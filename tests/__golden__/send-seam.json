@@ -1,0 +1,1002 @@
+{
+  "picker.happy_bank_saved": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"123456789012|HDFC0001234\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.happy_upi_saved": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $2.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: UPI ****@upi\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"upi\",\"payoutDestination\":\"mom@upi\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"debit_card\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.happy_cold_start_payout_args_ignored": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $150.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹12,750 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|150|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":150,\"amountSource\":150,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":12750,\"feeSource\":0,\"totalChargeSource\":150,\"totalChargeUsd\":150,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.invalid_phone": {
+    "calls": [
+      {
+        "ok": {
+          "error": "A valid recipient WhatsApp number with country code is required (e.g. 919876543210)."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.bad_funding": {
+    "calls": [
+      {
+        "ok": {
+          "error": "funding_method must be one of: credit_card, debit_card, bank_transfer, ach_pull."
+        }
+      },
+      {
+        "ok": {
+          "error": "funding_method must be one of: credit_card, debit_card, bank_transfer, ach_pull."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.unknown_destination": {
+    "calls": [
+      {
+        "ok": {
+          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.missing_destination": {
+    "calls": [
+      {
+        "ok": {
+          "error": "destination_country is missing — the recipient number looks like MX. Ask where the money is going, then pass destination_country (one of: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX)."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.kyc_gate_unverified": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Identity verification required before sending.",
+          "reason": "kyc_required",
+          "kyc_required": true,
+          "kyc_url": "https://example.com/admin-dashboard/customers"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [
+      {
+        "partner_id": "gated",
+        "kyc_inquiry_id": "mock-15551234567"
+      }
+    ],
+    "warns": []
+  },
+  "picker.sender_name_required": {
+    "calls": [
+      {
+        "ok": {
+          "needs_sender_name": true,
+          "reply_to_customer": "What's your full legal name, as on your ID?"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.t0_daily_cap": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Cap exceeded for this transfer.",
+          "cap_eval": {
+            "tier": "T0",
+            "reason": "over_daily_cap",
+            "today_used_usd": 400,
+            "today_remaining_usd": 100,
+            "daily_cap_usd": 500
+          }
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [
+      {
+        "id": "ID_1",
+        "partner_id": "default",
+        "status": "paid",
+        "compliance_status": "cleared"
+      }
+    ],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.per_transfer_cap": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Cap exceeded for this transfer.",
+          "cap_eval": {
+            "tier": "T0",
+            "reason": "over_per_transfer_cap",
+            "today_used_usd": 0,
+            "today_remaining_usd": 500,
+            "daily_cap_usd": 500
+          }
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.sanctions_blocked": {
+    "calls": [
+      {
+        "ok": {
+          "blocked": true,
+          "reply_to_customer": "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [
+      {
+        "id": "ID_1",
+        "partner_id": "default",
+        "status": "blocked",
+        "compliance_status": "blocked"
+      }
+    ],
+    "audits": [
+      {
+        "action": "sanctions.screen",
+        "partner_id": "default",
+        "subject_id": "ID_1"
+      }
+    ],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.fx_unavailable": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Exchange rates are temporarily unavailable — please try again in a few minutes."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": [
+      "send_approve_picker.fx-unavailable"
+    ]
+  },
+  "picker.quote_error_below_min": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Transfers must be between $10 and $2999."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.delegated_partner_gate_off": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:deleg:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"deleg\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.default_tenant_route_selector": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹86\nThey get ₹17,200 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":86,\"amountInr\":17200,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"settlementPartnerId\":\"rail-partner-x\",\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.duplicate_card_deduped": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      },
+      {
+        "ok": {
+          "sent": false,
+          "duplicate": true,
+          "draft_id": "ID_2",
+          "reply_hint": "The payment card for this exact send is already above — ask the customer to tap it, or say what to change."
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_2",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}",
+      "recipient_draft:ID_2": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.send_failure_releases_dedupe": {
+    "calls": [
+      {
+        "threw": "network reset"
+      },
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_2"
+              }
+            }
+          }
+        }
+      },
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}",
+      "recipient_draft:ID_2": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.b2b_refusals": {
+    "calls": [
+      {
+        "ok": {
+          "error": "A business bill payment needs entity_type business, funding_method ach_pull and the invoice_id from present_bill."
+        }
+      },
+      {
+        "ok": {
+          "error": "That bill is not open for this account. Call present_bill to fetch the current bill."
+        }
+      },
+      {
+        "ok": {
+          "error": "That bill is not open for this account. Call present_bill to fetch the current bill."
+        }
+      },
+      {
+        "ok": {
+          "error": "This bill is paid on its secure checkout page, not in chat. Share the pay_url with the customer.",
+          "pay_url": "https://smartremit.test/pay/b2b/inv_checkout"
+        }
+      },
+      {
+        "ok": {
+          "error": "This bill is for exactly 400 USD: send amount_source 400 with source_currency USD."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.b2b_happy": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $400.00 to Globex Trading LLC.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹34,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|400|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Globex Trading LLC\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":400,\"amountSource\":400,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"ach_pull\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":34000,\"feeSource\":0,\"totalChargeSource\":400,\"totalChargeUsd\":400,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"transferType\":\"b2b\",\"senderEntityType\":\"business\",\"recipientEntityType\":\"business\",\"senderBusinessName\":\"Acme Imports Ltd\",\"recipientBusinessName\":\"Globex Trading LLC\",\"invoiceId\":\"inv_mine\",\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.edd_fields_on_draft": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:default:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"default\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"recipientLegalName\":\"Sita Devi\",\"purpose\":\"family_support\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "picker.tenant_pair_same_phone": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      },
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_2"
+        }
+      },
+      {
+        "ok": {
+          "cancelled": true
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      },
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $120.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹10,200 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_2"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "active_draft:pa:15551234567": "ID_1",
+      "approvecard:15551234567|919876543210|120|USD|IN": "1",
+      "approvecard:15551234567|919876543210|200|USD|IN": "1",
+      "recipient_draft:ID_1": "{\"senderPhone\":\"15551234567\",\"partnerId\":\"pa\",\"recipient\":{\"name\":\"Mom\",\"recipientPhone\":\"919876543210\",\"payoutMethod\":\"bank\",\"payoutDestination\":\"123456789012|HDFC0001234\"},\"amountUsd\":200,\"amountSource\":200,\"sourceCurrency\":\"USD\",\"destinationCountry\":\"IN\",\"destinationCurrency\":\"INR\",\"fundingMethod\":\"bank_transfer\",\"quote\":{\"feeUsd\":0,\"fxRate\":85,\"amountInr\":17000,\"feeSource\":0,\"totalChargeSource\":200,\"totalChargeUsd\":200,\"destinationCurrency\":\"INR\",\"fxFetchedAt\":<NOW+0ms>},\"createdAt\":\"<ISO>\"}"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "cancel_draft.after_picker": {
+    "calls": [
+      {
+        "ok": {
+          "sent": true,
+          "draft_id": "ID_1"
+        }
+      },
+      {
+        "ok": {
+          "cancelled": true
+        }
+      },
+      {
+        "ok": {
+          "cancelled": false,
+          "reason": "no_active_draft",
+          "reply_hint": "No payment was set up yet, so nothing will be charged — confirm you have dropped the send you were discussing."
+        }
+      }
+    ],
+    "sends": [
+      {
+        "url": "https://graph.facebook.com/v21.0/123456/messages",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "15551234567",
+          "type": "interactive",
+          "interactive": {
+            "type": "cta_url",
+            "body": {
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+            },
+            "action": {
+              "name": "cta_url",
+              "parameters": {
+                "display_text": "Approve & Pay",
+                "url": "https://smartremit.test/pay/ID_1"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "redis": {
+      "approvecard:15551234567|919876543210|200|USD|IN": "1"
+    },
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "web.repeat_transfer_result": {
+    "calls": [
+      {
+        "ok": {
+          "draft_id": "ID_1",
+          "summary": "Sending $50.00 to Seeded Recipient.\nFee $1.99\nRate: 1 USD = ₹85\nThey get ₹4,250 within 10 minutes.\nTo: bank a/c ****0001\nRate locked for 30 min.",
+          "pay_url": "https://smartremit.test/pay/ID_1",
+          "reply_hint": "show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for 30 minutes"
+        }
+      }
+    ],
+    "sends": [],
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "quote.happy": {
+    "calls": [
+      {
+        "ok": {
+          "source_currency": "USD",
+          "amount_source": 200,
+          "fee_source": 0,
+          "total_charge_source": 200,
+          "amount_usd": 200,
+          "fee_usd": 0,
+          "total_charge_usd": 200,
+          "fx_rate": 85,
+          "amount_inr": 17000,
+          "amount_dest": 17000,
+          "destination_currency": "INR",
+          "destination_country": "IN",
+          "delivery_estimate": "within 10 minutes",
+          "amount_source_display": "$200.00 USD"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "quote.receive_first_routed": {
+    "calls": [
+      {
+        "ok": {
+          "source_currency": "USD",
+          "amount_source": 116.28,
+          "fee_source": 0,
+          "total_charge_source": 116.28,
+          "amount_usd": 116.28,
+          "fee_usd": 0,
+          "total_charge_usd": 116.28,
+          "fx_rate": 86,
+          "amount_inr": 10000,
+          "amount_dest": 10000,
+          "destination_currency": "INR",
+          "destination_country": "IN",
+          "delivery_estimate": "within 10 minutes",
+          "amount_source_display": "$116.28 USD"
+        }
+      },
+      {
+        "ok": {
+          "source_currency": "USD",
+          "amount_source": 100,
+          "fee_source": 0,
+          "total_charge_source": 100,
+          "amount_usd": 100,
+          "fee_usd": 0,
+          "total_charge_usd": 100,
+          "fx_rate": 86,
+          "amount_inr": 8600,
+          "amount_dest": 8600,
+          "destination_currency": "INR",
+          "destination_country": "IN",
+          "delivery_estimate": "within 10 minutes",
+          "amount_source_display": "$100.00 USD"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "quote.kyc_gate": {
+    "calls": [
+      {
+        "ok": {
+          "within_cap": false,
+          "reason": "kyc_required",
+          "kyc_url": "https://example.com/admin-dashboard/customers"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [
+      {
+        "partner_id": "gated",
+        "kyc_inquiry_id": "mock-15551234567"
+      }
+    ],
+    "warns": []
+  },
+  "quote.cap_without_kyc_url": {
+    "calls": [
+      {
+        "ok": {
+          "within_cap": false,
+          "tier": "T0",
+          "reason": "over_per_transfer_cap",
+          "daily_cap_usd": 500,
+          "per_transfer_cap_usd": 500,
+          "today_used_usd": 0,
+          "today_remaining_usd": 500,
+          "day_of_window": 1
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": []
+  },
+  "quote.cap_with_kyc_url": {
+    "calls": [
+      {
+        "ok": {
+          "within_cap": false,
+          "tier": "T0",
+          "reason": "over_per_transfer_cap",
+          "daily_cap_usd": 500,
+          "per_transfer_cap_usd": 500,
+          "today_used_usd": 0,
+          "today_remaining_usd": 500,
+          "day_of_window": 1,
+          "kyc_url": "https://example.com/admin-dashboard/customers"
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [
+      {
+        "partner_id": "gated",
+        "kyc_inquiry_id": "mock-15551234567"
+      }
+    ],
+    "warns": []
+  },
+  "quote.fx_unavailable": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Exchange rates are temporarily unavailable — please try again in a few minutes."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": [
+      "get_quote.fx-unavailable"
+    ]
+  },
+  "quote.errors": {
+    "calls": [
+      {
+        "ok": {
+          "error": "Transfers must be between $10 and $2999."
+        }
+      },
+      {
+        "ok": {
+          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+        }
+      },
+      {
+        "ok": {
+          "error": "Please give a valid amount."
+        }
+      }
+    ],
+    "sends": [],
+    "redis": {},
+    "transfers": [],
+    "audits": [],
+    "kycInquiries": [],
+    "warns": [
+      "get_quote.rejected",
+      "get_quote.rejected",
+      "get_quote.rejected"
+    ]
+  }
+}
