@@ -109,12 +109,15 @@ export function createRecipientRepo(
           sql`DELETE FROM ${recipientTombstones} WHERE ${recipientTombstones.partnerId} = ${partnerId} AND ${recipientTombstones.senderPhone} = ${senderPhone} AND ${recipientTombstones.recipientPhone} = ${r.recipientPhone}`,
         );
       if (opts.keepTombstone) {
+        // A scheduled run's refresh: never un-delete, and never overwrite the book with the
+        // schedule's own (possibly older) account — a customer edit after the schedule was created
+        // must survive. An existing row only gets lastUsedAt; a missing row is saved in full.
         await db
           .insert(recipients)
           .values(row)
           .onConflictDoUpdate({
             target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
-            set: row,
+            set: { lastUsedAt: row.lastUsedAt },
           });
         return;
       }

@@ -159,4 +159,20 @@ describe('L2: a recipient delete racing a scheduled run', () => {
     await store.upsertRecipient('default', PHONE, r);
     expect(await tombstones()).toBe(0);
   });
+
+  it('a scheduled refresh never reverts an edited account: an existing row only gets lastUsedAt; a missing row is inserted', async () => {
+    const { store } = await setup();
+    const edited = '000099990000 HDFC0000009';
+    // The customer edits the account after the schedule was created (the schedule keeps the old one).
+    await createRecipientRepo(db).updateLiveRecipient('default', PHONE, { name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: edited, lastUsedAt: new Date(0).toISOString() });
+    const later = new Date().toISOString();
+    await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: BANK, lastUsedAt: later }, { keepTombstone: true });
+    const row = await createRecipientRepo(db).getRecipient('default', PHONE, MOM);
+    expect(row?.payoutDestination).toBe(edited);
+    expect(row?.lastUsedAt).toBe(later);
+    // A recipient not in the book yet is still saved in full.
+    const NEW = '919000000077';
+    await store.upsertRecipient('default', PHONE, { name: 'New', recipientPhone: NEW, payoutMethod: 'bank', payoutDestination: BANK, lastUsedAt: later }, { keepTombstone: true });
+    expect((await createRecipientRepo(db).getRecipient('default', PHONE, NEW))?.payoutDestination).toBe(BANK);
+  });
 });
