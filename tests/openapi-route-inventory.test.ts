@@ -52,8 +52,8 @@ describe('parseRouteSource', () => {
   it('reads each exported method, its literal scope and its one service call', async () => {
     const { parseRouteSource } = await import('@/lib/openapi/route-inventory');
     expect(parseRouteSource(ROUTE_SVC, 'f')).toEqual([
-      { method: 'POST', scope: 'things:write', serviceFn: 'createThing', directStatuses: [] },
-      { method: 'GET', scope: 'things:read', serviceFn: 'listThings', directStatuses: [] },
+      { method: 'POST', scope: 'things:write', serviceFn: 'createThing', viaSvc: true, directStatuses: [] },
+      { method: 'GET', scope: 'things:read', serviceFn: 'listThings', viaSvc: true, directStatuses: [] },
     ]);
   });
 
@@ -61,7 +61,7 @@ describe('parseRouteSource', () => {
     const { parseRouteSource } = await import('@/lib/openapi/route-inventory');
     // Like corridors/route.ts:9, which resolves to listCorridors (no err/ok literals) plus a direct 200.
     expect(parseRouteSource(ROUTE_DIRECT, 'f')).toEqual([
-      { method: 'GET', scope: 'things:read', serviceFn: 'listThings', directStatuses: [200] },
+      { method: 'GET', scope: 'things:read', serviceFn: 'listThings', viaSvc: false, directStatuses: [200] },
     ]);
   });
 
@@ -125,5 +125,93 @@ describe('guardStatusesFromSource (the real guard files)', () => {
     const guard = readFileSync('src/lib/partner-api.ts', 'utf8');
     const auth = readFileSync('src/lib/partner-api-auth.ts', 'utf8');
     expect(guardStatusesFromSource(guard, auth)).toEqual([...GUARD_STATUSES]);
+  });
+});
+
+// ── Review round 1 (PR #370): pass-through shapes and escape hatches ─────────
+
+const PASS_THROUGH = `
+const ok = (status, data) => ({ ok: true, status, data });
+const err = (status, error) => ({ ok: false, status, error });
+async function inner() { return err(409, 'x'); }
+export async function outer() {
+  const r = await inner();
+  if (!r.ok) return r;
+  return ok(200, {});
+}
+export async function created() { return ok(201, {}); }
+export async function delegates() {
+  if (Math.random() > 2) return;
+  return created();
+}
+export async function early() {
+  return ok(200, {});
+}
+function helperAfter() { return err(418, 'teapot'); }
+const arrowAfter = () => err(451, 'x');
+export function plain() { return { a: 1 }; }
+`;
+
+describe('serviceFunctionStatuses (round 1: no silent under-count)', () => {
+  it('FAILS CLOSED when a status is passed through from a private helper', async () => {
+    const { serviceFunctionStatuses, InventoryError } = await import('@/lib/openapi/route-inventory');
+    expect(() => serviceFunctionStatuses(PASS_THROUGH, 'outer')).toThrow(InventoryError);
+  });
+  it('FAILS CLOSED when the function delegates to another exported function', async () => {
+    const { serviceFunctionStatuses, InventoryError } = await import('@/lib/openapi/route-inventory');
+    expect(() => serviceFunctionStatuses(PASS_THROUGH, 'delegates')).toThrow(InventoryError);
+  });
+  it('ends the span at the next top-level function or arrow, exported or not', async () => {
+    const { serviceFunctionStatuses } = await import('@/lib/openapi/route-inventory');
+    expect(serviceFunctionStatuses(PASS_THROUGH, 'early')).toEqual([200]);
+  });
+  it('allows a bare return; and, when not strict, a plain-object return', async () => {
+    const { serviceFunctionStatuses, InventoryError } = await import('@/lib/openapi/route-inventory');
+    expect(serviceFunctionStatuses('export function a() { if (x) return; return ok(204, null); }', 'a')).toEqual([204]);
+    expect(serviceFunctionStatuses(PASS_THROUGH, 'plain', { strict: false })).toEqual([]);
+    expect(() => serviceFunctionStatuses(PASS_THROUGH, 'plain')).toThrow(InventoryError);
+  });
+});
+
+describe('parseRouteSource (round 1: escape hatches)', () => {
+  it('FAILS CLOSED on a helper function, an arrow or a Response built before the first handler', async () => {
+    const { parseRouteSource, InventoryError } = await import('@/lib/openapi/route-inventory');
+    const split = ROUTE_SVC.indexOf('export async function POST');
+    const withPre = (pre: string) => ROUTE_SVC.slice(0, split) + pre + '\n' + ROUTE_SVC.slice(split);
+    expect(() => parseRouteSource(withPre('function helper() { return 1; }'), 'f')).toThrow(InventoryError);
+    expect(() => parseRouteSource(withPre('const helper = async () => 1;'), 'f')).toThrow(InventoryError);
+    expect(() => parseRouteSource(withPre("const gone = new Response(null, { status: 410 });"), 'f')).toThrow(InventoryError);
+    expect(() => parseRouteSource(withPre("const gone = NextResponse.json({});"), 'f')).toThrow(InventoryError);
+    // Comments before the first handler are fine, even when they mention these words.
+    expect(() => parseRouteSource(withPre('// a function => Response.json( note'), 'f')).not.toThrow();
+  });
+  it('FAILS CLOSED on .redirect( and Response.error( in a handler', async () => {
+    const { parseRouteSource, InventoryError } = await import('@/lib/openapi/route-inventory');
+    const redirect = ROUTE_SVC.replace('if (!g.ok) return g.response;', "if (!g.ok) return NextResponse.redirect('/x');");
+    expect(() => parseRouteSource(redirect, 'f')).toThrow(InventoryError);
+    const error = ROUTE_SVC.replace('if (!g.ok) return g.response;', 'if (!g.ok) return Response.error();');
+    expect(() => parseRouteSource(error, 'f')).toThrow(InventoryError);
+  });
+});
+
+describe('guardStatusesFromSource (round 1: guard pass-through)', () => {
+  const guard = (s: string) => `
+export async function guardPartner(req, scope) {
+  const auth = await authenticatePartner(req);
+  if (!auth.ok) return { ok: false, response: NextResponse.json({ error: auth.error }, { status: auth.status }) };
+  if (x) return { ok: false, response: NextResponse.json({}, { status: ${s} }) };
+}
+export function svcResponse(result) { return NextResponse.json({}, { status: result.status }); }
+`;
+  const auth = 'export interface R { status: number; }\nreturn { ok: false, status: 401 };';
+  it('accepts literals and the auth.status pass-through, and ignores svcResponse', async () => {
+    const { guardStatusesFromSource } = await import('@/lib/openapi/route-inventory');
+    expect(guardStatusesFromSource(guard('429'), auth)).toEqual([401, 429]);
+  });
+  it('FAILS CLOSED on any other non-literal guard status, or a missing guardPartner', async () => {
+    const { guardStatusesFromSource, InventoryError } = await import('@/lib/openapi/route-inventory');
+    expect(() => guardStatusesFromSource(guard('code'), auth)).toThrow(InventoryError);
+    expect(() => guardStatusesFromSource('export function other() {}', auth)).toThrow(InventoryError);
+    expect(() => guardStatusesFromSource(guard('429'), 'return { status: s };')).toThrow(InventoryError);
   });
 });
