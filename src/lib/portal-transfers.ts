@@ -221,3 +221,17 @@ export function renderReceiptText(v: ReceiptView, brand: string): string {
     t('portal.receipt.textFoot', { brand }),
   ].join('\n');
 }
+
+// ── The list cursor in a URL ───────────────────────────────────────────────────────────────────
+
+/** The keyset cursor (`createdAt|id`) as an opaque base64url token for `?cursor=`. */
+export function encodePortalCursor(cursor: string): string {
+  return Buffer.from(cursor, 'utf8').toString('base64url');
+}
+
+/** The cursor behind a `?cursor=` token, or undefined for anything malformed or oversized. */
+export function decodePortalCursor(token: unknown): string | undefined {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 200 || !/^[A-Za-z0-9_-]+$/.test(token)) return undefined;
+  const c = Buffer.from(token, 'base64url').toString('utf8');
+  return /^[0-9T:.Z+-]{10,40}\|[A-Za-z0-9_-]{1,64}$/.test(c) ? c : undefined;
+}
