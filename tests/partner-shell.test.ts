@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
@@ -200,6 +201,16 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
     await expect(SecurityPage()).rejects.toThrow('REDIRECT:/login');
     await signInAs({ partnerId: undefined });
     await expect(SecurityPage()).rejects.toThrow('REDIRECT:/admin-dashboard');
+  });
+  it('EVERY page under (app) gates with a policy from routes.ts (the layout uses skipMfa + every role)', () => {
+    const pages = (d: string): string[] =>
+      readdirSync(d).flatMap((n) => {
+        const p = join(d, n);
+        return statSync(p).isDirectory() ? pages(p) : n === 'page.tsx' ? [p] : [];
+      });
+    const found = pages('src/app/partner/(app)');
+    expect(found.length).toBeGreaterThanOrEqual(2);
+    for (const f of found) expect(readFileSync(f, 'utf8'), f).toMatch(/await requirePartnerStaff\(PARTNER_ROUTES\.\w+\.policy/);
   });
   it('pages render no <main> of their own (the layout owns it) and read their policy from routes.ts', () => {
     for (const [f, key] of [

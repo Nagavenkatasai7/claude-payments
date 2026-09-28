@@ -4,6 +4,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { PARTNER_ANY } from '@/lib/partner-access';
 import { getPartnerStore } from '@/lib/partner-store';
 import { t } from '@/lib/i18n';
+import { logWarn } from '@/lib/log';
 import { buttonVariants } from '@/components/ds';
 import { SiteBrand } from '@/components/ds/site-brand';
 import { logout } from '@/app/login/actions';
@@ -30,7 +31,8 @@ async function brandName(partnerId: string): Promise<string> {
   try {
     const p = await getPartnerStore().getPartner(partnerId);
     return p?.displayName ?? p?.name ?? '';
-  } catch {
+  } catch (err) {
+    logWarn('partner.shell', 'brand lookup failed', { err });
     return '';
   }
 }
