@@ -38,6 +38,8 @@ Then confirm it with `POST /transactions/{id}/confirm` and read it back with `GE
 
 ## The reference rail
 
-Before your own rail is ready, your account can be pointed at the hosted **reference rail**. It runs the exact loop a production rail would: it receives the signed settlement instruction, verifies the signature, acknowledges it with a provider reference, and later sends a signed status callback. Use it to prove your understanding of the loop described in <GuideLink slug="webhooks">Webhooks</GuideLink>. Ask SmartRemit to enable it for your account.
+Sandbox transactions always deliver: they never reach a settlement rail, so they cannot exercise your settlement endpoint or a failed payout.
 
-To exercise the failure path on the reference rail, pay out to a bank account of all zeros (for India: account `000000000000`, IFSC `HDFC0001234`). The reference rail acknowledges the instruction, then reports `failed` with reason `account_unreachable`.
+To test the full settlement loop, SmartRemit can point your account at the hosted **reference rail** for a test run arranged with you. No real money moves on it. It runs the exact loop a production rail would: it receives the signed settlement instruction, verifies the signature, acknowledges it with a provider reference, and later sends a signed status callback. See <GuideLink slug="webhooks">Webhooks</GuideLink> for the loop itself.
+
+On the reference rail, a payout to a bank account of all zeros (for India: account `000000000000`, IFSC `HDFC0001234`) exercises the failure path. The reference rail acknowledges the instruction, then reports `failed` with reason `account_unreachable`. This trigger has no effect on sandbox transactions.

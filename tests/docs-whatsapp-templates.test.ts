@@ -85,8 +85,11 @@ describe('WhatsApp template catalog is code-true', () => {
       expect({ name: e.name, sentToday: e.sentToday }).toEqual({ name: e.name, sentToday: referenced[e.name] });
     }
     // The configured (opt-in) verification and auth templates have live callers.
-    expect(text).toMatch(/sendVerificationStatus\(/);
-    expect(text).toMatch(/sendAuthTemplate\(/);
+    // Strip the definitions so a bare declaration never counts as a caller.
+    const callers = text.replace(/(export )?(async )?function (sendVerificationStatus|sendAuthTemplate)\(/g, '');
+    expect(callers).not.toMatch(/function (sendVerificationStatus|sendAuthTemplate)\(/);
+    expect(callers).toMatch(/sendVerificationStatus\(/);
+    expect(callers).toMatch(/sendAuthTemplate\(/);
     for (const e of TEMPLATES.filter((x) => x.nameSource === 'configured')) expect(e.sentToday).toBe(true);
   });
 

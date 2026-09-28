@@ -1,6 +1,6 @@
 ## Before live keys are issued
 
-Work through this list with a test key. When every item is done, ask SmartRemit to take you live; SmartRemit issues your live keys.
+Work through this list with your test key and a reference-rail test run arranged with SmartRemit. When every item is done, ask SmartRemit to take you live; SmartRemit issues your live keys.
 
 ### WhatsApp
 
@@ -20,7 +20,7 @@ Work through this list with a test key. When every item is done, ask SmartRemit 
 - [ ] Your settlement endpoint meets the endpoint rules and is saved with its signing secret.
 - [ ] Your endpoint verifies `x-smartremit-signature`, acknowledges quickly and deduplicates on `reference`.
 - [ ] Your status callbacks are signed with your webhook secret and echo the amount on `paid_out`.
-- [ ] You have run the full loop on the reference rail, including the failure path. See <GuideLink slug="webhooks">Webhooks</GuideLink>.
+- [ ] In a reference-rail test run arranged with SmartRemit, you completed the full loop, including the failure path. See <GuideLink slug="sandbox">Sandbox</GuideLink> and <GuideLink slug="webhooks">Webhooks</GuideLink>.
 
 ### Compliance
 
