@@ -6,6 +6,7 @@ import { test, expect } from '@playwright/test';
 // the landing shell with one h1, a skip link and noindex; the MDX pipeline produced real
 // tables (remark-gfm) and the code-backed blocks; an unknown guide is a 404; nothing links
 // the preview; /docs is untouched; no page scrolls sideways at 375px; one enforced CSP.
+// PR-4 adds /docs-next/api: all 11 operations from openapi.yaml, prerendered, same checks.
 
 test('/docs-next renders the docs index with one h1, a skip link and noindex', async ({ page }) => {
   const res = await page.goto('/docs-next');
@@ -39,10 +40,28 @@ test('a guide renders its MDX body, the code-backed blocks and gfm tables', asyn
   }
 });
 
+test('/docs-next/api renders every Partner API operation from openapi.yaml', async ({ page }) => {
+  const res = await page.goto('/docs-next/api');
+  expect(res?.status()).toBe(200);
+  await expect(page.getByRole('heading', { level: 1, name: 'API reference' })).toBeVisible();
+  await expect(page.locator('h1')).toHaveCount(1);
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
+  // One section per operation, with its stable anchor.
+  await expect(page.locator('main section[data-op]')).toHaveCount(11);
+  const confirm = page.locator('main section#post-transactions-id-confirm');
+  await expect(confirm).toContainText('POST /transactions/{id}/confirm');
+  await expect(confirm).toContainText('transactions:write');
+  await expect(confirm).toContainText('Sandbox keys: yes');
+  await expect(page.locator('main section#schema-transaction')).toBeVisible();
+  // Reachable from the docs nav and the docs index.
+  await page.goto('/docs-next');
+  await expect(page.locator('main h2 a[href="/docs-next/api"]')).toBeVisible();
+});
+
 test.describe('without JavaScript', () => {
   test.use({ javaScriptEnabled: false });
   test('the prerendered index and a guide show their h1 and body (no hidden streaming wrapper)', async ({ page, request }) => {
-    for (const [path, h1] of [['/docs-next', 'Partner documentation'], ['/docs-next/webhooks', 'Webhooks']] as const) {
+    for (const [path, h1] of [['/docs-next', 'Partner documentation'], ['/docs-next/api', 'API reference'], ['/docs-next/webhooks', 'Webhooks']] as const) {
       const html = await (await request.get(path)).text();
       expect(html).not.toContain('hidden id="S:0"');
       expect(html).not.toContain('<!--$?-->');
@@ -69,7 +88,7 @@ test('/docs is untouched: still the Partner integration guide', async ({ page })
 
 test.describe('at a 375px phone viewport', () => {
   test.use({ viewport: { width: 375, height: 812 } });
-  for (const path of ['/docs-next', '/docs-next/whatsapp-setup', '/docs-next/errors', '/docs-next/webhooks']) {
+  for (const path of ['/docs-next', '/docs-next/whatsapp-setup', '/docs-next/errors', '/docs-next/webhooks', '/docs-next/api']) {
     test(`${path} does not scroll sideways`, async ({ page }) => {
       const res = await page.goto(path);
       expect(res?.status()).toBe(200);
@@ -95,7 +114,7 @@ test.describe('tables at a 375px phone viewport', () => {
 });
 
 test('/docs-next carries exactly one enforced CSP', async ({ request }) => {
-  for (const path of ['/docs-next', '/docs-next/webhooks']) {
+  for (const path of ['/docs-next', '/docs-next/webhooks', '/docs-next/api']) {
     const res = await request.get(path);
     const csp = res.headersArray().filter((h) => h.name.toLowerCase() === 'content-security-policy');
     expect(csp).toHaveLength(1);
