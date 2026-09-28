@@ -34,15 +34,15 @@ describe('/docs-next/[slug] page contract (source)', () => {
 });
 
 describe('/docs-next segment states', () => {
-  it('both segments are state-exempt and have NO loading.tsx (it would hide the prerendered page behind a skeleton)', async () => {
+  it('every segment is state-exempt and has NO loading.tsx (it would hide the prerendered page behind a skeleton)', async () => {
     const { STATE_EXEMPT_DIRS } = await import('@/lib/ui/new-ui-roots');
-    for (const dir of ['src/app/docs-next', 'src/app/docs-next/[slug]']) {
+    for (const dir of ['src/app/docs-next', 'src/app/docs-next/[slug]', 'src/app/docs-next/api']) {
       expect(STATE_EXEMPT_DIRS).toContain(dir);
       expect({ dir, loading: existsSync(`${dir}/loading.tsx`) }).toEqual({ dir, loading: false });
     }
   });
-  it('both segments have error.tsx, the shared digest-only boundary', () => {
-    for (const dir of ['src/app/docs-next', 'src/app/docs-next/[slug]']) {
+  it('every segment has error.tsx, the shared digest-only boundary', () => {
+    for (const dir of ['src/app/docs-next', 'src/app/docs-next/[slug]', 'src/app/docs-next/api']) {
       const err = readFileSync(`${dir}/error.tsx`, 'utf8');
       expect(err).toMatch(/^'use client';/);
       expect(err).toMatch(/export \{ SegmentError as default \} from '@\/components\/ds\/segment-error';/);
@@ -56,5 +56,32 @@ describe('the route-mode baseline pins /docs-next as prerendered', () => {
     const b = JSON.parse(readFileSync('scripts/route-modes.baseline.json', 'utf8')) as Record<string, string>;
     expect(b['/docs-next']).toBe('static');
     expect(b['/docs-next/[slug]']).toBe('ssg');
+  });
+  it('the API reference is static (openapi.yaml is read with fs at BUILD time, never at runtime)', () => {
+    const b = JSON.parse(readFileSync('scripts/route-modes.baseline.json', 'utf8')) as Record<string, string>;
+    expect(b['/docs-next/api']).toBe('static');
+  });
+});
+
+describe('/docs-next/api page contract (source)', () => {
+  const files = ['page.tsx', 'Operation.tsx'].map((f) => readFileSync(`src/app/docs-next/api/${f}`, 'utf8'));
+  it('is force-static (caching-without-cache-components.md:88,104; cacheComponents is off)', () => {
+    expect(files[0]).toMatch(/^export const dynamic = 'force-static';$/m);
+  });
+  it('is server-only: no client directive, no inline script, no raw HTML', () => {
+    for (const src of files) {
+      expect(src).not.toMatch(/['"]use client['"]/);
+      expect(src).not.toMatch(/dangerouslySetInnerHTML|<script/);
+    }
+  });
+  it('uses the ds PageHeader (keeps the .sh-page-title smoke hook)', () => {
+    expect(files[0]).toMatch(/PageHeader/);
+  });
+});
+
+describe('the docs nav and index link the API reference', () => {
+  it('DocsNav and the index page link /docs-next/api', () => {
+    expect(readFileSync('src/app/docs-next/DocsNav.tsx', 'utf8')).toMatch(/href="\/docs-next\/api"/);
+    expect(readFileSync('src/app/docs-next/page.tsx', 'utf8')).toMatch(/href="\/docs-next\/api"/);
   });
 });
