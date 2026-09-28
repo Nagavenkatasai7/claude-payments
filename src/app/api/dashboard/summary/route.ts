@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getCurrentStaff, isLegacyDashboardStaff } from '@/lib/auth';
+import { getCurrentStaff } from '@/lib/auth';
+import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 import { scopeOf } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';

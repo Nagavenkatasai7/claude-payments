@@ -10,6 +10,7 @@ import { getStaffMfaStore } from './staff-mfa-store';
 import type { Staff } from './types';
 import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';
 import { partnerMfaEnrolmentPending } from './partner-mfa-gate';
+import { isLegacyDashboardStaff } from './legacy-dashboard-staff';
 
 /**
  * Program-Fix 45 P1: the session's username from the `__Host-` cookie, else the
@@ -133,12 +134,9 @@ export async function requirePartnerStaff(policy: PartnerPolicy, opts: { skipMfa
 
 // UI redesign M3-6: the finance role. 'finance' is a /partner-only role, so every legacy
 // /admin-dashboard gate (all of them resolve the session through requireStaff) refuses it.
-// The check is a CLOSED allowlist: a role outside it fails closed to /login in requireStaff
-// (never /partner, which would bounce a platform-scoped record back to /admin-dashboard).
-export function isLegacyDashboardStaff(s: Staff): boolean {
-  return s.role === 'admin' || s.role === 'agent' || s.role === 'support';
-}
-
+// isLegacyDashboardStaff is a CLOSED allowlist: a role outside it fails closed to /login in
+// requireStaff (never /partner, which would bounce a platform-scoped record back to /admin-dashboard).
+//
 // Today's requireStaff behaviour (any role), for the self-service account actions ONLY (MFA
 // enrolment and the own-password change), so a finance member can enrol at /partner/security.
 export async function requireStaffSelf(): Promise<Staff> {

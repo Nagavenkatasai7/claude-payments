@@ -8,12 +8,13 @@ import { readFileSync } from 'node:fs';
 // A later PR that changes an existing gate on purpose (announced to the owner first) updates
 // this pin, and the list below, in the same PR.
 // UI redesign M3-6 (the finance role): ONE line inserted into requireStaff (INSERTED_LINES) and
-// a second appended block (M3_6_MARKER) with exactly two exports. The 96c8933 pin still holds
+// one added import and a second appended block (M3_6_MARKER) with exactly one export. The 96c8933 pin still holds
 // once those are stripped, so every other pre-existing byte is unchanged.
 const AUTH_TS_ORIGINAL_SHA = 'c176d7c74b5526668745310f02effa39d123e9e6cad90bd51338f882a906095a'; // gitleaks:allow (SHA-256 digest, not a secret)
 const ADDED_IMPORTS = [
   "import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';",
   "import { partnerMfaEnrolmentPending } from './partner-mfa-gate';",
+  "import { isLegacyDashboardStaff } from './legacy-dashboard-staff';", // M3-6
 ];
 const APPENDED_MARKER = '// UI redesign M3 (SPEC §3): requirePartnerStaff.';
 const M3_6_MARKER = '// UI redesign M3-6: the finance role.';
@@ -48,14 +49,13 @@ describe('src/lib/auth.ts: existing gates are byte-identical (M3-1 is additive o
         '\n  return staff;\n}',
     );
   });
-  it('the M3-6 block comes last and declares exactly two exports: isLegacyDashboardStaff, requireStaffSelf', () => {
+  it('the M3-6 block comes last and declares exactly one export: requireStaffSelf', () => {
     const text = src();
     const at = text.indexOf(`\n${M3_6_MARKER}`);
     expect(at).toBeGreaterThan(text.indexOf(APPENDED_MARKER));
     const exports = text.slice(at).match(/^export\s+[^\n]*/gm) ?? [];
-    expect(exports).toHaveLength(2);
-    expect(exports[0]).toMatch(/^export function isLegacyDashboardStaff\(/);
-    expect(exports[1]).toMatch(/^export async function requireStaffSelf\(/);
+    expect(exports).toHaveLength(1);
+    expect(exports[0]).toMatch(/^export async function requireStaffSelf\(/);
   });
   it('the appended block declares exactly one export: requirePartnerStaff', () => {
     const text = src();

@@ -51,6 +51,7 @@ vi.mock('@/lib/staff-login-guard', async () => {
 });
 
 import * as auth from '@/lib/auth';
+import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { PARTNER_ANY, PARTNER_MONEY_READ, PARTNER_OPS } from '@/lib/partner-access';
@@ -135,12 +136,12 @@ describe('M3-6: legacy dashboard gates deny finance', () => {
 
   it('isLegacyDashboardStaff is a closed allowlist: admin, agent, support only', () => {
     const mk = (role: string) => ({ role }) as Staff;
-    expect(auth.isLegacyDashboardStaff(mk('admin'))).toBe(true);
-    expect(auth.isLegacyDashboardStaff(mk('agent'))).toBe(true);
-    expect(auth.isLegacyDashboardStaff(mk('support'))).toBe(true);
-    expect(auth.isLegacyDashboardStaff(mk('finance'))).toBe(false);
-    expect(auth.isLegacyDashboardStaff(mk('root'))).toBe(false);
-    expect(auth.isLegacyDashboardStaff(mk(''))).toBe(false);
+    expect(isLegacyDashboardStaff(mk('admin'))).toBe(true);
+    expect(isLegacyDashboardStaff(mk('agent'))).toBe(true);
+    expect(isLegacyDashboardStaff(mk('support'))).toBe(true);
+    expect(isLegacyDashboardStaff(mk('finance'))).toBe(false);
+    expect(isLegacyDashboardStaff(mk('root'))).toBe(false);
+    expect(isLegacyDashboardStaff(mk(''))).toBe(false);
   });
 
   it('existing roles are unchanged by the new branch', async () => {

@@ -8,7 +8,7 @@ import type { Staff } from '@/lib/types';
 // not a require* gate) refuse the /partner-only 'finance' role. The five copilot routes already
 // refuse it through their role allowlists (403; pinned here, code unchanged). dashboard/summary
 // had no role check: it now answers 401 for any role outside the closed legacy set, the same
-// response as an anonymous caller. The real isLegacyDashboardStaff is used (importActual).
+// response as an anonymous caller. The real isLegacyDashboardStaff (src/lib/legacy-dashboard-staff.ts) is used.
 let currentStaff: Staff | null = null;
 let db: Db;
 

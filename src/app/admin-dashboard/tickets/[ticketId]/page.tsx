@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation';
 import { requireTicketWorker } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { scopeOf, canSee } from '@/lib/staff-scope';
+import { isTicketAssignable } from '@/lib/ticket-assignable';
 import { isTestStaff } from '@/lib/ticket-balancer';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
@@ -104,12 +105,7 @@ export default async function TicketDetailPage({
   // tenant. Same rule the action re-validates. Skipped entirely for agents.
   const assignable = isAgent
     ? []
-    : allStaff.filter(
-        (s) =>
-          s.status !== 'suspended' &&
-          !isTestStaff(s) &&
-          canSee(scopeOf(s), ticket.partnerId),
-      );
+    : allStaff.filter((s) => isTicketAssignable(s, ticket.partnerId) && !isTestStaff(s));
   const closed = ticket.status === 'closed';
 
   return (
