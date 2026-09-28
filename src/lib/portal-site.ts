@@ -3,7 +3,7 @@ import { notFound } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { loadSiteTheme } from '@/db/repos/partner-site-repo';
 import { getSiteTenant } from './site-tenant';
-import { getPortalSettings } from './portal-settings-repo';
+import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { getPartnerStore } from './partner-store';
 import { resolvePartnerBranding } from './partner-config';
 import { env } from './env';

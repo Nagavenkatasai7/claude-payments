@@ -12,6 +12,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { getPortalSettings, portalAuthTemplate } from '@/db/repos/portal-settings-repo';
 import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
 import { getFundingProvider, isPendingCapture, selectFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
@@ -461,7 +462,7 @@ export async function POST(
     }
     const otpPhone = otpDraft?.senderPhone ?? otpTransfer?.phone ?? null;
 
-    // (1) "request_otp": issue + deliver a code in-session (free-form). No charge.
+    // (1) "request_otp": issue + deliver a code (free-form, or an auth template). No charge.
     if (typeof body.action === 'string' && body.action === 'request_otp') {
       if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
       // The owning partner scopes the per-phone code budget (Program-Fix 45) and
@@ -491,8 +492,24 @@ export async function POST(
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
           }
         } catch { /* fall back to the shared env number */ }
+        // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
+        // template (read by THIS transfer's partner only) carries the code, so a
+        // customer outside the 24-h window still receives it. Best-effort: a lookup
+        // error keeps today's free-form send on the same number.
+        let otpTemplate: { name: string; lang: string } | undefined;
+        if (otpCreds && otpPartnerId) {
+          try {
+            otpTemplate = portalAuthTemplate(await getPortalSettings(getDb(), otpPartnerId));
+          } catch (err) {
+            logWarn(
+              'pay.otp-template-lookup',
+              `partner auth template lookup failed; sending free-form on the partner number: ${err instanceof Error ? err.message : 'unknown error'}`,
+              { partnerId: otpPartnerId },
+            );
+          }
+        }
         try {
-          await sendTransactionOtp(otpPhone, issued.code, otpCreds);
+          await sendTransactionOtp(otpPhone, issued.code, otpCreds, undefined, otpTemplate);
         } catch {
           // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
           // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.

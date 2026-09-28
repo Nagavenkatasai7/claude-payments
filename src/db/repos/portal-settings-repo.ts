@@ -1,21 +1,22 @@
+// portal-settings-repo — reader for partner_portal_settings (migration 0027): the partner's
+// approved WhatsApp AUTHENTICATION template and the portal enablement timestamp.
+//
+// Tenant scoping: every query takes ONE partnerId and has `partner_id = $1` in its WHERE; nothing
+// here lists or reads across tenants. Callers derive partnerId from the transfer/draft/session,
+// never from a request body.
+//
+// M2-6 shipped the reader (the pay step's OTP template). M2-5 adds the writers (setPortalAuthTemplate,
+// setPortalEnabled): validated, audited in the same transaction, and repo-only (M3's go-live checklist
+// or the M2-14 platform-admin card wires the UI, owner O6).
 import { eq, sql } from 'drizzle-orm';
-import type { DbOrTx } from '@/db/client';
 import { partnerPortalSettings, partners } from '@/db/schema';
+import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { resolveWaChannel } from './whatsapp-creds';
-import { DEFAULT_PARTNER_ID } from './defaults';
-import type { PartnerIntegrations } from './partner-integrations';
-import type { PartnerId } from './types';
-
-/**
- * portal-settings-repo — the per-partner customer-portal settings (UI redesign M2-5, Task 5.2):
- * the partner's approved WhatsApp AUTHENTICATION template (the portal sign-in code is sent ONLY
- * through it, from the partner's own number) and the per-partner enablement stamp.
- *
- * Every query is `WHERE partner_id = $1`. The writers are audited in the same transaction. They have
- * no UI in M2-5: M3's go-live checklist (or the M2-14 platform-admin card) wires them (owner O6).
- */
+import { resolveWaChannel } from '@/lib/whatsapp-creds';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { PartnerIntegrations } from '@/lib/partner-integrations';
+import type { PartnerId } from '@/lib/types';
 
 export interface PortalSettings {
   authTemplateName: string | null;
@@ -23,25 +24,8 @@ export interface PortalSettings {
   portalEnabledAt: Date | null;
 }
 
-/** The Meta template-name charset. Length ≤ 512 (the DB CHECK splits the length out; Postgres caps regex bounds at 255). */
-export const PORTAL_TEMPLATE_NAME_RE = /^[a-z0-9_]{1,512}$/;
-/** A language code such as `en` or `en_US` (the DB CHECK is the same pattern). */
-export const PORTAL_TEMPLATE_LANG_RE = /^[a-z]{2}(_[A-Z]{2})?$/;
+const EMPTY: PortalSettings = { authTemplateName: null, authTemplateLang: null, portalEnabledAt: null };
 
-const NONE: PortalSettings = { authTemplateName: null, authTemplateLang: null, portalEnabledAt: null };
-
-type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
-function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
-  const maybeTx = db as TxRunner;
-  return maybeTx.transaction ? maybeTx.transaction(fn) : fn(db);
-}
-
-async function partnerExists(db: DbOrTx, partnerId: PartnerId): Promise<boolean> {
-  const rows = await db.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).limit(1);
-  return rows.length > 0;
-}
-
-/** ONE partner's settings (all null when the partner has no row). */
 export async function getPortalSettings(db: DbOrTx, partnerId: PartnerId): Promise<PortalSettings> {
   const rows = await db
     .select({
@@ -52,7 +36,34 @@ export async function getPortalSettings(db: DbOrTx, partnerId: PartnerId): Promi
     .from(partnerPortalSettings)
     .where(eq(partnerPortalSettings.partnerId, partnerId))
     .limit(1);
-  return rows[0] ?? { ...NONE };
+  return rows[0] ?? { ...EMPTY };
+}
+
+/**
+ * The recorded auth template as a send argument, or undefined unless BOTH the name and the
+ * language are set (the DB CHECKs validate each column but do not require them as a pair).
+ */
+export function portalAuthTemplate(s: PortalSettings): { name: string; lang: string } | undefined {
+  if (!s.authTemplateName || !s.authTemplateLang) return undefined;
+  return { name: s.authTemplateName, lang: s.authTemplateLang };
+}
+
+// ── Writers (UI redesign M2-5, Task 5.2) ────────────────────────────────────────
+
+/** The Meta template-name charset. Length ≤ 512 (the DB CHECK splits the length out; Postgres caps regex bounds at 255). */
+export const PORTAL_TEMPLATE_NAME_RE = /^[a-z0-9_]{1,512}$/;
+/** A language code such as `en` or `en_US` (the DB CHECK is the same pattern). */
+export const PORTAL_TEMPLATE_LANG_RE = /^[a-z]{2}(_[A-Z]{2})?$/;
+
+type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
+function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
+  const maybeTx = db as TxRunner;
+  return maybeTx.transaction ? maybeTx.transaction(fn) : fn(db);
+}
+
+async function partnerExists(db: DbOrTx, partnerId: PartnerId): Promise<boolean> {
+  const rows = await db.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).limit(1);
+  return rows.length > 0;
 }
 
 export type SetTemplateResult = { ok: true } | { ok: false; reason: 'invalid' | 'not_found' };

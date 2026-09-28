@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
   calls: [] as string[],
 }));
 vi.mock('@/lib/site-tenant', () => ({ getSiteTenant: async () => (h.calls.push('tenant'), h.tenant) }));
-vi.mock('@/lib/portal-settings-repo', () => ({
+vi.mock('@/db/repos/portal-settings-repo', () => ({
   getPortalSettings: async () => {
     h.calls.push('settings');
     if (h.settingsThrows) throw new Error('db down');

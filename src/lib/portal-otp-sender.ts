@@ -6,7 +6,7 @@ import { WhatsAppSendError } from './whatsapp-errors';
 import { resolveWaChannel } from './whatsapp-creds';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { parseHealthMarks, recordChannelHealth } from './channel-health';
-import { getPortalSettings, type PortalSettings } from './portal-settings-repo';
+import { getPortalSettings, portalAuthTemplate, type PortalSettings } from '@/db/repos/portal-settings-repo';
 import { getStore } from './store';
 import { pokeWorker } from './outbox';
 import { env } from './env';
@@ -59,7 +59,8 @@ export async function portalOtpChannelReady(partnerId: PartnerId, deps?: PortalO
     const settings = await d.getSettings(partnerId);
     const channel = resolveWaChannel(partnerId, await d.getIntegrations(partnerId));
     const health = parseHealthMarks(await d.readChannelHealth(partnerId));
-    if (!settings.authTemplateName || !settings.authTemplateLang) return { ready: false, why: 'no_template' };
+    const template = portalAuthTemplate(settings);
+    if (!template) return { ready: false, why: 'no_template' };
     let creds: WaCreds | undefined;
     if (channel.kind === 'own') creds = channel.creds;
     else if (channel.kind === 'shared') {
@@ -70,7 +71,7 @@ export async function portalOtpChannelReady(partnerId: PartnerId, deps?: PortalO
     if (Number.isFinite(authErrAt) && d.now() - authErrAt < PORTAL_OTP_AUTH_ERROR_WINDOW_MS) {
       return { ready: false, why: 'health_auth_error' };
     }
-    return { ready: true, creds, template: { name: settings.authTemplateName, lang: settings.authTemplateLang } };
+    return { ready: true, creds, template };
   } catch {
     return { ready: false, why: 'lookup_failed' };
   }
