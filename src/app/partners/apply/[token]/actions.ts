@@ -15,6 +15,7 @@ import type {
   PartnerApplicationDetails,
   PartnerApplicationDocument,
 } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // submitPartnerApplicationAction — the PUBLIC, token-gated detailed-application
 // submit. The URL token (hidden field) is the only identity: re-hash it, resolve
@@ -125,6 +126,7 @@ function parseDocuments(raw: string, requestId: string): PartnerApplicationDocum
 class LinkNoLongerOpen extends Error {}
 
 export async function submitPartnerApplicationAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const token = String(formData.get('token') ?? '').trim();
   const back = `/partners/apply/${encodeURIComponent(token)}`;
 

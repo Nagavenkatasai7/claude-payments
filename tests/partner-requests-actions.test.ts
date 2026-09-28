@@ -60,6 +60,13 @@ import {
   rejectApplicationAction,
 } from '@/app/admin-dashboard/partner-requests/actions';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 const REQ = 'preq_TestReq1';
 const ORIGINAL_TOKEN = 'a'.repeat(64);
 

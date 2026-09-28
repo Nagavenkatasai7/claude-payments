@@ -12,6 +12,7 @@ import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { setMfaPendingCookie } from '@/lib/staff-mfa-cookie';
 import { completeStaffSignIn, staffSignInBlocked } from '@/lib/staff-sign-in';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Program-Fix 17a: ONE refusal string for every throttle (known and unknown
 // usernames alike, outer ring or reservation), so it says nothing about
@@ -28,6 +29,7 @@ export async function login(
   _prev: string | null,
   formData: FormData,
 ): Promise<string | null> {
+  await refuseOnSiteHost();
   await ensureSeedAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const password = String(formData.get('password') ?? '');
@@ -126,6 +128,7 @@ export async function login(
 }
 
 export async function logout(): Promise<void> {
+  await refuseOnSiteHost();
   const jar = await cookies();
   // Program-Fix 45 P1: revoke the session behind EITHER cookie (the __Host-
   // one and a legacy one may both be present), then expire both cookies with

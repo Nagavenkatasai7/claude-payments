@@ -18,6 +18,8 @@ import type { Staff } from '@/lib/types';
 const redis = fakeRedis();
 const cookieJar = new Map<string, string>();
 vi.mock('next/headers', () => ({
+  // The legacy actions refuse on a partner-site host (site-host-guard): run them as on the apex.
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n)! } : undefined),
     set: () => {},

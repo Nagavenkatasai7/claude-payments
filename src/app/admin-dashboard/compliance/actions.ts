@@ -8,6 +8,7 @@ import type { CountryCode } from '@/lib/types';
 import { boundStaffNote } from '@/lib/send-limits';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Program-Fix 43 (compliance-09, partial): close an AML review item.
@@ -42,6 +43,7 @@ function parseAlertId(raw: FormDataEntryValue | null): number | null {
 }
 
 export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireScope();
   const alertId = parseAlertId(formData.get('alertId'));
   if (alertId === null) throw new Error('Alert not found');
@@ -96,6 +98,7 @@ export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
  *      what it was before the switch was first turned on.
  */
 export async function setAmlHoldsAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
   const onRaw = String(formData.get('on') ?? '');
   if (onRaw !== 'on' && onRaw !== 'off') throw new Error('Invalid setting');

@@ -103,6 +103,13 @@ import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store
 import { createPartnerStore } from '@/lib/partner-store';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 describe('wizardCreatePartnerAction (the setup wizard commit)', () => {
   it('creates an active Partner, saves integrations, and issues a show-once API key', async () => {
     const r = await wizardCreatePartnerAction({

@@ -34,6 +34,13 @@ vi.mock('next/navigation', () => ({ redirect: (p: string) => { throw new Error(`
 
 import { startVerificationAction } from '@/app/account/verify/actions';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 /** Flip the default partner's OPT-IN verify-before-send gate — the ROW decides. */
 async function setGate(requireKycBeforeSend: boolean): Promise<void> {
   const dflt = await ps.ensureDefaultPartner();
