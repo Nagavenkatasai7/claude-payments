@@ -110,6 +110,8 @@ async function rowsFor(db: Db, phone: string) {
 }
 
 async function cleanup(db: Db, phone: string) {
+  // Tombstones first: recipient_tombstones → recipients is ON DELETE no action (migration 0027).
+  await db.execute(sql`DELETE FROM recipient_tombstones WHERE partner_id = 'default' AND sender_phone = ${phone}`);
   await db.execute(sql`DELETE FROM recipients WHERE partner_id = 'default' AND sender_phone = ${phone}`);
   await db.execute(sql`DELETE FROM transfers WHERE partner_id = 'default' AND phone = ${phone}`);
 }
