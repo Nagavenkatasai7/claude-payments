@@ -1,6 +1,7 @@
 import { buildSystemPrompt } from './prompt';
 import { resolveEffectiveSendLimits } from './send-limits';
 import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext } from './tools';
+import { buildToolContext } from './tool-context';
 import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Store } from './store';
@@ -17,9 +18,6 @@ import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
-import { selectSettlementRoute } from './partner-rates'; // best-rate routing
-import { getPartnerIntegrationsStore } from './partner-integrations-store';
-import { getDb } from '@/db/client';
 import { env } from './env';
 import { BRAND_MAX, boundUntrustedText, hasModelHost, hasWebAddress, stripModelHosts } from './untrusted-text';
 
@@ -189,26 +187,25 @@ export function createAgent(deps: AgentDeps) {
 
     // ONE tool context per turn: the tools and the round-0 customer context
     // read the same tenant, phone, stores and tap.
-    const toolCtx: ToolContext = {
-      phone,
+    // UI redesign M2-4: built by the shared buildToolContext (tool-context.ts),
+    // the same object field for field; every dep is passed, so no singleton.
+    const toolCtx: ToolContext = buildToolContext({
       partnerId,
-      store: deps.store,
-      scheduleStore: deps.scheduleStore,
-      draftStore: deps.draftStore,
-      customerStore: deps.customerStore,
-      dailyVolumeStore: deps.dailyVolumeStore,
-      monthlyVolumeStore: deps.monthlyVolumeStore,  // NEW (KYC)
-      kycProvider: deps.kycProvider,
-      partnerStore: deps.partnerStore, // NEW (P4)
-      waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
-      channel, // B5 — 'web' blocks non-allowlisted tools at dispatch
+      phone,
+      channel,
       turn,
-      // Best-rate routing: the LIVE selection service (partner_rates +
-      // integrations over the shared Pool). The tools gate by tenant
-      // (default only) and fail open to mid — this only supplies it.
-      routeSelector: (s, d, m) =>
-        selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
-    };
+      deps: {
+        store: deps.store,
+        scheduleStore: deps.scheduleStore,
+        draftStore: deps.draftStore,
+        customerStore: deps.customerStore,
+        dailyVolumeStore: deps.dailyVolumeStore,
+        monthlyVolumeStore: deps.monthlyVolumeStore,
+        kycProvider: deps.kycProvider,
+        partnerStore: deps.partnerStore,
+        waCreds: deps.waCreds,
+      },
+    });
 
     // Customer context (fix 5 / F43): the customer's OWN recent sends and, after
     // a saved-recipient tap, the tapped recipient — as DATA. Injected once at

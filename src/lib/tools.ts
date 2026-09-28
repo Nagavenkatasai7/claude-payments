@@ -14,7 +14,9 @@ import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
-import { DRAFT_TTL_SECONDS, type DraftStore } from './draft-store';
+import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
+import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
+import { payUrlFor } from './pay-url';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -1414,10 +1416,69 @@ async function getQuoteTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // UI redesign M2-4: the body is getQuoteTyped; this maps each arm back to
+  // the exact record (keys and key order) the model has always read. The raw
+  // args pass through uncoerced, as before (tests/send-seam-golden.test.ts).
+  const r = await getQuoteTyped(ctx, {
+    sourceCurrency: args.source_currency,
+    destinationCountry: args.destination_country,
+    amountDest: args.amount_dest ?? args.amount_inr,
+    amountSource: args.amount_source ?? args.amount_usd,
+    fundingMethod: args.funding_method as FundingMethod | undefined,
+  });
+  switch (r.kind) {
+    case 'kyc_required':
+      return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: r.kycUrl };
+    case 'cap': {
+      const ev = r.evaluation;
+      return {
+        within_cap: false,
+        tier: ev.tier,
+        reason: ev.reason,
+        daily_cap_usd: ev.dailyCapCents / 100,
+        per_transfer_cap_usd: ev.perTransferCapCents / 100,
+        today_used_usd: ev.todayUsedCents / 100,
+        today_remaining_usd: ev.todayRemainingCents / 100,
+        day_of_window: ev.dayOfWindow,
+        kyc_url: r.kycUrl,
+      };
+    }
+    case 'fx_unavailable':
+    case 'invalid_request':
+      return { error: r.message };
+    case 'quote': {
+      const q = r.quote;
+      return {
+        source_currency: q.sourceCurrency,
+        amount_source: q.amountSource,
+        fee_source: q.feeSource,
+        total_charge_source: q.totalChargeSource,
+        amount_usd: q.amountUsd,
+        fee_usd: q.feeUsd,
+        total_charge_usd: q.totalChargeUsd,
+        fx_rate: q.fxRate,
+        amount_inr: q.amountInr,           // back-compat field (= amount in destination currency)
+        amount_dest: q.amountInr,          // clear alias for non-India destinations
+        destination_currency: q.destinationCurrency,
+        destination_country: r.destinationCountry,
+        delivery_estimate: q.deliveryEstimate,
+        // Program-Fix 33: the unit the sender pays in, server-formatted; the
+        // prompt makes the model restate it verbatim ("$50.00 USD").
+        amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
+      };
+    }
+  }
+}
+
+/**
+ * The typed body of get_quote (UI redesign M2-4; re-exported by send-seam.ts).
+ * getQuoteTool maps each arm back to the record the model has always read.
+ */
+export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): Promise<QuoteTypedResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
     const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
-      await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+      await resolveCurrencyAndRates(ctx, input.sourceCurrency, input.destinationCountry);
 
     // Phase 3 verify-before-send gate — a NEW condition on kycStatus, independent
     // of the existing T0/Suspended cap branch below. Hand off the kyc_url before
@@ -1425,7 +1486,7 @@ async function getQuoteTool(
     // WL1: skipped for a 'delegated' partner (they run KYC). Sanctions unaffected.
     if (sendGateActive(partner) && !isSendVerified(customer)) {
       const start = await startVerificationForTurn(ctx);
-      return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
+      return { kind: 'kyc_required', kycUrl: start.url };
     }
 
     // Receive-first (Win A → any-to-any): when a finite, positive target amount
@@ -1435,11 +1496,11 @@ async function getQuoteTool(
     // neutral params (amount_dest / amount_source) are preferred; amount_inr /
     // amount_usd are back-compat aliases. Otherwise this is byte-for-byte today's
     // send-first path (USD→INR: destinationCurrency='INR' ⇒ sourceForDest ÷toInr).
-    const targetDest = Number(args.amount_dest ?? args.amount_inr);
+    const targetDest = Number(input.amountDest);
     const receiveFirst = Number.isFinite(targetDest) && targetDest > 0;
     const amountSource = receiveFirst
       ? sourceForDest(targetDest, rates, destinationCurrency, destToUsd)
-      : Number(args.amount_source ?? args.amount_usd);
+      : Number(input.amountSource);
 
     // Cap/tier guard (Bundle D) — refuse BEFORE quoting so the bot never presents
     // an unfulfillable quote. Mirrors check_send_limit's cap result (caps-only; EDD
@@ -1462,22 +1523,12 @@ async function getQuoteTool(
           const start = await startVerificationForTurn(ctx);
           kycUrl = start.url;
         }
-        return {
-          within_cap: false,
-          tier: ev.tier,
-          reason: ev.reason,
-          daily_cap_usd: ev.dailyCapCents / 100,
-          per_transfer_cap_usd: ev.perTransferCapCents / 100,
-          today_used_usd: ev.todayUsedCents / 100,
-          today_remaining_usd: ev.todayRemainingCents / 100,
-          day_of_window: ev.dayOfWindow,
-          kyc_url: kycUrl,
-        };
+        return { kind: 'cap', evaluation: ev, kycUrl };
       }
     }
 
     // G: default funding_method to bank_transfer when absent
-    const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
+    const fundingMethod = input.fundingMethod ?? 'bank_transfer';
 
     let q = quote(
       amountSource,
@@ -1528,27 +1579,10 @@ async function getQuoteTool(
         q = applyRouteToQuote(q, route);
       }
     }
-    return {
-      source_currency: q.sourceCurrency,
-      amount_source: q.amountSource,
-      fee_source: q.feeSource,
-      total_charge_source: q.totalChargeSource,
-      amount_usd: q.amountUsd,
-      fee_usd: q.feeUsd,
-      total_charge_usd: q.totalChargeUsd,
-      fx_rate: q.fxRate,
-      amount_inr: q.amountInr,           // back-compat field (= amount in destination currency)
-      amount_dest: q.amountInr,          // clear alias for non-India destinations
-      destination_currency: q.destinationCurrency,
-      destination_country: destinationCountry,
-      delivery_estimate: q.deliveryEstimate,
-      // Program-Fix 33: the unit the sender pays in, server-formatted; the
-      // prompt makes the model restate it verbatim ("$50.00 USD").
-      amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
-    };
+    return { kind: 'quote', quote: q, destinationCountry };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
-    if (refusal) return refusal;
+    if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
     if (err instanceof QuoteError) {
       // Observability: a QuoteError is returned to the model (not thrown), so it
       // never reached a server log before — corridor/amount failures were
@@ -1557,10 +1591,10 @@ async function getQuoteTool(
         // The RAW request values (what the model passed) — the resolved source
         // currency may differ (auto-detected from the phone / ignored on a
         // single-currency partner), so label these as the request.
-        requested_source_currency: String(args.source_currency ?? ''),
-        requested_destination_country: String(args.destination_country ?? ''),
+        requested_source_currency: String(input.sourceCurrency ?? ''),
+        requested_destination_country: String(input.destinationCountry ?? ''),
       });
-      return { error: err.message };
+      return { kind: 'invalid_request', message: err.message };
     }
     throw err;
   }
@@ -2472,7 +2506,7 @@ async function generatePaymentLinkTool(
       error: 'This transfer did not pass compliance and cannot be paid.',
     };
   }
-  return { url: `${env.appBaseUrl}/pay/${transfer.id}` };
+  return { url: payUrlFor(transfer.id) };
 }
 
 async function checkPaymentStatusTool(
@@ -3680,41 +3714,56 @@ async function setSenderNameTool(
   };
 }
 
-async function sendApprovePickerTool(
-  args: Record<string, unknown>,
+/**
+ * The typed body of send_approve_picker up to (not including) the channel send
+ * (UI redesign M2-4; re-exported by send-seam.ts). The gate ORDER is the bot's:
+ * phone → funding → destination → rates → KYC gate → sender name → B2B bill →
+ * cap → server-side payout → quote + route → sanctions warm + screen → draft.
+ * The pointer defaults from the channel, so a web caller can never land on the
+ * bot's pointer by forgetting the option (Task 4.1).
+ */
+export async function prepareSendDraft(
   ctx: ToolContext,
-): Promise<ToolResult> {
-  const recipientPhone = normalizePhone(args.recipient_phone);
+  input: PrepareSendInput,
+  opts: { pointer?: DraftPointer } = {},
+): Promise<PrepareSendResult> {
+  const pointer: DraftPointer = opts.pointer ?? (isWebChannel(ctx) ? 'web' : 'bot');
+  const recipientPhone = normalizePhone(input.recipientPhone);
   if (!isValidPhone(recipientPhone)) {
-    return {
-      error:
-        "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
-    };
+    return { kind: 'invalid_phone' };
   }
   // G: default funding_method to bank_transfer when absent. fix 6: a value outside
   // the schema enum (e.g. a model-invented 'bank_pull') is refused, never cast.
-  const fundingArg = parseFundingArg(CHAT_FUNDING_METHODS, args.funding_method);
-  if (fundingArg === null) return { error: fundingMethodError(CHAT_FUNDING_METHODS) };
+  const fundingArg = parseFundingArg(CHAT_FUNDING_METHODS, input.fundingMethod);
+  if (fundingArg === null) return { kind: 'bad_funding', message: fundingMethodError(CHAT_FUNDING_METHODS) };
   const fundingMethod: FundingMethod = fundingArg ?? 'bank_transfer';
   // B2B (business-to-business): a bill payment between two businesses, funded by
   // ach_pull. Parsed once; null ⇒ a normal consumer send (every b2c line below
   // is byte-for-byte unchanged). For B2B the recipient_name the card/screen use
   // is the PAYEE business legal name (the model passes it as recipient_name too).
-  const b2b = parseB2bArgs(args);
+  // The B2B helpers read these five arg keys (and only these), as before.
+  const b2bArgs: Record<string, unknown> = {
+    entity_type: input.entityType,
+    funding_method: input.fundingMethod,
+    sender_business_name: input.senderBusinessName,
+    recipient_business_name: input.recipientBusinessName,
+    invoice_id: input.invoiceId,
+  };
+  const b2b = parseB2bArgs(b2bArgs);
   // Program-Fix 33: no silent card to India — an absent destination with a
   // recipient number in another supported country is refused before any draft.
-  const missingDestination = missingDestinationRefusal(args.destination_country, recipientPhone);
-  if (missingDestination) return missingDestination;
+  const missingDestination = missingDestinationRefusal(input.destinationCountry, recipientPhone);
+  if (missingDestination) return { kind: 'missing_destination', message: String(missingDestination.error) };
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   let resolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
-    resolved = await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+    resolved = await resolveCurrencyAndRates(ctx, input.sourceCurrency, input.destinationCountry);
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
-    if (refusal) return refusal;
+    if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
     // An unknown destination (or an ambiguous send currency) is the model's
     // error to correct — a returned { error }, never a thrown agent turn.
-    if (err instanceof QuoteError) return { error: err.message };
+    if (err instanceof QuoteError) return { kind: 'invalid_request', message: err.message };
     throw err;
   }
   const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
@@ -3728,16 +3777,20 @@ async function sendApprovePickerTool(
   const verified = b2b ? isB2bSendVerified(customer) : isSendVerified(customer);
   if (gateActive && !verified) {
     const start = await startVerificationForTurn(ctx);
-    return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
+    return { kind: 'kyc_required', kycUrl: start.url };
   }
   // Program-Fix 14: the sender's legal name is screened with the recipient's,
   // so a consumer send without one stops here — no quote, no draft, no card.
   // (B2B screens the payer business name instead.)
-  if (!b2b && !hasSenderName(customer)) return senderNameRequired();
-  const amountSource = Number(args.amount_source ?? args.amount_usd);
+  if (!b2b && !hasSenderName(customer)) return { kind: 'sender_name_required' };
+  const amountSource = input.amountSource;
   if (b2b) {
-    const notOwnBill = await refuseUnlessOwnOpenBill(ctx, args, b2b, amountSource, sourceCurrency);
-    if (notOwnBill) return notOwnBill;
+    const notOwnBill = await refuseUnlessOwnOpenBill(ctx, b2bArgs, b2b, amountSource, sourceCurrency);
+    if (notOwnBill) {
+      return notOwnBill.pay_url === undefined
+        ? { kind: 'bill_refused', message: String(notOwnBill.error) }
+        : { kind: 'bill_refused', message: String(notOwnBill.error), payUrl: String(notOwnBill.pay_url) };
+    }
   }
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
@@ -3748,16 +3801,7 @@ async function sendApprovePickerTool(
     const requestedCents = Math.round(amountUsd * 100);
     const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), limits);
     if (!ev.withinCap) {
-      return {
-        error: 'Cap exceeded for this transfer.',
-        cap_eval: {
-          tier: ev.tier,
-          reason: ev.reason,
-          today_used_usd: ev.todayUsedCents / 100,
-          today_remaining_usd: ev.todayRemainingCents / 100,
-          daily_cap_usd: ev.dailyCapCents / 100,
-        },
-      };
+      return { kind: 'cap', evaluation: ev };
     }
   }
   // ── Payout destination: SERVER-SIDE ONLY (fix 6 / audit ctx-01) ─────────
@@ -3792,7 +3836,7 @@ async function sendApprovePickerTool(
     await warmSanctionsList();
     const screen = await screenTransfer({
       amountUsd,
-      recipientName: String(args.recipient_name),
+      recipientName: input.recipientName,
       transfersToday,
       sourceCountry: customer.senderCountry,
       // B2B: screen the PAYER business legal name (defense-in-depth — the mint
@@ -3804,7 +3848,7 @@ async function sendApprovePickerTool(
       try {
         await recordBlockedAttempt(ctx.store, {
           phone: ctx.phone,
-          recipientName: String(args.recipient_name),
+          recipientName: input.recipientName,
           recipientPhone,
           payoutMethod,
           // fix 6: the sender's stored destination for this number, or '' — never a
@@ -3835,18 +3879,14 @@ async function sendApprovePickerTool(
         // DrizzleQueryError carries query + params, errors.d.ts:9-14).
         logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
       }
-      return {
-        blocked: true,
-        reply_to_customer:
-          "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
-      };
+      return { kind: 'blocked' };
     }
 
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       partnerId: ctx.partnerId,
       recipient: {
-        name: String(args.recipient_name),
+        name: input.recipientName,
         recipientPhone,
         payoutMethod,
         payoutDestination,
@@ -3858,11 +3898,11 @@ async function sendApprovePickerTool(
       destinationCurrency,
       fundingMethod,
       // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
-      recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
-      relationship: asEnum(RELATIONSHIPS, args.relationship),
-      purpose: asEnum(PURPOSES, args.purpose),
-      sourceOfFunds: asEnum(SOURCE_OF_FUNDS, args.source_of_funds),
-      occupation: asEnum(OCCUPATIONS, args.occupation),
+      recipientLegalName: typeof input.recipientLegalName === 'string' ? input.recipientLegalName : undefined,
+      relationship: asEnum(RELATIONSHIPS, input.relationship),
+      purpose: asEnum(PURPOSES, input.purpose),
+      sourceOfFunds: asEnum(SOURCE_OF_FUNDS, input.sourceOfFunds),
+      occupation: asEnum(OCCUPATIONS, input.occupation),
       quote: {
         feeUsd: q.feeUsd,
         fxRate: q.fxRate,           // the winning rate when a route applied
@@ -3884,84 +3924,172 @@ async function sendApprovePickerTool(
       senderEntityType: b2b ? BUSINESS_ENTITY : undefined,
       recipientEntityType: b2b ? BUSINESS_ENTITY : undefined,
       senderBusinessName: b2b?.senderBusinessName,
-      recipientBusinessName: b2b?.recipientBusinessName ?? (b2b ? String(args.recipient_name) : undefined),
+      recipientBusinessName: b2b?.recipientBusinessName ?? (b2b ? input.recipientName : undefined),
       invoiceId: b2b?.invoiceId,
-    });
+    }, { pointer });
     const summary = buildApproveSummary(
       q,
-      String(args.recipient_name),
+      input.recipientName,
       payoutMethod,
       payoutDestination,
       fundingMethod,
       q.destinationCurrency ?? 'INR',
       rateLockMinutes(fxFetchedAt),
     );
-    const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
-    // Web channel (B5): no WhatsApp interactive exists here — return the
-    // canonical, code-generated pay-page URL instead of sending a card. The
-    // agent appends pay_url verbatim after stripping every model-written URL,
-    // so the link the customer taps is always ours. All the guards above
-    // (verify gate, cap, screening, draft) ran identically; money still only
-    // ever moves through the secure pay page. Reached via repeat_transfer —
-    // direct send_approve_picker calls are blocked at dispatch on web.
-    if (isWebChannel(ctx)) {
-      return {
-        draft_id: draftId,
-        summary,
-        pay_url: payUrl,
-        reply_hint:
-          `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
-            rateLockMinutes(fxFetchedAt) < 2
-              ? 'the rate is valid only for a moment, so they should tap soon'
-              : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
-          }`,
-      };
-    }
-    // Idempotency guard: the agent.turn outbox row is at-least-once, so a retry
-    // (e.g. the reply send to Meta threw a transient 5xx) re-runs this whole turn
-    // and would emit a SECOND card + a NEW pay link; the model can also call this
-    // tool twice in one turn. Dedupe the card SEND by sender+content within a
-    // short TTL — a duplicate is not re-sent (and says so, below), a genuinely new send still goes
-    // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
-    // Content-keyed (NOT by draftId, which changes every call): two byte-identical
-    // sends inside the TTL intentionally collide — a true "same amount, same
-    // recipient, right now" duplicate is rare and worth suppressing.
-    const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
-    if (!(await ctx.store.markApproveCardSent(cardKey))) {
-      // Program-Fix 34A: a DEDUPED card was not sent — never report sent:true
-      // (the agent would treat the card as the reply and the customer would see
-      // nothing). The model answers in text, pointing at the card above.
-      return {
-        sent: false,
-        duplicate: true,
-        draft_id: draftId,
-        reply_hint:
-          'The payment card for this exact send is already above — ask the customer to tap it, or say what to change.',
-      };
-    }
-    try {
-      await sendCtaUrl(
-        ctx.phone,
-        `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
-        { displayText: 'Approve & Pay', url: payUrl },
-        undefined,
-        undefined,
-        ctx.waCreds, // WL2 — approve card leaves from the partner's number
-      );
-    } catch (sendErr) {
-      // The send itself failed AFTER we claimed the key — release it so the
-      // at-least-once retry can actually deliver the card. (A failure in a
-      // LATER step keeps the key, so that retry stays deduped.)
-      await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
-      throw sendErr;
-    }
-    return { sent: true, draft_id: draftId };
+    const payUrl = payUrlFor(draftId);
+    return {
+      kind: 'draft',
+      draftId,
+      summary,
+      payUrl,
+      quote: q,
+      recipientPhone,
+      amountSource,
+      sourceCurrency,
+      destinationCountry,
+      fxFetchedAt,
+    };
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
-    if (refusal) return refusal;
-    if (err instanceof QuoteError) return { error: err.message };
+    if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
+    if (err instanceof QuoteError) return { kind: 'invalid_request', message: err.message };
     throw err;
   }
+}
+
+/**
+ * send_approve_picker's refusals, mapped back to the exact records (keys and
+ * key order) the model has always read (tests/send-seam-golden.test.ts).
+ */
+function prepareRefusalToTool(r: Exclude<PrepareSendResult, { kind: 'draft' }>): ToolResult {
+  switch (r.kind) {
+    case 'invalid_phone':
+      return {
+        error:
+          "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
+      };
+    case 'bad_funding':
+    case 'missing_destination':
+    case 'invalid_request':
+    case 'fx_unavailable':
+      return { error: r.message };
+    case 'kyc_required':
+      return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: r.kycUrl };
+    case 'sender_name_required':
+      return senderNameRequired();
+    case 'bill_refused':
+      return r.payUrl === undefined ? { error: r.message } : { error: r.message, pay_url: r.payUrl };
+    case 'cap': {
+      const ev = r.evaluation;
+      return {
+        error: 'Cap exceeded for this transfer.',
+        cap_eval: {
+          tier: ev.tier,
+          reason: ev.reason,
+          today_used_usd: ev.todayUsedCents / 100,
+          today_remaining_usd: ev.todayRemainingCents / 100,
+          daily_cap_usd: ev.dailyCapCents / 100,
+        },
+      };
+    }
+    case 'blocked':
+      return {
+        blocked: true,
+        reply_to_customer:
+          "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
+      };
+  }
+}
+
+async function sendApprovePickerTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  // UI redesign M2-4: the gates, screen and draft are prepareSendDraft; this
+  // tool keeps only the channel tail. Raw model args pass through uncoerced
+  // (each parser sees what it saw before); payout_* is never read.
+  const r = await prepareSendDraft(
+    ctx,
+    {
+      recipientPhone: args.recipient_phone,
+      recipientName: String(args.recipient_name),
+      amountSource: Number(args.amount_source ?? args.amount_usd),
+      sourceCurrency: args.source_currency,
+      destinationCountry: args.destination_country,
+      fundingMethod: args.funding_method,
+      entityType: args.entity_type,
+      senderBusinessName: args.sender_business_name,
+      recipientBusinessName: args.recipient_business_name,
+      invoiceId: args.invoice_id,
+      recipientLegalName: args.recipient_legal_name,
+      relationship: args.relationship,
+      purpose: args.purpose,
+      sourceOfFunds: args.source_of_funds,
+      occupation: args.occupation,
+    },
+    { pointer: isWebChannel(ctx) ? 'web' : 'bot' },
+  );
+  if (r.kind !== 'draft') return prepareRefusalToTool(r);
+  const { draftId, summary, payUrl, recipientPhone, amountSource, sourceCurrency, destinationCountry, fxFetchedAt } = r;
+  // Web channel (B5): no WhatsApp interactive exists here — return the
+  // canonical, code-generated pay-page URL instead of sending a card. The
+  // agent appends pay_url verbatim after stripping every model-written URL,
+  // so the link the customer taps is always ours. All the guards above
+  // (verify gate, cap, screening, draft) ran identically; money still only
+  // ever moves through the secure pay page. Reached via repeat_transfer —
+  // direct send_approve_picker calls are blocked at dispatch on web.
+  if (isWebChannel(ctx)) {
+    return {
+      draft_id: draftId,
+      summary,
+      pay_url: payUrl,
+      reply_hint:
+        `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+          rateLockMinutes(fxFetchedAt) < 2
+            ? 'the rate is valid only for a moment, so they should tap soon'
+            : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
+        }`,
+    };
+  }
+  // Idempotency guard: the agent.turn outbox row is at-least-once, so a retry
+  // (e.g. the reply send to Meta threw a transient 5xx) re-runs this whole turn
+  // and would emit a SECOND card + a NEW pay link; the model can also call this
+  // tool twice in one turn. Dedupe the card SEND by sender+content within a
+  // short TTL — a duplicate is not re-sent (and says so, below), a genuinely new send still goes
+  // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
+  // Content-keyed (NOT by draftId, which changes every call): two byte-identical
+  // sends inside the TTL intentionally collide — a true "same amount, same
+  // recipient, right now" duplicate is rare and worth suppressing.
+  const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
+  if (!(await ctx.store.markApproveCardSent(cardKey))) {
+    // Program-Fix 34A: a DEDUPED card was not sent — never report sent:true
+    // (the agent would treat the card as the reply and the customer would see
+    // nothing). The model answers in text, pointing at the card above.
+    return {
+      sent: false,
+      duplicate: true,
+      draft_id: draftId,
+      reply_hint:
+        'The payment card for this exact send is already above — ask the customer to tap it, or say what to change.',
+    };
+  }
+  try {
+    await sendCtaUrl(
+      ctx.phone,
+      `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+      { displayText: 'Approve & Pay', url: payUrl },
+      undefined,
+      undefined,
+      ctx.waCreds, // WL2 — approve card leaves from the partner's number
+    );
+  } catch (sendErr) {
+    // The send itself failed AFTER we claimed the key — release it so the
+    // at-least-once retry can actually deliver the card. (A failure in a
+    // LATER step keeps the key, so that retry stays deduped.)
+    await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
+    throw sendErr;
+  }
+  return { sent: true, draft_id: draftId };
 }
 
 async function repeatTransferTool(
