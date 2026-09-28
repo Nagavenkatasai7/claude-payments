@@ -223,6 +223,7 @@ export const en = {
   'portal.kyc.status.verified': 'Verified',
   'portal.kyc.status.review': 'In review',
   'portal.kyc.status.rejected': 'Not approved',
+  'portal.kyc.rejected_body': 'Your identity check was not approved. Contact {brand} if you have questions or want to try again.',
   'portal.kyc.status.started': 'Started, not finished',
   'portal.kyc.status.none': 'Not verified',
   'portal.kyc.start_body': 'Verify your identity with our verification provider. It takes a few minutes and you will need a photo ID.',

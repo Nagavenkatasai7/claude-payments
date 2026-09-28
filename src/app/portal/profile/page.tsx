@@ -80,6 +80,9 @@ export default async function ProfilePage() {
           </div>
           {delegated ? (
             <p className="text-[14px] text-ds-ink-muted">{t('portal.kyc.delegated_body', { brand: site.brand })}</p>
+          ) : ctx.customer.kycStatus === 'rejected' ? (
+            // Owner decision (2026-09-28): no retry after a rejection in the portal; the customer contacts the partner.
+            <p className="text-[14px] text-ds-ink-muted">{t('portal.kyc.rejected_body', { brand: site.brand })}</p>
           ) : view.kyc.canStart && gateOn ? (
             <>
               <p className="text-[14px] text-ds-ink-muted">{t('portal.kyc.start_body')}</p>

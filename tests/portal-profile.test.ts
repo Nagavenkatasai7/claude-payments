@@ -200,6 +200,14 @@ describe('Profile page', () => {
     const rows = await audits('pii.view');
     expect(rows.map((r) => r.partnerId)).toEqual(['pb']);
   });
+  it('a rejected customer sees "contact the partner" and no start button', async () => {
+    await setPartner('pa', { requireKycBeforeSend: true });
+    await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, kycStatus: 'rejected' });
+    await signIn('pa');
+    const html = await render();
+    expect(html).toContain('Contact Acme Remit');
+    expect(html).not.toContain('Verify your identity</button>');
+  });
   it('a delegated partner shows the provider copy and no start button', async () => {
     await setPartner('pa', { kycMode: 'delegated', requireKycBeforeSend: true });
     await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, kycStatus: 'not_started' });
@@ -269,6 +277,13 @@ describe('startPortalVerificationAction', () => {
     expect(await startPortalVerificationAction(null, fd())).toEqual({ notice: 'portal.kyc.not_required' });
     await setPartner('pa', { requireKycBeforeSend: true });
     await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, kycStatus: 'verified' });
+    await signIn('pa');
+    expect(await startPortalVerificationAction(null, fd())).toEqual({ notice: 'portal.kyc.already' });
+    expect(h.startVerification).not.toHaveBeenCalled();
+  });
+  it('a REJECTED customer cannot start verification again in the portal (owner: they contact the partner)', async () => {
+    await setPartner('pa', { requireKycBeforeSend: true });
+    await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, kycStatus: 'rejected' });
     await signIn('pa');
     expect(await startPortalVerificationAction(null, fd())).toEqual({ notice: 'portal.kyc.already' });
     expect(h.startVerification).not.toHaveBeenCalled();
