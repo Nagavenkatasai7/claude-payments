@@ -10,13 +10,16 @@ import { t, type MessageKey } from './i18n';
  * route's metadata: the page's for the streamed head, and on the not-found path every layout's
  * (node_modules/next/dist/lib/metadata/resolve-metadata.js collectMetadata). A static `metadata`
  * export therefore leaked the portal's structure onto the apex 404. This returns the page's
- * metadata only when getPortalSite() resolves, else {} so nothing page-specific reaches the head.
+ * metadata only when getPortalSite() resolves, else the root 404's own metadata. Not {}: that leaves
+ * the root layout's "SmartRemit" in the RSC head, while an unmatched URL's says "Page not found"
+ * (seen on `next start`), which still marks the route. Every apex portal route is a 404, so the
+ * 404 metadata is always right there.
  */
 export async function portalMetadata(
   title: MessageKey | null,
   extra: Omit<Metadata, 'title'> = {},
 ): Promise<Metadata> {
-  if (!(await getPortalSite())) return {};
+  if (!(await getPortalSite())) return NOT_FOUND_METADATA;
   return title ? { title: t(title), ...extra } : { ...extra };
 }
 
