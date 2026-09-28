@@ -185,3 +185,13 @@ for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/trans
     await expect(page.locator('body')).not.toContainText(/smartremit/i);
   });
 }
+
+// UI redesign M2-10: the schedules pages, same neutral apex 404.
+for (const path of ['/portal/schedules', '/portal/schedules/new']) {
+  test(`apex ${path} is the neutral 404`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}
