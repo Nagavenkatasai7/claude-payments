@@ -34,7 +34,7 @@ describe('buildPartnerHome', () => {
       { key: 'whatsapp', count: 1 },
       { key: 'webhooks', count: 1 },
     ]);
-    expect(buildPartnerHome({ ...base, summary: { ...base.summary, needsAttention: 0, byStatus: {} } }).actions).toEqual([]);
+    expect(buildPartnerHome({ ...base, summary: { ...base.summary!, needsAttention: 0, byStatus: {} } }).actions).toEqual([]);
   });
 
   it('api health: off without an unrevoked key; attention when no live key was used in 7 days or only test keys', () => {
