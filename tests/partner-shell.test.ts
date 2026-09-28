@@ -216,7 +216,10 @@ describe('/partner layout: the chrome', () => {
 // Only the security page may pass { skipMfa: true } (it IS the enrolment page).
 const APP_DIR = 'src/app/partner/(app)';
 const SECURITY_PAGE = `${APP_DIR}/security/page.tsx`;
-function gateProblems(file: string, src: string): string[] {
+// Comments are stripped first, so a commented-out gate never satisfies the check.
+const stripComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+function gateProblems(file: string, rawSrc: string): string[] {
+  const src = stripComments(rawSrc);
   const segs = file
     .slice(APP_DIR.length)
     .split('/')
@@ -274,6 +277,9 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
       gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);\nawait requirePartnerStaff(PARTNER_ANY);'),
     ).not.toEqual([]);
     expect(gateProblems(home, 'export default function P() { return null; }')).not.toEqual([]);
+    // A commented-out gate is no gate (LOW-5): comments are stripped before matching.
+    expect(gateProblems(home, '// await requirePartnerStaff(PARTNER_ROUTES.home.policy);\nexport default function P() { return null; }')).not.toEqual([]);
+    expect(gateProblems(home, '/* await requirePartnerStaff(PARTNER_ROUTES.home.policy); */ export default function P() { return null; }')).not.toEqual([]);
     expect(gateProblems('src/app/partner/(app)/nowhere/page.tsx', 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);')).not.toEqual([]);
   });
   it('pages render no <main> of their own (the layout owns it) and read their policy from routes.ts', () => {
