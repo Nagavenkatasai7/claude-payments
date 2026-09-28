@@ -39,6 +39,20 @@ test('a guide renders its MDX body, the code-backed blocks and gfm tables', asyn
   }
 });
 
+test.describe('without JavaScript', () => {
+  test.use({ javaScriptEnabled: false });
+  test('the prerendered index and a guide show their h1 and body (no hidden streaming wrapper)', async ({ page, request }) => {
+    for (const [path, h1] of [['/docs-next', 'Partner documentation'], ['/docs-next/webhooks', 'Webhooks']] as const) {
+      const html = await (await request.get(path)).text();
+      expect(html).not.toContain('hidden id="S:0"');
+      expect(html).not.toContain('<!--$?-->');
+      await page.goto(path);
+      await expect(page.getByRole('heading', { level: 1, name: h1 })).toBeVisible();
+    }
+    await expect(page.locator('main')).toContainText('x-smartremit-signature');
+  });
+});
+
 test('an unknown guide is a 404', async ({ request }) => {
   expect((await request.get('/docs-next/no-such-guide')).status()).toBe(404);
 });
@@ -59,7 +73,6 @@ test.describe('at a 375px phone viewport', () => {
     test(`${path} does not scroll sideways`, async ({ page }) => {
       const res = await page.goto(path);
       expect(res?.status()).toBe(200);
-      // Measure the revealed page, not the loading skeleton the segment boundary shows first.
       await expect(page.locator('h1')).toBeVisible();
       const { scrollWidth, innerWidth } = await page.evaluate(() => ({
         scrollWidth: document.documentElement.scrollWidth,
