@@ -42,5 +42,21 @@ export const config = {
     '/admin-dashboard/:path*',
     '/account',
     '/account/:path*',
+    // UI redesign M1: partner subdomains ONLY (<slug>.smartremit.ai). Next lowercases the Host, strips
+    // the port and tests ^value$ (next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so
+    // apex hosts never satisfy this `has` and the apex match set is unchanged
+    // (tests/site-matcher-parity.test.ts). The value is a hand-written literal of the parseSiteHost
+    // rules (reserved labels, ??-- labels, 3-30 char slug); the parity test fails if they drift.
+    // Static assets are excluded explicitly.
+    {
+      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg).*)',
+      has: [
+        {
+          type: 'host',
+          value:
+            '(?!(?:www|api|admin|partner|docs|trust|status|mail|app|smartremit|portal|pay|support|help|static|cdn|m|ops)\\.smartremit\\.ai$)(?!..--)[a-z0-9][a-z0-9-]{1,28}[a-z0-9]\\.smartremit\\.ai',
+        },
+      ],
+    },
   ],
 };

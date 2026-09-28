@@ -114,12 +114,16 @@ describe('proxy (auth gate)', () => {
   });
 
   it('matches only the two gated trees (/login and /login/mfa stay unmatched)', () => {
-    expect(config.matcher).toEqual([
+    // UI redesign M1: the four legacy entries stay byte-identical; ONE host-conditioned entry
+    // (partner subdomains only) is appended. tests/site-matcher-parity.test.ts proves the apex
+    // match set is unchanged.
+    expect(config.matcher.slice(0, 4)).toEqual([
       '/admin-dashboard',
       '/admin-dashboard/:path*',
       '/account',
       '/account/:path*',
     ]);
+    expect(config.matcher.slice(4)).toHaveLength(1);
   });
 });
 
