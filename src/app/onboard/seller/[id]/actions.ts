@@ -11,6 +11,7 @@ import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { logError } from '@/lib/log';
 import type { Seller } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Hosted seller-onboarding server actions — the web-finish of the WhatsApp-start
 // register_seller flow. The route `id` is the ONLY trusted identity: every action
@@ -35,6 +36,7 @@ function eligible(seller: Seller): boolean {
  * bare { ok } — never leaks whether the id exists beyond "can't send".
  */
 export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean; reason?: 'otp_send_failed' }> {
+  await refuseOnSiteHost();
   const sellerId = String(id ?? '');
   try {
     const seller = await getStore().getSellerById(sellerId);
@@ -88,6 +90,7 @@ export async function activateSellerAction(input: {
   /** Payout method chosen on the page. Absent/unknown ⇒ 'bank' (back-compat). */
   method?: 'bank' | 'usdc';
 }): Promise<OnboardResult> {
+  await refuseOnSiteHost();
   const id = String(input?.id ?? '');
   try {
     // Per-IP outer ring (fail-open).

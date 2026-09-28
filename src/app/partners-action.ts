@@ -16,6 +16,7 @@ import { buildInviteEmail, inviteDedupeKey } from '@/lib/partner-invite-email';
 import { isPartnerType, partnerTypeLabel } from '@/lib/partner-type';
 import { getRedis } from '@/lib/redis';
 import { PARTNER_CORRIDOR_CODES } from '@/app/landing/corridors';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // submitPartnerRequestAction — the PUBLIC "Partner with us" landing form action.
 // Intentionally unauthenticated (anyone can express interest), but defended:
@@ -33,6 +34,7 @@ const ALLOWED_CORRIDORS = PARTNER_CORRIDOR_CODES;
 const EMAIL_RE = /.+@.+\..+/;
 
 export async function submitPartnerRequestAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   // ── HONEYPOT — bots fill hidden fields; a non-empty value ⇒ drop silently. ──
   // Look successful (redirect to ?partner=ok) but persist/notify nothing.
   if (String(formData.get('website') ?? '').trim() !== '') {

@@ -190,6 +190,17 @@ export const env = {
     // code step at sign-in and before those actions, whatever this says.
     return process.env.CUSTOMER_MFA_REQUIRED === 'true';
   },
+  // ── UI redesign M2: the customer portal on partner subdomains (both OPTIONAL; never in boot-assert) ──
+  get customerPortalEnabled(): boolean {
+    // '1' ⇒ the portal routes may serve on a partner subdomain (each partner ALSO needs
+    // partner_portal_settings.portal_enabled_at). Default off: every portal page, action and
+    // route 404s, and the proxy does not route the portal paths (src/lib/site-routes.ts).
+    return process.env.CUSTOMER_PORTAL_ENABLED === '1';
+  },
+  get customerDataRightsEnabled(): boolean {
+    // '1' ⇒ the portal shows the Privacy (data requests) page. Default off (SPEC §6b).
+    return process.env.CUSTOMER_DATA_RIGHTS_ENABLED === '1';
+  },
   // ── Program-Fix 7: real sender funds capture (both OPTIONAL; never in boot-assert) ──
   get stripeFundingEnabled(): boolean {
     // 'true' ⇒ a partner with a Stripe funding config (partner_integrations

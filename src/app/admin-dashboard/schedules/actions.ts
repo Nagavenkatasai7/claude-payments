@@ -10,6 +10,7 @@ import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
 import type { Schedule, Staff } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Staff kill switch on recurring schedules (Program-Fix 36 / schedules-02):
@@ -88,13 +89,16 @@ async function transition(action: ScheduleAction, formData: FormData): Promise<v
 }
 
 export async function pauseScheduleAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await transition('pause', formData);
 }
 
 export async function resumeScheduleAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await transition('resume', formData);
 }
 
 export async function cancelScheduleAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await transition('cancel', formData);
 }

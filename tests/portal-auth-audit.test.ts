@@ -46,6 +46,13 @@ describe('recordPortalAuthEvent', () => {
     expect(byPartner.pa).not.toBe(byPartner.pb);
   });
 
+  it('records the first-sign-in consent (owner O11) as portal.auth.consent', async () => {
+    await recordPortalAuthEvent(db, { partnerId: 'pa', phone: PHONE, event: 'consent', meta: { whatsapp: true, terms: true } });
+    const rows = await db.select().from(auditEvents).where(eq(auditEvents.action, 'portal.auth.consent'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toEqual({ whatsapp: true, terms: true });
+  });
+
   it('writes no meta column when none is given', async () => {
     await recordPortalAuthEvent(db, { partnerId: 'pa', phone: PHONE, event: 'signout' });
     const [row] = await db.select().from(auditEvents).where(eq(auditEvents.action, 'portal.auth.signout'));

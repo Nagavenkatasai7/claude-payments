@@ -9,6 +9,7 @@ import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { clearMfaPendingCookie, readMfaPendingToken } from '@/lib/staff-mfa-cookie';
 import { completeStaffSignIn, staffSignInBlocked } from '@/lib/staff-sign-in';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Program-Fix 17b: the sign-in's second step (a public POST endpoint, like
 // every server action). The ONLY input trusted for WHO is signing in is the
@@ -23,6 +24,7 @@ const TOO_MANY_CODES = 'Too many codes. Sign in again.';
 const UNAVAILABLE = 'Account unavailable. Contact SmartRemit support.';
 
 export async function verifyMfa(_prev: string | null, formData: FormData): Promise<string | null> {
+  await refuseOnSiteHost();
   const jar = await cookies();
   const token = readMfaPendingToken(jar);
   const mfa = getStaffMfaStore();

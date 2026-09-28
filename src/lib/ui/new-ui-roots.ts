@@ -16,6 +16,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/app/partner', // the partner app (hex-scanned and state-walked)
   // PR5: the generic inactive-site sheet a partner subdomain shows for an unknown/disabled slug.
   'src/app/site-inactive',
+  // M2-5: the customer portal on partner subdomains (hex-scanned and state-walked).
+  'src/app/portal',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */
