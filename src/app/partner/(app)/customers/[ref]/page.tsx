@@ -10,6 +10,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { auditIdentityView, openCustomerRef } from '@/lib/customer-ref';
 import { hasPermission } from '@/lib/permissions';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { customerDetailView } from '@/lib/partner-customer-view';
 import { t } from '@/lib/i18n';
 import { Card, MaskedValue, PageHeader, buttonVariants } from '@/components/ds';
@@ -63,7 +64,9 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
 
   const partner = await getPartnerStore().getPartner(ctx.partnerId);
   const view = customerDetailView(customer, ref, new Date(), sendGateActive(partner));
-  const canReveal = hasPermission(ctx.staff, 'canRevealPii');
+  // Mirrors the action's viewer checks (the action is the authority): no Show control that would
+  // always be refused. It depends only on the viewer, never on the customer (no oracle).
+  const canReveal = hasPermission(ctx.staff, 'canRevealPii') && (await getStaffMfaStore().isEnrolled(ctx.username));
 
   return (
     <>

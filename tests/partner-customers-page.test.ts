@@ -54,6 +54,10 @@ vi.mock('@/lib/customer-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/customer-store')>('@/lib/customer-store');
   return { ...actual, getCustomerStore: (store: Parameters<typeof actual.createCustomerStore>[1]) => actual.createCustomerStore(db, store) };
 });
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
+});
 vi.mock('@/db/repos/aux-repos', async () => {
   const actual = await vi.importActual<typeof import('@/db/repos/aux-repos')>('@/db/repos/aux-repos');
   return {
@@ -69,6 +73,7 @@ vi.mock('@/db/repos/aux-repos', async () => {
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { auditSubjectId, openCustomerRef, sealCustomerRef } from '@/lib/customer-ref';
+import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import CustomersPage from '@/app/partner/(app)/customers/page';
 import CustomerDetailPage from '@/app/partner/(app)/customers/[ref]/page';
 
@@ -251,8 +256,13 @@ describe('/partner/customers/[ref]: detail', () => {
     await signInAs({ partnerId: PA, role: 'agent' });
     expect(await detail(sealCustomerRef(PA, SHARED))).not.toContain('>Show<');
     await signInAs({ partnerId: PA, role: 'admin', username: 'adm' });
+    await redis.set(staffMfaKeys.secret('adm'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
     const html = await detail(sealCustomerRef(PA, SHARED));
     expect(html.match(/>Show</g)).toHaveLength(4);
+  });
+  it('an admin without two-step verification sees no Show control (the reveal would be refused)', async () => {
+    await signInAs({ partnerId: PA, role: 'admin', username: 'adm-nomfa' });
+    expect(await detail(sealCustomerRef(PA, SHARED))).not.toContain('>Show<');
   });
   it('if the pii.view audit write fails, the page fails (no identity without a record)', async () => {
     await signInAs({ partnerId: PA, role: 'admin' });

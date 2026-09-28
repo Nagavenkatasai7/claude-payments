@@ -81,7 +81,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import { auditSubjectId, sealCustomerRef } from '@/lib/customer-ref';
-import { REVEAL_LIMIT, revealThrottleKey, takeRevealBudget } from '@/lib/partner-reveal-throttle';
+import { REVEAL_LIMIT, REVEAL_TENANT_LIMIT, revealThrottleKey, takeRevealBudget } from '@/lib/partner-reveal-throttle';
 import { revealCustomerFieldAction } from '@/app/partner/(app)/customers/[ref]/actions';
 
 const PA = 'ptn-alpha3';
@@ -256,6 +256,16 @@ describe('partner-reveal-throttle', () => {
     expect(k).toContain('alice');
     expect(revealThrottleKey(PB, 'alice', 0)).not.toBe(k);
     expect(revealThrottleKey(PA, 'bob', 0)).not.toBe(k);
+  });
+  it('a tenant-wide ceiling caps many staff members together (extra accounts do not multiply the budget)', async () => {
+    const r = fakeRedis();
+    let allowed = 0;
+    for (let u = 0; allowed < REVEAL_TENANT_LIMIT + 5 && u < 100; u++) {
+      for (let i = 0; i < REVEAL_LIMIT; i++) if (await takeRevealBudget(r, PA, `staff${u}`, 1_000)) allowed++;
+    }
+    expect(allowed).toBe(REVEAL_TENANT_LIMIT);
+    expect(REVEAL_TENANT_LIMIT).toBeGreaterThan(REVEAL_LIMIT);
+    expect(await takeRevealBudget(r, PB, 'staff0', 1_000)).toBe(true);
   });
   it('one tenant spending its budget never throttles another', async () => {
     const r = fakeRedis();
