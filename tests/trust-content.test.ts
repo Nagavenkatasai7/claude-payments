@@ -101,6 +101,7 @@ describe('Trust content is honest', () => {
     const fle = SECURITY_POINTS.find((p) => p.title === 'Field-level encryption');
     expect(fle?.body).toMatch(/in our database/);
     expect(fle?.body).toMatch(/up to 30 minutes/);
+    expect(fle?.body).toMatch(/unencrypted copy/);
   });
 
   it('the disclosure policy does not tell outside researchers to use keys they cannot get', async () => {

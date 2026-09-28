@@ -17,7 +17,7 @@ export const SECURITY_POINTS: readonly SecurityPoint[] = [
   // src/lib/field-crypto.ts (envelope AES-256-GCM). Deliberately not "all data".
   {
     title: 'Field-level encryption',
-    body: 'Payout account details, identity-verification data and integration credentials are encrypted at the field level in our database (AES-256-GCM). A transfer draft waiting for payment keeps a copy in the short-lived cache for up to 30 minutes.',
+    body: 'Payout account details, identity-verification data and integration credentials are encrypted at the field level in our database (AES-256-GCM). A transfer draft waiting for payment keeps an unencrypted copy in the short-lived cache for up to 30 minutes.',
   },
   // Outbound instructions are signed; inbound callbacks are verified fail-closed with a freshness window.
   {
