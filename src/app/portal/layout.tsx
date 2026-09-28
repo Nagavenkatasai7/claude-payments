@@ -34,7 +34,7 @@ export default async function PortalLayout({ children }: { children: ReactNode }
           >
             {t('portal.skip')}
           </a>
-          <header className="flex items-center justify-between gap-4 border-b border-ds-border bg-ds-surface px-4 py-3 sm:px-6">
+          <header className="flex items-center justify-between gap-4 border-b border-ds-border bg-ds-surface px-4 py-3 sm:px-6 print:hidden">
             <SiteBrand brand={site.brand} logo={site.logo} />
             {customer ? (
               <form action={signOutAction}>
@@ -44,8 +44,12 @@ export default async function PortalLayout({ children }: { children: ReactNode }
               </form>
             ) : null}
           </header>
-          <div className={customer ? 'md:grid md:grid-cols-[240px_1fr]' : undefined}>
-            {customer ? <Sidebar label={t('portal.nav.label')} items={portalNavItems(env.customerDataRightsEnabled)} /> : null}
+          <div className={customer ? 'md:grid md:grid-cols-[240px_1fr] print:block' : undefined}>
+            {customer ? (
+              <div className="print:hidden">
+                <Sidebar label={t('portal.nav.label')} items={portalNavItems(env.customerDataRightsEnabled)} />
+              </div>
+            ) : null}
             <main id="main" className="sh-main mx-auto w-full max-w-3xl bg-transparent px-4 py-8 sm:px-6">
               {children}
             </main>
