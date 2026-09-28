@@ -28,7 +28,15 @@ describe('docs registry ⇄ src/content/docs/*.mdx', () => {
 
   it('funding is coming-soon while the funding flag defaults off; every other guide is published', async () => {
     const { GUIDES, guideBySlug } = await import('@/content/docs/registry');
-    // src/lib/env.ts: the funding flag is on only when explicitly set to 'true'; unset ⇒ off.
+    // Read the real default from src/lib/env.ts: with the flag unset, funding is off.
+    const { env } = await import('@/lib/env');
+    const saved = process.env.STRIPE_FUNDING_ENABLED;
+    delete process.env.STRIPE_FUNDING_ENABLED;
+    try {
+      expect(env.stripeFundingEnabled).toBe(false);
+    } finally {
+      if (saved !== undefined) process.env.STRIPE_FUNDING_ENABLED = saved;
+    }
     expect(guideBySlug('funding')?.status).toBe('coming-soon');
     for (const g of GUIDES.filter((x) => x.slug !== 'funding')) expect(g.status).toBe('published');
     expect(guideBySlug('nope')).toBeUndefined();

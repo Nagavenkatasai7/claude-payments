@@ -71,8 +71,8 @@ Content-Type: application/json
 | `created` | Awaiting payment (no change). |
 | `funded` | Paid: the customer was charged on your side. |
 | `paid_out` | Delivered. Triggers the delivery notifications. |
-| `failed` | Cancelled. The sender's charge is refunded and the customer is told. |
-| `returned` | Cancelled, as for `failed`. |
+| `failed` | Cancelled. If SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
+| `returned` | Cancelled, as for `failed`: if SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
 
 - The state machine only moves forward, so replays and out-of-order callbacks are safe.
 - A `failed` or `returned` may carry an optional `reason` string. It is stored on the transfer for your operations team and ours, cut to <Fact name="failureReasonMaxChars" /> characters.

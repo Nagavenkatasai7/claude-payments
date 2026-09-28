@@ -6,7 +6,7 @@ No other endpoint is idempotent. In particular, retrying `POST /beneficiaries` s
 
 ## Choosing a key
 
-- Use a fresh random UUID per transaction, and put no personal data in it. Keep it to 255 characters or fewer.
+- Use a fresh random UUID per transaction, and put no personal data in it. We recommend at most 255 characters (a recommendation, not an enforced limit).
 - Keys are kept indefinitely, per partner and per environment. The sandbox and live namespaces never collide: the same key sent with a test key and with a live key creates two separate transactions.
 - These prefixes are reserved and refused with `400`: <Fact name="reservedIdempotencyPrefixes" />.
 

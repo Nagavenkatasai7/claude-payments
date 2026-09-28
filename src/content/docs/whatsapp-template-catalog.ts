@@ -11,7 +11,7 @@
 export const BRAND_PLACEHOLDER = '[Your brand]';
 
 export interface TemplateEntry {
-  /** Exact Meta template name (for 'configured' entries: the recommended name, confirmed at onboarding). */
+  /** Exact Meta template name. For 'configured' entries the name is platform-wide: submit it exactly as given. */
   name: string;
   category: 'UTILITY' | 'AUTHENTICATION';
   language: 'en';
@@ -26,7 +26,11 @@ export interface TemplateEntry {
   samples?: readonly string[];
   /** True only if a send path uses it today. */
   sentToday: boolean;
-  /** 'fixed' = the platform sends exactly this name; 'configured' = the name is set for you at onboarding. */
+  /**
+   * 'fixed' = the platform sends exactly this name; 'configured' = a platform-wide name, used once
+   * SmartRemit enables it (src/lib/env.ts). sendTransactionOtp never uses the verification-code
+   * template on a partner's own number (src/lib/whatsapp.ts).
+   */
   nameSource: 'fixed' | 'configured';
   purpose: string;
 }
@@ -108,7 +112,6 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     category: 'UTILITY',
     language: 'en',
     body: 'Hi {{1}}, your transfer of {{2}} to {{3}} is still pending. You can complete it using the button below.',
-    footer: FOOTER,
     button: { kind: 'url', label: 'Complete Payment', urlPattern: 'https://smartremit.ai/pay/{{1}}' },
     paramCount: 3,
     samples: ['Anand', '$50.00', 'Priya'],
@@ -121,7 +124,6 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     category: 'UTILITY',
     language: 'en',
     body: "Hi {{1}}, your transfer of {{2}} to {{3}} is being reviewed by our team for security. We'll update you shortly — no action is needed right now.",
-    footer: FOOTER,
     paramCount: 3,
     samples: ['Anand', '$1,000.00', 'Priya'],
     sentToday: false,
@@ -133,7 +135,6 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     category: 'UTILITY',
     language: 'en',
     body: 'Good news {{1}} — your transfer of {{2}} to {{3}} has cleared review and is on its way.',
-    footer: FOOTER,
     paramCount: 3,
     samples: ['Anand', '$1,000.00', 'Priya'],
     sentToday: false,
@@ -145,7 +146,6 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     category: 'UTILITY',
     language: 'en',
     body: 'Hi {{1}}, your transfer of {{2}} to {{3}} could not be completed and any charge has been reversed. Reply here if you have questions.',
-    footer: FOOTER,
     paramCount: 3,
     samples: ['Anand', '$200.00', 'Priya'],
     sentToday: false,
@@ -157,7 +157,6 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     category: 'UTILITY',
     language: 'en',
     body: `Hi {{1}}, identity verification is still pending on your ${BRAND_PLACEHOLDER} account. Until it's complete, some transfers may be limited. You can finish it using the button below.`,
-    footer: FOOTER,
     button: { kind: 'url', label: 'Verify Now', urlPattern: null },
     paramCount: 1,
     samples: ['Anand'],

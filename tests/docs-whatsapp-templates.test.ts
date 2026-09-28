@@ -68,18 +68,25 @@ describe('WhatsApp template catalog is code-true', () => {
   it('sentToday is true exactly for templates a send path references', async () => {
     const { TEMPLATES } = await import('@/content/docs/whatsapp-template-catalog');
     const srcs = allSources('src').filter((f) => !f.endsWith('whatsapp-templates.ts') && !f.includes(join('src', 'content')));
-    const text = srcs.map((f) => readFileSync(f, 'utf8')).join('\n');
+    // Comments and import/export-from statements are stripped, so a mention in a comment or a
+    // bare import can never count as a send path; builders must be CALLED (name followed by '(').
+    const stripComments = (s: string) =>
+      s
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:'"`])\/\/.*$/gm, '$1')
+        .replace(/^\s*(?:import|export)\s[^;]*?\sfrom\s*['"][^'"]+['"];?/gm, '');
+    const text = srcs.map((f) => stripComments(readFileSync(f, 'utf8'))).join('\n');
     const referenced: Record<string, boolean> = {
       transfer_delivered: /RECIPIENT_TEMPLATE_NAME/.test(text.replace(/export const RECIPIENT_TEMPLATE_NAME[^\n]*/, '')),
       scheduled_payment_ready: /TEMPLATE_SCHEDULED_PAYMENT_READY|SCHEDULED_TEMPLATE_NAME/.test(
         text.replace(/export const (TEMPLATE_SCHEDULED_PAYMENT_READY|SCHEDULED_TEMPLATE_NAME)[^\n]*/g, ''),
       ),
-      transfer_delivered_sender: /transferDeliveredSenderParams|TEMPLATE_TRANSFER_DELIVERED_SENDER/.test(text),
-      payment_reminder: /paymentReminderParams|TEMPLATE_PAYMENT_REMINDER/.test(text),
-      transfer_in_review: /transferInReviewParams|TEMPLATE_TRANSFER_IN_REVIEW/.test(text),
-      transfer_released: /transferReleasedParams|TEMPLATE_TRANSFER_RELEASED/.test(text),
-      transfer_cancelled: /transferCancelledParams|TEMPLATE_TRANSFER_CANCELLED/.test(text),
-      verification_reminder: /verificationReminderParams|TEMPLATE_VERIFICATION_REMINDER/.test(text),
+      transfer_delivered_sender: /transferDeliveredSenderParams\(|TEMPLATE_TRANSFER_DELIVERED_SENDER/.test(text),
+      payment_reminder: /paymentReminderParams\(|TEMPLATE_PAYMENT_REMINDER/.test(text),
+      transfer_in_review: /transferInReviewParams\(|TEMPLATE_TRANSFER_IN_REVIEW/.test(text),
+      transfer_released: /transferReleasedParams\(|TEMPLATE_TRANSFER_RELEASED/.test(text),
+      transfer_cancelled: /transferCancelledParams\(|TEMPLATE_TRANSFER_CANCELLED/.test(text),
+      verification_reminder: /verificationReminderParams\(|TEMPLATE_VERIFICATION_REMINDER/.test(text),
     };
     for (const e of TEMPLATES.filter((x) => x.nameSource === 'fixed')) {
       expect({ name: e.name, sentToday: e.sentToday }).toEqual({ name: e.name, sentToday: referenced[e.name] });

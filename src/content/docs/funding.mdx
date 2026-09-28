@@ -2,7 +2,4 @@
 
 Collecting sender funds through your own account is not enabled yet. This guide will describe it when it is available.
 
-Until then, you collect funds on your side and tell SmartRemit a transfer is paid in one of two ways:
-
-- confirm it through the API with `POST /transactions/{id}/confirm`, or
-- report `funded` in a signed status callback (see <GuideLink slug="webhooks">Webhooks</GuideLink>).
+Until then, you collect funds on your side and tell SmartRemit a transfer is paid by confirming it through the API with `POST /transactions/{id}/confirm`.
