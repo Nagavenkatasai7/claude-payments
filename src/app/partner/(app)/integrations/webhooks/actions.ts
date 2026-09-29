@@ -29,6 +29,7 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 /** The audit actor, derived from the authenticated record (never from input). */
 const actorOf = (ctx: PartnerCtx): EndpointActor => ({ username: ctx.username, actorScope: scopeOf(ctx.staff).kind });
 const refused = (key: MessageKey) => ({ ok: false as const, error: t(key) });
+const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 
 export async function saveEndpointAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult> {
   await refuseOnSiteHost();
@@ -55,12 +56,16 @@ export async function rotateSecretAction(_prev: RotateSecretResult | null, formD
   if (!kind) return refused('partner.webhooks.invalid');
   let r;
   try {
-    r = await rotateRailSecret(getDb(), ctx.partnerId, actorOf(ctx), kind);
+    // The override is an explicit ConfirmDialog flag: exactly '1', anything else means no.
+    r = await rotateRailSecret(getDb(), ctx.partnerId, actorOf(ctx), kind, { endGrace: formData.get('endGrace') === '1' });
   } catch (err) {
     logWarn('partner.webhooks.rotate', errName(err), { partnerId: ctx.partnerId, kind });
     return refused('partner.webhooks.failed');
   }
-  if (!r.ok) return refused('partner.webhooks.managed');
+  if (!r.ok) {
+    if (r.reason === 'rotation_in_grace') return { ok: false, error: t('partner.webhooks.rotationInGrace', { when: whenUtc(r.graceUntil) }) };
+    return refused('partner.webhooks.managed');
+  }
   revalidatePath(PAGE);
   return { ok: true, secret: r.secret, kind, graceUntil: r.graceUntil };
 }

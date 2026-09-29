@@ -7,7 +7,7 @@ import { env } from '@/lib/env';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
-import { RAIL_SECRET_GRACE_MS, railSecrets, withRotatedSecret, type PartnerIntegrations, type RailSecretKind } from '@/lib/partner-integrations';
+import { PREVIOUS_SECRET_KEYS, RAIL_SECRET_GRACE_MS, railSecrets, withRotatedSecret, type PartnerIntegrations, type RailSecretKind } from '@/lib/partner-integrations';
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { getRedis } from '@/lib/redis';
 import { safeFetch } from '@/lib/safe-fetch';
@@ -94,6 +94,13 @@ async function lockTenant(tx: DbOrTx, partnerId: string): Promise<void> {
   await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('update');
 }
 
+class InGrace extends Error {
+  constructor(readonly graceUntil: string) {
+    super('rotation_in_grace');
+    this.name = 'InGrace';
+  }
+}
+
 class NotPartnerRail extends Error {
   constructor() {
     super('not_partner_rail');
@@ -133,14 +140,17 @@ export async function saveSettlementEndpoint(db: Db, partnerId: string, actor: E
   }
 }
 
-export type RotateResult = { ok: true; secret: string; graceUntil: string | null } | { ok: false; reason: 'not_partner_rail' };
+export type RotateResult =
+  | { ok: true; secret: string; graceUntil: string | null }
+  | { ok: false; reason: 'not_partner_rail' }
+  | { ok: false; reason: 'rotation_in_grace'; graceUntil: string };
 
 export async function rotateRailSecret(
   db: Db,
   partnerId: string,
   actor: EndpointActor,
   kind: RailSecretKind,
-  deps: { now?: () => Date } = {},
+  deps: { now?: () => Date; endGrace?: boolean } = {},
 ): Promise<RotateResult> {
   const now = (deps.now ?? (() => new Date()))();
   const fresh = randomBytes(32).toString('hex');
@@ -155,6 +165,12 @@ export async function rotateRailSecret(
       // withRotatedSecret records only the previous/until pair in the blob.
       const creds = existing.payment.credentials ?? {};
       const old = kind === 'signing' ? creds.signingSecret : existing.payment.webhookSecret;
+      // M3-15a review M1: a previous secret still in its grace is the one the partner most likely
+      // still runs (the current one may never have been deployed). Rotating again would drop it at
+      // once, so it is refused unless the admin explicitly ends that grace (endGrace).
+      const inGrace = railSecrets(existing.payment, kind, now).length > 1;
+      const priorUntil = creds[PREVIOUS_SECRET_KEYS[kind].until] ?? '';
+      if (inGrace && !deps.endGrace) throw new InGrace(priorUntil);
       const credentials = withRotatedSecret(creds, kind, old, fresh, now);
       let webhookSecret = existing.payment.webhookSecret;
       if (kind === 'signing') credentials.signingSecret = fresh;
@@ -167,12 +183,13 @@ export async function rotateRailSecret(
         actorType: 'staff',
         action: 'partner.settlement_secret.rotate',
         subjectId: partnerId,
-        meta: { kind, graceUntil, actorScope: actor.actorScope },
+        meta: { kind, graceUntil, ...(inGrace ? { endedGrace: true } : {}), actorScope: actor.actorScope },
       });
       return { ok: true as const, secret: fresh, graceUntil };
     });
   } catch (err) {
     if (err instanceof NotPartnerRail) return { ok: false, reason: 'not_partner_rail' };
+    if (err instanceof InGrace) return { ok: false, reason: 'rotation_in_grace', graceUntil: err.graceUntil };
     throw err;
   }
 }
@@ -204,14 +221,14 @@ const isUrlRefusal = (e: unknown) => e instanceof Error && e.message.startsWith(
 
 export async function sendTestPing(db: Db, partnerId: string, actor: EndpointActor, deps: PingDeps = {}): Promise<PingResult> {
   const now = (deps.now ?? (() => new Date()))();
-  if (!(await withinPingLimit(deps.redis ?? getRedis(), partnerId, now.getTime()))) return { ok: false, reason: 'rate_limited' };
-
+  // Configuration refusals first (no network, no row): they do not consume the rate-limit budget.
   const cfg = await createPartnerIntegrationsStore(db).getIntegrations(partnerId);
   if (!isPartnerRail(cfg)) return { ok: false, reason: 'not_partner_rail' };
   const stored = cfg.payment.credentials?.settlementUrl ?? '';
   if (stored === '') return { ok: false, reason: 'no_endpoint' };
   const secrets = railSecrets(cfg.payment, 'signing', now);
   if (secrets.length === 0) return { ok: false, reason: 'no_signing_secret' };
+  if (!(await withinPingLimit(deps.redis ?? getRedis(), partnerId, now.getTime()))) return { ok: false, reason: 'rate_limited' };
 
   let outcome: PingOutcome;
   let httpStatus: number | null = null;

@@ -99,7 +99,11 @@ function SecretReveal({ secret, graceUntil }: { secret: string; graceUntil: stri
   );
 }
 
-export function RotateSecretControl({ kind }: { kind: RailSecretKind }) {
+/**
+ * `graceUntil` set ⇒ a previous secret is still accepted: rotating again would retire it at once, so
+ * the dialog says so and sends the explicit override flag (endGrace=1). The server re-checks.
+ */
+export function RotateSecretControl({ kind, graceUntil }: { kind: RailSecretKind; graceUntil: string | null }) {
   const [result, setResult] = React.useState<RotateSecretResult | null>(null);
   return (
     <div className="flex flex-col">
@@ -110,12 +114,14 @@ export function RotateSecretControl({ kind }: { kind: RailSecretKind }) {
               {t(kind === 'signing' ? 'partner.webhooks.rotate.signing' : 'partner.webhooks.rotate.webhook')}
             </Button>
           }
-          title={t('partner.webhooks.rotate.title')}
-          body={t('partner.webhooks.rotate.body')}
-          confirmLabel={t('partner.webhooks.rotate.confirm')}
+          title={t(graceUntil ? 'partner.webhooks.rotate.endGraceTitle' : 'partner.webhooks.rotate.title')}
+          body={graceUntil ? t('partner.webhooks.rotate.endGraceBody', { when: whenUtc(graceUntil) }) : t('partner.webhooks.rotate.body')}
+          confirmLabel={t(graceUntil ? 'partner.webhooks.rotate.endGraceConfirm' : 'partner.webhooks.rotate.confirm')}
+          destructive={Boolean(graceUntil)}
           requireReason={false}
           action={async (fd) => {
             fd.set('kind', kind);
+            if (graceUntil) fd.set('endGrace', '1');
             setResult(await rotateSecretAction(null, fd));
           }}
         />

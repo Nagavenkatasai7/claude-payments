@@ -236,6 +236,25 @@ describe('rotateSecretAction', () => {
   });
 });
 
+describe('rotateSecretAction: a second rotation within the grace window', () => {
+  it('is refused with the grace expiry; the ConfirmDialog override (endGrace=1) rotates and is audited', async () => {
+    await signInAs({});
+    const first = await rotateSecretAction(null, form({ kind: 'signing' }));
+    if (!first.ok) throw new Error(first.error);
+    const until = first.graceUntil!;
+    const refusedR = await rotateSecretAction(null, form({ kind: 'signing' }));
+    expect(refusedR).toEqual({ ok: false, error: t('partner.webhooks.rotationInGrace', { when: `${until.slice(0, 10)} ${until.slice(11, 16)} UTC` }) });
+    expect(await audits()).toHaveLength(1);
+    for (const v of ['0', 'yes', 'true ', '']) expect((await rotateSecretAction(null, form({ kind: 'signing', endGrace: v }))).ok).toBe(false);
+    const r = await rotateSecretAction(null, form({ kind: 'signing', endGrace: '1' }));
+    if (!r.ok) throw new Error(r.error);
+    const a = await audits();
+    expect(a).toHaveLength(2);
+    expect(a[1].meta).toMatchObject({ kind: 'signing', endedGrace: true, actorScope: 'partner' });
+    expect(railSecrets((await store().getIntegrations('pa')).payment, 'signing', new Date())).toEqual([r.secret, first.secret]);
+  });
+});
+
 describe('sendTestAction', () => {
   it('sends ONE signed ping through safeFetch and reports the outcome; one delivery row + one audit row', async () => {
     await signInAs({});

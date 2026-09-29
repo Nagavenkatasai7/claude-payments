@@ -51,7 +51,7 @@ function SecretRow({ kind, state }: { kind: RailSecretKind; state: SecretState }
       </div>
       <p className="text-[13.5px] leading-relaxed text-ds-ink-muted">{t(hint)}</p>
       {state.previousUntil ? <p className="text-[13.5px] leading-relaxed text-ds-ink">{t('partner.webhooks.secret.grace', { when: whenUtc(state.previousUntil) })}</p> : null}
-      <RotateSecretControl kind={kind} />
+      <RotateSecretControl kind={kind} graceUntil={state.previousUntil} />
     </li>
   );
 }

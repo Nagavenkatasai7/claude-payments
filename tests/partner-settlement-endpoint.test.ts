@@ -174,6 +174,52 @@ describe('rotateRailSecret', () => {
     expect(after.payment.credentials?.previousWebhookSecret).toBe(HOOK_OLD);
   });
 
+  it.each(['signing', 'webhook'] as const)('%s: a second rotation while the previous secret is in grace is REFUSED (the live original must not be dropped); nothing written, no audit', async (kind) => {
+    const now = new Date();
+    const first = await rotateRailSecret(db, 'pa', actor, kind, { now: () => now });
+    if (!first.ok) throw new Error('expected ok');
+    const before = JSON.stringify(await store().getIntegrations('pa'));
+    const later = new Date(now.getTime() + 60_000);
+    const r = await rotateRailSecret(db, 'pa', actor, kind, { now: () => later });
+    expect(r).toEqual({ ok: false, reason: 'rotation_in_grace', graceUntil: first.graceUntil });
+    expect(JSON.stringify(await store().getIntegrations('pa'))).toBe(before);
+    expect(await audits()).toHaveLength(1);
+    // the partner's original secret still verifies
+    expect(railSecrets((await store().getIntegrations('pa')).payment, kind, later)).toEqual([first.secret, kind === 'signing' ? SIGN_OLD : HOOK_OLD]);
+  });
+
+  it('the other kind is not blocked by one kind\'s grace', async () => {
+    const now = new Date();
+    expect((await rotateRailSecret(db, 'pa', actor, 'signing', { now: () => now })).ok).toBe(true);
+    expect((await rotateRailSecret(db, 'pa', actor, 'webhook', { now: () => now })).ok).toBe(true);
+  });
+
+  it('the explicit override (endGrace) ends the old grace now: rotates and audits endedGrace: true', async () => {
+    const now = new Date();
+    const first = await rotateRailSecret(db, 'pa', actor, 'signing', { now: () => now });
+    if (!first.ok) throw new Error();
+    const later = new Date(now.getTime() + 60_000);
+    const r = await rotateRailSecret(db, 'pa', actor, 'signing', { now: () => later, endGrace: true });
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.graceUntil).toBe(new Date(later.getTime() + RAIL_SECRET_GRACE_MS).toISOString());
+    expect(railSecrets((await store().getIntegrations('pa')).payment, 'signing', later)).toEqual([r.secret, first.secret]);
+    const a = await audits();
+    expect(a).toHaveLength(2);
+    expect(a[1].meta).toEqual({ kind: 'signing', graceUntil: r.graceUntil, endedGrace: true, actorScope: 'partner' });
+    expect(JSON.stringify(a)).not.toContain(r.secret);
+  });
+
+  it('after the grace window (now + 7d + 1ms) a normal rotation is allowed', async () => {
+    const now = new Date();
+    const first = await rotateRailSecret(db, 'pa', actor, 'webhook', { now: () => now });
+    if (!first.ok) throw new Error();
+    const after = new Date(now.getTime() + RAIL_SECRET_GRACE_MS + 1);
+    const r = await rotateRailSecret(db, 'pa', actor, 'webhook', { now: () => after });
+    if (!r.ok) throw new Error('expected ok');
+    expect(railSecrets((await store().getIntegrations('pa')).payment, 'webhook', after)).toEqual([r.secret, first.secret]);
+    expect((await audits())[1].meta).toEqual({ kind: 'webhook', graceUntil: r.graceUntil, actorScope: 'partner' });
+  });
+
   it('a first mint (no old secret) is not a rotation: no grace', async () => {
     await store().saveIntegrations('pa', httpRail({ credentials: { settlementUrl: 'https://rail.example.com/i' }, webhookSecret: undefined }));
     const r = await rotateRailSecret(db, 'pa', actor, 'signing');
@@ -322,6 +368,9 @@ describe('sendTestPing', () => {
     expect(await sendTestPing(db, 'pa', actor, deps(f as unknown as typeof fetch))).toEqual({ ok: false, reason: 'no_signing_secret' });
     expect(f).not.toHaveBeenCalled();
     expect(await pings('pa')).toHaveLength(0);
+    // a refused configuration does not consume the rate-limit budget
+    await store().saveIntegrations('pa', httpRail());
+    for (let i = 0; i < PING_LIMIT.limit; i++) expect((await sendTestPing(db, 'pa', actor, deps(f as unknown as typeof fetch))).ok).toBe(true);
   });
 
   it('never reads the response body', async () => {

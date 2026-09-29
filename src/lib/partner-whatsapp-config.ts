@@ -177,7 +177,6 @@ async function lockedIntegrations(tx: DbOrTx, partnerId: PartnerId) {
 }
 
 export async function disconnectWhatsapp(partnerId: PartnerId, actor: string, opts: WhatsappWriteOpts = {}): Promise<void> {
-  const existing = await getPartnerIntegrationsStore().getIntegrations(partnerId);
   await getDb().transaction(async (tx) => {
     const fresh = await lockedIntegrations(tx, partnerId);
     await createPartnerIntegrationsStore(tx).saveIntegrations(partnerId, { ...fresh, whatsapp: {} });
