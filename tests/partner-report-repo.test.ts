@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { captureQueries, freshDb } from './helpers-db';
 import { seedTwoTenants, seedPartnerTransfer } from './helpers-partner-app';
 import type { Db } from '@/db/client';
@@ -144,6 +144,25 @@ describe('ledger reads', () => {
     expect((await repo.transfersForExport('pa', { ...w, limit: 10, environment: 'test' })).items.map((t) => t.id)).toEqual(['tx_a4']);
     expect(p1.items[0].payoutDestination).toMatch(/^\*{4}/);
     await expect(repo.transfersForExport('', { ...w, limit: 1 })).rejects.toThrow(/tenant/);
+  });
+
+  it('transfersForExport keyset keeps rows that share a created_at millisecond (µs precision)', async () => {
+    const base = new Date(Date.now() - 86_400_000).toISOString();
+    for (const id of ['tx_u1', 'tx_u2', 'tx_u3']) await seedPartnerTransfer(db, { id, partnerId: 'pa', createdAt: base });
+    // Same millisecond, different microseconds (Postgres keeps µs; a JS Date cursor does not).
+    await db.execute(sql`UPDATE transfers SET created_at = created_at + interval '456 microseconds' WHERE id = 'tx_u2'`);
+    await db.execute(sql`UPDATE transfers SET created_at = created_at + interval '123 microseconds' WHERE id = 'tx_u3'`);
+    const repo = createPartnerReportRepo(db);
+    const w = { from: new Date(Date.now() - 31 * 86_400_000), to: new Date(Date.now() + 86_400_000), environment: 'live' as const, limit: 1 };
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 10; i++) {
+      const p = await repo.transfersForExport('pa', { ...w, cursor });
+      seen.push(...p.items.map((t) => t.id));
+      if (!p.nextCursor) break;
+      cursor = p.nextCursor;
+    }
+    expect(seen).toEqual(['tx_u2', 'tx_u3', 'tx_u1']);
   });
 
   it('feesByDay: live paid/delivered rows of the tenant, per UTC day and currency', async () => {

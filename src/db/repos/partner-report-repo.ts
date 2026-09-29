@@ -51,12 +51,19 @@ export interface ExportPageReq {
   cursor?: string;
 }
 
-function parseCursor(cursor: string | undefined): { createdAt: Date; id: string } | null {
+// The keyset cursor carries created_at as Postgres TEXT (6 µs digits, '+00'), never a JS Date
+// (ms), which would skip rows sharing a millisecond at a page edge (the listSettledPage pattern,
+// transfer-repo.ts paidAtText). Anything not exactly that shape is ignored (first page).
+const CURSOR_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}\+00$/;
+const CURSOR_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+function parseCursor(cursor: string | undefined): { createdAtText: string; id: string } | null {
   if (!cursor) return null;
   const sep = cursor.lastIndexOf('|');
   if (sep < 0) return null;
-  const at = new Date(cursor.slice(0, sep));
-  return isNaN(at.getTime()) ? null : { createdAt: at, id: cursor.slice(sep + 1) };
+  const createdAtText = cursor.slice(0, sep);
+  const id = cursor.slice(sep + 1);
+  return CURSOR_TS_RE.test(createdAtText) && CURSOR_ID_RE.test(id) ? { createdAtText, id } : null;
 }
 
 export function createPartnerReportRepo(db: DbOrTx) {
@@ -216,20 +223,22 @@ export function createPartnerReportRepo(db: DbOrTx) {
         gte(transfers.createdAt, req.from),
         lt(transfers.createdAt, req.to),
         req.status ? eq(transfers.status, req.status) : undefined,
-        cur
-          ? or(lt(transfers.createdAt, cur.createdAt), and(eq(transfers.createdAt, cur.createdAt), lt(transfers.id, cur.id)))
-          : undefined,
+        cur ? sql`(${transfers.createdAt}, ${transfers.id}) < (${cur.createdAtText}::timestamptz, ${cur.id})` : undefined,
       ].filter((c): c is NonNullable<typeof c> => Boolean(c));
       const limit = Math.min(Math.max(1, Math.trunc(req.limit) || 1), 1000);
       const rows = await db
-        .select()
+        .select({
+          row: transfers,
+          createdAtText: sql<string>`to_char(${transfers.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'`.as('created_at_text'),
+        })
         .from(transfers)
         .where(and(...conds))
         .orderBy(desc(transfers.createdAt), desc(transfers.id))
         .limit(limit + 1);
-      const items = rows.slice(0, limit).map((r) => rowToTransfer(r, { decrypt: false }));
-      const last = items[items.length - 1];
-      return { items, nextCursor: rows.length > limit && last ? `${last.createdAt}|${last.id}` : undefined };
+      const page = rows.slice(0, limit);
+      const items = page.map((r) => rowToTransfer(r.row, { decrypt: false }));
+      const last = page[page.length - 1];
+      return { items, nextCursor: rows.length > limit && last ? `${last.createdAtText}|${last.row.id}` : undefined };
     },
 
     /**

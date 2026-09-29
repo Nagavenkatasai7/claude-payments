@@ -7,6 +7,7 @@ import { freshDb } from './helpers-db';
 import { seedPartnerTransfer, seedTwoTenants } from './helpers-partner-app';
 import { createOutboxRepo, LEASE_MS, type OutboxRepo } from '@/db/repos/outbox-repo';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { outbox as outboxTable, partnerReportJobs } from '@/db/schema';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { buildReportCsv, openReportCsv, runPartnerReportJob } from '@/lib/partner-report-worker';
@@ -209,6 +210,51 @@ describe('money rows are not starved (review MEDIUM)', () => {
     expect(r.failed).toBe(1);
     expect(await jobRow(id)).toMatchObject({ status: 'queued', claimedAt: null, errorCode: null });
     expect((await outboxRow(id)).status).toBe('failed');
+  });
+});
+
+describe('batch ordering (money first)', () => {
+  it('a report row claimed BEFORE a settlement.instruct row runs after it', async () => {
+    await seedBoth();
+    await createIntegrationsRepo(db).saveIntegrations('pa', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    await seedPartnerTransfer(db, { id: 'tx_money', partnerId: 'pa', status: 'paid', paidAt: new Date().toISOString() });
+    const jobId = await newJob('pa', 'settlements', WINDOW()); // lower outbox id: claimed first
+    await outbox.enqueue('settlement.instruct', { transferId: 'tx_money' }, { dedupeKey: 'instruct:tx_money' });
+    const jobStatusAtPost: string[] = [];
+    const d = deps();
+    d.fetchFn = (async () => {
+      jobStatusAtPost.push((await jobRow(jobId)).status);
+      return { ok: true, json: async () => ({ providerRef: 'rail-xyz' }) } as unknown as Response;
+    }) as typeof fetch;
+    const r = await drainOnce(d, 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    expect(r.processed).toBe(2);
+    expect(jobStatusAtPost).toEqual(['queued']); // the money POST happened before the report started
+    expect((await jobRow(jobId)).status).toBe('ready');
+  });
+});
+
+describe('rolling-release skew', () => {
+  it('an older build that throws "Unknown outbox kind" leaves the job queued; the new build then completes it', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const mod = await import('@/lib/partner-report-worker');
+    const spy = vi.spyOn(mod, 'runPartnerReportJob').mockImplementation(async () => {
+      throw new Error('Unknown outbox kind: partner.report'); // what the old build's `default:` throws
+    });
+    const old = await drainOnce(deps(), 'w-old', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    expect(old.failed).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'queued', claimedAt: null });
+    expect((await outboxRow(id))).toMatchObject({ status: 'failed', attempts: 1 });
+    // Backoff elapses; the new build drains it.
+    await db.update(outboxTable).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outboxTable.dedupeKey, `report:${id}`));
+    await drainOnce(deps(), 'w-new', 10, { hardStopAt: Date.now() + 60_000 });
+    expect((await jobRow(id)).status).toBe('ready');
+    expect((await outboxRow(id)).status).toBe('done');
   });
 });
 

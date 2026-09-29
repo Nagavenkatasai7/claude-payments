@@ -1194,6 +1194,9 @@ export async function drainOnce(
   // Review S1: run in id order — UPDATE … RETURNING order is not guaranteed,
   // and agent.turn ordering (plus the FIFO gate) assumes oldest first.
   const rows = (await outbox.claimBatch(batchSize, workerId)).sort((a, b) => a.id - b.id);
+  // UI redesign M3-16: partner.report rows run LAST in a batch (a stable partition, so every other
+  // kind keeps its id order), so a report build never delays a money row claimed with it.
+  rows.sort((a, b) => Number(a.kind === 'partner.report') - Number(b.kind === 'partner.report'));
   if (rows.length > 0 && opts.onClaim) {
     try {
       await opts.onClaim();
