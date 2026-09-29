@@ -172,6 +172,36 @@ export function resolveEffectiveSendLimits(
   };
 }
 
+/** The UTC date of an ISO expiry, as the admin form's date-only field posts it back (null if unparseable). */
+function expiryDay(iso: string): string | null {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * UI redesign M3-12 follow-up: true when `next` (a validated admin raise-form value) names
+ * EXACTLY the caps and expiry of a PARTNER-set customer entry, i.e. the admin re-saved the
+ * prefilled form without changing a value. The admin action then writes nothing, so a
+ * partner-set entry is never silently converted into a SmartRemit (setScope 'platform') override
+ * that locks the partner out. Compared: perTransferCapCents, t1DailyCapCents (absent equals
+ * absent) and the expiry by its UTC DATE (the form posts a date, the validator stores the end of
+ * that day). setBy / setAt / setScope and the reason are ignored. Every non-partner entry
+ * (platform, legacy, unknown scope), a missing entry, a clear and an unparseable stored expiry are
+ * NOT unchanged: they take the audited write exactly as before.
+ */
+export function isUnchangedPartnerSetEntry(
+  previous: SendLimitOverride | null | undefined,
+  next: Pick<SendLimitOverride, 'perTransferCapCents' | 't1DailyCapCents' | 'expiresAt'> | null,
+): boolean {
+  if (!previous || typeof previous !== 'object' || previous.setScope !== 'partner' || next === null) return false;
+  if (previous.perTransferCapCents !== next.perTransferCapCents) return false;
+  if (previous.t1DailyCapCents !== next.t1DailyCapCents) return false;
+  const prevExp = typeof previous.expiresAt === 'string' ? previous.expiresAt : undefined;
+  if (prevExp === undefined || next.expiresAt === undefined) return prevExp === next.expiresAt;
+  const prevDay = expiryDay(prevExp);
+  return prevDay !== null && prevDay === expiryDay(next.expiresAt);
+}
+
 /**
  * The ceiling a quote() caller passes for ONE sender (fix 16b, ruling 12
  * amended). It never sits BELOW the platform MAX_USD: a tightening is refused

@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type { SendLimitChange } from '@/db/repos/aux-repos';
 import { PLATFORM_SEND_LIMITS, SEND_LIMIT_HARD_CEILING_CENTS, SEND_LIMIT_REASON_MAX } from '@/lib/send-limits';
-import type { EffectiveSendLimits, PartnerSendLimits, SendLimitSource } from '@/lib/types';
+import type { EffectiveSendLimits, PartnerSendLimits, SendLimitOverride, SendLimitSource } from '@/lib/types';
 
 // Program fix 16b: the shared "Send limits" card for the customer and partner
 // detail pages. Read-only for everyone; the raise/clear form renders ONLY when
@@ -21,6 +21,23 @@ const sourceLabel: Record<SendLimitSource, string> = {
   partner: 'partner default',
   platform: 'platform',
 };
+
+/** UI redesign M3-12: a customer entry the tenant's own admin set (setScope 'partner'). */
+const isPartnerSet = (scope: SendLimitsCardProps['scope'], stored: SendLimitOverride | undefined): boolean =>
+  scope === 'customer' && stored?.setScope === 'partner';
+
+/**
+ * The provenance shown next to one effective figure. On the CUSTOMER card a figure that comes from
+ * a partner-set entry reads as set by the partner; SmartRemit-set and legacy entries (and every
+ * partner-level card) read as before.
+ */
+export function sendLimitSourceLabel(
+  source: SendLimitSource,
+  scope: SendLimitsCardProps['scope'],
+  stored: SendLimitOverride | undefined,
+): string {
+  return source === 'customer' && isPartnerSet(scope, stored) ? 'set by the partner for this customer' : sourceLabel[source];
+}
 
 export interface SendLimitsCardProps {
   scope: 'customer' | 'partner';
@@ -42,6 +59,8 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
   const expired = storedExpiry !== undefined && Date.parse(storedExpiry) <= Date.now();
   const ceilingUsd = SEND_LIMIT_HARD_CEILING_CENTS / 100;
   const idPrefix = `sl-${p.scope}`;
+  const partnerSet = isPartnerSet(p.scope, stored);
+  const label = (source: SendLimitSource) => sendLimitSourceLabel(source, p.scope, stored);
 
   return (
     <Card className="mb-6">
@@ -56,11 +75,23 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
       <CardContent>
         <dl className={DL_CLASS}>
           <dt>Per transfer</dt>
-          <dd>{usd(effective.perTransferCapCents)} <span className="text-muted-foreground">({sourceLabel[effective.source.perTransferCapCents]})</span></dd>
+          <dd>{usd(effective.perTransferCapCents)} <span className="text-muted-foreground">({label(effective.source.perTransferCapCents)})</span></dd>
           <dt>Daily, verified (T1)</dt>
-          <dd>{usd(effective.t1DailyCapCents)} <span className="text-muted-foreground">({sourceLabel[effective.source.t1DailyCapCents]})</span></dd>
+          <dd>{usd(effective.t1DailyCapCents)} <span className="text-muted-foreground">({label(effective.source.t1DailyCapCents)})</span></dd>
           <dt>Daily, first 3 days (T0)</dt>
-          <dd>{usd(effective.t0DailyCapCents)} <span className="text-muted-foreground">({sourceLabel[effective.source.t0DailyCapCents]})</span></dd>
+          <dd>{usd(effective.t0DailyCapCents)} <span className="text-muted-foreground">({label(effective.source.t0DailyCapCents)})</span></dd>
+          {partnerSet && stored && (
+            <>
+              <dt>Set by</dt>
+              <dd>
+                The partner{typeof stored.setBy === 'string' ? ` (${stored.setBy})` : ''}
+                {typeof stored.setAt === 'string' ? `, ${new Date(stored.setAt).toLocaleString()}` : ''}:{' '}
+                per transfer {typeof stored.perTransferCapCents === 'number' ? usd(stored.perTransferCapCents) : '—'},
+                daily {typeof stored.t1DailyCapCents === 'number' ? usd(stored.t1DailyCapCents) : '—'}
+                <span className="text-muted-foreground"> (always held at or below the platform and partner caps)</span>
+              </dd>
+            </>
+          )}
           <dt>Expiry</dt>
           <dd>
             {storedExpiry
@@ -71,7 +102,8 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
           <dd>
             {p.lastChange ? (
               <>
-                <strong>{p.lastChange.actor}</strong> · {new Date(p.lastChange.at).toLocaleString()} ·{' '}
+                <strong>{p.lastChange.actor}</strong>
+                {p.lastChange.meta.actorScope === 'partner' ? ' (partner)' : ''} · {new Date(p.lastChange.at).toLocaleString()} ·{' '}
                 {p.lastChange.action === 'send_limits.clear' ? 'cleared' : 'set'}
                 {typeof p.lastChange.meta.reason === 'string' ? ` — ${p.lastChange.meta.reason}` : ''}
               </>
@@ -116,6 +148,13 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
               <Label htmlFor={`${idPrefix}-reason`}>Reason (required, recorded in the audit log)</Label>
               <Input id={`${idPrefix}-reason`} name="reason" type="text" required maxLength={SEND_LIMIT_REASON_MAX} placeholder="e.g. QA large-amount test" />
             </div>
+            {partnerSet && (
+              <p className="text-xs text-muted-foreground">
+                The partner set this limit. Saving it with the same values changes nothing, and the partner keeps control.
+                Changing any value replaces it with a SmartRemit limit that the partner cannot edit or clear while it is live.
+                Clear removes it, and the partner can then set it again.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button type="submit">Save limits</Button>
               <Button type="submit" name="clear" value="on" variant="outline">Clear override</Button>

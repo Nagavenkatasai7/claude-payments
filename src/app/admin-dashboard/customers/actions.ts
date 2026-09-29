@@ -8,7 +8,7 @@ import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
-import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { canDecideCustomerKyc } from '@/lib/compliance-config';
 import { sendGateActive } from '@/lib/kyc-gate';
@@ -297,9 +297,22 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
  *  4. ONE transaction: read the old value (FOR UPDATE), the single-column
  *     UPDATE, then the audit_events row (actor, old, new, reason, expiresAt).
  *     If the audit insert fails, the limit write rolls back.
+ *     UI redesign M3-12 follow-up: when the row-locked previous value is a
+ *     PARTNER-set entry and the posted caps + expiry are exactly its own (the
+ *     admin re-saved the prefilled form), the transaction rolls back and the
+ *     action returns: no write, no audit row, the partner keeps control. Any
+ *     changed value (or Clear) takes the audited write as before.
  * Only the dollar caps move: sanctions, EDD and the tier gates are untouched
  * (send-limits.ts resolveEffectiveSendLimits).
  */
+/** Thrown INSIDE the transaction on an unchanged re-save of a partner-set entry: rolls it back. */
+class UnchangedPartnerEntry extends Error {
+  constructor() {
+    super('unchanged_partner_entry');
+    this.name = 'UnchangedPartnerEntry';
+  }
+}
+
 export async function setCustomerSendLimitAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
@@ -323,22 +336,29 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
   // never overwrite or clear while it is live (an entry without it is treated the same way).
   const value =
     validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso, setScope: 'platform' as const };
-  await getDb().transaction(async (tx) => {
-    // tx-bound repos ONLY inside the transaction (a root-handle call here would
-    // deadlock PGlite's single connection / hold a second Neon pool connection).
-    const { found, previous } = await createCustomerStore(tx, getStore()).setSendLimitOverride(
-      customer.partnerId, customer.senderPhone, value,
-    );
-    if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
-    await createAuditRepo(tx).record({
-      partnerId: customer.partnerId,
-      actor: staff.username,
-      actorType: 'staff',
-      action: value === null ? 'send_limits.clear' : 'send_limits.set',
-      subjectId: customer.senderPhone,
-      meta: { scope: 'customer', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+  try {
+    await getDb().transaction(async (tx) => {
+      // tx-bound repos ONLY inside the transaction (a root-handle call here would
+      // deadlock PGlite's single connection / hold a second Neon pool connection).
+      const { found, previous } = await createCustomerStore(tx, getStore()).setSendLimitOverride(
+        customer.partnerId, customer.senderPhone, value,
+      );
+      if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
+      // Checked against the value read FOR UPDATE, so a concurrent partner edit is never missed.
+      if (isUnchangedPartnerSetEntry(previous, validated.value)) throw new UnchangedPartnerEntry();
+      await createAuditRepo(tx).record({
+        partnerId: customer.partnerId,
+        actor: staff.username,
+        actorType: 'staff',
+        action: value === null ? 'send_limits.clear' : 'send_limits.set',
+        subjectId: customer.senderPhone,
+        meta: { scope: 'customer', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+      });
     });
-  });
+  } catch (err) {
+    if (err instanceof UnchangedPartnerEntry) return; // rolled back: nothing written, nothing audited
+    throw err;
+  }
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

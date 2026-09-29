@@ -139,6 +139,26 @@ describe('single-column writers (fix 16b)', () => {
     expect((await audit.lastSendLimitChange('A', 'partner', 'A'))!.meta).toMatchObject({ reason: 'partner-level' });
     expect(await audit.lastSendLimitChange('B', 'partner', 'B')).toBeNull();
   });
+
+  it('auditRepo.lastSendLimitChange: a list of subjects (plain phone + the partner writes’ hashed subject) returns the newest across both, never another tenant’s', async () => {
+    const audit = createAuditRepo(db);
+    const HASHED_A = 'cust:aaaa';
+    const HASHED_B = 'cust:bbbb';
+    await db.execute(sql`
+      INSERT INTO audit_events (partner_id, actor, actor_type, action, subject_id, meta, at)
+      VALUES ('A', 'root', 'staff', 'send_limits.set', ${PHONE},
+              ${JSON.stringify({ scope: 'customer', reason: 'platform raise' })}::jsonb, now() - interval '2 minutes')`);
+    // Another tenant's (newer) partner write with ITS hashed subject never matches A's read.
+    await audit.record({ partnerId: 'B', actor: 'pb-admin', actorType: 'staff', action: 'send_limits.set', subjectId: HASHED_B, meta: { scope: 'customer', reason: 'other tenant' } });
+    expect(await audit.lastSendLimitChange('A', 'customer', [PHONE, HASHED_A])).toMatchObject({ actor: 'root', meta: { reason: 'platform raise' } });
+
+    await audit.record({ partnerId: 'A', actor: 'pa-admin', actorType: 'staff', action: 'send_limits.set', subjectId: HASHED_A, meta: { scope: 'customer', setScope: 'partner', reason: 'partner lowered' } });
+    expect(await audit.lastSendLimitChange('A', 'customer', [PHONE, HASHED_A])).toMatchObject({ actor: 'pa-admin', meta: { reason: 'partner lowered' } });
+    // The single-subject form (the partner page) is unchanged.
+    expect(await audit.lastSendLimitChange('A', 'customer', PHONE)).toMatchObject({ actor: 'root' });
+    expect(await audit.lastSendLimitChange('A', 'customer', [HASHED_B])).toBeNull();
+    expect(await audit.lastSendLimitChange('A', 'customer', [])).toBeNull();
+  });
 });
 
 describe('tenant scope (fix 16b test 6)', () => {

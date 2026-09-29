@@ -594,18 +594,23 @@ export function createAuditRepo(db: DbOrTx) {
      * ONE subject — tenant-keyed, and keyed on the meta scope too so a partner
      * id and a phone can never read each other's history. Feeds the admin
      * "Send limits" card ("last change: actor, when, reason").
+     * UI redesign M3-12 follow-up: `subjectId` may be a LIST, so the customer card reads both the
+     * platform writes (plain phone subject) and the partner writes (auditSubjectId, the hashed
+     * subject); the newest across them wins. Still tenant-keyed; an empty list matches nothing
+     * (drizzle inArray([]) is `false`, node_modules/drizzle-orm/sql/expressions/conditions.js:73-77).
      */
     async lastSendLimitChange(
       partnerId: PartnerId,
       scope: 'customer' | 'partner',
-      subjectId: string,
+      subjectId: string | readonly string[],
     ): Promise<SendLimitChange | null> {
+      const subjects = typeof subjectId === 'string' ? [subjectId] : subjectId;
       const rows = await db
         .select({ actor: auditEvents.actor, action: auditEvents.action, meta: auditEvents.meta, at: auditEvents.at })
         .from(auditEvents)
         .where(
           sql`${auditEvents.partnerId} = ${partnerId}
-            AND ${auditEvents.subjectId} = ${subjectId}
+            AND ${inArray(auditEvents.subjectId, subjects)}
             AND ${auditEvents.action} IN ('send_limits.set', 'send_limits.clear')
             AND ${auditEvents.meta}->>'scope' = ${scope}`,
         )
