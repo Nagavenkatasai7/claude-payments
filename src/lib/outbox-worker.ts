@@ -14,6 +14,7 @@ import {
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
 import { signRailHeaders } from '@/lib/providers/rail-signature';
+import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
@@ -584,7 +585,9 @@ async function handle(
         partner_id: railPartnerId,
         ...(compliance ? { compliance } : {}),
       });
-      const res = await deps.fetchFn(settlementUrl, {
+      // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body);
+      // the response and any thrown error pass through unchanged (webhook-delivery-log.ts).
+      const { res, logged } = await withInstructDeliveryLog(deps.db, { partnerId: railPartnerId, transferId, outboxId: row.id, attempt: row.attempts }, () => deps.fetchFn(settlementUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -593,8 +596,9 @@ async function handle(
         },
         body: rawBody,
         signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
-      });
+      }));
       if (!res.ok) {
+        await logged; // never rejects; capped
         throw new Error(`Settlement instruction rejected (${res.status})`);
       }
       let providerRef = `rail-${transferId}`;
@@ -605,6 +609,7 @@ async function handle(
         /* non-JSON 2xx ack — keep deterministic ref */
       }
       await transferRepo.setProviderRef(transferId, providerRef); // write-once
+      await logged; // after the body read: a slow log never costs the rail's providerRef
       return;
     }
 
