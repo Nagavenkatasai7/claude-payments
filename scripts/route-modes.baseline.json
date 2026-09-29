@@ -87,6 +87,8 @@
   "/onboard/seller/[id]": "dynamic",
   "/partner": "dynamic",
   "/partner/audit": "dynamic",
+  "/partner/customers": "dynamic",
+  "/partner/customers/[ref]": "dynamic",
   "/partner/security": "dynamic",
   "/partner/support": "dynamic",
   "/partner/support/[ticketId]": "dynamic",
