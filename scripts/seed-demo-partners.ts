@@ -32,6 +32,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 import { newTransferId } from '@/lib/id';
 import { getFxRates } from '@/lib/rate';
 import { env } from '@/lib/env';
@@ -91,7 +92,8 @@ async function main() {
   const partnerStore = getPartnerStore();
   const integrationsStore = getPartnerIntegrationsStore();
   const apiKeyStore = getPartnerApiKeyStore();
-  const rates = createPartnerRateRepo(getDb());
+  const db = getDb();
+  const rates = createPartnerRateRepo(db);
 
   // Live mid for the winner's strictly-better pushed rate (real Frankfurter).
   // getFxRates THROWS when no rate inside the ceiling exists (Task 9) — the
@@ -131,6 +133,9 @@ async function main() {
     } else {
       console.log(`  • exists  ${id}  (ensuring rail + rates)`);
     }
+    // M3-21: like the platform wizard, a seeded demo partner is approved for go-live (idempotent;
+    // an existing approval keeps its first approver).
+    await upsertApprovedGoLive(db, id, 'system:seed-demo-partners');
 
     // Ensure the simulator rail (idempotent): auto-provision the endpoint + both
     // HMAC secrets if not already configured — the exact zero-setup wiring the

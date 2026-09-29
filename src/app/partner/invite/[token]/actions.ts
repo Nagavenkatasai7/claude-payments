@@ -156,7 +156,9 @@ export async function acceptInviteAction(formData: FormData): Promise<AcceptInvi
         target: invite.username,
         detail: `${invite.role}, partner staff (invite accepted)`,
         partnerId: invite.partnerId,
-        actorScope: 'partner',
+        // M3-21: the actor here is the INVITER; a platform-issued invite's inviter is SmartRemit, so the
+        // tenant audit view shows "SmartRemit", never the platform username (partner-audit-view.ts).
+        actorScope: invite.inviterScope === 'platform' ? 'platform' : 'partner',
       });
     });
   } catch (err) {
