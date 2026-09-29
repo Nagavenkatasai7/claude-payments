@@ -59,6 +59,7 @@ export async function replayDeadInstruction(
     // rail ack, no live sibling) is then evaluated after the other side committed.
     await tx.execute(sql`SELECT t.id FROM transfers t
       WHERE t.id = (SELECT o.payload ->> 'transferId' FROM outbox o WHERE o.id = ${outboxId} AND o.kind = 'settlement.instruct')
+        AND coalesce(t.settlement_partner_id, t.partner_id) = ${partnerId}
       FOR UPDATE`);
     if (!(await createOutboxRepo(tx).retryDeadForPartner(outboxId, partnerId))) return false;
     await createAuditRepo(tx).record({

@@ -103,11 +103,15 @@ describe('replayDeadInstruction → the worker', { retry: 0 }, () => {
     const id = await deadRow('instruct:rp_t1');
     const stop = captureQueries();
     expect(await replayDeadInstruction(db, 'pa', actor, id, { redis })).toEqual({ ok: true });
-    const q = stop().map((x) => x.sql.toLowerCase());
+    const all = stop();
+    const q = all.map((x) => x.sql.toLowerCase());
     const lock = q.findIndex((x) => x.includes('transfers') && x.includes('for update'));
     const revive = q.findIndex((x) => x.startsWith('update "outbox"'));
     expect(lock).toBeGreaterThanOrEqual(0);
     expect(lock).toBeLessThan(revive);
+    // The lock itself is tenant-scoped: another tenant's outbox id never locks that tenant's transfer.
+    expect(q[lock]).toContain('coalesce(t.settlement_partner_id, t.partner_id)');
+    expect(all[lock].params).toContain('pa');
   });
 
   it('replaying the dead row of a still-PAID transfer re-POSTs exactly once, carrying the same transfer id', async () => {
