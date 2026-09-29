@@ -270,3 +270,54 @@ describe('/partner/customers/[ref]: detail', () => {
     await expect(detail(sealCustomerRef(PA, SHARED))).rejects.toThrow('audit down');
   });
 });
+
+// UI redesign M3-12: the send-limits section. Every page viewer sees the EFFECTIVE limits (the
+// same resolver a mint uses) with their source; only an admin gets the form, and never over a live
+// SmartRemit override (the action refuses it too; the page does not offer it).
+describe('/partner/customers/[ref]: send limits (M3-12)', () => {
+  const plant = (v: Record<string, unknown>) =>
+    createCustomerStore(db, createStore(redis, db)).setSendLimitOverride(PA, SHARED, v as never);
+  const FORM = 'data-testid="partner-customer-limit-form"';
+
+  it('an agent sees the effective limits (platform) but no form', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('Send limits');
+    expect(html).toContain('$2,999.00');
+    expect(html).toContain('Platform limit');
+    expect(html).not.toContain(FORM);
+  });
+  it('an admin gets the form carrying the opaque ref only (never a phone or tenant field)', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const ref = sealCustomerRef(PA, SHARED);
+    const html = await detail(ref);
+    expect(html).toContain(FORM);
+    expect(html).toContain(`name="ref" value="${ref}"`);
+    expect(html).not.toMatch(/name="(partnerId|partner|phone|setScope)"/);
+    for (const v of ALL_PII) expect(html).not.toContain(v);
+  });
+  it('a partner-set override shows as "Set for this customer", clamped at read, and the admin may change it', async () => {
+    await plant({ perTransferCapCents: 50_000, setScope: 'partner', setBy: 'adm' });
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('$500.00');
+    expect(html).toContain('Set for this customer');
+    expect(html).toContain(FORM);
+  });
+  it('a live SmartRemit override (legacy, no setScope) shows the notice and NO form, even to an admin', async () => {
+    await plant({ perTransferCapCents: 500_000, setBy: 'root' });
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('$5,000.00');
+    expect(html).toContain('SmartRemit has set this customer');
+    expect(html).not.toContain(FORM);
+    expect(html).not.toContain('root');
+  });
+  it('an EXPIRED SmartRemit override lapses: platform limits, and the admin gets the form', async () => {
+    await plant({ perTransferCapCents: 500_000, setBy: 'root', setScope: 'platform', expiresAt: daysAgo(1) });
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).not.toContain('$5,000.00');
+    expect(html).toContain(FORM);
+  });
+});
