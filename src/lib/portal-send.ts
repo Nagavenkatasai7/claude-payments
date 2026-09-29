@@ -9,7 +9,6 @@ import { getStore, type RedisLike } from './store';
 import { env } from './env';
 import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { resolveKycMode } from './partner-config';
-import { kycView } from './portal-profile';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import { auditSubjectId } from './customer-ref';
@@ -392,16 +391,17 @@ const contactPartner = (brand: string): SendCopy => ({ error: 'portal.send.conta
 const verifyCard: SendCopy = { error: 'portal.send.kycBody', kyc: 'verify' };
 
 /**
- * M2-14 (#413 L1): can the customer actually start verification on the Profile page? Not on a
- * DELEGATED partner (the partner verifies; Profile shows the provider copy), and not when Profile has
- * no start control for this customer (e.g. grandfathered shows as verified; rejected; in review).
+ * M2-14 (#413 L1): does the verify card lead anywhere? Two dead ends, exactly: a DELEGATED partner
+ * (the partner verifies; Profile shows the provider copy) and a GRANDFATHERED customer (Profile shows
+ * them as verified, with no start control). A customer in review keeps the card: Profile says
+ * "In review" and they only have to wait. (Rejected is routed to contact before this.)
  */
 export function canVerifyInProfile(
   partner: Partner | null | undefined,
-  customer: Pick<Customer, 'kycStatus' | 'kycReviewState'> | null | undefined,
+  customer: Pick<Customer, 'kycStatus'> | null | undefined,
 ): boolean {
   if (resolveKycMode(partner).mode === 'delegated') return false;
-  return customer ? kycView(customer).canStart : true;
+  return customer?.kycStatus !== 'grandfathered';
 }
 
 /** A 'verify' card that would be a dead end becomes the contact-the-partner card. */
@@ -417,7 +417,7 @@ export function routeKycCopy(copy: SendCopy, canVerify: boolean, brand: string):
  */
 export function portalKycGate(
   partner: Partner | null | undefined,
-  customer: Pick<Customer, 'kycStatus' | 'kycReviewState'> | null | undefined,
+  customer: Pick<Customer, 'kycStatus'> | null | undefined,
   brand: string,
 ): SendCopy | null {
   if (!sendGateActive(partner) || isSendVerified(customer)) return null;
