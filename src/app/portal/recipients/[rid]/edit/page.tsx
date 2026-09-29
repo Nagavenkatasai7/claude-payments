@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -12,8 +11,9 @@ import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { editRecipientAction } from '../../actions';
 import { RecipientForm } from '../../recipient-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.recipients.editTitle') };
+export const generateMetadata = () => portalMetadata('portal.recipients.editTitle');
 
 /**
  * Edit a saved recipient (UI redesign M2-8). The rid resolves only inside (host partner, session

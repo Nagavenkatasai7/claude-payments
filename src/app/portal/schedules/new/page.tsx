@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Users } from 'lucide-react';
 import { getDb } from '@/db/client';
@@ -17,8 +16,9 @@ import { t } from '@/lib/i18n';
 import { buttonVariants, Card, EmptyState, PageHeader } from '@/components/ds';
 import { createScheduleAction } from '../actions';
 import { ScheduleForm } from '../schedule-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.schedules.newTitle') };
+export const generateMetadata = () => portalMetadata('portal.schedules.newTitle');
 
 /**
  * New scheduled payment (UI redesign M2-10). Step-up on load, so the form is not lost to a later

@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import { getDb } from '@/db/client';
 import { createRecipientRepo } from '@/db/repos/aux-repos';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -22,8 +21,9 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { KycCard } from './kyc-card';
 import { SendForm } from './send-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.send.title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.send.title', { referrer: 'no-referrer' });
 
 const FUNDING_LABEL: Record<PortalFundingMethod, MessageKey> = {
   bank_transfer: 'portal.send.funding.bank_transfer',

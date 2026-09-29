@@ -242,3 +242,29 @@ for (const path of ['/portal/schedules', '/portal/schedules/new']) {
     await expect(page.locator('body')).not.toContainText(/smartremit/i);
   });
 }
+// M2 follow-up L8: an apex portal 404's HEAD must match an unmatched URL's exactly: the same <title>,
+// the same title in the RSC payload (it once said "Sign in" on /portal/login) and the same robots
+// metas (the portal layout's noindex,nofollow once showed too). Compared against the live root 404,
+// never a hardcoded string, over the raw HTML (what a crawler sees before hydration).
+test.describe('apex portal 404 heads match the root 404 (L8)', () => {
+  const head = (html: string) => ({
+    title: [...html.matchAll(/<title>([^<]*)<\/title>/g)].map((m) => m[1]),
+    rscTitle: [...html.matchAll(/\\"title\\",\\"0\\",\{\\"children\\":\\"([^\\]*)/g)].map((m) => m[1]),
+    robots: [...html.matchAll(/<meta name="robots"[^>]*>/g)].map((m) => m[0]),
+  });
+  for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456',
+    '/portal/transfers/AbCdEf123456/receipt', '/portal/recipients', '/portal/recipients/new', '/portal/profile',
+    '/portal/notifications', '/portal/devices', '/portal/help', '/portal/help/tickets', '/portal/help/tickets/new',
+    '/portal/chat', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete',
+    '/portal/send', '/portal/send/review', '/portal/schedules', '/portal/schedules/new']) {
+    test(`apex ${path} carries the root 404 head`, async ({ request }) => {
+      const root = await request.get(`/no-such-page-${randomBytes(6).toString('hex')}`);
+      expect(root.status()).toBe(404);
+      const want = head(await root.text());
+      expect(want.title).toEqual(['Page not found']);
+      const res = await request.get(path);
+      expect(res.status()).toBe(404);
+      expect(head(await res.text())).toEqual(want);
+    });
+  }
+});

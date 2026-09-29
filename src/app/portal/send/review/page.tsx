@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Send } from 'lucide-react';
 import { getDb } from '@/db/client';
@@ -29,8 +28,9 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { buttonVariants, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { KycCard, SendAlert } from '../kyc-card';
 import { ContinueForm, NameForm } from './review-forms';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.send.reviewTitle'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.send.reviewTitle', { referrer: 'no-referrer' });
 
 const FUNDING_LABEL: Record<string, MessageKey> = {
   bank_transfer: 'portal.send.funding.bank_transfer',

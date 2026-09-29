@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requireFreshPortalAuth } from '@/lib/portal-auth';
 import { newRequestKey } from '@/lib/portal-request-key';
@@ -7,8 +6,9 @@ import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { addRecipientAction } from '../actions';
 import { RecipientForm } from '../recipient-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.recipients.newTitle') };
+export const generateMetadata = () => portalMetadata('portal.recipients.newTitle');
 
 const regionName = (code: string) => {
   try {

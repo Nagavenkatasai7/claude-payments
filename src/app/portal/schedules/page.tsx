@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CalendarClock } from 'lucide-react';
 import { getDb } from '@/db/client';
@@ -11,8 +10,9 @@ import { boundUntrustedText, NAME_MAX } from '@/lib/untrusted-text';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, Button, buttonVariants, Card, ConfirmDialog, EmptyState, PageHeader } from '@/components/ds';
 import { cancelScheduleAction, pauseScheduleAction, resumeScheduleAction } from './actions';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.schedules.title') };
+export const generateMetadata = () => portalMetadata('portal.schedules.title');
 
 // The flash copy is a fixed allow-list keyed by a fixed query value: nothing from the URL is echoed.
 const DONE: Record<string, MessageKey> = {

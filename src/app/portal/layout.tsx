@@ -1,6 +1,6 @@
-import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { requirePortalSite } from '@/lib/portal-site';
+import { portalMetadata } from '@/lib/portal-metadata';
 import { getPortalCustomer } from '@/lib/portal-auth';
 import { env } from '@/lib/env';
 import { t } from '@/lib/i18n';
@@ -10,7 +10,8 @@ import { SiteBrand } from '@/components/ds/site-brand';
 import { SiteThemeStyle } from '@/components/ds/site-theme-style';
 import { signOutAction } from './signout/actions';
 
-export const metadata: Metadata = { robots: { index: false, follow: false } };
+// Site-only (L8): on the apex the whole tree is the root 404, whose head must match any unmatched URL.
+export const generateMetadata = () => portalMetadata(null, { robots: { index: false, follow: false } });
 // Per-request only (Host, flag, per-partner enablement, session): never prerendered.
 export const dynamic = 'force-dynamic';
 

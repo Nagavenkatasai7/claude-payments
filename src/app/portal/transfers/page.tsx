@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ArrowLeftRight, Search } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -11,8 +10,9 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Button, EmptyState, Field, Input, PageHeader, Select } from '@/components/ds';
 import { TransferRows } from './transfer-rows';
 import { filterTransfersAction } from './actions';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.transfers.title') };
+export const generateMetadata = () => portalMetadata('portal.transfers.title');
 
 const PAGE_SIZE = 20;
 const GROUP_LABEL: Record<string, MessageKey> = {

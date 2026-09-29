@@ -1,16 +1,14 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { LifeBuoy, MessageCircle } from 'lucide-react';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { portalSupportEnabled } from '@/lib/portal-tickets';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Card, PageHeader } from '@/components/ds';
+import { portalMetadata } from '@/lib/portal-metadata';
 
 // The title is set only on a portal host: an apex 404 carries no portal copy (the M2-5 review, L8).
-export async function generateMetadata(): Promise<Metadata> {
-  return (await getPortalSite()) ? { title: t('portal.help.title') } : {};
-}
+export const generateMetadata = () => portalMetadata('portal.help.title');
 
 const FAQ: ReadonlyArray<{ q: MessageKey; a: MessageKey }> = [
   { q: 'portal.help.faq.track.q', a: 'portal.help.faq.track.a' },
