@@ -24,13 +24,12 @@ import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
+import { removeTenantStaff } from '@/lib/partner-staff-ops';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import {
-  isLastTenantAdmin,
   isReservedStaffUsername,
   newStaffRecord,
-  removeDecision,
   resolveStaffTenant,
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
@@ -315,8 +314,7 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   const actor = await requireStaffManager();
   const username = String(formData.get('username') ?? '').trim();
   if (!username) throw new Error('username is required.');
-  const authStore = getAuthStore();
-  const target = await authStore.getStaff(username);
+  const target = await getAuthStore().getStaff(username);
   const isPlatformActor = actorScopeOf(actor) === 'platform';
   // M3: this is the PARTNER-staff endpoint; platform staff are managed from
   // the Team page. A platform admin is told so; a partner admin gets the same
@@ -325,31 +323,20 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   if (target && !target.partnerId && isPlatformActor) {
     throw new Error('Use the Team page to manage platform staff.');
   }
-  if (!target) return;
-  const decision = removeDecision(actor, target);
-  if (decision === 'noop') return;
+  if (!target?.partnerId) return;
+  // UI redesign M3-8: the core moved to removeTenantStaff (shared with /partner/staff).
+  const result = await removeTenantStaff(actor, target.partnerId, username);
+  if (result === 'noop') return;
   // Fix round 1: only reachable inside the actor's own tenant. A SmartRemit
   // suspension is not the tenant's to undo (remove + re-create active).
-  if (decision === 'suspended') {
+  if (result === 'suspended') {
     throw new Error('This member was suspended by SmartRemit. Contact SmartRemit to change or remove them.');
   }
   // Never orphan a tenant. Partner admins cannot reach this (no self-removal),
   // so the message points the platform admin at the Team page.
-  if (isLastTenantAdmin(target, await authStore.listStaff())) {
+  if (result === 'last_admin') {
     throw new Error('Cannot remove the only admin for this partner here. Add another admin first, or use the Team page to offboard.');
   }
-  await authStore.deleteStaff(username);
-  await authStore.deleteAllSessionsFor(username);
-  await getStaffMfaStore().reset(username); // Program-Fix 17b
-  await getAuditLogStore().record({
-    at: new Date().toISOString(),
-    actor: actor.username,
-    action: 'removed',
-    target: username,
-    detail: `was ${target.role}, partner staff`,
-    partnerId: target.partnerId,
-    actorScope: actorScopeOf(actor),
-  });
   revalidatePath(`/admin-dashboard/partners/${target.partnerId}`);
 }
 
