@@ -19,7 +19,7 @@ export interface PartnerCtx {
 export type PartnerRedirect = '/login' | '/admin-dashboard' | '/partner' | '/partner/security?enroll=1';
 export type AccessDecision = { ok: true; ctx: PartnerCtx } | { ok: false; redirectTo: PartnerRedirect };
 
-export const KNOWN_PARTNER_ROLES: readonly PartnerRole[] = Object.freeze(['admin', 'agent', 'support'] as const);
+export const KNOWN_PARTNER_ROLES: readonly PartnerRole[] = Object.freeze(['admin', 'agent', 'support', 'finance'] as const);
 
 const policy = (...roles: PartnerRole[]): PartnerPolicy => Object.freeze({ roles: Object.freeze(roles) });
 
@@ -27,9 +27,9 @@ const policy = (...roles: PartnerRole[]): PartnerPolicy => Object.freeze({ roles
 export const PARTNER_ANY = policy(...KNOWN_PARTNER_ROLES);
 export const PARTNER_ADMIN = policy('admin');
 export const PARTNER_OPS = policy('admin', 'agent');
-export const PARTNER_MONEY_READ = policy('admin', 'agent');
+export const PARTNER_MONEY_READ = policy('admin', 'agent', 'finance');
 export const PARTNER_TICKETS = policy('admin', 'agent', 'support');
-export const PARTNER_REPORTS = policy('admin');
+export const PARTNER_REPORTS = policy('admin', 'finance');
 
 export function decidePartnerAccess(
   staff: Staff | null,
@@ -46,6 +46,9 @@ export function decidePartnerAccess(
     // An empty-string partnerId must never be read as platform scope.
     return { ok: false, redirectTo: '/login' };
   }
+  // 'finance' is partner-only. A (malformed) platform-scoped finance record would loop
+  // /partner → /admin-dashboard → requireStaff → /partner, so it is refused before the platform branch.
+  if (staff.role === 'finance' && scope.kind === 'platform') return { ok: false, redirectTo: '/login' };
   if (scope.kind === 'platform') return { ok: false, redirectTo: '/admin-dashboard' };
   if (!KNOWN_PARTNER_ROLES.includes(staff.role)) return { ok: false, redirectTo: '/login' };
   if (mfa.pending && !mfa.skip) return { ok: false, redirectTo: '/partner/security?enroll=1' };

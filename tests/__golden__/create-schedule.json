@@ -1,0 +1,776 @@
+{
+  "monthly.saved_recipient": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "123456789012|HDFC0001234",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "monthly.cold_start_no_payout": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "weekly.day0": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "weekly",
+        "day_of_month": null,
+        "day_of_week": 0,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "123456789012|HDFC0001234",
+        "fundingMethod": "bank_transfer",
+        "frequency": "weekly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfWeek": 0
+      }
+    ],
+    "customerRows": 1
+  },
+  "weekly.day6_string": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "weekly",
+        "day_of_month": null,
+        "day_of_week": 6,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "weekly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfWeek": 6
+      }
+    ],
+    "customerRows": 1
+  },
+  "frequency.garbage_is_monthly": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "invalid_phone": {
+    "result": {
+      "ok": {
+        "error": "A valid recipient WhatsApp number with country code is required."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "bad_funding.crypto": {
+    "result": {
+      "ok": {
+        "error": "funding_method must be one of: credit_card, debit_card, bank_transfer."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "bad_funding.bank_pull": {
+    "result": {
+      "ok": {
+        "error": "funding_method must be one of: credit_card, debit_card, bank_transfer."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "funding.absent": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "funding.debit_card": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "debit_card",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "day_of_month.0": {
+    "result": {
+      "ok": {
+        "error": "For a monthly schedule, pick a day of the month between 1 and 28."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "day_of_month.29": {
+    "result": {
+      "ok": {
+        "error": "For a monthly schedule, pick a day of the month between 1 and 28."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "day_of_month.1_5": {
+    "result": {
+      "ok": {
+        "error": "For a monthly schedule, pick a day of the month between 1 and 28."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "day_of_month.absent": {
+    "result": {
+      "ok": {
+        "error": "For a monthly schedule, pick a day of the month between 1 and 28."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "weekly.day7": {
+    "result": {
+      "ok": {
+        "error": "For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday)."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "weekly.day_neg": {
+    "result": {
+      "ok": {
+        "error": "For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday)."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "destination.unknown": {
+    "result": {
+      "ok": {
+        "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "destination.mx": {
+    "result": {
+      "ok": {
+        "error": "Recurring transfers can go to India only for now — offer a one-time send instead."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "destination.absent_mx_phone": {
+    "result": {
+      "ok": {
+        "error": "Recurring transfers can go to India only for now — offer a one-time send instead."
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "destination.absent_in_phone": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "sender_name.missing": {
+    "result": {
+      "ok": {
+        "needs_sender_name": true,
+        "reply_to_customer": "What's your full legal name, as on your ID?"
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "sender_name.no_customer_row": {
+    "result": {
+      "ok": {
+        "needs_sender_name": true,
+        "reply_to_customer": "What's your full legal name, as on your ID?"
+      }
+    },
+    "rows": [],
+    "customerRows": 1
+  },
+  "no_customer_row.invalid_phone_first": {
+    "result": {
+      "ok": {
+        "error": "A valid recipient WhatsApp number with country code is required."
+      }
+    },
+    "rows": [],
+    "customerRows": 0
+  },
+  "no_customer_row.day_first": {
+    "result": {
+      "ok": {
+        "error": "For a monthly schedule, pick a day of the month between 1 and 28."
+      }
+    },
+    "rows": [],
+    "customerRows": 0
+  },
+  "amount.legacy_amount_usd": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 55,
+        "source_currency": "USD",
+        "amount_source_display": "$55.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 55,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 55,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "amount.zero": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 0,
+        "source_currency": "USD",
+        "amount_source_display": "$0.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 0,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 0,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "amount.huge": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 99999,
+        "source_currency": "USD",
+        "amount_source_display": "$99,999.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 99999,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 99999,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "amount.string": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 75.5,
+        "source_currency": "USD",
+        "amount_source_display": "$75.50 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 75.5,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 75.5,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "end_date.valid": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": "2027-01-31",
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5,
+        "endDate": "2027-01-31"
+      }
+    ],
+    "customerRows": 1
+  },
+  "end_date.garbage": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "end_date.blank": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "source_currency.gbp_request": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "GBP",
+        "amount_source_display": "£100.00 GBP",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "GBP",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "recipient_name.number": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "42",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "payout.ledger_fallback": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "000011112222|HDFC0000001",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  },
+  "payout.tombstoned_recipient": {
+    "result": {
+      "ok": {
+        "schedule_id": "<id>",
+        "frequency": "monthly",
+        "day_of_month": 5,
+        "day_of_week": null,
+        "end_date": null,
+        "amount_source": 100,
+        "source_currency": "USD",
+        "amount_source_display": "$100.00 USD",
+        "destination_country": "IN"
+      }
+    },
+    "rows": [
+      {
+        "phone": "15551230000",
+        "amountUsd": 100,
+        "recipientName": "Mom",
+        "recipientPhone": "919876543210",
+        "payoutMethod": "bank",
+        "payoutDestination": "",
+        "fundingMethod": "bank_transfer",
+        "frequency": "monthly",
+        "status": "active",
+        "partnerId": "default",
+        "sourceCurrency": "USD",
+        "amountSource": 100,
+        "dayOfMonth": 5
+      }
+    ],
+    "customerRows": 1
+  }
+}

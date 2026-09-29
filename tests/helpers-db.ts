@@ -71,6 +71,10 @@ const ALL_TABLES = [
   'partner_integrations',
   'customer_portal_prefs', // UI redesign M2-3 (0027): FK child of customers
   'customers',
+  'partner_go_live', // UI redesign M3-7 (0028): FK children of partners
+  'partner_report_jobs',
+  'partner_slug_tombstones',
+  'partner_webhook_deliveries',
   'partners',
   'waitlist_signups',
   'sanctions_list_entries',

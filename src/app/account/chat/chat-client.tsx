@@ -15,6 +15,51 @@ interface Message {
   text: string;
 }
 
+/** The legacy /account endpoint: the default, so the /account page is unchanged. */
+export const DEFAULT_CHAT_ENDPOINT = '/api/account/chat';
+
+/** The visible copy. The default is the legacy English; the customer portal passes its t() strings. */
+export interface ChatCopy {
+  intro: string;
+  placeholder: string;
+  inputLabel: string;
+  send: string;
+  typing: string;
+  genericError: string;
+  unreachable: string;
+}
+
+export const DEFAULT_CHAT_COPY: ChatCopy = {
+  intro: 'Ask about your transfers, limits, saved recipients, refunds — or repeat a past send.',
+  placeholder: 'Type a message',
+  inputLabel: 'Message',
+  send: 'Send',
+  typing: 'Assistant is typing',
+  genericError: 'Something went wrong — please try again.',
+  unreachable: 'Could not reach the assistant — check your connection and try again.',
+};
+
+/**
+ * POST one message to `endpoint` (same origin, so the browser sends the Origin header the portal
+ * route requires). Returns the reply, or the server's error text (else `genericError`). Network
+ * failures throw.
+ */
+export async function postChatMessage(
+  endpoint: string,
+  text: string,
+  genericError: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ reply: string } | { error: string }> {
+  const res = await fetchImpl(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text }),
+  });
+  const data = (await res.json().catch(() => null)) as { reply?: string; error?: string } | null;
+  if (!res.ok || typeof data?.reply !== 'string') return { error: data?.error ?? genericError };
+  return { reply: data.reply };
+}
+
 /** Render reply text with code-generated URLs as tappable links. */
 function Linkified({ text }: { text: string }) {
   const parts = text.split(/(https?:\/\/\S+)/g);
@@ -39,9 +84,9 @@ function Linkified({ text }: { text: string }) {
   );
 }
 
-function TypingDots() {
+function TypingDots({ label }: { label: string }) {
   return (
-    <span className="inline-flex items-center gap-1 py-1" aria-label="Assistant is typing">
+    <span className="inline-flex items-center gap-1 py-1" aria-label={label}>
       {[0, 1, 2].map((i) => (
         <span
           key={i}
@@ -53,7 +98,10 @@ function TypingDots() {
   );
 }
 
-export function ChatClient() {
+export function ChatClient({
+  endpoint = DEFAULT_CHAT_ENDPOINT,
+  copy = DEFAULT_CHAT_COPY,
+}: { endpoint?: string; copy?: ChatCopy }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
@@ -84,21 +132,14 @@ export function ChatClient() {
       setToast(notice);
     }
     try {
-      const res = await fetch('/api/account/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { reply?: string; error?: string }
-        | null;
-      if (!res.ok || typeof data?.reply !== 'string') {
-        failTurn(data?.error ?? 'Something went wrong — please try again.');
+      const result = await postChatMessage(endpoint, text, copy.genericError);
+      if ('error' in result) {
+        failTurn(result.error);
         return;
       }
-      setMessages((m) => [...m, { role: 'assistant', text: data.reply! }]);
+      setMessages((m) => [...m, { role: 'assistant', text: result.reply }]);
     } catch {
-      failTurn('Could not reach the assistant — check your connection and try again.');
+      failTurn(copy.unreachable);
     } finally {
       setPending(false);
     }
@@ -110,10 +151,7 @@ export function ChatClient() {
         <CardContent className="flex flex-col px-0">
           <div className="flex h-[480px] flex-col gap-3 overflow-y-auto p-4 sm:p-6">
             {messages.length === 0 ? (
-              <p className="text-sm leading-normal text-muted-foreground">
-                Ask about your transfers, limits, saved recipients, refunds — or repeat a past
-                send.
-              </p>
+              <p className="text-sm leading-normal text-muted-foreground">{copy.intro}</p>
             ) : null}
             {messages.map((m, i) => (
               <div
@@ -129,7 +167,7 @@ export function ChatClient() {
             ))}
             {pending ? (
               <div className="max-w-[85%] self-start rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5">
-                <TypingDots />
+                <TypingDots label={copy.typing} />
               </div>
             ) : null}
             <div ref={endRef} />
@@ -147,12 +185,12 @@ export function ChatClient() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               maxLength={1000}
-              placeholder="Type a message"
-              aria-label="Message"
+              placeholder={copy.placeholder}
+              aria-label={copy.inputLabel}
               className="flex-1"
             />
             <Button type="submit" disabled={pending || input.trim().length === 0}>
-              Send
+              {copy.send}
             </Button>
           </form>
         </CardContent>

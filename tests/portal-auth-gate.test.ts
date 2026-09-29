@@ -35,6 +35,7 @@ const h = vi.hoisted(() => {
     sends: [] as Array<{ partnerId: string; phone: string; code: string }>,
     sendHang: false,
     mfaEnrolled: new Set<string>(),
+    mfaThrow: false,
     mfaValid: '654321',
     redisProxy: null as unknown,
   };
@@ -102,13 +103,16 @@ vi.mock('@/lib/portal-otp-sender', async (orig) => ({
 }));
 vi.mock('@/lib/customer-mfa', () => ({
   getCustomerMfaStore: () => ({
-    isEnrolled: async (k: { partnerId: string; phone: string }) => h.mfaEnrolled.has(`${k.partnerId}|${k.phone}`),
+    isEnrolled: async (k: { partnerId: string; phone: string }) => {
+      if (h.mfaThrow) throw new Error('mfa store down');
+      return h.mfaEnrolled.has(`${k.partnerId}|${k.phone}`);
+    },
     verifyCode: async (_k: unknown, c: string) => c === h.mfaValid,
   }),
 }));
 
 
-import { getPortalCustomer, requireFreshPortalAuth, requirePortalCustomer, safePortalNext } from '@/lib/portal-auth';
+import { getPortalCustomer, isPortalSessionFresh, requireFreshPortalAuth, requirePortalCustomer, safePortalNext } from '@/lib/portal-auth';
 import { stepUpRequestAction, stepUpTotpAction, stepUpVerifyAction, type PortalStepUpState } from '@/app/portal/verify/actions';
 import { signOutAction } from '@/app/portal/signout/actions';
 import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-session-store';
@@ -156,6 +160,7 @@ beforeEach(async () => {
   h.ops = [];
   h.sends = [];
   h.mfaEnrolled = new Set();
+  h.mfaThrow = false;
   now = Date.now();
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   const repo = createCustomerRepo(db, async () => null);
@@ -212,6 +217,42 @@ describe('requireFreshPortalAuth', () => {
   });
 });
 
+// The portal chat's non-redirecting twin of requireFreshPortalAuth: the SAME rule (15 minutes, plus
+// the TOTP when enrolled), answered as a boolean, failing CLOSED on any error.
+describe('isPortalSessionFresh', () => {
+  it('a fresh session is fresh; 16 minutes later it is not (no redirect either way)', async () => {
+    await signedIn('pa');
+    const ctx = await requirePortalCustomer();
+    expect(await isPortalSessionFresh(ctx)).toBe(true);
+    now += 16 * 60_000;
+    expect(await isPortalSessionFresh(ctx)).toBe(false);
+  });
+  it('a TOTP-enrolled customer is not fresh on a WhatsApp code alone; fresh after a TOTP step-up', async () => {
+    h.mfaEnrolled.add(`pa|${PHONE}`);
+    const token = await signedIn('pa');
+    expect(await isPortalSessionFresh(await requirePortalCustomer())).toBe(false);
+    expect(await sessions().markStepUp(token, 'pa', { totp: true })).toBe(true);
+    const session = await sessions().resolve(token, 'pa');
+    expect(await isPortalSessionFresh({ ...(await requirePortalCustomer()), session: session! })).toBe(true);
+  });
+  it('an enrolment lookup error fails closed (demands the TOTP proof)', async () => {
+    await signedIn('pa');
+    const ctx = await requirePortalCustomer();
+    h.mfaThrow = true;
+    expect(await isPortalSessionFresh(ctx)).toBe(false);
+  });
+  it('a freshness check that throws fails closed', async () => {
+    await signedIn('pa');
+    const ctx = await requirePortalCustomer();
+    const broken = new Proxy(ctx.session, {
+      get: () => {
+        throw new Error('corrupt session');
+      },
+    });
+    expect(await isPortalSessionFresh({ ...ctx, session: broken })).toBe(false);
+  });
+});
+
 describe('5. safePortalNext', () => {
   it.each(['//evil.com', '/admin-dashboard', '/portal/../admin-dashboard', '/portal/transfers/a b', '/portal/send?x=1',
     'https://evil.com/portal', '/portal/', '/portalx', '/portal/recipients/ABC/edit', '/portal/transfers/x', null, 42])(
@@ -219,7 +260,7 @@ describe('5. safePortalNext', () => {
     (v) => expect(safePortalNext(v)).toBe('/portal'),
   );
   it.each(['/portal', '/portal/send', '/portal/send/review', '/portal/transfers/tx_ABC123', `/portal/recipients/${'a'.repeat(32)}/edit`,
-    '/portal/devices', '/portal/privacy'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
+    '/portal/devices', '/portal/privacy', '/portal/profile', '/portal/notifications'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
 });
 
 describe('step-up', () => {

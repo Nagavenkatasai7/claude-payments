@@ -1,7 +1,7 @@
 import { getRedis } from './redis';
 import { createHash, randomBytes } from 'node:crypto';
 import type { RedisLike } from './store';
-import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffPermissions, type StaffRole } from './types';
+import { FINANCE_DEFAULT_PERMISSIONS, SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffPermissions, type StaffRole } from './types';
 import { isSeedAdminRecord, seedAdminUsername } from './staff-login-guard';
 import { logWarn } from './log';
 import { createStaffRepo, type StaffRepo } from '@/db/repos/staff-repo';
@@ -132,7 +132,8 @@ function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissi
  * Identity, name, password hash and timestamps come from Redis (the store both
  * builds write). Status: suspended if either says so. Role: admin vs a lower
  * role takes the lower one; agent vs support (incomparable) suspends and keeps
- * the Redis role; a support result carries no permissions.
+ * the Redis role; a support or finance (UI redesign M3-6) result carries no
+ * permissions. finance is incomparable with agent and support too (suspends).
  * Permissions: per-key AND. Partner scope: Redis's; a row naming a different
  * partner (or one where Redis says platform) fails closed (suspended). The seed admin's
  * platform-admin record is returned unchanged.
@@ -143,7 +144,11 @@ export function mergeStaffRecords(fromRedis: Staff, fromLedger: Staff | null, se
   const { role, suspend: roleConflict } = mergeRole(fromRedis.role, fromLedger.role);
   merged.role = role;
   merged.permissions =
-    role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : andPermissions(fromRedis.permissions, fromLedger.permissions);
+    role === 'support'
+      ? { ...SUPPORT_DEFAULT_PERMISSIONS }
+      : role === 'finance'
+        ? { ...FINANCE_DEFAULT_PERMISSIONS } // UI redesign M3-6: finance never carries a money permission
+        : andPermissions(fromRedis.permissions, fromLedger.permissions);
   if (fromRedis.status === 'suspended' || fromLedger.status === 'suspended' || roleConflict) {
     merged.status = 'suspended';
   }
