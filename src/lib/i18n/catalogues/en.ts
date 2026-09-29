@@ -619,6 +619,8 @@ export const en = {
   'partner.invite.deadTitle': 'This invite link is not valid',
   'partner.invite.deadBody': 'It may have expired, been used already or been withdrawn. Ask your workspace admin to send a new invite.',
   'partner.invite.signIn': 'Go to sign in',
+  'portal.legacy.banner': "Password sign-in is ending on {date}. Sign in with a WhatsApp code at your provider's site.",
+  'portal.legacy.bannerDismiss': 'Dismiss',
   'portal.nav.label': 'Your account',
   'portal.nav.home': 'Home',
   'portal.nav.send': 'Send',

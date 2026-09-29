@@ -4,6 +4,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+// M2-14: the account layout reads CUSTOMER_PASSWORD_SUNSET at request time (connection()).
+vi.mock('next/server', async (orig) => ({ ...(await orig<typeof import('next/server')>()), connection: async () => {} }));
+
 // Program-Fix 41 — the public surface: robots + sitemap, the header config,
 // the brand-neutral root error/404 boundaries (they also render under the
 // white-label /pay/** pages, so no SmartRemit name, mark or home link), the
@@ -174,10 +177,41 @@ describe('admin-dashboard error boundary', () => {
 describe('customer portal brand scope', () => {
   it('the account layout wraps every portal page in .account-brand, skip link first', async () => {
     const { default: AccountLayout } = await import('@/app/account/layout');
-    const html = renderToStaticMarkup(
-      AccountLayout({ children: createElement('p', null, 'child') as ReactNode }) as ReactElement,
-    );
-    expect(html).toMatch(/^<div class="account-brand"><a href="#main"[^>]*>Skip to content<\/a><p>child<\/p><\/div>$/);
+    const prev = process.env.CUSTOMER_PASSWORD_SUNSET;
+    delete process.env.CUSTOMER_PASSWORD_SUNSET;
+    try {
+      const html = renderToStaticMarkup(
+        (await AccountLayout({ children: createElement('p', null, 'child') as ReactNode })) as ReactElement,
+      );
+      expect(html).toMatch(/^<div class="account-brand"><a href="#main"[^>]*>Skip to content<\/a><p>child<\/p><\/div>$/);
+    } finally {
+      if (prev === undefined) delete process.env.CUSTOMER_PASSWORD_SUNSET;
+      else process.env.CUSTOMER_PASSWORD_SUNSET = prev;
+    }
+  });
+
+  it('M2-14: CUSTOMER_PASSWORD_SUNSET set ⇒ the dismissible notice with the date, after the skip link, with no heading/aside/alert role', async () => {
+    const { default: AccountLayout } = await import('@/app/account/layout');
+    const prev = process.env.CUSTOMER_PASSWORD_SUNSET;
+    try {
+      process.env.CUSTOMER_PASSWORD_SUNSET = '2026-11-06';
+      const html = renderToStaticMarkup(
+        (await AccountLayout({ children: createElement('p', null, 'child') as ReactNode })) as ReactElement,
+      );
+      expect(html).toContain('Password sign-in is ending on November 6, 2026.');
+      expect(html).toContain('Sign in with a WhatsApp code at your provider&#x27;s site.');
+      expect(html).toMatch(/Skip to content<\/a><div[^>]*>.*Dismiss<\/button><\/div><p>child<\/p>/);
+      expect(html).not.toMatch(/<h[1-6]|<aside|role="alert"/);
+
+      process.env.CUSTOMER_PASSWORD_SUNSET = 'not-a-date';
+      const hidden = renderToStaticMarkup(
+        (await AccountLayout({ children: createElement('p', null, 'child') as ReactNode })) as ReactElement,
+      );
+      expect(hidden).not.toContain('Password sign-in');
+    } finally {
+      if (prev === undefined) delete process.env.CUSTOMER_PASSWORD_SUNSET;
+      else process.env.CUSTOMER_PASSWORD_SUNSET = prev;
+    }
   });
 
   it('tailwind.css scopes the brand tokens to .account-brand only', () => {
