@@ -1,5 +1,5 @@
 import { canSee, scopeOf, type Scope } from './staff-scope';
-import { SUPPORT_DEFAULT_PERMISSIONS, type PartnerId, type Staff, type StaffRole } from './types';
+import { FINANCE_DEFAULT_PERMISSIONS, SUPPORT_DEFAULT_PERMISSIONS, type PartnerId, type Staff, type StaffRole } from './types';
 
 /**
  * partner-staff-policy — partner-demo R5 (owner decision 8). The pure rules for
@@ -92,7 +92,9 @@ export interface NewStaffInput {
 export function newStaffRecord(tenant: PartnerId, input: NewStaffInput): Staff {
   if (!tenant) throw new Error('A tenant is required.');
   const { role } = input;
-  if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
+  // M3-8: finance is creatable (migration 0028 widened staff_role_check). The legacy
+  // createPartnerStaffAction still refuses it on its own; only the /partner invite path mints it.
+  if (role !== 'admin' && role !== 'agent' && role !== 'support' && role !== 'finance') throw new Error('Invalid role.');
   return {
     username: input.username,
     name: input.name,
@@ -100,7 +102,9 @@ export function newStaffRecord(tenant: PartnerId, input: NewStaffInput): Staff {
     permissions:
       role === 'support'
         ? { ...SUPPORT_DEFAULT_PERMISSIONS }
-        : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
+        : role === 'finance'
+          ? { ...FINANCE_DEFAULT_PERMISSIONS }
+          : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
     passwordHash: input.passwordHash,
     createdAt: input.createdAt,
     partnerId: tenant,
