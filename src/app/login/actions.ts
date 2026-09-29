@@ -13,6 +13,7 @@ import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { setMfaPendingCookie } from '@/lib/staff-mfa-cookie';
 import { completeStaffSignIn, staffSignInBlocked } from '@/lib/staff-sign-in';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { postLoginTarget } from '@/lib/post-login-target';
 
 // Program-Fix 17a: ONE refusal string for every throttle (known and unknown
 // usernames alike, outer ring or reservation), so it says nothing about
@@ -124,7 +125,10 @@ export async function login(
   // __Host- cookie, idle/absolute windows) and audits auth.login.
   // Best-effort audit; the redirect below stays outside any try/catch.
   await completeStaffSignIn(staff, ip);
-  redirect('/admin-dashboard');
+  // UI redesign M3-9: an invite-accepted account that has not enrolled lands on enrolment. Resolved
+  // before the redirect, which stays outside any try (next/dist/docs/.../redirect.md "Behavior").
+  const target = await postLoginTarget(staff);
+  redirect(target);
 }
 
 export async function logout(): Promise<void> {
