@@ -72,17 +72,25 @@ export async function signOutEverywhereAction(): Promise<void> {
   const partnerId = ctx.site.partnerId;
   const phone = ctx.session.phone;
   const store = getPortalSessionStore();
-  let ended: number;
+  let ended = 0;
+  let failure: unknown = null;
   try {
     ended = await store.revokeAll(partnerId, phone);
+  } catch (err) {
+    failure = err;
   } finally {
     // Whatever happened to the others, THIS session ends and its cookie goes (a failure still errors).
     try {
       await store.destroy(ctx.token);
+    } catch (err) {
+      failure ??= err;
     } finally {
       await clearPortalCookie();
     }
   }
-  await portalAudit(partnerId, phone, 'signout_all', { count: ended });
+  // M2-14 (#401 L6): the attempt is audited even when Redis failed (marked failed), then the error
+  // page shows; the customer is never told the other devices were signed out.
+  await portalAudit(partnerId, phone, 'signout_all', failure ? { count: ended, failed: true } : { count: ended });
+  if (failure) throw failure;
   redirect('/portal/login');
 }

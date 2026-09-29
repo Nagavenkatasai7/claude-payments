@@ -219,6 +219,10 @@ describe('signOutEverywhereAction', () => {
     spy.mockRestore();
     expect(await sessions().resolve(mine.token, 'pa')).toBeNull();
     expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+    // M2-14 (#401 L6): the attempt is still audited, marked failed.
+    const rows = await db.select().from(auditEvents).where(eq(auditEvents.action, 'portal.auth.signout_all'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ failed: true });
   });
 
   it('the audit row carries no phone', async () => {

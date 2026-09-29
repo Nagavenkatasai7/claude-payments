@@ -171,9 +171,10 @@ describe('flag on', () => {
   it('a stale session: both step-1 pages and the action go through step-up first', async () => {
     await signIn();
     now += 16 * 60_000;
-    await expect(ExportRequestPage()).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy');
-    await expect(DeleteRequestPage()).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy');
-    await expect(requestDataAction('delete', newRequestKey(), fd(REASON))).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy');
+    // M2-14 (#401 L3): the step-up returns to the page the customer was on.
+    await expect(ExportRequestPage()).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy/export');
+    await expect(DeleteRequestPage()).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy/delete');
+    await expect(requestDataAction('delete', newRequestKey(), fd(REASON))).rejects.toThrow('REDIRECT:/portal/verify?next=/portal/privacy/delete');
     expect(await auditRows()).toHaveLength(0);
   });
 
@@ -242,6 +243,37 @@ describe('flag on', () => {
     await signIn('pb');
     await expect(requestDataAction('export', newRequestKey(), fd(REASON))).rejects.toThrow('status=requested');
     expect(await auditRows('pb')).toHaveLength(1);
+  });
+
+  it('M2-14 (#401 L4): a request whose write fails does not burn the daily budget', async () => {
+    await signIn();
+    const real = h.db as Db;
+    h.db = new Proxy(real, {
+      get(t, k) {
+        if (k === 'transaction') return async () => { throw new Error('db down'); };
+        return Reflect.get(t, k);
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 4; i++) {
+        await expect(requestDataAction('export', newRequestKey(), fd(REASON))).rejects.toThrow('status=failed');
+      }
+    } finally {
+      h.db = real;
+      warn.mockRestore();
+    }
+    for (let i = 0; i < 3; i++) {
+      await expect(requestDataAction('export', newRequestKey(), fd(REASON))).rejects.toThrow('status=requested');
+    }
+  });
+
+  it('M2-14 (#401 L5): a forged call without FormData is refused cleanly (no 500), nothing written', async () => {
+    await signIn();
+    for (const bad of [undefined, null, 'x', { reason: 'y'.repeat(40) }]) {
+      await expect(requestDataAction('export', newRequestKey(), bad as never)).rejects.toThrow(/status=reason/);
+    }
+    expect(await auditRows()).toHaveLength(0);
   });
 
   it('a malformed request key → expired copy, nothing written', async () => {
