@@ -29,7 +29,8 @@ export function PartnerSidebar({ label, menuLabel, items }: { label: string; men
   const marked = items.map((i) => ({ ...i, current: isCurrent(i.href, pathname) }));
   return (
     <>
-      <details className="group rounded-ds-card border border-ds-border bg-ds-surface lg:hidden">
+      {/* Keyed on the pathname: a client-side navigation remounts the menu closed. */}
+      <details key={pathname ?? ''} className="group rounded-ds-card border border-ds-border bg-ds-surface lg:hidden">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-2 rounded-ds-card px-4 text-[15px] font-semibold text-ds-ink focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring [&::-webkit-details-marker]:hidden">
           {menuLabel}
           <ChevronDown aria-hidden="true" className="size-4 transition-transform group-open:rotate-180 motion-reduce:transition-none" />

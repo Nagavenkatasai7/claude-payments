@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getCurrentStaff } from '@/lib/auth';
+import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 import { scopeOf } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
@@ -17,7 +18,9 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const staff = await getCurrentStaff();
-  if (!staff) return NextResponse.json({ ok: false }, { status: 401 });
+  // UI redesign M3-6: a /partner-only role (finance) or any role outside the closed legacy set
+  // gets the anonymous answer; this endpoint belongs to the legacy dashboard.
+  if (!staff || !isLegacyDashboardStaff(staff)) return NextResponse.json({ ok: false }, { status: 401 });
 
   const scope = scopeOf(staff);
   const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;

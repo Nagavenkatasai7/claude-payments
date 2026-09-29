@@ -18,8 +18,9 @@ import { PartnerSidebar } from './partner-sidebar';
 // The gate here is for the CHROME only. A layout does not re-render on navigation and does not
 // stop child segments rendering (next/dist/docs/01-app/02-guides/authentication.md "Layouts and
 // auth checks"), so every page calls requirePartnerStaff itself. skipMfa: an enrolment-pending
-// user must still see the shell around /partner/security (the pages enforce enrolment), otherwise
-// the security page's own layout would redirect to itself.
+// user must still see the shell around /partner/security (the pages enforce enrolment). Without
+// it, THIS layout (which also wraps /partner/security) would redirect to /partner/security on every
+// render of that page: a loop. There is no separate security layout.
 const ROOT =
   'min-h-dvh overflow-x-clip bg-ds-ground font-sans leading-[1.6] text-ds-ink antialiased ' +
   '[&_:focus-visible]:rounded-ds-focus [&_:focus-visible]:outline-2 [&_:focus-visible]:outline-offset-[3px] [&_:focus-visible]:outline-ds-focus-ring';

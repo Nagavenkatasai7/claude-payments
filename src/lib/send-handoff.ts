@@ -40,12 +40,12 @@ export function isHandoffSlug(slug: unknown): slug is string {
 }
 
 /**
- * https://<slug>.smartremit.ai/send[?amount=<n.nn>][&to=<ISO2>], or null when the
+ * https://<slug>.smartremit.ai/portal/send[?amount=<n.nn>][&to=<ISO2>], or null when the
  * slug is not a valid partner_sites slug (no link at all).
  */
 export function buildSendHandoffUrl(input: { slug: string; amount?: number; to?: string }): string | null {
   if (!isHandoffSlug(input.slug)) return null;
-  const url = new URL(`https://${input.slug}.smartremit.ai/send`);
+  const url = new URL(`https://${input.slug}.smartremit.ai/portal/send`);
   const { amount, to } = input;
   if (
     typeof amount === 'number' &&

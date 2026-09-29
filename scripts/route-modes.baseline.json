@@ -85,6 +85,7 @@
   "/login/mfa": "dynamic",
   "/onboard/seller/[id]": "dynamic",
   "/partner": "dynamic",
+  "/partner/audit": "dynamic",
   "/partner/security": "dynamic",
   "/partner/transfers": "dynamic",
   "/partner/transfers/[id]": "dynamic",
