@@ -45,7 +45,9 @@ import {
   testWhatsappConnectionAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
+  changePartnerSlugAction,
 } from '../actions';
+import { getPartnerSite } from '@/db/repos/partner-site-repo';
 import { SendLimitsCard } from '../../send-limits-card';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
@@ -184,6 +186,14 @@ export default async function PartnerDetailPage({
         })
       : Promise.resolve([]),
   ]);
+  // M3-18: the partner's web address, platform admins only (the change is platform-only).
+  const site =
+    isPlatformAdmin && partner.id !== 'default'
+      ? await getPartnerSite(getDb(), partner.id).catch((err: unknown) => {
+          logWarn('admin.partner_slug', err, { partnerId: partner.id });
+          return null;
+        })
+      : null;
   const nowMs = Date.now();
   const recents = recentPage.items;
   // R2a: the WhatsApp channel (own / shared / incomplete, from the integrations
@@ -287,6 +297,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
             {/* partner-demo R5 (A1-4): send limits are SmartRemit governance, platform admins only. */}
             {isPlatformAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
+            {isPlatformAdmin && partner.id !== 'default' && <TabsTrigger value="web-address">Web address</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -629,6 +640,40 @@ export default async function PartnerDetailPage({
                 hidden={{ id: partner.id }}
                 showT0
               />
+            </TabsContent>
+          )}
+
+          {/* ── Web address (M3-18): the partner claims once; only SmartRemit changes it ── */}
+          {isPlatformAdmin && partner.id !== 'default' && (
+            <TabsContent value="web-address">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Web address</CardTitle>
+                  <CardDescription>
+                    The partner claims its address once. Changing it here retires the old address for good: it is never
+                    reused, by this partner or any other. A reason is required and audited.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p className="mb-4 text-sm">
+                    Current: <span className="font-mono">{site?.slug ? `${site.slug}.smartremit.ai` : 'not claimed yet'}</span>
+                  </p>
+                  <form action={changePartnerSlugAction} className="grid max-w-xl gap-3">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="p-slug">New address</Label>
+                      <Input id="p-slug" name="slug" required minLength={3} maxLength={30} placeholder="acme-pay" autoComplete="off" />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="p-slug-reason">Reason (at least 10 characters)</Label>
+                      <Input id="p-slug-reason" name="reason" required minLength={10} maxLength={500} autoComplete="off" />
+                    </div>
+                    <div>
+                      <Button type="submit" variant="outline">Change web address</Button>
+                    </div>
+                  </form>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 

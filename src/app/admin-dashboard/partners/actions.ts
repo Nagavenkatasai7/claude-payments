@@ -7,7 +7,8 @@ import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { validateSendLimitInput } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
+import { setPartnerSlug } from '@/db/repos/partner-site-repo';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { createPartnerIntegrationsStore, getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -551,6 +552,32 @@ export async function setPartnerSendLimitAction(formData: FormData): Promise<voi
     });
   });
   revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
+}
+
+// ── UI redesign M3-18: the partner's web address (slug) — PLATFORM-only change ──
+// A partner claims its slug once (/partner/branding); after that only SmartRemit moves it, with a
+// mandatory reason. The writer locks the partner row, tombstones the old slug in the same
+// transaction (never reused, by anyone) and audits partner.slug.update with actorScope 'platform'.
+// Input is lowercased + trimmed like the partner claim (the proxy lowercases the host).
+const SLUG_UNAVAILABLE = 'That web address is not available.';
+export async function changePartnerSlugAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  const reason = requireStaffReason(formData.get('reason'));
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+  const raw = formData.get('slug');
+  if (typeof raw !== 'string' || raw.length > 64) throw new Error(SLUG_UNAVAILABLE);
+
+  const r = await setPartnerSlug(getDb(), existing.id, raw.trim().toLowerCase(), staff.username, {
+    mode: 'change',
+    actorScope: 'platform',
+    reason,
+  });
+  if (!r.ok) throw new Error(r.reason === 'not_found' ? 'Partner not found.' : SLUG_UNAVAILABLE);
   revalidatePath(`/admin-dashboard/partners/${existing.id}`);
 }
 
