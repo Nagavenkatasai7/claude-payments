@@ -50,6 +50,8 @@ import {
 import { getPartnerSite } from '@/db/repos/partner-site-repo';
 import { SendLimitsCard } from '../../send-limits-card';
 import { enablePartnerPortalAction, recordPortalAuthTemplateAction } from '../portal-actions';
+import { GoLiveCard, goLiveFlash } from '../go-live-card';
+import { getGoLive, type GoLiveRecord } from '@/db/repos/partner-go-live-repo';
 import { getPortalSettings, type PortalSettings } from '@/db/repos/portal-settings-repo';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
@@ -151,8 +153,10 @@ const PRE_CLASS =
 
 export default async function PartnerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ golive?: string }>;
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
@@ -211,6 +215,15 @@ export default async function PartnerDetailPage({
         return 'error' as const;
       })
     : null;
+  // UI redesign M3-21: the go-live approval card (platform admins only; the action re-checks).
+  const goLive: GoLiveRecord | null | 'error' =
+    isPlatformAdmin && partner.id !== 'default'
+      ? await getGoLive(getDb(), partner.id).catch((err: unknown) => {
+          logWarn('admin.go_live', err, { partnerId: partner.id });
+          return 'error' as const;
+        })
+      : null;
+  const goLiveFlashText = goLiveFlash((await searchParams)?.golive);
   const [channelHealth, channelTest, signature] = await Promise.all([
     partner.id === 'default'
       ? Promise.resolve(null)
@@ -317,6 +330,9 @@ export default async function PartnerDetailPage({
 
           {/* ── Overview ─────────────────────────────────────────────────── */}
           <TabsContent value="overview">
+            {isPlatformAdmin && partner.id !== 'default' && (
+              <GoLiveCard partnerId={partner.id} partnerStatus={partner.status} goLive={goLive} flash={goLiveFlashText} />
+            )}
             {health && (
               <Card className="mb-6">
                 <CardHeader>
