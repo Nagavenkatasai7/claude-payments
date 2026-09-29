@@ -131,13 +131,13 @@ describe('listDeliveries (the /partner delivery log reader)', () => {
     }
   }
 
-  it("the session tenant's rows only, newest first, both kinds, masked columns only (no outbox id, no URL)", async () => {
+  it("the session tenant's instruction rows only (pings have their own list), newest first, no outbox id or URL", async () => {
     await seedPartner(db, 'pb', 'Partner B');
     await seed(2, 'pa');
     await seed(1, 'pb');
     await db.insert(partnerWebhookDeliveries).values({ partnerId: 'pa', kind: 'ping', attempt: 1, outcome: 'ok', httpStatus: 204, latencyMs: 3 });
     const page = await listDeliveries(db, 'pa', {});
-    expect(page.rows.map((r) => [r.kind, r.subjectId])).toEqual([['ping', null], ['settlement.instruct', 'tr_pa_1'], ['settlement.instruct', 'tr_pa_0']]);
+    expect(page.rows.map((r) => [r.kind, r.subjectId])).toEqual([['settlement.instruct', 'tr_pa_1'], ['settlement.instruct', 'tr_pa_0']]);
     expect(Object.keys(page.rows[0]).sort()).toEqual(['attempt', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outcome', 'subjectId']);
     expect(JSON.stringify(page.rows)).not.toContain('tr_pb_');
     expect(page.nextBefore).toBeNull();

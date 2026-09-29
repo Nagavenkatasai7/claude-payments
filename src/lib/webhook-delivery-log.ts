@@ -104,7 +104,7 @@ export const DELIVERY_PAGE_SIZE = 50;
 export interface DeliveryView {
   id: number;
   kind: string;
-  /** The transfer id for an instruction (the rail owner already received it); null for a ping. */
+  /** The transfer id (the rail owner already received it in the instruction). */
   subjectId: string | null;
   outcome: string;
   httpStatus: number | null;
@@ -130,7 +130,7 @@ export function parsePositiveId(v: unknown): number | null {
 }
 
 /**
- * The tenant's deliveries (instructions and test pings), newest first, keyset-paged on the identity
+ * The tenant's settlement-instruction deliveries (test pings have their own list, listRecentPings), newest first, keyset-paged on the identity
  * id (monotonic, no sub-millisecond timestamp ties). Never the outbox id, a URL or a body.
  */
 export async function listDeliveries(db: DbOrTx, partnerId: string, opts: { before?: number | null }): Promise<{ rows: DeliveryView[]; nextBefore: number | null }> {
@@ -138,7 +138,7 @@ export async function listDeliveries(db: DbOrTx, partnerId: string, opts: { befo
   const rows = await db
     .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, createdAt: d.createdAt })
     .from(d)
-    .where(opts.before ? and(eq(d.partnerId, partnerId), lt(d.id, opts.before)) : eq(d.partnerId, partnerId))
+    .where(and(eq(d.partnerId, partnerId), eq(d.kind, 'settlement.instruct'), opts.before ? lt(d.id, opts.before) : undefined))
     .orderBy(desc(d.id))
     .limit(DELIVERY_PAGE_SIZE + 1);
   const more = rows.length > DELIVERY_PAGE_SIZE;

@@ -7,7 +7,7 @@ import { Button, ConfirmDialog, Field, Input } from '@/components/ds';
 import type { RailSecretKind } from '@/lib/partner-integrations';
 import type { RotateSecretResult, TestPingResult } from '@/lib/partner-webhooks-view';
 import type { ActionResult } from '../../../action-result';
-import { rotateSecretAction, saveEndpointAction, sendTestAction } from './actions';
+import { replayDeliveryAction, rotateSecretAction, saveEndpointAction, sendTestAction } from './actions';
 
 // The /partner settlement-webhook controls (UI redesign M3-15a). A rotated secret exists ONLY in the
 // rotate action's result, held in this component's state: never a prop from the server page, never
@@ -159,5 +159,43 @@ export function TestEventForm() {
         )
       ) : null}
     </form>
+  );
+}
+
+/**
+ * M3-15b: Replay one DEAD settlement instruction. The id is the outbox row id; the server resolves it
+ * inside the session tenant, re-checks rail type and rate limit, and only re-queues the row.
+ */
+export function ReplayControl({ id }: { id: number }) {
+  const [result, setResult] = React.useState<ActionResult | null>(null);
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      {result?.ok ? null : (
+        <ConfirmDialog
+          trigger={
+            <Button type="button" variant="ghost" size="md">
+              {t('partner.webhooks.replay')}
+            </Button>
+          }
+          title={t('partner.webhooks.replay.title')}
+          body={t('partner.webhooks.replay.body')}
+          confirmLabel={t('partner.webhooks.replay')}
+          requireReason={false}
+          action={async (fd) => {
+            fd.set('id', String(id));
+            setResult(await replayDeliveryAction(null, fd));
+          }}
+        />
+      )}
+      {result ? (
+        result.ok ? (
+          <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
+            {t('partner.webhooks.replay.done')}
+          </p>
+        ) : (
+          <Alert text={result.error} />
+        )
+      ) : null}
+    </div>
   );
 }
