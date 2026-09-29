@@ -40,6 +40,7 @@ import type { WaCreds } from '@/lib/whatsapp';
 import { WhatsAppSendError, isAuthErrorCode } from '@/lib/whatsapp-errors';
 import { resolveWaChannel, WaChannelIncompleteError, type WaChannel } from '@/lib/whatsapp-creds';
 import { recordChannelHealth } from '@/lib/channel-health';
+import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-worker';
 import { sendBusinessInitiated, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
@@ -411,6 +412,7 @@ async function handle(
   row: OutboxRow,
   signal: RowSignal,
   partner: PartnerResolver,
+  budget: { hardStopAt?: number } = {},
 ): Promise<void> {
   const p = row.payload as Payload;
   switch (row.kind) {
@@ -1016,6 +1018,14 @@ async function handle(
       }
     }
 
+    // UI redesign M3-16: a partner report job (async, masked CSV). The payload is { jobId } only;
+    // the tenant is the job row's. Starts only with enough invocation budget left (else
+    // ReportDeferredError, deferred uncharged below). An older build hits `default` and retries.
+    case 'partner.report': {
+      await runPartnerReportJob(deps.db, str(p.jobId), { hardStopAt: budget.hardStopAt });
+      return;
+    }
+
     default:
       throw new Error(`Unknown outbox kind: ${row.kind}`);
   }
@@ -1235,7 +1245,7 @@ export async function drainOnce(
     // and it flags the row `abandoned` when it fires.
     const signal = newRowSignal(rowDeadlineMs);
     try {
-      await withRowDeadline(handle(deps, row, signal, partner), rowDeadlineMs, signal);
+      await withRowDeadline(handle(deps, row, signal, partner, { hardStopAt: opts.hardStopAt }), rowDeadlineMs, signal);
       // Partner-Demo R3b: a finished agent.turn drops its plaintext messageText
       // in the SAME compare-and-set (the text now lives sealed in the log).
       // Failed / dead rows keep it (retry, ops Retry).
@@ -1257,7 +1267,8 @@ export async function drainOnce(
       // Program-Fix 34A: a busy turn is NOT a failure — hand it back uncharged,
       // due in a few seconds. Checked BEFORE markFailed so waiting can never
       // spend the attempt budget or dead-letter a customer's message.
-      if (err instanceof TurnBusyError) {
+      // M3-16: a report that cannot fit this invocation is deferred the same way (never charged).
+      if (err instanceof TurnBusyError || err instanceof ReportDeferredError) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;
         } else {

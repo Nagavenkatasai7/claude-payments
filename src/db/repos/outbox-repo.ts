@@ -31,7 +31,8 @@ export type OutboxKind =
   | 'ticket.triage'
   | 'ops.alert'
   | 'email.send'
-  | 'ops.webhook';
+  | 'ops.webhook'
+  | 'partner.report'; // UI redesign M3-16: { jobId } only (src/lib/partner-report-worker.ts)
 
 export type OutboxRow = typeof outbox.$inferSelect;
 

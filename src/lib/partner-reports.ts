@@ -17,8 +17,9 @@ export type ReportKind = (typeof REPORT_KINDS)[number];
 export const isReportKind = (v: unknown): v is ReportKind => typeof v === 'string' && (REPORT_KINDS as readonly string[]).includes(v);
 
 /**
- * The row cap. Measured on PGlite (tests/partner-report-build-bench, see the PR): a 10k-row
- * transfers build stays well inside the 15 s wall box. Start at 10k, not 50k (plan review R4).
+ * The row cap. Measured on PGlite (2026-09-29, a one-off bench, numbers in the PR): a 10k-row
+ * build took 328 ms (transfers, 1.76 MB) / 219 ms (settlements, 1.44 MB), well inside the 15 s
+ * wall box and the byte cap. Start at 10k, not 50k (plan review R4).
  */
 export const MAX_REPORT_ROWS = 10_000;
 /**
