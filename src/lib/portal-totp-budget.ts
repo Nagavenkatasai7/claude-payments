@@ -35,7 +35,9 @@ export function createPortalTotpBudget(redis: RedisLike, opts: { now?: () => num
       return n <= PORTAL_TOTP_FAILS_PER_DAY;
     },
     async refund(partnerId: PartnerId, phone: string): Promise<void> {
-      await redis.decr(key(partnerId, phone));
+      // A refund just past UTC midnight lands on the NEW day's key: never leave it negative (and TTL-less).
+      const k = key(partnerId, phone);
+      if ((await redis.decr(k)) < 0) await redis.del(k);
     },
   };
 }

@@ -501,12 +501,33 @@ export async function POST(
         }
         // The default tenant's number IS the shared env number.
       }
-      // Program-Fix 49A: the partner's name on the free-form text. Best-effort:
-      // a read error keeps the neutral default wording.
+      // Program-Fix 49A: the partner's name on the free-form text, on the partner's
+      // OWN number only (the shared number keeps its wording). Best-effort: a read
+      // error keeps the neutral default wording.
       let otpBrand: string | undefined;
-      try {
-        otpBrand = resolvePartnerBranding(await getPartnerStore().getPartner(otpPartnerId)).brand;
-      } catch { /* the default brand */ }
+      if (otpCreds) {
+        try {
+          otpBrand = resolvePartnerBranding(await getPartnerStore().getPartner(otpPartnerId)).brand;
+        } catch { /* the default brand */ }
+      }
+      // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
+      // template (read by THIS transfer's partner only) carries the code, so a
+      // customer outside the 24-h window still receives it. M2-14: a lookup error
+      // falls back to free-form on the SAME partner number only inside the window
+      // (outside it Meta accepts, then drops, the text): otherwise 502, nothing minted.
+      let otpTemplate: { name: string; lang: string } | undefined;
+      if (otpCreds) {
+        try {
+          otpTemplate = portalAuthTemplate(await getPortalSettings(getDb(), otpPartnerId));
+        } catch (err) {
+          logWarn(
+            'pay.otp-template-lookup',
+            `partner auth template lookup failed; free-form on the partner number inside the window only: ${err instanceof Error ? err.name : 'unknown error'}`,
+            { partnerId: otpPartnerId },
+          );
+          if (!(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
+        }
+      }
       const otpStore = getTransactionOtpStore();
       const issued = await otpStore.issue(transferId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });
       // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
@@ -515,29 +536,15 @@ export async function POST(
         return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
       }
       if (issued.ok) {
-        // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
-        // template (read by THIS transfer's partner only) carries the code, so a
-        // customer outside the 24-h window still receives it. A lookup error keeps
-        // the free-form send on the SAME partner number (never the shared one).
-        let otpTemplate: { name: string; lang: string } | undefined;
-        if (otpCreds) {
-          try {
-            otpTemplate = portalAuthTemplate(await getPortalSettings(getDb(), otpPartnerId));
-          } catch (err) {
-            logWarn(
-              'pay.otp-template-lookup',
-              `partner auth template lookup failed; sending free-form on the partner number: ${err instanceof Error ? err.name : 'unknown error'}`,
-              { partnerId: otpPartnerId },
-            );
-          }
-        }
         const tenant = otpPartnerId;
         try {
           await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
             // #393: outside the window a free-form fallback is accepted, then dropped.
             inWindow: () => isInServiceWindow(store, tenant, otpPhone),
-            // #393: the partner sees (and is emailed about) a rejected template.
-            onTemplateFailure: async ({ code }) => {
+            // #393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx
+            // only. A 5xx, a timeout or a non-Graph error is transient, not the partner's to fix.
+            onTemplateFailure: async ({ status, code }) => {
+              if (status === undefined || status < 400 || status >= 500) return;
               await recordChannelHealth(tenant, 'auth_template_failed', code !== undefined ? { code } : {});
             },
           });

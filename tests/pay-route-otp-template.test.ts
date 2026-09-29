@@ -158,9 +158,10 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
     expect(getPortalSettingsSpy.calls).toEqual([]);
   });
 
-  it('the settings lookup throws → template undefined, the code still goes out (today\'s behaviour), 200 sent', async () => {
+  it('the settings lookup throws INSIDE the 24-h window → template undefined, free-form on the partner number, 200 sent', async () => {
     integrationsByPartner.set('pa', CREDS_A);
     getPortalSettingsSpy.fail = true;
+    vi.spyOn(store, 'getLastInboundAt').mockResolvedValue('2026-09-29T10:00:00.000Z');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await requestOtp('t_pa');
     expect(res.status).toBe(200);
@@ -242,12 +243,36 @@ describe('POST /api/pay/[transferId] request_otp — fail closed off the partner
     expect(recordChannelHealth).toHaveBeenCalledWith('pa', 'incomplete_config');
   });
 
-  it('a partner deliberately on the shared number (no WhatsApp field set) still gets the code on the shared number, with its brand', async () => {
+  it('a partner deliberately on the shared number (no WhatsApp field set) still gets the code on the shared number, wording unchanged (no brand)', async () => {
     const res = await requestOtp('t_pb');
     expect(res.status).toBe(200);
     const args = sendTransactionOtp.mock.calls[0];
     expect(args[2]).toBeUndefined();
-    expect(args[3]).toBe('Bravo B');
+    expect(args[3]).toBeUndefined();
+  });
+
+  it('the settings lookup throws OUTSIDE the 24-h window → 502 before a code is minted (a free-form text would be dropped)', async () => {
+    integrationsByPartner.set('pa', CREDS_A);
+    getPortalSettingsSpy.fail = true;
+    vi.spyOn(store, 'getLastInboundAt').mockResolvedValue(null);
+    const issue = vi.spyOn(txOtp, 'issue');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await requestOtp('t_pa');
+    expect(res.status).toBe(502);
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(issue).not.toHaveBeenCalled();
+  });
+
+  it('a transient template error (5xx, or no Graph status) is NOT reported to the partner as a rejected template', async () => {
+    integrationsByPartner.set('pa', CREDS_A);
+    sendTransactionOtp.mockImplementationOnce(async (...a: unknown[]) => {
+      const hooks = a[5] as { onTemplateFailure: (i: { status?: number; code?: number }) => Promise<void> };
+      await hooks.onTemplateFailure({ status: 503 });
+      await hooks.onTemplateFailure({});
+    });
+    const res = await requestOtp('t_pa');
+    expect(res.status).toBe(200);
+    expect(recordChannelHealth).not.toHaveBeenCalledWith('pa', 'auth_template_failed', expect.anything());
   });
 
   it("the hooks: a template failure records auth_template_failed with the Graph code for THIS partner; the window check reads THIS partner's marker", async () => {

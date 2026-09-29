@@ -26,6 +26,16 @@ describe('portal TOTP failure budget', () => {
     expect(await b.reserve('pa', P)).toBe(true);
   });
 
+  it('a refund that lands in a NEW day never leaves a negative, TTL-less key', async () => {
+    let t = Date.UTC(2026, 8, 29, 23, 59, 59);
+    const r = fakeRedis();
+    const b = createPortalTotpBudget(r, { now: () => t });
+    await b.reserve('pa', P);
+    t = Date.UTC(2026, 8, 30, 0, 0, 1);
+    await b.refund('pa', P);
+    for (const [k, v] of r.dump) if (k.startsWith('ptotp:')) expect(Number(v)).toBeGreaterThanOrEqual(0);
+  });
+
   it('is per partner and per phone (digits-normalised), and resets on the next UTC day', async () => {
     let t = Date.UTC(2026, 8, 29, 23);
     const b = createPortalTotpBudget(fakeRedis(), { now: () => t });
