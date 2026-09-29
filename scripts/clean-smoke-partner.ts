@@ -53,6 +53,14 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
       await tx.execute(sql`DELETE FROM partner_rates WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM api_keys WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM partner_integrations WHERE partner_id = ${t.id}`);
+      // UI redesign 0026-0028 children (partner site, portal settings, go-live, slug tombstones,
+      // report jobs, webhook delivery log). After the 0028 backfill EVERY partner has a go-live row.
+      await tx.execute(sql`DELETE FROM partner_sites WHERE partner_id = ${t.id}`);
+      await tx.execute(sql`DELETE FROM partner_portal_settings WHERE partner_id = ${t.id}`);
+      await tx.execute(sql`DELETE FROM partner_go_live WHERE partner_id = ${t.id}`);
+      await tx.execute(sql`DELETE FROM partner_slug_tombstones WHERE partner_id = ${t.id}`);
+      await tx.execute(sql`DELETE FROM partner_report_jobs WHERE partner_id = ${t.id}`);
+      await tx.execute(sql`DELETE FROM partner_webhook_deliveries WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM partners WHERE id = ${t.id}`);
       log(`  ✓ removed smoke partner ${t.id} (${t.name})`);
     }

@@ -7,6 +7,9 @@ import { test, expect } from '@playwright/test';
 // tables (remark-gfm) and the code-backed blocks; an unknown guide is a 404; nothing links
 // the preview; /docs is untouched; no page scrolls sideways at 375px; one enforced CSP.
 // PR-4 adds /docs-next/api: all 11 operations from openapi.yaml, prerendered, same checks.
+// PR-5 adds the sandbox "Try it" form (5 allowlisted operations) and its proxy POST /api/docs/try-it.
+// The proxy cases use FABRICATED keys only (agents never create credentials, SPEC §6a) and are
+// skipped on previews, which share the prod DB and Redis.
 
 test('/docs-next renders the docs index with one h1, a skip link and noindex', async ({ page }) => {
   const res = await page.goto('/docs-next');
@@ -122,4 +125,61 @@ test('/docs-next carries exactly one enforced CSP', async ({ request }) => {
     expect(csp[0].value).toContain("object-src 'none'");
     expect(csp[0].value).not.toContain('unsafe-eval');
   }
+});
+
+// ── PR-5: "Try it" (sandbox only, same origin) ─────────────────────────────────────────────
+const bypassActive = !!process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+
+test('/docs-next/api shows the Try it form under exactly the 5 allowlisted sandbox operations', async ({ page }) => {
+  await page.goto('/docs-next/api');
+  await expect(page.locator('main section[data-op] details summary', { hasText: 'Try it with a sandbox key' })).toHaveCount(5);
+  for (const op of ['listCorridors', 'createQuote', 'validateBeneficiary', 'listTransactions', 'getTransaction'])
+    await expect(page.locator(`main section[data-op="${op}"] details`)).toHaveCount(1);
+  for (const op of ['createTransaction', 'confirmTransaction', 'listSettlements'])
+    await expect(page.locator(`main section[data-op="${op}"] details`)).toHaveCount(0);
+});
+
+test.describe('Try it at a 375px phone viewport', () => {
+  test.use({ viewport: { width: 375, height: 812 } });
+  test('an opened form does not scroll the page sideways', async ({ page }) => {
+    await page.goto('/docs-next/api');
+    for (const op of ['listTransactions', 'createQuote']) await page.locator(`main section[data-op="${op}"] details summary`).click();
+    await expect(page.locator('main section[data-op="createQuote"] textarea')).toBeVisible();
+    await expect(page.locator('main section[data-op="listTransactions"]').getByText('No response yet')).toBeVisible();
+    const { scrollWidth, innerWidth } = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
+    expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+});
+
+test('try-it refuses a (fabricated) live key and a cross-site request', async ({ request }) => {
+  test.skip(bypassActive, 'previews share the prod DB: no POSTs on previews');
+  const live = await request.post('/api/docs/try-it', {
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    data: { operationId: 'listCorridors', key: 'sr_live_smoke_fabricated' },
+  });
+  expect(live.status()).toBe(400);
+  expect(await live.text()).not.toContain('sr_live_smoke_fabricated');
+  const cross = await request.post('/api/docs/try-it', {
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+    data: { operationId: 'listCorridors', key: 'sr_test_smoke_fabricated' },
+  });
+  expect(cross.status()).toBe(403);
+  const mint = await request.post('/api/docs/try-it', {
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    data: { operationId: 'createTransaction', key: 'sr_test_smoke_fabricated', body: {} },
+  });
+  expect(mint.status()).toBe(400);
+});
+
+test('try-it forwards a (fabricated) sandbox key and reports the upstream 401', async ({ request }) => {
+  test.skip(bypassActive, 'previews share the prod DB: no POSTs on previews');
+  const res = await request.post('/api/docs/try-it', {
+    headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+    data: { operationId: 'listCorridors', key: 'sr_test_smoke_fabricated' },
+  });
+  expect(res.status()).toBe(200);
+  expect(res.headers()['cache-control']).toContain('no-store');
+  const json = await res.json();
+  expect(json.upstreamStatus).toBe(401);
+  expect(JSON.stringify(json)).not.toContain('sr_test_smoke_fabricated');
 });

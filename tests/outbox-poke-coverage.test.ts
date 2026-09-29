@@ -39,6 +39,10 @@ const HELPERS: Record<string, string[]> = {
   // R2a: the partner alert email.send — called from drainOnce (the worker) and
   // the inbound webhook path (whatsapp-inbound.ts, which pokes).
   'src/lib/channel-health.ts': ['recordChannelHealth'],
+  // UI redesign M2-11b: the automatic receipt row, enqueued inside the delivered
+  // transition. Only Store.updateTransferFromWebhook calls it, reached from the
+  // payment-webhook route (which pokes) and the worker's mock.settle.
+  'src/lib/delivery-receipt.ts': ['deliverTransfer'],
 };
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';

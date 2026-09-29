@@ -81,6 +81,20 @@ export function createScheduleRepo(
       return rows[0] ? rowToSchedule(rows[0]) : null;
     },
 
+    /**
+     * UI redesign M2-10 (plan X14 / review round 1 L1): one schedule of ONE customer. The tenant AND
+     * the phone are in the WHERE, so another partner's or another customer's id reads as null
+     * (the portal's single "not found"). The unscoped getSchedule above stays for staff and cron.
+     */
+    async getOwnedSchedule(partnerId: PartnerId, phone: string, id: string): Promise<Schedule | null> {
+      const rows = await db
+        .select()
+        .from(schedules)
+        .where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId), eq(schedules.phone, phone)))
+        .limit(1);
+      return rows[0] ? rowToSchedule(rows[0]) : null;
+    },
+
     async saveSchedule(schedule: Schedule): Promise<void> {
       const row = scheduleToRow(schedule);
       await db.insert(schedules).values(row).onConflictDoUpdate({ target: schedules.id, set: row });
@@ -106,6 +120,28 @@ export function createScheduleRepo(
         .where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId), inArray(schedules.status, from)))
         .returning();
       return rows[0] ? rowToSchedule(rows[0]) : null;
+    },
+
+    /**
+     * UI redesign M2-10 (#398 review L2): the scheduled mint's in-transaction re-check. Reads the
+     * schedule of THIS (tenant, owner) with `FOR SHARE` (drizzle-orm/pg-core/query-builders/
+     * select.d.ts:586, LockStrength select.types.d.ts:60), so a concurrent status write (a delete's
+     * or a customer's cancel via setStatusIf) either committed first and is seen here, or waits for
+     * the mint transaction to commit. Only meaningful on a transaction handle. null = no such row.
+     */
+    async lockForMint(
+      id: string,
+      partnerId: PartnerId,
+      phone: string,
+    ): Promise<{ status: ScheduleStatus; hasDestination: boolean } | null> {
+      const rows = await db
+        .select({ status: schedules.status, enc: schedules.payoutDestinationEnc })
+        .from(schedules)
+        .where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId), eq(schedules.phone, phone)))
+        .limit(1)
+        .for('share');
+      const r = rows[0];
+      return r ? { status: r.status as ScheduleStatus, hasDestination: r.enc !== '' } : null;
     },
 
     /**
