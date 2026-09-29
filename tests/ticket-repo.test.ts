@@ -112,6 +112,20 @@ describe('ticket-repo — lifecycle', () => {
     expect(await repo.assign(t.id, 'sup1')).toBeNull();
   });
 
+  it('an optional notFrom guard refuses a move out of the listed states atomically (the read-then-write race)', async () => {
+    const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
+    // A caller read the ticket as 'open'; an escalation lands before its write.
+    expect((await repo.getTicket(t.id))?.status).toBe('open');
+    await repo.updateStatus(t.id, 'waiting_admin');
+    expect(await repo.updateStatus(t.id, 'pending', { notFrom: ['waiting_admin'] })).toBeNull();
+    expect(await repo.updateStatus(t.id, 'resolved', { notFrom: ['waiting_admin'] })).toBeNull();
+    expect((await repo.getTicket(t.id))?.status).toBe('waiting_admin');
+    // Not in the list: the move proceeds as before; an empty list changes nothing.
+    const t2 = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
+    expect((await repo.updateStatus(t2.id, 'pending', { notFrom: ['waiting_admin'] }))?.status).toBe('pending');
+    expect((await repo.updateStatus(t2.id, 'resolved', { notFrom: [] }))?.status).toBe('resolved');
+  });
+
   it('same-state transition is a no-op returning null', async () => {
     const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
     expect(await repo.updateStatus(t.id, 'open')).toBeNull();

@@ -8,6 +8,7 @@ import { logWarn } from '@/lib/log';
 import { maskPhoneLast4 } from '@/lib/mask';
 import {
   QUEUE_LIMIT,
+  contactAvailable,
   errName,
   listVisibleCustomerTickets,
   parseQueueStatus,
@@ -61,9 +62,12 @@ export default async function PartnerSupportPage({
         title={t('partner.support.title')}
         sub={ctx.role === 'agent' ? t('partner.support.agentSub') : t('partner.support.sub')}
         actions={
-          <Link href={PARTNER_ROUTES.supportContact.href} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
-            {t('partner.support.contactLink')}
-          </Link>
+          // The platform's own 'default' tenant has no Contact SmartRemit surface.
+          contactAvailable(ctx.partnerId) ? (
+            <Link href={PARTNER_ROUTES.supportContact.href} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              {t('partner.support.contactLink')}
+            </Link>
+          ) : undefined
         }
       />
       <nav aria-label={t('partner.support.filterLabel')} className="mb-4 flex flex-wrap gap-2">
