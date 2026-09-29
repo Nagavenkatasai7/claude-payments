@@ -13,6 +13,7 @@ import {
   deleteRecipientWithSchedules,
   findByRid,
   isRid,
+  lockRecipientBook,
   PORTAL_RECIPIENT_LIMIT,
   recipientRid,
   recordRecipientAudit,
@@ -134,6 +135,7 @@ export async function editRecipientAction(rid: string, _prev: RecipientFormState
 
   const out = await once('portal-recipient-edit', pid, phone, formData, async () => {
     return getDb().transaction(async (tx): Promise<Outcome> => {
+      await lockRecipientBook(tx, pid, phone); // M2-10: serialized with a portal schedule create
       const current = await findByRid(tx, pid, phone, rid); // deleted before this read → not found
       if (!current) return { kind: 'not_found' };
       if (change.fields.length === 0) return { kind: 'unchanged' };

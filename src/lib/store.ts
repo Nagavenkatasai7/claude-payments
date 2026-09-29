@@ -11,6 +11,7 @@ import { logError } from './log';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
+import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
@@ -46,6 +47,13 @@ export interface SenderLedgerOps {
    * the caller does not hold (fail to "no hold" + alert).
    */
   amlHoldInputs(q: AmlHoldQuery): Promise<AmlHoldInputs | null>;
+  /**
+   * UI redesign M2-10 (#398 review L2): a scheduled mint's re-check, in the mint transaction. The
+   * schedule row of this (tenant, sender) is read FOR SHARE (a racing cancel or recipient delete is
+   * either seen or waits for this mint); 'inactive' = missing or not 'active'; 'recipient_deleted' =
+   * the schedule still carries its own stored account for a recipient the sender deleted.
+   */
+  scheduleMintCheck(scheduleId: string, recipientPhone: string): Promise<'ok' | 'inactive' | 'recipient_deleted'>;
 }
 
 export interface AmlHoldQuery {
@@ -413,6 +421,14 @@ export function createStore(redis: RedisLike, db: Db) {
               insertTransfer: (t, opts) => repo.saveTransfer(t, opts),
               recordAudit: (e) => audit.record(e),
               amlHoldInputs: (q) => readAmlHoldInputs(tx, partnerId, phone, q),
+              scheduleMintCheck: async (scheduleId, recipientPhone) => {
+                const s = await createScheduleRepo(tx).lockForMint(scheduleId, partnerId, phone);
+                if (!s || s.status !== 'active') return 'inactive';
+                if (s.hasDestination && (await createRecipientRepo(tx).isTombstoned(partnerId, phone, recipientPhone))) {
+                  return 'recipient_deleted';
+                }
+                return 'ok';
+              },
             });
           },
           { isolationLevel: 'read committed' },
@@ -551,8 +567,9 @@ export function createStore(redis: RedisLike, db: Db) {
       partnerId: PartnerId,
       senderPhone: string,
       recipient: import('./types').Recipient,
+      opts?: { keepTombstone?: boolean },
     ): Promise<void> {
-      await recipientsRepo.upsertRecipient(partnerId, senderPhone, recipient);
+      await recipientsRepo.upsertRecipient(partnerId, senderPhone, recipient, opts);
     },
     async listRecipients(
       partnerId: PartnerId,
