@@ -10,11 +10,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { validateSendLimitInput } from '@/lib/send-limits';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
-import {
-  createPartnerIntegrationsStore,
-  getPartnerIntegrationsStore,
-  partnerForPhoneNumberId,
-} from '@/lib/partner-integrations-store';
+import { createPartnerIntegrationsStore, getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerApiKeyStore, getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
@@ -45,12 +41,18 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
-import { verifyPhoneNumberOwnership } from '@/lib/partner-integrations-verify';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
-import { checkWhatsappConfig, type WaConfigField } from '@/lib/whatsapp-creds';
-import { clearChannelHealthMarks, normalizeAlertEmail, type ChannelTestResult } from '@/lib/channel-health';
-import { getStore } from '@/lib/store';
-import { logWarn } from '@/lib/log';
+import {
+  assertPhoneNumberIdFree,
+  assertPhoneNumberIdOwned,
+  assertWhatsappConfigComplete,
+  disconnectWhatsapp,
+  rethrowPnidConflict,
+  saveWhatsappConfig,
+  testWhatsappConnection,
+  whatsappAuditMeta,
+} from '@/lib/partner-whatsapp-config';
+import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import type {
   Partner,
@@ -357,195 +359,40 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
 // Secrets are write-only (blank ⇒ keep existing) and envelope-encrypted inside
 // the integrations store. Non-secret routing data (phoneNumberId, providerType)
 // is stored in the clear and may be shown back in the form.
-
-/**
- * D11 (fix 1): a WhatsApp phone_number_id routes inbound traffic to ONE tenant,
- * so it is REFUSED when it is the platform's own number or already held by a
- * different partner. One generic message for both cases — the refusal must not
- * tell a partner who holds a number. The partial unique index
- * partner_integrations_wa_pnid is the race-proof last line.
- */
-async function assertPhoneNumberIdFree(partnerId: string, pnid: string | undefined): Promise<void> {
-  if (!pnid) return;
-  const holder = await partnerForPhoneNumberId(pnid);
-  if (pnid === env.whatsappPhoneNumberId || (holder && holder !== partnerId)) {
-    throw new Error('That WhatsApp number cannot be used.');
-  }
-}
-
-/** Same generic refusal when the partial unique index loses a race (SQLSTATE 23505). */
-function rethrowPnidConflict(e: unknown): never {
-  // The partial unique index partner_integrations_wa_pnid is the race-proof
-  // last line (two admins saving the same number at once). SAME generic
-  // message as assertPhoneNumberIdFree — never who holds it, never "race".
-  // drizzle wraps the driver error (DrizzleQueryError.cause — node_modules/drizzle-orm/errors.js).
-  const err = e as { code?: string; cause?: { code?: string } } | null;
-  if (err?.code === '23505' || err?.cause?.code === '23505') throw new Error('That WhatsApp number cannot be used.');
-  throw e;
-}
-
-/**
- * Program-Fix 30 (F64): a pnid alone routes inbound traffic on the shared
- * webhook, so it must be PROVEN before it is stored: the access token has to
- * read that phone number from Meta (GET /{pnid}, plus /{waba}/phone_numbers
- * when a WABA id is given). A pnid with no token is refused outright.
- * Fail-closed, one generic message (never why, never who holds the number).
- * Logs partnerId + status only — never the token, never the pnid.
- */
-const PNID_UNVERIFIED = 'That WhatsApp number could not be verified with this access token.';
-async function assertPhoneNumberIdOwned(
-  partnerId: string,
-  pnid: string,
-  token: string | undefined,
-  wabaId: string | undefined,
-): Promise<void> {
-  if (!token) {
-    logWarn('wa.pnid_verify_failed', 'pnid registration refused: no access token', { partnerId, status: 'no_token' });
-    throw new Error(PNID_UNVERIFIED);
-  }
-  const r = await verifyPhoneNumberOwnership({ pnid, token, wabaId });
-  if (!r.ok) {
-    logWarn('wa.pnid_verify_failed', 'pnid ownership check failed', { partnerId, status: r.status ?? 'network_or_invalid' });
-    throw new Error(PNID_UNVERIFIED);
-  }
-}
-
-/**
- * R2a: the SAVE rule on the MERGED WhatsApp state (checkWhatsappConfig): either
- * nothing set, or pnid + token + app secret. A partial state would save and then
- * fail closed at send time, so it is refused here with the missing fields named.
- */
-const WA_FIELD_LABEL: Record<WaConfigField, string> = {
-  phoneNumberId: 'Phone number ID',
-  token: 'Access token',
-  appSecret: 'App secret',
-  verifyToken: 'Verify token',
-};
-function assertWhatsappConfigComplete(w: PartnerWhatsappConfig): void {
-  const check = checkWhatsappConfig(w);
-  if (!check.ok) {
-    throw new Error(
-      `WhatsApp setup is incomplete — also provide: ${check.missing.map((f) => WA_FIELD_LABEL[f]).join(', ')}. Or tick "Disconnect WhatsApp" to use the shared SmartRemit number.`,
-    );
-  }
-}
-
-/**
- * partner-demo R3a (M4): which WhatsApp fields a save changed — BOOLEANS ONLY.
- * Never a value, a last4 of a token, or a hash (the audit row must not help
- * anyone guess or confirm a secret).
- */
-function whatsappAuditMeta(before: PartnerWhatsappConfig, after: PartnerWhatsappConfig) {
-  return {
-    pnidChanged: (after.phoneNumberId ?? '') !== (before.phoneNumberId ?? ''),
-    tokenChanged: (after.token ?? '') !== (before.token ?? ''),
-    verifyTokenChanged: (after.verifyToken ?? '') !== (before.verifyToken ?? ''),
-    appSecretChanged: (after.appSecret ?? '') !== (before.appSecret ?? ''),
-    pnidCleared: !after.phoneNumberId && Boolean(before.phoneNumberId),
-  };
-}
+//
+// UI redesign M3-13: the WhatsApp config core (number-free check, complete
+// config, Graph ownership probe, write + audit in one transaction, health
+// marks, test connection) lives in src/lib/partner-whatsapp-config.ts, shared
+// with the /partner surface. These actions gate, call it, and revalidate.
 
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const store = getPartnerIntegrationsStore();
-  const existing = await store.getIntegrations(id);
-  // R2a: an explicit disconnect wipes all four fields (blank fields otherwise
-  // KEEP stored secrets, so without this a config could never be cleared).
-  // R3a: audited in the same transaction — actor + partnerId only.
   if (formData.get('disconnect') === 'on') {
-    await getDb().transaction(async (tx) => {
-      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp: {} });
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.whatsapp.disconnect',
-        subjectId: id,
-      });
-    });
-    await clearChannelHealthMarks(id, ['auth_error', 'incomplete_config']);
+    await disconnectWhatsapp(id, staff.username);
     revalidatePath(`/admin-dashboard/partners/${id}`);
     return;
   }
-  const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
-  await assertPhoneNumberIdFree(id, newPnid || undefined);
-  const whatsapp: PartnerWhatsappConfig = {
-    phoneNumberId: newPnid || undefined,
-    token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
-    verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
-    appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
-  };
-  // R2a rule on the MERGED state; R3a moved it BEFORE the Graph probe, so an
-  // incomplete form never costs a network call.
-  assertWhatsappConfigComplete(whatsapp);
-  // Fix 30: verify only when the pnid changes, or a NEW token arrives while a
-  // pnid is set. A save changing neither (e.g. only the verify token) is
-  // grandfathered — no Graph call. Clearing the pnid needs no proof.
-  const submittedToken = String(formData.get('token') ?? '').trim();
-  const pnidChanged = newPnid !== (existing.whatsapp.phoneNumberId ?? '');
-  const tokenChanged = submittedToken !== '' && submittedToken !== existing.whatsapp.token;
-  const probed = Boolean(newPnid && (pnidChanged || tokenChanged));
-  if (probed) {
-    // wabaId is read ONLY for this check; it is never persisted.
-    const wabaId = String(formData.get('wabaId') ?? '').trim() || undefined;
-    // R3a (R7 review): the Graph call stays BEFORE the transaction — never
-    // network I/O while holding a database transaction open.
-    await assertPhoneNumberIdOwned(id, newPnid, submittedToken || existing.whatsapp.token, wabaId);
-  }
-  try {
-    // R3a (M4): the write and its audit row commit together, or neither does.
-    await getDb().transaction(async (tx) => {
-      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp });
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.whatsapp_config',
-        subjectId: id,
-        meta: whatsappAuditMeta(existing.whatsapp, whatsapp),
-      });
-    });
-  } catch (e) {
-    rethrowPnidConflict(e);
-  }
-  // A saved (complete) config resolves the incomplete signal. auth_error is
-  // resolved ONLY when this save's token just passed the Graph probe — a
-  // blank-field or verify-token-only save still holds the rejected token.
-  await clearChannelHealthMarks(id, probed ? ['auth_error', 'incomplete_config'] : ['incomplete_config']);
-  // No separate reverse index to maintain anymore — inbound routing resolves
-  // the partner straight off the integrations row (partnerForPhoneNumberId).
+  await saveWhatsappConfig(id, staff.username, {
+    phoneNumberId: String(formData.get('phoneNumberId') ?? ''),
+    token: String(formData.get('token') ?? ''),
+    verifyToken: String(formData.get('verifyToken') ?? ''),
+    appSecret: String(formData.get('appSecret') ?? ''),
+    wabaId: String(formData.get('wabaId') ?? ''),
+  });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
 /**
- * R2a: "Test connection" — the SAME Graph ownership probe the save runs
- * (verifyPhoneNumberOwnership, GET /{pnid} with the STORED token), on demand.
- * Gated like every config action; network I/O only, no DB transaction. The
- * result (ok + HTTP status only — never the token or body) is kept in Redis for
- * the WhatsApp tab; a pass clears a stale auth_error mark.
+ * R2a: "Test connection" — the SAME Graph ownership probe the save runs, on
+ * demand (testWhatsappConnection). Gated like every config action.
  */
 export async function testWhatsappConnectionAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
-  const { whatsapp } = await getPartnerIntegrationsStore().getIntegrations(id);
-  const at = new Date().toISOString();
-  let result: ChannelTestResult;
-  if (!whatsapp.phoneNumberId || !whatsapp.token) {
-    result = { ok: false, at, reason: 'not_configured' };
-  } else {
-    const r = await verifyPhoneNumberOwnership({ pnid: whatsapp.phoneNumberId, token: whatsapp.token });
-    result = r.ok ? { ok: true, at } : { ok: false, at, reason: 'probe_failed', ...(r.status !== undefined ? { status: r.status } : {}) };
-    if (!r.ok) logWarn('wa.test_connection_failed', 'WhatsApp test connection failed', { partnerId: id, status: r.status ?? 'network_or_invalid' });
-  }
-  try {
-    await getStore().writeChannelTest(id, JSON.stringify(result));
-  } catch (err) {
-    logWarn('wa.test_connection', 'result not stored', { partnerId: id, error: err instanceof Error ? err.name : 'error' });
-  }
-  if (result.ok) await clearChannelHealthMarks(id, ['auth_error']);
+  await testWhatsappConnection(id);
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 

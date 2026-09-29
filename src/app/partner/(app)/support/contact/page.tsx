@@ -5,7 +5,7 @@ import { PARTNER_ROUTES } from '../../../routes';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { newRequestKey } from '@/lib/portal-request-key';
-import { errName, listContactThreads, tenantStaffUsernames } from '@/lib/partner-tickets';
+import { contactAvailable, errName, listContactThreads, tenantStaffUsernames } from '@/lib/partner-tickets';
 import { Card, EmptyState, PageHeader } from '@/components/ds';
 import type { Ticket } from '@/lib/types';
 import { BackLink, LoadError, TicketRows, formatWhen } from '../support-bits';
@@ -65,7 +65,11 @@ export default async function PartnerContactPage() {
         </section>
         <Card as="section" className="order-1 p-4 sm:p-6 lg:order-2">
           <h2 className="mb-4 text-[17px] font-semibold text-ds-ink">{t('partner.contact.newTitle')}</h2>
-          <ContactForm requestKey={newRequestKey()} />
+          {contactAvailable(ctx.partnerId) ? (
+            <ContactForm requestKey={newRequestKey()} />
+          ) : (
+            <p className="text-[15px] text-ds-ink-muted">{t('partner.contact.unavailable')}</p>
+          )}
         </Card>
       </div>
     </>
