@@ -33,7 +33,11 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  * sanctions or AML reason, an unknown or empty list, a blocked row ⇒ refused), re-checked by the
  * legacy canReleaseHeld rule as defence in depth. M3-10 follow-up: the transfer SENDER's customer
  * row (read inside the session tenant) must exist and carry no PEP / watchlist hit; a missing row
- * or a failed lookup is refused (fail closed).
+ * or a failed lookup is refused (fail closed). Known residuals: (1) the flags are read before the
+ * guarded claim and the claim does not re-check them, so a flag raised by the Persona webhook in
+ * that window is not seen (the same read-then-claim shape as the kycMode check); (2) a sandbox mint
+ * writes no customer row (partner-api-service.ts, live only), so a sandbox hold is never
+ * partner-releasable.
  *
  * The money movement is NOT forked: releaseTransfer (dashboard-ops.ts) → settlement.releaseHold
  * commits the guarded in_review → paid claim, the rail effect and the ONE `transfer.release` audit

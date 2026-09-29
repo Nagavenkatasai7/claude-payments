@@ -52,9 +52,22 @@ describe('loadSenderScreening (fail-closed wrapper)', () => {
     expect(await loadSenderScreening(db, 'pa', PHONE)).toEqual({ pepHit: null, watchlistHit: true });
   });
 
-  it('a lookup failure → null (never throws), so the release predicate refuses', async () => {
-    const broken = { select: vi.fn(() => { throw new Error('connection reset 14155550101'); }) } as unknown as Db;
-    await expect(loadSenderScreening(broken, 'pa', PHONE)).resolves.toBeNull();
+  it('a lookup failure → null (never throws), so the release predicate refuses; the log never carries the phone', async () => {
+    const lines: string[] = [];
+    const capture = (...a: unknown[]) => void lines.push(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '));
+    const spies = (['log', 'info', 'warn', 'error'] as const).map((m) => vi.spyOn(console, m).mockImplementation(capture));
+    try {
+      // A failed query's message carries its bound params: the phone and any other value.
+      const broken = { select: vi.fn(() => { throw new Error('params: 14155550101, bound-param-sentinel'); }) } as unknown as Db;
+      await expect(loadSenderScreening(broken, 'pa', PHONE)).resolves.toBeNull();
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+    expect(lines.length).toBeGreaterThan(0);
+    for (const l of lines) {
+      expect(l).not.toContain('5550101');
+      expect(l).not.toContain('bound-param-sentinel');
+    }
   });
 
   it('a blank tenant or phone → null without a query', async () => {
