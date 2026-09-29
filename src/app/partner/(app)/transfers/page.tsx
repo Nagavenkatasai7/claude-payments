@@ -10,6 +10,7 @@ import { Button, EmptyState, Field, Input, PageHeader, Select, buttonVariants } 
 import type { Transfer } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../routes';
 import { TransferRows, toPartnerRow } from './transfer-rows';
+import { TransfersExportForm } from '../reports/request-form';
 
 export const metadata: Metadata = {
   title: t('partner.transfers.title'),
@@ -95,6 +96,9 @@ export default async function PartnerTransfersPage({ searchParams }: { searchPar
             {t('partner.transfers.apply')}
           </Button>
         </form>
+        {/* M3-16: an async, masked CSV of the current closed-set filters (reportPolicy('transfers')
+            = this page's own policy, so every role that sees the page may export). */}
+        <TransfersExportForm status={f.status} environment={f.environment} />
         {filtered ? (
           <p className="text-[14px] text-ds-ink-muted">
             <Link href="/partner/transfers" className="font-semibold text-ds-primary hover:underline">

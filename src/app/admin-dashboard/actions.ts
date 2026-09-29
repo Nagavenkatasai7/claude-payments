@@ -17,6 +17,7 @@ import {
   canReleaseHeld,
 } from '@/lib/dashboard-ops';
 import { getPartnerStore } from '@/lib/partner-store';
+import { loadSenderScreening } from '@/lib/sender-screening';
 import { getCustomerStore } from '@/lib/customer-store';
 import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
@@ -131,7 +132,8 @@ export async function resendPaymentLinkAction(
  *   (c) canReleaseHeld — a hold flagged by SmartRemit's own screening (owning
  *       partner kycMode 'ours') needs PLATFORM staff (owner decision 2026-09-16),
  *       and a sanctions / name-screening hold is PLATFORM-only in every KYC
- *       mode (Program-Fix 43 follow-up)
+ *       mode (Program-Fix 43 follow-up); a PARTNER-scoped admin follows the
+ *       /partner allowlist incl. the sender PEP / watchlist check (M3-10 Task 10.3)
  *   (d) a non-blank release reason (the bounded `note`) is REQUIRED
  *   (e) releaseTransfer re-verifies status === 'in_review'
  */
@@ -146,8 +148,14 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   // Program-Fix 43 follow-up: a hold raised by sanctions / name screening is
   // PLATFORM-only even for a 'delegated' partner (canReleaseHeld keys on
   // isScreeningHold over the transfer's stored reasons).
+  // UI redesign M3-10 Task 10.3 / O8: a PARTNER-scoped admin follows the /partner rule
+  // (isPartnerReleasableHold: allowlisted reasons only, and the SENDER customer row, read in the
+  // owning tenant, must exist with no PEP / watchlist hit). The lookup runs for partner scope only
+  // and never throws (a miss or failure ⇒ null ⇒ refused); platform staff are unchanged.
   const owner = await getPartnerStore().getPartner(transfer.partnerId);
-  if (!canReleaseHeld(scopeOf(staff), owner, transfer)) {
+  const scope = scopeOf(staff);
+  const sender = scope.kind === 'partner' ? await loadSenderScreening(getDb(), transfer.partnerId, transfer.phone) : null;
+  if (!canReleaseHeld(scope, owner, transfer, sender)) {
     throw new Error('You do not have permission to perform this action.');
   }
   // Program-Fix 43 follow-up: every release records WHO (the session actor)
