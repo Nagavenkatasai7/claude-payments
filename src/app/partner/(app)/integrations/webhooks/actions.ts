@@ -10,6 +10,9 @@ import { parseSecretKind, type RotateSecretResult, type TestPingResult } from '@
 import { MAX_SETTLEMENT_URL_LENGTH } from '@/lib/settlement-url';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
+import { pokeWorker } from '@/lib/outbox';
+import { replayDeadInstruction } from '@/lib/partner-webhook-replay';
+import { parsePositiveId } from '@/lib/webhook-delivery-log';
 import type { PartnerCtx } from '@/lib/partner-access';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
@@ -91,4 +94,35 @@ export async function sendTestAction(_prev: TestPingResult | null, _formData: Fo
   }
   revalidatePath(PAGE);
   return { ok: true, outcome: r.outcome, httpStatus: r.httpStatus, latencyMs: r.latencyMs };
+}
+
+/**
+ * M3-15b: Replay a DEAD settlement instruction of this tenant's rail. The hidden `id` is the outbox
+ * row id, resolved INSIDE the session tenant (partner-webhook-replay.ts): a foreign, missing,
+ * non-instruct or already-replayed id is the same "not found" with no write. The replay only
+ * re-queues the row (no inline send); the worker is poked after the commit.
+ */
+export async function replayDeliveryAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(POLICY);
+  const id = parsePositiveId(formData.get('id'));
+  if (id === null) return refused('partner.webhooks.replay.notFound');
+  let r;
+  try {
+    r = await replayDeadInstruction(getDb(), ctx.partnerId, actorOf(ctx), id);
+  } catch (err) {
+    logWarn('partner.webhooks.replay', errName(err), { partnerId: ctx.partnerId });
+    return refused('partner.webhooks.failed');
+  }
+  if (!r.ok) {
+    const key: Record<typeof r.reason, MessageKey> = {
+      not_found: 'partner.webhooks.replay.notFound',
+      rate_limited: 'partner.webhooks.replay.rateLimited',
+      not_partner_rail: 'partner.webhooks.managed',
+    };
+    return refused(key[r.reason]);
+  }
+  pokeWorker();
+  revalidatePath(PAGE);
+  return { ok: true };
 }

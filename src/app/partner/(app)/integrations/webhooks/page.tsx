@@ -8,10 +8,12 @@ import { getDb } from '@/db/client';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { listRecentPings, type PingView } from '@/lib/partner-settlement-endpoint';
 import { webhookConfigView, type SecretState } from '@/lib/partner-webhooks-view';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { listDeliveries, parseDeliveryCursor, type DeliveryView } from '@/lib/webhook-delivery-log';
 import type { RailSecretKind } from '@/lib/partner-integrations';
-import { Badge, Card, EmptyState, ErrorState, PageHeader } from '@/components/ds';
+import { Badge, Card, EmptyState, ErrorState, PageHeader, buttonVariants } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../../routes';
-import { EndpointForm, RotateSecretControl, TestEventForm } from './webhook-controls';
+import { EndpointForm, ReplayControl, RotateSecretControl, TestEventForm } from './webhook-controls';
 
 export const metadata: Metadata = { title: t('partner.webhooks.title'), robots: { index: false, follow: false } };
 
@@ -21,6 +23,11 @@ export const metadata: Metadata = { title: t('partner.webhooks.title'), robots: 
 // is the partner's own config; secrets are shown as set / not set plus the grace expiry, never a
 // value). A rotated secret is shown once from the rotate action's result (webhook-controls.tsx). The
 // page reads cookies, so it is dynamically rendered and never cached. Viewing writes nothing.
+// M3-15b adds, for a partner-operated rail only: the delivery log (the worker's
+// partner_webhook_deliveries rows for this tenant AS THE RAIL OWNER, keyset-paged on a strict id
+// cursor: transfer id, outcome, HTTP status, latency, attempt, time; never a URL, body or outbox
+// payload) and the failed (dead) instructions with Replay (transfer id, time and attempts; the
+// outbox id is only the hidden form value).
 
 const H2 = 'text-[17px] font-semibold text-ds-ink';
 const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
@@ -30,6 +37,9 @@ const OUTCOME_KEYS: Record<string, MessageKey> = {
   network: 'partner.webhooks.outcome.network',
   refused: 'partner.webhooks.outcome.refused',
 };
+
+const DEAD_LIMIT = 50;
+type SearchParams = Record<string, string | string[] | undefined>;
 
 async function safe<T>(source: string, partnerId: string, read: () => Promise<T>): Promise<T | null> {
   try {
@@ -88,9 +98,87 @@ function PingList({ pings }: { pings: PingView[] }) {
   );
 }
 
-export default async function PartnerWebhooksPage() {
+function DeliveryLog({ page, before }: { page: { rows: DeliveryView[]; nextBefore: number | null }; before: number | null }) {
+  const base = PARTNER_ROUTES.integrationsWebhooks.href;
+  return (
+    <>
+      {page.rows.length === 0 ? (
+        <EmptyState title={t('partner.webhooks.log.empty')} />
+      ) : (
+        <ul className="flex flex-col gap-3">
+          {page.rows.map((d) => (
+            <Card as="li" key={d.id} className="p-4 sm:p-5">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1 text-[14px] sm:grid-cols-3 lg:grid-cols-6 sm:gap-y-3">
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.when')}</dt>
+                  <dd className="text-ds-ink">{whenUtc(d.createdAt.toISOString())}</dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.transfer')}</dt>
+                  <dd className="font-mono text-[13.5px] break-all text-ds-ink">{d.subjectId ?? '—'}</dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.outcome')}</dt>
+                  <dd>
+                    <Badge tone={d.outcome === 'ok' ? 'success' : 'danger'}>{t(OUTCOME_KEYS[d.outcome] ?? 'partner.webhooks.outcome.refused')}</Badge>
+                  </dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.status')}</dt>
+                  <dd className="text-ds-ink tabular-nums">{d.httpStatus ?? '—'}</dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.latency')}</dt>
+                  <dd className="text-ds-ink tabular-nums">{d.latencyMs === null ? '—' : `${d.latencyMs} ms`}</dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.attempt')}</dt>
+                  <dd className="text-ds-ink tabular-nums">{d.attempt}</dd>
+                </div>
+              </dl>
+            </Card>
+          ))}
+        </ul>
+      )}
+      {before !== null || page.nextBefore !== null ? (
+        <nav className="flex flex-wrap gap-3">
+          {before !== null ? (
+            <Link href={`${base}#delivery-log`} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              {t('partner.webhooks.log.newest')}
+            </Link>
+          ) : null}
+          {page.nextBefore !== null ? (
+            <Link href={`${base}?before=${page.nextBefore}#delivery-log`} rel="next" className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              {t('partner.webhooks.log.older')}
+            </Link>
+          ) : null}
+        </nav>
+      ) : null}
+    </>
+  );
+}
+
+function DeadList({ rows }: { rows: Array<{ id: number; transferId: string; createdAt: Date; attempts: number }> }) {
+  if (rows.length === 0) return <EmptyState title={t('partner.webhooks.dead.empty')} />;
+  return (
+    <ul className="flex flex-col gap-3">
+      {rows.map((r) => (
+        <Card as="li" key={r.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+          <div>
+            <p className="text-[15px] font-semibold break-all text-ds-ink">{t('partner.webhooks.dead.item', { ref: r.transferId })}</p>
+            <p className="mt-1 text-[13.5px] text-ds-ink-muted">{t('partner.webhooks.dead.meta', { when: whenUtc(r.createdAt.toISOString()), attempts: r.attempts })}</p>
+          </div>
+          <ReplayControl id={r.id} />
+        </Card>
+      ))}
+    </ul>
+  );
+}
+
+export default async function PartnerWebhooksPage({ searchParams }: { searchParams?: Promise<SearchParams> } = {}) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.integrationsWebhooks.policy);
   const pid = ctx.partnerId;
+  const before = parseDeliveryCursor((await searchParams)?.before);
   const [cfg, pings] = await Promise.all([
     safe('config', pid, () => createPartnerIntegrationsStore(getDb()).getIntegrations(pid)),
     safe('pings', pid, () => listRecentPings(getDb(), pid, 10)),
@@ -137,6 +225,12 @@ export default async function PartnerWebhooksPage() {
     );
   }
 
+  // Only a partner-operated rail reaches here: the delivery and dead-letter reads run after that check.
+  const [log, dead] = await Promise.all([
+    safe('deliveries', pid, () => listDeliveries(getDb(), pid, { before })),
+    safe('dead', pid, () => createOutboxRepo(getDb()).listDeadInstructionsForPartner(pid, DEAD_LIMIT)),
+  ]);
+
   return (
     <>
       {header}
@@ -166,6 +260,16 @@ export default async function PartnerWebhooksPage() {
         <section className="flex flex-col gap-3">
           <h2 className={H2}>{t('partner.webhooks.recentTitle')}</h2>
           {pings === null ? <ErrorState /> : <PingList pings={pings} />}
+        </section>
+        <section className="flex flex-col gap-3">
+          <h2 className={H2}>{t('partner.webhooks.dead.title')}</h2>
+          <p className="text-[14px] leading-relaxed text-ds-ink-muted">{t('partner.webhooks.dead.hint')}</p>
+          {dead === null ? <ErrorState /> : <DeadList rows={dead} />}
+        </section>
+        <section id="delivery-log" className="flex flex-col gap-3">
+          <h2 className={H2}>{t('partner.webhooks.log.title')}</h2>
+          <p className="text-[14px] leading-relaxed text-ds-ink-muted">{t('partner.webhooks.log.hint')}</p>
+          {log === null ? <ErrorState /> : <DeliveryLog page={log} before={before} />}
         </section>
       </div>
     </>
