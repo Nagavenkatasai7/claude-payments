@@ -37,7 +37,7 @@ import {
 //   - the password is validated BEFORE the token is consumed, so a weak password never burns the link;
 //   - the account claim is createStaff's SET NX, so a name taken meanwhile (two tenants may hold
 //     pending invites for one name) loses atomically;
-//   - the forced-MFA marker is written (NX, no TTL) BEFORE the account, so no invite-created account
+//   - the forced-MFA marker is written (NX, no TTL) BEFORE the account and never deleted here, so no invite-created account
 //     can ever exist without it (review R7);
 //   - no password, hash or token is ever logged or echoed.
 // redirect() stays outside every try (next/dist/docs/01-app/03-api-reference/04-functions/redirect.md:51-53).
@@ -118,25 +118,21 @@ export async function acceptInviteAction(formData: FormData): Promise<AcceptInvi
 
   const redis = getRedis();
   const markerKey = `${MFA_PENDING_PREFIX}${invite.username}`;
-  let markedByUs = false;
   let created: boolean;
   try {
     // NO ttl: a TTL would silently lift forced enrolment for an invitee who waits to sign in. Cleared
     // only by a successful enrolment (the gate's lazy clear) or by removing the member.
-    const set = await redis.set(markerKey, '1', { nx: true });
-    markedByUs = set !== null && set !== undefined;
+    await redis.set(markerKey, '1', { nx: true });
     created = await getAuthStore().createStaff(record);
   } catch (err) {
-    // createStaff released its own claim on a ledger failure; drop OUR marker only while no account
-    // holds the name (never another account's marker).
-    await releaseMarker(markerKey, markedByUs, invite.username);
+    // createStaff released its own claim on a ledger failure. The marker is NEVER deleted on a failure
+    // path: another tenant's invitee may win the name in the gap and rely on it (review LOW-1). A
+    // leftover marker only ever forces enrolment; enrolment or member removal clears it.
     logWarn('partner.invite.create', errName(err), { partnerId: invite.partnerId });
     return failed();
   }
   if (!created) {
-    // The name was taken between the checks and the claim. The marker is LEFT in place: the holder
-    // is either another invitee (who needs it) or an account the marker can only push toward
-    // enrolment (fail-safe). Deleting it could strip the winner's forced enrolment.
+    // The name was taken between the checks and the claim. The marker is LEFT in place (as above).
     logWarn('partner.invite.taken', 'username claimed concurrently', { partnerId: invite.partnerId });
     return DEAD_INVITE;
   }
@@ -175,13 +171,4 @@ export async function acceptInviteAction(formData: FormData): Promise<AcceptInvi
   }
 
   redirect('/login');
-}
-
-async function releaseMarker(key: string, markedByUs: boolean, username: string): Promise<void> {
-  if (!markedByUs) return;
-  try {
-    if (!(await getAuthStore().getStaff(username))) await getRedis().del(key);
-  } catch (err) {
-    logWarn('partner.invite.marker_release', errName(err));
-  }
 }

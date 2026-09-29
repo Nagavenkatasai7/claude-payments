@@ -334,6 +334,22 @@ describe('acceptInviteAction (POST: consume)', () => {
     expect(await auditRows('staff.invite.accept')).toHaveLength(0);
   });
 
+  it('a ledger failure in createStaff → failed(), no account, and the marker is NOT deleted (never strip another account’s marker)', async () => {
+    const token = await issueFor('pa', 'pa-fail');
+    authOverride = (base) => ({
+      ...base,
+      createStaff: async () => {
+        throw new Error('staff ledger write failed');
+      },
+    });
+    expect(await accept(token, STRONG)).toEqual({ ok: false, error: t('partner.common.failed') });
+    authOverride = null;
+    expect(await auth().getStaff('pa-fail')).toBeNull();
+    // A leftover marker only ever forces enrolment (fail-safe); enrolment or removal clears it.
+    expect(await redis.get(`${MFA_PENDING_PREFIX}pa-fail`)).toBe('1');
+    expect(await auditRows('staff.invite.accept')).toHaveLength(0);
+  });
+
   it('a stale enrolment on a re-used name is reset (the new owner enrols afresh)', async () => {
     const mfa = createStaffMfaStore(redis);
     const begun = await mfa.beginEnrolment('pa-new');
