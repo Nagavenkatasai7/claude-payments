@@ -22,6 +22,7 @@ describe('StepUpPrompt', () => {
     expect(html).toContain('inputMode="numeric"');
     expect(html).toContain(t('partner.stepUp.title'));
     expect(html).toContain(t('partner.stepUp.label.totp'));
+    expect(html).toContain(t('partner.stepUp.hint.totp')); // a sign-in code cannot be reused
     expect(html).toMatch(/role="alert"[^>]*>For your security, enter the 6-digit code/);
     expect(html).not.toContain('type="password"');
   });
@@ -30,6 +31,7 @@ describe('StepUpPrompt', () => {
     expect(html).toContain('type="password"');
     expect(html).toContain('autoComplete="current-password"');
     expect(html).toContain(t('partner.stepUp.label.password'));
+    expect(html).not.toContain(t('partner.stepUp.hint.totp'));
   });
   it('the secret input has no name, so it never rides a native submission', () => {
     for (const f of ['totp', 'password'] as const) {

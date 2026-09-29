@@ -62,7 +62,7 @@ export function StepUpPrompt({
       <p role="alert" className="text-[14px] leading-relaxed text-ds-ink-muted">
         {stepUp.error}
       </p>
-      <Field name="stepUpSecret" label={t(totp ? 'partner.stepUp.label.totp' : 'partner.stepUp.label.password')}>
+      <Field name="stepUpSecret" label={t(totp ? 'partner.stepUp.label.totp' : 'partner.stepUp.label.password')} hint={totp ? t('partner.stepUp.hint.totp') : undefined}>
         {(ids) => (
           <Input
             id={ids.id}

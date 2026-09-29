@@ -643,6 +643,7 @@ export const en = {
   'partner.stepUp.throttled': 'Too many attempts. Try again later.',
   'partner.stepUp.unavailable': 'We could not confirm it is you right now. Nothing was changed. Try again.',
   'partner.stepUp.label.totp': 'Authenticator code',
+  'partner.stepUp.hint.totp': 'A code you just used to sign in cannot be used again. Wait for the next code in your app.',
   'partner.stepUp.label.password': 'Password',
   'partner.stepUp.submit': 'Verify and continue',
   'partner.stepUp.verifying': 'Verifying…',

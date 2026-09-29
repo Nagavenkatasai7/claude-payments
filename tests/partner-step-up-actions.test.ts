@@ -65,7 +65,8 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { createStaffMfaStore } from '@/lib/staff-mfa-store';
 import { base32Decode, totpAt } from '@/lib/totp';
 import { hashPassword } from '@/lib/password';
-import { staffStepUpKey } from '@/lib/staff-step-up';
+import { staffStepUpKey, STEP_UP_SESSION_HOURLY_CAP } from '@/lib/staff-step-up';
+import { staffLoginKeys } from '@/lib/staff-login-guard';
 import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
 import { t } from '@/lib/i18n';
 import { createKeyAction, revokeKeyAction, rotateKeyAction } from '@/app/partner/(app)/integrations/api-keys/actions';
@@ -278,7 +279,7 @@ describe.each(RUNNERS)('$name: the 15-minute step-up', ({ run, done, target }) =
     const secret = await enrol();
     const incr = redis.incr.bind(redis);
     redis.incr = async (k: string) => {
-      if (k.startsWith('staff_lf:')) throw new Error('redis down');
+      if (k.startsWith('staff_su:')) throw new Error('redis down');
       return incr(k);
     };
     try {
@@ -307,15 +308,27 @@ describe.each(RUNNERS)('$name: the 15-minute step-up', ({ run, done, target }) =
   });
 });
 
-describe('step-up attempts share the staff login throttle', () => {
-  it('past the per-(user, IP) cap, even a correct code is refused and nothing runs', async () => {
+describe('step-up has its OWN throttle, separate from /login', () => {
+  it('past the per-session cap, even a correct code is refused and nothing runs', async () => {
     await signInAs();
     const secret = await enrol();
-    for (let i = 0; i < 10; i++) await createKeyAction(null, form({ mode: 'test', [STEP_UP_FIELD]: '000000' }));
+    for (let i = 0; i < STEP_UP_SESSION_HOURLY_CAP; i++) await createKeyAction(null, form({ mode: 'test', [STEP_UP_FIELD]: '000000' }));
     const before = (await db.select().from(apiKeys)).length;
     const r = await createKeyAction(null, form({ mode: 'test', [STEP_UP_FIELD]: nextCode(secret) }));
     expect(r).toEqual({ ok: false, code: 'step_up_required', factor: 'totp', error: t('partner.stepUp.throttled') });
     expect((await db.select().from(apiKeys)).length).toBe(before);
+  });
+  it('a /login budget burned for this username and IP does not block a signed-in step-up, and step-up failures leave /login untouched', async () => {
+    await signInAs();
+    const secret = await enrol();
+    const t0 = Date.now();
+    const burned = [staffLoginKeys.ui('pa-admin', '203.0.113.7', t0), staffLoginKeys.u('pa-admin', t0), staffLoginKeys.ip('203.0.113.7', t0)];
+    for (const k of burned) await redis.set(k, '999');
+    const loginKeys = () => [...redis.dump.keys()].filter((k) => k.startsWith('staff_lf:')).sort().map((k) => [k, redis.dump.get(k)]);
+    const before = loginKeys();
+    expect(isStepUpRequired(await rotateSecretAction(null, form({ kind: 'signing', [STEP_UP_FIELD]: '000000' })))).toBe(true);
+    expect(await rotateSecretAction(null, form({ kind: 'signing', [STEP_UP_FIELD]: nextCode(secret) }))).toMatchObject({ ok: true, secret: expect.any(String) });
+    expect(loginKeys()).toEqual(before);
   });
 });
 

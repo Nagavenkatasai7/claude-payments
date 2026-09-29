@@ -3,7 +3,6 @@ import { getAuthStore } from './auth-store';
 import { getRedis } from './redis';
 import { staffSessionTokens } from './session-cookie';
 import { getStaffMfaStore } from './staff-mfa-store';
-import { getStaffLoginGuard } from './staff-login-guard';
 import { getStaffAuthAudit } from './staff-auth-audit';
 import { verifyPassword } from './password';
 import { clientIpFrom } from './ip-rate-limit';
@@ -32,7 +31,6 @@ function stepUp(): StaffStepUp {
   return createStaffStepUp({
     redis: getRedis(),
     mfa: getStaffMfaStore(),
-    guard: getStaffLoginGuard(),
     verifyPassword,
     getStaff: (u) => getAuthStore().getStaff(u),
     audit: getStaffAuthAudit(),
