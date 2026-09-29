@@ -12,10 +12,15 @@ import { auditIdentityView, openCustomerRef } from '@/lib/customer-ref';
 import { hasPermission } from '@/lib/permissions';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { customerDetailView } from '@/lib/partner-customer-view';
-import { t } from '@/lib/i18n';
+import { PARTNER_ADMIN } from '@/lib/partner-access';
+import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits, type SendLimitSource } from '@/lib/send-limits';
+import { partnerMayWriteOverride } from '@/lib/partner-send-limits';
+import { formatMoney } from '@/lib/ui/money';
+import { t, type MessageKey } from '@/lib/i18n';
 import { Card, MaskedValue, PageHeader, buttonVariants } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../../routes';
 import { revealCustomerFieldAction } from './actions';
+import { LimitForm } from './limit-form';
 
 export const metadata: Metadata = {
   title: t('partner.customers.detailTitle'),
@@ -34,6 +39,13 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
     </div>
   );
 }
+
+const SOURCE_KEY: Record<SendLimitSource, MessageKey> = {
+  customer: 'partner.limits.source.customer',
+  partner: 'partner.limits.source.partner',
+  platform: 'partner.limits.source.platform',
+};
+const usd = (cents: number) => formatMoney(cents / 100);
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -67,6 +79,16 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
   // Mirrors the action's viewer checks (the action is the authority): no Show control that would
   // always be refused. It depends only on the viewer, never on the customer (no oracle).
   const canReveal = hasPermission(ctx.staff, 'canRevealPii') && (await getStaffMfaStore().isEnrolled(ctx.username));
+  // M3-12: the EFFECTIVE limits (the same resolver a mint uses, partner-set entries re-clamped at
+  // read). The form is offered to admins only (the action re-gates PARTNER_ADMIN) and never over a
+  // live SmartRemit override (the action refuses that too, under the row lock).
+  const now = new Date();
+  const limits = resolveEffectiveSendLimits(partner, customer, now);
+  const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
+  const canEditLimits = PARTNER_ADMIN.roles.includes(ctx.role);
+  const override = customer.sendLimitOverride;
+  const partnerSetExpiry =
+    !setBySmartRemit && override?.setScope === 'partner' && typeof override.expiresAt === 'string' ? override.expiresAt : null;
 
   return (
     <>
@@ -106,6 +128,40 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
             <Row label={t('partner.customers.verifiedAt')}>{when(view.kycVerifiedAt)}</Row>
             <Row label={t('partner.customers.firstSeen')}>{when(view.firstSeenAt)}</Row>
           </dl>
+        </Section>
+      </div>
+      <div className="mt-5">
+        <Section title={t('partner.limits.title')}>
+          <p className="text-[13px] text-ds-ink-muted">{t('partner.limits.sub')}</p>
+          <dl className="mt-2 divide-y divide-ds-border">
+            <Row label={t('partner.limits.perTransfer')}>
+              <span className="tabular-nums">{usd(limits.perTransferCapCents)}</span>
+              <span className="ml-2 text-[13px] text-ds-ink-muted">{t(SOURCE_KEY[limits.source.perTransferCapCents])}</span>
+            </Row>
+            <Row label={t('partner.limits.daily')}>
+              <span className="tabular-nums">{usd(limits.t1DailyCapCents)}</span>
+              <span className="ml-2 text-[13px] text-ds-ink-muted">{t(SOURCE_KEY[limits.source.t1DailyCapCents])}</span>
+            </Row>
+            <Row label={t('partner.limits.firstDays')}>
+              <span className="tabular-nums">{usd(limits.t0DailyCapCents)}</span>
+              <span className="ml-2 text-[13px] text-ds-ink-muted">{t(SOURCE_KEY[limits.source.t0DailyCapCents])}</span>
+            </Row>
+          </dl>
+          {partnerSetExpiry ? (
+            <p className="mt-2 text-[13px] text-ds-ink-muted">{t('partner.limits.endsOn', { date: when(partnerSetExpiry) })}</p>
+          ) : null}
+          {canEditLimits ? (
+            setBySmartRemit ? (
+              <p role="note" className="mt-4 text-[14px] font-semibold text-ds-ink">
+                {t('partner.limits.setBySmartRemit')}
+              </p>
+            ) : (
+              <div className="mt-5 border-t border-ds-border pt-5">
+                <h3 className="mb-3 text-[15px] font-bold text-ds-ink">{t('partner.limits.formTitle')}</h3>
+                <LimitForm customerRef={view.ref} capLabel={usd(PLATFORM_SEND_LIMITS.perTransferCapCents)} />
+              </div>
+            )
+          ) : null}
         </Section>
       </div>
     </>
