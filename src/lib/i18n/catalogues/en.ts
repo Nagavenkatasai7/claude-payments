@@ -624,7 +624,7 @@ export const en = {
   'partner.webhooks.col.transfer': 'Transfer',
   'partner.webhooks.col.attempt': 'Attempt',
   'partner.webhooks.dead.title': 'Failed instructions',
-  'partner.webhooks.dead.hint': 'These settlement instructions failed every retry. Replay sends one again if the transfer is still waiting to be paid out; a transfer that was already paid out, cancelled or refunded is not sent again. Your endpoint must treat a repeated transfer id as the same instruction.',
+  'partner.webhooks.dead.hint': 'Settlement instructions that failed every retry while the transfer is still waiting to be paid out. Replay sends one again. Your endpoint must treat a repeated transfer id as the same instruction.',
   'partner.webhooks.dead.empty': 'No failed instructions.',
   'partner.webhooks.dead.item': 'Instruction #{id}',
   'partner.webhooks.dead.meta': 'Queued {when} · {attempts} attempts',

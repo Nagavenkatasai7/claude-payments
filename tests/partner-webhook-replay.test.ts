@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { asc, eq, sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { createStore } from '@/lib/store';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { outbox as outboxTable, partnerWebhookDeliveries } from '@/db/schema';
@@ -77,15 +77,37 @@ beforeEach(async () => {
 });
 
 describe('replayDeadInstruction → the worker', { retry: 0 }, () => {
-  it('replaying the dead row of an already-DELIVERED transfer: the worker marks it done with NO POST and no delivery row', async () => {
+  it('the dead row of an already-DELIVERED transfer is not replayable at all (not_found, stays dead, no POST)', async () => {
     await store.saveTransfer(transfer({ status: 'delivered' }));
+    const id = await deadRow('instruct:rp_t1');
+    expect(await replayDeadInstruction(db, 'pa', actor, id, { redis })).toEqual({ ok: false, reason: 'not_found' });
+    await drainOnce(deps(), 'w1');
+    expect(await statusOf(id)).toBe('dead');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('a transfer DELIVERED after the replay was queued: the worker ledger guard marks the row done with NO POST and no delivery row', async () => {
+    await store.saveTransfer(transfer());
     const id = await deadRow('instruct:rp_t1');
     expect(await replayDeadInstruction(db, 'pa', actor, id, { redis })).toEqual({ ok: true });
     expect(fetchFn).not.toHaveBeenCalled(); // the replay itself never sends
+    await db.execute(sql`UPDATE transfers SET status = 'delivered' WHERE id = 'rp_t1'`);
     await drainOnce(deps(), 'w1');
     expect(await statusOf(id)).toBe('done');
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await db.select().from(partnerWebhookDeliveries)).toHaveLength(0);
+  });
+
+  it('the replay locks the transfer row FOR UPDATE before reviving (serialises sibling replays and sender cancel)', async () => {
+    await store.saveTransfer(transfer());
+    const id = await deadRow('instruct:rp_t1');
+    const stop = captureQueries();
+    expect(await replayDeadInstruction(db, 'pa', actor, id, { redis })).toEqual({ ok: true });
+    const q = stop().map((x) => x.sql.toLowerCase());
+    const lock = q.findIndex((x) => x.includes('transfers') && x.includes('for update'));
+    const revive = q.findIndex((x) => x.startsWith('update "outbox"'));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeLessThan(revive);
   });
 
   it('replaying the dead row of a still-PAID transfer re-POSTs exactly once, carrying the same transfer id', async () => {

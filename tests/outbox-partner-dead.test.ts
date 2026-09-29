@@ -82,7 +82,8 @@ describe('listDeadInstructionsForPartner', () => {
   });
 
   it('a non-dead row is not listed; the limit is clamped (1..100)', async () => {
-    await outbox.enqueue('settlement.instruct', { transferId: 't_pa' }, { dedupeKey: 'reinstruct:t_pa' }); // pending
+    await store.saveTransfer(transfer('t_pa2', 'pa'));
+    await outbox.enqueue('settlement.instruct', { transferId: 't_pa2' }, { dedupeKey: 'instruct:t_pa2' }); // pending
     expect((await outbox.listDeadInstructionsForPartner('pa', 50)).length).toBe(2);
     expect((await outbox.listDeadInstructionsForPartner('pa', 1)).length).toBe(1);
     expect((await outbox.listDeadInstructionsForPartner('pa', 0)).length).toBe(1);
@@ -93,6 +94,48 @@ describe('listDeadInstructionsForPartner', () => {
     const orphan = await deadRow('settlement.instruct', { transferId: 'gone' }, 'instruct:gone');
     expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(orphan);
     expect(await outbox.retryDeadForPartner(orphan, 'pa')).toBe(false);
+  });
+});
+
+describe('only a row that could still be needed is listed or revived (review MEDIUM)', () => {
+  it('a transfer the rail already acknowledged (payment_provider_ref set) is excluded: not listed, not revived', async () => {
+    await db.execute(sql`UPDATE transfers SET payment_provider_ref = 'rail-ack' WHERE id = 't_pa'`);
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(paRow);
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(false);
+    expect((await statusOf(paRow)).status).toBe('dead');
+  });
+
+  it.each(['delivered', 'cancelled'])('a %s transfer is excluded (nothing left to instruct)', async (status) => {
+    await db.execute(sql`UPDATE transfers SET status = ${status} WHERE id = 't_pa'`);
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(paRow);
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(false);
+  });
+
+  it('a dead row with a LIVE sibling instruct row for the same transfer is excluded (never two in flight)', async () => {
+    await outbox.enqueue('settlement.instruct', { transferId: 't_pa' }, { dedupeKey: 'reinstruct:t_pa' }); // pending
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(paRow);
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(false);
+  });
+
+  it('two dead siblings: reviving one hides and blocks the other', async () => {
+    const sibling = await deadRow('settlement.instruct', { transferId: 't_pa' }, 'reinstruct:t_pa');
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).toEqual(expect.arrayContaining([paRow, sibling]));
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(true);
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(sibling);
+    expect(await outbox.retryDeadForPartner(sibling, 'pa')).toBe(false);
+    expect((await statusOf(sibling)).status).toBe('dead');
+  });
+
+  it('a revived row keeps locked_at, so a later sender cancel escalates (rail_claimed) instead of auto-cancelling', async () => {
+    await db.execute(sql`UPDATE outbox SET locked_at = now() WHERE id = ${paRow}`); // it ran before it died
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(true);
+    const r = (await db.execute(sql`SELECT locked_at FROM outbox WHERE id = ${paRow}`)) as unknown as { rows: Array<{ locked_at: unknown }> };
+    expect(r.rows[0].locked_at).not.toBeNull();
+    await createOutboxRepo(db).enqueue('whatsapp.text', { to: '15551230000', text: 'x', partnerId: 'pa' }, { dedupeKey: 'stage1:t_pa' });
+    const { cancelPaidBySenderLocked } = await import('@/lib/sender-cancel');
+    const claim = await db.transaction((tx) => cancelPaidBySenderLocked(tx, 'pa', 't_pa'));
+    expect(claim.kind).toBe('escalate');
+    expect((claim as { reason?: string }).reason).toBe('rail_claimed');
   });
 });
 

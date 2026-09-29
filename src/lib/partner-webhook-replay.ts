@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -13,8 +14,10 @@ import type { RedisLike } from '@/lib/store';
 // row through the ordinary retry path (createOutboxRepo.retryDeadForPartner: the tenant-scoped
 // predicate + the status='dead' guard), and the worker then runs the normal instruct handler, whose
 // ledger guard refuses a transfer that is no longer payable (outbox-worker.ts settlement.instruct:
-// cancelled / delivered / refund pending|completed ⇒ done without a POST). A still-paid transfer IS
-// re-instructed once; settlement endpoints must be idempotent on the transfer id.
+// cancelled / delivered / refund pending|completed ⇒ done without a POST). Only a row that could still
+// be needed is replayable: the transfer is still paid with no rail ack, and no sibling instruct row
+// is live (outbox-repo.ts deadInstructionOnRail). Such a transfer IS re-instructed once; settlement
+// endpoints must be idempotent on the transfer id.
 //
 // NOT a 'use server' module: it takes a partnerId and trusts it. The action gates first and passes
 // the SESSION tenant. Order: rail type (only a partner-operated 'http' rail is self-service, as in
@@ -51,6 +54,12 @@ export async function replayDeadInstruction(
   if (!(await withinReplayLimit(deps.redis ?? getRedis(), partnerId, now.getTime()))) return { ok: false, reason: 'rate_limited' };
 
   const replayed = await db.transaction(async (tx) => {
+    // Lock order transfer → outbox (the order every writer uses): two replays of sibling rows for one
+    // transfer, or a replay racing a sender cancel, serialise here; the retry's predicate (paid, no
+    // rail ack, no live sibling) is then evaluated after the other side committed.
+    await tx.execute(sql`SELECT t.id FROM transfers t
+      WHERE t.id = (SELECT o.payload ->> 'transferId' FROM outbox o WHERE o.id = ${outboxId} AND o.kind = 'settlement.instruct')
+      FOR UPDATE`);
     if (!(await createOutboxRepo(tx).retryDeadForPartner(outboxId, partnerId))) return false;
     await createAuditRepo(tx).record({
       partnerId,
