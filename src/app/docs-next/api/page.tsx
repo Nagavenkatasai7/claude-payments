@@ -7,8 +7,8 @@ import { MethodBadge, Operation, ScrollTable } from './Operation';
 // UI redesign M4 PR-4: the Partner API reference, rendered from openapi.yaml at BUILD time.
 // force-static prerenders it (node_modules/next/dist/docs/01-app/02-guides/
 // caching-without-cache-components.md:88,104; cacheComponents is off in next.config.ts), so the
-// fs read of openapi.yaml happens during `next build` and the route ships as static HTML with no
-// client JS. The layout's metadata keeps the preview out of search (this file sets none of that).
+// fs read of openapi.yaml happens during `next build` and the route ships as static HTML. Its only
+// client JS is the PR-5 <TryIt> island under the allowlisted sandbox operations. The layout's metadata keeps the preview out of search (this file sets none of that).
 export const dynamic = 'force-static';
 
 export const metadata: Metadata = {
