@@ -24,7 +24,10 @@ const DAY_MS = 86_400_000;
 /**
  * Session lifetimes (owner O1 + addendum):
  * - `idleMs` 30 days sliding, `absoluteMs` 90 days from sign-in whatever the activity;
- * - `cookieMaxAgeS` the browser cookie lifetime (re-set by server actions only; the Redis record is the authority);
+ * - `cookieMaxAgeS` the browser cookie lifetime. Server actions re-set it clamped to the 90-day cap
+ *   (`portalSessionCookieOptions(session)`); the proxy's sliding refresh on reads re-sets it UNCLAMPED
+ *   (it has no session record), so the cookie can outlive the cap. The Redis record is the authority:
+ *   its 90-day absolute cap refuses the session whatever the cookie says (M2-14, PR 394 L3);
  * - `stepUpFreshMs` 15 minutes: sensitive actions need a code verified this recently;
  * - `maxSessionsPerCustomer` live sessions per (partner, phone); the oldest are evicted.
  */

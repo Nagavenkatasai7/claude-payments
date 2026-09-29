@@ -9,6 +9,7 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
 import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
+import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
 import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
@@ -131,6 +132,15 @@ export async function GET(req: NextRequest) {
     scrubbed = await scrubOldOutboxPayloads(getDb());
   } catch (err) {
     logError('cron.outbox-scrub', err);
+  }
+
+  // UI redesign M3-16 (owner default O7): a ready partner report past its 7-day expiry loses its
+  // sealed content (status 'expired'; the job row stays for audit). Fail-soft. The download route
+  // and the Reports list enforce expires_at themselves, so this daily lag is never an exposure.
+  try {
+    await createPartnerReportRepo(getDb()).expireDue(new Date());
+  } catch (err) {
+    logError('cron.report-expiry', err);
   }
 
   // Program-Fix 27 (vercel-09): ONE append-only audit row per authorized run

@@ -63,10 +63,23 @@ export interface SweepResult {
  * request that has since committed. True when a new row was created.
  */
 export async function enqueueReinstructLocked(db: Db, transferId: string): Promise<boolean> {
+  return (await reinstructLocked(db, transferId)) === 'enqueued';
+}
+
+/**
+ * enqueueReinstructLocked with the reason. M3-15b review MEDIUM-1: under the SAME transfer lock the
+ * partner Replay takes (partner-webhook-replay.ts), a transfer that already has a LIVE
+ * settlement.instruct row (pending / processing / failed: queued, running or backing off) gets NO
+ * recovery re-instruction now: the worker route sweeps before it drains, so both rows would POST back
+ * to back. The one `reinstruct:` stays available for a later sweep once that row is done or dead.
+ */
+export async function reinstructLocked(db: Db, transferId: string): Promise<'enqueued' | 'not_payable' | 'in_flight' | 'exists'> {
   return db.transaction(async (tx) => {
     const cur = await createTransferRepo(tx).getTransferForUpdate(transferId);
-    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return false;
-    return createOutboxRepo(tx).enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` });
+    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return 'not_payable';
+    const outbox = createOutboxRepo(tx);
+    if (await outbox.hasLiveInstruction(transferId)) return 'in_flight';
+    return (await outbox.enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` })) ? 'enqueued' : 'exists';
   });
 }
 
@@ -101,12 +114,15 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     // here every sweep; the recon: alert below is still deduped (fires once).
     const held = await outbox.hasDedupeKey(`railamount:${t.id}`);
     let reinstructedNow = false;
+    let inFlight = false;
     if (webhookDriven && !held) {
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —
       // the reference is the transfer id, so their rail dedupes a replay.
-      reinstructedNow = await enqueueReinstructLocked(db, t.id);
+      const outcome = await reinstructLocked(db, t.id);
+      reinstructedNow = outcome === 'enqueued';
+      inFlight = outcome === 'in_flight';
       if (reinstructedNow) reinstructed++;
     }
     // Mock-rail transfers land here too if their delayed settle died — the
@@ -126,7 +142,9 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
             : webhookDriven
               ? reinstructedNow
                 ? ' Re-instructed the partner rail once.'
-                : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, or a refund requested/in flight).'
+                : inFlight
+                  ? ' Not re-instructed: an instruction for it is still queued or retrying. A later sweep re-instructs once if that instruction fails for good.'
+                  : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, or a refund requested/in flight).'
               : ''),
       },
       { dedupeKey: `recon:${t.id}` },

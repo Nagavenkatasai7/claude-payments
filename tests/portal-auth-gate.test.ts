@@ -260,7 +260,10 @@ describe('5. safePortalNext', () => {
     (v) => expect(safePortalNext(v)).toBe('/portal'),
   );
   it.each(['/portal', '/portal/send', '/portal/send/review', '/portal/transfers/tx_ABC123', `/portal/recipients/${'a'.repeat(32)}/edit`,
-    '/portal/devices', '/portal/privacy', '/portal/profile', '/portal/notifications'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
+    '/portal/devices', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete', '/portal/profile', '/portal/notifications'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
+  it('M2-14: only the two privacy steps are allowed under /portal/privacy', () => {
+    expect(safePortalNext('/portal/privacy/other')).toBe('/portal');
+  });
 });
 
 describe('step-up', () => {
@@ -341,6 +344,39 @@ describe('step-up', () => {
       expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(true);
     });
 
+    it('M2-14 (#394 L2): the step-up TOTP draws on the same per-(partner, phone) daily budget as sign-in', async () => {
+      const { createPortalTotpBudget, PORTAL_TOTP_FAILS_PER_DAY } = await import('@/lib/portal-totp-budget');
+      const budget = createPortalTotpBudget(redis, { now: () => now });
+      for (let i = 0; i < PORTAL_TOTP_FAILS_PER_DAY; i++) await budget.reserve('pa', PHONE);
+      await signedIn('pa');
+      const s = await startStepUp();
+      const m = await stepUpVerifyAction(null, fd({ next: '/portal/send', pending: s.pending!, code: lastCode()! }));
+      expect(await stepUpTotpAction(null, fd({ next: '/portal/send', pending: m.pending!, code: h.mfaValid }))).toEqual({
+        step: 'start',
+        next: '/portal/send',
+        error: 'portal.login.try_later',
+      });
+    });
+
+    it('M2-14 (#394 L4): a Redis error creating the TOTP pending → cant_send, not a 500', async () => {
+      await signedIn('pa');
+      const s = await startStepUp();
+      const orig = h.redis.set;
+      h.redis.set = (...a: unknown[]) => {
+        if (String(a[0]).startsWith('ppend:')) throw new Error('redis down');
+        return orig(...a);
+      };
+      try {
+        expect(await stepUpVerifyAction(null, fd({ next: '/portal/send', pending: s.pending!, code: lastCode()! }))).toEqual({
+          step: 'start',
+          next: '/portal/send',
+          error: 'portal.login.cant_send',
+        });
+      } finally {
+        h.redis.set = orig;
+      }
+    });
+
     it('five wrong TOTP codes → back to the start of step-up', async () => {
       await signedIn('pa');
       const s = await startStepUp();
@@ -354,6 +390,22 @@ describe('step-up', () => {
         error: 'portal.login.expired',
       });
     });
+  });
+
+  it('M2-14 (#394 L4): a Redis error creating the step-up pending → cant_send, nothing sent', async () => {
+    await signedIn('pa');
+    const orig = h.redis.set;
+    h.redis.set = (...a: unknown[]) => {
+      if (String(a[0]).startsWith('ppend:')) throw new Error('redis down');
+      return orig(...a);
+    };
+    try {
+      expect(await stepUpRequestAction(null, fd({ next: '/portal/send' }))).toEqual({ step: 'start', next: '/portal/send', error: 'portal.login.cant_send' });
+    } finally {
+      h.redis.set = orig;
+    }
+    await flushAfter();
+    expect(h.sends).toEqual([]);
   });
 
   it('channel not ready → cant_send, nothing issued', async () => {

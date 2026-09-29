@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -12,8 +11,9 @@ import { buildReceiptDisclosure } from '@/lib/remittance-disclosure';
 import { t } from '@/lib/i18n';
 import { Money, PageHeader } from '@/components/ds';
 import { ReceiptDisclosureCard } from '@/app/account/receipt/[transferId]/disclosure-card';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.receipt.title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.receipt.title', { referrer: 'no-referrer' });
 
 const WHEN = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
 

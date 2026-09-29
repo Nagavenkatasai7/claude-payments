@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getCurrentStaff } from '@/lib/auth';
+import { inviteMfaPending } from '@/lib/partner-mfa-gate';
 import { scopeOf } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
@@ -29,6 +30,8 @@ export async function POST(req: NextRequest) {
   if (staff.role !== 'support' && staff.role !== 'admin' && staff.role !== 'agent') {
     return NextResponse.json({ ok: false }, { status: 403 });
   }
+  // UI redesign M3-9 (O10): an invite-accepted account must enrol in two-step sign-in first.
+  if (await inviteMfaPending(staff)) return NextResponse.json({ ok: false }, { status: 403 });
   const scope = scopeOf(staff);
 
   // Shared 60/h per-staff budget with draft-reply; fail-open on limiter errors.

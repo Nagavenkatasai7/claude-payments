@@ -13,17 +13,20 @@
 // accent_color/updated_at, so a theme write can never clear or change a slug (a suspended
 // partner keeps its slug).
 //
-// Never reuse a released slug: a partner that re-slugs releases its old slug, and a DIFFERENT
-// partner claiming it would receive the first partner's old links. Until the tombstone table
-// (planned for migration 0027) exists, setPartnerSlug refuses any slug that appears in another
-// partner's `partner.slug.update` audit history, as the claimed slug OR as the slug that partner
-// released (`previousSlug`). The claim's audit row commits in the same transaction as the slug, and
-// a release records the old slug, so this also covers a slug first written outside the writer once
-// the writer moves the partner off it. Known gaps, closed by 0027: a slug written by direct SQL and
-// then released by direct SQL (no audit row at all) is protected only while it is still held
-// (unique index), and deleting audit rows would erase the history the check relies on.
-import { and, eq, sql } from 'drizzle-orm';
-import { auditEvents, partners, partnerSites } from '@/db/schema';
+// Claimed once, changed only by the platform, never reused (UI redesign M3-18):
+// - mode 'claim' (the default; the partner's self-service claim) succeeds only while the partner has
+//   NO slug. The check runs inside the writer's transaction, after a FOR UPDATE lock on the partner
+//   row, so two concurrent claims by one partner serialise and the second sees the first's slug.
+// - mode 'change' (platform only; the caller gates on requirePlatformAdmin) moves a partner to a new
+//   slug and writes the old one to partner_slug_tombstones (migration 0028) in the SAME transaction.
+// - a tombstoned slug is unavailable to EVERY partner, including the one that released it: another
+//   partner would receive the first partner's old links, and the same partner reclaiming it would
+//   resurrect links the platform deliberately retired.
+// Belt and braces for history written before the tombstone table: a slug that appears in another
+// partner's slug audit history (claimed or set), or that ANY partner released (`previousSlug`), is
+// also unavailable. Every refusal is the same generic `unavailable` (no oracle).
+import { and, eq, inArray, sql } from 'drizzle-orm';
+import { auditEvents, partners, partnerSites, partnerSlugTombstones } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { resolveSiteTheme, validateThemeColor, type SiteTheme } from '@/lib/ui/theme';
@@ -42,6 +45,12 @@ export type SaveThemeResult =
   | { ok: true }
   | { ok: false; field: 'primaryColor' | 'accentColor'; reason: 'format' | 'contrast' }
   | { ok: false; reason: 'not_found' };
+
+/** node-postgres / neon return { rows }; PGlite too. Tolerate a bare array as well. */
+function rowsOf<T>(r: unknown): T[] {
+  if (Array.isArray(r)) return r as T[];
+  return ((r as { rows?: T[] } | null)?.rows ?? []) as T[];
+}
 
 type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
 /** Run `fn` in a transaction when holding a Db; inside an existing tx, share it. */
@@ -63,13 +72,16 @@ export async function getPartnerSite(db: DbOrTx, partnerId: PartnerId): Promise<
 /**
  * Validate BOTH colours, then in ONE transaction: a single-column UPDATE of partners.primary_color
  * (0 rows → not_found, nothing else written), an upsert of partner_sites.accent_color, and a
- * `partner.theme.update` audit row. Colours are not PII, so the audit carries them.
+ * `partner.theme.update` audit row. Colours are not PII, so the audit carries them. `opts.actorScope`
+ * (derived server-side by the caller from the session, never from input) is added to the audit
+ * meta so the tenant audit viewer can label the actor; without it the meta is unchanged.
  */
 export async function savePartnerTheme(
   db: DbOrTx,
   partnerId: PartnerId,
   input: { primaryColor: unknown; accentColor: unknown },
   actor: string,
+  opts: { actorScope?: 'platform' | 'partner' } = {},
 ): Promise<SaveThemeResult> {
   const p = validateThemeColor(input.primaryColor);
   if (!p.ok) return { ok: false, field: 'primaryColor', reason: p.reason };
@@ -96,7 +108,7 @@ export async function savePartnerTheme(
       actorType: 'staff',
       action: 'partner.theme.update',
       subjectId: partnerId,
-      meta: { primaryColor, accentColor },
+      meta: { primaryColor, accentColor, ...(opts.actorScope ? { actorScope: opts.actorScope } : {}) },
     });
     return { ok: true } as const;
   });
@@ -127,7 +139,13 @@ export async function findActivePartnerIdBySlug(db: DbOrTx, slug: string): Promi
   return rows[0]?.id ?? null;
 }
 
-export type SetSlugResult = { ok: true } | { ok: false; reason: 'unavailable' | 'not_found' };
+export type SetSlugResult = { ok: true } | { ok: false; reason: 'unavailable' | 'not_found' | 'already_claimed' };
+
+/** The partner's self-service claim (once) or a platform change (moves and tombstones the old slug). */
+export type SetSlugMode = 'claim' | 'change';
+/** The audit action for each mode. Both are read by the "ever held" history check. */
+const SLUG_AUDIT_ACTION: Record<SetSlugMode, string> = { claim: 'partner.slug.claim', change: 'partner.slug.update' };
+const SLUG_AUDIT_ACTIONS = Object.values(SLUG_AUDIT_ACTION);
 
 const isUniqueViolation = (e: unknown) => {
   const err = e as { code?: string; cause?: { code?: string } } | null;
@@ -135,12 +153,18 @@ const isUniqueViolation = (e: unknown) => {
 };
 
 /**
- * Claim `slug` for ONE partner. Reserved, `??--`, malformed, held by another partner, and ever
- * held by another partner (audit history, see the header) all return the SAME `unavailable`, so
- * the writer is not an oracle for which slugs exist. In ONE transaction: the partner must exist
- * (else not_found), the partner_sites row is upserted (slug only; the accent colour is kept),
- * and a `partner.slug.update` audit row records { slug, previousSlug }. After commit the cache
- * entries for the old and the new slug are deleted; if that fails the 60 s TTL bounds staleness.
+ * Set `slug` for ONE partner. Reserved, `??--`, malformed, held by another partner, tombstoned, and
+ * ever held by another partner or released by anyone (audit history, see the header) all return
+ * the SAME `unavailable`, so the writer is not an oracle for which slugs exist. In ONE transaction:
+ * the partner row is locked FOR UPDATE (else not_found); in 'claim' mode a partner that already has
+ * a slug gets `already_claimed`; in 'change' mode the old slug is tombstoned (`released_by = actor`);
+ * the partner_sites row is upserted (slug only; the accent colour is kept), and one audit row
+ * (`partner.slug.claim` / `partner.slug.update`) records { slug, previousSlug } plus the
+ * server-derived `actorScope` and the platform's `reason` when given. After commit the cache entries
+ * for the old and the new slug are deleted; if that fails the 60 s TTL bounds staleness.
+ *
+ * `deps.mode` defaults to 'claim' (the safe default: nothing can move an existing slug unless a
+ * platform-gated caller asks for 'change').
  *
  * Pass the top-level Db, not an open transaction: inside a caller's tx a lost unique-index race
  * (23505) is returned as `unavailable` but leaves that outer transaction aborted.
@@ -150,40 +174,58 @@ export async function setPartnerSlug(
   partnerId: PartnerId,
   slug: string,
   actor: string,
-  deps: { redis?: RedisLike } = {},
+  deps: { redis?: RedisLike; mode?: SetSlugMode; actorScope?: 'platform' | 'partner'; reason?: string } = {},
 ): Promise<SetSlugResult> {
   if (!isValidSiteSlug(slug)) return { ok: false, reason: 'unavailable' };
+  const mode: SetSlugMode = deps.mode ?? 'claim';
 
   type TxOut = SetSlugResult & { previousSlug?: string | null; changed?: boolean };
   let out: TxOut;
   try {
     out = await inTx(db, async (tx): Promise<TxOut> => {
-      const [partner] = await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).limit(1);
+      // FOR NO KEY UPDATE: every slug write for this partner serialises here (the mode conflicts with
+      // itself), so the claim-once check and the tombstone below read the slug as committed by any
+      // earlier writer. It does NOT conflict with the FOR KEY SHARE that FK child inserts (transfers,
+      // outbox, ...) take on the partner row, so money paths never wait on a slug write. Drizzle:
+      // select().for(), node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586; LockStrength at
+      // select.types.d.ts:60.
+      const [partner] = await tx
+        .select({ id: partners.id })
+        .from(partners)
+        .where(eq(partners.id, partnerId))
+        .limit(1)
+        .for('no key update');
       if (!partner) return { ok: false, reason: 'not_found' };
       const current = await getPartnerSite(tx, partnerId);
       const previousSlug = current?.slug ?? null;
+      if (mode === 'claim' && previousSlug !== null) return { ok: false, reason: 'already_claimed' };
       if (previousSlug === slug) return { ok: true, changed: false };
 
-      const [heldByOther] = await tx
-        .select({ id: partnerSites.partnerId })
-        .from(partnerSites)
-        .where(eq(partnerSites.slug, slug))
-        .limit(1);
-      if (heldByOther) return { ok: false, reason: 'unavailable' };
-      const [everHeldByOther] = await tx
-        .select({ id: auditEvents.id })
-        .from(auditEvents)
-        .where(
-          and(
-            eq(auditEvents.action, 'partner.slug.update'),
-            sql`(${auditEvents.meta}->>'slug' = ${slug} or ${auditEvents.meta}->>'previousSlug' = ${slug})`,
-            sql`${auditEvents.partnerId} is distinct from ${partnerId}`,
-          ),
-        )
-        .limit(1);
-      if (everHeldByOther) return { ok: false, reason: 'unavailable' };
+      // ONE statement for the three availability checks (held by another partner, tombstoned, in the
+      // slug audit history): a single snapshot, so a concurrent release (slug freed + tombstoned in one
+      // commit) is seen either as "held" or as "tombstoned", never as neither; and every refusal costs
+      // the same round trip (no timing oracle between the reasons).
+      const blocked = await tx.execute(sql`
+        select (
+          exists (select 1 from ${partnerSites} where ${partnerSites.slug} = ${slug} and ${partnerSites.partnerId} <> ${partnerId})
+          or exists (select 1 from ${partnerSlugTombstones} where ${partnerSlugTombstones.slug} = ${slug})
+          or exists (
+            select 1 from ${auditEvents}
+            where ${inArray(auditEvents.action, SLUG_AUDIT_ACTIONS)}
+              and (${auditEvents.meta}->>'previousSlug' = ${slug}
+                   or (${auditEvents.meta}->>'slug' = ${slug} and ${auditEvents.partnerId} is distinct from ${partnerId}))
+          )
+        ) as blocked`);
+      if (rowsOf<{ blocked: boolean }>(blocked)[0]?.blocked) return { ok: false, reason: 'unavailable' };
 
       const now = new Date();
+      if (previousSlug !== null) {
+        // Only 'change' reaches here with a previous slug (claim returned already_claimed above).
+        await tx
+          .insert(partnerSlugTombstones)
+          .values({ slug: previousSlug, partnerId, releasedBy: actor, releasedAt: now })
+          .onConflictDoNothing({ target: partnerSlugTombstones.slug });
+      }
       await tx
         .insert(partnerSites)
         .values({ partnerId, slug, updatedAt: now })
@@ -192,9 +234,14 @@ export async function setPartnerSlug(
         partnerId,
         actor,
         actorType: 'staff',
-        action: 'partner.slug.update',
+        action: SLUG_AUDIT_ACTION[mode],
         subjectId: partnerId,
-        meta: { slug, previousSlug },
+        meta: {
+          slug,
+          previousSlug,
+          ...(deps.actorScope ? { actorScope: deps.actorScope } : {}),
+          ...(deps.reason ? { reason: deps.reason } : {}),
+        },
       });
       return { ok: true, changed: true, previousSlug };
     });

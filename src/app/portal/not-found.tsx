@@ -1,6 +1,11 @@
 import Link from 'next/link';
 import { t } from '@/lib/i18n';
 import { buttonVariants } from '@/components/ds';
+import { portalNotFoundMetadata } from '@/lib/portal-metadata';
+
+// On the not-found path the deepest not-found module's metadata wins, so on the apex this carries the
+// root 404's own title (L8); on a portal site it adds nothing (unchanged).
+export const generateMetadata = portalNotFoundMetadata;
 
 // A 404 INSIDE the portal (a page that calls notFound() on a partner host). The apex never reaches
 // it: the portal layout's own gate 404s first, which falls through to the brand-neutral root 404.

@@ -1,13 +1,11 @@
-import type { Metadata } from 'next';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { t } from '@/lib/i18n';
 import { PageHeader } from '@/components/ds';
 import { ChatClient } from '@/app/account/chat/chat-client';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export async function generateMetadata(): Promise<Metadata> {
-  return (await getPortalSite()) ? { title: t('portal.chat.title') } : {};
-}
+export const generateMetadata = () => portalMetadata('portal.chat.title');
 
 /**
  * Chat (UI redesign M2-12, Task 12.3): the existing web-chat assistant, reused by import with the

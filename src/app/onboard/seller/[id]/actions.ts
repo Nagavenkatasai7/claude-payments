@@ -3,9 +3,8 @@
 import { headers } from 'next/headers';
 import { getStore } from '@/lib/store';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
-import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
-import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
+import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
+import { sendTransactionOtp } from '@/lib/whatsapp';
 import { composeUsdcDestination, validatePayoutFields, validateUsdcAddress } from '@/lib/payout-format';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
@@ -49,17 +48,19 @@ export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean;
       if (!r.allowed) return { ok: false };
     } catch { /* never block on a limiter error */ }
 
+    // The sending number is resolved BEFORE a code is minted and FAILS CLOSED: a partner whose own
+    // channel is half-configured or whose creds read throws never falls back to the shared number.
+    // Nothing is minted, so no issue budget is spent.
+    const channel = await resolveDirectOtpChannel(seller.partnerId, 'seller-onboard.otp-channel');
+    if (!channel.ok) return { ok: false, reason: 'otp_send_failed' };
+
     // Program-Fix 45: its own per-phone budget (kind 'seller', the seller's partner).
     const otpStore = getTransactionOtpStore();
     const issued = await otpStore.issue(sellerId, seller.phone, { kind: 'seller', partnerId: seller.partnerId });
     if (!issued.ok) return { ok: false }; // cooldown, or an issue cap (locked): same bare answer
-    // Deliver from the seller's partner WhatsApp number when configured.
-    let creds: WaCreds | undefined;
     try {
-      creds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(seller.partnerId));
-    } catch { /* fall back to the shared env number */ }
-    try {
-      await sendTransactionOtp(seller.phone, issued.code, creds);
+      // From the seller's partner WhatsApp number when it has its own; else the shared number.
+      await sendTransactionOtp(seller.phone, issued.code, channel.creds);
     } catch {
       // Program-Fix 25 PR B: the code never arrived — shorten the cooldown to a
       // ~10-s floor so a Resend works soon, and tell the form. Never log the code.

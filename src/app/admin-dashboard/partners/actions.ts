@@ -4,17 +4,17 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
-import { getDb } from '@/db/client';
+import { eq } from 'drizzle-orm';
+import { getDb, type DbOrTx } from '@/db/client';
+import { partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { validateSendLimitInput } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
+import { setPartnerSlug } from '@/db/repos/partner-site-repo';
+import { normalizeSlugInput } from '@/lib/partner-slug-policy';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
-import {
-  createPartnerIntegrationsStore,
-  getPartnerIntegrationsStore,
-  partnerForPhoneNumberId,
-} from '@/lib/partner-integrations-store';
+import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerApiKeyStore, getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
@@ -24,13 +24,12 @@ import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
+import { removeTenantStaff } from '@/lib/partner-staff-ops';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import {
-  isLastTenantAdmin,
   isReservedStaffUsername,
   newStaffRecord,
-  removeDecision,
   resolveStaffTenant,
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
@@ -45,12 +44,18 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
-import { verifyPhoneNumberOwnership } from '@/lib/partner-integrations-verify';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
-import { checkWhatsappConfig, type WaConfigField } from '@/lib/whatsapp-creds';
-import { clearChannelHealthMarks, normalizeAlertEmail, type ChannelTestResult } from '@/lib/channel-health';
-import { getStore } from '@/lib/store';
-import { logWarn } from '@/lib/log';
+import {
+  assertPhoneNumberIdFree,
+  assertPhoneNumberIdOwned,
+  assertWhatsappConfigComplete,
+  disconnectWhatsapp,
+  rethrowPnidConflict,
+  saveWhatsappConfig,
+  testWhatsappConnection,
+  whatsappAuditMeta,
+} from '@/lib/partner-whatsapp-config';
+import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import type {
   Partner,
@@ -315,8 +320,7 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   const actor = await requireStaffManager();
   const username = String(formData.get('username') ?? '').trim();
   if (!username) throw new Error('username is required.');
-  const authStore = getAuthStore();
-  const target = await authStore.getStaff(username);
+  const target = await getAuthStore().getStaff(username);
   const isPlatformActor = actorScopeOf(actor) === 'platform';
   // M3: this is the PARTNER-staff endpoint; platform staff are managed from
   // the Team page. A platform admin is told so; a partner admin gets the same
@@ -325,31 +329,20 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   if (target && !target.partnerId && isPlatformActor) {
     throw new Error('Use the Team page to manage platform staff.');
   }
-  if (!target) return;
-  const decision = removeDecision(actor, target);
-  if (decision === 'noop') return;
+  if (!target?.partnerId) return;
+  // UI redesign M3-8: the core moved to removeTenantStaff (shared with /partner/staff).
+  const result = await removeTenantStaff(actor, target.partnerId, username);
+  if (result === 'noop') return;
   // Fix round 1: only reachable inside the actor's own tenant. A SmartRemit
   // suspension is not the tenant's to undo (remove + re-create active).
-  if (decision === 'suspended') {
+  if (result === 'suspended') {
     throw new Error('This member was suspended by SmartRemit. Contact SmartRemit to change or remove them.');
   }
   // Never orphan a tenant. Partner admins cannot reach this (no self-removal),
   // so the message points the platform admin at the Team page.
-  if (isLastTenantAdmin(target, await authStore.listStaff())) {
+  if (result === 'last_admin') {
     throw new Error('Cannot remove the only admin for this partner here. Add another admin first, or use the Team page to offboard.');
   }
-  await authStore.deleteStaff(username);
-  await authStore.deleteAllSessionsFor(username);
-  await getStaffMfaStore().reset(username); // Program-Fix 17b
-  await getAuditLogStore().record({
-    at: new Date().toISOString(),
-    actor: actor.username,
-    action: 'removed',
-    target: username,
-    detail: `was ${target.role}, partner staff`,
-    partnerId: target.partnerId,
-    actorScope: actorScopeOf(actor),
-  });
   revalidatePath(`/admin-dashboard/partners/${target.partnerId}`);
 }
 
@@ -357,195 +350,40 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
 // Secrets are write-only (blank ⇒ keep existing) and envelope-encrypted inside
 // the integrations store. Non-secret routing data (phoneNumberId, providerType)
 // is stored in the clear and may be shown back in the form.
-
-/**
- * D11 (fix 1): a WhatsApp phone_number_id routes inbound traffic to ONE tenant,
- * so it is REFUSED when it is the platform's own number or already held by a
- * different partner. One generic message for both cases — the refusal must not
- * tell a partner who holds a number. The partial unique index
- * partner_integrations_wa_pnid is the race-proof last line.
- */
-async function assertPhoneNumberIdFree(partnerId: string, pnid: string | undefined): Promise<void> {
-  if (!pnid) return;
-  const holder = await partnerForPhoneNumberId(pnid);
-  if (pnid === env.whatsappPhoneNumberId || (holder && holder !== partnerId)) {
-    throw new Error('That WhatsApp number cannot be used.');
-  }
-}
-
-/** Same generic refusal when the partial unique index loses a race (SQLSTATE 23505). */
-function rethrowPnidConflict(e: unknown): never {
-  // The partial unique index partner_integrations_wa_pnid is the race-proof
-  // last line (two admins saving the same number at once). SAME generic
-  // message as assertPhoneNumberIdFree — never who holds it, never "race".
-  // drizzle wraps the driver error (DrizzleQueryError.cause — node_modules/drizzle-orm/errors.js).
-  const err = e as { code?: string; cause?: { code?: string } } | null;
-  if (err?.code === '23505' || err?.cause?.code === '23505') throw new Error('That WhatsApp number cannot be used.');
-  throw e;
-}
-
-/**
- * Program-Fix 30 (F64): a pnid alone routes inbound traffic on the shared
- * webhook, so it must be PROVEN before it is stored: the access token has to
- * read that phone number from Meta (GET /{pnid}, plus /{waba}/phone_numbers
- * when a WABA id is given). A pnid with no token is refused outright.
- * Fail-closed, one generic message (never why, never who holds the number).
- * Logs partnerId + status only — never the token, never the pnid.
- */
-const PNID_UNVERIFIED = 'That WhatsApp number could not be verified with this access token.';
-async function assertPhoneNumberIdOwned(
-  partnerId: string,
-  pnid: string,
-  token: string | undefined,
-  wabaId: string | undefined,
-): Promise<void> {
-  if (!token) {
-    logWarn('wa.pnid_verify_failed', 'pnid registration refused: no access token', { partnerId, status: 'no_token' });
-    throw new Error(PNID_UNVERIFIED);
-  }
-  const r = await verifyPhoneNumberOwnership({ pnid, token, wabaId });
-  if (!r.ok) {
-    logWarn('wa.pnid_verify_failed', 'pnid ownership check failed', { partnerId, status: r.status ?? 'network_or_invalid' });
-    throw new Error(PNID_UNVERIFIED);
-  }
-}
-
-/**
- * R2a: the SAVE rule on the MERGED WhatsApp state (checkWhatsappConfig): either
- * nothing set, or pnid + token + app secret. A partial state would save and then
- * fail closed at send time, so it is refused here with the missing fields named.
- */
-const WA_FIELD_LABEL: Record<WaConfigField, string> = {
-  phoneNumberId: 'Phone number ID',
-  token: 'Access token',
-  appSecret: 'App secret',
-  verifyToken: 'Verify token',
-};
-function assertWhatsappConfigComplete(w: PartnerWhatsappConfig): void {
-  const check = checkWhatsappConfig(w);
-  if (!check.ok) {
-    throw new Error(
-      `WhatsApp setup is incomplete — also provide: ${check.missing.map((f) => WA_FIELD_LABEL[f]).join(', ')}. Or tick "Disconnect WhatsApp" to use the shared SmartRemit number.`,
-    );
-  }
-}
-
-/**
- * partner-demo R3a (M4): which WhatsApp fields a save changed — BOOLEANS ONLY.
- * Never a value, a last4 of a token, or a hash (the audit row must not help
- * anyone guess or confirm a secret).
- */
-function whatsappAuditMeta(before: PartnerWhatsappConfig, after: PartnerWhatsappConfig) {
-  return {
-    pnidChanged: (after.phoneNumberId ?? '') !== (before.phoneNumberId ?? ''),
-    tokenChanged: (after.token ?? '') !== (before.token ?? ''),
-    verifyTokenChanged: (after.verifyToken ?? '') !== (before.verifyToken ?? ''),
-    appSecretChanged: (after.appSecret ?? '') !== (before.appSecret ?? ''),
-    pnidCleared: !after.phoneNumberId && Boolean(before.phoneNumberId),
-  };
-}
+//
+// UI redesign M3-13: the WhatsApp config core (number-free check, complete
+// config, Graph ownership probe, write + audit in one transaction, health
+// marks, test connection) lives in src/lib/partner-whatsapp-config.ts, shared
+// with the /partner surface. These actions gate, call it, and revalidate.
 
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const store = getPartnerIntegrationsStore();
-  const existing = await store.getIntegrations(id);
-  // R2a: an explicit disconnect wipes all four fields (blank fields otherwise
-  // KEEP stored secrets, so without this a config could never be cleared).
-  // R3a: audited in the same transaction — actor + partnerId only.
   if (formData.get('disconnect') === 'on') {
-    await getDb().transaction(async (tx) => {
-      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp: {} });
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.whatsapp.disconnect',
-        subjectId: id,
-      });
-    });
-    await clearChannelHealthMarks(id, ['auth_error', 'incomplete_config']);
+    await disconnectWhatsapp(id, staff.username);
     revalidatePath(`/admin-dashboard/partners/${id}`);
     return;
   }
-  const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
-  await assertPhoneNumberIdFree(id, newPnid || undefined);
-  const whatsapp: PartnerWhatsappConfig = {
-    phoneNumberId: newPnid || undefined,
-    token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
-    verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
-    appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
-  };
-  // R2a rule on the MERGED state; R3a moved it BEFORE the Graph probe, so an
-  // incomplete form never costs a network call.
-  assertWhatsappConfigComplete(whatsapp);
-  // Fix 30: verify only when the pnid changes, or a NEW token arrives while a
-  // pnid is set. A save changing neither (e.g. only the verify token) is
-  // grandfathered — no Graph call. Clearing the pnid needs no proof.
-  const submittedToken = String(formData.get('token') ?? '').trim();
-  const pnidChanged = newPnid !== (existing.whatsapp.phoneNumberId ?? '');
-  const tokenChanged = submittedToken !== '' && submittedToken !== existing.whatsapp.token;
-  const probed = Boolean(newPnid && (pnidChanged || tokenChanged));
-  if (probed) {
-    // wabaId is read ONLY for this check; it is never persisted.
-    const wabaId = String(formData.get('wabaId') ?? '').trim() || undefined;
-    // R3a (R7 review): the Graph call stays BEFORE the transaction — never
-    // network I/O while holding a database transaction open.
-    await assertPhoneNumberIdOwned(id, newPnid, submittedToken || existing.whatsapp.token, wabaId);
-  }
-  try {
-    // R3a (M4): the write and its audit row commit together, or neither does.
-    await getDb().transaction(async (tx) => {
-      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp });
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.whatsapp_config',
-        subjectId: id,
-        meta: whatsappAuditMeta(existing.whatsapp, whatsapp),
-      });
-    });
-  } catch (e) {
-    rethrowPnidConflict(e);
-  }
-  // A saved (complete) config resolves the incomplete signal. auth_error is
-  // resolved ONLY when this save's token just passed the Graph probe — a
-  // blank-field or verify-token-only save still holds the rejected token.
-  await clearChannelHealthMarks(id, probed ? ['auth_error', 'incomplete_config'] : ['incomplete_config']);
-  // No separate reverse index to maintain anymore — inbound routing resolves
-  // the partner straight off the integrations row (partnerForPhoneNumberId).
+  await saveWhatsappConfig(id, staff.username, {
+    phoneNumberId: String(formData.get('phoneNumberId') ?? ''),
+    token: String(formData.get('token') ?? ''),
+    verifyToken: String(formData.get('verifyToken') ?? ''),
+    appSecret: String(formData.get('appSecret') ?? ''),
+    wabaId: String(formData.get('wabaId') ?? ''),
+  });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
 /**
- * R2a: "Test connection" — the SAME Graph ownership probe the save runs
- * (verifyPhoneNumberOwnership, GET /{pnid} with the STORED token), on demand.
- * Gated like every config action; network I/O only, no DB transaction. The
- * result (ok + HTTP status only — never the token or body) is kept in Redis for
- * the WhatsApp tab; a pass clears a stale auth_error mark.
+ * R2a: "Test connection" — the SAME Graph ownership probe the save runs, on
+ * demand (testWhatsappConnection). Gated like every config action.
  */
 export async function testWhatsappConnectionAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
-  const { whatsapp } = await getPartnerIntegrationsStore().getIntegrations(id);
-  const at = new Date().toISOString();
-  let result: ChannelTestResult;
-  if (!whatsapp.phoneNumberId || !whatsapp.token) {
-    result = { ok: false, at, reason: 'not_configured' };
-  } else {
-    const r = await verifyPhoneNumberOwnership({ pnid: whatsapp.phoneNumberId, token: whatsapp.token });
-    result = r.ok ? { ok: true, at } : { ok: false, at, reason: 'probe_failed', ...(r.status !== undefined ? { status: r.status } : {}) };
-    if (!r.ok) logWarn('wa.test_connection_failed', 'WhatsApp test connection failed', { partnerId: id, status: r.status ?? 'network_or_invalid' });
-  }
-  try {
-    await getStore().writeChannelTest(id, JSON.stringify(result));
-  } catch (err) {
-    logWarn('wa.test_connection', 'result not stored', { partnerId: id, error: err instanceof Error ? err.name : 'error' });
-  }
-  if (result.ok) await clearChannelHealthMarks(id, ['auth_error']);
+  await testWhatsappConnection(id);
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
@@ -568,46 +406,84 @@ function assertSettlementUrlAllowed(url: string | undefined, providerType: strin
   if (!check.ok) throw new Error('Settlement endpoint must be a public https:// URL.');
 }
 
+/**
+ * UI redesign M3-15a follow-up: saveIntegrations rewrites the WHOLE integrations row
+ * (integrations-repo.ts saveIntegrations), so a writer must never write back a copy read before its
+ * transaction: a concurrent WhatsApp config write or settlement-secret rotation would be silently
+ * undone. Lock the tenant's partners row first (the per-tenant mutex the partner-side writers take;
+ * drizzle `select().for('update')`, node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586),
+ * then re-read inside the same transaction.
+ */
+async function lockedIntegrationsForSave(tx: DbOrTx, partnerId: string) {
+  await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('update');
+  return createPartnerIntegrationsStore(tx).getIntegrations(partnerId);
+}
+
 export async function savePaymentConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
-  await gatePartnerConfig(id);
-  const store = getPartnerIntegrationsStore();
-  const existing = await store.getIntegrations(id);
+  const staff = await gatePartnerConfig(id);
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
-  // Spread-merge so fields this form doesn't manage are never silently wiped.
-  let credentials: Record<string, string> = { ...existing.payment.credentials };
   const submittedSettlementUrl = String(formData.get('settlementUrl') ?? '').trim();
-  const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
-  const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
-  let webhookSecret = keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret);
-  // Program-Fix 29: a changed secret keeps the old one active for a 7-day grace
-  // period (previous* keys in this encrypted blob, one expiry per secret).
-  const now = new Date();
-  credentials = withRotatedSecret(credentials, 'signing', existing.payment.credentials?.signingSecret, signingSecret, now);
-  credentials = withRotatedSecret(credentials, 'webhook', existing.payment.webhookSecret, webhookSecret, now);
-  if (settlementUrl) credentials.settlementUrl = settlementUrl;
-  if (signingSecret) credentials.signingSecret = signingSecret;
+  const submittedSigningSecret = String(formData.get('signingSecret') ?? '');
+  const submittedWebhookSecret = String(formData.get('webhookSecret') ?? '');
 
-  // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
-  // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
-  // rail exercises the exact signed instruction→callback loop a real rail would.
-  if (providerType === 'simulator') {
-    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
-    if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
-    if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
-  }
-  // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
-  const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
-  assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
+  // Everything below is built from the row as read UNDER the lock: this form owns the payment
+  // provider, settlement URL and the two rail secrets; every other column (WhatsApp, KYC) and a
+  // blank-field "keep" resolve against the fresh read, and the write and its audit row commit together.
+  await getDb().transaction(async (tx) => {
+    const existing = await lockedIntegrationsForSave(tx, id);
+    // Spread-merge so fields this form doesn't manage are never silently wiped.
+    let credentials: Record<string, string> = { ...existing.payment.credentials };
+    const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
+    const signingSecret = keepOrUpdate(submittedSigningSecret, credentials.signingSecret);
+    let webhookSecret = keepOrUpdate(submittedWebhookSecret, existing.payment.webhookSecret);
+    // Program-Fix 29: a changed secret keeps the old one active for a 7-day grace
+    // period (previous* keys in this encrypted blob, one expiry per secret).
+    const now = new Date();
+    credentials = withRotatedSecret(credentials, 'signing', existing.payment.credentials?.signingSecret, signingSecret, now);
+    credentials = withRotatedSecret(credentials, 'webhook', existing.payment.webhookSecret, webhookSecret, now);
+    if (settlementUrl) credentials.settlementUrl = settlementUrl;
+    if (signingSecret) credentials.signingSecret = signingSecret;
 
-  await store.saveIntegrations(id, {
-    ...existing,
-    payment: {
-      providerType,
-      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-      webhookSecret,
-    },
+    // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
+    // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
+    // rail exercises the exact signed instruction→callback loop a real rail would.
+    if (providerType === 'simulator') {
+      if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+      if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
+      if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
+    }
+    // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
+    // Pure (no network), so it may run while the row lock is held; a throw rolls back (nothing written).
+    const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
+    assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
+
+    const before = existing.payment;
+    await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
+      ...existing,
+      payment: {
+        providerType,
+        credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+        webhookSecret,
+      },
+    });
+    // Booleans + the (non-secret) provider only: never a URL, a secret, a last4 or a hash.
+    await createAuditRepo(tx).record({
+      partnerId: id,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'partner.payment_config',
+      subjectId: id,
+      meta: {
+        providerType: providerType ?? null,
+        providerChanged: (providerType ?? '') !== (before.providerType ?? ''),
+        settlementUrlChanged: (credentials.settlementUrl ?? '') !== (before.credentials?.settlementUrl ?? ''),
+        signingSecretChanged: (credentials.signingSecret ?? '') !== (before.credentials?.signingSecret ?? ''),
+        webhookSecretChanged: (webhookSecret ?? '') !== (before.webhookSecret ?? ''),
+        actorScope: actorScopeOf(staff),
+      },
+    });
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
@@ -704,6 +580,34 @@ export async function setPartnerSendLimitAction(formData: FormData): Promise<voi
     });
   });
   revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
+}
+
+// ── UI redesign M3-18: the partner's web address (slug) — PLATFORM-only change ──
+// A partner claims its slug once (/partner/branding); after that only SmartRemit moves it, with a
+// mandatory reason. The writer locks the partner row, tombstones the old slug in the same
+// transaction (never reused, by anyone) and audits partner.slug.update with actorScope 'platform'.
+// Input is lowercased + trimmed like the partner claim (the proxy lowercases the host).
+const SLUG_UNAVAILABLE = 'That web address is not available.';
+export async function changePartnerSlugAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  const reason = requireStaffReason(formData.get('reason'));
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  // The default tenant has no partner site; the form is hidden for it, and a direct POST is refused here.
+  if (id.length > 64 || id === 'default') throw new Error('Partner not found.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+  const slug = normalizeSlugInput(formData.get('slug'));
+  if (slug === null) throw new Error(SLUG_UNAVAILABLE);
+
+  const r = await setPartnerSlug(getDb(), existing.id, slug, staff.username, {
+    mode: 'change',
+    actorScope: 'platform',
+    reason,
+  });
+  if (!r.ok) throw new Error(r.reason === 'not_found' ? 'Partner not found.' : SLUG_UNAVAILABLE);
   revalidatePath(`/admin-dashboard/partners/${existing.id}`);
 }
 

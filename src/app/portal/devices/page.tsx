@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import { LogOut, MonitorSmartphone } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
@@ -7,8 +6,9 @@ import { t } from '@/lib/i18n';
 import { Badge, Button, Card, EmptyState, PageHeader } from '@/components/ds';
 import { signOutDeviceAction, signOutEverywhereAction } from './actions';
 import { DeviceSignOut } from './device-signout';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.devices.title') };
+export const generateMetadata = () => portalMetadata('portal.devices.title');
 
 const WHEN = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
 const when = (ms: number) => (Number.isFinite(ms) ? `${WHEN.format(new Date(ms))} UTC` : '—');

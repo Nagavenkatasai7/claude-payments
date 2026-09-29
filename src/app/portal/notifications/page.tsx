@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
@@ -9,8 +8,9 @@ import { newRequestKey } from '@/lib/portal-request-key';
 import { t } from '@/lib/i18n';
 import { Badge, Card, PageHeader } from '@/components/ds';
 import { EmailForm, ReceiptsToggleForm, WhatsappToggleForm } from './notification-forms';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.notify.title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.notify.title', { referrer: 'no-referrer' });
 
 /**
  * Notifications (UI redesign M2-11, Tasks 11.3-11.4): WhatsApp updates on/off (the bot's STOP/START),

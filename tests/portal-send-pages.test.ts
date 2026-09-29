@@ -228,6 +228,30 @@ describe('the Send page (GET)', () => {
     expect(startSpy.mock.calls).toHaveLength(0);
   });
 
+  it('M2-14 (#413 L1): a grandfathered customer on a gate-on partner gets the contact card, not a dead-end verify link', async () => {
+    await gateOn();
+    await seedSender(db, { partnerId: 'pa', phone, firstSeenDaysAgo: 10, kycStatus: 'grandfathered' });
+    const html = await sendHtml();
+    expect(html).toContain('data-kyc-card="contact"');
+    expect(html).not.toContain('/portal/profile#verify');
+  });
+
+  it('M2-14: a customer IN REVIEW keeps the verify card (Profile shows "In review"; nothing to contact the partner about)', async () => {
+    await gateOn();
+    await seedSender(db, { partnerId: 'pa', phone, firstSeenDaysAgo: 10, kycStatus: 'pending' });
+    await db.execute(sql`UPDATE customers SET kyc_review_state = 'pending_review' WHERE partner_id = 'pa' AND phone = ${phone}`);
+    const html = await sendHtml();
+    expect(html).toContain('data-kyc-card="verify"');
+  });
+
+  it('M2-14 (#413 L1): on a DELEGATED partner (the partner verifies) a gated customer gets the contact card', async () => {
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated', require_kyc_before_send = true WHERE id = 'pa'`);
+    await seedSender(db, { partnerId: 'pa', phone, firstSeenDaysAgo: 10, kycStatus: 'not_started' });
+    const html = await sendHtml();
+    expect(html).toContain('data-kyc-card="contact"');
+    expect(html).not.toContain('/portal/profile#verify');
+  });
+
   it('a rejected customer is told to contact the partner: no verify link, no retry', async () => {
     await gateOn();
     await seedSender(db, { partnerId: 'pa', phone, firstSeenDaysAgo: 10, kycStatus: 'rejected' });

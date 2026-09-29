@@ -1,4 +1,4 @@
-import { and, desc, eq, asc, sql, count, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, asc, sql, count, inArray, notInArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
@@ -249,6 +249,29 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
+     * M2-14 (PR 397 L2): the OPEN recall ticket for one transfer under ONE tenant (partnerId in the
+     * WHERE), so a second recall on the same transfer reuses it. A recall ticket is the customer
+     * ticket whose subject starts with the fixed "Recall request:" prefix (receipt-cores).
+     */
+    async findOpenRecallForTransfer(partnerId: PartnerId, customerPhone: string, transferId: string): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.transferId, transferId),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+            sql`${tickets.subject} LIKE 'Recall request:%'`,
+          ),
+        )
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
      * Program-Fix 34B: the customer's OPEN help case under ONE tenant — the one
      * request_human_help reuses. Tenant-scoped in SQL (never a phone-only page
      * filtered in JS). A help case is category human_help OR the fixed help
@@ -302,8 +325,13 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
      * to any non-equal state (support workflows legitimately bounce between
      * open/pending/waiting_admin/resolved). Returns null when the guard
      * refuses (already closed / same state / missing).
+     *
+     * `notFrom` (optional) refuses the move when the CURRENT status is one of the listed states,
+     * checked in the same UPDATE's WHERE (atomic: no read-then-write race). The partner surface
+     * passes ['waiting_admin'] so an escalation landing mid-request is never overwritten.
      */
-    async updateStatus(id: string, status: TicketStatus): Promise<Ticket | null> {
+    async updateStatus(id: string, status: TicketStatus, guard: { notFrom?: readonly TicketStatus[] } = {}): Promise<Ticket | null> {
+      const notFrom = guard.notFrom ?? [];
       const rows = await db
         .update(tickets)
         .set({
@@ -315,6 +343,7 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
           eq(tickets.id, id),
           sql`${tickets.status} <> 'closed'`,
           sql`${tickets.status} <> ${status}`,
+          notFrom.length > 0 ? notInArray(tickets.status, [...notFrom]) : undefined,
         ))
         .returning();
       return rows[0] ? rowToTicket(rows[0]) : null;

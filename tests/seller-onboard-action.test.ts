@@ -30,18 +30,21 @@ vi.mock('@/lib/ip-rate-limit', () => ({
   clientIpFrom: () => '1.2.3.4',
 }));
 vi.mock('next/headers', () => ({ headers: async () => new Headers() }));
+const getIntegrations = vi.hoisted(() => vi.fn(async (_id: string): Promise<unknown> => ({ kyc: {}, payment: {}, whatsapp: {} })));
 vi.mock('@/lib/partner-integrations-store', () => ({
-  getPartnerIntegrationsStore: () => ({ getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }) }),
+  getPartnerIntegrationsStore: () => ({ getIntegrations }),
 }));
+const recordChannelHealth = vi.hoisted(() => vi.fn(async () => false));
+vi.mock('@/lib/channel-health', async (orig) => ({ ...(await orig<typeof import('@/lib/channel-health')>()), recordChannelHealth }));
 
 import { activateSellerAction, requestSellerOtpAction } from '@/app/onboard/seller/[id]/actions';
 
 const PHONE = '85291234567'; // HK
 const HK_FIELDS = { bankCode: '024', branchCode: '388', accountNumber: '12345678' };
 
-async function seedPendingSeller(id = 's_hk1') {
+async function seedPendingSeller(id = 's_hk1', partnerId = 'default') {
   await store.createSeller({
-    id, partnerId: 'default', phone: PHONE,
+    id, partnerId, phone: PHONE,
     businessName: 'Kowloon Design Co', country: 'HK', currency: 'HKD',
   });
   return id;
@@ -57,6 +60,8 @@ beforeEach(async () => {
   store = createStore(redis, db);
   txOtp = createTransactionOtpStore(redis);
   sendTransactionOtp.mockClear();
+  getIntegrations.mockReset().mockResolvedValue({ kyc: {}, payment: {}, whatsapp: {} });
+  recordChannelHealth.mockClear();
 });
 
 describe('activateSellerAction', () => {
@@ -264,5 +269,50 @@ describe('requestSellerOtpAction — send honesty (Program-Fix 25 PR B)', { retr
     expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
     expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
     expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The seller code never falls back to SmartRemit's shared number for a partner whose own channel
+// fails (half-configured, or its creds read throws): nothing minted, nothing sent, the form is told
+// otp_send_failed. The default tenant and a partner with no WhatsApp config are unchanged; a partner's
+// own channel sends from its own number. Portal pay-page twin: PR #438.
+describe('requestSellerOtpAction — fail closed on a partner channel that cannot be used', { retry: 0 }, () => {
+  const wa = (whatsapp: Record<string, string>) => ({ kyc: {}, payment: {}, whatsapp });
+
+  it('a half-configured partner channel → otp_send_failed; nothing minted or sent; incomplete_config recorded', async () => {
+    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode) VALUES ('pa', 'pa', 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
+    const id = await seedPendingSeller('s_pa1', 'pa');
+    getIntegrations.mockResolvedValue(wa({ phoneNumberId: '1234567', appSecret: 'app' }));
+    const issue = vi.spyOn(txOtp, 'issue');
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(issue).not.toHaveBeenCalled();
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(recordChannelHealth).toHaveBeenCalledWith('pa', 'incomplete_config');
+  });
+
+  it('a partner whose creds read throws → otp_send_failed; nothing minted or sent', async () => {
+    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode) VALUES ('pa', 'pa', 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
+    const id = await seedPendingSeller('s_pa1', 'pa');
+    getIntegrations.mockRejectedValue(new Error('decrypt failed'));
+    const issue = vi.spyOn(txOtp, 'issue');
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(issue).not.toHaveBeenCalled();
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+  });
+
+  it("a partner's own channel → the code goes out on the partner's number", async () => {
+    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode) VALUES ('pa', 'pa', 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
+    const id = await seedPendingSeller('s_pa1', 'pa');
+    getIntegrations.mockResolvedValue(wa({ phoneNumberId: '1234567', token: 'tok', appSecret: 'app' }));
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(sendTransactionOtp.mock.calls[0][2]).toEqual({ phoneNumberId: '1234567', token: 'tok' });
+  });
+
+  it('the default tenant whose read throws → the shared number, as before', async () => {
+    const id = await seedPendingSeller();
+    getIntegrations.mockRejectedValue(new Error('db down'));
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(sendTransactionOtp).toHaveBeenCalledOnce();
+    expect(sendTransactionOtp.mock.calls[0][2]).toBeUndefined();
   });
 });

@@ -254,5 +254,5 @@ export function transactionOtpMessage(code: string, brand?: string): string {
  * be logged. `brand` (Program-Fix 49A): the owning partner's name; absent ⇒ SmartRemit.
  */
 export function otpMessage(code: string, brand?: string): string {
-  return `Your ${brandOr(brand)} verification code is ${code}. It expires in 10 minutes. Don't share it with anyone.`;
+  return `Your ${brandOr(brand)} verification code is ${code}. It expires in 5 minutes. Don't share it with anyone.`;
 }

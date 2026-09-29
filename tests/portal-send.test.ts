@@ -325,3 +325,25 @@ describe('no web mint (money-path DoD grep)', () => {
     }
   });
 });
+
+// ── M2-14 (#413 L1): no dead-end verify links ──────────────────────────────
+import { canVerifyInProfile, routeKycCopy } from '@/lib/portal-send';
+describe('routeKycCopy / canVerifyInProfile', () => {
+  const ours = { id: 'pa', name: 'A', countries: [], status: 'active' } as never;
+  const delegated = { id: 'pa', name: 'A', countries: [], status: 'active', kycMode: 'delegated', requireKycBeforeSend: true } as never;
+  it('dead ends are exactly the two named cases: a delegated partner, a grandfathered customer', () => {
+    expect(canVerifyInProfile(ours, { kycStatus: 'not_started' })).toBe(true);
+    expect(canVerifyInProfile(ours, { kycStatus: 'pending' })).toBe(true);
+    expect(canVerifyInProfile(delegated, { kycStatus: 'not_started' })).toBe(false);
+    expect(canVerifyInProfile(ours, { kycStatus: 'grandfathered' })).toBe(false);
+    // In review: Profile says "In review"; the customer only has to wait, so the verify card stays.
+    expect(canVerifyInProfile(ours, { kycStatus: 'pending' } as never)).toBe(true);
+  });
+  it("a 'verify' card becomes the contact card only when Profile can't act; other copy is untouched", () => {
+    const verify = { error: 'portal.send.cap_verify', kyc: 'verify' } as const;
+    expect(routeKycCopy(verify, true, 'Acme')).toBe(verify);
+    expect(routeKycCopy(verify, false, 'Acme')).toEqual({ error: 'portal.send.contact_partner', vars: { brand: 'Acme' }, kyc: 'contact' });
+    const other = { error: 'portal.send.cap_daily' } as const;
+    expect(routeKycCopy(other, false, 'Acme')).toBe(other);
+  });
+});

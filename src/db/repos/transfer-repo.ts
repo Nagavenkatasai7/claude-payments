@@ -1050,7 +1050,11 @@ export function createTransferRepo(
       }));
     },
 
-    /** Reconciliation: compliance holds nobody has reviewed in `hours`. */
+    /**
+     * Reconciliation: compliance holds nobody has reviewed in `hours`. LIVE rows only: a sandbox
+     * (test-key) hold has no customer row and no real money behind it, and only staff can release
+     * it, so it is never an ops alert (reconcileSweep) nor an ops-page stale review (getOpsSnapshot).
+     */
     async findInReviewOlderThan(hours: number): Promise<Transfer[]> {
       const rows = await db
         .select()
@@ -1059,6 +1063,7 @@ export function createTransferRepo(
           and(
             eq(transfers.status, 'in_review'),
             sql`${transfers.paidAt} < now() - make_interval(hours => ${hours})`,
+            LIVE_ONLY,
           ),
         )
         .orderBy(transfers.paidAt);

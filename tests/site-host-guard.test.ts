@@ -72,14 +72,48 @@ function isGuard(s: ts.Statement | undefined): boolean {
 
 const hasMod = (n: ts.Node, k: ts.SyntaxKind) => (ts.canHaveModifiers(n) ? ts.getModifiers(n) ?? [] : []).some((m) => m.kind === k);
 
+/**
+ * M2-14 (#394 L9): the guard must be THE guard. The name alone is not enough: a module could declare
+ * its own `refuseOnSiteHost` (or import one from elsewhere) and pass a name-only scan. So a file with
+ * any server action must import `refuseOnSiteHost` by that name from '@/lib/site-host-guard', and must
+ * not declare anything else with that name.
+ */
+const GUARD_MODULE = '@/lib/site-host-guard';
+function guardProvenanceOk(sf: ts.SourceFile): boolean {
+  let imported = false;
+  let shadowed = false;
+  for (const s of sf.statements) {
+    if (ts.isImportDeclaration(s) && ts.isStringLiteral(s.moduleSpecifier)) {
+      const named = s.importClause?.namedBindings;
+      const els = named && ts.isNamedImports(named) ? named.elements : [];
+      for (const el of els) {
+        if (el.name.text !== GUARD) continue;
+        const ok = s.moduleSpecifier.text === GUARD_MODULE && !s.importClause?.isTypeOnly && !el.isTypeOnly && (!el.propertyName || el.propertyName.text === GUARD);
+        if (ok) imported = true;
+        else shadowed = true;
+      }
+    }
+  }
+  const visit = (n: ts.Node) => {
+    if ((ts.isFunctionDeclaration(n) || ts.isVariableDeclaration(n) || ts.isParameter(n) || ts.isClassDeclaration(n)) && n.name && ts.isIdentifier(n.name) && n.name.text === GUARD) {
+      shadowed = true;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return imported && !shadowed;
+}
+
 /** Violations in one source text (file name used only for messages and the TSX flag). */
 function scanSource(fileName: string, text: string): string[] {
   const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const out: string[] = [];
   const line = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  let hasActions = false;
 
   // (a) module-level 'use server'
   const moduleLevel = prologue(sf.statements).some(isUseServer);
+  if (moduleLevel) hasActions = true;
   if (moduleLevel) {
     for (const s of sf.statements) {
       if (ts.isExportDeclaration(s)) {
@@ -115,6 +149,7 @@ function scanSource(fileName: string, text: string): string[] {
         : undefined;
     if (body) {
       const pro = prologue(body.statements);
+      if (pro.some(isUseServer)) hasActions = true;
       if (pro.some(isUseServer) && !isGuard(body.statements[pro.length])) {
         out.push(`${fileName}:${line(n)} inline 'use server' function does not start with await ${GUARD}()`);
       }
@@ -122,6 +157,9 @@ function scanSource(fileName: string, text: string): string[] {
     ts.forEachChild(n, visit);
   };
   visit(sf);
+  if (hasActions && !guardProvenanceOk(sf)) {
+    out.push(`${fileName}: ${GUARD} must be imported by name from '${GUARD_MODULE}' and not redeclared`);
+  }
   return out;
 }
 
@@ -180,10 +218,22 @@ describe('scanner self-test (planted fixtures)', () => {
   ])('%s in a use-server module fails', (_label, src) => {
     expect(scanSource('a.ts', src).length).toBeGreaterThan(0);
   });
+  it('M2-14 (#394 L9): a look-alike guard (declared locally, imported from elsewhere, renamed, or missing) is flagged', () => {
+    const body = `export async function go() {\n  await refuseOnSiteHost();\n}\n`;
+    expect(scanSource('a.ts', `'use server';\nasync function refuseOnSiteHost() {}\n${body}`).length).toBeGreaterThan(0);
+    expect(scanSource('a.ts', `'use server';\nimport { refuseOnSiteHost } from '@/lib/other';\n${body}`).length).toBeGreaterThan(0);
+    expect(scanSource('a.ts', `'use server';\nimport { somethingElse as refuseOnSiteHost } from '@/lib/site-host-guard';\n${body}`).length).toBeGreaterThan(0);
+    expect(scanSource('a.ts', `'use server';\n${body}`).length).toBeGreaterThan(0);
+    expect(scanSource('a.ts', `${MOD}const refuseOnSiteHost = async () => {};\n${body}`).length).toBeGreaterThan(0);
+    expect(scanSource('a.ts', `${MOD}${body}`)).toEqual([]);
+    const inline = `export default function Page() {\n  async function act() {\n    'use server';\n    await refuseOnSiteHost();\n  }\n  return act;\n}\n`;
+    expect(scanSource('p.tsx', inline).length).toBeGreaterThan(0); // no import
+    expect(scanSource('p.tsx', `import { refuseOnSiteHost } from '@/lib/site-host-guard';\n${inline}`)).toEqual([]);
+  });
   it('an unguarded inline action is flagged; a guarded one passes; a non-server module is ignored', () => {
-    const inlineBad = `export default function Page() {\n  async function act(fd: FormData) {\n    'use server';\n    return fd;\n  }\n  return act;\n}\n`;
-    const inlineArrow = `export const X = () => { const a = async () => { 'use server'; return 1; }; return a; };`;
-    const inlineGood = `export default function Page() {\n  async function act() {\n    'use server';\n    await refuseOnSiteHost();\n  }\n  return act;\n}\n`;
+    const inlineBad = `import { refuseOnSiteHost } from '@/lib/site-host-guard';\nexport default function Page() {\n  async function act(fd: FormData) {\n    'use server';\n    return fd;\n  }\n  return act;\n}\n`;
+    const inlineArrow = `import { refuseOnSiteHost } from '@/lib/site-host-guard';\nexport const X = () => { const a = async () => { 'use server'; return 1; }; return a; };`;
+    const inlineGood = `import { refuseOnSiteHost } from '@/lib/site-host-guard';\nexport default function Page() {\n  async function act() {\n    'use server';\n    await refuseOnSiteHost();\n  }\n  return act;\n}\n`;
     expect(scanSource('p.tsx', inlineBad)).toHaveLength(1);
     expect(scanSource('p.tsx', inlineArrow)).toHaveLength(1);
     expect(scanSource('p.tsx', inlineGood)).toEqual([]);
