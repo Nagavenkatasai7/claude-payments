@@ -16,8 +16,8 @@ import { isB2bSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { countryForPhone, currencyForPhone } from '@/lib/partner-currency';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
-import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
+import { sendTransactionOtp } from '@/lib/whatsapp';
+import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
 import { logError } from '@/lib/log';
@@ -98,6 +98,11 @@ export async function POST(
     // ── OTP step-up (keyed on the invoice; the code is bound to this bill) ─────
     const otpStore = getTransactionOtpStore();
     if (typeof body.action === 'string' && body.action === 'request_otp') {
+      // The sending number is resolved BEFORE a code is minted and FAILS CLOSED: a partner whose own
+      // channel is half-configured or whose creds read throws never falls back to the shared number
+      // (the buyer is paying the partner's brand). Nothing is minted, so no issue budget is spent.
+      const channel = await resolveDirectOtpChannel(invoice.partnerId, 'b2b.otp-channel');
+      if (!channel.ok) return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
       // Program-Fix 45: the buyer code draws from its own per-phone budget (kind 'b2b', this invoice's partner).
       const issued = await otpStore.issue(invoiceId, buyerPhone, { kind: 'b2b', partnerId: invoice.partnerId });
       // Program-Fix 25 PR B: locked answers 429; a cooldown stays 200 sent:true.
@@ -105,14 +110,8 @@ export async function POST(
         return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
       }
       if (issued.ok) {
-        let otpCreds: WaCreds | undefined;
         try {
-          otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(invoice.partnerId));
-        } catch {
-          /* fall back to the shared env number */
-        }
-        try {
-          await sendTransactionOtp(buyerPhone, issued.code, otpCreds);
+          await sendTransactionOtp(buyerPhone, issued.code, channel.creds);
         } catch {
           // Program-Fix 25 PR B: honest — shorten the cooldown to a ~10-s floor
           // (Resend works soon, never hammered), and say so. Never log the code.
