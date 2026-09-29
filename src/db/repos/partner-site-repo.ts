@@ -46,6 +46,12 @@ export type SaveThemeResult =
   | { ok: false; field: 'primaryColor' | 'accentColor'; reason: 'format' | 'contrast' }
   | { ok: false; reason: 'not_found' };
 
+/** node-postgres / neon return { rows }; PGlite too. Tolerate a bare array as well. */
+function rowsOf<T>(r: unknown): T[] {
+  if (Array.isArray(r)) return r as T[];
+  return ((r as { rows?: T[] } | null)?.rows ?? []) as T[];
+}
+
 type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
 /** Run `fn` in a transaction when holding a Db; inside an existing tx, share it. */
 function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
@@ -177,47 +183,40 @@ export async function setPartnerSlug(
   let out: TxOut;
   try {
     out = await inTx(db, async (tx): Promise<TxOut> => {
-      // FOR UPDATE: every slug write for this partner serialises here (Drizzle pg-core
-      // select().for('update'), node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586), so the
-      // claim-once check and the tombstone below read the slug as committed by any earlier writer.
+      // FOR NO KEY UPDATE: every slug write for this partner serialises here (the mode conflicts with
+      // itself), so the claim-once check and the tombstone below read the slug as committed by any
+      // earlier writer. It does NOT conflict with the FOR KEY SHARE that FK child inserts (transfers,
+      // outbox, ...) take on the partner row, so money paths never wait on a slug write. Drizzle:
+      // select().for(), node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586; LockStrength at
+      // select.types.d.ts:60.
       const [partner] = await tx
         .select({ id: partners.id })
         .from(partners)
         .where(eq(partners.id, partnerId))
         .limit(1)
-        .for('update');
+        .for('no key update');
       if (!partner) return { ok: false, reason: 'not_found' };
       const current = await getPartnerSite(tx, partnerId);
       const previousSlug = current?.slug ?? null;
       if (mode === 'claim' && previousSlug !== null) return { ok: false, reason: 'already_claimed' };
       if (previousSlug === slug) return { ok: true, changed: false };
 
-      // Order matters: "held by another" BEFORE "tombstoned". A concurrent platform change of the
-      // holder frees the slug and tombstones it in ONE commit, so whichever side of that commit these
-      // two reads fall on, one of them refuses.
-      const [heldByOther] = await tx
-        .select({ id: partnerSites.partnerId })
-        .from(partnerSites)
-        .where(eq(partnerSites.slug, slug))
-        .limit(1);
-      if (heldByOther) return { ok: false, reason: 'unavailable' };
-      const [tombstoned] = await tx
-        .select({ slug: partnerSlugTombstones.slug })
-        .from(partnerSlugTombstones)
-        .where(eq(partnerSlugTombstones.slug, slug))
-        .limit(1);
-      if (tombstoned) return { ok: false, reason: 'unavailable' };
-      const [inHistory] = await tx
-        .select({ id: auditEvents.id })
-        .from(auditEvents)
-        .where(
-          and(
-            inArray(auditEvents.action, SLUG_AUDIT_ACTIONS),
-            sql`(${auditEvents.meta}->>'previousSlug' = ${slug} or (${auditEvents.meta}->>'slug' = ${slug} and ${auditEvents.partnerId} is distinct from ${partnerId}))`,
-          ),
-        )
-        .limit(1);
-      if (inHistory) return { ok: false, reason: 'unavailable' };
+      // ONE statement for the three availability checks (held by another partner, tombstoned, in the
+      // slug audit history): a single snapshot, so a concurrent release (slug freed + tombstoned in one
+      // commit) is seen either as "held" or as "tombstoned", never as neither; and every refusal costs
+      // the same round trip (no timing oracle between the reasons).
+      const blocked = await tx.execute(sql`
+        select (
+          exists (select 1 from ${partnerSites} where ${partnerSites.slug} = ${slug} and ${partnerSites.partnerId} <> ${partnerId})
+          or exists (select 1 from ${partnerSlugTombstones} where ${partnerSlugTombstones.slug} = ${slug})
+          or exists (
+            select 1 from ${auditEvents}
+            where ${inArray(auditEvents.action, SLUG_AUDIT_ACTIONS)}
+              and (${auditEvents.meta}->>'previousSlug' = ${slug}
+                   or (${auditEvents.meta}->>'slug' = ${slug} and ${auditEvents.partnerId} is distinct from ${partnerId}))
+          )
+        ) as blocked`);
+      if (rowsOf<{ blocked: boolean }>(blocked)[0]?.blocked) return { ok: false, reason: 'unavailable' };
 
       const now = new Date();
       if (previousSlug !== null) {

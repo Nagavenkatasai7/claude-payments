@@ -7,3 +7,17 @@
 export function partnerMayClaimSlug(site: { slug: string | null } | null): boolean {
   return site === null || site.slug === null;
 }
+
+/** Longer than any valid slug (30) with room for spaces; anything longer is refused unread. */
+export const MAX_SLUG_INPUT = 64;
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+
+/**
+ * A form value → the candidate slug (trimmed, lowercased), or null. Only printable ASCII is
+ * accepted BEFORE lowercasing, so Unicode case folding (e.g. the Kelvin sign → "k") can never turn
+ * a look-alike into a valid slug. The result is still validated by setPartnerSlug (isValidSiteSlug).
+ */
+export function normalizeSlugInput(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > MAX_SLUG_INPUT || !PRINTABLE_ASCII.test(raw)) return null;
+  return raw.trim().toLowerCase();
+}

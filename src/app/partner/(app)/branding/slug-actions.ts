@@ -5,7 +5,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getDb } from '@/db/client';
 import { getPartnerSite, setPartnerSlug } from '@/db/repos/partner-site-repo';
-import { partnerMayClaimSlug } from '@/lib/partner-slug-policy';
+import { normalizeSlugInput, partnerMayClaimSlug } from '@/lib/partner-slug-policy';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { scopeOf } from '@/lib/staff-scope';
@@ -26,8 +26,6 @@ import { PARTNER_ROUTES } from '../../routes';
 // src/lib/site-host.ts hostnameOf) and the send-handoff pin (https://<slug>.smartremit.ai).
 
 const CLAIM_LIMIT_PER_HOUR = 10;
-/** Longer than any valid slug (30) with room for spaces; anything longer is refused unread. */
-const MAX_SLUG_INPUT = 64;
 
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 const unavailable = (): ActionResult => ({ ok: false, error: t('partner.slug.unavailable') });
@@ -49,9 +47,8 @@ export async function claimSlugAction(formData: FormData): Promise<ActionResult>
     return failed();
   }
 
-  const raw = formData.get('slug');
-  if (typeof raw !== 'string' || raw.length > MAX_SLUG_INPUT) return unavailable();
-  const slug = raw.trim().toLowerCase();
+  const slug = normalizeSlugInput(formData.get('slug'));
+  if (slug === null) return unavailable();
 
   let r: Awaited<ReturnType<typeof setPartnerSlug>>;
   try {

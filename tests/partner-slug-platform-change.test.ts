@@ -123,6 +123,17 @@ describe('changePartnerSlugAction (platform only)', () => {
     await expect(changePartnerSlugAction(changeForm({ id: 'ptn-nope00' }))).rejects.toThrow(/not found/i);
     expect(await snapshot()).toEqual(before);
   });
+  it('the default tenant and an oversized id are refused server-side (the UI hides the form; a direct POST must not get through)', async () => {
+    await signInAs({});
+    const before = await snapshot();
+    await expect(changePartnerSlugAction(changeForm({ id: 'default' }))).rejects.toThrow(/not found/i);
+    await expect(changePartnerSlugAction(changeForm({ id: 'p'.repeat(65) }))).rejects.toThrow(/not found/i);
+    expect(await snapshot()).toEqual(before);
+  });
+  it('a non-ASCII input that lowercases to a valid slug (Kelvin sign) is refused', async () => {
+    await signInAs({});
+    await expect(changePartnerSlugAction(changeForm({ slug: '\u212Aelvin-co' }))).rejects.toThrow(/not available/i);
+  });
   it('success: moves the partner, tombstones the old slug, one audit row with actorScope platform + reason', async () => {
     await signInAs({});
     await changePartnerSlugAction(changeForm({ slug: '  Alpha-Two ' }));

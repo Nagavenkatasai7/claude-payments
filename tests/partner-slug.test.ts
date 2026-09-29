@@ -181,4 +181,12 @@ describe('setPartnerSlug', () => {
     expect(await getPartnerSite(db, 'pa')).toMatchObject({ slug: 'acme' });
     expect(await tombstones()).toEqual([]);
   });
+  it('M3-18 review: every write locks the partner row FOR NO KEY UPDATE (serialises slug writers; never blocks FK child inserts)', async () => {
+    const { PgSelectBase } = await import('drizzle-orm/pg-core');
+    const lock = vi.spyOn(PgSelectBase.prototype, 'for');
+    await setPartnerSlug(db, 'pa', 'acme', 'u', { redis });
+    await setPartnerSlug(db, 'pa', 'acme-two', 'u', { redis, mode: 'change' });
+    expect(lock.mock.calls.map((c) => c[0])).toEqual(['no key update', 'no key update']);
+    lock.mockRestore();
+  });
 });

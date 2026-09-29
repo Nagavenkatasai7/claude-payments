@@ -9,6 +9,7 @@ import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { setPartnerSlug } from '@/db/repos/partner-site-repo';
+import { normalizeSlugInput } from '@/lib/partner-slug-policy';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { createPartnerIntegrationsStore, getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -554,12 +555,14 @@ export async function changePartnerSlugAction(formData: FormData): Promise<void>
   const reason = requireStaffReason(formData.get('reason'));
   const id = String(formData.get('id') ?? '').trim();
   if (!id) throw new Error('Partner id is required.');
+  // The default tenant has no partner site; the form is hidden for it, and a direct POST is refused here.
+  if (id.length > 64 || id === 'default') throw new Error('Partner not found.');
   const existing = await getPartnerStore().getPartner(id);
   if (!existing) throw new Error('Partner not found.');
-  const raw = formData.get('slug');
-  if (typeof raw !== 'string' || raw.length > 64) throw new Error(SLUG_UNAVAILABLE);
+  const slug = normalizeSlugInput(formData.get('slug'));
+  if (slug === null) throw new Error(SLUG_UNAVAILABLE);
 
-  const r = await setPartnerSlug(getDb(), existing.id, raw.trim().toLowerCase(), staff.username, {
+  const r = await setPartnerSlug(getDb(), existing.id, slug, staff.username, {
     mode: 'change',
     actorScope: 'platform',
     reason,

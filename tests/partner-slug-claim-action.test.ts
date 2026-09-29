@@ -203,6 +203,12 @@ describe('claimSlugAction: claim once, no oracle, throttle', () => {
     for (const r of results) expect(JSON.stringify(r)).toBe(JSON.stringify(UNAVAILABLE));
     expect(await snapshot()).toEqual(before);
   });
+  it('a non-ASCII input that lowercases to a valid slug (Kelvin sign) is refused without reaching the writer', async () => {
+    await signInAs({});
+    expect(await claimSlugAction(claimForm('\u212Aelvin-co'))).toEqual(UNAVAILABLE);
+    expect(repoSpy.setPartnerSlug).not.toHaveBeenCalled();
+    expect(await siteOf(PA)).toBeNull();
+  });
   it('an oversized input is refused without reaching the writer', async () => {
     await signInAs({});
     expect(await claimSlugAction(claimForm('a'.repeat(5000)))).toEqual(UNAVAILABLE);
