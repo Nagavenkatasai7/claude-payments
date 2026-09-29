@@ -44,3 +44,14 @@ describe('isSameOrigin', () => {
     expect(isSameOrigin(h({ origin: 'https://acme.smartremit.ai@evil.test', host: 'acme.smartremit.ai' }))).toBe(false);
   });
 });
+
+// M2-14 (the M2-2 held follow-up): ONE same-origin rule. The waitlist export route uses the shared
+// helper instead of its own copy.
+import { readFileSync } from 'node:fs';
+describe('one same-origin implementation', () => {
+  it('the waitlist export route imports isSameOrigin from @/lib/same-origin and defines none', () => {
+    const src = readFileSync('src/app/admin-dashboard/waitlist/export/route.ts', 'utf8');
+    expect(src).toMatch(/import \{ isSameOrigin \} from '@\/lib\/same-origin';/);
+    expect(src).not.toMatch(/function isSameOrigin/);
+  });
+});
