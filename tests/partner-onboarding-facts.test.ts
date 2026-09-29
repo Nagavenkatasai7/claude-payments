@@ -112,6 +112,10 @@ describe('loadOnboardingFacts: each fact', () => {
     expect((await only()).sandboxKeyActive).toBe(true);
     expect((await db.select().from(apiKeys).where(eq(apiKeys.partnerId, 'pa'))).length).toBe(3);
   });
+  it('sandbox key: the pk_test_ prefix is matched literally (LIKE "_" is escaped)', async () => {
+    await db.insert(apiKeys).values({ id: 'pkXtestXabc', partnerId: 'pa', keyHash: 'h-like-pin', last4: 'abcd' });
+    expect((await only()).sandboxKeyActive).toBe(false);
+  });
   it('sandbox transfer: a live delivered or a test not-yet-delivered transfer does not count', async () => {
     await seedPartnerTransfer(db, { id: 'tr_live', partnerId: 'pa', environment: 'live', status: 'delivered' });
     await seedPartnerTransfer(db, { id: 'tr_test_paid', partnerId: 'pa', environment: 'test', status: 'paid' });
