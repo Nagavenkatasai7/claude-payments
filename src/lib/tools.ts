@@ -1,4 +1,4 @@
-import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
+import { MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -16,6 +16,7 @@ import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
 import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
+import type { ScheduleInput, ScheduleValidateOptions, ScheduleValidateResult } from './schedule-validate';
 import { payUrlFor } from './pay-url';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
@@ -3465,81 +3466,122 @@ async function updateRecipientPhoneTool(
   };
 }
 
-async function createScheduleTool(
-  args: Record<string, unknown>,
+/**
+ * UI redesign M2-10: the ONE create-schedule validation (bot + portal), the old
+ * createScheduleTool body up to the save, moved verbatim. Checks run in the old
+ * order (resolveSender can create the customer row, so every refusal before it
+ * still writes nothing). The two opt-in checks (amountBounds, requirePayout) are
+ * the portal's; the bot sets neither. See schedule-validate.ts.
+ */
+export async function validateScheduleInput(
   ctx: ToolContext,
-): Promise<ToolResult> {
-  const recipientPhone = normalizePhone(args.recipient_phone);
-  if (!isValidPhone(recipientPhone)) {
-    return { error: 'A valid recipient WhatsApp number with country code is required.' };
-  }
+  input: ScheduleInput,
+  opts: ScheduleValidateOptions = {},
+): Promise<ScheduleValidateResult> {
+  const recipientPhone = normalizePhone(input.recipientPhone);
+  if (!isValidPhone(recipientPhone)) return { ok: false, code: 'invalid_phone' };
   // fix 6: a schedule is a consumer send — funding_method is a closed set.
-  const scheduleFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
-  if (scheduleFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
-  const frequency = args.frequency === 'weekly' ? 'weekly' : 'monthly';
+  const scheduleFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, input.fundingMethod);
+  if (scheduleFundingArg === null) return { ok: false, code: 'bad_funding' };
+  const frequency = input.frequency === 'weekly' ? 'weekly' : 'monthly';
   let dayOfMonth: number | undefined;
   let dayOfWeek: number | undefined;
   if (frequency === 'monthly') {
-    dayOfMonth = Number(args.day_of_month);
+    dayOfMonth = Number(input.dayOfMonth);
     if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) {
-      return { error: 'For a monthly schedule, pick a day of the month between 1 and 28.' };
+      return { ok: false, code: 'day_range', frequency };
     }
   } else {
-    dayOfWeek = Number(args.day_of_week);
+    dayOfWeek = Number(input.dayOfWeek);
     if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
-      return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
+      return { ok: false, code: 'day_range', frequency };
     }
   }
   // Program-Fix 33 (owner decision 1): schedules are India-only until they carry
   // a destination (cron-run mints every run as DEFAULT_DESTINATION_COUNTRY). A
   // destination that is not IN, an unknown one, or an absent one whose recipient
   // number maps to another supported country is refused — and NOTHING is saved.
-  const scheduleDestination = parseDestinationCountry(args.destination_country);
-  if (scheduleDestination === null) return { error: UNKNOWN_DESTINATION_MESSAGE };
+  const scheduleDestination = parseDestinationCountry(input.destinationCountry);
+  if (scheduleDestination === null) return { ok: false, code: 'unknown_destination' };
   const impliedDestination = scheduleDestination ?? countryForPhone(recipientPhone);
   if (impliedDestination !== undefined && impliedDestination !== DEFAULT_DESTINATION_COUNTRY) {
-    return { error: 'Recurring transfers can go to India only for now — offer a one-time send instead.' };
+    return { ok: false, code: 'corridor' };
   }
+  // M2-10 (portal only): the amount is checked BEFORE resolveSender, so a refusal writes nothing.
+  if (opts.amountBounds && !scheduleAmountInBounds(input.amountSource)) return { ok: false, code: 'amount' };
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
   // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
   // not stop the customer from setting one up.
-  const { customer, sourceCurrency } = await resolveSender(ctx, args.source_currency);
+  const { customer, sourceCurrency } = await resolveSender(ctx, input.sourceCurrency);
   // Program-Fix 14: every scheduled run is screened with the sender's legal
   // name, so a schedule is set up only once one is on file — nothing is saved
   // until then (the same needs_sender_name flow as send_approve_picker).
-  if (!hasSenderName(customer)) return senderNameRequired();
+  if (!hasSenderName(customer)) return { ok: false, code: 'sender_name' };
   const partnerId = ctx.partnerId;
-  const amountSource = Number(args.amount_source ?? args.amount_usd);
+  const amountSource = Number(input.amountSource);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.
   let endDate: string | undefined;
-  if (typeof args.end_date === 'string' && args.end_date.trim() !== '') {
-    const parsed = Date.parse(args.end_date.trim());
+  if (typeof input.endDate === 'string' && input.endDate.trim() !== '') {
+    const parsed = Date.parse(input.endDate.trim());
     if (!isNaN(parsed)) {
-      endDate = args.end_date.trim();
+      endDate = input.endDate.trim();
     }
   }
   // fix 6: SERVER-SIDE payout only; cron mints a schedule with no destination
   // country, i.e. DEFAULT_DESTINATION_COUNTRY.
   const schedulePayout = await resolveStoredPayout(ctx, recipientPhone, DEFAULT_DESTINATION_COUNTRY);
+  if (opts.requirePayout && !schedulePayout) return { ok: false, code: 'no_payout' };
+  return {
+    ok: true,
+    schedule: {
+      phone: ctx.phone,
+      amountUsd: amountSource, // kept as source amount (USD-equivalent when USD; else raw source)
+      recipientName: String(input.recipientName),
+      recipientPhone,
+      payoutMethod: schedulePayout?.payoutMethod ?? 'bank',
+      // fix 6: the sender's own stored record, or '' (collected on the pay page each run).
+      payoutDestination: schedulePayout?.payoutDestination ?? '',
+      fundingMethod: scheduleFundingArg ?? 'bank_transfer',
+      frequency,
+      dayOfMonth,
+      dayOfWeek,
+      status: 'active',
+      endDate,
+      partnerId,
+      sourceCurrency,
+      amountSource,
+    },
+  };
+}
+
+/** M2-10 amountBounds: a finite number, at most 2 decimals, inside fx.ts MIN_USD..MAX_USD (as entered). */
+function scheduleAmountInBounds(v: unknown): boolean {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return false;
+  if (Math.round(v * 100) / 100 !== v) return false;
+  return v >= MIN_USD && v <= MAX_USD;
+}
+
+async function createScheduleTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const v = await validateScheduleInput(ctx, {
+    recipientPhone: args.recipient_phone,
+    recipientName: args.recipient_name,
+    amountSource: args.amount_source ?? args.amount_usd,
+    fundingMethod: args.funding_method,
+    frequency: args.frequency,
+    dayOfMonth: args.day_of_month,
+    dayOfWeek: args.day_of_week,
+    destinationCountry: args.destination_country,
+    sourceCurrency: args.source_currency,
+    endDate: args.end_date,
+  });
+  if (!v.ok) return scheduleRefusalToolResult(v);
   const schedule: Schedule = {
     id: newTransferId(),
-    phone: ctx.phone,
-    amountUsd: amountSource, // kept as source amount (USD-equivalent when USD; else raw source)
-    recipientName: String(args.recipient_name),
-    recipientPhone,
-    payoutMethod: schedulePayout?.payoutMethod ?? 'bank',
-    // fix 6: the sender's own stored record, or '' (collected on the pay page each run).
-    payoutDestination: schedulePayout?.payoutDestination ?? '',
-    fundingMethod: scheduleFundingArg ?? 'bank_transfer',
-    frequency,
-    dayOfMonth,
-    dayOfWeek,
-    status: 'active',
+    ...v.schedule,
     createdAt: new Date().toISOString(),
-    endDate,
-    partnerId,
-    sourceCurrency,
-    amountSource,
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {
@@ -3555,6 +3597,31 @@ async function createScheduleTool(
     amount_source_display: sourceAmountDisplay(schedule.amountSource, schedule.sourceCurrency),
     destination_country: DEFAULT_DESTINATION_COUNTRY,
   };
+}
+
+/** The bot's exact pre-M2-10 error record for each refusal (golden-pinned). */
+function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: false }>): ToolResult {
+  switch (r.code) {
+    case 'invalid_phone':
+      return { error: 'A valid recipient WhatsApp number with country code is required.' };
+    case 'bad_funding':
+      return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
+    case 'day_range':
+      return r.frequency === 'weekly'
+        ? { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' }
+        : { error: 'For a monthly schedule, pick a day of the month between 1 and 28.' };
+    case 'unknown_destination':
+      return { error: UNKNOWN_DESTINATION_MESSAGE };
+    case 'corridor':
+      return { error: 'Recurring transfers can go to India only for now — offer a one-time send instead.' };
+    case 'sender_name':
+      return senderNameRequired();
+    // The bot never sets the opt-in checks; kept exhaustive for the compiler.
+    case 'amount':
+      return { error: 'Please give a valid amount.' };
+    case 'no_payout':
+      return { error: 'No saved bank details for this recipient.' };
+  }
 }
 
 async function listSchedulesTool(

@@ -742,7 +742,8 @@ export const staff = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check('staff_role_check', sql`${t.role} IN ('admin','agent','support')`),
+    // UI redesign M3-7 (0028): widened to a SUPERSET ('finance'); no column change.
+    check('staff_role_check', sql`${t.role} IN ('admin','agent','support','finance')`),
     check('staff_status_check', sql`${t.status} IN ('active','suspended')`),
     index('staff_partner').on(t.partnerId),
   ],
@@ -916,5 +917,70 @@ export const customerPortalPrefs = pgTable(
       columns: [t.partnerId, t.phone],
       foreignColumns: [customers.partnerId, customers.phone],
     }),
+  ],
+);
+
+// ── UI redesign M3-7 (0028): partner-app tables ───────────────────────────────
+// NEW tables, so no existing explicit-column query changes shape during a rolling release.
+// Readers/writers land in later PRs, after /migrate-prod. 0028 backfills an approved
+// partner_go_live row ('system:0028-backfill') for every partner that exists when it is applied.
+export const partnerGoLive = pgTable('partner_go_live', {
+  partnerId: text('partner_id').primaryKey().references(() => partners.id),
+  requestedAt: timestamp('requested_at', { withTimezone: true }),
+  requestedBy: text('requested_by'),
+  approvedAt: timestamp('approved_at', { withTimezone: true }),
+  approvedBy: text('approved_by'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const partnerReportJobs = pgTable(
+  'partner_report_jobs',
+  {
+    id: uuid('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    kind: text('kind').notNull(), // 'settlements' | 'transfers' | 'fees_monthly'
+    params: jsonb('params').notNull(), // validated window/filters only; never PII
+    status: text('status').notNull().default('queued'),
+    requestedBy: text('requested_by').notNull(),
+    rowCount: integer('row_count'),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }), // stale-running reclaim (M3-16)
+    contentEnc: text('content_enc'), // field-crypto envelope of the MASKED CSV; nulled at expiry
+    errorCode: text('error_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+  },
+  (t) => [
+    check('partner_report_jobs_kind', sql`${t.kind} IN ('settlements','transfers','fees_monthly')`),
+    check('partner_report_jobs_status', sql`${t.status} IN ('queued','running','ready','failed','expired')`),
+    index('partner_report_jobs_partner_created').on(t.partnerId, t.createdAt.desc()),
+  ],
+);
+
+export const partnerSlugTombstones = pgTable('partner_slug_tombstones', {
+  slug: text('slug').primaryKey(), // a slug that was ever claimed and then released: never reusable
+  partnerId: text('partner_id').notNull().references(() => partners.id),
+  releasedAt: timestamp('released_at', { withTimezone: true }).notNull().defaultNow(),
+  releasedBy: text('released_by').notNull(),
+});
+
+export const partnerWebhookDeliveries = pgTable(
+  'partner_webhook_deliveries',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    kind: text('kind').notNull(), // 'settlement.instruct' | 'ping'
+    subjectId: text('subject_id'), // transfer id for instruct; null for ping
+    outboxId: bigint('outbox_id', { mode: 'number' }),
+    attempt: integer('attempt').notNull(),
+    outcome: text('outcome').notNull(), // 'ok' | 'http_error' | 'network' | 'refused'
+    httpStatus: integer('http_status'),
+    latencyMs: integer('latency_ms'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('partner_webhook_deliveries_kind', sql`${t.kind} IN ('settlement.instruct','ping')`),
+    check('partner_webhook_deliveries_outcome', sql`${t.outcome} IN ('ok','http_error','network','refused')`),
+    index('partner_webhook_deliveries_partner_created').on(t.partnerId, t.createdAt.desc()),
   ],
 );

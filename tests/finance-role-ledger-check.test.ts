@@ -6,10 +6,10 @@ import { createAuthStore } from '@/lib/auth-store';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
-// UI redesign M3-6: creating a finance account is IMPOSSIBLE until the M3-7 migration (0028) adds
-// 'finance' to staff_role_check. The ledger CHECK (schema.ts staff_role_check) refuses the row,
-// and createStaff releases its Redis claim, so no half-created finance member exists.
-// M3-7 flips this test to "accepts" in the same PR as the CHECK change.
+// UI redesign M3-6 + M3-7: migration 0028 adds 'finance' to staff_role_check, so the LEDGER now
+// accepts a finance row (flipped here in M3-7). Creating one through the app stays refused by the
+// role allowlists on every create path (team/partners actions, partner-staff-policy; pinned in the
+// M3-6 suites) until M3-8 adds the finance create path. Unknown roles are still refused by the CHECK.
 let db: Db;
 const finance = (): Staff => ({
   username: 'fin1',
@@ -26,23 +26,21 @@ beforeEach(async () => {
   await seedPartner(db, 'pa');
 });
 
-describe('finance is fail-closed at the ledger until the M3-7 migration', () => {
-  it('createStaffRepo(db).upsert(finance) is rejected by the CHECK', async () => {
-    await expect(createStaffRepo(db).upsert(finance())).rejects.toThrow();
-    expect(await createStaffRepo(db).get('fin1')).toBeNull();
+describe('the ledger accepts finance after 0028; unknown roles stay refused', () => {
+  it('createStaffRepo(db).upsert(finance) is accepted and reads back as finance', async () => {
+    await createStaffRepo(db).upsert(finance());
+    expect((await createStaffRepo(db).get('fin1'))?.role).toBe('finance');
   });
-  it('createAuthStore(redis, { ledger }).createStaff(finance) throws and leaves no Redis record', async () => {
+  it('an unknown role is still rejected by the CHECK', async () => {
+    await expect(createStaffRepo(db).upsert({ ...finance(), username: 'x1', role: 'root' as Staff['role'] })).rejects.toThrow();
+    expect(await createStaffRepo(db).get('x1')).toBeNull();
+  });
+  it('a finance member created through the store keeps all-false legacy permissions', async () => {
     const redis = fakeRedis();
     const store = createAuthStore(redis, { ledger: () => createStaffRepo(db) });
-    await expect(store.createStaff(finance())).rejects.toThrow('staff ledger write failed');
-    expect(redis.dump.has('staff:fin1')).toBe(false);
-    expect(await redis.smembers('staff:index')).not.toContain('fin1');
-    expect(await store.getStaff('fin1')).toBeNull();
-  });
-  it('saveStaff(finance) throws before Redis changes', async () => {
-    const redis = fakeRedis();
-    const store = createAuthStore(redis, { ledger: () => createStaffRepo(db) });
-    await expect(store.saveStaff(finance())).rejects.toThrow('staff ledger write failed');
-    expect(redis.dump.has('staff:fin1')).toBe(false);
+    await store.createStaff({ ...finance(), permissions: { canCancel: true, canResend: true, canAssign: true, canRevealPii: true } });
+    const got = await store.getStaff('fin1');
+    expect(got?.role).toBe('finance');
+    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
   });
 });
