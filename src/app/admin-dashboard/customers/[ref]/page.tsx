@@ -87,7 +87,7 @@ export default async function CustomerDetailPage({
     // follow-up: platform writes carry the plain-phone subject, partner writes the hashed one
     // (limit-actions.ts auditSubjectId), so the card reads both.
     createAuditRepo(getDb())
-      .lastSendLimitChange(customer.partnerId, 'customer', [phone, auditSubjectId(customer.partnerId, customer.senderPhone)])
+      .lastSendLimitChange(customer.partnerId, 'customer', [customer.senderPhone, auditSubjectId(customer.partnerId, customer.senderPhone)])
       .catch((err: unknown) => {
         // Never blank the card silently: log (tenant id only — no phone), then render "—".
         logWarn('admin.send_limits.last_change', err, { scope: 'customer', partnerId: customer.partnerId });

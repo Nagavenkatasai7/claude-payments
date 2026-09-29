@@ -44,6 +44,8 @@ describe('isUnchangedPartnerSetEntry', () => {
     const d = futureDate(5);
     expect(isUnchangedPartnerSetEntry({ ...PARTNER_SET, expiresAt: endOfDay(d) }, base)).toBe(false);
     expect(isUnchangedPartnerSetEntry({ ...PARTNER_SET, expiresAt: endOfDay(d) }, { ...base, expiresAt: endOfDay(futureDate(6)) })).toBe(false);
+    // A full datetime on the same UTC day (not what the date-only prefill posts) is a change.
+    expect(isUnchangedPartnerSetEntry({ ...PARTNER_SET, expiresAt: endOfDay(d) }, { ...base, expiresAt: `${d}T10:00:00.000Z` })).toBe(false);
   });
 
   it('false for a clear, a missing entry, and every non-partner entry (platform, legacy, unknown scope)', () => {

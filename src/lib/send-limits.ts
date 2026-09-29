@@ -198,8 +198,10 @@ export function isUnchangedPartnerSetEntry(
   if (previous.t1DailyCapCents !== next.t1DailyCapCents) return false;
   const prevExp = typeof previous.expiresAt === 'string' ? previous.expiresAt : undefined;
   if (prevExp === undefined || next.expiresAt === undefined) return prevExp === next.expiresAt;
+  // Exactly the value the date-only prefill round-trips to (end of the stored UTC day): a hand-built
+  // POST with another time on the same day is a change, not a no-op.
   const prevDay = expiryDay(prevExp);
-  return prevDay !== null && prevDay === expiryDay(next.expiresAt);
+  return prevDay !== null && next.expiresAt === `${prevDay}T23:59:59.999Z`;
 }
 
 /**

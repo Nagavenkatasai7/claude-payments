@@ -356,8 +356,8 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
       });
     });
   } catch (err) {
-    if (err instanceof UnchangedPartnerEntry) return; // rolled back: nothing written, nothing audited
-    throw err;
+    if (!(err instanceof UnchangedPartnerEntry)) throw err;
+    // Rolled back: nothing written, nothing audited. The page still re-renders the current state.
   }
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
