@@ -22,6 +22,12 @@ export interface StaffInvite {
   name: string;
   role: StaffRole;
   invitedBy: string;
+  /**
+   * UI redesign M3-21: 'platform' when a SmartRemit platform admin issued the invite (a new partner's
+   * first admin, create-from-request). Absent means tenant-issued: every record written before M3-21
+   * parses as tenant-issued, so the M3-9 accept rule is unchanged for them.
+   */
+  inviterScope?: 'platform';
   createdAt: string;
   expiresAt: string;
 }
@@ -49,7 +55,7 @@ function parseInvite(raw: string | null): StaffInvite | null {
   try {
     const v = JSON.parse(raw) as Partial<StaffInvite> | null;
     if (!v || typeof v !== 'object') return null;
-    const { partnerId, username, name, role, invitedBy, createdAt, expiresAt } = v;
+    const { partnerId, username, name, role, invitedBy, createdAt, expiresAt, inviterScope } = v;
     if (
       typeof partnerId !== 'string' || !partnerId ||
       typeof username !== 'string' || typeof name !== 'string' || typeof role !== 'string' ||
@@ -58,7 +64,10 @@ function parseInvite(raw: string | null): StaffInvite | null {
     ) {
       return null;
     }
-    return { partnerId, username, name, role: role as StaffRole, invitedBy, createdAt, expiresAt };
+    return {
+      partnerId, username, name, role: role as StaffRole, invitedBy, createdAt, expiresAt,
+      ...(inviterScope === 'platform' ? { inviterScope: 'platform' as const } : {}),
+    };
   } catch {
     return null;
   }
@@ -99,6 +108,7 @@ export function createStaffInviteStore(redis: RedisLike, now: () => Date = () =>
         name: input.name,
         role: input.role,
         invitedBy: input.invitedBy,
+        ...(input.inviterScope === 'platform' ? { inviterScope: 'platform' as const } : {}),
         createdAt: at.toISOString(),
         expiresAt,
       };

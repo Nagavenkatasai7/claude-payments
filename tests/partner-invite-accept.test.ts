@@ -96,13 +96,18 @@ async function seedMember(username: string, partnerId: string | undefined, role:
   });
 }
 
-async function issueFor(partnerId: string, username: string, o: { role?: StaffRole; invitedBy?: string; now?: () => Date } = {}) {
+async function issueFor(
+  partnerId: string,
+  username: string,
+  o: { role?: StaffRole; invitedBy?: string; now?: () => Date; inviterScope?: 'platform' } = {},
+) {
   const r = await invites(o.now).issue({
     partnerId,
     username,
     name: 'New Person',
     role: o.role ?? 'agent',
     invitedBy: o.invitedBy ?? `${partnerId}-owner`,
+    ...(o.inviterScope ? { inviterScope: o.inviterScope } : {}),
   });
   if ('error' in r) throw new Error('issue refused');
   return r.token;
@@ -197,6 +202,30 @@ describe('/partner/invite/[token] page (GET: peek only)', () => {
 });
 
 describe('acceptInviteAction (POST: consume)', () => {
+  // UI redesign M3-21: a platform admin's invite for a new partner's first admin.
+  it('a platform-issued ADMIN invite is accepted, and the tenant-visible "created" row is platform-scoped', async () => {
+    await createAuthStore(redis).saveStaff({
+      username: 'plat-root', name: 'Root', role: 'admin',
+      permissions: { canCancel: true, canResend: true, canAssign: true },
+      passwordHash: 'x', createdAt: new Date().toISOString(),
+    });
+    const token = await issueFor('pa', 'pa-first', { role: 'admin', invitedBy: 'plat-root', inviterScope: 'platform' });
+    await expect(accept(token, STRONG)).rejects.toThrow('REDIRECT:/login');
+    expect(await auth().getStaff('pa-first')).toMatchObject({ partnerId: 'pa', role: 'admin' });
+    const created = await auditRows('created');
+    expect(created).toHaveLength(1);
+    expect((created[0].meta as { actorScope?: string }).actorScope).toBe('platform');
+  });
+  it('a platform account named as the inviter of a TENANT-issued admin invite → dead, nothing created', async () => {
+    await createAuthStore(redis).saveStaff({
+      username: 'plat-root', name: 'Root', role: 'admin',
+      permissions: { canCancel: true, canResend: true, canAssign: true },
+      passwordHash: 'x', createdAt: new Date().toISOString(),
+    });
+    const token = await issueFor('pa', 'pa-first', { role: 'admin', invitedBy: 'plat-root' });
+    await accept(token, STRONG).catch(() => undefined);
+    expect(await auth().getStaff('pa-first')).toBeNull();
+  });
   it('success: creates the account in the INVITE’s tenant and role, sets the MFA marker, audits, redirects to /login', async () => {
     const token = await issueFor('pa', 'pa-new', { role: 'finance' });
     await expect(accept(token, STRONG)).rejects.toThrow('REDIRECT:/login');

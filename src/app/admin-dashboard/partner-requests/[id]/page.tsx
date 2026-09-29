@@ -14,7 +14,16 @@ import { getDb } from '@/db/client';
 import { getInviteEmailStatus } from '@/db/repos/aux-repos';
 import { emailConfigured } from '@/lib/email';
 import type { InviteEmailStatus } from '@/lib/partner-invite-email';
-import { approveApplicationAction, rejectApplicationAction, resendApplicationInviteAction } from '../actions';
+import {
+  approveApplicationAction,
+  createPartnerFromRequestAction,
+  rejectApplicationAction,
+  resendApplicationInviteAction,
+} from '../actions';
+import { partnerIdForRequest } from '@/lib/partner-from-request';
+import { getPartnerStore } from '@/lib/partner-store';
+import { STAFF_REASON_MAX, STAFF_REASON_MIN } from '@/lib/send-limits';
+import { STAFF_USERNAME_RULE } from '@/lib/staff-username';
 import { canDecideApplication, DECISION_REASON_MAX } from '@/lib/partner-application-decision';
 
 // /admin-dashboard/partner-requests/[id] — the staff view of ONE submitted
@@ -102,6 +111,20 @@ const DECISION_FLASH: Record<string, string> = {
   reason_required: 'Add a reason before approving or rejecting.',
 };
 
+/** UI redesign M3-21: the flash line after "Create partner and invite its admin" (?create=…). */
+const CREATE_FLASH: Record<string, string> = {
+  created: 'Partner created and its admin invited by email (single-use link, 72 hours). It gets no live API keys until go-live is approved.',
+  exists: 'A partner was already created from this request. Nothing changed.',
+  not_approved: 'Only an approved request can become a partner.',
+  reason_required: `Add a reason of at least ${STAFF_REASON_MIN} characters.`,
+  invalid_username: STAFF_USERNAME_RULE,
+  invalid_name: 'Enter the admin’s name.',
+  invalid_email: 'The request’s email address cannot receive an invite.',
+  username_taken: 'That username is not available. Choose another.',
+  unconfigured: 'Email is not configured, so no invite could be sent. Nothing was created.',
+  failed: 'Something went wrong. Nothing was created. Try again.',
+};
+
 const STATUS_LABEL: Record<string, string> = {
   invited: 'Invited',
   completed: 'Submitted, awaiting decision',
@@ -114,7 +137,7 @@ export default async function PartnerApplicationPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ invite?: string; decision?: string }>;
+  searchParams?: Promise<{ invite?: string; decision?: string; create?: string }>;
 }) {
   const { staff, scope } = await requireScope();
   if (scope.kind !== 'platform') redirect('/admin-dashboard');
@@ -137,6 +160,14 @@ export default async function PartnerApplicationPage({
   const status = request.applicationStatus ?? 'invited';
   // Decide is platform-ADMIN only (the actions re-check via requirePlatformAdmin).
   const decisionOpen = canDecideApplication(request.applicationStatus) && staff.role === 'admin';
+  // UI redesign M3-21: create the partner + its admin invite, platform ADMIN only, approved requests
+  // only (the action re-checks both). The partner id is derived from the request id, so an already
+  // created partner shows as a link instead of the form.
+  const createParam = sp?.create ?? '';
+  const createFlash = Object.hasOwn(CREATE_FLASH, createParam) ? CREATE_FLASH[createParam] : undefined;
+  const fromRequestPartnerId = partnerIdForRequest(request.id);
+  const fromRequestPartner =
+    status === 'approved' && staff.role === 'admin' ? await getPartnerStore().getPartner(fromRequestPartnerId) : null;
 
   return (
     <>
@@ -226,12 +257,59 @@ export default async function PartnerApplicationPage({
                     </div>
                   </form>
                 )}
-                {status === 'approved' && (
+                {status === 'approved' && !fromRequestPartner && (
                   <Button asChild size="sm">
                     <Link href={`/admin-dashboard/partners/new?fromRequest=${encodeURIComponent(request.id)}`}>
                       Set up this partner →
                     </Link>
                   </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {staff.role === 'admin' && status === 'approved' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Create the partner and invite its admin</CardTitle>
+                <CardDescription>
+                  Creates the partner from this request (company name and source countries) and emails a single-use,
+                  72-hour admin invite to {request.email}. No API key is issued, and live API keys stay unavailable
+                  until the partner requests go-live and SmartRemit approves it.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {createFlash && <p className="mb-3 text-[13px] text-muted-foreground">{createFlash}</p>}
+                {fromRequestPartner ? (
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/admin-dashboard/partners/${encodeURIComponent(fromRequestPartner.id)}`}>
+                      Open {fromRequestPartner.name} →
+                    </Link>
+                  </Button>
+                ) : (
+                  <form action={createPartnerFromRequestAction} className="flex flex-col gap-3">
+                    <input type="hidden" name="id" value={request.id} />
+                    <label className="flex flex-col gap-1.5 text-sm font-medium">
+                      Admin username
+                      <Input name="username" required maxLength={64} autoComplete="off" placeholder="e.g. acme-admin" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm font-medium">
+                      Admin name
+                      <Input name="name" required maxLength={80} autoComplete="off" placeholder="e.g. Jane Doe" />
+                    </label>
+                    <label className="flex flex-col gap-1.5 text-sm font-medium">
+                      Reason (required, kept in the audit log)
+                      <Input name="reason" required minLength={STAFF_REASON_MIN} maxLength={STAFF_REASON_MAX} placeholder="e.g. Approved application, onboarding kickoff" />
+                    </label>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button type="submit" size="sm" disabled={!mailConfigured}>
+                        Create partner and invite admin
+                      </Button>
+                      {!mailConfigured && (
+                        <span className="text-xs text-muted-foreground">Email is not configured, so no invite can be sent.</span>
+                      )}
+                    </div>
+                  </form>
                 )}
               </CardContent>
             </Card>
