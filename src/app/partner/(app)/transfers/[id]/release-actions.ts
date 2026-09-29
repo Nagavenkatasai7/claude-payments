@@ -73,7 +73,7 @@ export async function releaseHoldAction(formData: FormData): Promise<ActionResul
   // The guard. One generic refusal for screening, AML, 'ours', blocked, not held and unknown.
   const owner = await getPartnerStore().getPartner(ctx.partnerId);
   const sender = await loadSenderScreening(getDb(), ctx.partnerId, transfer.phone);
-  if (!isPartnerReleasableHold(transfer, owner, sender) || !canReleaseHeld(scopeOf(ctx.staff), owner, transfer)) {
+  if (!isPartnerReleasableHold(transfer, owner, sender) || !canReleaseHeld(scopeOf(ctx.staff), owner, transfer, sender)) {
     return notAllowed;
   }
 

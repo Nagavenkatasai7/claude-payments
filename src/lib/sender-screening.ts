@@ -1,5 +1,5 @@
 import type { DbOrTx } from '@/db/client';
-import { readSenderScreeningFlags, type SenderScreeningFlags } from '@/db/repos/customer-repo';
+import { readSenderScreeningFlags, readSenderScreeningFlagsForPhones, type SenderScreeningFlags } from '@/db/repos/customer-repo';
 import { logWarn } from './log';
 import type { PartnerId } from './types';
 
@@ -21,5 +21,26 @@ export async function loadSenderScreening(db: DbOrTx, partnerId: PartnerId, phon
   } catch (err) {
     logWarn('partner.release.sender-screening', errName(err), { partnerId });
     return null;
+  }
+}
+
+/**
+ * M3-10 Task 10.3: the batch form for the legacy compliance page, which shows the Release button to
+ * PARTNER-scoped staff only where canReleaseHeld allows it. De-duplicates and drops blank phones.
+ * FAILS CLOSED: a blank tenant or a failed lookup returns an empty map, so every row's sender reads
+ * as missing and the button is hidden. Never throws; logs the error NAME only.
+ */
+export async function loadSenderScreeningMap(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phones: readonly string[],
+): Promise<Map<string, SenderScreeningFlags>> {
+  const unique = [...new Set(phones.filter((p) => typeof p === 'string' && p !== ''))];
+  if (!partnerId || unique.length === 0) return new Map();
+  try {
+    return await readSenderScreeningFlagsForPhones(db, partnerId, unique);
+  } catch (err) {
+    logWarn('partner.release.sender-screening', errName(err), { partnerId });
+    return new Map();
   }
 }

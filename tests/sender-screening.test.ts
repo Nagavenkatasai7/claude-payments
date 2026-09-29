@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import { seedTwoTenants } from './helpers-partner-app';
-import { createCustomerRepo, readSenderScreeningFlags } from '@/db/repos/customer-repo';
-import { loadSenderScreening } from '@/lib/sender-screening';
+import { createCustomerRepo, readSenderScreeningFlags, readSenderScreeningFlagsForPhones } from '@/db/repos/customer-repo';
+import { loadSenderScreening, loadSenderScreeningMap } from '@/lib/sender-screening';
 import type { Db } from '@/db/client';
 
 // M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release. A
@@ -75,5 +75,37 @@ describe('loadSenderScreening (fail-closed wrapper)', () => {
     expect(await loadSenderScreening(spy, '', PHONE)).toBeNull();
     expect(await loadSenderScreening(spy, 'pa', '')).toBeNull();
     expect((spy as unknown as { select: ReturnType<typeof vi.fn> }).select).not.toHaveBeenCalled();
+  });
+});
+
+// M3-10 Task 10.3: the legacy compliance page's Release button for PARTNER-scoped staff needs the
+// flags of every held row's sender, read in ONE tenant-scoped query.
+describe('readSenderScreeningFlagsForPhones + loadSenderScreeningMap (batch, Task 10.3)', () => {
+  const P2 = '14155550202';
+
+  it('returns a phone → flags map for this tenant’s rows only', async () => {
+    await seedCustomer('pa', PHONE, { pep: true });
+    await seedCustomer('pa', P2);
+    await seedCustomer('pb', P2, { watch: true });
+    const m = await readSenderScreeningFlagsForPhones(db, 'pa', [PHONE, P2, '19995550000']);
+    expect(m.get(PHONE)).toEqual({ pepHit: true, watchlistHit: null });
+    expect(m.get(P2)).toEqual({ pepHit: null, watchlistHit: null });
+    expect(m.has('19995550000')).toBe(false);
+    expect(m.size).toBe(2);
+  });
+
+  it('an empty phone list → an empty map without a query', async () => {
+    const spy = { select: vi.fn() } as unknown as Db;
+    expect((await readSenderScreeningFlagsForPhones(spy, 'pa', [])).size).toBe(0);
+    expect((spy as unknown as { select: ReturnType<typeof vi.fn> }).select).not.toHaveBeenCalled();
+  });
+
+  it('the wrapper de-duplicates, drops blanks and fails CLOSED to an empty map', async () => {
+    await seedCustomer('pa', PHONE);
+    const m = await loadSenderScreeningMap(db, 'pa', [PHONE, PHONE, '']);
+    expect([...m.keys()]).toEqual([PHONE]);
+    const broken = { select: vi.fn(() => { throw new Error('connection reset'); }) } as unknown as Db;
+    expect((await loadSenderScreeningMap(broken, 'pa', [PHONE])).size).toBe(0);
+    expect((await loadSenderScreeningMap(db, '', [PHONE])).size).toBe(0);
   });
 });
