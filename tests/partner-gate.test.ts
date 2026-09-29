@@ -166,3 +166,32 @@ describe('legacy gates and the invite marker (M3-9, O10)', () => {
     expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
   });
 });
+
+// UI redesign M3-9, Task 9.3: the marker written at acceptance still forces enrolment when the first
+// sign-in happens a month later (the marker has no TTL), and a successful enrolment lifts it.
+describe('invite acceptance → first sign-in → enrolment (M3-9)', () => {
+  it('31 days after acceptance the marker still forces enrolment; confirmEnrolment lifts it', async () => {
+    // freshDb() ran in beforeEach, BEFORE the fake clock (CLAUDE.md: PGlite + fake timers).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Acceptance writes the marker exactly like acceptInviteAction: NX, no expiry.
+      await redis.set(`${MFA_PENDING_PREFIX}u1`, '1', { nx: true });
+      vi.setSystemTime(Date.now() + 31 * 24 * 3600 * 1000);
+      await signInAs({ partnerId: 'pa', role: 'agent' });
+      await expect(requirePartnerStaff(PARTNER_ANY)).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
+      await expect(requireScope()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
+
+      const mfa = (await import('@/lib/staff-mfa-store')).getStaffMfaStore();
+      const begun = await mfa.beginEnrolment('u1');
+      if (!begun.ok) throw new Error('enrol refused');
+      const { base32Decode, totpAt } = await import('@/lib/totp');
+      expect(await mfa.confirmEnrolment('u1', totpAt(base32Decode(begun.secretBase32), Date.now()))).toBe('ok');
+
+      await expect(requirePartnerStaff(PARTNER_ANY)).resolves.toMatchObject({ partnerId: 'pa', username: 'u1' });
+      expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
+      await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
