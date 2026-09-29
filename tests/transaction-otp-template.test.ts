@@ -144,3 +144,95 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     expect(bodyOf(fetchMock, 0).template.name).toBe('otp_auth');
   });
 });
+
+// ── M2-14 (#393 enablement follow-ups) ──────────────────────────────────────
+describe('sendTransactionOtp partner-template failure handling (M2-14)', () => {
+  const failThenOk = (body = '{"error":{"code":132001}}') => {
+    let n = 0;
+    return vi.fn(async () =>
+      n++ === 0
+        ? { ok: false, status: 404, text: async (): Promise<string> => body }
+        : { ok: true, text: async (): Promise<string> => '' },
+    );
+  };
+  const allLogs = (spies: Array<{ mock: { calls: unknown[][] } }>) =>
+    spies
+      .flatMap((s) => s.mock.calls.flat())
+      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
+      .join('\n');
+
+  it('outside the 24-h window → no free-form fallback (Meta would drop it later); throws; failure reported with the Graph code', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = failThenOk();
+    vi.stubGlobal('fetch', fetchMock);
+    const onTemplateFailure = vi.fn();
+
+    await expect(
+      sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme Remit', PARTNER_TEMPLATE, {
+        inWindow: async () => false,
+        onTemplateFailure,
+      }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onTemplateFailure).toHaveBeenCalledWith({ status: 404, code: 132001 });
+  });
+
+  it('inside the window → the free-form fallback carries the PARTNER brand on the partner number', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = failThenOk();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme Remit', PARTNER_TEMPLATE, { inWindow: async () => true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expectAllOnPartnerNumber(fetchMock);
+    const text = bodyOf(fetchMock, 1).text.body as string;
+    expect(text).toContain('Acme Remit');
+    expect(text).not.toContain('SmartRemit');
+  });
+
+  it('a throwing window check counts as OUTSIDE (no fallback); a throwing failure hook never masks the send', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = failThenOk();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme', PARTNER_TEMPLATE, {
+        inWindow: async () => {
+          throw new Error('redis down');
+        },
+        onTemplateFailure: () => {
+          throw new Error('hook broke');
+        },
+      }),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('the template-failure log carries only the HTTP status and Graph code, never the Graph message (which may echo digits)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const graphBody = '{"error":{"code":132001,"message":"(#132001) Template param 918273 does not exist"}}';
+    vi.stubGlobal('fetch', failThenOk(graphBody));
+
+    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme', PARTNER_TEMPLATE, { inWindow: async () => true });
+
+    const logged = allLogs([warn, err, log]);
+    expect(logged).toContain('132001');
+    expect(logged).not.toContain('918273');
+    expect(logged).not.toContain('does not exist');
+  });
+
+  it('the SHARED-number env-template failure log is scrubbed the same way', async () => {
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', failThenOk('{"error":{"code":132001,"message":"param 918273 bad"}}'));
+
+    await sendTransactionOtp(PHONE, CODE);
+
+    const logged = allLogs([warn]);
+    expect(logged).not.toContain('918273');
+    expect(logged).not.toContain('param');
+  });
+});

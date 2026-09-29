@@ -54,6 +54,7 @@ import { KNOWN_PARTNER_ROLES } from '@/lib/partner-access';
 import { partners, partnerSites } from '@/db/schema';
 import { DEFAULT_THEME } from '@/lib/ui/tokens';
 import BrandingPage from '@/app/partner/(app)/branding/page';
+import { t } from '@/lib/i18n';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -175,6 +176,28 @@ describe('/partner/branding for a partner admin', () => {
 
 // Carry-forward from the PR #381 review: a stored logo is safe only as an <img> data URI (a PNG+HTML
 // polyglot passes the signature check). No app route may serve it.
+describe('/partner/branding web address (M3-18)', () => {
+  beforeEach(async () => {
+    await signInAs({});
+    await box.db!.update(partnerSites).set({ slug: 'bravo-co' }).where(eq(partnerSites.partnerId, PB));
+  });
+  it('no slug yet → the one-time claim form, and nothing of B’s slug', async () => {
+    const html = await render();
+    expect(html).toContain('data-testid="branding-slug-form"');
+    expect(html).toContain('name="slug"');
+    expect(html).not.toContain('bravo-co');
+  });
+  it('a claimed slug → shown read-only with the contact-SmartRemit note; no claim form', async () => {
+    await box.db!.insert(partnerSites).values({ partnerId: PA, slug: 'alpha-co' });
+    const html = await render();
+    expect(html).not.toContain('data-testid="branding-slug-form"');
+    expect(html).toContain('data-testid="branding-slug-current"');
+    expect(html).toContain('alpha-co.smartremit.ai');
+    expect(html).toContain(t('partner.slug.contactSmartRemit'));
+    expect(html).not.toContain('bravo-co');
+  });
+});
+
 describe('stored logos are never served from an app route', () => {
   const routeFiles = (dir: string): string[] =>
     readdirSync(dir).flatMap((n) => {

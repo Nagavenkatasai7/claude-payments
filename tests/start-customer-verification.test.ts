@@ -67,6 +67,27 @@ describe('startCustomerVerification', () => {
     expect((await kcs.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'kyc.start', actor: 'system:customer-portal' });
   });
 
+  it('M2-14 (#400 L9): a restart REUSES the started inquiry (no second inquiry to go unbound)', async () => {
+    await startCustomerVerification(customer, { actor: 'system:customer-portal' });
+    startVerification.mockClear();
+    await startCustomerVerification(customer, { actor: 'system:customer-portal' });
+    expect(startVerification).toHaveBeenCalledWith({ customerId: PHONE, senderPhone: PHONE, existingInquiryId: 'inq_1' });
+    expect(await cs.getCustomer('default', PHONE)).toMatchObject({ kycInquiryId: 'inq_1' });
+  });
+
+  it('M2-14 (#400 L9): a reuse the provider refuses falls back to a fresh inquiry, which is recorded', async () => {
+    await startCustomerVerification(customer, { actor: 'x' });
+    startVerification.mockClear();
+    startVerification.mockRejectedValueOnce(new Error('inquiry expired'));
+    startVerification.mockResolvedValueOnce({ url: 'https://kyc.example.com/verify?code=new', providerRef: 'inq_2' });
+    const err = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await startCustomerVerification(customer, { actor: 'x' })).toEqual({ kind: 'redirect', url: 'https://kyc.example.com/verify?code=new' });
+    err.mockRestore();
+    expect(startVerification).toHaveBeenNthCalledWith(1, { customerId: PHONE, senderPhone: PHONE, existingInquiryId: 'inq_1' });
+    expect(startVerification).toHaveBeenNthCalledWith(2, { customerId: PHONE, senderPhone: PHONE });
+    expect(await cs.getCustomer('default', PHONE)).toMatchObject({ kycInquiryId: 'inq_2' });
+  });
+
   it('gate off → gate_off, the provider is never touched and nothing is recorded', async () => {
     await setPartner({ requireKycBeforeSend: false });
     expect(await startCustomerVerification(customer, { actor: 'x' })).toEqual({ kind: 'gate_off' });

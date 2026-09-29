@@ -39,12 +39,21 @@ const TTL_MS: Record<PortalPendingPurpose, number> = {
   stepup_totp: 600_000,
 };
 
+/**
+ * M2-14 (PR 394 L7): "Send a new code" restarts a code-carrying token's clock (the new code has its own
+ * 5 minutes), up to this cap from creation. Kept in a SEPARATE key (`ppend_x:`), so an extend racing
+ * a consume can never re-create the record; an old build ignores it (a shorter life only).
+ */
+const EXTENDABLE: ReadonlySet<PortalPendingPurpose> = new Set(['login', 'stepup']);
+const MAX_EXTENDED_LIFE_MS = 30 * 60_000;
+
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 const SID_RE = /^[0-9a-f]{32}$/;
 const PURPOSES: ReadonlySet<string> = new Set(['login', 'mfa', 'consent', 'stepup', 'stepup_totp']);
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const recKey = (h: string) => `ppend:${h}`;
 const cntKey = (h: string) => `ppend_n:${h}`;
+const extKey = (h: string) => `ppend_x:${h}`;
 
 function parse(raw: string | null): PortalPending | null {
   if (typeof raw !== 'string') return null;
@@ -73,6 +82,18 @@ function parse(raw: string | null): PortalPending | null {
 
 export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => number } = {}) {
   const now = opts.now ?? (() => Date.now());
+  /** Within its logical life: from the later of creation and the last extend, never past the cap. */
+  async function live(rec: PortalPending, h: string, extRaw?: string | null): Promise<boolean> {
+    const t = now();
+    if (t < rec.createdMs) return false;
+    let start = rec.createdMs;
+    if (EXTENDABLE.has(rec.purpose)) {
+      if (t - rec.createdMs > MAX_EXTENDED_LIFE_MS) return false;
+      const ext = Number(extRaw === undefined ? await redis.get(extKey(h)) : extRaw);
+      if (Number.isFinite(ext) && ext > start && ext <= t) start = ext;
+    }
+    return t - start <= TTL_MS[rec.purpose];
+  }
   return {
     async create(input: { partnerId: PartnerId; phone: string; purpose: PortalPendingPurpose; sid?: string }): Promise<string> {
       const phone = normalizePhone(input.phone);
@@ -93,10 +114,30 @@ export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => n
     /** The live record for this host partner and purpose, else null. */
     async peek(token: unknown, hostPartnerId: PartnerId, purpose: PortalPendingPurpose): Promise<PortalPending | null> {
       if (typeof token !== 'string' || !TOKEN_RE.test(token)) return null;
-      const rec = parse(await redis.get(recKey(sha(token))));
+      const h = sha(token);
+      const rec = parse(await redis.get(recKey(h)));
       if (!rec || rec.partnerId !== hostPartnerId || rec.purpose !== purpose) return null;
-      if (now() - rec.createdMs > TTL_MS[rec.purpose] || now() < rec.createdMs) return null;
+      if (!(await live(rec, h))) return null;
       return rec;
+    },
+
+    /**
+     * M2-14 (PR 394 L7): restart a live login / step-up token's clock after a resend (capped at 30
+     * minutes from creation). Returns whether it extended. Never touches the record itself.
+     */
+    async extend(token: unknown, hostPartnerId: PartnerId, purpose: PortalPendingPurpose): Promise<boolean> {
+      if (!EXTENDABLE.has(purpose) || typeof token !== 'string' || !TOKEN_RE.test(token)) return false;
+      const h = sha(token);
+      const rec = parse(await redis.get(recKey(h)));
+      if (!rec || rec.partnerId !== hostPartnerId || rec.purpose !== purpose) return false;
+      if (!(await live(rec, h))) return false;
+      const ttlS = Math.ceil(MAX_EXTENDED_LIFE_MS / 1000) + 60;
+      await redis.set(extKey(h), String(now()), { ex: ttlS });
+      await redis.expire(recKey(h), ttlS);
+      await redis.expire(cntKey(h), ttlS); // the per-token attempt count survives the longer life
+      // A consume that raced this extend: drop the marker again (the record stays gone either way).
+      if (!(await redis.exists(recKey(h)))) await redis.del(extKey(h));
+      return true;
     },
 
     /**
@@ -109,8 +150,9 @@ export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => n
       const h = sha(token);
       const rec = parse(await redis.getdel(recKey(h)));
       await redis.del(cntKey(h));
+      const ext = await redis.getdel(extKey(h));
       if (!rec || rec.partnerId !== hostPartnerId || rec.purpose !== purpose) return null;
-      if (now() - rec.createdMs > TTL_MS[rec.purpose] || now() < rec.createdMs) return null;
+      if (!(await live(rec, h, ext))) return null;
       return rec;
     },
 
@@ -127,6 +169,7 @@ export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => n
       const h = sha(token);
       await redis.del(recKey(h));
       await redis.del(cntKey(h));
+      await redis.del(extKey(h));
     },
   };
 }

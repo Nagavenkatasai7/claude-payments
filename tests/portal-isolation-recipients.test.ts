@@ -252,6 +252,19 @@ describe('add', () => {
     expect(await audits('recipient.create')).toHaveLength(1);
   });
 
+  it('M2-14 (#398 L5): two tabs adding the same number (two keys) → one saved, the other told it exists; never an overwrite', async () => {
+    await signIn('pa');
+    const settle = (p: Promise<RecipientFormState>) => p.then((v) => v, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+    const [a, b] = await Promise.all([
+      settle(addRecipientAction(init(), addForm({ name: 'First Tab' }))),
+      settle(addRecipientAction(init(), addForm({ name: 'Second Tab' }))),
+    ]);
+    const results = [a, b];
+    expect(results.filter((r) => typeof r === 'string' && r.includes('/portal/recipients?done=added'))).toHaveLength(1);
+    expect(results.filter((r) => typeof r === 'object' && r.error === 'portal.recipients.exists')).toHaveLength(1);
+    expect(await audits('recipient.create')).toHaveLength(1);
+  });
+
   it('re-adding a deleted recipient brings it back (the tombstone is removed)', async () => {
     await signIn('pa');
     await expectRedirect(deleteRecipientAction(recipientRid('pa', PHONE, A_RP), fd({})), '/portal/recipients?done=deleted');

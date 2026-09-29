@@ -174,6 +174,22 @@ describe('recordChannelHealth (Redis + deduped audit + daily email)', { retry: 0
     expect(await recordChannelHealth('beta', 'delivery_failed', { code: 131026 }, deps())).toBe(false); // not alertable
   });
 
+  it('M2-14: auth_template_failed (the pay-code template was rejected) is recorded with its Graph code and IS alertable', async () => {
+    await createPartnerRepo(db).updateSupportConfig('beta', (prev) => ({ ...prev, alertEmail: 'ops@beta.example' }));
+    expect(await recordChannelHealth('beta', 'auth_template_failed', { code: 132001 }, deps())).toBe(true);
+    expect(parseHealthMarks(await store.readChannelHealth('beta')).auth_template_failed).toMatchObject({ count: 1, code: 132001 });
+    const rows = await emailRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].payload.text).toMatch(/authentication template/i);
+    const summary = summarizeChannelHealth({
+      channel: { kind: 'own', creds: { phoneNumberId: 'p', token: 't' }, warnings: [] },
+      marks: parseHealthMarks(await store.readChannelHealth('beta')),
+      now: NOW,
+    });
+    expect(summary.level).toBe('error');
+    expect(summary.items.map((i) => i.kind)).toContain('auth_template_failed');
+  });
+
   it('sig_fail is never alertable (signature failures are unauthenticated: banner only, never an email)', async () => {
     await createPartnerRepo(db).updateSupportConfig('beta', (prev) => ({ ...prev, alertEmail: 'ops@beta.example' }));
     expect(await recordChannelHealth('beta', 'sig_fail', {}, deps())).toBe(false);

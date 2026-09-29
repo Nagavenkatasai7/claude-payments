@@ -71,6 +71,8 @@ vi.mock('@/lib/audit-log-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/audit-log-store')>('@/lib/audit-log-store');
   return { ...actual, getAuditLogStore: () => auditStore };
 });
+// M3-9-fu: remove clears the invite's MFA-enrolment marker (staffmfa:pending:<username>).
+vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 
@@ -85,6 +87,7 @@ import {
 import { hashPassword, verifyPassword } from '@/lib/password';
 import { staffLoginKeys } from '@/lib/staff-login-guard';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
 
 const authStore = createAuthStore(redis);
 
@@ -363,6 +366,19 @@ describe('removeStaffAction', () => {
     expect(await authStore.getStaff('boss')).toBeNull();
     // now boss2 is the only platform admin; removing them is blocked by self-guard,
     // but demoting via update is the real lockout guard (covered above).
+  });
+
+  it('M3-9-fu: removal clears the pending MFA-enrolment marker', async () => {
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent' }));
+    await redis.set(`${MFA_PENDING_PREFIX}a`, '1');
+    await removeStaffAction(form({ username: 'a' }));
+    expect(await redis.get(`${MFA_PENDING_PREFIX}a`)).toBeNull();
+  });
+
+  it('M3-9-fu: a refused removal keeps the marker (cleared only after a successful remove)', async () => {
+    await redis.set(`${MFA_PENDING_PREFIX}boss`, '1');
+    await expect(removeStaffAction(form({ username: 'boss' }))).rejects.toThrow(/your own account/i);
+    expect(await redis.get(`${MFA_PENDING_PREFIX}boss`)).toBe('1');
   });
 
   it('writes an audit entry on removal', async () => {

@@ -83,12 +83,16 @@ export default async function CustomerDetailPage({
         logWarn('admin.kyc_trail', err, { partnerId: customer.partnerId }); // tenant id only — no phone
         return [];
       }),
-    // Program fix 16b: the last audited raise/clear for THIS (tenant, phone).
-    createAuditRepo(getDb()).lastSendLimitChange(customer.partnerId, 'customer', phone).catch((err: unknown) => {
-      // Never blank the card silently: log (tenant id only — no phone), then render "—".
-      logWarn('admin.send_limits.last_change', err, { scope: 'customer', partnerId: customer.partnerId });
-      return null;
-    }),
+    // Program fix 16b: the last audited raise/clear for THIS (tenant, phone). UI redesign M3-12
+    // follow-up: platform writes carry the plain-phone subject, partner writes the hashed one
+    // (limit-actions.ts auditSubjectId), so the card reads both.
+    createAuditRepo(getDb())
+      .lastSendLimitChange(customer.partnerId, 'customer', [customer.senderPhone, auditSubjectId(customer.partnerId, customer.senderPhone)])
+      .catch((err: unknown) => {
+        // Never blank the card silently: log (tenant id only — no phone), then render "—".
+        logWarn('admin.send_limits.last_change', err, { scope: 'customer', partnerId: customer.partnerId });
+        return null;
+      }),
   ]);
   // Program-Fix 28: durable rows + the legacy Redis entries not tagged durable.
   const kycAudit = mergeKycTrail(durableKycAudit, legacyKycAudit);

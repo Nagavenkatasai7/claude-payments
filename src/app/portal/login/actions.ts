@@ -8,6 +8,7 @@ import { getPortalPendingStore, PORTAL_PENDING_MAX_ATTEMPTS, type PortalPending 
 import { alertPortalOtpFailure, portalOtpChannelReady } from '@/lib/portal-otp-sender';
 import { afterPortalResponse, completePortalSignIn, portalCustomers } from '@/lib/portal-auth';
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
+import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
 import { isValidPhone, normalizePhone } from '@/lib/phone';
 import type { MessageKey } from '@/lib/i18n';
 import type { PartnerId } from '@/lib/types';
@@ -93,6 +94,12 @@ export async function resendCodeAction(_prev: PortalLoginState | null, formData:
   if (!rec) return { step: 'phone', error: 'portal.login.expired' };
   const ready = await portalOtpChannelReady(pid);
   if (!ready.ready) return { step: 'phone', error: 'portal.login.cant_send' };
+  // M2-14 (PR 394 L7): the new code gets its own 5 minutes on this token (capped; see the store).
+  try {
+    await getPortalPendingStore().extend(pendingToken, pid, 'login');
+  } catch {
+    return { step: 'phone', error: 'portal.login.cant_send' };
+  }
   await issueAndSendAfterResponse(pid, rec.phone, 'login', ipOk, ready);
   return { step: 'code', pending: pendingToken, last4: rec.phone.slice(-4), notice: 'portal.login.code_sent_if_possible' };
 }
@@ -157,8 +164,12 @@ export async function verifyCodeAction(_prev: PortalLoginState | null, formData:
     return { step: 'phone', error: 'portal.login.cant_send' }; // never skip a second factor on an error
   }
   if (enrolled) {
-    const pending = await pendingStore.create({ partnerId: pid, phone, purpose: 'mfa' });
-    return { step: 'mfa', pending };
+    try {
+      const pending = await pendingStore.create({ partnerId: pid, phone, purpose: 'mfa' });
+      return { step: 'mfa', pending };
+    } catch {
+      return { step: 'phone', error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4): never a 500
+    }
   }
   const next = await nextAfterProof(pid, phone);
   if (next !== 'signed_in') return next;
@@ -173,19 +184,38 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
   const code = field(formData, 'code').replace(/\D/g, '');
   const pendingStore = getPortalPendingStore();
 
-  if (!(await ipAllowed(VERIFY_IP_LIMIT))) return { step: 'phone', error: 'portal.login.try_later' };
-  const rec = await pendingStore.peek(pendingToken, pid, 'mfa');
-  if (!rec) return { step: 'phone', error: 'portal.login.expired' };
-  const n = await pendingStore.countAttempt(pendingToken);
-  if (n > PORTAL_PENDING_MAX_ATTEMPTS) {
-    await pendingStore.consume(pendingToken);
-    return { step: 'phone', error: 'portal.login.try_later' };
+  // M2-14 (PR 394 L4): a Redis error on the way in answers cant_send, never a 500.
+  let rec: PortalPending | null;
+  let n: number;
+  try {
+    if (!(await ipAllowed(VERIFY_IP_LIMIT))) return { step: 'phone', error: 'portal.login.try_later' };
+    rec = await pendingStore.peek(pendingToken, pid, 'mfa');
+    if (!rec) return { step: 'phone', error: 'portal.login.expired' };
+    n = await pendingStore.countAttempt(pendingToken);
+    if (n > PORTAL_PENDING_MAX_ATTEMPTS) {
+      await pendingStore.consume(pendingToken);
+      return { step: 'phone', error: 'portal.login.try_later' };
+    }
+    // M2-14 (PR 394 L2): the per-(partner, phone) daily budget, reserved BEFORE the compare.
+    if (!(await getPortalTotpBudget().reserve(pid, rec.phone))) {
+      await pendingStore.consume(pendingToken);
+      const phone = rec.phone;
+      await afterPortalResponse('portal.auth', () => audit(pid, phone, 'login_locked', { factor: 'totp' }));
+      return { step: 'phone', error: 'portal.login.try_later' };
+    }
+  } catch {
+    return { step: 'phone', error: 'portal.login.cant_send' };
   }
   let ok = false;
   try {
     ok = /^\d{6}$/.test(code) && (await getCustomerMfaStore().verifyCode({ partnerId: pid, phone: rec.phone }, code));
   } catch {
     ok = false;
+  }
+  if (ok) {
+    try {
+      await getPortalTotpBudget().refund(pid, rec.phone); // only failures consume the budget
+    } catch { /* the unit simply stays spent until the day ends */ }
   }
   if (!ok) {
     const phone = rec.phone;

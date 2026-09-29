@@ -1,0 +1,289 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import { createStore, type Store } from '@/lib/store';
+import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import { seedPartnerTransfer, seedTwoTenants } from './helpers-partner-app';
+import { createOutboxRepo, LEASE_MS, type OutboxRepo } from '@/db/repos/outbox-repo';
+import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { outbox as outboxTable, partnerReportJobs } from '@/db/schema';
+import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
+import { buildReportCsv, openReportCsv, runPartnerReportJob } from '@/lib/partner-report-worker';
+import { MAX_REPORT_ROWS, REPORT_MIN_BUDGET_MS, TRANSFER_EXPORT_COLUMNS } from '@/lib/partner-reports';
+import { STATEMENT_COLUMNS } from '@/lib/settlement-statement';
+import { decryptField } from '@/lib/field-crypto';
+import { ctx as cryptoCtx } from '@/lib/crypto-context';
+import type { Db } from '@/db/client';
+
+// UI redesign M3-16, Task 16.3: the 'partner.report' outbox effect.
+
+let db: Db;
+let store: Store;
+let outbox: OutboxRepo;
+
+function deps(): WorkerDeps {
+  return {
+    db,
+    store,
+    sendText: vi.fn(async () => {}) as unknown as WorkerDeps['sendText'],
+    sendTemplate: vi.fn(async () => {}) as unknown as WorkerDeps['sendTemplate'],
+    fetchFn: vi.fn() as unknown as typeof fetch,
+    recipientTemplateName: 't',
+    recipientTemplateLang: 'en',
+    listStaff: async () => [],
+    runAgentTurn: vi.fn(async () => '') as unknown as WorkerDeps['runAgentTurn'],
+  };
+}
+
+beforeEach(async () => {
+  db = await freshDb();
+  store = createStore(fakeRedis(), db);
+  outbox = createOutboxRepo(db);
+  await seedTwoTenants(db);
+});
+
+const day = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString();
+const WINDOW = () => ({ from: new Date(Date.now() - 20 * 86_400_000).toISOString(), to: new Date(Date.now() + 86_400_000).toISOString() });
+
+async function newJob(partnerId: string, kind: 'settlements' | 'transfers' | 'fees_monthly', params: Record<string, unknown>) {
+  const id = randomUUID();
+  await createPartnerReportRepo(db).createJob(partnerId, { id, kind, params, requestedBy: 'u1' });
+  await outbox.enqueue('partner.report', { jobId: id }, { dedupeKey: `report:${id}` });
+  return id;
+}
+const jobRow = async (id: string) => (await db.select().from(partnerReportJobs).where(eq(partnerReportJobs.id, id)))[0];
+const outboxRow = async (id: string) => (await db.select().from(outboxTable).where(eq(outboxTable.dedupeKey, `report:${id}`)))[0];
+
+async function seedBoth() {
+  await seedPartnerTransfer(db, { id: 'tx_pa1', partnerId: 'pa', createdAt: day(2), paidAt: day(2), status: 'paid', paymentProviderRef: 'rail-1', phone: '14155557777' });
+  await seedPartnerTransfer(db, { id: 'tx_pa2', partnerId: 'pa', createdAt: day(3), paidAt: day(3), status: 'delivered', paymentProviderRef: 'rail-2' });
+  await seedPartnerTransfer(db, { id: 'tx_pb1', partnerId: 'pb', createdAt: day(2), paidAt: day(2), status: 'paid', paymentProviderRef: 'rail-3' });
+}
+
+describe('partner.report through drainOnce', () => {
+  it('a pa settlements job contains pa rows only; the content is sealed, bound to the job', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    expect(r.processed).toBe(1);
+    const job = await jobRow(id);
+    expect(job.status).toBe('ready');
+    expect(job.rowCount).toBe(2);
+    expect(job.expiresAt!.getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+    expect(job.contentEnc!.startsWith('v2.')).toBe(true);
+    expect(job.contentEnc).not.toContain('tx_pa1');
+    // Bound to (tenant, job): the other tenant's context does not open it.
+    expect(() => decryptField(job.contentEnc!, undefined, cryptoCtx.partnerReport('pb', id))).toThrow();
+    const csv = openReportCsv(job);
+    expect(csv.split('\r\n')[0]).toBe(STATEMENT_COLUMNS.join(','));
+    expect(csv).toContain('tx_pa1');
+    expect(csv).toContain('tx_pa2');
+    expect(csv).not.toContain('tx_pb1');
+    expect((await outboxRow(id)).status).toBe('done');
+  });
+
+  it('a transfers job carries no full phone, destination or legal name', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'transfers', { ...WINDOW(), environment: 'live' });
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    const job = await jobRow(id);
+    expect(job.status).toBe('ready');
+    const csv = openReportCsv(job);
+    expect(csv.split('\r\n')[0]).toBe(TRANSFER_EXPORT_COLUMNS.join(','));
+    expect(csv).toContain('****7777');
+    for (const pii of ['14155557777', '14155550101', '919876543210', '000011112222', 'HDFC0001111', 'Samplesurname']) expect(csv).not.toContain(pii);
+    expect(csv).not.toContain('tx_pb1');
+    expect(csv.replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '')).not.toMatch(/\d{10,}/);
+  });
+
+  it('a fees job aggregates the month', async () => {
+    const now = new Date();
+    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    await seedPartnerTransfer(db, { id: 'tx_f1', partnerId: 'pa', createdAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 12)).toISOString(), status: 'paid', feeSource: 2, feeUsd: 2 });
+    const id = await newJob('pa', 'fees_monthly', { month });
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    const csv = openReportCsv(await jobRow(id));
+    expect(csv).toContain('day,source_currency,transfers,amount_source,fee_source,fee_usd');
+    expect(csv).toContain('"USD",1,100,2,2');
+  });
+
+  it('a generation failure → failed with a fixed code, the outbox row done (no retry storm)', async () => {
+    const id = await newJob('pa', 'settlements', { from: 'not-a-date', to: 'x' });
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    const job = await jobRow(id);
+    expect(job.status).toBe('failed');
+    expect(job.errorCode).toBe('invalid_params');
+    expect(job.contentEnc).toBeNull();
+    expect((await outboxRow(id)).status).toBe('done');
+  });
+
+  it('with < 20 s of budget left: no claim, the job stays queued, the row is deferred UNCHARGED', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + REPORT_MIN_BUDGET_MS - 1_000 });
+    expect(r.released).toBe(1);
+    const job = await jobRow(id);
+    expect(job.status).toBe('queued');
+    expect(job.claimedAt).toBeNull();
+    const row = await outboxRow(id);
+    expect(row.status).toBe('pending');
+    expect(row.attempts).toBe(0);
+    expect(row.nextAttemptAt.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('a stale running job (killed worker) is reclaimed and completed exactly once', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    await db.update(partnerReportJobs).set({ status: 'running', claimedAt: new Date(Date.now() - LEASE_MS - 5_000) }).where(eq(partnerReportJobs.id, id));
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    expect((await jobRow(id)).status).toBe('ready');
+    // A replay (e.g. a lost markDone) finds it ready: nothing is rebuilt, the row completes.
+    const before = (await jobRow(id)).contentEnc;
+    expect(await runPartnerReportJob(db, id, { hardStopAt: Date.now() + 60_000 })).toBe('skipped');
+    expect((await jobRow(id)).contentEnc).toBe(before);
+  });
+
+  it('a fresh running job (claimed elsewhere) is deferred UNCHARGED until its claim goes stale, the job untouched', async () => {
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const claimedAt = new Date();
+    await db.update(partnerReportJobs).set({ status: 'running', claimedAt }).where(eq(partnerReportJobs.id, id));
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    expect(r.released).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'running', claimedAt });
+    const row = await outboxRow(id);
+    expect(row).toMatchObject({ status: 'pending', attempts: 0 });
+    // Due no earlier than the moment the claim becomes reclaimable.
+    expect(row.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(claimedAt.getTime() + LEASE_MS - 1000);
+  });
+
+  it('a failing post-build write never puts query params (the sealed blob) into last_error', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const mod = await import('@/db/repos/partner-report-repo');
+    const real = mod.createPartnerReportRepo;
+    const spy = vi.spyOn(mod, 'createPartnerReportRepo').mockImplementation((...a: Parameters<typeof real>) => ({
+      ...real(...a),
+      completeJob: async () => {
+        throw new Error('Failed query: update ... params: v2.k0.SEALEDBLOB,tx_pa1');
+      },
+    }));
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    const row = await outboxRow(id);
+    expect(row.status).toBe('failed');
+    expect(row.lastError).toBe('report_complete_failed');
+  });
+});
+
+describe('money rows are not starved (review MEDIUM)', () => {
+  it('at most ONE report starts per invocation slot; the second is deferred uncharged and stays queued', async () => {
+    await seedBoth();
+    const a = await newJob('pa', 'settlements', WINDOW());
+    const b = await newJob('pa', 'settlements', WINDOW());
+    const slot = { reportStarted: false };
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000, reportSlot: slot });
+    expect(r.processed).toBe(1);
+    expect(r.released).toBe(1);
+    expect((await jobRow(a)).status).toBe('ready');
+    expect((await jobRow(b)).status).toBe('queued');
+    expect((await outboxRow(b))).toMatchObject({ status: 'pending', attempts: 0 });
+    // A later drainOnce in the SAME invocation (same slot) still does not start it.
+    await db.update(outboxTable).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outboxTable.dedupeKey, `report:${b}`));
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000, reportSlot: slot });
+    expect((await jobRow(b)).status).toBe('queued');
+  });
+
+  it('a transient build error hands the job back to queued (retryable), never a terminal failure', async () => {
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const repoMod = await import('@/db/repos/transfer-repo');
+    const real = repoMod.createTransferRepo;
+    const spy = vi.spyOn(repoMod, 'createTransferRepo').mockImplementation((...a: Parameters<typeof real>) => ({
+      ...real(...a),
+      listSettledPage: async () => {
+        throw new Error('connection reset');
+      },
+    }));
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    expect(r.failed).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'queued', claimedAt: null, errorCode: null });
+    expect((await outboxRow(id)).status).toBe('failed');
+  });
+});
+
+describe('batch ordering (money first)', () => {
+  it('a report row claimed BEFORE a settlement.instruct row runs after it', async () => {
+    await seedBoth();
+    await createIntegrationsRepo(db).saveIntegrations('pa', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    await seedPartnerTransfer(db, { id: 'tx_money', partnerId: 'pa', status: 'paid', paidAt: new Date().toISOString() });
+    const jobId = await newJob('pa', 'settlements', WINDOW()); // lower outbox id: claimed first
+    await outbox.enqueue('settlement.instruct', { transferId: 'tx_money' }, { dedupeKey: 'instruct:tx_money' });
+    const jobStatusAtPost: string[] = [];
+    const d = deps();
+    d.fetchFn = (async () => {
+      jobStatusAtPost.push((await jobRow(jobId)).status);
+      return { ok: true, json: async () => ({ providerRef: 'rail-xyz' }) } as unknown as Response;
+    }) as typeof fetch;
+    const r = await drainOnce(d, 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    expect(r.processed).toBe(2);
+    expect(jobStatusAtPost).toEqual(['queued']); // the money POST happened before the report started
+    expect((await jobRow(jobId)).status).toBe('ready');
+  });
+});
+
+describe('rolling-release skew', () => {
+  it('an older build that throws "Unknown outbox kind" leaves the job queued; the new build then completes it', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const mod = await import('@/lib/partner-report-worker');
+    const spy = vi.spyOn(mod, 'runPartnerReportJob').mockImplementation(async () => {
+      throw new Error('Unknown outbox kind: partner.report'); // what the old build's `default:` throws
+    });
+    const old = await drainOnce(deps(), 'w-old', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    expect(old.failed).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'queued', claimedAt: null });
+    expect((await outboxRow(id))).toMatchObject({ status: 'failed', attempts: 1 });
+    // Backoff elapses; the new build drains it.
+    await db.update(outboxTable).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outboxTable.dedupeKey, `report:${id}`));
+    await drainOnce(deps(), 'w-new', 10, { hardStopAt: Date.now() + 60_000 });
+    expect((await jobRow(id)).status).toBe('ready');
+    expect((await outboxRow(id)).status).toBe('done');
+  });
+});
+
+describe('buildReportCsv limits', () => {
+  it('honours the row cap and flags truncated', async () => {
+    await seedBoth();
+    const job = { id: randomUUID(), partnerId: 'pa', kind: 'transfers', params: { ...WINDOW(), environment: 'live' } };
+    const r = await buildReportCsv(db, job, { maxRows: 1 });
+    expect(r.rowCount).toBe(1);
+    expect(r.truncated).toBe(true);
+    expect(r.csv.trim().split('\r\n')).toHaveLength(2);
+    const full = await buildReportCsv(db, job, {});
+    expect(full).toMatchObject({ rowCount: 2, truncated: false });
+    expect(MAX_REPORT_ROWS).toBe(10_000);
+  });
+
+  it('honours the byte cap', async () => {
+    await seedBoth();
+    const job = { id: randomUUID(), partnerId: 'pa', kind: 'transfers', params: { ...WINDOW(), environment: 'live' } };
+    const header = TRANSFER_EXPORT_COLUMNS.join(',').length + 2;
+    const r = await buildReportCsv(db, job, { maxBytes: header + 10 });
+    expect(r).toMatchObject({ rowCount: 0, truncated: true });
+  });
+
+  it('the wall-time box truncates between pages', async () => {
+    await seedBoth();
+    const job = { id: randomUUID(), partnerId: 'pa', kind: 'transfers', params: { ...WINDOW(), environment: 'live' } };
+    let t = 0;
+    const r = await buildReportCsv(db, job, { pageSize: 1, wallMs: 10, now: () => (t += 11) });
+    expect(r).toMatchObject({ rowCount: 1, truncated: true });
+  });
+});

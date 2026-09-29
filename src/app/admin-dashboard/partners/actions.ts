@@ -4,13 +4,17 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
-import { getDb } from '@/db/client';
+import { eq } from 'drizzle-orm';
+import { getDb, type DbOrTx } from '@/db/client';
+import { partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { validateSendLimitInput } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
+import { setPartnerSlug } from '@/db/repos/partner-site-repo';
+import { normalizeSlugInput } from '@/lib/partner-slug-policy';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
-import { createPartnerIntegrationsStore, getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerApiKeyStore, getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
@@ -402,46 +406,84 @@ function assertSettlementUrlAllowed(url: string | undefined, providerType: strin
   if (!check.ok) throw new Error('Settlement endpoint must be a public https:// URL.');
 }
 
+/**
+ * UI redesign M3-15a follow-up: saveIntegrations rewrites the WHOLE integrations row
+ * (integrations-repo.ts saveIntegrations), so a writer must never write back a copy read before its
+ * transaction: a concurrent WhatsApp config write or settlement-secret rotation would be silently
+ * undone. Lock the tenant's partners row first (the per-tenant mutex the partner-side writers take;
+ * drizzle `select().for('update')`, node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586),
+ * then re-read inside the same transaction.
+ */
+async function lockedIntegrationsForSave(tx: DbOrTx, partnerId: string) {
+  await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('update');
+  return createPartnerIntegrationsStore(tx).getIntegrations(partnerId);
+}
+
 export async function savePaymentConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
-  await gatePartnerConfig(id);
-  const store = getPartnerIntegrationsStore();
-  const existing = await store.getIntegrations(id);
+  const staff = await gatePartnerConfig(id);
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
-  // Spread-merge so fields this form doesn't manage are never silently wiped.
-  let credentials: Record<string, string> = { ...existing.payment.credentials };
   const submittedSettlementUrl = String(formData.get('settlementUrl') ?? '').trim();
-  const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
-  const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
-  let webhookSecret = keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret);
-  // Program-Fix 29: a changed secret keeps the old one active for a 7-day grace
-  // period (previous* keys in this encrypted blob, one expiry per secret).
-  const now = new Date();
-  credentials = withRotatedSecret(credentials, 'signing', existing.payment.credentials?.signingSecret, signingSecret, now);
-  credentials = withRotatedSecret(credentials, 'webhook', existing.payment.webhookSecret, webhookSecret, now);
-  if (settlementUrl) credentials.settlementUrl = settlementUrl;
-  if (signingSecret) credentials.signingSecret = signingSecret;
+  const submittedSigningSecret = String(formData.get('signingSecret') ?? '');
+  const submittedWebhookSecret = String(formData.get('webhookSecret') ?? '');
 
-  // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
-  // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
-  // rail exercises the exact signed instruction→callback loop a real rail would.
-  if (providerType === 'simulator') {
-    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
-    if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
-    if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
-  }
-  // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
-  const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
-  assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
+  // Everything below is built from the row as read UNDER the lock: this form owns the payment
+  // provider, settlement URL and the two rail secrets; every other column (WhatsApp, KYC) and a
+  // blank-field "keep" resolve against the fresh read, and the write and its audit row commit together.
+  await getDb().transaction(async (tx) => {
+    const existing = await lockedIntegrationsForSave(tx, id);
+    // Spread-merge so fields this form doesn't manage are never silently wiped.
+    let credentials: Record<string, string> = { ...existing.payment.credentials };
+    const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
+    const signingSecret = keepOrUpdate(submittedSigningSecret, credentials.signingSecret);
+    let webhookSecret = keepOrUpdate(submittedWebhookSecret, existing.payment.webhookSecret);
+    // Program-Fix 29: a changed secret keeps the old one active for a 7-day grace
+    // period (previous* keys in this encrypted blob, one expiry per secret).
+    const now = new Date();
+    credentials = withRotatedSecret(credentials, 'signing', existing.payment.credentials?.signingSecret, signingSecret, now);
+    credentials = withRotatedSecret(credentials, 'webhook', existing.payment.webhookSecret, webhookSecret, now);
+    if (settlementUrl) credentials.settlementUrl = settlementUrl;
+    if (signingSecret) credentials.signingSecret = signingSecret;
 
-  await store.saveIntegrations(id, {
-    ...existing,
-    payment: {
-      providerType,
-      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-      webhookSecret,
-    },
+    // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
+    // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
+    // rail exercises the exact signed instruction→callback loop a real rail would.
+    if (providerType === 'simulator') {
+      if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+      if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
+      if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
+    }
+    // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
+    // Pure (no network), so it may run while the row lock is held; a throw rolls back (nothing written).
+    const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
+    assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
+
+    const before = existing.payment;
+    await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
+      ...existing,
+      payment: {
+        providerType,
+        credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+        webhookSecret,
+      },
+    });
+    // Booleans + the (non-secret) provider only: never a URL, a secret, a last4 or a hash.
+    await createAuditRepo(tx).record({
+      partnerId: id,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'partner.payment_config',
+      subjectId: id,
+      meta: {
+        providerType: providerType ?? null,
+        providerChanged: (providerType ?? '') !== (before.providerType ?? ''),
+        settlementUrlChanged: (credentials.settlementUrl ?? '') !== (before.credentials?.settlementUrl ?? ''),
+        signingSecretChanged: (credentials.signingSecret ?? '') !== (before.credentials?.signingSecret ?? ''),
+        webhookSecretChanged: (webhookSecret ?? '') !== (before.webhookSecret ?? ''),
+        actorScope: actorScopeOf(staff),
+      },
+    });
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
@@ -538,6 +580,34 @@ export async function setPartnerSendLimitAction(formData: FormData): Promise<voi
     });
   });
   revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
+}
+
+// ── UI redesign M3-18: the partner's web address (slug) — PLATFORM-only change ──
+// A partner claims its slug once (/partner/branding); after that only SmartRemit moves it, with a
+// mandatory reason. The writer locks the partner row, tombstones the old slug in the same
+// transaction (never reused, by anyone) and audits partner.slug.update with actorScope 'platform'.
+// Input is lowercased + trimmed like the partner claim (the proxy lowercases the host).
+const SLUG_UNAVAILABLE = 'That web address is not available.';
+export async function changePartnerSlugAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  const reason = requireStaffReason(formData.get('reason'));
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  // The default tenant has no partner site; the form is hidden for it, and a direct POST is refused here.
+  if (id.length > 64 || id === 'default') throw new Error('Partner not found.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+  const slug = normalizeSlugInput(formData.get('slug'));
+  if (slug === null) throw new Error(SLUG_UNAVAILABLE);
+
+  const r = await setPartnerSlug(getDb(), existing.id, slug, staff.username, {
+    mode: 'change',
+    actorScope: 'platform',
+    reason,
+  });
+  if (!r.ok) throw new Error(r.reason === 'not_found' ? 'Partner not found.' : SLUG_UNAVAILABLE);
   revalidatePath(`/admin-dashboard/partners/${existing.id}`);
 }
 

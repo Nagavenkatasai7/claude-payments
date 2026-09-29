@@ -33,7 +33,7 @@ const COPY = {
 export async function RequestStep({ kind }: { kind: DataRequestKind }) {
   await requirePortalSite();
   if (!env.customerDataRightsEnabled) notFound();
-  await requireFreshPortalAuth('/portal/privacy');
+  await requireFreshPortalAuth(`/portal/privacy/${kind}`); // M2-14 (PR 401 L3): back to this step
   const copy = COPY[kind];
   const action = requestDataAction.bind(null, kind, newRequestKey());
 
