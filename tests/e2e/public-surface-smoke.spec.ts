@@ -122,7 +122,7 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
 // loading.md "Status Codes"; .../04-functions/redirect.md). So this checks where
 // the browser lands, not the status: anonymous → /login, with nothing of the
 // partner page on screen. Every new /partner page is added to this list.
-for (const path of ['/partner', '/partner/security', '/partner/audit', '/partner/transfers', '/partner/transfers/tr_smoke_missing']) {
+for (const path of ['/partner', '/partner/security', '/partner/audit', '/partner/transfers', '/partner/transfers/tr_smoke_missing', '/partner/support', '/partner/support/contact', '/partner/support/tk_smoke_missing']) {
   test(`anonymous ${path} ends on /login and shows nothing of the partner app`, async ({ page, baseURL }) => {
     test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
     await page.goto(path);
