@@ -9,6 +9,7 @@ import { getPortalSessionStore } from '@/lib/portal-session-store';
 import { alertPortalOtpFailure, portalOtpChannelReady } from '@/lib/portal-otp-sender';
 import { field, ipAllowed, issueAndSendAfterResponse, portalAudit, PORTAL_VERIFY_IP_LIMIT } from '@/lib/portal-login-flow';
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
+import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
 import type { MessageKey } from '@/lib/i18n';
 
 /**
@@ -64,7 +65,12 @@ export async function stepUpRequestAction(_prev: PortalStepUpState | null, formD
     });
     return { step: 'start', next, error: 'portal.login.cant_send' };
   }
-  const pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'stepup', sid: ctx.session.sid });
+  let pending: string;
+  try {
+    pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'stepup', sid: ctx.session.sid });
+  } catch {
+    return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (#394 L4): never a 500
+  }
   await issueAndSendAfterResponse(pid, phone, 'stepup', ipOk, ready);
   return { step: 'code', next, pending, notice: 'portal.verify.codeSent' };
 }
@@ -110,8 +116,12 @@ export async function stepUpVerifyAction(_prev: PortalStepUpState | null, formDa
     /* keep true */
   }
   if (enrolled) {
-    const pending = await store.create({ partnerId: pid, phone: rec.phone, purpose: 'stepup_totp', sid: ctx.session.sid });
-    return { step: 'mfa', next, pending };
+    try {
+      const pending = await store.create({ partnerId: pid, phone: rec.phone, purpose: 'stepup_totp', sid: ctx.session.sid });
+      return { step: 'mfa', next, pending };
+    } catch {
+      return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (#394 L4)
+    }
   }
   return markFresh(ctx, false, next);
 }
@@ -126,19 +136,38 @@ export async function stepUpTotpAction(_prev: PortalStepUpState | null, formData
   const code = field(formData, 'code').replace(/\D/g, '');
   const store = getPortalPendingStore();
 
-  if (!(await ipAllowed(PORTAL_VERIFY_IP_LIMIT))) return { step: 'start', next, error: 'portal.login.try_later' };
-  const rec = await sessionPending(pendingToken, 'stepup_totp', ctx);
-  if (!rec) return { step: 'start', next, error: 'portal.login.expired' };
-  const n = await store.countAttempt(pendingToken);
-  if (n > PORTAL_PENDING_MAX_ATTEMPTS) {
-    await store.consume(pendingToken);
-    return { step: 'start', next, error: 'portal.login.try_later' };
+  // M2-14 (#394 L4): a Redis error on the way in answers cant_send, never a 500.
+  let rec: PortalPending | null;
+  let n: number;
+  try {
+    if (!(await ipAllowed(PORTAL_VERIFY_IP_LIMIT))) return { step: 'start', next, error: 'portal.login.try_later' };
+    rec = await sessionPending(pendingToken, 'stepup_totp', ctx);
+    if (!rec) return { step: 'start', next, error: 'portal.login.expired' };
+    n = await store.countAttempt(pendingToken);
+    if (n > PORTAL_PENDING_MAX_ATTEMPTS) {
+      await store.consume(pendingToken);
+      return { step: 'start', next, error: 'portal.login.try_later' };
+    }
+    // M2-14 (#394 L2): the same per-(partner, phone) daily budget as sign-in, reserved BEFORE the compare.
+    if (!(await getPortalTotpBudget().reserve(pid, rec.phone))) {
+      await store.consume(pendingToken);
+      const phone = rec.phone;
+      await afterPortalResponse('portal.auth', () => portalAudit(pid, phone, 'stepup_failure', { reason: 'totp_budget' }));
+      return { step: 'start', next, error: 'portal.login.try_later' };
+    }
+  } catch {
+    return { step: 'start', next, error: 'portal.login.cant_send' };
   }
   let ok = false;
   try {
     ok = /^\d{6}$/.test(code) && (await getCustomerMfaStore().verifyCode({ partnerId: pid, phone: rec.phone }, code));
   } catch {
     ok = false;
+  }
+  if (ok) {
+    try {
+      await getPortalTotpBudget().refund(pid, rec.phone); // only failures consume the budget
+    } catch { /* the unit simply stays spent until the day ends */ }
   }
   if (!ok) {
     await afterPortalResponse('portal.auth', () => portalAudit(pid, rec.phone, 'stepup_failure', { reason: 'totp' }));

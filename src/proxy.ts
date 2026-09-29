@@ -117,7 +117,8 @@ const PORTAL_TOKEN_RE = /^[0-9a-f]{64}$/;
 /**
  * Sliding-cookie refresh on activity (UI redesign M2, review L1). Pages cannot set cookies, so a
  * GET/HEAD of an allowed subdomain path re-sets a well-formed portal cookie with the standard options
- * (host-only, 30 days). The Redis session record stays the authority (idle, 90-day cap, revocation):
+ * (host-only, 30 days, NOT clamped to the 90-day cap: the proxy has no session record). The Redis
+ * session record stays the authority (idle, 90-day cap, revocation):
  * re-setting a revoked token grants nothing. NEVER on another method: a sign-out POST deletes the
  * cookie, and a proxy Set-Cookie on the same response could re-create it.
  */
