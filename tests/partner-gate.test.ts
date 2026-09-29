@@ -42,7 +42,7 @@ vi.mock('@/lib/partner-store', async () => {
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 
-import { requirePartnerStaff } from '@/lib/auth';
+import { requirePartnerStaff, requireScope, requireStaff, requireStaffSelf, requireTicketWorker } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { PARTNER_ANY, PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
@@ -125,5 +125,44 @@ describe('requirePartnerStaff', () => {
   });
   it('takes no request input: the policy and options are its only parameters', () => {
     expect(requirePartnerStaff.length).toBeLessThanOrEqual(2);
+  });
+});
+
+// UI redesign M3-9 (O10 = yes): the legacy /admin-dashboard gates honour the invite marker, so an
+// invitee cannot skip enrolment by opening the old dashboard directly. requireStaffSelf (the
+// enrolment + own-password actions) stays exempt, or enrolment itself would be unreachable.
+describe('legacy gates and the invite marker (M3-9, O10)', () => {
+  it('a marked, unenrolled partner agent → requireScope / requireStaff / requireTicketWorker send it to enrolment', async () => {
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
+    await expect(requireScope()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
+    await expect(requireStaff()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
+    await expect(requireTicketWorker()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
+  });
+  it('an unmarked partner agent is unchanged', async () => {
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+  });
+  it('requireStaffSelf admits the marked account (the enrolment actions stay reachable)', async () => {
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
+    await expect(requireStaffSelf()).resolves.toMatchObject({ username: 'u1' });
+    expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBe('1');
+  });
+  it('a platform admin is never affected, even with a stray marker under its name', async () => {
+    await signInAs({ partnerId: undefined, role: 'admin' });
+    await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
+    await expect(requireStaff()).resolves.toMatchObject({ username: 'u1' });
+  });
+  it('marked but enrolled → admitted, and the marker is cleared', async () => {
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
+    const mfa = (await import('@/lib/staff-mfa-store')).getStaffMfaStore();
+    const begun = await mfa.beginEnrolment('u1');
+    if (!begun.ok) throw new Error('enrol refused');
+    const { base32Decode, totpAt } = await import('@/lib/totp');
+    expect(await mfa.confirmEnrolment('u1', totpAt(base32Decode(begun.secretBase32), Date.now()))).toBe('ok');
+    await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+    expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
   });
 });
