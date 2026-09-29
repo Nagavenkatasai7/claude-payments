@@ -180,6 +180,35 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
     });
   });
 
+  it('a SLOW delivery insert never costs the rail providerRef: the body is read before the record is awaited', async () => {
+    const slowLogDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) =>
+            table === partnerWebhookDeliveries
+              ? { values: (v: unknown) => new Promise((r) => setTimeout(() => r(target.insert(partnerWebhookDeliveries).values(v as never)), 400)) }
+              : target.insert(table as never);
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    let answeredAt = 0;
+    // Stands in for a body whose read is aborted by the still-armed AbortSignal.timeout if it is delayed.
+    fetchFn.mockImplementation(async () => {
+      answeredAt = Date.now();
+      return { ok: true, status: 200, json: async () => {
+        if (Date.now() - answeredAt > 150) throw Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+        return { providerRef: 'rail-fast' };
+      } };
+    });
+    await outbox.enqueue('settlement.instruct', { transferId: 'dl_t1' }, { dedupeKey: 'instruct:dl_t1' });
+    const r = await drainOnce(deps(slowLogDb), 'w1');
+    expect(r.processed).toBe(1);
+    expect(await providerRef()).toBe('rail-fast');
+    expect((await deliveries()).map((d) => d.outcome)).toEqual(['ok']); // awaited before the handler returned
+  });
+
   it('pre-POST exits record NOTHING: a delivered transfer, a sandbox transfer, a refused stored URL', async () => {
     await store.saveTransfer({ ...transferFixture(), status: 'delivered' });
     await outbox.enqueue('settlement.instruct', { transferId: 'dl_t1' }, { dedupeKey: 'instruct:dl_t1' });

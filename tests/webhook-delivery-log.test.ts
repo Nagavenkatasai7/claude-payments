@@ -92,13 +92,17 @@ describe('recordInstructDelivery', () => {
 describe('withInstructDeliveryLog', () => {
   it('returns the response unchanged and records ok with its status', async () => {
     const res = new Response('{}', { status: 201 });
-    await expect(withInstructDeliveryLog(db, meta, async () => res)).resolves.toBe(res);
+    const out = await withInstructDeliveryLog(db, meta, async () => res);
+    expect(out.res).toBe(res);
+    await out.logged;
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['ok', 201]]);
   });
 
   it('records http_error for a non-2xx and still returns the response (the caller decides)', async () => {
     const res = new Response(null, { status: 503 });
-    await expect(withInstructDeliveryLog(db, meta, async () => res)).resolves.toBe(res);
+    const out = await withInstructDeliveryLog(db, meta, async () => res);
+    expect(out.res).toBe(res);
+    await out.logged;
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['http_error', 503]]);
   });
 
@@ -111,15 +115,29 @@ describe('withInstructDeliveryLog', () => {
   it('a failing recorder changes neither the returned response nor the thrown error', async () => {
     const failing = stubDb(() => Promise.reject(new Error('down')));
     const res = new Response(null, { status: 200 });
-    await expect(withInstructDeliveryLog(failing, meta, async () => res)).resolves.toBe(res);
+    const out = await withInstructDeliveryLog(failing, meta, async () => res);
+    expect(out.res).toBe(res);
+    await expect(out.logged).resolves.toBeUndefined();
     const err = new Error('net');
     await expect(withInstructDeliveryLog(failing, meta, async () => Promise.reject(err))).rejects.toBe(err);
     expect(await rows()).toHaveLength(0);
   });
 
+  it('a SLOW record never delays the response (the caller reads the body while the rail timeout is still armed)', async () => {
+    const slow = stubDb(() => new Promise((r) => setTimeout(r, 400)));
+    const res = new Response('{"providerRef":"x"}', { status: 200 });
+    const started = Date.now();
+    const out = await withInstructDeliveryLog(slow, meta, async () => res);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(out.res).toBe(res);
+    await expect(out.logged).resolves.toBeUndefined();
+  });
+
   it('a response-like object without a numeric status stores a null status', async () => {
     const res = { ok: true, json: async () => ({}) } as unknown as Response;
-    await expect(withInstructDeliveryLog(db, meta, async () => res)).resolves.toBe(res);
+    const out = await withInstructDeliveryLog(db, meta, async () => res);
+    expect(out.res).toBe(res);
+    await out.logged;
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['ok', null]]);
   });
 });

@@ -80,8 +80,18 @@ export async function recordInstructDelivery(db: DbOrTx, d: InstructDelivery, ti
 /**
  * Runs the instruction POST and records its outcome. The response is returned and the error rethrown
  * UNCHANGED: the caller's success/failure handling is exactly what it was without the log.
+ *
+ * On a response, the record is STARTED but not awaited here: `logged` is returned for the caller to
+ * await after it has read the body (review LOW: the POST's AbortSignal.timeout is still armed while
+ * the body is read, so waiting on the insert first could make res.json() fail and lose the rail's
+ * providerRef). `logged` never rejects. A thrown POST has no body to read: it is recorded, then
+ * rethrown.
  */
-export async function withInstructDeliveryLog(db: DbOrTx, meta: InstructDeliveryMeta, post: () => Promise<Response>): Promise<Response> {
+export async function withInstructDeliveryLog(
+  db: DbOrTx,
+  meta: InstructDeliveryMeta,
+  post: () => Promise<Response>,
+): Promise<{ res: Response; logged: Promise<void> }> {
   const started = performance.now();
   let res: Response;
   try {
@@ -90,10 +100,11 @@ export async function withInstructDeliveryLog(db: DbOrTx, meta: InstructDelivery
     await recordInstructDelivery(db, { ...meta, outcome: 'network', httpStatus: null, latencyMs: performance.now() - started });
     throw err;
   }
-  if (res && typeof res === 'object') {
-    await recordInstructDelivery(db, { ...meta, outcome: res.ok ? 'ok' : 'http_error', httpStatus: res.status, latencyMs: performance.now() - started });
-  }
-  return res;
+  const logged =
+    res && typeof res === 'object'
+      ? recordInstructDelivery(db, { ...meta, outcome: res.ok ? 'ok' : 'http_error', httpStatus: res.status, latencyMs: performance.now() - started })
+      : Promise.resolve();
+  return { res, logged };
 }
 
 // ── The /partner delivery log reader ─────────────────────────────────────────────────────────────
