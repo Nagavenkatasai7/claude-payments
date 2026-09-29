@@ -217,6 +217,26 @@ describe('sendOtpCode — fallback log is scrubbed (Program-Fix 37)', () => {
     expect(text).toContain('4567');
     expect(text).toContain('whatsapp.otp-fallback');
   });
+
+  it('M2-14: logs only the HTTP status + Graph code, never the Graph message (a 6-digit run slips past the 7+ scrubber)', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        const body = JSON.parse(init.body as string);
+        if (body.type === 'template')
+          return { ok: false, status: 400, text: async () => '{"error":{"code":131008,"message":"param 246810 invalid"}}' };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await sendOtpCode('15551234567', '135790');
+    const text = warn.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join('\n');
+    expect(text).toContain('131008');
+    expect(text).not.toContain('246810');
+    expect(text).not.toContain('invalid');
+  });
 });
 
 // ── Program-Fix 49A (whatsapp-11): a BYO-number partner's OTPs and KYC notices

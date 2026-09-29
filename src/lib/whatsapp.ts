@@ -671,7 +671,7 @@ export async function sendOtpCode(
     // recipient). The code is never passed to the logger.
     logWarn(
       'whatsapp.otp-fallback',
-      `OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
+      `OTP template send failed (${summaryText(err)}); falling back to free-form text`,
       { to: maskPhone(phone) },
     );
     await sendText(phone, otpMessage(code, brand), creds);
@@ -897,13 +897,42 @@ export async function sendVerificationStatus(
  * go out on the partner's number, never the shared one. A partner template
  * without creds is ignored (today's path), so one tenant's template name never
  * reaches the shared number. No partnerTemplate ⇒ today's behaviour exactly.
+ *
+ * M2-14 (#393 enablement follow-ups), `hooks` (optional; absent ⇒ M2-6 behaviour):
+ *  - `inWindow`: asked only after the partner template FAILED. Outside the 24-h
+ *    window a free-form fallback is accepted by Graph and then dropped (131047
+ *    arrives later on the status webhook), so the send would look successful.
+ *    false (or a throw) ⇒ no fallback; the template error is rethrown and the
+ *    route answers honestly.
+ *  - `onTemplateFailure`: told the HTTP status and Graph code only (the caller
+ *    records the channel-health mark). Its own failure is swallowed.
+ * Failure logs carry only the status and the Graph code: a Graph message can
+ * echo request digits, and the scrubber only masks runs of 7+ digits.
  */
+export interface TxOtpSendHooks {
+  inWindow?: () => Promise<boolean>;
+  onTemplateFailure?: (info: { status?: number; code?: number }) => void | Promise<void>;
+}
+
+/** Only the HTTP status and Graph code of a send error: never its message or body. */
+export function sendErrorSummary(err: unknown): { status?: number; code?: number } {
+  if (err instanceof WhatsAppSendError) {
+    return { status: err.status, ...(err.code !== undefined ? { code: err.code } : {}) };
+  }
+  return {};
+}
+const summaryText = (err: unknown): string => {
+  const { status, code } = sendErrorSummary(err);
+  return err instanceof WhatsAppSendError ? `status ${status ?? 'unknown'}, code ${code ?? 'none'}` : 'non-Graph error';
+};
+
 export async function sendTransactionOtp(
   phone: string,
   code: string,
   creds?: WaCreds,
   brand?: string, // Program-Fix 49A: absent ⇒ "SmartRemit" (callers unchanged)
   partnerTemplate?: { name: string; lang: string }, // M2-6: absent ⇒ today's behaviour
+  hooks: TxOtpSendHooks = {},
 ): Promise<void> {
   if (creds && partnerTemplate) {
     try {
@@ -915,12 +944,28 @@ export async function sendTransactionOtp(
         creds,
       );
     } catch (err) {
-      // The Graph error never echoes the params; the code is never passed to the logger.
+      try {
+        await hooks.onTemplateFailure?.(sendErrorSummary(err));
+      } catch {
+        /* best-effort signal; the send outcome wins */
+      }
+      let fallback = true;
+      if (hooks.inWindow) {
+        try {
+          fallback = await hooks.inWindow();
+        } catch {
+          fallback = false; // unknown ⇒ outside: the conservative answer
+        }
+      }
+      // Status + Graph code only; the code and the Graph message are never logged.
       logWarn(
         'whatsapp.txotp-partner-fallback',
-        `transaction OTP partner template send failed; falling back to free-form text on the partner number: ${err instanceof Error ? err.message : 'unknown error'}`,
+        fallback
+          ? `transaction OTP partner template send failed (${summaryText(err)}); falling back to free-form text on the partner number`
+          : `transaction OTP partner template send failed (${summaryText(err)}); customer outside the 24-h window, no free-form fallback`,
         { to: maskPhone(phone) },
       );
+      if (!fallback) throw err;
       await sendText(phone, transactionOtpMessage(code, brand), creds);
     }
     return;
@@ -936,7 +981,7 @@ export async function sendTransactionOtp(
     // The Graph error never echoes the params; the code is never passed to the logger.
     logWarn(
       'whatsapp.txotp-fallback',
-      `transaction OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
+      `transaction OTP template send failed (${summaryText(err)}); falling back to free-form text`,
       { to: maskPhone(phone) },
     );
     await sendText(phone, transactionOtpMessage(code, brand));

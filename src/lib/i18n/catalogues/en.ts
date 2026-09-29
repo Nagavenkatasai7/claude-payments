@@ -498,6 +498,7 @@ export const en = {
   'partner.whatsapp.health.kind.sig_fail': 'Some inbound webhook calls failed the signature check. Check the app secret.',
   'partner.whatsapp.health.kind.no_phone': 'Some inbound messages had no phone number and could not be answered.',
   'partner.whatsapp.health.kind.delivery_failed': 'WhatsApp reported failed deliveries.',
+  'partner.whatsapp.health.kind.auth_template_failed': 'WhatsApp rejected the authentication template used for payment confirmation codes.',
   'partner.whatsapp.health.kind.config_warning': 'The app secret or the webhook verify token is not set.',
   'partner.whatsapp.test.title': 'Connection test',
   'partner.whatsapp.test.body': 'Checks with Meta that your stored access token can read your phone number. No message is sent.',
