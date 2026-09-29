@@ -37,6 +37,9 @@ import type { RedisLike } from '@/lib/store';
 // mutex as api-keys/actions.ts), then spreads the WHOLE config back: saveIntegrations rewrites every
 // column (integrations-repo.ts:58-80), so a dropped field would silently null a secret (the inbound
 // status webhook would then fail closed for in-flight transfers).
+// The WhatsApp writers (partner-whatsapp-config.ts) take the same lock and re-read in their
+// transaction. The legacy platform-admin savePaymentConfigAction (admin-dashboard, freeze-listed)
+// does not yet: a platform save racing a partner rotation can still undo it (follow-up).
 
 /** The platform's own hosts (and every subdomain of the first). A partner endpoint may be none of them. */
 export const SMARTREMIT_HOSTS = Object.freeze(['smartremit.ai', 'claude-payments.vercel.app'] as const);
