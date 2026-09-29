@@ -102,11 +102,6 @@ const fundingGate = () =>
   sql`(${transfers.fundingState} IS NULL OR ${transfers.fundingState} = 'succeeded')`;
 
 /**
- * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /
- * edit predicates' unfunded test. A bound PSP intent counts as possibly
- * charged (the sender may have confirmed an ACH debit that lands days later).
- */
-/**
  * M3-10 follow-up: the partner-release predicates for markPaidIfInReview — the transfer is in
  * `partnerId`'s tenant AND its sender's customer row there exists with no PEP / watchlist hit.
  */
@@ -115,6 +110,11 @@ const senderClearForPartnerRelease = (partnerId: PartnerId) => [
   sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE)`,
 ];
 
+/**
+ * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /
+ * edit predicates' unfunded test. A bound PSP intent counts as possibly
+ * charged (the sender may have confirmed an ACH debit that lands days later).
+ */
 const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
 
 /**
@@ -777,7 +777,12 @@ export function createTransferRepo(
      * watchlist_hit both NOT TRUE (NULL = never flagged, as in
      * isScreeningCustomerHold). A flag raised after the caller's pre-check
      * (loadSenderScreening) but before this statement therefore refuses the
-     * claim, and a missing row refuses it (fail closed). Both correlated
+     * claim, and a missing row refuses it (fail closed). Deliberately no
+     * FOR SHARE on the customer row: a flag write committing after this
+     * statement's snapshot but before the release transaction commits (a few
+     * ms) is not seen; the result equals "released, then flagged", which the
+     * flag writer (kyc-state-machine, never touches transfers) already allows
+     * for any flag raised just after a release. Both correlated
      * columns are table-qualified ("transfers"."phone"), so they can never
      * bind to customers' own phone / partner_id. Omitted (platform staff) ⇒
      * the statement is byte-identical to before (test-pinned). Drizzle 0.45:
