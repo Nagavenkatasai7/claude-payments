@@ -9,6 +9,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
 import { logError } from './log';
 import { amlHoldRailEligible } from './aml-hold';
+import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
@@ -291,6 +292,12 @@ export function createStore(redis: RedisLike, db: Db) {
       status: TransferStatus,
     ): Promise<Transfer | null> {
       // Single rank-guarded UPDATE — atomic under concurrent callbacks.
+      // UI redesign M2-11b: EVERY move to 'delivered' (the rail/simulator
+      // callback route and the worker's mock.settle) comes through here, so the
+      // automatic receipt email is enqueued in the SAME transaction as the flip
+      // (delivery-receipt.ts; prefs read before it, fail-open). Other targets
+      // are unchanged.
+      if (status === 'delivered') return deliverTransfer(db, transferId);
       return transfersRepo.updateTransferFromWebhook(transferId, status);
     },
     async listTransfers(): Promise<Transfer[]> {
