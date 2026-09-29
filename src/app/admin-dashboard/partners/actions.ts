@@ -6,10 +6,12 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { eq } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
-import { partners } from '@/db/schema';
+import { partnerRequests, partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import { isPartnerRequestId } from '@/lib/partner-application-decision';
+import { partnerIdForRequest } from '@/lib/partner-from-request';
+import { createAuditRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { setPartnerSlug } from '@/db/repos/partner-site-repo';
 import { normalizeSlugInput } from '@/lib/partner-slug-policy';
@@ -868,6 +870,12 @@ export interface PartnerWizardInput {
   /** wabaId is used only to verify pnid ownership (fix 30) and is never persisted. */
   whatsapp?: { phoneNumberId?: string; token?: string; verifyToken?: string; appSecret?: string; wabaId?: string };
   payment?: { providerType?: string; settlementUrl?: string; signingSecret?: string; webhookSecret?: string };
+  /**
+   * M3-21 review: the APPROVED partner request this wizard run was opened from (?fromRequest=). The
+   * partner then gets the request-derived id (partnerIdForRequest), the same one the "create partner"
+   * card uses, so a request never yields two partners. Re-validated here: never trusted.
+   */
+  fromRequest?: string;
 }
 
 export interface PartnerWizardResult {
@@ -902,7 +910,18 @@ export async function wizardCreatePartnerAction(
 
   // Program-Fix 38: the same persona refusal as updatePartnerAction, before any write.
   const botPersona = boundedPersona(input.botPersona);
-  const id = newTransferId();
+  // M3-21 review: a wizard opened from an approved request takes the request-derived id and refuses
+  // when that partner already exists (re-checked under the request row lock below).
+  const fromRequest = clean(input.fromRequest);
+  if (fromRequest !== undefined) {
+    if (!isPartnerRequestId(fromRequest)) throw new Error('Invalid partner request.');
+    const req = await createPartnerRequestRepo(getDb()).getPartnerRequest(fromRequest);
+    if (!req || req.applicationStatus !== 'approved') throw new Error('The partner request is not approved.');
+  }
+  const id = fromRequest !== undefined ? partnerIdForRequest(fromRequest) : newTransferId();
+  if (fromRequest !== undefined && (await getPartnerStore().getPartner(id))) {
+    throw new Error('A partner was already created from this request.');
+  }
   const now = new Date().toISOString();
   const partner: Partner = {
     id,
@@ -974,6 +993,18 @@ export async function wizardCreatePartnerAction(
   // rolls back too — never an orphan ACTIVE partner with no integrations/key.
   try {
     await getDb().transaction(async (tx) => {
+      if (fromRequest !== undefined) {
+        // The same lock + existence check as createPartnerFromRequestAction: the two serialise on the
+        // request row, and savePartner (an upsert) never overwrites a partner made from this request.
+        const [locked] = await tx
+          .select({ status: partnerRequests.applicationStatus })
+          .from(partnerRequests)
+          .where(eq(partnerRequests.id, fromRequest))
+          .limit(1)
+          .for('update');
+        if (!locked || locked.status !== 'approved') throw new Error('The partner request is not approved.');
+        if (await createPartnerStore(tx).getPartner(id)) throw new Error('A partner was already created from this request.');
+      }
       await createPartnerStore(tx).savePartner(partner);
       // UI redesign M3-21: a platform-wizard partner is approved for go-live at creation (it gets a
       // live key below), committed with the partner itself.

@@ -36,7 +36,27 @@ vi.mock('next/navigation', () => ({
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('@/lib/outbox', () => ({ pokeWorker: () => pokeWorkerMock() }));
-vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
+// A switch that makes a transaction COMMIT and then throw (a driver error after COMMIT: the client
+// sees a failure although everything was written).
+const throwAfterCommit = vi.hoisted(() => ({ on: false }));
+function dbThrowingAfterCommit(real: Db): Db {
+  return new Proxy(real, {
+    get(target, prop) {
+      if (prop === 'transaction') {
+        return async (fn: Parameters<Db['transaction']>[0]) => {
+          await target.transaction(fn);
+          throw new Error('connection lost after COMMIT');
+        };
+      }
+      const v = Reflect.get(target, prop) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  });
+}
+vi.mock('@/db/client', async (orig) => ({
+  ...(await orig<typeof import('@/db/client')>()),
+  getDb: () => (throwAfterCommit.on ? dbThrowingAfterCommit(db) : db),
+}));
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
@@ -64,6 +84,7 @@ vi.mock('@/lib/partner-store', async () => {
 
 import { approveGoLiveAction } from '@/app/admin-dashboard/partners/go-live-actions';
 import { createPartnerFromRequestAction } from '@/app/admin-dashboard/partner-requests/actions';
+import { wizardCreatePartnerAction } from '@/app/admin-dashboard/partners/actions';
 import { auditEvents, outbox, partnerGoLive, partners, apiKeys } from '@/db/schema';
 import { createAuthStore } from '@/lib/auth-store';
 import { createPartnerRequestRepo } from '@/db/repos/aux-repos';
@@ -138,6 +159,7 @@ beforeEach(async () => {
   cookieJar.clear();
   pokeWorkerMock.mockReset();
   failEnqueue.on = false;
+  throwAfterCommit.on = false;
   db = await freshDb();
   pgPartnerStore = createPartnerStore(db);
   await db.execute(sql`TRUNCATE partner_requests, partner_applications RESTART IDENTITY CASCADE`);
@@ -394,5 +416,67 @@ describe('createPartnerFromRequestAction', () => {
     // A retry then succeeds.
     failEnqueue.on = false;
     expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=created`);
+  });
+
+  it('an error AFTER the commit keeps the committed partner and its already-emailed invite (no revoke)', async () => {
+    await asPlatformAdmin();
+    throwAfterCommit.on = true;
+    const out = await run(createPartnerFromRequestAction(createForm()));
+    throwAfterCommit.on = false;
+    expect(out).toBe(`/admin-dashboard/partner-requests/${REQ}?create=created`);
+    expect(await pgPartnerStore.getPartner(NEW_PID)).not.toBeNull();
+    expect(await emailRows()).toHaveLength(1);
+    // The emailed link still works: the invite was NOT revoked.
+    const payload = (await emailRows())[0].payload as { sealed: Record<string, string> };
+    const link = decryptField(payload.sealed.staff_invite_link, undefined, outboxSealedCtx('staff_invite_link'));
+    expect(await invites().peek(link.slice(link.lastIndexOf('/') + 1))).not.toBeNull();
+    expect(await invites().listForPartner(NEW_PID)).toHaveLength(1);
+  });
+});
+
+// Review fix: the wizard (?fromRequest=) and the create card must never both create a partner.
+describe('wizard fromRequest + create-from-request: one partner per request', () => {
+  const wizard = (o: Partial<Parameters<typeof wizardCreatePartnerAction>[0]> = {}) =>
+    wizardCreatePartnerAction({ name: 'Acme Remit', countries: ['CA'], fromRequest: REQ, ...o });
+  const fromRequestPartners = async () => (await partnerRows()).filter((r) => r.id === NEW_PID);
+
+  it('create-from-request first, then the wizard for the same request → refused, still one partner', async () => {
+    await asPlatformAdmin();
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=created`);
+    const before = (await partnerRows()).length;
+    await expect(wizard()).rejects.toThrow(/already/i);
+    expect((await partnerRows()).length).toBe(before);
+    expect(await fromRequestPartners()).toHaveLength(1);
+    expect(await db.select().from(apiKeys).where(eq(apiKeys.partnerId, NEW_PID))).toEqual([]);
+  });
+
+  it('the wizard first (it uses the request-derived id), then create-from-request → exists, no invite', async () => {
+    await asPlatformAdmin();
+    const r = await wizard();
+    expect(r.id).toBe(NEW_PID);
+    expect(await isLiveApproved(db, NEW_PID)).toBe(true); // a wizard partner is approved at creation
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=exists`);
+    expect(await fromRequestPartners()).toHaveLength(1);
+    expect(await invites().listForPartner(NEW_PID)).toEqual([]);
+    expect(await emailRows()).toEqual([]);
+    await expect(wizard()).rejects.toThrow(/already/i); // a second wizard run too
+  });
+
+  it('a wizard fromRequest that is malformed, unknown or not approved → refused, nothing written', async () => {
+    await asPlatformAdmin();
+    const before = (await partnerRows()).length;
+    await expect(wizard({ fromRequest: "x' OR 1=1" })).rejects.toThrow(/request/i);
+    await expect(wizard({ fromRequest: 'preq_Unknown' })).rejects.toThrow(/request/i);
+    await setRequestStatus('completed');
+    await expect(wizard()).rejects.toThrow(/request/i);
+    expect((await partnerRows()).length).toBe(before);
+  });
+
+  it('a wizard WITHOUT fromRequest is unchanged (a fresh random id every time)', async () => {
+    await asPlatformAdmin();
+    const a = await wizardCreatePartnerAction({ name: 'Plain A', countries: ['US'] });
+    const b = await wizardCreatePartnerAction({ name: 'Plain B', countries: ['US'] });
+    expect(a.id).not.toBe(b.id);
+    expect(a.id).not.toBe(NEW_PID);
   });
 });

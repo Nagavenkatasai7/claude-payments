@@ -5,7 +5,7 @@ import { notFound, redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { requirePlatformAdmin } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { partnerRequests } from '@/db/schema';
+import { outbox, partnerRequests } from '@/db/schema';
 import { createAuditRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { emailConfigured } from '@/lib/email';
@@ -312,6 +312,20 @@ async function createPartnerFromRequest(
   } catch (err) {
     logWarn('admin.partner_from_request', errName(err), { requestId: id });
     outcome = 'failed';
+    // A driver error AFTER COMMIT (e.g. the connection dropped) looks like a failure here although the
+    // partner, the email and both audit rows were written. Revoking would kill the link already on its
+    // way, so check what actually committed first: THIS invite's email row (its dedupe key is derived
+    // from this token's hash) exists only if our transaction committed.
+    try {
+      const [mailRow] = await getDb()
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(eq(outbox.dedupeKey, staffInviteDedupeKey(issued.hash)))
+        .limit(1);
+      if (mailRow && (await createPartnerStore(getDb()).getPartner(partnerId))) outcome = 'created';
+    } catch (checkErr) {
+      logWarn('admin.partner_from_request.recheck', errName(checkErr), { requestId: id });
+    }
   }
 
   if (outcome !== 'created') {

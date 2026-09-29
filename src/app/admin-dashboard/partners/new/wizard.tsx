@@ -102,7 +102,9 @@ export function PartnerSetupWizard({ fromRequest }: { fromRequest?: WizardSource
     setError(null);
     startTransition(async () => {
       try {
-        setResult(await wizardCreatePartnerAction(draft));
+        // M3-21 review: a run opened from an approved request carries its id; the action re-validates it
+        // and gives the partner the request-derived id, so the request never yields two partners.
+        setResult(await wizardCreatePartnerAction(fromRequest ? { ...draft, fromRequest: fromRequest.id } : draft));
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Could not create the partner.');
       }

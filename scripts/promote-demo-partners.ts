@@ -24,6 +24,7 @@ import { getDb } from '@/db/client';
 import { sql } from 'drizzle-orm';
 import { getPartnerStore } from '@/lib/partner-store';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 import { newTransferId } from '@/lib/id';
 import { getFxRates } from '@/lib/rate';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
@@ -99,6 +100,9 @@ async function main() {
       requireKycBeforeSend: false,
       updatedAt: new Date().toISOString(),
     });
+
+    // M3-21: like the platform wizard, a promoted demo partner is approved for go-live (idempotent).
+    await upsertApprovedGoLive(db, id, 'system:promote-demo-partners');
 
     // USD→INR board position + (winner) a strictly-better fresh pushed rate.
     await rates.upsertRate({

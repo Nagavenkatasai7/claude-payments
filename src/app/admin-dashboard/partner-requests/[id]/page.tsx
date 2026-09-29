@@ -257,7 +257,7 @@ export default async function PartnerApplicationPage({
                     </div>
                   </form>
                 )}
-                {status === 'approved' && (
+                {status === 'approved' && !fromRequestPartner && (
                   <Button asChild size="sm">
                     <Link href={`/admin-dashboard/partners/new?fromRequest=${encodeURIComponent(request.id)}`}>
                       Set up this partner →
