@@ -22,12 +22,14 @@ export const PARTNER_ROUTES = Object.freeze({
   security: { href: '/partner/security', labelKey: 'partner.nav.security', policy: PARTNER_ANY, nav: true },
   audit: { href: '/partner/audit', labelKey: 'partner.nav.audit', policy: PARTNER_ADMIN, nav: true },
   branding: { href: '/partner/branding', labelKey: 'partner.nav.branding', policy: PARTNER_ADMIN, nav: true },
+  integrations: { href: '/partner/integrations', labelKey: 'partner.nav.integrations', policy: PARTNER_ADMIN, nav: true },
+  integrationsWhatsapp: { href: '/partner/integrations/whatsapp', labelKey: 'partner.integrations.whatsapp.title', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
 // Final order once every page exists: home, onboarding, transfers, customers, reports, support,
 // staff, audit, integrations, branding, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'transfers', 'customers', 'support', 'audit', 'branding', 'security'];
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'transfers', 'customers', 'support', 'audit', 'integrations', 'branding', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

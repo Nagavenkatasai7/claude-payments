@@ -25,6 +25,7 @@ const ACTION_LABELS = Object.freeze({
   'api_key.revoke': 'partner.audit.action.apiKeyRevoke',
   'partner.whatsapp_config': 'partner.audit.action.whatsappConfig',
   'partner.whatsapp.disconnect': 'partner.audit.action.whatsappDisconnect',
+  'partner.whatsapp.test': 'partner.audit.action.whatsappTest',
   'partner.support_config': 'partner.audit.action.supportConfig',
   'partner.alert_email.update': 'partner.audit.action.alertEmail',
   'partner.disclosure_config': 'partner.audit.action.disclosureConfig',
