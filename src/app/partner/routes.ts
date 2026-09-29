@@ -28,13 +28,15 @@ export const PARTNER_ROUTES = Object.freeze({
   integrations: { href: '/partner/integrations', labelKey: 'partner.nav.integrations', policy: PARTNER_ADMIN, nav: true },
   integrationsWhatsapp: { href: '/partner/integrations/whatsapp', labelKey: 'partner.integrations.whatsapp.title', policy: PARTNER_ADMIN, nav: false },
   integrationsApiKeys: { href: '/partner/integrations/api-keys', labelKey: 'partner.integrations.apiKeys.title', policy: PARTNER_ADMIN, nav: false },
+  // M3-20: the seven-step go-live checklist + request (admin only; SPEC §3.1).
+  onboarding: { href: '/partner/onboarding', labelKey: 'partner.nav.onboarding', policy: PARTNER_ADMIN, nav: true },
   integrationsWebhooks: { href: '/partner/integrations/webhooks', labelKey: 'partner.integrations.webhooks.title', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
-// Final order once every page exists: home, onboarding, transfers, customers, reports, support,
-// staff, audit, integrations, branding, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'transfers', 'customers', 'reports', 'support', 'staff', 'audit', 'integrations', 'branding', 'security'];
+// The final order: home, onboarding, transfers, customers, reports, support, staff, audit,
+// integrations, branding, security.
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'customers', 'reports', 'support', 'staff', 'audit', 'integrations', 'branding', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);
