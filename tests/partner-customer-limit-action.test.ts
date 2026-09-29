@@ -276,7 +276,9 @@ describe('setCustomerLimitAction: never over a SmartRemit override', () => {
     await asAdmin();
     expect(await setCustomerLimitAction(form(REF_A()))).toEqual({ ok: true });
     expect(await overrideOf('pa', SHARED)).toMatchObject({ perTransferCapCents: 50_000, setScope: 'partner' });
-    expect((await limitAudits())[0].meta.old).toEqual(lapsed);
+    // A SmartRemit staff username never lands in the partner's tenant audit row.
+    expect((await limitAudits())[0].meta.old).toEqual({ ...lapsed, setBy: 'smartremit' });
+    expect(JSON.stringify(await limitAudits())).not.toContain('"root"');
   });
   it('its OWN partner-set override may be replaced and cleared', async () => {
     await asAdmin();

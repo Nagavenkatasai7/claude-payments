@@ -116,7 +116,8 @@ export async function setCustomerLimitAction(formData: FormData): Promise<Action
           scope: 'customer',
           setScope: 'partner',
           actorScope: 'partner',
-          old: previous,
+          // A replaced (expired) SmartRemit entry is recorded without the platform staff username.
+          old: previous && previous.setScope !== 'partner' && previous.setBy ? { ...previous, setBy: 'smartremit' } : previous,
           new: value,
           reason: validated.reason,
           expiresAt: validated.expiresAt ?? null,
