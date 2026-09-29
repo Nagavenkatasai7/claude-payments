@@ -203,6 +203,11 @@ export function openReportCsv(job: Pick<ReportJobRow, 'id' | 'partnerId' | 'cont
 export interface RunOpts extends BuildOpts {
   /** Epoch ms when the worker invocation will be killed (DrainOptions.hardStopAt). */
   hardStopAt?: number;
+  /**
+   * One per worker INVOCATION (DrainOptions.reportSlot): at most one report is built per
+   * invocation, so two back-to-back 15 s builds can never push money rows past the start cutoff.
+   */
+  slot?: { reportStarted: boolean };
 }
 
 export type RunOutcome = 'ready' | 'failed' | 'skipped';
@@ -213,6 +218,8 @@ export async function runPartnerReportJob(db: DbOrTx, jobId: string, opts: RunOp
   const now = opts.now ?? Date.now;
   if (opts.hardStopAt !== undefined && opts.hardStopAt - now() < REPORT_MIN_BUDGET_MS) throw new ReportDeferredError();
 
+  if (opts.slot?.reportStarted) throw new ReportDeferredError(5);
+
   const repo = createPartnerReportRepo(db);
   const job = await repo.claimJob(jobId, new Date(now()));
   if (!job) {
@@ -222,6 +229,7 @@ export async function runPartnerReportJob(db: DbOrTx, jobId: string, opts: RunOp
     throw new Error('report_busy');
   }
   const claimedAt = job.claimedAt!;
+  if (opts.slot) opts.slot.reportStarted = true;
 
   let built: BuiltReport;
   let contentEnc: string;
@@ -229,10 +237,16 @@ export async function runPartnerReportJob(db: DbOrTx, jobId: string, opts: RunOp
     built = await buildReportCsv(db, job, opts);
     contentEnc = encryptField(built.csv, undefined, cryptoCtx.partnerReport(job.partnerId, job.id));
   } catch (err) {
-    const code = err instanceof InvalidParamsError ? ERR_INVALID_PARAMS : ERR_GENERATION;
     logWarn('worker.partner-report', 'report build failed', { jobId: job.id, error: err instanceof Error ? err.name : 'error' });
-    await repo.failJob(job.id, claimedAt, code);
-    return 'failed';
+    if (err instanceof InvalidParamsError) {
+      await repo.failJob(job.id, claimedAt, ERR_INVALID_PARAMS);
+      return 'failed';
+    }
+    // Anything else may be transient (a dropped connection): hand the job back to queued and let
+    // the outbox retry it with backoff. A FIXED message, never the cause (it could echo data).
+    // At MAX_ATTEMPTS the row dead-letters (one ops alert) and the job shows as not built.
+    await repo.releaseJob(job.id, claimedAt);
+    throw new Error(ERR_GENERATION);
   }
   const params = { ...obj(job.params), ...(built.truncated ? { truncated: true } : {}) };
   const ok = await repo.completeJob(job.id, claimedAt, {

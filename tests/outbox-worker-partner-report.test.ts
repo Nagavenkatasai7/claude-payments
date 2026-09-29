@@ -155,6 +155,42 @@ describe('partner.report through drainOnce', () => {
   });
 });
 
+describe('money rows are not starved (review MEDIUM)', () => {
+  it('at most ONE report starts per invocation slot; the second is deferred uncharged and stays queued', async () => {
+    await seedBoth();
+    const a = await newJob('pa', 'settlements', WINDOW());
+    const b = await newJob('pa', 'settlements', WINDOW());
+    const slot = { reportStarted: false };
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000, reportSlot: slot });
+    expect(r.processed).toBe(1);
+    expect(r.released).toBe(1);
+    expect((await jobRow(a)).status).toBe('ready');
+    expect((await jobRow(b)).status).toBe('queued');
+    expect((await outboxRow(b))).toMatchObject({ status: 'pending', attempts: 0 });
+    // A later drainOnce in the SAME invocation (same slot) still does not start it.
+    await db.update(outboxTable).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outboxTable.dedupeKey, `report:${b}`));
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000, reportSlot: slot });
+    expect((await jobRow(b)).status).toBe('queued');
+  });
+
+  it('a transient build error hands the job back to queued (retryable), never a terminal failure', async () => {
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const repoMod = await import('@/db/repos/transfer-repo');
+    const real = repoMod.createTransferRepo;
+    const spy = vi.spyOn(repoMod, 'createTransferRepo').mockImplementation((...a: Parameters<typeof real>) => ({
+      ...real(...a),
+      listSettledPage: async () => {
+        throw new Error('connection reset');
+      },
+    }));
+    const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    expect(r.failed).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'queued', claimedAt: null, errorCode: null });
+    expect((await outboxRow(id)).status).toBe('failed');
+  });
+});
+
 describe('buildReportCsv limits', () => {
   it('honours the row cap and flags truncated', async () => {
     await seedBoth();

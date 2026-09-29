@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { freshDb } from './helpers-db';
+import { captureQueries, freshDb } from './helpers-db';
 import { seedTwoTenants, seedPartnerTransfer } from './helpers-partner-app';
 import type { Db } from '@/db/client';
 import { partnerReportJobs } from '@/db/schema';
@@ -57,6 +57,16 @@ describe('tenant scoping', () => {
     expect(await repo.countActive('pa', since)).toBe(2);
     expect(await repo.countSince('pa', new Date(Date.now() - 86_400_000))).toBe(4);
     expect(await repo.countActive('pb', since)).toBe(1);
+  });
+});
+
+describe('lockTenant', () => {
+  it('takes FOR NO KEY UPDATE on the partners row (never FOR UPDATE, which would block FK inserts into transfers)', async () => {
+    const stop = captureQueries();
+    expect(await createPartnerReportRepo(db).lockTenant('pa')).toBe(true);
+    const q = stop().map((x) => x.sql.toLowerCase()).find((x) => x.includes('"partners"'));
+    expect(q).toContain('for no key update');
+    expect(await createPartnerReportRepo(db).lockTenant('nope')).toBe(false);
   });
 });
 

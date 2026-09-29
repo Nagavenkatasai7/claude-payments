@@ -71,13 +71,16 @@ export function createPartnerReportRepo(db: DbOrTx) {
     },
 
     /**
-     * Lock the tenant's partners row (FOR UPDATE) inside the request transaction, so the
-     * concurrency + daily caps are counted by one request at a time per tenant. False when the
-     * tenant does not exist.
+     * Lock the tenant's partners row (FOR NO KEY UPDATE) inside the request transaction, so the
+     * concurrency + daily caps are counted by one request at a time per tenant. NO KEY UPDATE, not
+     * UPDATE: it does not conflict with the FOR KEY SHARE lock every FK insert into transfers
+     * (and the other partner_id children) takes, so money-path mints never wait on it
+     * (LockStrength: node_modules/drizzle-orm/pg-core/query-builders/select.types.d.ts:60).
+     * False when the tenant does not exist.
      */
     async lockTenant(partnerId: PartnerId): Promise<boolean> {
       requireTenant(partnerId);
-      const rows = await db.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('update');
+      const rows = await db.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('no key update');
       return rows.length > 0;
     },
 
@@ -143,6 +146,16 @@ export function createPartnerReportRepo(db: DbOrTx) {
       const rows = await db
         .update(partnerReportJobs)
         .set({ status: 'ready', contentEnc: r.contentEnc, rowCount: r.rowCount, params: r.params, expiresAt: r.expiresAt, completedAt: new Date(), errorCode: null })
+        .where(and(eq(partnerReportJobs.id, id), eq(partnerReportJobs.status, 'running'), eq(partnerReportJobs.claimedAt, claimedAt)))
+        .returning({ id: partnerReportJobs.id });
+      return rows.length > 0;
+    },
+
+    /** running → queued again (a transient build error): the next outbox retry can claim it at once. */
+    async releaseJob(id: string, claimedAt: Date): Promise<boolean> {
+      const rows = await db
+        .update(partnerReportJobs)
+        .set({ status: 'queued', claimedAt: null })
         .where(and(eq(partnerReportJobs.id, id), eq(partnerReportJobs.status, 'running'), eq(partnerReportJobs.claimedAt, claimedAt)))
         .returning({ id: partnerReportJobs.id });
       return rows.length > 0;
