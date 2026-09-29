@@ -2,6 +2,8 @@ import { env } from './env';
 import { getStore } from './store';
 import { getCustomerStore } from './customer-store';
 import { getKycCaseStore } from './kyc-case-store';
+import { reusableInquiryId } from './verify-link';
+import { logWarn } from './log';
 import { sendGateActive } from './kyc-gate';
 import { getPartnerStore } from './partner-store';
 import { getKycProvider } from './providers/kyc-provider';
@@ -35,10 +37,28 @@ export async function startCustomerVerification(
   const customers = getCustomerStore(getStore());
   const provider = getKycProvider(customers, env.appBaseUrl);
 
-  const { url, providerRef } = await provider.startVerification({
-    customerId: customer.senderPhone,
-    senderPhone: customer.senderPhone,
-  });
+  // M2-14 (#400 L9): reuse the inquiry already started (verify-link.ts reusableInquiryId), so a
+  // restart never mints a second one whose completion could go unbound. A reuse the provider refuses
+  // falls back to a fresh inquiry.
+  let reuseId: string | undefined;
+  try {
+    reuseId = reusableInquiryId(await customers.getCustomer(customer.partnerId, customer.senderPhone));
+  } catch {
+    reuseId = undefined; // unknown ⇒ a fresh inquiry (today's behaviour)
+  }
+  const base = { customerId: customer.senderPhone, senderPhone: customer.senderPhone };
+  let started: { url: string; providerRef: string };
+  if (reuseId) {
+    try {
+      started = await provider.startVerification({ ...base, existingInquiryId: reuseId });
+    } catch (err) {
+      logWarn('kyc.start', 'inquiry reuse refused; starting a fresh one', { error: err instanceof Error ? err.name : 'unknown' });
+      started = await provider.startVerification(base);
+    }
+  } else {
+    started = await provider.startVerification(base);
+  }
+  const { url, providerRef } = started;
 
   await getKycCaseStore(getStore()).applyDelta(
     customer.partnerId,
