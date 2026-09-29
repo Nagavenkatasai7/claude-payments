@@ -16,16 +16,30 @@
 // must run that same pre-check itself BEFORE calling prepareSendDraft (the
 // portal send action does: review round 1, M5).
 //
-// Obligations of every non-bot caller:
+// Obligations of every non-bot caller (the customer portal's Send action,
+// src/app/portal/send/actions.ts, meets each one; tests/portal-send-actions.test.ts):
 //  - Build the ToolContext with buildToolContext, with partnerId and phone from
 //    the resolved session (never from form fields) and channel 'web'.
-//  - Pass only the consumer subset of PrepareSendInput: no entityType, business
-//    names or invoiceId (the B2B shape is the bot's bill flow).
+//  - Always pass { pointer: 'web' } explicitly; never 'bot'.
+//  - Pass only the consumer subset of PrepareSendInput: recipient phone + name,
+//    amount + source currency, destination country and funding method. Never
+//    entityType, the business names or invoiceId (the B2B shape is the bot's
+//    bill flow), and never the EDD enums (recipientLegalName, relationship,
+//    purpose, sourceOfFunds, occupation).
+//  - Restrict fundingMethod to the consumer methods: 'ach_pull' ALONE makes a
+//    send B2B here (parseB2bArgs reads funding_method).
+//  - Clamp recipientName with boundUntrustedText(…, NAME_MAX), as
+//    repeat_transfer does, before calling prepareSendDraft.
 //  - Validate fundingMethod before getQuoteTyped: like get_quote, it does not
 //    (prepareSendDraft does, over the chat funding set).
 //  - Run the pure KYC-gate reads first: a gated call here mints a verification
-//    inquiry (startVerificationForTurn) as a side effect.
-//  - Run the cap + EDD pre-check first (above).
+//    inquiry (startVerificationForTurn) as a side effect. (The portal also gives
+//    its context a non-minting KYC provider, so a verified customer inside the
+//    T0 window never mints one either.)
+//  - Run the cap + EDD pre-check first (above) and refuse on edd_required: the
+//    mint only FLAGS an EDD-less transfer for review; it is a backstop, not a block.
+//  - Guard a public entry point with a request key (runOnce) and a per-customer
+//    rate limit, so a double submit makes one draft.
 
 import type { Quote, CapEvaluation, CountryCode, CurrencyCode, FundingMethod } from './types';
 import type { DraftPointer } from './draft-store';

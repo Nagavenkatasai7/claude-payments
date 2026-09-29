@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isScheduleDueToday } from './schedule';
-import { createTransfer } from './transfer-create';
+import { createTransfer, ScheduleMintRefusedError } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
@@ -166,6 +166,8 @@ export async function runDueSchedules(
         senderName, // Program-Fix 14: screened with the recipient's name
         senderKycStatus: owner?.kycStatus ?? 'not_started',
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
+        // M2-10 (#398 review L2): re-check this schedule inside the mint transaction.
+        scheduleId: schedule.id,
       });
       // Program fix 16: a busy per-sender lock wrote nothing — retry the mint
       // once in-process before counting the schedule as failed (the next
@@ -186,6 +188,9 @@ export async function runDueSchedules(
       await deps.scheduleStore.markRun(schedule.id, new Date(deps.now));
       fired++;
     } catch (err) {
+      // M2-10 (#398 review L2): paused / cancelled between the re-read above and the mint — the
+      // same silent skip as that re-read (nothing written, lastRunAt untouched).
+      if (err instanceof ScheduleMintRefusedError && err.reason === 'inactive') continue;
       // A refused mint (Task 9: FX unavailable; or any other refusal) is LOUD:
       // a scrubbed error line, counted in the result (the /api/cron JSON), and
       // ONE deduped ops alert per schedule per Eastern day. lastRunAt is NOT
@@ -198,6 +203,7 @@ export async function runDueSchedules(
         err instanceof RateUnavailableError ? err.reason
         : err instanceof SendCapError ? 'send_cap'   // Program fix 16: the schedule owner is at their cap today
         : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
+        : err instanceof ScheduleMintRefusedError ? 'recipient_deleted' // M2-10: the account's recipient was deleted
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
       await alertScheduleNotCreated(deps, schedule.id, reason, 'schedule-refused');

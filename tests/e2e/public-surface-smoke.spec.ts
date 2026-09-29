@@ -177,10 +177,11 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
 // every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
 // M2-7 adds the transfers pages (a made-up id: the 404 is the host gate's, never a lookup); M2-8 the recipients pages;
-// M2-11 the profile and notifications pages and the email verify link.
+// M2-11 the profile and notifications pages and the email verify link; M2-9 the send pages.
 for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456', '/portal/transfers/AbCdEf123456/receipt',
   '/portal/recipients', '/portal/recipients/new',
-  '/portal/profile', '/portal/notifications', '/portal/notifications/verify?token=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE']) {
+  '/portal/profile', '/portal/notifications', '/portal/notifications/verify?token=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE',
+  '/portal/send', '/portal/send/review']) {
   test(`apex ${path} is the neutral 404`, async ({ page }) => {
     const res = await page.goto(path);
     expect(res?.status()).toBe(404);
@@ -210,6 +211,16 @@ test('apex POST /api/portal/chat is a 404 with no body (M2-12)', async ({ reques
 // M2-13: the Devices and Privacy pages are apex 404s too (Privacy is also behind its own flag).
 for (const path of ['/portal/devices', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete']) {
   test(`apex ${path} is the neutral 404 (M2-13)`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}
+
+// UI redesign M2-10: the schedules pages, same neutral apex 404.
+for (const path of ['/portal/schedules', '/portal/schedules/new']) {
+  test(`apex ${path} is the neutral 404 (M2-10)`, async ({ page }) => {
     const res = await page.goto(path);
     expect(res?.status()).toBe(404);
     await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
