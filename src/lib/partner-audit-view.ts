@@ -39,6 +39,7 @@ const ACTION_LABELS = Object.freeze({
   'partner.settlement_secret.rotate': 'partner.audit.action.settlementSecret',
   'partner.go_live.request': 'partner.audit.action.goLiveRequest',
   'partner.go_live.approve': 'partner.audit.action.goLiveApprove',
+  'partner.templates.attest': 'partner.audit.action.templatesAttest', // M3-20: subject = partner id; meta { templates, actorScope }, not shown
   'pii.view': 'partner.audit.action.piiView',
   'pii.reveal': 'partner.audit.action.piiReveal',
   'send_limits.set': 'partner.audit.action.sendLimitsSet',

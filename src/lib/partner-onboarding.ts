@@ -3,7 +3,7 @@
 // there are no manual ticks. The page, the request action and the platform approval card (M3-21)
 // all use these functions, so the three can never disagree about what "done" means.
 //
-// Live = go-live approved AND the partner is active (#409 L1: the 0028 backfill approved every
+// Live = go-live approved AND the partner is active (PR 409 review L1: the 0028 backfill approved every
 // partner that existed, including suspended/test ones, so approval alone is never "live"). A
 // backfilled partner has approved_at without requested_at: step 7 counts as done, and the
 // checklist becomes informational.
@@ -38,6 +38,9 @@ export interface OnboardingFacts {
   /** partners.status === 'active'. */
   partnerActive: boolean;
 }
+
+/** Step 2: the WhatsApp templates a partner admin attests are approved (plan O9). */
+export const ATTESTED_TEMPLATES = Object.freeze(['authentication', 'transfer_delivered'] as const);
 
 /** How recent a successful test ping must be to count for step 5. */
 export const PING_FRESH_DAYS = 30;
