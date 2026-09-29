@@ -396,6 +396,7 @@ export const en = {
   'partner.staff.revoke': 'Revoke',
   'partner.staff.revokeName': 'Revoke the invite for {name}',
   'partner.staff.revoked': 'Invite revoked.',
+  'partner.staff.revokeBody': 'The emailed link stops working. You can send a new invite later.',
   'partner.staff.inviteTitle': 'Invite a teammate',
   'partner.staff.inviteSub': 'We email them a link that works once and expires in 72 hours. They set a password and turn on two-step sign-in.',
   'partner.staff.fieldEmail': 'Email',
