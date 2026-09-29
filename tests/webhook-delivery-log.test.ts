@@ -11,7 +11,7 @@ import type { Db } from '@/db/client';
 const logWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/log', async (orig) => ({ ...(await orig<typeof import('@/lib/log')>()), logWarn: logWarnSpy }));
 
-import { DELIVERY_LOG_TIMEOUT_MS, recordInstructDelivery, withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
+import { DELIVERY_LOG_TIMEOUT_MS, DELIVERY_PAGE_SIZE, listDeliveries, parseDeliveryCursor, recordInstructDelivery, withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 
 let db: Db;
 const meta = { partnerId: 'pa', transferId: 'tr_1', outboxId: 42, attempt: 3 };
@@ -121,5 +121,60 @@ describe('withInstructDeliveryLog', () => {
     const res = { ok: true, json: async () => ({}) } as unknown as Response;
     await expect(withInstructDeliveryLog(db, meta, async () => res)).resolves.toBe(res);
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['ok', null]]);
+  });
+});
+
+describe('listDeliveries (the /partner delivery log reader)', () => {
+  async function seed(n: number, partnerId = 'pa') {
+    for (let i = 0; i < n; i++) {
+      await recordInstructDelivery(db, { partnerId, transferId: `tr_${partnerId}_${i}`, outboxId: 100 + i, attempt: 1, outcome: i % 2 ? 'http_error' : 'ok', httpStatus: i % 2 ? 500 : 200, latencyMs: i });
+    }
+  }
+
+  it("the session tenant's rows only, newest first, both kinds, masked columns only (no outbox id, no URL)", async () => {
+    await seedPartner(db, 'pb', 'Partner B');
+    await seed(2, 'pa');
+    await seed(1, 'pb');
+    await db.insert(partnerWebhookDeliveries).values({ partnerId: 'pa', kind: 'ping', attempt: 1, outcome: 'ok', httpStatus: 204, latencyMs: 3 });
+    const page = await listDeliveries(db, 'pa', {});
+    expect(page.rows.map((r) => [r.kind, r.subjectId])).toEqual([['ping', null], ['settlement.instruct', 'tr_pa_1'], ['settlement.instruct', 'tr_pa_0']]);
+    expect(Object.keys(page.rows[0]).sort()).toEqual(['attempt', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outcome', 'subjectId']);
+    expect(JSON.stringify(page.rows)).not.toContain('tr_pb_');
+    expect(page.nextBefore).toBeNull();
+  });
+
+  it('keyset pages by id inside the tenant: 50 per page, then the older rows', async () => {
+    await seed(53);
+    const first = await listDeliveries(db, 'pa', {});
+    expect(first.rows).toHaveLength(DELIVERY_PAGE_SIZE);
+    expect(first.nextBefore).toBe(first.rows[DELIVERY_PAGE_SIZE - 1].id);
+    const second = await listDeliveries(db, 'pa', { before: first.nextBefore });
+    expect(second.rows.map((r) => r.subjectId)).toEqual(['tr_pa_2', 'tr_pa_1', 'tr_pa_0']);
+    expect(second.nextBefore).toBeNull();
+  });
+
+  it("a cursor never reaches another tenant's rows", async () => {
+    await seedPartner(db, 'pb', 'Partner B');
+    await seed(3, 'pb');
+    const page = await listDeliveries(db, 'pa', { before: 1_000_000 });
+    expect(page.rows).toEqual([]);
+  });
+});
+
+describe('parseDeliveryCursor', () => {
+  it.each([
+    ['17', 17],
+    ['1', 1],
+    [undefined, null],
+    ['', null],
+    ['0', null],
+    ['-4', null],
+    ['1e3', null],
+    ['12abc', null],
+    [' 12', null],
+    ['9'.repeat(20), null],
+    [['5', '6'], null],
+  ] as Array<[unknown, number | null]>)('%j → %j', (v, want) => {
+    expect(parseDeliveryCursor(v)).toBe(want);
   });
 });

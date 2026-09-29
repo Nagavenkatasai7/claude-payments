@@ -1,3 +1,4 @@
+import { and, desc, eq, lt } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
 import { partnerWebhookDeliveries } from '@/db/schema';
 import { logWarn } from '@/lib/log';
@@ -93,4 +94,54 @@ export async function withInstructDeliveryLog(db: DbOrTx, meta: InstructDelivery
     await recordInstructDelivery(db, { ...meta, outcome: res.ok ? 'ok' : 'http_error', httpStatus: res.status, latencyMs: performance.now() - started });
   }
   return res;
+}
+
+// ── The /partner delivery log reader ─────────────────────────────────────────────────────────────
+
+/** Rows per page of the partner delivery log. */
+export const DELIVERY_PAGE_SIZE = 50;
+
+export interface DeliveryView {
+  id: number;
+  kind: string;
+  /** The transfer id for an instruction (the rail owner already received it); null for a ping. */
+  subjectId: string | null;
+  outcome: string;
+  httpStatus: number | null;
+  latencyMs: number | null;
+  attempt: number;
+  createdAt: Date;
+}
+
+/**
+ * A strict keyset cursor: a positive decimal integer id, nothing else. It is only a position inside
+ * the tenant's own rows (the WHERE below always carries the tenant), so a crafted value can at most
+ * page within them.
+ */
+export function parseDeliveryCursor(v: unknown): number | null {
+  return parsePositiveId(v);
+}
+
+/** A positive decimal integer id (a form field or query value), else null. No signs, spaces, exponents or leading zeros. */
+export function parsePositiveId(v: unknown): number | null {
+  if (typeof v !== 'string' || !/^[1-9]\d{0,14}$/.test(v)) return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/**
+ * The tenant's deliveries (instructions and test pings), newest first, keyset-paged on the identity
+ * id (monotonic, no sub-millisecond timestamp ties). Never the outbox id, a URL or a body.
+ */
+export async function listDeliveries(db: DbOrTx, partnerId: string, opts: { before?: number | null }): Promise<{ rows: DeliveryView[]; nextBefore: number | null }> {
+  const d = partnerWebhookDeliveries;
+  const rows = await db
+    .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, createdAt: d.createdAt })
+    .from(d)
+    .where(opts.before ? and(eq(d.partnerId, partnerId), lt(d.id, opts.before)) : eq(d.partnerId, partnerId))
+    .orderBy(desc(d.id))
+    .limit(DELIVERY_PAGE_SIZE + 1);
+  const more = rows.length > DELIVERY_PAGE_SIZE;
+  const page = more ? rows.slice(0, DELIVERY_PAGE_SIZE) : rows;
+  return { rows: page, nextBefore: more ? page[page.length - 1].id : null };
 }
