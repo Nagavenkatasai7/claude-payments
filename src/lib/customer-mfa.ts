@@ -243,10 +243,13 @@ export async function recordCustomerMfaAudit(
   action: CustomerMfaAuditAction,
   k: CustomerKey,
   meta?: Record<string, unknown>,
+  // M2-14 (#399 L3): the partner portal passes its own actor (PORTAL_AUTH_ACTOR); the legacy
+  // apex /account keeps its historical 'customer-portal'.
+  actor: string = 'customer-portal',
 ): Promise<void> {
   await createAuditRepo(getDb()).record({
     partnerId: k.partnerId,
-    actor: 'customer-portal',
+    actor,
     actorType: 'system',
     action,
     subjectId: auditSubjectId(k.partnerId, k.phone),

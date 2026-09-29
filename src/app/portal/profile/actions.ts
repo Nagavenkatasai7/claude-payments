@@ -6,6 +6,7 @@ import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requireFreshPortalAuth, requirePortalCustomer } from '@/lib/portal-auth';
 import { getPortalSessionStore } from '@/lib/portal-session-store';
+import { getCustomerAuthStore } from '@/lib/customer-auth-store';
 import { customerKey, getCustomerMfaStore, recordCustomerMfaAudit } from '@/lib/customer-mfa';
 import { startCustomerVerification } from '@/lib/customer-verification';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -139,13 +140,24 @@ export async function confirmPortalMfaEnrolmentAction(_prev: PortalMfaState, for
     revoked = false;
     logWarn('portal.profile.mfa_revoke', err instanceof Error ? err.name : 'error');
   }
+  // M2-14 (#399 L2): the factor is shared with the legacy apex /account (same partner + phone key),
+  // so that surface's sessions go too, when its account belongs to THIS partner.
+  try {
+    const legacy = getCustomerAuthStore();
+    if ((await legacy.getCustomer(ctx.session.phone))?.partnerId === ctx.site.partnerId) {
+      await legacy.deleteAllSessions(ctx.session.phone);
+    }
+  } catch (err) {
+    revoked = false;
+    logWarn('portal.profile.mfa_revoke_legacy', err instanceof Error ? err.name : 'error');
+  }
   try {
     await sessions.markStepUp(ctx.token, ctx.site.partnerId, { totp: true });
   } catch (err) {
     logWarn('portal.profile.mfa_stepup', err instanceof Error ? err.name : 'error');
   }
   try {
-    await recordCustomerMfaAudit('customer.mfa.enroll', key, { via: 'portal' });
+    await recordCustomerMfaAudit('customer.mfa.enroll', key, { via: 'portal' }, PORTAL_AUTH_ACTOR);
   } catch (err) {
     logWarn('portal.profile.mfa_audit', err instanceof Error ? err.name : 'error');
   }

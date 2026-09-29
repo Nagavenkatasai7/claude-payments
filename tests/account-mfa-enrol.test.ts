@@ -55,6 +55,12 @@ vi.mock('@/lib/customer-mfa', async () => {
   const actual = await vi.importActual<typeof import('@/lib/customer-mfa')>('@/lib/customer-mfa');
   return { ...actual, getCustomerMfaStore: () => actual.createCustomerMfaStore(redis, customerStore, { now: () => nowMs }) };
 });
+// M2-14 (#399 L2): the legacy enrolment also signs out the portal sessions of the same (partner, phone).
+const portalRevokeAll = vi.hoisted(() => vi.fn(async () => 0));
+vi.mock('@/lib/portal-session-store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/portal-session-store')>()),
+  getPortalSessionStore: () => ({ revokeAll: portalRevokeAll }),
+}));
 vi.mock('@/lib/field-crypto', async () => {
   const actual = await vi.importActual<typeof import('@/lib/field-crypto')>('@/lib/field-crypto');
   return { ...actual, defaultProvider: () => crypto };
@@ -138,6 +144,7 @@ describe('portal MFA enrolment (Program-Fix 49D)', () => {
     expect(done.ok).toBe(true);
     expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(true);
     expect(await authStore.getSessionIdentity(other)).toBeNull(); // other device signed out
+    expect(portalRevokeAll).toHaveBeenCalledWith('default', NORM); // M2-14: and every portal session
     const mine = cookieSet.mock.calls.find((c) => c[0] === CUSTOMER_SESSION_COOKIE)?.[1];
     expect(mine && (await authStore.getSessionIdentity(mine))?.phone).toBe(NORM);
     const rows = await auditRows();

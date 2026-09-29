@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { cookies, headers } from 'next/headers';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getCustomerAuthStore } from '@/lib/customer-auth-store';
+import { getPortalSessionStore } from '@/lib/portal-session-store';
 import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/customer-mfa';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
@@ -87,6 +88,13 @@ export async function confirmCustomerMfaEnrolmentAction(
       // the second factor existed) is signed out; this browser gets a fresh one.
       const auth = getCustomerAuthStore();
       await auth.deleteAllSessions(customer.senderPhone);
+      // M2-14 (#399 L2): the factor is shared with the partner portal (same partner + phone key),
+      // so that surface's sessions go too. Best-effort: the enrolment itself has committed.
+      try {
+        await getPortalSessionStore().revokeAll(customer.partnerId, customer.senderPhone);
+      } catch (err) {
+        logWarn('customer.mfa', 'portal sessions not revoked', { error: err instanceof Error ? err.name : 'unknown' });
+      }
       (await cookies()).set(CUSTOMER_SESSION_COOKIE, await auth.createSession(customer.senderPhone, customer.partnerId), {
         httpOnly: true,
         secure: true,
