@@ -32,6 +32,7 @@ const ACTION_LABELS = Object.freeze({
   'partner.theme.update': 'partner.audit.action.theme',
   'partner.logo.update': 'partner.audit.action.logo',
   'partner.slug.update': 'partner.audit.action.slug',
+  'partner.support_contact.update': 'partner.audit.action.supportContact',
   'partner.settlement_endpoint.update': 'partner.audit.action.settlementEndpoint',
   'partner.settlement_secret.rotate': 'partner.audit.action.settlementSecret',
   'partner.go_live.request': 'partner.audit.action.goLiveRequest',

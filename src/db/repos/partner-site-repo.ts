@@ -63,13 +63,16 @@ export async function getPartnerSite(db: DbOrTx, partnerId: PartnerId): Promise<
 /**
  * Validate BOTH colours, then in ONE transaction: a single-column UPDATE of partners.primary_color
  * (0 rows → not_found, nothing else written), an upsert of partner_sites.accent_color, and a
- * `partner.theme.update` audit row. Colours are not PII, so the audit carries them.
+ * `partner.theme.update` audit row. Colours are not PII, so the audit carries them. `opts.actorScope`
+ * (derived server-side by the caller from the session, never from input) is added to the audit
+ * meta so the tenant audit viewer can label the actor; without it the meta is unchanged.
  */
 export async function savePartnerTheme(
   db: DbOrTx,
   partnerId: PartnerId,
   input: { primaryColor: unknown; accentColor: unknown },
   actor: string,
+  opts: { actorScope?: 'platform' | 'partner' } = {},
 ): Promise<SaveThemeResult> {
   const p = validateThemeColor(input.primaryColor);
   if (!p.ok) return { ok: false, field: 'primaryColor', reason: p.reason };
@@ -96,7 +99,7 @@ export async function savePartnerTheme(
       actorType: 'staff',
       action: 'partner.theme.update',
       subjectId: partnerId,
-      meta: { primaryColor, accentColor },
+      meta: { primaryColor, accentColor, ...(opts.actorScope ? { actorScope: opts.actorScope } : {}) },
     });
     return { ok: true } as const;
   });
