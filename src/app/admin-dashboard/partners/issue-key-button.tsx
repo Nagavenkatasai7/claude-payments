@@ -24,7 +24,7 @@ export function IssueKeyButton({ partnerId }: { partnerId: string }) {
         const r = await issueApiKeyAction(partnerId, mode);
         setIssued(r.plaintext);
       } catch {
-        setError('Could not issue a key. You may not have permission.');
+        setError(mode === 'live' ? 'Could not issue a live key. You may not have permission, or go-live is not approved yet (a sandbox key is always available).' : 'Could not issue a key. You may not have permission.');
       }
     });
   }

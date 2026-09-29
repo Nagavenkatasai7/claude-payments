@@ -8,6 +8,7 @@ import { eq } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
 import { partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { setPartnerSlug } from '@/db/repos/partner-site-repo';
@@ -789,9 +790,16 @@ export async function issueApiKeyAction(
   const staff = await gatePartnerConfig(partnerId);
   const m: unknown = mode ?? 'live';
   if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
+  // UI redesign M3-21 (#427 review follow-up): a PARTNER-scoped admin gets a live key only once
+  // SmartRemit approved its go-live, checked in the same transaction as the insert (a thrown read
+  // fails closed). Platform admins are the approvers and are unchanged.
+  const partnerScoped = scopeOf(staff).kind === 'partner';
   // R3a (M4): the key and its audit row commit together. Meta: keyId, mode,
   // last4 — never the plaintext.
   const issued = await getDb().transaction(async (tx) => {
+    if (m === 'live' && partnerScoped && !(await isLiveApproved(tx, partnerId))) {
+      throw new Error('Live keys are available after SmartRemit approves go-live. Issue a sandbox key for now.');
+    }
     const k = await createPartnerApiKeyStore(tx).issue(partnerId, m);
     await createAuditRepo(tx).record(apiKeyIssueAuditEvent(partnerId, staff.username, k.keyId, m, k.last4));
     return k;
@@ -967,6 +975,9 @@ export async function wizardCreatePartnerAction(
   try {
     await getDb().transaction(async (tx) => {
       await createPartnerStore(tx).savePartner(partner);
+      // UI redesign M3-21: a platform-wizard partner is approved for go-live at creation (it gets a
+      // live key below), committed with the partner itself.
+      await upsertApprovedGoLive(tx, id, staff.username);
       if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},

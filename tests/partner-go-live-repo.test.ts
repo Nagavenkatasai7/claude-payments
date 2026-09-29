@@ -2,7 +2,15 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { partnerGoLive } from '@/db/schema';
-import { approveGoLive, getGoLive, isLiveApproved, requestGoLive } from '@/db/repos/partner-go-live-repo';
+import {
+  approveGoLive,
+  createPendingGoLive,
+  getGoLive,
+  getGoLiveForUpdate,
+  isLiveApproved,
+  requestGoLive,
+  upsertApprovedGoLive,
+} from '@/db/repos/partner-go-live-repo';
 
 // UI redesign M3-14: the go-live gate for LIVE API keys. A partner is live-approved only when its
 // partner_go_live row has approved_at set (migration 0028 backfills an approved row for every
@@ -67,5 +75,46 @@ describe('partner-go-live-repo', () => {
     expect(await isLiveApproved(db, 'pa')).toBe(true);
     expect(await isLiveApproved(db, 'pb')).toBe(false);
     expect((await getGoLive(db, 'pb'))?.requestedBy).toBe('pb-admin');
+  });
+
+  // M3-21: the platform-side writers.
+  it('createPendingGoLive writes ONE empty row (not requested, not approved) and never touches an existing one', async () => {
+    await createPendingGoLive(db, 'pa');
+    const g = await getGoLive(db, 'pa');
+    expect(g).not.toBeNull();
+    expect(g?.requestedAt).toBeNull();
+    expect(g?.approvedAt).toBeNull();
+    expect(await isLiveApproved(db, 'pa')).toBe(false);
+    // A later request still records itself on the empty row, and approval then works.
+    await requestGoLive(db, 'pa', 'pa-admin');
+    expect(await approveGoLive(db, 'pa', 'root')).toBe(true);
+    await createPendingGoLive(db, 'pa'); // a repeat never un-approves
+    expect(await isLiveApproved(db, 'pa')).toBe(true);
+    expect(await getGoLive(db, 'pb')).toBeNull();
+  });
+
+  it('upsertApprovedGoLive approves a partner with no row (the platform wizard) and records the approver', async () => {
+    await upsertApprovedGoLive(db, 'pa', 'root', new Date('2026-09-29T00:00:00Z'));
+    expect(await isLiveApproved(db, 'pa')).toBe(true);
+    const g = await getGoLive(db, 'pa');
+    expect(g?.approvedBy).toBe('root');
+    expect(g?.approvedAt?.toISOString()).toBe('2026-09-29T00:00:00.000Z');
+    expect(await isLiveApproved(db, 'pb')).toBe(false);
+  });
+
+  it('upsertApprovedGoLive approves an existing pending row, and keeps the first approval', async () => {
+    await createPendingGoLive(db, 'pa');
+    await upsertApprovedGoLive(db, 'pa', 'first', new Date('2026-09-01T00:00:00Z'));
+    await upsertApprovedGoLive(db, 'pa', 'second', new Date('2026-09-02T00:00:00Z'));
+    const g = await getGoLive(db, 'pa');
+    expect(g?.approvedBy).toBe('first');
+    expect(g?.approvedAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+  });
+
+  it('getGoLiveForUpdate reads the row inside a transaction (null when there is none)', async () => {
+    await requestGoLive(db, 'pa', 'pa-admin');
+    const [a, b] = await db.transaction(async (tx) => [await getGoLiveForUpdate(tx, 'pa'), await getGoLiveForUpdate(tx, 'pb')]);
+    expect(a?.requestedBy).toBe('pa-admin');
+    expect(b).toBeNull();
   });
 });

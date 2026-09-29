@@ -51,6 +51,7 @@ import {
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 
 // Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
 // them as on the apex.
@@ -79,6 +80,10 @@ beforeEach(async () => {
   db = await freshDb();
   await seedPartner(db, 'acme');
   await seedPartner(db, 'beta');
+  // Both existed before migration 0028, which backfills an APPROVED go-live row (M3-21: a
+  // partner-scoped admin's live key needs one).
+  await upsertApprovedGoLive(db, 'acme', 'system:0028-backfill');
+  await upsertApprovedGoLive(db, 'beta', 'system:0028-backfill');
   integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
   currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
 });

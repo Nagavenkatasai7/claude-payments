@@ -28,7 +28,12 @@ export async function inviteRedeemable(inv: StaffInvite, deps: RedeemDeps): Prom
   // #421 review (MEDIUM): the inviter must STILL be an active admin of the SAME tenant, so the
   // invites of a removed, suspended or demoted admin die with their authority.
   const inviter = await deps.getStaff(inv.invitedBy);
-  if (!inviter || inviter.role !== 'admin' || inviter.status === 'suspended' || inviter.partnerId !== inv.partnerId) return false;
+  if (!inviter || inviter.role !== 'admin' || inviter.status === 'suspended') return false;
+  // UI redesign M3-21: a new partner's FIRST admin is invited by a SmartRemit platform admin
+  // (create-from-request). The same predicate as requirePlatformAdmin (auth.ts: role admin, no
+  // partnerId), and ONLY for an admin invite: every other teammate is tenant-issued.
+  const platformInviter = inviter.partnerId === undefined;
+  if (platformInviter ? inv.role !== 'admin' : inviter.partnerId !== inv.partnerId) return false;
 
   // A fast pre-check only: the atomic guarantee is createStaff's SET NX at accept time.
   if (await deps.getStaff(inv.username)) return false;

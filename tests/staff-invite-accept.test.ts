@@ -55,8 +55,26 @@ describe('inviteRedeemable', () => {
     expect(await inviteRedeemable(invite(), deps({ staff: [member({ role: 'agent' })] }))).toBe(false);
     expect(await inviteRedeemable(invite(), deps({ staff: [member({ partnerId: 'pb' })] }))).toBe(false);
   });
-  it('a platform account as the inviter → false (invites are tenant-issued only)', async () => {
+  it('a platform account as the inviter of a NON-admin role → false (teammates are tenant-issued only)', async () => {
     expect(await inviteRedeemable(invite(), deps({ staff: [member({ partnerId: undefined })] }))).toBe(false);
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      expect(await inviteRedeemable(invite({ role }), deps({ staff: [member({ partnerId: undefined })] }))).toBe(false);
+    }
+  });
+  // M3-21: a new partner's FIRST admin is invited by a SmartRemit platform admin (create-from-request).
+  it('an active platform admin inviting a tenant ADMIN → true', async () => {
+    expect(await inviteRedeemable(invite({ role: 'admin' }), deps({ staff: [member({ partnerId: undefined })] }))).toBe(true);
+  });
+  it('a platform inviter who is suspended, removed, not an admin, or an empty-string tenant → false', async () => {
+    const adminInvite = invite({ role: 'admin' });
+    expect(await inviteRedeemable(adminInvite, deps({ staff: [member({ partnerId: undefined, status: 'suspended' })] }))).toBe(false);
+    expect(await inviteRedeemable(adminInvite, deps({ staff: [] }))).toBe(false);
+    expect(await inviteRedeemable(adminInvite, deps({ staff: [member({ partnerId: undefined, role: 'agent' })] }))).toBe(false);
+    expect(await inviteRedeemable(adminInvite, deps({ staff: [member({ partnerId: undefined, role: 'support' })] }))).toBe(false);
+    expect(await inviteRedeemable(adminInvite, deps({ staff: [member({ partnerId: '' })] }))).toBe(false);
+  });
+  it('a platform admin invite into a suspended tenant → false', async () => {
+    expect(await inviteRedeemable(invite({ role: 'admin' }), deps({ partners: { pa: 'suspended' }, staff: [member({ partnerId: undefined })] }))).toBe(false);
   });
   it('a role outside INVITE_ROLES → false', async () => {
     expect(await inviteRedeemable(invite({ role: 'root' as never }), deps())).toBe(false);
