@@ -13,5 +13,16 @@
       "schedule": "* * * * *"
     }
   ],
-  "ignoreCommand": "if [ \"${VERCEL_GIT_COMMIT_REF#component/}\" != \"$VERCEL_GIT_COMMIT_REF\" ]; then exit 0; else exit 1; fi"
+  "ignoreCommand": "if [ \"${VERCEL_GIT_COMMIT_REF#component/}\" != \"$VERCEL_GIT_COMMIT_REF\" ]; then exit 0; else exit 1; fi",
+  "git": {
+    "deploymentEnabled": {
+      "main": true,
+      "feat/**": false,
+      "fix/**": false,
+      "dependabot/**": false,
+      "component/**": false,
+      "loop/**": false,
+      "chore/**": false
+    }
+  }
 }

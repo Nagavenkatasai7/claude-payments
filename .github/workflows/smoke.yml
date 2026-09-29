@@ -11,8 +11,11 @@ run-name: Smoke ${{ inputs.sha || github.event.deployment.sha || github.sha }} (
 #   AND the rolling release. With Rolling Releases on, Vercel no longer posts a
 #   GitHub deployment / deployment_status for production builds (only Preview
 #   records exist after 6269fda), so a deployment_status-only smoke never ran
-#   for 2365627. No paths filter: vercel.json's ignoreCommand skips only
-#   component/* branches, so every push to main deploys.
+#   for 2365627. No paths filter: vercel.json's git.deploymentEnabled turns
+#   off Git deployments for PR branches (feat/**, fix/**, dependabot/**,
+#   component/**, loop/**, chore/**; owner cost rules 2026-09-29) and its
+#   ignoreCommand still skips component/*; main stays enabled, so every push
+#   to main deploys.
 # - workflow_dispatch: re-run for a commit on main,
 #   `gh workflow run smoke.yml -f sha=<sha>` (7-40 hex chars; empty = the head
 #   of the dispatching branch).
