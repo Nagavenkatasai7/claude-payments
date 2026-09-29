@@ -512,9 +512,10 @@ export async function POST(
       }
       // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
       // template (read by THIS transfer's partner only) carries the code, so a
-      // customer outside the 24-h window still receives it. M2-14: a lookup error
-      // falls back to free-form on the SAME partner number only inside the window
-      // (outside it Meta accepts, then drops, the text): otherwise 502, nothing minted.
+      // customer outside the 24-h window still receives it. M2-14: without a template
+      // (none recorded, or the read failed) the free-form text on the SAME partner
+      // number is sent only inside the window (outside it Meta accepts, then drops,
+      // the text): otherwise 502, nothing minted.
       let otpTemplate: { name: string; lang: string } | undefined;
       if (otpCreds) {
         try {
@@ -525,8 +526,10 @@ export async function POST(
             `partner auth template lookup failed; free-form on the partner number inside the window only: ${err instanceof Error ? err.name : 'unknown error'}`,
             { partnerId: otpPartnerId },
           );
-          if (!(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
         }
+        // M2-14: no template (none recorded, or the read failed) means a free-form text on the
+        // partner's number, which only arrives inside the 24-h window: outside it, 502, nothing minted.
+        if (!otpTemplate && !(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
       }
       const otpStore = getTransactionOtpStore();
       const issued = await otpStore.issue(transferId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });

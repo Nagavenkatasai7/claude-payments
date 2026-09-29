@@ -139,6 +139,7 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
   it("tenant isolation: B's transfer (own number, no template) never gets A's template", async () => {
     integrationsByPartner.set('pa', CREDS_A);
     integrationsByPartner.set('pb', CREDS_B);
+    vi.spyOn(store, 'getLastInboundAt').mockResolvedValue('2026-09-29T10:00:00.000Z'); // inside the 24-h window
     const res = await requestOtp('t_pb');
     expect(res.status).toBe(200);
     expect(sendTransactionOtp).toHaveBeenCalledOnce();
@@ -179,6 +180,7 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
   it("draft path: a draft of B (own number) never gets A's template; the draft's tenant decides", async () => {
     integrationsByPartner.set('pa', CREDS_A);
     integrationsByPartner.set('pb', CREDS_B);
+    vi.spyOn(store, 'getLastInboundAt').mockResolvedValue('2026-09-29T10:00:00.000Z'); // inside the 24-h window
     draftsById.set('d_pb', { senderPhone: PHONE, partnerId: 'pb' });
     const res = await requestOtp('d_pb');
     expect(res.status).toBe(200);
@@ -259,6 +261,18 @@ describe('POST /api/pay/[transferId] request_otp — fail closed off the partner
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await requestOtp('t_pa');
     expect(res.status).toBe(502);
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(issue).not.toHaveBeenCalled();
+  });
+
+  it('own number, NO recorded template, OUTSIDE the 24-h window → 502 before a code is minted (free-form would be dropped)', async () => {
+    integrationsByPartner.set('pb', CREDS_B);
+    vi.spyOn(store, 'getLastInboundAt').mockResolvedValue(null);
+    const issue = vi.spyOn(txOtp, 'issue');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await requestOtp('t_pb');
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
     expect(sendTransactionOtp).not.toHaveBeenCalled();
     expect(issue).not.toHaveBeenCalled();
   });
