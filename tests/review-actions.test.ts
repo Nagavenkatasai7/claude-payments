@@ -28,6 +28,19 @@ vi.mock('@/lib/store', async () => {
   return { ...actual, getStore: () => store };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+// M3-10 claim re-check: `afterRead` runs right after the (real) sender pre-check read returns.
+const screeningHook: { afterRead: null | (() => Promise<unknown>) } = { afterRead: null };
+vi.mock('@/db/repos/customer-repo', async () => {
+  const actual = await vi.importActual<typeof import('@/db/repos/customer-repo')>('@/db/repos/customer-repo');
+  return {
+    ...actual,
+    readSenderScreeningFlags: async (...a: Parameters<typeof actual.readSenderScreeningFlags>) => {
+      const r = await actual.readSenderScreeningFlags(...a);
+      if (screeningHook.afterRead) await screeningHook.afterRead();
+      return r;
+    },
+  };
+});
 vi.mock('@/db/client', async (orig) => ({
   ...(await orig<typeof import('@/db/client')>()),
   getDb: () => db,
@@ -96,6 +109,7 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   mockRequireAdmin.mockReset();
+  screeningHook.afterRead = null;
 });
 
 describe('releaseTransferAction', () => {
@@ -333,6 +347,20 @@ describe('releaseTransferAction — partner scope follows the /partner allowlist
     await store.saveTransfer(makeTransfer({ id: 'n5', partnerId: 'delg', complianceReasons: [AML_HOLD_REASON] }));
     await releaseTransferAction(form({ id: 'n5', note: 'cleared by platform compliance' }));
     expect((await store.getTransfer('n5'))?.status).toBe('paid');
+  });
+
+  it.each(['pep_hit', 'watchlist_hit'] as const)('a partner-scoped admin is refused when %s is set AFTER the pre-check read (the claim re-checks it): stays in_review, no outbox, no audit', async (col) => {
+    asPartnerAdmin();
+    await store.saveTransfer(makeTransfer({ id: 'n7', partnerId: 'delg' }));
+    screeningHook.afterRead = () => flagSender('delg', col);
+    try {
+      await expect(releaseTransferAction(form({ id: 'n7', note: 'reviewed by the partner team' }))).rejects.toThrow(/Cannot release/);
+    } finally {
+      screeningHook.afterRead = null;
+    }
+    expect((await store.getTransfer('n7'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
   });
 
   it('PLATFORM staff are unchanged: a hold whose sender has NO customer row still releases', async () => {

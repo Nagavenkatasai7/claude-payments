@@ -165,7 +165,9 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   if (audit.reason === null) {
     throw new Error('A release reason is required. Add a note explaining why this hold is being released.');
   }
-  await releaseTransfer(store, getDb(), id, audit);
+  // M3-10 follow-up: a PARTNER-scoped release re-checks the sender flags inside the guarded claim
+  // (the staff tenant, which canSee made equal to the owning tenant above); platform staff pass nothing (unchanged).
+  await releaseTransfer(store, getDb(), id, audit, scope.kind === 'partner' ? { partnerId: scope.partnerId } : undefined);
   revalidatePath('/admin-dashboard', 'layout');
 }
 
