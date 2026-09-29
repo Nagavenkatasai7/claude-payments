@@ -87,15 +87,12 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   }
   return (
     <Shell>
-      <div className="mb-6 flex flex-col gap-2">
-        <h1 className="text-[24px] font-semibold tracking-tight text-ds-ink">{t('partner.invite.title', { partner: view.partnerName })}</h1>
-        <p className="text-[15px] text-ds-ink-muted">{t('partner.invite.sub')}</p>
-        <p className="text-[14px] text-ds-ink">
-          <span className="font-semibold">{t('partner.invite.role')}:</span>{' '}
-          {t(`partner.staff.role.${view.role as 'admin' | 'agent' | 'support' | 'finance'}`)}
-        </p>
-      </div>
-      <AcceptForm token={token} username={view.username} />
+      <AcceptForm
+        token={token}
+        username={view.username}
+        title={t('partner.invite.title', { partner: view.partnerName })}
+        roleLabel={t(`partner.staff.role.${view.role as 'admin' | 'agent' | 'support' | 'finance'}`)}
+      />
     </Shell>
   );
 }

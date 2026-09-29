@@ -16,11 +16,30 @@ async function submit(_prev: AcceptInviteResult | null, formData: FormData): Pro
   return acceptInviteAction(formData);
 }
 
-export function AcceptForm({ token, username }: { token: string; username: string }) {
+export function AcceptForm({
+  token,
+  username,
+  title,
+  roleLabel,
+}: {
+  token: string;
+  username: string;
+  title: string;
+  roleLabel: string;
+}) {
   const [state, formAction, pending] = useActionState(submit, null);
   if (state && 'dead' in state) return <DeadInvite />;
   const error = state && 'error' in state ? state.error : undefined;
+  // The header lives here, not in the page, so a dead result replaces the WHOLE card body (one <h1>).
   return (
+    <>
+    <div className="mb-6 flex flex-col gap-2">
+      <h1 className="text-[24px] font-semibold tracking-tight text-ds-ink">{title}</h1>
+      <p className="text-[15px] text-ds-ink-muted">{t('partner.invite.sub')}</p>
+      <p className="text-[14px] text-ds-ink">
+        <span className="font-semibold">{t('partner.invite.role')}:</span> {roleLabel}
+      </p>
+    </div>
     <form action={formAction} className="flex flex-col gap-4" data-testid="partner-invite-form">
       <input type="hidden" name="token" value={token} />
       <Field name="invite-username" label={t('partner.invite.username')}>
@@ -64,5 +83,6 @@ export function AcceptForm({ token, username }: { token: string; username: strin
         </Button>
       </div>
     </form>
+    </>
   );
 }

@@ -153,6 +153,11 @@ describe('/partner/invite/[token] page (GET: peek only)', () => {
     expect(html).toContain(t('partner.staff.role.agent'));
     expect(html).toContain(`name="token" value="${token}"`);
     expect(html).not.toContain(t('partner.invite.deadTitle'));
+    expect((html.match(/<h1/g) ?? []).length).toBe(1);
+    // The header is inside the client form, so a dead action result replaces it (never two headings).
+    const { readFileSync } = await import('node:fs');
+    expect(readFileSync('src/app/partner/invite/[token]/page.tsx', 'utf8')).not.toMatch(/<h1/);
+    expect(readFileSync('src/app/partner/invite/[token]/accept-form.tsx', 'utf8')).toMatch(/if \(state && 'dead' in state\) return <DeadInvite \/>;[\s\S]*<h1/);
     // A mail scanner's prefetch must never burn the link.
     expect(await invites().peek(token)).not.toBeNull();
     expect(await page(token)).toContain('data-testid="partner-invite-form"');
