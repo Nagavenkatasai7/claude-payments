@@ -249,7 +249,7 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
-     * M2-14 (#397 L2): the OPEN recall ticket for one transfer under ONE tenant (partnerId in the
+     * M2-14 (PR 397 L2): the OPEN recall ticket for one transfer under ONE tenant (partnerId in the
      * WHERE), so a second recall on the same transfer reuses it. A recall ticket is the customer
      * ticket whose subject starts with the fixed "Recall request:" prefix (receipt-cores).
      */

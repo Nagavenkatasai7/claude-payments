@@ -4,7 +4,7 @@ import type { PartnerId } from './types';
 import { getRedis } from './redis';
 
 /**
- * portal-totp-budget — UI redesign M2-14 (#394 L2). A per-(partner, phone) daily budget of
+ * portal-totp-budget — UI redesign M2-14 (PR 394 L2). A per-(partner, phone) daily budget of
  * authenticator-code attempts across portal sign-in and step-up. The pending token's own cap
  * (PORTAL_PENDING_MAX_ATTEMPTS) restarts with every token; this one does not, so the 6-digit
  * factor can't be guessed across many tokens.

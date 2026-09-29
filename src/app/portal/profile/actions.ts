@@ -140,7 +140,7 @@ export async function confirmPortalMfaEnrolmentAction(_prev: PortalMfaState, for
     revoked = false;
     logWarn('portal.profile.mfa_revoke', err instanceof Error ? err.name : 'error');
   }
-  // M2-14 (#399 L2): the factor is shared with the legacy apex /account (same partner + phone key),
+  // M2-14 (PR 399 L2): the factor is shared with the legacy apex /account (same partner + phone key),
   // so that surface's sessions go too, when its account belongs to THIS partner.
   try {
     const legacy = getCustomerAuthStore();

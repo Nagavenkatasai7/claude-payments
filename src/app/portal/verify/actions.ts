@@ -69,7 +69,7 @@ export async function stepUpRequestAction(_prev: PortalStepUpState | null, formD
   try {
     pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'stepup', sid: ctx.session.sid });
   } catch {
-    return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (#394 L4): never a 500
+    return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4): never a 500
   }
   await issueAndSendAfterResponse(pid, phone, 'stepup', ipOk, ready);
   return { step: 'code', next, pending, notice: 'portal.verify.codeSent' };
@@ -120,7 +120,7 @@ export async function stepUpVerifyAction(_prev: PortalStepUpState | null, formDa
       const pending = await store.create({ partnerId: pid, phone: rec.phone, purpose: 'stepup_totp', sid: ctx.session.sid });
       return { step: 'mfa', next, pending };
     } catch {
-      return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (#394 L4)
+      return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4)
     }
   }
   return markFresh(ctx, false, next);
@@ -136,7 +136,7 @@ export async function stepUpTotpAction(_prev: PortalStepUpState | null, formData
   const code = field(formData, 'code').replace(/\D/g, '');
   const store = getPortalPendingStore();
 
-  // M2-14 (#394 L4): a Redis error on the way in answers cant_send, never a 500.
+  // M2-14 (PR 394 L4): a Redis error on the way in answers cant_send, never a 500.
   let rec: PortalPending | null;
   let n: number;
   try {
@@ -148,7 +148,7 @@ export async function stepUpTotpAction(_prev: PortalStepUpState | null, formData
       await store.consume(pendingToken);
       return { step: 'start', next, error: 'portal.login.try_later' };
     }
-    // M2-14 (#394 L2): the same per-(partner, phone) daily budget as sign-in, reserved BEFORE the compare.
+    // M2-14 (PR 394 L2): the same per-(partner, phone) daily budget as sign-in, reserved BEFORE the compare.
     if (!(await getPortalTotpBudget().reserve(pid, rec.phone))) {
       await store.consume(pendingToken);
       const phone = rec.phone;

@@ -2994,7 +2994,7 @@ async function openRecallDisputeTool(
   const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
   if (stepUpRefusal) return stepUpRefusal;
 
-  // M2-14 (#403 L3): on the web (account and portal chat) the partner's support switch applies,
+  // M2-14 (PR 403 L3): on the web (account and portal chat) the partner's support switch applies,
   // exactly as the receipt and portal recall actions apply it (receipt-cores portalDisabled). The
   // WhatsApp bot is unchanged.
   if (ctx.channel === 'web') {

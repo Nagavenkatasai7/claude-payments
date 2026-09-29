@@ -131,7 +131,7 @@ export default async function PortalSendReviewPage() {
   ]);
   const gated = portalKycGate(partner, customer, site.brand);
   if (gated) return shell(<Refusal copy={gated} />);
-  // M2-14 (#413 L1): any later 'verify' card that Profile could not act on becomes the contact card.
+  // M2-14 (PR 413 L1): any later 'verify' card that Profile could not act on becomes the contact card.
   const kycRoute = (c: SendCopy) => routeKycCopy(c, canVerifyInProfile(partner, customer), site.brand);
 
   let recipient: { name: string; phone: string } | null;

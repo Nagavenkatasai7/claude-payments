@@ -36,8 +36,8 @@ export async function requestDataAction(kind: string, requestKey: string, formDa
   await requirePortalSite();
   if (!env.customerDataRightsEnabled) notFound();
   if (!isDataRequestKind(kind)) notFound();
-  const ctx = await requireFreshPortalAuth(`/portal/privacy/${kind}`); // M2-14 (#401 L3)
-  // M2-14 (#401 L5): a forged call may carry no FormData at all; that is a bad reason, not a 500.
+  const ctx = await requireFreshPortalAuth(`/portal/privacy/${kind}`); // M2-14 (PR 401 L3)
+  // M2-14 (PR 401 L5): a forged call may carry no FormData at all; that is a bad reason, not a 500.
   const reason = formData instanceof FormData ? formData.get('reason') : null;
   if (!isReasonValid(reason, DEFAULT_REASON_MIN)) redirect('/portal/privacy?status=reason');
 
@@ -71,7 +71,7 @@ export async function requestDataAction(kind: string, requestKey: string, formDa
             );
           });
         } catch (err) {
-          // M2-14 (#401 L4): nothing was filed, so the attempt gives its unit back.
+          // M2-14 (PR 401 L4): nothing was filed, so the attempt gives its unit back.
           try {
             await refundIpRateLimit(getRedis(), PORTAL_PRIVACY_LIMIT.scope, subjectId, { windowSec: PORTAL_PRIVACY_LIMIT.windowSec });
           } catch { /* the unit simply stays spent */ }

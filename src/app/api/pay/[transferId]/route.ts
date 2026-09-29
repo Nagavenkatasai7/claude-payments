@@ -470,7 +470,7 @@ export async function POST(
       // The owning partner scopes the per-phone code budget (Program-Fix 45) and
       // picks the sending number (WL2). The draft carries its tenant (fix 1); a
       // pre-deploy draft resolves by the oldest-row rule.
-      // M2-14 (#393 ENABLEMENT BLOCKER): the tenant and its channel are resolved
+      // M2-14 (PR 393 ENABLEMENT BLOCKER): the tenant and its channel are resolved
       // BEFORE a code is minted, and FAIL CLOSED: a tenant that can't be resolved,
       // a non-default partner whose creds read throws, or a half-configured
       // channel never falls back to the shared number (the customer is paying the
@@ -539,9 +539,9 @@ export async function POST(
         const tenant = otpPartnerId;
         try {
           await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
-            // #393: outside the window a free-form fallback is accepted, then dropped.
+            // PR 393: outside the window a free-form fallback is accepted, then dropped.
             inWindow: () => isInServiceWindow(store, tenant, otpPhone),
-            // #393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx
+            // PR 393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx
             // only. A 5xx, a timeout or a non-Graph error is transient, not the partner's to fix.
             onTemplateFailure: async ({ status, code }) => {
               if (status === undefined || status < 400 || status >= 500) return;

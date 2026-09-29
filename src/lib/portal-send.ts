@@ -391,7 +391,7 @@ const contactPartner = (brand: string): SendCopy => ({ error: 'portal.send.conta
 const verifyCard: SendCopy = { error: 'portal.send.kycBody', kyc: 'verify' };
 
 /**
- * M2-14 (#413 L1): does the verify card lead anywhere? Two dead ends, exactly: a DELEGATED partner
+ * M2-14 (PR 413 L1): does the verify card lead anywhere? Two dead ends, exactly: a DELEGATED partner
  * (the partner verifies; Profile shows the provider copy) and a GRANDFATHERED customer (Profile shows
  * them as verified, with no start control). A customer in review keeps the card: Profile says
  * "In review" and they only have to wait. (Rejected is routed to contact before this.)
@@ -413,7 +413,7 @@ export function routeKycCopy(copy: SendCopy, canVerify: boolean, brand: string):
  * The bot's verify-before-send gate as PURE reads (kyc-gate.ts), run before any seam call so a gated
  * customer never reaches startVerificationForTurn. A rejected customer is told to contact the partner
  * and is never offered a retry (owner decision 2026-09-28); so is anyone whose Profile could not start
- * verification (M2-14, #413 L1).
+ * verification (M2-14, PR 413 L1).
  */
 export function portalKycGate(
   partner: Partner | null | undefined,

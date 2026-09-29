@@ -94,7 +94,7 @@ export async function resendCodeAction(_prev: PortalLoginState | null, formData:
   if (!rec) return { step: 'phone', error: 'portal.login.expired' };
   const ready = await portalOtpChannelReady(pid);
   if (!ready.ready) return { step: 'phone', error: 'portal.login.cant_send' };
-  // M2-14 (#394 L7): the new code gets its own 5 minutes on this token (capped; see the store).
+  // M2-14 (PR 394 L7): the new code gets its own 5 minutes on this token (capped; see the store).
   try {
     await getPortalPendingStore().extend(pendingToken, pid, 'login');
   } catch {
@@ -168,7 +168,7 @@ export async function verifyCodeAction(_prev: PortalLoginState | null, formData:
       const pending = await pendingStore.create({ partnerId: pid, phone, purpose: 'mfa' });
       return { step: 'mfa', pending };
     } catch {
-      return { step: 'phone', error: 'portal.login.cant_send' }; // M2-14 (#394 L4): never a 500
+      return { step: 'phone', error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4): never a 500
     }
   }
   const next = await nextAfterProof(pid, phone);
@@ -184,7 +184,7 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
   const code = field(formData, 'code').replace(/\D/g, '');
   const pendingStore = getPortalPendingStore();
 
-  // M2-14 (#394 L4): a Redis error on the way in answers cant_send, never a 500.
+  // M2-14 (PR 394 L4): a Redis error on the way in answers cant_send, never a 500.
   let rec: PortalPending | null;
   let n: number;
   try {
@@ -196,7 +196,7 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
       await pendingStore.consume(pendingToken);
       return { step: 'phone', error: 'portal.login.try_later' };
     }
-    // M2-14 (#394 L2): the per-(partner, phone) daily budget, reserved BEFORE the compare.
+    // M2-14 (PR 394 L2): the per-(partner, phone) daily budget, reserved BEFORE the compare.
     if (!(await getPortalTotpBudget().reserve(pid, rec.phone))) {
       await pendingStore.consume(pendingToken);
       const phone = rec.phone;

@@ -37,7 +37,7 @@ export async function startCustomerVerification(
   const customers = getCustomerStore(getStore());
   const provider = getKycProvider(customers, env.appBaseUrl);
 
-  // M2-14 (#400 L9): reuse the inquiry already started (verify-link.ts reusableInquiryId), so a
+  // M2-14 (PR 400 L9): reuse the inquiry already started (verify-link.ts reusableInquiryId), so a
   // restart never mints a second one whose completion could go unbound. A reuse the provider refuses
   // falls back to a fresh inquiry.
   let reuseId: string | undefined;

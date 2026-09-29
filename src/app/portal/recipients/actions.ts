@@ -105,7 +105,7 @@ export async function addRecipientAction(_prev: RecipientFormState, formData: Fo
   const input = v.value;
   // The duplicate check runs INSIDE runOnce, so a double submit replays the first run's "done"; an
   // "exists" answer carries a fresh request key, so it is never replayed to a corrected form.
-  // M2-14 (#398 L5): the check and the write run in ONE transaction under the address-book lock, so
+  // M2-14 (PR 398 L5): the check and the write run in ONE transaction under the address-book lock, so
   // two tabs (two request keys) adding the same number can't both pass the check and overwrite.
   const out = await once('portal-recipient-add', pid, phone, formData, async () =>
     getDb().transaction(async (tx) => {

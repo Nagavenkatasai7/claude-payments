@@ -898,7 +898,7 @@ export async function sendVerificationStatus(
  * without creds is ignored (today's path), so one tenant's template name never
  * reaches the shared number. No partnerTemplate ⇒ today's behaviour exactly.
  *
- * M2-14 (#393 enablement follow-ups), `hooks` (optional; absent ⇒ M2-6 behaviour):
+ * M2-14 (PR 393 enablement follow-ups), `hooks` (optional; absent ⇒ M2-6 behaviour):
  *  - `inWindow`: asked only after the partner template FAILED. Outside the 24-h
  *    window a free-form fallback is accepted by Graph and then dropped (131047
  *    arrives later on the status webhook), so the send would look successful.

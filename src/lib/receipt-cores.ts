@@ -129,7 +129,7 @@ export async function requestRecallFor(
   if (gate !== 'ok') return { kind: 'step_up', failure: gate };
 
   const reasonLabel = REASON_LABEL[reason] ?? reason;
-  // M2-14 (#397 L2): one open recall per transfer. The check and the insert run under a per-transfer
+  // M2-14 (PR 397 L2): one open recall per transfer. The check and the insert run under a per-transfer
   // advisory lock in ONE transaction, so two tabs (or a double submit with two request keys) can't
   // both insert; the second gets the first ticket back. The lock is not a ledger row lock.
   return getDb().transaction(async (tx) => {
@@ -138,7 +138,7 @@ export async function requestRecallFor(
     const existing = await repo.findOpenRecallForTransfer(customer.partnerId, customer.senderPhone, transfer.id);
     if (existing) return { kind: 'opened', ticketId: existing.id } as const;
 
-    // M2-14 (#397 L1): the portal's cap counts in SQL with the tenant in the WHERE; the legacy
+    // M2-14 (PR 397 L1): the portal's cap counts in SQL with the tenant in the WHERE; the legacy
     // receipt keeps counting every ticket on the phone.
     const openCount = opts.tenantScopedCap
       ? await repo.countOpenByCustomerInTenant(customer.partnerId, customer.senderPhone)

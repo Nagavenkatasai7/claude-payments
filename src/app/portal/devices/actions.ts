@@ -88,7 +88,7 @@ export async function signOutEverywhereAction(): Promise<void> {
       await clearPortalCookie();
     }
   }
-  // M2-14 (#401 L6): the attempt is audited even when Redis failed (marked failed), then the error
+  // M2-14 (PR 401 L6): the attempt is audited even when Redis failed (marked failed), then the error
   // page shows; the customer is never told the other devices were signed out.
   await portalAudit(partnerId, phone, 'signout_all', failure ? { count: ended, failed: true } : { count: ended });
   if (failure) throw failure;

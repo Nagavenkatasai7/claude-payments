@@ -88,7 +88,7 @@ export async function confirmCustomerMfaEnrolmentAction(
       // the second factor existed) is signed out; this browser gets a fresh one.
       const auth = getCustomerAuthStore();
       await auth.deleteAllSessions(customer.senderPhone);
-      // M2-14 (#399 L2): the factor is shared with the partner portal (same partner + phone key),
+      // M2-14 (PR 399 L2): the factor is shared with the partner portal (same partner + phone key),
       // so that surface's sessions go too. Best-effort: the enrolment itself has committed.
       try {
         await getPortalSessionStore().revokeAll(customer.partnerId, customer.senderPhone);

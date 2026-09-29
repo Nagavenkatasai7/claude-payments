@@ -40,7 +40,7 @@ const TTL_MS: Record<PortalPendingPurpose, number> = {
 };
 
 /**
- * M2-14 (#394 L7): "Send a new code" restarts a code-carrying token's clock (the new code has its own
+ * M2-14 (PR 394 L7): "Send a new code" restarts a code-carrying token's clock (the new code has its own
  * 5 minutes), up to this cap from creation. Kept in a SEPARATE key (`ppend_x:`), so an extend racing
  * a consume can never re-create the record; an old build ignores it (a shorter life only).
  */
@@ -122,7 +122,7 @@ export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => n
     },
 
     /**
-     * M2-14 (#394 L7): restart a live login / step-up token's clock after a resend (capped at 30
+     * M2-14 (PR 394 L7): restart a live login / step-up token's clock after a resend (capped at 30
      * minutes from creation). Returns whether it extended. Never touches the record itself.
      */
     async extend(token: unknown, hostPartnerId: PartnerId, purpose: PortalPendingPurpose): Promise<boolean> {
