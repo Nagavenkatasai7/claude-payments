@@ -144,14 +144,35 @@ describe('partner.report through drainOnce', () => {
     expect((await jobRow(id)).contentEnc).toBe(before);
   });
 
-  it('a fresh running job (claimed elsewhere) is a retryable failure, the job untouched', async () => {
+  it('a fresh running job (claimed elsewhere) is deferred UNCHARGED until its claim goes stale, the job untouched', async () => {
     const id = await newJob('pa', 'settlements', WINDOW());
     const claimedAt = new Date();
     await db.update(partnerReportJobs).set({ status: 'running', claimedAt }).where(eq(partnerReportJobs.id, id));
     const r = await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
-    expect(r.failed).toBe(1);
-    expect((await jobRow(id))).toMatchObject({ status: 'running', claimedAt });
-    expect((await outboxRow(id)).lastError).toBe('report_busy');
+    expect(r.released).toBe(1);
+    expect(await jobRow(id)).toMatchObject({ status: 'running', claimedAt });
+    const row = await outboxRow(id);
+    expect(row).toMatchObject({ status: 'pending', attempts: 0 });
+    // Due no earlier than the moment the claim becomes reclaimable.
+    expect(row.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(claimedAt.getTime() + LEASE_MS - 1000);
+  });
+
+  it('a failing post-build write never puts query params (the sealed blob) into last_error', async () => {
+    await seedBoth();
+    const id = await newJob('pa', 'settlements', WINDOW());
+    const mod = await import('@/db/repos/partner-report-repo');
+    const real = mod.createPartnerReportRepo;
+    const spy = vi.spyOn(mod, 'createPartnerReportRepo').mockImplementation((...a: Parameters<typeof real>) => ({
+      ...real(...a),
+      completeJob: async () => {
+        throw new Error('Failed query: update ... params: v2.k0.SEALEDBLOB,tx_pa1');
+      },
+    }));
+    await drainOnce(deps(), 'w1', 10, { hardStopAt: Date.now() + 60_000 });
+    spy.mockRestore();
+    const row = await outboxRow(id);
+    expect(row.status).toBe('failed');
+    expect(row.lastError).toBe('report_complete_failed');
   });
 });
 

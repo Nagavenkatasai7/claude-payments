@@ -1,5 +1,6 @@
 import type { DbOrTx } from '@/db/client';
 import { createPartnerReportRepo, type ReportJobRow } from '@/db/repos/partner-report-repo';
+import { LEASE_MS } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { ctx as cryptoCtx } from '@/lib/crypto-context';
 import { decryptField, encryptField } from '@/lib/field-crypto';
@@ -37,7 +38,7 @@ import type { TransferStatus } from '@/lib/types';
 //    else ReportDeferredError is thrown BEFORE the claim (drainOnce defers the row uncharged, the
 //    job stays queued). A build is boxed by rows, bytes and REPORT_WALL_MS, and flags `truncated`.
 //  - Idempotent: a replay finds the job ready/failed/expired and completes without rebuilding. A
-//    job 'running' under a fresh claim is a retryable 'report_busy'; a stale claim is reclaimed.
+//    job 'running' under a fresh claim is deferred uncharged until the claim is stale, then reclaimed.
 //  - Failure after the claim → failJob with a FIXED code (never an exception message).
 
 /** Thrown before any claim when the invocation cannot fit a report: deferred UNCHARGED. */
@@ -200,6 +201,20 @@ export function openReportCsv(job: Pick<ReportJobRow, 'id' | 'partnerId' | 'cont
   return decryptField(job.contentEnc, undefined, cryptoCtx.partnerReport(job.partnerId, job.id));
 }
 
+/**
+ * Run a job-row write and replace any error with a FIXED message. drizzle's DrizzleQueryError
+ * message embeds the query params (node_modules/drizzle-orm/errors.js:11-13), which for
+ * completeJob include the sealed CSV blob; drainOnce stores err.message in outbox.last_error.
+ */
+async function fixedError<T>(write: () => Promise<T>, code: string): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    logWarn('worker.partner-report', code, { error: err instanceof Error ? err.name : 'error' });
+    throw new Error(code);
+  }
+}
+
 export interface RunOpts extends BuildOpts {
   /** Epoch ms when the worker invocation will be killed (DrainOptions.hardStopAt). */
   hardStopAt?: number;
@@ -225,8 +240,11 @@ export async function runPartnerReportJob(db: DbOrTx, jobId: string, opts: RunOp
   if (!job) {
     const st = await repo.getStatus(jobId);
     if (!st || st.status === 'ready' || st.status === 'failed' || st.status === 'expired') return 'skipped';
-    // Running under a fresh claim (or locked by a concurrent claimer): retry with backoff.
-    throw new Error('report_busy');
+    // Running under a fresh claim (a worker killed mid-build, or a claim whose final write
+    // failed), or locked by a concurrent claimer: defer UNCHARGED until the claim is reclaimable.
+    // A charged retry would dead-letter first (8 backoffs ≈ 254 s < LEASE_MS).
+    const staleAt = st.claimedAt ? st.claimedAt.getTime() + LEASE_MS : now() + 5_000;
+    throw new ReportDeferredError(Math.max(1, Math.ceil((staleAt - now()) / 1000) + 1));
   }
   const claimedAt = job.claimedAt!;
   if (opts.slot) opts.slot.reportStarted = true;
@@ -239,22 +257,20 @@ export async function runPartnerReportJob(db: DbOrTx, jobId: string, opts: RunOp
   } catch (err) {
     logWarn('worker.partner-report', 'report build failed', { jobId: job.id, error: err instanceof Error ? err.name : 'error' });
     if (err instanceof InvalidParamsError) {
-      await repo.failJob(job.id, claimedAt, ERR_INVALID_PARAMS);
+      await fixedError(() => repo.failJob(job.id, claimedAt, ERR_INVALID_PARAMS), 'report_fail_failed');
       return 'failed';
     }
     // Anything else may be transient (a dropped connection): hand the job back to queued and let
     // the outbox retry it with backoff. A FIXED message, never the cause (it could echo data).
     // At MAX_ATTEMPTS the row dead-letters (one ops alert) and the job shows as not built.
-    await repo.releaseJob(job.id, claimedAt);
+    await fixedError(() => repo.releaseJob(job.id, claimedAt), 'report_release_failed');
     throw new Error(ERR_GENERATION);
   }
   const params = { ...obj(job.params), ...(built.truncated ? { truncated: true } : {}) };
-  const ok = await repo.completeJob(job.id, claimedAt, {
-    contentEnc,
-    rowCount: built.rowCount,
-    params,
-    expiresAt: new Date(now() + REPORT_TTL_MS),
-  });
+  const ok = await fixedError(
+    () => repo.completeJob(job.id, claimedAt, { contentEnc, rowCount: built.rowCount, params, expiresAt: new Date(now() + REPORT_TTL_MS) }),
+    'report_complete_failed',
+  );
   if (!ok) logWarn('worker.partner-report', 'completeJob refused: claim no longer ours', { jobId: job.id });
   return ok ? 'ready' : 'skipped';
 }
