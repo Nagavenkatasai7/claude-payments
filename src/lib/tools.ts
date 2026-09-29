@@ -2994,6 +2994,19 @@ async function openRecallDisputeTool(
   const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
   if (stepUpRefusal) return stepUpRefusal;
 
+  // M2-14 (#403 L3): on the web (account and portal chat) the partner's support switch applies,
+  // exactly as the receipt and portal recall actions apply it (receipt-cores portalDisabled). The
+  // WhatsApp bot is unchanged.
+  if (ctx.channel === 'web') {
+    const partner = (await ctx.partnerStore.getPartner(ctx.partnerId)) ?? (await ctx.partnerStore.ensureDefaultPartner());
+    if (partner.supportConfig?.enableSupportPortal === false) {
+      return {
+        error_code: 'support_off',
+        reply_hint: 'online support cases are turned off for this service — ask them to contact the provider directly',
+      };
+    }
+  }
+
   // recall_eligible — open the case. Respect the per-customer open-case cap.
   const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
   // Count only THIS tenant's cases (fix 1 review): another partner's open tickets

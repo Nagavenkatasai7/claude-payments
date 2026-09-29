@@ -2894,6 +2894,20 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(ticket.subject.toLowerCase()).toContain('recall');
   });
 
+  it('M2-14 (#403 L3): web chat honours the partner support switch like the receipt/portal recall (no ticket); WhatsApp unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    await ctx.partnerStore.ensureDefaultPartner();
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig(ctx.partnerId, (prev) => ({ ...prev, enableSupportPortal: false }));
+    const web = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, { ...ctx, channel: 'web' as const });
+    expect(web.opened).toBeUndefined();
+    expect(web.error_code).toBe('support_off');
+    expect((await createTicketRepo(db).listByCustomer(ctx.phone)).filter((t) => t.transferId === id)).toHaveLength(0);
+    const wa = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, ctx);
+    expect(wa.opened).toBe(true);
+  });
+
   it('no transfer_id: resolves the latest delivered-within-window transfer', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintDelivered(ctx);

@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
@@ -127,29 +128,41 @@ export async function requestRecallFor(
   const gate = await stepUpGate();
   if (gate !== 'ok') return { kind: 'step_up', failure: gate };
 
-  const repo = createTicketRepo(getDb());
-  const mine = await repo.listByCustomer(customer.senderPhone);
-  const open = mine.filter((t) => OPEN_STATUSES.has(t.status) && (!opts.tenantScopedCap || t.partnerId === customer.partnerId));
-  if (open.length >= MAX_OPEN_TICKETS) return { kind: 'cap' };
-
   const reasonLabel = REASON_LABEL[reason] ?? reason;
-  // partnerId + customerPhone come from the caller's SESSION; transferId was re-validated above.
-  const ticket = await repo.createTicket({
-    id: `tk_${newTransferId()}`,
-    partnerId: customer.partnerId,
-    kind: 'customer',
-    customerPhone: customer.senderPhone,
-    transferId: transfer.id,
-    subject: `Recall request: ${reason}`,
-    body:
-      `Recall/dispute opened from the receipt page for transfer ${transfer.id}.\n` +
-      `Reason: ${reasonLabel} (${reason}).\n` +
-      `The customer reports a problem with a delivered transfer within the 24h recall window. ` +
-      `Recovery is not guaranteed — please review and follow up.`,
-    category: 'refund',
-  });
+  // M2-14 (#397 L2): one open recall per transfer. The check and the insert run under a per-transfer
+  // advisory lock in ONE transaction, so two tabs (or a double submit with two request keys) can't
+  // both insert; the second gets the first ticket back. The lock is not a ledger row lock.
+  return getDb().transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`recall:${customer.partnerId}:${transfer.id}`}))`);
+    const repo = createTicketRepo(tx);
+    const existing = await repo.findOpenRecallForTransfer(customer.partnerId, customer.senderPhone, transfer.id);
+    if (existing) return { kind: 'opened', ticketId: existing.id } as const;
 
-  // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
-  await enqueueTriage(getDb(), ticket.id);
-  return { kind: 'opened', ticketId: ticket.id };
+    // M2-14 (#397 L1): the portal's cap counts in SQL with the tenant in the WHERE; the legacy
+    // receipt keeps counting every ticket on the phone.
+    const openCount = opts.tenantScopedCap
+      ? await repo.countOpenByCustomerInTenant(customer.partnerId, customer.senderPhone)
+      : (await repo.listByCustomer(customer.senderPhone)).filter((t) => OPEN_STATUSES.has(t.status)).length;
+    if (openCount >= MAX_OPEN_TICKETS) return { kind: 'cap' } as const;
+
+    // partnerId + customerPhone come from the caller's SESSION; transferId was re-validated above.
+    const ticket = await repo.createTicket({
+      id: `tk_${newTransferId()}`,
+      partnerId: customer.partnerId,
+      kind: 'customer',
+      customerPhone: customer.senderPhone,
+      transferId: transfer.id,
+      subject: `Recall request: ${reason}`,
+      body:
+        `Recall/dispute opened from the receipt page for transfer ${transfer.id}.\n` +
+        `Reason: ${reasonLabel} (${reason}).\n` +
+        `The customer reports a problem with a delivered transfer within the 24h recall window. ` +
+        `Recovery is not guaranteed — please review and follow up.`,
+      category: 'refund',
+    });
+
+    // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
+    await enqueueTriage(tx, ticket.id);
+    return { kind: 'opened', ticketId: ticket.id } as const;
+  });
 }

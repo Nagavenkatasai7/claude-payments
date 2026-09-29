@@ -222,6 +222,23 @@ describe('requestRecallPortalAction', () => {
   it("B's transfer → not found", async () => {
     expect(await requestRecallPortalAction(B.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ error: 'portal.transfer.not_found' });
   });
+  it('M2-14 (#397 L2): two tabs (two request keys) on one transfer → ONE recall ticket, even when concurrent', async () => {
+    const [r1, r2] = await Promise.all([
+      requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' })),
+      requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'wrong_amount' })),
+    ]);
+    expect(r1).toEqual({ notice: 'portal.recall.opened' });
+    expect(r2).toEqual({ notice: 'portal.recall.opened' });
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'other' }))).toEqual({ notice: 'portal.recall.opened' });
+    expect(await db.select().from(tickets).where(eq(tickets.transferId, A.transferIds[1]))).toHaveLength(1);
+  });
+  it('M2-14 (#397 L1): the cap still counts THIS tenant: 5 open tickets on A cap A', async () => {
+    const repo = createTicketRepo(db);
+    for (let i = 0; i < 5; i++) {
+      await repo.createTicket({ id: `tk_capa${i}`, partnerId: 'pa', kind: 'customer', customerPhone: phone, subject: 's', body: 'b' });
+    }
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ error: 'portal.recall.cap' });
+  });
   it("the open-ticket cap counts THIS tenant only: 5 open tickets on B do not cap A", async () => {
     const repo = createTicketRepo(db);
     for (let i = 0; i < 5; i++) {
