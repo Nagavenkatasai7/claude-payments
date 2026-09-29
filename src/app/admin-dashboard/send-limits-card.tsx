@@ -121,6 +121,11 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
             {Object.entries(p.hidden).map(([k, v]) => (
               <input key={k} type="hidden" name={k} value={v} />
             ))}
+            {p.scope === 'customer' && (
+              // Stale-form guard: the partner entry this page rendered ('' when none); the action
+              // refuses a save or clear if the partner changed it since.
+              <input type="hidden" name="expectedSetAt" value={partnerSet && typeof stored?.setAt === 'string' ? stored.setAt : ''} />
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor={`${idPrefix}-per`}>Per-transfer limit (USD)</Label>
@@ -152,7 +157,7 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
               <p className="text-xs text-muted-foreground">
                 The partner set this limit. Saving it with the same values changes nothing, and the partner keeps control.
                 Changing any value replaces it with a SmartRemit limit that the partner cannot edit or clear while it is live.
-                Clear removes it, and the partner can then set it again.
+                Clear removes it, and the partner can then set it again. If the partner changes it after you open this page, the save is refused; reload first.
               </p>
             )}
             <div className="flex flex-wrap gap-2">

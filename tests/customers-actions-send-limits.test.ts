@@ -247,12 +247,19 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
     perTransferCapCents: 50_000, t1DailyCapCents: 150_000, expiresAt: `${expDate()}T23:59:59.999Z`,
     setBy: 'pa-admin', setAt: new Date(Date.now() - 86_400_000).toISOString(), setScope: 'partner' as const,
   });
-  /** Exactly what the card prefills for a stored entry (send-limits-card.tsx defaultValue). */
-  const prefilled = (reason: string) => ({ partnerId: 'A', phone: PHONE, perTransferUsd: '500', t1DailyUsd: '1500', expiresAt: expDate(), reason });
+  /** Exactly what the card prefills for a stored entry (send-limits-card.tsx defaultValue + the hidden expectedSetAt). */
+  let loadedSetAt = '';
+  const prefilled = (reason: string) => ({
+    partnerId: 'A', phone: PHONE, perTransferUsd: '500', t1DailyUsd: '1500', expiresAt: expDate(), reason, expectedSetAt: loadedSetAt,
+  });
+  const plant = async (v: Parameters<typeof cs.setSendLimitOverride>[2]) => {
+    await cs.setSendLimitOverride('A', PHONE, v);
+    loadedSetAt = v && v.setScope === 'partner' && v.setAt ? v.setAt : ''; // what the page rendered
+  };
 
   it('an unchanged re-save (only a reason typed) leaves the partner entry untouched: no write, no audit row', async () => {
     const planted = partnerSet();
-    await cs.setSendLimitOverride('A', PHONE, planted);
+    await plant(planted);
     await setCustomerSendLimitAction(form(prefilled('Looked at it, no change')));
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(planted);
     expect(await auditRows()).toEqual([]);
@@ -260,7 +267,7 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
 
   it('changing a value replaces it with a SmartRemit override and audits the partner entry as old', async () => {
     const planted = partnerSet();
-    await cs.setSendLimitOverride('A', PHONE, planted);
+    await plant(planted);
     await setCustomerSendLimitAction(form({ ...prefilled('Raise for a verified business'), perTransferUsd: '5000', t1DailyUsd: '5000' }));
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toMatchObject({
       perTransferCapCents: 500_000, t1DailyCapCents: 500_000, setBy: 'root', setScope: 'platform',
@@ -271,7 +278,7 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
   });
 
   it('changing only the expiry is a change', async () => {
-    await cs.setSendLimitOverride('A', PHONE, partnerSet());
+    await plant(partnerSet());
     const later = new Date(Date.now() + 9 * 86_400_000).toISOString().slice(0, 10);
     await setCustomerSendLimitAction(form({ ...prefilled('Extend'), expiresAt: later }));
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toMatchObject({ setScope: 'platform', expiresAt: `${later}T23:59:59.999Z` });
@@ -280,8 +287,8 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
 
   it('Clear on a partner entry is still a real, audited clear (null, so the partner can set it again)', async () => {
     const planted = partnerSet();
-    await cs.setSendLimitOverride('A', PHONE, planted);
-    await setCustomerSendLimitAction(form({ partnerId: 'A', phone: PHONE, clear: 'on', reason: 'Back to defaults' }));
+    await plant(planted);
+    await setCustomerSendLimitAction(form({ partnerId: 'A', phone: PHONE, clear: 'on', reason: 'Back to defaults', expectedSetAt: loadedSetAt }));
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toBeUndefined();
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
@@ -293,7 +300,7 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
       { perTransferCapCents: 500_000, t1DailyCapCents: 500_000, setBy: 'ops', setAt: '2026-09-01T00:00:00.000Z', setScope: 'platform' as const },
       { perTransferCapCents: 500_000, t1DailyCapCents: 500_000, setBy: 'ops', setAt: '2026-09-01T00:00:00.000Z' },
     ]) {
-      await cs.setSendLimitOverride('A', PHONE, planted);
+      await plant(planted);
       await setCustomerSendLimitAction(form(RAISE));
     }
     const rows = await auditRows();
@@ -304,9 +311,69 @@ describe('setCustomerSendLimitAction — partner-set entries (M3-12 follow-up)',
 
   it('a forced audit failure on a real change still rolls back (the no-op sentinel is the only swallowed error)', async () => {
     const planted = partnerSet();
-    await cs.setSendLimitOverride('A', PHONE, planted);
+    await plant(planted);
     failAudit = true;
     await expect(setCustomerSendLimitAction(form({ ...prefilled('Raise'), perTransferUsd: '5000' }))).rejects.toThrow('audit insert failed');
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(planted);
+  });
+
+  describe('stale form guard (the partner changed the entry after the admin opened the page)', () => {
+    const STALE = /The partner changed this limit since you opened the page\. Reload and try again\./;
+    const partnerEdit = async (perTransferCapCents: number) => {
+      // The partner edits AFTER the admin's page rendered: loadedSetAt keeps the old setAt.
+      const edited = { ...partnerSet(), perTransferCapCents, setAt: new Date().toISOString() };
+      await cs.setSendLimitOverride('A', PHONE, edited);
+      return edited;
+    };
+
+    it('an unchanged re-save of the stale form is refused: row unchanged, no audit', async () => {
+      await plant(partnerSet());
+      const edited = await partnerEdit(40_000);
+      await expect(setCustomerSendLimitAction(form(prefilled('No change')))).rejects.toThrow(STALE);
+      expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(edited);
+      expect(await auditRows()).toEqual([]);
+    });
+
+    it('a single-field change on the stale form is refused too', async () => {
+      await plant(partnerSet());
+      const edited = await partnerEdit(40_000);
+      await expect(setCustomerSendLimitAction(form({ ...prefilled('Raise'), perTransferUsd: '5000' }))).rejects.toThrow(STALE);
+      expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(edited);
+      expect(await auditRows()).toEqual([]);
+    });
+
+    it('Clear on the stale form is refused', async () => {
+      await plant(partnerSet());
+      const edited = await partnerEdit(40_000);
+      await expect(
+        setCustomerSendLimitAction(form({ partnerId: 'A', phone: PHONE, clear: 'on', reason: 'Back to defaults', expectedSetAt: loadedSetAt })),
+      ).rejects.toThrow(STALE);
+      expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(edited);
+      expect(await auditRows()).toEqual([]);
+    });
+
+    it('a page rendered with no partner entry (empty expectedSetAt) cannot overwrite one the partner set since', async () => {
+      await plant(null);
+      const edited = await partnerEdit(40_000);
+      await expect(setCustomerSendLimitAction(form({ ...RAISE, expectedSetAt: loadedSetAt }))).rejects.toThrow(STALE);
+      await expect(setCustomerSendLimitAction(form(RAISE))).rejects.toThrow(STALE); // field missing entirely
+      expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual(edited);
+      expect(await auditRows()).toEqual([]);
+    });
+
+    it('a fresh form (expectedSetAt matches) works: a change writes and audits', async () => {
+      await plant(partnerSet());
+      await setCustomerSendLimitAction(form({ ...prefilled('Raise'), perTransferUsd: '5000' }));
+      expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toMatchObject({ perTransferCapCents: 500_000, setScope: 'platform' });
+      expect(await auditRows()).toHaveLength(1);
+    });
+
+    it('platform and legacy entries ignore expectedSetAt (a stale or missing value never blocks)', async () => {
+      await cs.setSendLimitOverride('A', PHONE, { perTransferCapCents: 500_000, setBy: 'ops', setAt: '2026-09-01T00:00:00.000Z', setScope: 'platform' });
+      await setCustomerSendLimitAction(form({ ...RAISE, expectedSetAt: 'something-else' }));
+      await cs.setSendLimitOverride('A', PHONE, { perTransferCapCents: 500_000, setBy: 'ops' });
+      await setCustomerSendLimitAction(form(RAISE));
+      expect(await auditRows()).toHaveLength(2);
+    });
   });
 });

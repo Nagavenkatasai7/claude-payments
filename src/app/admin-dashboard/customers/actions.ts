@@ -301,7 +301,9 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
  *     PARTNER-set entry and the posted caps + expiry are exactly its own (the
  *     admin re-saved the prefilled form), the transaction rolls back and the
  *     action returns: no write, no audit row, the partner keeps control. Any
- *     changed value (or Clear) takes the audited write as before.
+ *     changed value (or Clear) takes the audited write as before. A partner-set
+ *     entry whose setAt differs from the form's hidden expectedSetAt (the partner
+ *     edited it after the page rendered) is refused, for a save and a clear.
  * Only the dollar caps move: sanctions, EDD and the tier gates are untouched
  * (send-limits.ts resolveEffectiveSendLimits).
  */
@@ -310,6 +312,14 @@ class UnchangedPartnerEntry extends Error {
   constructor() {
     super('unchanged_partner_entry');
     this.name = 'UnchangedPartnerEntry';
+  }
+}
+
+/** Thrown INSIDE the transaction when the partner changed its entry after the admin's page rendered. */
+class StalePartnerEntry extends Error {
+  constructor() {
+    super('stale_partner_entry');
+    this.name = 'StalePartnerEntry';
   }
 }
 
@@ -327,6 +337,7 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
   const phone = String(formData.get('phone') ?? '').trim();
   if (!phone) throw new Error('Phone is required.');
   const partnerId = targetPartnerId(staff, formData); // platform staff MUST name the tenant
+  const expectedSetAt = String(formData.get('expectedSetAt') ?? '');
 
   const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
   if (!customer) throw new Error('Customer not found.');
@@ -345,6 +356,11 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
       );
       if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
       // Checked against the value read FOR UPDATE, so a concurrent partner edit is never missed.
+      // Stale-form guard: the card posts the partner entry's setAt it rendered ('' when none); a
+      // partner-set entry that no longer matches it is refused for a save AND a clear.
+      if (previous?.setScope === 'partner' && (typeof previous.setAt === 'string' ? previous.setAt : '') !== expectedSetAt) {
+        throw new StalePartnerEntry(); // same normalization as the card's hidden field
+      }
       if (isUnchangedPartnerSetEntry(previous, validated.value)) throw new UnchangedPartnerEntry();
       await createAuditRepo(tx).record({
         partnerId: customer.partnerId,
@@ -356,6 +372,9 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
       });
     });
   } catch (err) {
+    if (err instanceof StalePartnerEntry) {
+      throw new Error('The partner changed this limit since you opened the page. Reload and try again.');
+    }
     if (!(err instanceof UnchangedPartnerEntry)) throw err;
     // Rolled back: nothing written, nothing audited. The page still re-renders the current state.
   }
