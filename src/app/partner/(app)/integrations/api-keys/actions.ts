@@ -13,6 +13,8 @@ import { createPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { keyModeFromId, type ApiKeyMode } from '@/lib/partner-api-scopes';
 import { MAX_KEYS_PER_MODE, activeCount, parseKeyId, parseKeyMode, type KeyIssueResult } from '@/lib/partner-api-keys-view';
 import { getRedis } from '@/lib/redis';
+import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
@@ -33,6 +35,10 @@ import type { ActionResult } from '../../../action-result';
 // Issuance serialises per tenant on the partners row (SELECT … FOR UPDATE: drizzle
 // node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586, precedent
 // partner-requests/actions.ts:61-67), so the per-mode cap cannot be raced past.
+//
+// Create and rotate need a 15-minute step-up (partner-step-up-gate.ts), checked after the input
+// parse and BEFORE the issue budget is spent or anything is written; a stale session gets the typed
+// step_up_required result and the page re-verifies, then retries. Revoke is never gated.
 
 const PAGE = PARTNER_ROUTES.integrationsApiKeys.href;
 // Create and rotate share ONE budget per tenant. FAILS CLOSED on a limiter error (issuing a
@@ -118,19 +124,23 @@ async function issue(ctx: PartnerCtx, source: string, target: { mode: ApiKeyMode
   return result;
 }
 
-export async function createKeyAction(_prev: KeyIssueResult | null, formData: FormData): Promise<KeyIssueResult> {
+export async function createKeyAction(_prev: KeyIssueResult | null, formData: FormData): Promise<KeyIssueResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.integrationsApiKeys.policy);
   const mode = parseKeyMode(formData.get('mode'));
   if (!mode) return refused('partner.keys.invalid');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'api_key.issue');
+  if (stepUp) return stepUp;
   return issue(ctx, 'partner.apikeys.create', { mode });
 }
 
-export async function rotateKeyAction(_prev: KeyIssueResult | null, formData: FormData): Promise<KeyIssueResult> {
+export async function rotateKeyAction(_prev: KeyIssueResult | null, formData: FormData): Promise<KeyIssueResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.integrationsApiKeys.policy);
   const keyId = parseKeyId(formData.get('id'));
   if (!keyId) return refused('partner.keys.notFound');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'api_key.rotate');
+  if (stepUp) return stepUp;
   return issue(ctx, 'partner.apikeys.rotate', { rotateFrom: keyId });
 }
 

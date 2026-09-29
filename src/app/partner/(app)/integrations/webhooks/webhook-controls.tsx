@@ -8,11 +8,14 @@ import type { RailSecretKind } from '@/lib/partner-integrations';
 import type { RotateSecretResult, TestPingResult } from '@/lib/partner-webhooks-view';
 import type { ActionResult } from '../../../action-result';
 import { replayDeliveryAction, rotateSecretAction, saveEndpointAction, sendTestAction } from './actions';
+import { StepUpPrompt, useStepUpAction } from '../step-up';
 
 // The /partner settlement-webhook controls (UI redesign M3-15a). A rotated secret exists ONLY in the
 // rotate action's result, held in this component's state: never a prop from the server page, never
 // written to storage or the URL, gone on reload. The server re-validates everything (URL rule,
-// SmartRemit-host refusal, kind allowlist, tenant, rate limit).
+// SmartRemit-host refusal, kind allowlist, tenant, rate limit). Save, rotate and replay need a
+// 15-minute step-up: the step_up_required result shows StepUpPrompt, whose retry re-sends the same
+// submission (a rotated secret is then revealed from that one result; ../step-up.tsx).
 
 const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 
@@ -34,39 +37,43 @@ function Alert({ text }: { text: string }) {
 }
 
 export function EndpointForm({ current }: { current: string | null }) {
-  const [result, formAction] = React.useActionState(saveEndpointAction, null as ActionResult | null);
+  const flow = useStepUpAction<ActionResult>((fd) => saveEndpointAction(null, fd));
+  const result = flow.stepUp ? null : flow.result;
   return (
-    <form action={formAction} className="mt-4 flex flex-col gap-4">
-      <Field name="url" label={t('partner.webhooks.endpointLabel')} hint={t('partner.webhooks.endpointHint')}>
-        {(ids) => (
-          <Input
-            id={ids.id}
-            aria-describedby={ids.describedBy}
-            name="url"
-            type="url"
-            inputMode="url"
-            autoComplete="off"
-            spellCheck={false}
-            required
-            maxLength={2048}
-            defaultValue={current ?? ''}
-            placeholder="https://"
-          />
-        )}
-      </Field>
-      <div className="flex flex-wrap items-center gap-3">
-        <Submit label={t('partner.webhooks.save')} pending={t('partner.webhooks.saving')} />
-        {result ? (
-          result.ok ? (
-            <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
-              {t('partner.webhooks.saved')}
-            </p>
-          ) : (
-            <Alert text={result.error} />
-          )
-        ) : null}
-      </div>
-    </form>
+    <div>
+      <form action={flow.run} className="mt-4 flex flex-col gap-4">
+        <Field name="url" label={t('partner.webhooks.endpointLabel')} hint={t('partner.webhooks.endpointHint')}>
+          {(ids) => (
+            <Input
+              id={ids.id}
+              aria-describedby={ids.describedBy}
+              name="url"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              required
+              maxLength={2048}
+              defaultValue={current ?? ''}
+              placeholder="https://"
+            />
+          )}
+        </Field>
+        <div className="flex flex-wrap items-center gap-3">
+          <Submit label={t('partner.webhooks.save')} pending={t('partner.webhooks.saving')} />
+          {result ? (
+            result.ok ? (
+              <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
+                {t('partner.webhooks.saved')}
+              </p>
+            ) : (
+              <Alert text={result.error} />
+            )
+          ) : null}
+        </div>
+      </form>
+      {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
+    </div>
   );
 }
 
@@ -104,7 +111,8 @@ function SecretReveal({ secret, graceUntil }: { secret: string; graceUntil: stri
  * the dialog says so and sends the explicit override flag (endGrace=1). The server re-checks.
  */
 export function RotateSecretControl({ kind, graceUntil }: { kind: RailSecretKind; graceUntil: string | null }) {
-  const [result, setResult] = React.useState<RotateSecretResult | null>(null);
+  const flow = useStepUpAction<RotateSecretResult>((fd) => rotateSecretAction(null, fd));
+  const result = flow.stepUp ? null : flow.result;
   return (
     <div className="flex flex-col">
       <div>
@@ -122,10 +130,11 @@ export function RotateSecretControl({ kind, graceUntil }: { kind: RailSecretKind
           action={async (fd) => {
             fd.set('kind', kind);
             if (graceUntil) fd.set('endGrace', '1');
-            setResult(await rotateSecretAction(null, fd));
+            await flow.run(fd);
           }}
         />
       </div>
+      {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
       {result ? result.ok ? <SecretReveal key={result.secret.slice(-8)} secret={result.secret} graceUntil={result.graceUntil} /> : <div className="mt-3"><Alert text={result.error} /></div> : null}
     </div>
   );
@@ -167,7 +176,8 @@ export function TestEventForm() {
  * inside the session tenant, re-checks rail type and rate limit, and only re-queues the row.
  */
 export function ReplayControl({ id }: { id: number }) {
-  const [result, setResult] = React.useState<ActionResult | null>(null);
+  const flow = useStepUpAction<ActionResult>((fd) => replayDeliveryAction(null, fd));
+  const result = flow.stepUp ? null : flow.result;
   return (
     <div className="flex flex-wrap items-center gap-3">
       {result?.ok ? null : (
@@ -183,10 +193,11 @@ export function ReplayControl({ id }: { id: number }) {
           requireReason={false}
           action={async (fd) => {
             fd.set('id', String(id));
-            setResult(await replayDeliveryAction(null, fd));
+            await flow.run(fd);
           }}
         />
       )}
+      {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
       {result ? (
         result.ok ? (
           <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
