@@ -249,6 +249,29 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
+     * M2-14 (PR 397 L2): the OPEN recall ticket for one transfer under ONE tenant (partnerId in the
+     * WHERE), so a second recall on the same transfer reuses it. A recall ticket is the customer
+     * ticket whose subject starts with the fixed "Recall request:" prefix (receipt-cores).
+     */
+    async findOpenRecallForTransfer(partnerId: PartnerId, customerPhone: string, transferId: string): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.transferId, transferId),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+            sql`${tickets.subject} LIKE 'Recall request:%'`,
+          ),
+        )
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
      * Program-Fix 34B: the customer's OPEN help case under ONE tenant — the one
      * request_human_help reuses. Tenant-scoped in SQL (never a phone-only page
      * filtered in JS). A help case is category human_help OR the fixed help

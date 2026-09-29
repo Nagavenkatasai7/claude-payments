@@ -36,6 +36,7 @@ export const CHANNEL_HEALTH_KINDS = [
   'sig_fail', // inbound signature failures (R2b: shown from webhook-signature-health, never a mark; never emailed)
   'no_phone', // an inbound message without a phone number (R1)
   'delivery_failed', // Meta reported a failed delivery (R2b)
+  'auth_template_failed', // M2-14: the partner's recorded AUTHENTICATION template was rejected on a pay-code send
 ] as const;
 export type ChannelHealthKind = (typeof CHANNEL_HEALTH_KINDS)[number];
 const KIND_SET: ReadonlySet<string> = new Set(CHANNEL_HEALTH_KINDS);
@@ -44,7 +45,7 @@ const KIND_SET: ReadonlySet<string> = new Set(CHANNEL_HEALTH_KINDS);
  * Kinds the partner must act on: these get the (daily) alert email. Never
  * `sig_fail`: a signature failure is unauthenticated traffic (banner hint only).
  */
-const ALERTABLE: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config']);
+const ALERTABLE: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config', 'auth_template_failed']);
 
 export const CHANNEL_HEALTH_ACTION = 'whatsapp.channel_health';
 /** The audit actions the partner-page banner reads (the R1 no-phone row included). */
@@ -131,9 +132,11 @@ const KIND_MESSAGE: Record<ChannelHealthKind, string> = {
   sig_fail: "Some inbound webhook calls failed signature checks. If your bot isn't receiving messages, check the app secret.",
   no_phone: 'Some inbound messages arrived without a phone number and could not be answered.',
   delivery_failed: 'WhatsApp reported failed deliveries.',
+  auth_template_failed:
+    'WhatsApp rejected your authentication template when sending a payment confirmation code. Check that the template recorded for your portal is approved in WhatsApp Manager with the same name and language.',
 };
 
-const ERROR_KINDS: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config']);
+const ERROR_KINDS: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config', 'auth_template_failed']);
 
 export interface ChannelHealthItem {
   kind: ChannelHealthKind | 'config_warning';
@@ -235,6 +238,7 @@ const EMAIL_SUBJECT: Record<ChannelHealthKind, string> = {
   sig_fail: 'Action needed: WhatsApp webhook signature failures',
   no_phone: 'WhatsApp channel notice',
   delivery_failed: 'WhatsApp channel notice',
+  auth_template_failed: 'Action needed: your WhatsApp authentication template was rejected',
 };
 
 /** FIXED text only (plus the dashboard link): never a code body, phone or token. */

@@ -74,6 +74,7 @@ const KIND_KEY: Readonly<Record<ChannelHealthItem['kind'], MessageKey>> = Object
   sig_fail: 'partner.whatsapp.health.kind.sig_fail',
   no_phone: 'partner.whatsapp.health.kind.no_phone',
   delivery_failed: 'partner.whatsapp.health.kind.delivery_failed',
+  auth_template_failed: 'partner.whatsapp.health.kind.auth_template_failed',
   config_warning: 'partner.whatsapp.health.kind.config_warning',
 });
 

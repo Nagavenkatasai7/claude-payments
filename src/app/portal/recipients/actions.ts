@@ -105,16 +105,20 @@ export async function addRecipientAction(_prev: RecipientFormState, formData: Fo
   const input = v.value;
   // The duplicate check runs INSIDE runOnce, so a double submit replays the first run's "done"; an
   // "exists" answer carries a fresh request key, so it is never replayed to a corrected form.
-  const out = await once('portal-recipient-add', pid, phone, formData, async () => {
-    const live = await createRecipientRepo(getDb()).listAllForSender(pid, phone);
-    if (live.some((r) => normalizePhone(r.recipientPhone) === input.recipientPhone)) return { kind: 'exists' };
-    const rid = recipientRid(pid, phone, input.recipientPhone);
-    await getDb().transaction(async (tx) => {
-      await createRecipientRepo(tx).upsertRecipient(pid, phone, { ...input, lastUsedAt: new Date().toISOString() });
+  // M2-14 (PR 398 L5): the check and the write run in ONE transaction under the address-book lock, so
+  // two tabs (two request keys) adding the same number can't both pass the check and overwrite.
+  const out = await once('portal-recipient-add', pid, phone, formData, async () =>
+    getDb().transaction(async (tx) => {
+      await lockRecipientBook(tx, pid, phone);
+      const repo = createRecipientRepo(tx);
+      const live = await repo.listAllForSender(pid, phone);
+      if (live.some((r) => normalizePhone(r.recipientPhone) === input.recipientPhone)) return { kind: 'exists' as const };
+      const rid = recipientRid(pid, phone, input.recipientPhone);
+      await repo.upsertRecipient(pid, phone, { ...input, lastUsedAt: new Date().toISOString() });
       await recordRecipientAudit(tx, { partnerId: pid, phone, action: 'recipient.create', meta: { rid, fields: ['name', 'destination'] } });
-    });
-    return { kind: 'done' };
-  });
+      return { kind: 'done' as const };
+    }),
+  );
   if ('requestKey' in out) return out;
   if (out.kind === 'exists') return refuse(formData, { error: 'portal.recipients.exists' });
   redirect('/portal/recipients?done=added');

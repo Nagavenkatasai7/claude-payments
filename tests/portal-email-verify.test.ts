@@ -93,6 +93,12 @@ describe('verify token', () => {
     expect(await consumeEmailVerifyToken(redis, token, bind())).toBe(false);
   });
 
+  it('M2-14 (#399 L6): two concurrent POSTs of the same link (two tabs) → exactly one verifies', async () => {
+    const token = await mintEmailVerifyToken(redis, bind());
+    const results = await Promise.all([1, 2, 3].map(() => consumeEmailVerifyToken(redis, token, bind())));
+    expect(results.filter(Boolean)).toHaveLength(1);
+  });
+
   it("a token minted for A on partner X fails for partner Y or for another phone, and does NOT burn the owner's token", async () => {
     const token = await mintEmailVerifyToken(redis, bind('pa'));
     expect(await consumeEmailVerifyToken(redis, token, bind('pb'))).toBe(false);

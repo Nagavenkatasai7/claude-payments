@@ -75,6 +75,23 @@ export async function checkIpRateLimit(
 }
 
 /**
+ * M2-14: give back one unit reserved by checkIpRateLimit in the SAME window (same key), for an
+ * attempt that did nothing (its write failed). If the counter had already expired, DECR would
+ * create it at -1 with no TTL, so a negative result deletes the key instead.
+ */
+export async function refundIpRateLimit(
+  redis: RedisLike,
+  scope: string,
+  ip: string,
+  opts: { windowSec?: number; now?: number },
+): Promise<void> {
+  const windowSec = normalizeWindowSec(opts.windowSec);
+  const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
+  const key = `iprl|${scope}|${ip}|${window}`;
+  if ((await redis.decr(key)) < 0) await redis.del(key);
+}
+
+/**
  * The client IP for limiting. On Vercel the platform sets x-forwarded-for and
  * the FIRST entry is the connecting client (not spoofable through the edge).
  */

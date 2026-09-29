@@ -31,10 +31,38 @@ function firstIsGate(s: ts.Statement | undefined): boolean {
   return false;
 }
 
-function violations(file: string, text: string): string[] {
-  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  if (!sf.statements.some(isUseServer)) return [];
+/**
+ * M2-14 (#394 L5): an INLINE 'use server' function (a server action declared inside a page or
+ * component) is a public endpoint too. Its first statement after the directive prologue must await
+ * requirePortalSite(). Neither this scanner nor the site-host one covered these under src/app/portal.
+ */
+function inlineViolations(file: string, sf: ts.SourceFile): string[] {
   const out: string[] = [];
+  const visit = (n: ts.Node) => {
+    const body =
+      (ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n)) && n.body && ts.isBlock(n.body)
+        ? n.body
+        : undefined;
+    if (body) {
+      let i = 0;
+      let server = false;
+      while (i < body.statements.length && ts.isExpressionStatement(body.statements[i]) && ts.isStringLiteral((body.statements[i] as ts.ExpressionStatement).expression)) {
+        if (isUseServer(body.statements[i])) server = true;
+        i++;
+      }
+      if (server && !firstIsGate(body.statements[i])) out.push(`${file}: an inline 'use server' function does not start with requirePortalSite()`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+function violations(file: string, text: string): string[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const inline = inlineViolations(file, sf);
+  if (!sf.statements.some(isUseServer)) return inline;
+  const out: string[] = [...inline];
   for (const s of sf.statements) {
     if (ts.isExportDeclaration(s) ? !s.isTypeOnly : ts.isExportAssignment(s)) out.push(`${file}: non-function export`);
     if (!hasMod(s, ts.SyntaxKind.ExportKeyword)) continue;
@@ -54,6 +82,14 @@ describe('customer-portal server actions gate on the host first', () => {
   });
   it('every export starts with requirePortalSite()', () => {
     expect(files.flatMap((f) => violations(f, readFileSync(f, 'utf8')))).toEqual([]);
+  });
+  it('M2-14 (#394 L5) self-test: an ungated inline action in a page is flagged; a gated one passes', () => {
+    const bad = `export default function Page() {\n  async function act(fd: FormData) {\n    'use server';\n    return fd;\n  }\n  return <form action={act} />;\n}\n`;
+    const arrow = `export const X = () => { const a = async () => { 'use server'; await other(); }; return a; };`;
+    const good = `export default function Page() {\n  async function act() {\n    'use server';\n    await requirePortalSite();\n  }\n  return <form action={act} />;\n}\n`;
+    expect(violations('p.tsx', bad)).toHaveLength(1);
+    expect(violations('p.tsx', arrow)).toHaveLength(1);
+    expect(violations('p.tsx', good)).toEqual([]);
   });
   it('self-test: an ungated or late-gated action is flagged; both gate forms pass', () => {
     const M = "'use server';\n";

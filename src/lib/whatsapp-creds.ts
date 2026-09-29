@@ -13,7 +13,7 @@ import { DEFAULT_PARTNER_ID } from './defaults';
 // undefined (the shared env number). R2a: the outbox worker's
 // whatsapp.text/template send does NOT take that fallback for a
 // half-configured channel — it asks resolveWaChannel and fails closed on
-// `incomplete`. The direct senders (pay OTP, partnerWaContext) keep it.
+// `incomplete`, and so does the pay-page OTP (M2-14). partnerWaContext keeps it.
 export function waCredsFrom(
   integrations: PartnerIntegrations | null | undefined,
 ): WaCreds | undefined {
