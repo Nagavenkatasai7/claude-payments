@@ -95,7 +95,7 @@ function rowFromSql(r: Record<string, unknown>): OutboxRow {
 
 /**
  * A dead settlement.instruct row whose transfer settles on `partnerId`'s rail (M3-15b), and that
- * could still be NEEDED: the transfer is still `paid` with no rail ack recorded (payment_provider_ref
+ * could still be NEEDED: the transfer is still `paid` with refund_status 'none' and no rail ack (payment_provider_ref
  * NULL, the same "rail has it" signal sender-cancel uses), and no other instruct row for it is live
  * (pending / processing / failed). So a Replay never re-sends what the rail already accepted, and two
  * dead siblings (instruct: + reinstruct:) can never both be put back in flight.
@@ -104,7 +104,7 @@ const deadInstructionOnRail = (partnerId: string) =>
   sql`${outbox.kind} = 'settlement.instruct' AND ${outbox.status} = 'dead' AND EXISTS (
     SELECT 1 FROM transfers t
     WHERE t.id = (${outbox.payload} ->> 'transferId') AND coalesce(t.settlement_partner_id, t.partner_id) = ${partnerId}
-      AND t.status = 'paid' AND t.payment_provider_ref IS NULL)
+      AND t.status = 'paid' AND t.refund_status = 'none' AND t.payment_provider_ref IS NULL)
   AND NOT EXISTS (
     SELECT 1 FROM outbox o2
     WHERE o2.kind = 'settlement.instruct' AND o2.id <> ${outbox.id}

@@ -105,6 +105,12 @@ describe('only a row that could still be needed is listed or revived (review MED
     expect((await statusOf(paRow)).status).toBe('dead');
   });
 
+  it('a paid transfer with a refund requested (the worker would only hold it again) is excluded', async () => {
+    await db.execute(sql`UPDATE transfers SET refund_status = 'requested' WHERE id = 't_pa'`);
+    expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(paRow);
+    expect(await outbox.retryDeadForPartner(paRow, 'pa')).toBe(false);
+  });
+
   it.each(['delivered', 'cancelled'])('a %s transfer is excluded (nothing left to instruct)', async (status) => {
     await db.execute(sql`UPDATE transfers SET status = ${status} WHERE id = 't_pa'`);
     expect((await outbox.listDeadInstructionsForPartner('pa', 50)).map((r) => r.id)).not.toContain(paRow);
