@@ -15,6 +15,7 @@ import {
   CONTACT_OPEN_CAP,
   CapReachedError,
   claimOnce,
+  contactAvailable,
   errName,
   getVisibleTicket,
   isRequestKey,
@@ -41,6 +42,8 @@ const failed = (): ActionResult => ({ ok: false, error: t('partner.support.faile
 export async function contactSmartRemitAction(formData: FormData): Promise<ActionResult> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.supportContact.policy);
+  // The platform's own 'default' tenant has no Contact surface (partner-tickets.ts contactAvailable).
+  if (!contactAvailable(ctx.partnerId)) return failed();
   const subject = parseContactSubject(formData.get('subject'));
   if (!subject) return { ok: false, error: t('partner.contact.subjectInvalid') };
   const message = parseContactBody(formData.get('message'));
