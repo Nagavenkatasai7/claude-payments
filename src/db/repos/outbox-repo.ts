@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { outbox } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 
@@ -92,6 +92,12 @@ function rowFromSql(r: Record<string, unknown>): OutboxRow {
     createdAt: new Date(String(r.created_at)),
   } as OutboxRow;
 }
+
+/** A dead settlement.instruct row whose transfer settles on `partnerId`'s rail (M3-15b). */
+const deadInstructionOnRail = (partnerId: string) =>
+  sql`${outbox.kind} = 'settlement.instruct' AND ${outbox.status} = 'dead' AND EXISTS (
+    SELECT 1 FROM transfers t
+    WHERE t.id = (${outbox.payload} ->> 'transferId') AND coalesce(t.settlement_partner_id, t.partner_id) = ${partnerId})`;
 
 export function createOutboxRepo(db: DbOrTx) {
   return {
@@ -537,6 +543,37 @@ export function createOutboxRepo(db: DbOrTx) {
         .update(outbox)
         .set({ status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null, leaseUntil: null, leaseOwner: null })
         .where(sql`${outbox.id} = ${id} AND ${outbox.status} = 'dead'`);
+    },
+
+    /**
+     * UI redesign M3-15b: the dead settlement instructions whose transfer settles on `partnerId`'s
+     * rail (`coalesce(settlement_partner_id, partner_id)`, the partner whose endpoint the worker
+     * called), newest first. `{ id, createdAt, attempts }` ONLY: never the payload or last_error.
+     */
+    async listDeadInstructionsForPartner(partnerId: string, limit: number): Promise<Array<{ id: number; createdAt: Date; attempts: number }>> {
+      const n = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 1;
+      return db
+        .select({ id: outbox.id, createdAt: outbox.createdAt, attempts: outbox.attempts })
+        .from(outbox)
+        .where(deadInstructionOnRail(partnerId))
+        .orderBy(desc(outbox.id))
+        .limit(n);
+    },
+
+    /**
+     * UI redesign M3-15b: the TENANT-SCOPED dead-letter retry behind the partner's Replay button
+     * (the ops `retryDead` above is unscoped and is never used for it). The same predicate as
+     * listDeadInstructionsForPartner plus the id; the `status = 'dead'` guard makes a double submit
+     * a no-op. The revived row runs the normal instruct handler, whose ledger guard refuses a
+     * transfer that is no longer payable. True when the row was revived.
+     */
+    async retryDeadForPartner(id: number, partnerId: string): Promise<boolean> {
+      const rows = await db
+        .update(outbox)
+        .set({ status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null, leaseUntil: null, leaseOwner: null })
+        .where(and(eq(outbox.id, id), deadInstructionOnRail(partnerId)))
+        .returning({ id: outbox.id });
+      return rows.length > 0;
     },
 
     async countPending(): Promise<number> {
