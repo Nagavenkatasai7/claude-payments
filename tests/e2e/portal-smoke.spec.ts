@@ -35,6 +35,13 @@ test.describe('customer portal on a partner subdomain', () => {
     }
   });
 
+  test('the send pages without a cookie land on the sign-in page (M2-9)', async ({ page }) => {
+    for (const path of ['/portal/send', '/portal/send/review', '/portal/send?amount=100.00&to=IN']) {
+      await page.goto(`${ORIGIN}${path}`);
+      await expect(page, path).toHaveURL(/\/portal\/login$/);
+    }
+  });
+
   test('the email verify link signed out asks to sign in and never renders the token (M2-11)', async ({ page }) => {
     const token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE';
     await page.goto(`${ORIGIN}/portal/notifications/verify?token=${token}`);
