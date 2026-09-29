@@ -6,6 +6,73 @@ import { Input } from '@/components/ui/input';
 import type { GoLiveRecord } from '@/db/repos/partner-go-live-repo';
 import { STAFF_REASON_MAX, STAFF_REASON_MIN } from '@/lib/send-limits';
 import { approveGoLiveAction } from './go-live-actions';
+import { computeOnboardingChecklist, goLivePrerequisitesDone, type OnboardingFacts, type OnboardingStepKey } from '@/lib/partner-onboarding';
+import { t, type MessageKey } from '@/lib/i18n';
+
+/** What the card shows of the partner's M3-20 checklist: the stored facts and the attestation row. */
+export interface GoLiveChecklistView {
+  facts: OnboardingFacts;
+  /** The latest partner.templates.attest audit row (who attested, when), or null. */
+  attestation: { actor: string; at: Date } | null;
+}
+
+const STEP_TITLE: Record<OnboardingStepKey, MessageKey> = {
+  whatsapp: 'partner.onboarding.step.whatsapp.title',
+  templates: 'partner.onboarding.step.templates.title',
+  sandboxKey: 'partner.onboarding.step.sandboxKey.title',
+  sandboxTransfer: 'partner.onboarding.step.sandboxTransfer.title',
+  webhook: 'partner.onboarding.step.webhook.title',
+  branding: 'partner.onboarding.step.branding.title',
+  goLive: 'partner.onboarding.step.goLive.title',
+};
+
+const yesNo = (v: boolean): string => (v ? 'yes' : 'no');
+
+function ChecklistView({ view }: { view: GoLiveChecklistView | 'error' | undefined }) {
+  if (view === undefined) return null;
+  if (view === 'error') return <p className="text-muted-foreground">The onboarding checklist could not be read. Reload to try again.</p>;
+  const { facts, attestation } = view;
+  const steps = computeOnboardingChecklist(facts);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="font-medium">Onboarding checklist</div>
+      <ol className="flex flex-col gap-1.5">
+        {steps.map((s) => (
+          <li key={s.key} className="flex flex-col gap-0.5">
+            <span className="flex items-center gap-2">
+              <Badge variant="outline" className={s.done ? 'border-success/50 text-success' : 'text-muted-foreground'}>
+                {s.done ? 'done' : 'not done'}
+              </Badge>
+              {s.step}. {t(STEP_TITLE[s.key])}
+            </span>
+            {s.key === 'whatsapp' && (
+              <span className="pl-2 text-xs text-muted-foreground">
+                Own number saved: {yesNo(facts.whatsappOwnConfigured)} · Test connection passing: {yesNo(facts.whatsappTestOk)} ·
+                Inbound message received: {yesNo(facts.whatsappInboundSeen)}
+              </span>
+            )}
+            {s.key === 'templates' && (
+              <span className="pl-2 text-xs text-muted-foreground">
+                {attestation
+                  ? `Attested by ${attestation.actor} on ${when(attestation.at)}: the authentication and transfer_delivered templates are approved. Verify in WhatsApp Manager before approving.`
+                  : 'Not attested yet.'}
+              </span>
+            )}
+            {s.key === 'webhook' && (
+              <span className="pl-2 text-xs text-muted-foreground">
+                Partner rail: {yesNo(facts.partnerRail)} · Endpoint URL valid: {yesNo(facts.endpointUrlValid)} · Recent test event accepted:{' '}
+                {yesNo(facts.recentPingOk)}
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+      {!goLivePrerequisitesDone(steps) && (
+        <p className="text-destructive">Steps 1 to 6 are not all done, so go-live cannot be approved yet.</p>
+      )}
+    </div>
+  );
+}
 
 // UI redesign M3-21: the platform admin's go-live card on /admin-dashboard/partners/[id]. The page
 // renders it ONLY for a platform admin (the same predicate as requirePlatformAdmin), and the action
@@ -16,6 +83,9 @@ const FLASH: Record<string, string> = {
   approved: 'Go-live approved. The partner can now issue live API keys.',
   already: 'Go-live was already approved. Nothing changed.',
   not_requested: 'This partner has not requested go-live, so there is nothing to approve.',
+  not_active: 'The partner is not active, so go-live cannot be approved. Reactivate it first.',
+  incomplete: 'Steps 1 to 6 of the onboarding checklist are not all done, so go-live was not approved.',
+  checklist_unavailable: 'The onboarding checklist could not be read, so go-live was not approved. Try again.',
   reason_required: `Add a reason of at least ${STAFF_REASON_MIN} characters before approving.`,
 };
 
@@ -36,13 +106,15 @@ export function GoLiveCard({
   partnerStatus: string;
   goLive: GoLiveRecord | null | 'error';
   flash?: string;
-  /** The onboarding checklist + template attestation (M3-20). Absent until that lands. */
-  checklist?: ReactNode;
+  /** The M3-20 onboarding checklist + template attestation. */
+  checklist: GoLiveChecklistView | 'error';
 }) {
   const record = goLive === 'error' ? null : goLive;
   const approved = Boolean(record?.approvedAt);
   const requested = Boolean(record?.requestedAt);
-  const canApprove = goLive !== 'error' && requested && !approved;
+  // Display only: the action re-checks all of it (go-live-actions.ts precheck).
+  const ready = checklist !== 'error' && goLivePrerequisitesDone(computeOnboardingChecklist(checklist.facts));
+  const canApprove = goLive !== 'error' && requested && !approved && partnerStatus === 'active' && ready;
 
   let badge: ReactNode;
   if (goLive === 'error') badge = <Badge variant="outline" className="text-muted-foreground">unavailable</Badge>;
@@ -72,15 +144,14 @@ export function GoLiveCard({
             {record.approvedBy ? ` by ${record.approvedBy}` : ''}.
           </p>
         )}
+        <p>Partner status: {partnerStatus}.</p>
         {approved && partnerStatus !== 'active' && (
           <p className="text-destructive">Go-live is approved, but the partner is {partnerStatus}, so it is not live.</p>
         )}
-        {checklist ?? (
-          <p className="text-muted-foreground">
-            Before approving, check the partner&apos;s setup (WhatsApp number and templates, settlement endpoint, a delivered
-            sandbox transfer) on the tabs of this page.
-          </p>
+        {!approved && requested && partnerStatus !== 'active' && (
+          <p className="text-destructive">The partner is {partnerStatus}: reactivate it before approving go-live.</p>
         )}
+        <ChecklistView view={checklist} />
         {flash && <p className="text-muted-foreground">{flash}</p>}
         {canApprove && (
           <form action={approveGoLiveAction} className="flex flex-col gap-3">

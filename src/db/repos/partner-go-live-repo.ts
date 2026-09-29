@@ -1,5 +1,5 @@
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
-import { partnerGoLive } from '@/db/schema';
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { auditEvents, partnerGoLive } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import type { PartnerId } from '@/lib/types';
 
@@ -81,4 +81,18 @@ export async function upsertApprovedGoLive(db: DbOrTx, partnerId: PartnerId, by:
     .update(partnerGoLive)
     .set({ approvedAt: now, approvedBy: by, updatedAt: now })
     .where(and(eq(partnerGoLive.partnerId, partnerId), isNull(partnerGoLive.approvedAt)));
+}
+
+/**
+ * M3-21: the newest template attestation (M3-20 writes audit `partner.templates.attest`, subject = the
+ * partner) for the platform approval card: who attested and when. Keyed by partner_id.
+ */
+export async function latestTemplateAttestation(db: DbOrTx, partnerId: PartnerId): Promise<{ actor: string; at: Date } | null> {
+  const rows = await db
+    .select({ actor: auditEvents.actor, at: auditEvents.at })
+    .from(auditEvents)
+    .where(and(eq(auditEvents.partnerId, partnerId), eq(auditEvents.subjectId, partnerId), eq(auditEvents.action, 'partner.templates.attest')))
+    .orderBy(desc(auditEvents.id))
+    .limit(1);
+  return rows[0] ?? null;
 }

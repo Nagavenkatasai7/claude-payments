@@ -10,7 +10,9 @@ import {
   isLiveApproved,
   requestGoLive,
   upsertApprovedGoLive,
+  latestTemplateAttestation,
 } from '@/db/repos/partner-go-live-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 
 // UI redesign M3-14: the go-live gate for LIVE API keys. A partner is live-approved only when its
 // partner_go_live row has approved_at set (migration 0028 backfills an approved row for every
@@ -116,5 +118,20 @@ describe('partner-go-live-repo', () => {
     const [a, b] = await db.transaction(async (tx) => [await getGoLiveForUpdate(tx, 'pa'), await getGoLiveForUpdate(tx, 'pb')]);
     expect(a?.requestedBy).toBe('pa-admin');
     expect(b).toBeNull();
+  });
+
+  it('latestTemplateAttestation: the newest partner.templates.attest row of THIS partner only', async () => {
+    expect(await latestTemplateAttestation(db, 'pa')).toBeNull();
+    const audit = createAuditRepo(db);
+    const row = (partnerId: string, actor: string, action = 'partner.templates.attest') =>
+      audit.record({ partnerId, actor, actorType: 'staff', action, subjectId: partnerId, meta: {} });
+    await row('pb', 'pb-admin');
+    await row('pa', 'pa-other', 'partner.theme.update');
+    expect(await latestTemplateAttestation(db, 'pa')).toBeNull();
+    await row('pa', 'pa-first');
+    await row('pa', 'pa-second');
+    const a = await latestTemplateAttestation(db, 'pa');
+    expect(a?.actor).toBe('pa-second');
+    expect(a?.at).toBeInstanceOf(Date);
   });
 });

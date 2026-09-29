@@ -73,6 +73,7 @@ import { inviteRedeemable } from '@/lib/staff-invite-accept';
 import { decryptField } from '@/lib/field-crypto';
 import { outboxSealedCtx } from '@/lib/crypto-context';
 import { partnerIdForRequest } from '@/lib/partner-from-request';
+import { seedOnboardingComplete } from './helpers-partner-onboarding';
 
 const REQ = 'preq_GoLiveReq1';
 const NEW_PID = partnerIdForRequest(REQ);
@@ -196,7 +197,33 @@ describe('approveGoLiveAction', () => {
     await expect(approveGoLiveAction(goLiveForm(''))).rejects.toThrow('NOT_FOUND');
   });
 
+  it('a requested go-live whose checklist (steps 1-6) is incomplete → refused, nothing written', async () => {
+    for (const omit of ['whatsapp', 'templates', 'sandboxKey', 'sandboxTransfer', 'webhook', 'branding'] as const) {
+      db = await freshDb();
+      pgPartnerStore = createPartnerStore(db);
+      await seedTwoTenants(db);
+      redis.dump.clear();
+      await seedOnboardingComplete(db, redis, 'pa', undefined, { omit: [omit] });
+      await requestGoLive(db, 'pa', 'pa-owner');
+      await asPlatformAdmin();
+      expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/admin-dashboard/partners/pa?golive=incomplete');
+      expect(await isLiveApproved(db, 'pa')).toBe(false);
+      expect(await auditRows('partner.go_live.approve')).toEqual([]);
+    }
+  });
+
+  it('a partner that is not active → refused even with a complete checklist and a request', async () => {
+    await seedOnboardingComplete(db, redis, 'pa');
+    await requestGoLive(db, 'pa', 'pa-owner');
+    await db.update(partners).set({ status: 'suspended' }).where(eq(partners.id, 'pa'));
+    await asPlatformAdmin();
+    expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/admin-dashboard/partners/pa?golive=not_active');
+    expect(await isLiveApproved(db, 'pa')).toBe(false);
+    expect(await auditRows('partner.go_live.approve')).toEqual([]);
+  });
+
   it('success: approves the requested go-live and writes ONE audit row {reason, actorScope}; a repeat is a no-op', async () => {
+    await seedOnboardingComplete(db, redis, 'pa');
     await requestGoLive(db, 'pa', 'pa-owner');
     await requestGoLive(db, 'pb', 'pb-owner');
     await asPlatformAdmin();

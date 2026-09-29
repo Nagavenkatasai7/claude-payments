@@ -15,11 +15,39 @@ import { requirePlatformAdmin } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { approveGoLive, getGoLiveForUpdate } from '@/db/repos/partner-go-live-repo';
+import { approveGoLive, getGoLive, getGoLiveForUpdate } from '@/db/repos/partner-go-live-repo';
+import { loadOnboardingFacts } from '@/db/repos/partner-onboarding-facts';
+import { computeOnboardingChecklist, goLivePrerequisitesDone } from '@/lib/partner-onboarding';
+import { logWarn } from '@/lib/log';
 import { createPartnerStore } from '@/lib/partner-store';
 import { requireStaffReason } from '@/lib/send-limits';
 
-export type GoLiveApprovalOutcome = 'approved' | 'already' | 'not_requested' | 'reason_required';
+export type GoLiveApprovalOutcome =
+  | 'approved'
+  | 'already'
+  | 'not_requested'
+  | 'reason_required'
+  | 'not_active'
+  | 'incomplete'
+  | 'checklist_unavailable';
+
+/** The pre-transaction checks: request state, partner status, and the M3-20 checklist (steps 1-6). */
+async function precheck(id: string, partnerStatus: string): Promise<GoLiveApprovalOutcome | null> {
+  const row = await getGoLive(getDb(), id);
+  if (!row || !row.requestedAt) return 'not_requested';
+  if (row.approvedAt) return 'already';
+  // #409 review L1 / #444 review: approval alone never makes a partner live; refuse a non-active one.
+  if (partnerStatus !== 'active') return 'not_active';
+  try {
+    // The same pure rule the partner's own request used (partner-onboarding.ts), re-derived from the
+    // stored facts NOW: a step can reopen after the request (e.g. the 7-day WhatsApp test result).
+    const facts = await loadOnboardingFacts(getDb(), id);
+    return goLivePrerequisitesDone(computeOnboardingChecklist(facts)) ? null : 'incomplete';
+  } catch (err) {
+    logWarn('admin.go_live.facts', err, { partnerId: id });
+    return 'checklist_unavailable'; // fail closed
+  }
+}
 
 export async function approveGoLiveAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
@@ -39,6 +67,9 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
   }
   if (reason === null) redirect(`${page}?golive=reason_required`);
   const why: string = reason;
+
+  const refused = await precheck(id, partner.status);
+  if (refused) redirect(`${page}?golive=${refused}`);
 
   const outcome = await getDb().transaction(async (tx): Promise<GoLiveApprovalOutcome> => {
     // The row lock serialises two approvers, so exactly one audit row is written.
