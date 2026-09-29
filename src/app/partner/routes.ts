@@ -15,6 +15,8 @@ export interface PartnerRoute {
 
 export const PARTNER_ROUTES = Object.freeze({
   home: { href: '/partner', labelKey: 'partner.nav.home', policy: PARTNER_ANY, nav: true },
+  // M3-20: the seven-step go-live checklist + request (admin only; SPEC §3.1).
+  onboarding: { href: '/partner/onboarding', labelKey: 'partner.nav.onboarding', policy: PARTNER_ADMIN, nav: true },
   transfers: { href: '/partner/transfers', labelKey: 'partner.nav.transfers', policy: PARTNER_MONEY_READ, nav: true },
   customers: { href: '/partner/customers', labelKey: 'partner.nav.customers', policy: PARTNER_OPS, nav: true },
   // M3-16: the page is a money read; each report KIND is further gated by reportPolicy(kind).
@@ -28,8 +30,6 @@ export const PARTNER_ROUTES = Object.freeze({
   integrations: { href: '/partner/integrations', labelKey: 'partner.nav.integrations', policy: PARTNER_ADMIN, nav: true },
   integrationsWhatsapp: { href: '/partner/integrations/whatsapp', labelKey: 'partner.integrations.whatsapp.title', policy: PARTNER_ADMIN, nav: false },
   integrationsApiKeys: { href: '/partner/integrations/api-keys', labelKey: 'partner.integrations.apiKeys.title', policy: PARTNER_ADMIN, nav: false },
-  // M3-20: the seven-step go-live checklist + request (admin only; SPEC §3.1).
-  onboarding: { href: '/partner/onboarding', labelKey: 'partner.nav.onboarding', policy: PARTNER_ADMIN, nav: true },
   integrationsWebhooks: { href: '/partner/integrations/webhooks', labelKey: 'partner.integrations.webhooks.title', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;

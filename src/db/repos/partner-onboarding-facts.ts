@@ -28,7 +28,9 @@ import type { PartnerId } from '@/lib/types';
 //  4. a transfer with environment 'test' and status 'delivered'.
 //  5. rail providerType 'http', the stored URL passes checkPartnerEndpointUrl (checkSettlementUrl
 //     plus the SmartRemit-host refusal, partner-settlement-endpoint.ts:83), and a ping 'ok' row in
-//     the last PING_FRESH_DAYS days.
+//     the last PING_FRESH_DAYS days that is newer than the latest partner.settlement_endpoint.update
+//     audit row for this tenant (the partner-surface URL writer; the legacy platform admin save
+//     does not write that action, so a platform-side URL change does not reopen the step).
 //  6. partner_sites.slug, a renderable logo, or a validated primary colour.
 //  7. partner_go_live requested_at / approved_at, and partners.status.
 
@@ -39,6 +41,8 @@ export interface OnboardingFactsOptions {
   /** The last WhatsApp test result as stored; defaults to the Redis store. */
   readChannelTest?: (partnerId: PartnerId) => Promise<string | null>;
 }
+
+const ENDPOINT_UPDATE_ACTION = 'partner.settlement_endpoint.update';
 
 const present = (v: unknown): boolean => typeof v === 'string' && v.trim() !== '';
 
@@ -93,6 +97,9 @@ export async function loadOnboardingFacts(db: DbOrTx, partnerId: PartnerId, opts
             eq(partnerWebhookDeliveries.kind, 'ping'),
             eq(partnerWebhookDeliveries.outcome, 'ok'),
             gte(partnerWebhookDeliveries.createdAt, pingSince),
+            // Newer than the tenant's latest endpoint change (written by saveSettlementEndpoint,
+            // partner-settlement-endpoint.ts:131): a ping to a previous URL proves nothing now.
+            sql`${partnerWebhookDeliveries.createdAt} > coalesce((select max(${auditEvents.at}) from ${auditEvents} where ${auditEvents.partnerId} = ${partnerId} and ${auditEvents.action} = ${ENDPOINT_UPDATE_ACTION}), '-infinity'::timestamptz)`,
           ),
         )
         .limit(1),

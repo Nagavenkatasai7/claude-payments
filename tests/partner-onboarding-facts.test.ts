@@ -144,6 +144,19 @@ describe('loadOnboardingFacts: each fact', () => {
     await seedPing(db, 'pa', { createdAt: new Date(now.getTime() - 29 * DAY) });
     expect((await load('pa', now)).recentPingOk).toBe(true);
   });
+  it('ping: an ok ping from BEFORE the latest endpoint update does not count; a newer one does', async () => {
+    const now = new Date();
+    const endpointUpdate = (pid: string, at: Date) =>
+      db.insert(auditEvents).values({ partnerId: pid, actor: 'x', actorType: 'staff', action: 'partner.settlement_endpoint.update', subjectId: pid, meta: {}, at });
+    await seedPing(db, 'pa', { createdAt: new Date(now.getTime() - 2 * DAY) });
+    expect((await load('pa', now)).recentPingOk).toBe(true);
+    await endpointUpdate('pa', new Date(now.getTime() - DAY));
+    expect((await load('pa', now)).recentPingOk).toBe(false);
+    // another tenant's (later) endpoint update never affects pa
+    await seedPing(db, 'pa', { createdAt: new Date(now.getTime() - DAY / 2) });
+    await endpointUpdate('pb', new Date(now.getTime() - DAY / 4));
+    expect((await load('pa', now)).recentPingOk).toBe(true);
+  });
   it('branding: slug; a validated primary colour; a renderable logo', async () => {
     await db.update(partners).set({ primaryColor: 'not-a-colour' }).where(eq(partners.id, 'pa'));
     let f = await only();
