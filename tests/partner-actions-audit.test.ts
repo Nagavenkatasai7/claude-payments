@@ -51,6 +51,7 @@ import {
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 
 // Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
 // them as on the apex.
@@ -79,6 +80,10 @@ beforeEach(async () => {
   db = await freshDb();
   await seedPartner(db, 'acme');
   await seedPartner(db, 'beta');
+  // Both existed before migration 0028, which backfills an APPROVED go-live row (M3-21: a
+  // partner-scoped admin's live key needs one).
+  await upsertApprovedGoLive(db, 'acme', 'system:0028-backfill');
+  await upsertApprovedGoLive(db, 'beta', 'system:0028-backfill');
   integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
   currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
 });
@@ -215,11 +220,14 @@ describe('wizardCreatePartnerAction audits the WhatsApp creds and the first key'
     const w = { phoneNumberId: PN, token: 'EAA-wizard-token', appSecret: 'wizard-app-secret', verifyToken: 'wizard-vt' };
     const r = await wizardCreatePartnerAction({ name: 'Wiz Co', countries: ['US'], whatsapp: w, payment: { providerType: 'simulator' } });
     const rows = (await auditRows()).filter((x) => x.partner_id === r.id);
-    expect(rows.map((x) => x.action)).toEqual(['partner.whatsapp_config', 'api_key.issue']);
+    expect(rows.map((x) => x.action)).toEqual(['partner.go_live.approve', 'partner.whatsapp_config', 'api_key.issue']);
+    // M3-21: the wizard's go-live approval is audited (platform-scoped).
     expect(rows[0]).toMatchObject({ actor: 'admin', actor_type: 'staff', subject_id: r.id });
-    expect(rows[0].meta).toEqual({ created: true, pnidChanged: true, tokenChanged: true, verifyTokenChanged: true, appSecretChanged: true, pnidCleared: false });
-    expect(rows[1].meta).toMatchObject({ mode: 'live', last4: r.apiKeyLast4 });
-    expect(rows[1].subject_id).toBe(rows[1].meta!.keyId);
+    expect(rows[0].meta).toEqual({ reason: 'platform setup wizard', actorScope: 'platform' });
+    expect(rows[1]).toMatchObject({ actor: 'admin', actor_type: 'staff', subject_id: r.id });
+    expect(rows[1].meta).toEqual({ created: true, pnidChanged: true, tokenChanged: true, verifyTokenChanged: true, appSecretChanged: true, pnidCleared: false });
+    expect(rows[2].meta).toMatchObject({ mode: 'live', last4: r.apiKeyLast4 });
+    expect(rows[2].subject_id).toBe(rows[2].meta!.keyId);
     const raw = JSON.stringify(rows);
     for (const v of [PN, w.token, w.appSecret, w.verifyToken, r.apiKey]) expect(raw).not.toContain(v);
   });
@@ -228,7 +236,7 @@ describe('wizardCreatePartnerAction audits the WhatsApp creds and the first key'
     currentStaff = { username: 'admin', role: 'admin' };
     const r = await wizardCreatePartnerAction({ name: 'Plain Co', countries: ['CA'] });
     const rows = (await auditRows()).filter((x) => x.partner_id === r.id);
-    expect(rows.map((x) => x.action)).toEqual(['partner.whatsapp_config', 'api_key.issue']);
-    expect(rows[0].meta).toEqual({ created: true, pnidChanged: false, tokenChanged: false, verifyTokenChanged: false, appSecretChanged: false, pnidCleared: false });
+    expect(rows.map((x) => x.action)).toEqual(['partner.go_live.approve', 'partner.whatsapp_config', 'api_key.issue']);
+    expect(rows[1].meta).toEqual({ created: true, pnidChanged: false, tokenChanged: false, verifyTokenChanged: false, appSecretChanged: false, pnidCleared: false });
   });
 });

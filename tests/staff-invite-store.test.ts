@@ -127,6 +127,19 @@ describe('staff invite store', () => {
       expect(await s.consume(t)).toBeNull();
     }
   });
+  it('M3-21: inviterScope round-trips only as "platform"; absent (or anything else) reads as tenant-issued', async () => {
+    const redis = fakeRedis();
+    const store = createStaffInviteStore(redis);
+    const a = await store.issue({ partnerId: 'pa', username: 'pa-plat', name: 'P', role: 'admin', invitedBy: 'root', inviterScope: 'platform' });
+    const b = await store.issue({ partnerId: 'pa', username: 'pa-ten', name: 'T', role: 'admin', invitedBy: 'pa-owner' });
+    if ('error' in a || 'error' in b) throw new Error('issue refused');
+    expect((await store.peek(a.token))?.inviterScope).toBe('platform');
+    expect(await store.peek(b.token)).not.toHaveProperty('inviterScope');
+    const raw = JSON.parse((await redis.get(`staffinvite:${b.hash}`))!);
+    await redis.set(`staffinvite:${b.hash}`, JSON.stringify({ ...raw, inviterScope: 'PLATFORM' }));
+    expect(await store.peek(b.token)).not.toHaveProperty('inviterScope');
+  });
+
   it('a corrupt stored record reads as null', async () => {
     const redis = fakeRedis();
     const s = createStaffInviteStore(redis);

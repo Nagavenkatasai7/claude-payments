@@ -102,6 +102,7 @@ import { sql as rawSql } from 'drizzle-orm';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { getGoLive, isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 
 // Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
 // them as on the apex.
@@ -1153,6 +1154,45 @@ describe('issueApiKeyAction — mode is live by default, test on request, nothin
   it('the setup wizard\'s first key is live', async () => {
     const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment: { providerType: 'simulator' } });
     expect(r.apiKey.startsWith('sr_live_')).toBe(true);
+  });
+
+  // UI redesign M3-21 (#427 review follow-up): the legacy per-partner page no longer lets a
+  // PARTNER-scoped admin mint a LIVE key before SmartRemit approves its go-live. Platform admins (the
+  // approvers) are unchanged; a sandbox key is always issuable.
+  const liveKeys = async (pid: string) =>
+    (await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = ${pid} AND id LIKE 'pk_live_%'`) as unknown as { rows: unknown[] }).rows;
+  it('a partner-scoped admin of a partner NOT approved for go-live: live refused (nothing written), test issued', async () => {
+    await seedPartner(db, 'acme');
+    currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
+    await expect(issueApiKeyAction('acme')).rejects.toThrow(/go-live/i);
+    await expect(issueApiKeyAction('acme', 'live')).rejects.toThrow(/go-live/i);
+    expect(await liveKeys('acme')).toEqual([]);
+    const audits = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'api_key.issue'`);
+    expect((audits as unknown as { rows: unknown[] }).rows).toEqual([]);
+    const t = await issueApiKeyAction('acme', 'test');
+    expect(t.keyId.startsWith('pk_test_')).toBe(true);
+  });
+  it('a partner-scoped admin of a go-live APPROVED partner may issue a live key', async () => {
+    await seedPartner(db, 'acme');
+    await upsertApprovedGoLive(db, 'acme', 'root');
+    currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
+    const r = await issueApiKeyAction('acme');
+    expect(r.keyId.startsWith('pk_live_')).toBe(true);
+  });
+});
+
+// UI redesign M3-21: a partner the PLATFORM wizard creates is approved for go-live at creation (it
+// already gets a live key), with the approving platform admin recorded.
+describe('wizardCreatePartnerAction — go-live', () => {
+  it('a wizard-created partner is live-approved (approved_by = the platform admin)', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Go Live Co', countries: ['US'], payment: { providerType: 'simulator' } });
+    expect(await isLiveApproved(db, r.id)).toBe(true);
+    expect((await getGoLive(db, r.id))?.approvedBy).toBe('admin');
+  });
+  it('a refused wizard commit writes no go-live row', async () => {
+    await expect(wizardCreatePartnerAction({ name: 'X', countries: ['ZZ'] })).rejects.toThrow();
+    const rows = await db.execute(sql`SELECT partner_id FROM partner_go_live`);
+    expect((rows as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 });
 

@@ -1,5 +1,5 @@
-import { and, eq, isNotNull, isNull } from 'drizzle-orm';
-import { partnerGoLive } from '@/db/schema';
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { auditEvents, partnerGoLive } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import type { PartnerId } from '@/lib/types';
 
@@ -50,4 +50,49 @@ export async function approveGoLive(db: DbOrTx, partnerId: PartnerId, by: string
     .returning({ id: partnerGoLive.partnerId });
   if (updated.length > 0) return true;
   return isLiveApproved(db, partnerId);
+}
+
+/** The row, locked FOR UPDATE (call inside a transaction). null when the partner has no row. */
+export async function getGoLiveForUpdate(tx: DbOrTx, partnerId: PartnerId): Promise<GoLiveRecord | null> {
+  // select().for('update'): node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+  const rows = await tx.select().from(partnerGoLive).where(eq(partnerGoLive.partnerId, partnerId)).limit(1).for('update');
+  return rows[0] ?? null;
+}
+
+/**
+ * M3-21: a partner created from an approved request starts with an EMPTY row (not requested, not
+ * approved), so it is sandbox-only until it asks and SmartRemit approves. Never touches an existing row.
+ */
+export async function createPendingGoLive(db: DbOrTx, partnerId: PartnerId, now: Date = new Date()): Promise<void> {
+  await db.insert(partnerGoLive).values({ partnerId, updatedAt: now }).onConflictDoNothing({ target: partnerGoLive.partnerId });
+}
+
+/**
+ * M3-21: the platform wizard's partner is approved at creation (a platform admin set it up, and the
+ * wizard issues its first live key). Inserts an approved row, or approves a pending one; an already
+ * approved row keeps its first approver and time.
+ */
+export async function upsertApprovedGoLive(db: DbOrTx, partnerId: PartnerId, by: string, now: Date = new Date()): Promise<void> {
+  await db
+    .insert(partnerGoLive)
+    .values({ partnerId, approvedAt: now, approvedBy: by, updatedAt: now })
+    .onConflictDoNothing({ target: partnerGoLive.partnerId });
+  await db
+    .update(partnerGoLive)
+    .set({ approvedAt: now, approvedBy: by, updatedAt: now })
+    .where(and(eq(partnerGoLive.partnerId, partnerId), isNull(partnerGoLive.approvedAt)));
+}
+
+/**
+ * M3-21: the newest template attestation (M3-20 writes audit `partner.templates.attest`, subject = the
+ * partner) for the platform approval card: who attested and when. Keyed by partner_id.
+ */
+export async function latestTemplateAttestation(db: DbOrTx, partnerId: PartnerId): Promise<{ actor: string; at: Date } | null> {
+  const rows = await db
+    .select({ actor: auditEvents.actor, at: auditEvents.at })
+    .from(auditEvents)
+    .where(and(eq(auditEvents.partnerId, partnerId), eq(auditEvents.subjectId, partnerId), eq(auditEvents.action, 'partner.templates.attest')))
+    .orderBy(desc(auditEvents.id))
+    .limit(1);
+  return rows[0] ?? null;
 }
