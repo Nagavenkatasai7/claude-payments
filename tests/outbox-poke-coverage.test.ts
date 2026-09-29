@@ -22,7 +22,7 @@ const SRC = join(ROOT, 'src');
 /** Files that enqueue but do not poke → the exported functions whose callers must. */
 const HELPERS: Record<string, string[]> = {
   // Only ever run inside an /api/worker invocation.
-  'src/lib/reconcile.ts': ['reconcileSweep', 'enqueueReinstructLocked'],
+  'src/lib/reconcile.ts': ['reconcileSweep', 'enqueueReinstructLocked', 'reinstructLocked'],
   'src/lib/aml-sweep.ts': ['amlSweep'],
   'src/lib/rate-staleness.ts': ['sweepStaleRates', 'sweepFxHealth'],
   'src/lib/worker-cadence.ts': ['checkCronQuiet', 'sweepDrainGap'],

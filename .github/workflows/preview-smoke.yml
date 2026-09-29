@@ -1,3 +1,6 @@
+# DORMANT for PR branches since the vercel.json git.deploymentEnabled change (#435):
+# only main deploys, so Preview deployment_status events no longer fire for PRs.
+#
 # Pre-merge smoke against the Vercel PREVIEW deployment of a PR — catches the
 # class of failure that has reached prod twice (incl. the 2026-06-11 outage)
 # because the only smoke ran post-deploy.

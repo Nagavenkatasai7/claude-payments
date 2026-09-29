@@ -289,7 +289,8 @@ export function statementTotals(rows: StatementRow[]): StatementTotals {
 // String cells only — a number (e.g. a negative) stays numeric.
 const FORMULA_LEAD = /^[=+\-@\t\r]/;
 
-function csvCell(v: string | number | null): string {
+/** One CSV cell (exported for M3-16 partner reports: every report CSV goes through this guard). */
+export function csvCell(v: string | number | null): string {
   if (v === null || v === undefined) return '';
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
   const guarded = FORMULA_LEAD.test(v) ? `'${v}` : v;

@@ -8,7 +8,7 @@ import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
-import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { canDecideCustomerKyc } from '@/lib/compliance-config';
 import { sendGateActive } from '@/lib/kyc-gate';
@@ -297,9 +297,32 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
  *  4. ONE transaction: read the old value (FOR UPDATE), the single-column
  *     UPDATE, then the audit_events row (actor, old, new, reason, expiresAt).
  *     If the audit insert fails, the limit write rolls back.
+ *     UI redesign M3-12 follow-up: when the row-locked previous value is a
+ *     PARTNER-set entry and the posted caps + expiry are exactly its own (the
+ *     admin re-saved the prefilled form), the transaction rolls back and the
+ *     action returns: no write, no audit row, the partner keeps control. Any
+ *     changed value (or Clear) takes the audited write as before. A partner-set
+ *     entry whose setAt differs from the form's hidden expectedSetAt (the partner
+ *     edited it after the page rendered) is refused, for a save and a clear.
  * Only the dollar caps move: sanctions, EDD and the tier gates are untouched
  * (send-limits.ts resolveEffectiveSendLimits).
  */
+/** Thrown INSIDE the transaction on an unchanged re-save of a partner-set entry: rolls it back. */
+class UnchangedPartnerEntry extends Error {
+  constructor() {
+    super('unchanged_partner_entry');
+    this.name = 'UnchangedPartnerEntry';
+  }
+}
+
+/** Thrown INSIDE the transaction when the partner changed its entry after the admin's page rendered. */
+class StalePartnerEntry extends Error {
+  constructor() {
+    super('stale_partner_entry');
+    this.name = 'StalePartnerEntry';
+  }
+}
+
 export async function setCustomerSendLimitAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
@@ -314,6 +337,7 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
   const phone = String(formData.get('phone') ?? '').trim();
   if (!phone) throw new Error('Phone is required.');
   const partnerId = targetPartnerId(staff, formData); // platform staff MUST name the tenant
+  const expectedSetAt = String(formData.get('expectedSetAt') ?? '');
 
   const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
   if (!customer) throw new Error('Customer not found.');
@@ -323,22 +347,37 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
   // never overwrite or clear while it is live (an entry without it is treated the same way).
   const value =
     validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso, setScope: 'platform' as const };
-  await getDb().transaction(async (tx) => {
-    // tx-bound repos ONLY inside the transaction (a root-handle call here would
-    // deadlock PGlite's single connection / hold a second Neon pool connection).
-    const { found, previous } = await createCustomerStore(tx, getStore()).setSendLimitOverride(
-      customer.partnerId, customer.senderPhone, value,
-    );
-    if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
-    await createAuditRepo(tx).record({
-      partnerId: customer.partnerId,
-      actor: staff.username,
-      actorType: 'staff',
-      action: value === null ? 'send_limits.clear' : 'send_limits.set',
-      subjectId: customer.senderPhone,
-      meta: { scope: 'customer', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+  try {
+    await getDb().transaction(async (tx) => {
+      // tx-bound repos ONLY inside the transaction (a root-handle call here would
+      // deadlock PGlite's single connection / hold a second Neon pool connection).
+      const { found, previous } = await createCustomerStore(tx, getStore()).setSendLimitOverride(
+        customer.partnerId, customer.senderPhone, value,
+      );
+      if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
+      // Checked against the value read FOR UPDATE, so a concurrent partner edit is never missed.
+      // Stale-form guard: the card posts the partner entry's setAt it rendered ('' when none); a
+      // partner-set entry that no longer matches it is refused for a save AND a clear.
+      if (previous?.setScope === 'partner' && (typeof previous.setAt === 'string' ? previous.setAt : '') !== expectedSetAt) {
+        throw new StalePartnerEntry(); // same normalization as the card's hidden field
+      }
+      if (isUnchangedPartnerSetEntry(previous, validated.value)) throw new UnchangedPartnerEntry();
+      await createAuditRepo(tx).record({
+        partnerId: customer.partnerId,
+        actor: staff.username,
+        actorType: 'staff',
+        action: value === null ? 'send_limits.clear' : 'send_limits.set',
+        subjectId: customer.senderPhone,
+        meta: { scope: 'customer', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+      });
     });
-  });
+  } catch (err) {
+    if (err instanceof StalePartnerEntry) {
+      throw new Error('The partner changed this limit since you opened the page. Reload and try again.');
+    }
+    if (!(err instanceof UnchangedPartnerEntry)) throw err;
+    // Rolled back: nothing written, nothing audited. The page still re-renders the current state.
+  }
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

@@ -50,6 +50,55 @@ export function isScreeningHold(t: { complianceReasons?: readonly string[] | nul
   return reasons.some((r) => SCREENING_REASONS.includes(r));
 }
 
+// ── Partner-releasable hold reasons (UI redesign M3-10) ────────────────────
+// The non-screening flag reasons screenTransfer (compliance.ts) and the EDD
+// check (tier-rules.ts evaluateEddForTransfer) write. The strings are what
+// stored rows carry: never change them (tests/partner-releasable-hold pins them).
+export const LARGE_AMOUNT_REASON = 'Large transfer amount.';
+export const VELOCITY_REASON = 'High transfer velocity.';
+export const EDD_REQUIRED_REASON = 'edd_required';
+
+/**
+ * SPEC §3.3 + D7, owner answer O1 (2026-09-28): the ONLY hold reasons a
+ * delegated partner's admin may release from /partner. KYC-class holds only;
+ * every screening/sanctions reason and the AML hold stay PLATFORM-only. A
+ * closed allowlist: a new reason is refused until it is added here on purpose.
+ */
+export const PARTNER_RELEASABLE_REASONS: readonly string[] = Object.freeze([
+  LARGE_AMOUNT_REASON,
+  VELOCITY_REASON,
+  EDD_REQUIRED_REASON,
+]);
+
+/**
+ * SPEC §3.3 + D7: a partner admin may release ONLY a delegated partner's
+ * KYC-class hold. Fails CLOSED: an unknown KYC mode, a missing partner, a
+ * status other than in_review, a sanctions-blocked row, an empty or malformed
+ * reasons list, ANY screening reason (isScreeningHold) or ANY reason outside
+ * PARTNER_RELEASABLE_REASONS ⇒ false. Pure: the /partner release action (the
+ * guard) and the transfer detail page (which hides the button) both call it.
+ *
+ * M3-10 follow-up (owner, 2026-09-29): `sender` is the transfer SENDER's
+ * customer row flags, read in the owner's tenant (lib/sender-screening.ts). A
+ * PEP or watchlist hit on the sender (isScreeningCustomerHold) is a screening
+ * matter, so it stays PLATFORM-only even when every transfer reason is
+ * KYC-class. REQUIRED, and a missing row or failed lookup (null / undefined)
+ * ⇒ false.
+ */
+export function isPartnerReleasableHold(
+  t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
+  owner: { kycMode?: string | null } | null | undefined,
+  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
+): boolean {
+  if (!owner || owner.kycMode !== 'delegated') return false;
+  if (!sender || isScreeningCustomerHold(sender)) return false;
+  if (t.status !== 'in_review' || t.complianceStatus === 'blocked') return false;
+  const r = t.complianceReasons;
+  if (!Array.isArray(r) || r.length === 0) return false;
+  if (isScreeningHold({ complianceReasons: r })) return false;
+  return r.every((x) => typeof x === 'string' && PARTNER_RELEASABLE_REASONS.includes(x));
+}
+
 /**
  * Program-Fix 43 follow-up: a CUSTOMER-level screening hold — a Persona
  * watchlist/sanctions or PEP report matched (kyc-state-machine sets the flag).

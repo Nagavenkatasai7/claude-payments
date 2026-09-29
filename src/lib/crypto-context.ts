@@ -101,6 +101,13 @@ export const ctx = {
     channel: number,
     direction: number,
   ): CryptoContext => make('conversation_messages', 'body_enc', [partnerId, id, threadKeyHex, channel, direction]),
+  /**
+   * UI redesign M3-16: `partner_report_jobs.content_enc`, the sealed (already masked) report CSV.
+   * Binds the tenant and the job id, so a blob copied to another tenant's or another job's row
+   * does not open. Pinned by tests/crypto-context.test.ts.
+   */
+  partnerReport: (partnerId: PartnerId, jobId: string): CryptoContext =>
+    make('partner_report_jobs', 'content_enc', [partnerId, jobId]),
   /** For fix 17b (staff MFA secrets in Redis). Permanently v1-exempt. */
   staffMfa: (username: string): CryptoContext => make('staff_mfa', 'secret', [username], true),
   purpose: (purpose: CryptoPurpose): CryptoContext =>

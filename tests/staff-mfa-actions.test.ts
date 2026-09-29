@@ -59,6 +59,8 @@ vi.mock('@/lib/audit-log-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/audit-log-store')>('@/lib/audit-log-store');
   return { ...actual, getAuditLogStore: () => auditStore };
 });
+// M3-9-fu: removeStaffAction also clears the invite's MFA-enrolment marker in Redis.
+vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 
