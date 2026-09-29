@@ -40,7 +40,7 @@ export async function loadSenderScreeningMap(
   try {
     return await readSenderScreeningFlagsForPhones(db, partnerId, unique);
   } catch (err) {
-    logWarn('partner.release.sender-screening', errName(err), { partnerId });
+    logWarn('compliance.release.sender-screening-batch', errName(err), { partnerId });
     return new Map();
   }
 }
