@@ -164,11 +164,11 @@ describe('/partner/integrations/whatsapp: write-only secrets, session tenant onl
 });
 
 describe('/partner/integrations (the hub)', () => {
-  it('links to the WhatsApp page; the other tabs are text until their pages exist', async () => {
+  it('links to the WhatsApp and API keys pages; webhooks is text until its page exists', async () => {
     await signInAs({});
     const html = decode(renderToStaticMarkup(await IntegrationsPage()));
     expect(html).toContain('href="/partner/integrations/whatsapp"');
-    expect(html).not.toContain('href="/partner/integrations/api-keys"');
+    expect(html).toContain('href="/partner/integrations/api-keys"'); // M3-14
     expect(html).not.toContain('href="/partner/integrations/webhooks"');
     expect(html.match(/<h1\b/g)).toHaveLength(1);
   });
