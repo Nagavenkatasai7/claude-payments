@@ -31,7 +31,13 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
       return {
         ...repo,
         enqueue: async (...e: Parameters<typeof repo.enqueue>) => {
-          if (faults.enqueueThrow && e[0] === 'email.send') throw new Error(`Failed query: insert into outbox params: ${JSON.stringify(e[1])}`);
+          if (faults.enqueueThrow && e[0] === 'email.send') {
+            // A REAL database error on the same handle first: without a savepoint this aborts the
+            // whole delivered transaction (Postgres: "current transaction is aborted").
+            const { sql: rawSql } = await import('drizzle-orm');
+            await (a[0] as { execute: (q: unknown) => Promise<unknown> }).execute(rawSql`SELECT 1/0`).catch(() => undefined);
+            throw new Error(`Failed query: insert into outbox params: ${JSON.stringify(e[1])}`);
+          }
           return repo.enqueue(...e);
         },
       };
@@ -202,18 +208,23 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     expect(logged).not.toContain(EMAIL);
   });
 
-  it('the email row is written IN the delivered transaction: an enqueue failure rolls the flip back', async () => {
+  it('an enqueue failure never holds back delivery (owner 2026-09-28): the flip commits, no receipt, a PII-free warning', async () => {
     await optIn('pa');
     await store().saveTransfer(transfer());
     faults.enqueueThrow = true;
-    const err = await store().updateTransferFromWebhook('rc_t1', 'delivered').then(() => null, (e: unknown) => e as Error);
-    expect(err?.message).toMatch(/delivery receipt enqueue failed/);
-    expect(err?.message).not.toContain(EMAIL); // the driver's params never leak into last_error / logs
-    expect(await statusOf('rc_t1')).toBe('paid'); // the rail retries; nothing half-committed
+    const updated = await store().updateTransferFromWebhook('rc_t1', 'delivered');
+    expect(updated?.status).toBe('delivered');
+    expect(await statusOf('rc_t1')).toBe('delivered');
     expect(await emailRows()).toHaveLength(0);
+    expect(logWarnSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(logWarnSpy.mock.calls[0]);
+    expect(logged).toContain('rc_t1');
+    expect(logged).not.toContain(EMAIL);
+    expect(logged).not.toContain(PHONE);
+    // A replayed callback is not a transition: still no receipt, still delivered.
     faults.enqueueThrow = false;
-    expect((await store().updateTransferFromWebhook('rc_t1', 'delivered'))?.status).toBe('delivered');
-    expect(await emailRows()).toHaveLength(1);
+    expect(await store().updateTransferFromWebhook('rc_t1', 'delivered')).toBeNull();
+    expect(await emailRows()).toHaveLength(0);
   });
 
   it('the rcpt-auto:<id> dedupe key alone holds: a pre-existing receipt row → delivered, still ONE row', async () => {

@@ -107,7 +107,8 @@ export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: stri
 
 /**
  * The delivered transition. ONE transaction: the guarded UPDATE, then — only when it moved the row,
- * and only for the same tenant and sender the receipt was prepared for — the receipt row. Returns
+ * and only for the same tenant and sender the receipt was prepared for — the receipt row, inside a
+ * savepoint so a receipt failure never holds back delivery (owner decision 2026-09-28). Returns
  * the UPDATE's result exactly as transferRepo.updateTransferFromWebhook does (non-null ⇒ a real
  * transition), so every caller's notify contract is unchanged.
  */
@@ -117,20 +118,28 @@ export async function deliverTransfer(db: Db, transferId: string): Promise<Trans
     const updated = await createTransferRepo(tx).updateTransferFromWebhook(transferId, 'delivered');
     if (updated && receipt && updated.partnerId === receipt.partnerId && updated.phone === receipt.phone) {
       try {
-        await createOutboxRepo(tx).enqueue(
-          'email.send',
-          {
-            to: [receipt.to],
-            subject: receipt.subject,
-            text: '{{receipt_body}}',
-            sealed: { receipt_body: receipt.sealedBody },
-          },
-          { dedupeKey: `${AUTO_RECEIPT_DEDUPE_PREFIX}:${transferId}` },
-        );
+        // Owner decision (2026-09-28): delivery ALWAYS commits. The receipt enqueue runs in a
+        // SAVEPOINT, so a failed insert (even a database-level error that would otherwise abort the
+        // whole transaction) rolls back only itself; the delivered flip still commits and the
+        // receipt is skipped with a PII-free warning. On success the row still commits with the flip.
+        await tx.transaction(async (sp) => {
+          await createOutboxRepo(sp).enqueue(
+            'email.send',
+            {
+              to: [receipt.to],
+              subject: receipt.subject,
+              text: '{{receipt_body}}',
+              sealed: { receipt_body: receipt.sealedBody },
+            },
+            { dedupeKey: `${AUTO_RECEIPT_DEDUPE_PREFIX}:${transferId}` },
+          );
+        });
       } catch (err) {
-        // Rethrown WITHOUT the driver's message: a query error carries its params (the address),
-        // and this error reaches outbox.last_error (mock.settle) and the runtime log (the route).
-        throw new Error(`delivery receipt enqueue failed (${err instanceof Error ? err.name : 'unknown'})`);
+        // The error NAME only: a query error carries its params (the address).
+        logWarn('delivery.receipt', 'receipt enqueue failed; delivery committed without it', {
+          transferId,
+          error: err instanceof Error ? err.name : 'unknown',
+        });
       }
     }
     return updated;
