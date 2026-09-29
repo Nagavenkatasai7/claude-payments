@@ -32,7 +32,10 @@ export type StaffAuthAction =
   | 'auth.password.reset'
   | 'auth.mfa.enroll'
   | 'auth.mfa.failed'
-  | 'auth.mfa.reset';
+  | 'auth.mfa.reset'
+  // The partner-staff 15-minute step-up (staff-step-up.ts): never the code or the password.
+  | 'auth.stepup'
+  | 'auth.stepup.failed';
 
 export interface StaffAuthEvent {
   action: StaffAuthAction;

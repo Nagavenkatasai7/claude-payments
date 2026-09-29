@@ -54,6 +54,7 @@ vi.mock('@/lib/outbox', async (orig) => ({ ...(await orig<typeof import('@/lib/o
 
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { staffStepUpKey } from '@/lib/staff-step-up';
 import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
 import { auditEvents, outbox as outboxTable } from '@/db/schema';
 import { createStore } from '@/lib/store';
@@ -68,7 +69,10 @@ const perms = { canCancel: false, canResend: false, canAssign: false, canRevealP
 async function signInAs(o: Partial<Staff>): Promise<void> {
   const s: Staff = { username: 'pa-admin', name: 'A', role: 'admin', permissions: perms, passwordHash: 'x', createdAt: new Date().toISOString(), partnerId: 'pa', ...o };
   await getAuthStore().saveStaff(s);
-  cookieJar.set(SESSION_COOKIE, await getAuthStore().createSession(s.username));
+  const token = await getAuthStore().createSession(s.username);
+  cookieJar.set(SESSION_COOKIE, token);
+  // A fresh 15-minute step-up on this session (the step-up itself: partner-step-up-actions.test.ts).
+  await redis.set(staffStepUpKey(token), `${s.username}:${Date.now()}`, { ex: 900 });
 }
 const form = (o: Record<string, string> = {}) => {
   const f = new FormData();

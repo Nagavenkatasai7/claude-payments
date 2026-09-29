@@ -13,6 +13,8 @@ import { logWarn } from '@/lib/log';
 import { pokeWorker } from '@/lib/outbox';
 import { replayDeadInstruction } from '@/lib/partner-webhook-replay';
 import { parsePositiveId } from '@/lib/webhook-delivery-log';
+import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
 import type { PartnerCtx } from '@/lib/partner-access';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
@@ -24,6 +26,10 @@ import type { ActionResult } from '../../../action-result';
 // refusal, the locked read-spread-write, the 7-day rotation overlap, the rate-limited safeFetch ping,
 // the audit rows). A rotated secret travels ONLY in the rotate action's result: never in an audit
 // row, a log line or a revalidated page.
+//
+// Save, rotate and replay need a 15-minute step-up (partner-step-up-gate.ts), checked after the
+// input parse and BEFORE any limiter or write; a stale session gets the typed step_up_required
+// result and the page re-verifies, then retries. The test event is never gated.
 
 const PAGE = PARTNER_ROUTES.integrationsWebhooks.href;
 const POLICY = PARTNER_ROUTES.integrationsWebhooks.policy;
@@ -34,12 +40,14 @@ const actorOf = (ctx: PartnerCtx): EndpointActor => ({ username: ctx.username, a
 const refused = (key: MessageKey) => ({ ok: false as const, error: t(key) });
 const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 
-export async function saveEndpointAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult> {
+export async function saveEndpointAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(POLICY);
   const raw = formData.get('url');
   // Bounded before anything else: the URL rule refuses > MAX_SETTLEMENT_URL_LENGTH too.
   if (typeof raw !== 'string' || raw.length > MAX_SETTLEMENT_URL_LENGTH + 64) return refused('partner.webhooks.invalidUrl');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'webhook.endpoint.save');
+  if (stepUp) return stepUp;
   let r;
   try {
     r = await saveSettlementEndpoint(getDb(), ctx.partnerId, actorOf(ctx), raw);
@@ -52,11 +60,13 @@ export async function saveEndpointAction(_prev: ActionResult | null, formData: F
   return { ok: true };
 }
 
-export async function rotateSecretAction(_prev: RotateSecretResult | null, formData: FormData): Promise<RotateSecretResult> {
+export async function rotateSecretAction(_prev: RotateSecretResult | null, formData: FormData): Promise<RotateSecretResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(POLICY);
   const kind = parseSecretKind(formData.get('kind'));
   if (!kind) return refused('partner.webhooks.invalid');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'webhook.secret.rotate');
+  if (stepUp) return stepUp;
   let r;
   try {
     // The override is an explicit ConfirmDialog flag: exactly '1', anything else means no.
@@ -102,11 +112,13 @@ export async function sendTestAction(_prev: TestPingResult | null, _formData: Fo
  * non-instruct or already-replayed id is the same "not found" with no write. The replay only
  * re-queues the row (no inline send); the worker is poked after the commit.
  */
-export async function replayDeliveryAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult> {
+export async function replayDeliveryAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(POLICY);
   const id = parsePositiveId(formData.get('id'));
   if (id === null) return refused('partner.webhooks.replay.notFound');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'webhook.replay');
+  if (stepUp) return stepUp;
   let r;
   try {
     r = await replayDeadInstruction(getDb(), ctx.partnerId, actorOf(ctx), id);
