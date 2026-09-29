@@ -72,10 +72,16 @@ function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
 
 /**
  * Validate, then write ONE partner's logo_url and its audit row in one transaction.
- * No caller in this change: the partner Branding action (which must derive partnerId from the
- * authenticated session, never the request body) is the intended caller.
+ * Caller: the /partner Branding action (M3-17), which derives partnerId from the authenticated
+ * session, never the request body, and passes `opts.actorScope` (session-derived) for the audit meta.
  */
-export async function savePartnerLogo(db: DbOrTx, partnerId: PartnerId, raw: unknown, actor: string): Promise<SaveLogoResult> {
+export async function savePartnerLogo(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  raw: unknown,
+  actor: string,
+  opts: { actorScope?: 'platform' | 'partner' } = {},
+): Promise<SaveLogoResult> {
   const v = decodeLogo(raw);
   if (!v.ok) return v;
   return inTx(db, async (tx) => {
@@ -91,7 +97,7 @@ export async function savePartnerLogo(db: DbOrTx, partnerId: PartnerId, raw: unk
       actorType: 'staff',
       action: 'partner.logo.update',
       subjectId: partnerId,
-      meta: { bytes: v.bytes },
+      meta: { bytes: v.bytes, ...(opts.actorScope ? { actorScope: opts.actorScope } : {}) },
     });
     return { ok: true } as const;
   });
