@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import type { RedisLike } from './store';
 import type { PartnerRole } from './partner-access';
@@ -19,6 +20,10 @@ import type { PartnerId, Ticket, TicketKind, TicketStatus } from './types';
  *   partner admin sees the tenant's threads; everyone else only the ones they opened
  *   (employee-questions/queries.ts).
  * Every miss (missing, another tenant's, the wrong kind, not yours) is the same null.
+ *
+ * The 'default' tenant has NO Contact SmartRemit surface: SmartRemit's own staff file their
+ * internal questions under 'default' (employee-questions), so a partner-scoped record pinned to
+ * 'default' must never read (or add to) that queue. It is closed for every role and every opener.
  */
 
 export type TicketViewer = { role: PartnerRole; username: string };
@@ -59,6 +64,11 @@ export async function getTenantTicket(partnerId: PartnerId, id: string, db: DbOr
 
 const TICKET_ROLES: readonly string[] = ['admin', 'agent', 'support'];
 
+/** Pure: does this tenant have a Contact SmartRemit surface? Never the platform's own 'default'. */
+export function contactAvailable(partnerId: PartnerId): boolean {
+  return partnerId !== DEFAULT_PARTNER_ID;
+}
+
 /** Pure: may this tenant staff member see (and work) this ticket? Fails closed on an unknown role. */
 export function canViewTicket(
   viewer: TicketViewer,
@@ -81,6 +91,7 @@ export async function getVisibleTicket(
   kind: TicketKind,
   db: DbOrTx = getDb(),
 ): Promise<Ticket | null> {
+  if (kind === 'internal' && !contactAvailable(viewer.partnerId)) return null;
   const ticket = await getTenantTicket(viewer.partnerId, id, db);
   if (!ticket || ticket.kind !== kind) return null;
   return canViewTicket(viewer, ticket) ? ticket : null;
@@ -110,7 +121,7 @@ export async function listVisibleCustomerTickets(
 
 /** The "Contact SmartRemit" threads this viewer may see (admin: the tenant's; others: their own). */
 export async function listContactThreads(viewer: TenantViewer, db: DbOrTx = getDb()): Promise<Ticket[]> {
-  if (!TICKET_ROLES.includes(viewer.role)) return [];
+  if (!TICKET_ROLES.includes(viewer.role) || !contactAvailable(viewer.partnerId)) return [];
   // The repo has no openedBy filter; a non-admin's own threads are picked from a deeper tenant page
   // (the same approach as the legacy employee-questions list).
   const rows = await listTenantTickets(

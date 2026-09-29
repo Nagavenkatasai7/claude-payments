@@ -171,6 +171,7 @@ describe('setCustomerSendLimitAction — audit (test 5)', () => {
     const expectedExpiry = `${tomorrow}T23:59:59.999Z`;
     expect((await cs.getCustomer('A', PHONE))!.sendLimitOverride).toEqual({
       perTransferCapCents: 500_000, t1DailyCapCents: 500_000, expiresAt: expectedExpiry, setBy: 'root', setAt: expect.any(String),
+      setScope: 'platform', // UI redesign M3-12: a SmartRemit raise is marked, so a partner can never overwrite it
     });
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
@@ -178,7 +179,7 @@ describe('setCustomerSendLimitAction — audit (test 5)', () => {
       partner_id: 'A', actor: 'root', actor_type: 'staff', action: 'send_limits.set', subject_id: PHONE,
       meta: {
         scope: 'customer', old: null, reason: 'QA large-amount test', expiresAt: expectedExpiry,
-        new: { perTransferCapCents: 500_000, t1DailyCapCents: 500_000, expiresAt: expectedExpiry, setBy: 'root' },
+        new: { perTransferCapCents: 500_000, t1DailyCapCents: 500_000, expiresAt: expectedExpiry, setBy: 'root', setScope: 'platform' },
       },
     });
   });

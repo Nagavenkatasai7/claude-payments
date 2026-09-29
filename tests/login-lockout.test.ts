@@ -34,6 +34,8 @@ const redirectMock = vi.hoisted(() =>
   }),
 );
 vi.mock('next/navigation', () => ({ redirect: redirectMock }));
+// UI redesign M3-9: postLoginTarget reads the invite marker through getRedis().
+vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };

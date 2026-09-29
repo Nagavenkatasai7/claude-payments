@@ -10,16 +10,20 @@ import { readFileSync } from 'node:fs';
 // UI redesign M3-6 (the finance role): ONE line inserted into requireStaff (INSERTED_LINES) and
 // one added import and a second appended block (M3_6_MARKER) with exactly one export. The 96c8933 pin still holds
 // once those are stripped, so every other pre-existing byte is unchanged.
+// UI redesign M3-9 (owner answer O10 = yes, 2026-09-28): ONE more line in requireStaff, directly after
+// the M3-6 line (the legacy gates honour the invite MFA marker), and its one added import.
 const AUTH_TS_ORIGINAL_SHA = 'c176d7c74b5526668745310f02effa39d123e9e6cad90bd51338f882a906095a'; // gitleaks:allow (SHA-256 digest, not a secret)
 const ADDED_IMPORTS = [
   "import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';",
   "import { partnerMfaEnrolmentPending } from './partner-mfa-gate';",
   "import { isLegacyDashboardStaff } from './legacy-dashboard-staff';", // M3-6
+  "import { inviteMfaPending } from './partner-mfa-gate';", // M3-9 (O10)
 ];
 const APPENDED_MARKER = '// UI redesign M3 (SPEC §3): requirePartnerStaff.';
 const M3_6_MARKER = '// UI redesign M3-6: the finance role.';
 const INSERTED_LINES = [
   "  if (!isLegacyDashboardStaff(staff)) redirect(staff.role === 'finance' ? '/partner' : '/login');",
+  "  if (await inviteMfaPending(staff)) redirect('/partner/security?enroll=1'); // M3-9 (O10): invite marker",
 ];
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -41,11 +45,13 @@ describe('src/lib/auth.ts: existing gates are byte-identical (M3-1 is additive o
     const lines = src().split('\n');
     expect(lines.slice(10, 10 + ADDED_IMPORTS.length)).toEqual(ADDED_IMPORTS);
   });
-  it('M3-6 inserts its one line directly after requireStaff\'s anonymous bounce', () => {
+  it('M3-6 then M3-9 insert their lines directly after requireStaff\'s anonymous bounce', () => {
     const text = src();
     expect(text).toContain(
       "export async function requireStaff(): Promise<Staff> {\n  const staff = await getCurrentStaff();\n  if (!staff) redirect('/login');\n" +
         INSERTED_LINES[0] +
+        '\n' +
+        INSERTED_LINES[1] +
         '\n  return staff;\n}',
     );
   });

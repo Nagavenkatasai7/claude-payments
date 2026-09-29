@@ -630,6 +630,11 @@ export interface SendLimitOverride {
   expiresAt?: string;   // ISO — lapses at read; absent ⇒ no expiry
   setBy?: string;       // staff username (fix 16b)
   setAt?: string;       // ISO (fix 16b)
+  // UI redesign M3-12: WHO set a customer override. 'partner' = the tenant's own admin (clamped to
+  // the platform + partner level at write AND at resolve, send-limits.ts); 'platform' = a SmartRemit
+  // raise/tightening. ABSENT (every pre-M3-12 row) or any other value = platform: it resolves
+  // exactly as before and a partner may never overwrite it while it is live.
+  setScope?: 'platform' | 'partner';
 }
 /** The partner-level shape additionally carries the T0 (observation-window) cap. */
 export interface PartnerSendLimits extends SendLimitOverride {

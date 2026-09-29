@@ -34,6 +34,8 @@ vi.mock('next/navigation', () => ({
     throw new Error('NOT_FOUND');
   },
 }));
+// M3-9: requireStaff reads the invite MFA marker for partner-scoped accounts.
+vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };

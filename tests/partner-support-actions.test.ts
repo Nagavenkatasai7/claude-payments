@@ -49,6 +49,7 @@ vi.mock('@/lib/partner-store', async () => {
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { KNOWN_PARTNER_ROLES } from '@/lib/partner-access';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { auditEvents, outbox, tickets, ticketMessages } from '@/db/schema';
 import { internalNoteAction, replyAction, setStatusAction } from '@/app/partner/(app)/support/[ticketId]/actions';
@@ -313,6 +314,49 @@ describe('setStatusAction specifics', () => {
     await setStatusAction(statusForm('tk_a1', { status: 'pending' }));
     expect((await audits())[0].meta).toEqual({ actorScope: 'partner', status: 'pending', from: 'open' });
     expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('LOW-4: a partner cannot move a ticket out of waiting_admin (the escalation is SmartRemit\'s)', () => {
+  it.each(['open', 'pending', 'resolved', 'closed'])('waiting_admin → %s is refused; nothing changes, no nudge, no audit', async (target) => {
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    await signInAs({ role: 'admin' });
+    const before = await snapshot('tk_a1');
+    expect(await setStatusAction(statusForm('tk_a1', { status: target }))).toEqual({ ok: false, error: 'That status change is not allowed.' });
+    expect(await snapshot('tk_a1')).toEqual(before);
+    expect((await ticketRow('tk_a1')).status).toBe('waiting_admin');
+    expect(await audits()).toHaveLength(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('a reply on an escalated (waiting_admin) ticket never de-escalates it', () => {
+  it('"waiting on customer" is ignored: the reply is stored, the status stays waiting_admin', async () => {
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    await signInAs({ role: 'admin' });
+    expect(await replyAction(replyForm('tk_a1', { waiting: 'on' }))).toEqual({ ok: true });
+    expect((await ticketRow('tk_a1')).status).toBe('waiting_admin');
+    const msgs = await createTicketRepo(db).listMessages('tk_a1', { includeInternal: false });
+    expect(msgs.map((m) => m.body)).toContain('Thanks, we are on it.');
+    expect((await audits())[0].meta).toMatchObject({ actorScope: 'partner', waiting: false });
+  });
+});
+
+describe("LOW-5: a partner pinned to the 'default' tenant has no Contact SmartRemit surface", () => {
+  it('creating a thread is refused before any write', async () => {
+    await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });
+    const r = await contactSmartRemitAction(contactForm());
+    expect(r).toEqual({ ok: false, error: 'Something went wrong. Nothing was changed. Try again.' });
+    expect(await db.select().from(tickets)).toHaveLength(5);
+    expect(await audits()).toHaveLength(0);
+  });
+  it('a follow-up on a default-tenant thread (even one you opened) is not found', async () => {
+    await seedTicket('tk_dq', DEFAULT_PARTNER_ID, { kind: 'internal', openedBy: 'dsup' });
+    await signInAs({ username: 'dsup', role: 'support', partnerId: DEFAULT_PARTNER_ID });
+    const before = await snapshot('tk_dq');
+    expect(await contactFollowUpAction(followForm('tk_dq'))).toEqual(NOT_FOUND);
+    expect(await snapshot('tk_dq')).toEqual(before);
+    expect(await audits()).toHaveLength(0);
   });
 });
 

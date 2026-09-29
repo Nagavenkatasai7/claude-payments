@@ -11,6 +11,7 @@ import type { Staff } from './types';
 import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';
 import { partnerMfaEnrolmentPending } from './partner-mfa-gate';
 import { isLegacyDashboardStaff } from './legacy-dashboard-staff';
+import { inviteMfaPending } from './partner-mfa-gate';
 
 /**
  * Program-Fix 45 P1: the session's username from the `__Host-` cookie, else the
@@ -50,6 +51,7 @@ export async function requireStaff(): Promise<Staff> {
   const staff = await getCurrentStaff();
   if (!staff) redirect('/login');
   if (!isLegacyDashboardStaff(staff)) redirect(staff.role === 'finance' ? '/partner' : '/login');
+  if (await inviteMfaPending(staff)) redirect('/partner/security?enroll=1'); // M3-9 (O10): invite marker
   return staff;
 }
 
