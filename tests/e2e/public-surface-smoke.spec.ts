@@ -177,10 +177,11 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
 // every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
 // M2-7 adds the transfers pages (a made-up id: the 404 is the host gate's, never a lookup); M2-8 the recipients pages;
-// M2-11 the profile and notifications pages and the email verify link.
+// M2-11 the profile and notifications pages and the email verify link; M2-9 the send pages.
 for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456', '/portal/transfers/AbCdEf123456/receipt',
   '/portal/recipients', '/portal/recipients/new',
-  '/portal/profile', '/portal/notifications', '/portal/notifications/verify?token=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE']) {
+  '/portal/profile', '/portal/notifications', '/portal/notifications/verify?token=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE',
+  '/portal/send', '/portal/send/review']) {
   test(`apex ${path} is the neutral 404`, async ({ page }) => {
     const res = await page.goto(path);
     expect(res?.status()).toBe(404);
@@ -217,6 +218,15 @@ for (const path of ['/portal/devices', '/portal/privacy', '/portal/privacy/expor
   });
 }
 
+// UI redesign M2-10: the schedules pages, same neutral apex 404.
+for (const path of ['/portal/schedules', '/portal/schedules/new']) {
+  test(`apex ${path} is the neutral 404 (M2-10)`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}
 // M2 follow-up L8: an apex portal 404's HEAD must match an unmatched URL's exactly: the same <title>,
 // the same title in the RSC payload (it once said "Sign in" on /portal/login) and the same robots
 // metas (the portal layout's noindex,nofollow once showed too). Compared against the live root 404,
@@ -230,7 +240,8 @@ test.describe('apex portal 404 heads match the root 404 (L8)', () => {
   for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456',
     '/portal/transfers/AbCdEf123456/receipt', '/portal/recipients', '/portal/recipients/new', '/portal/profile',
     '/portal/notifications', '/portal/devices', '/portal/help', '/portal/help/tickets', '/portal/help/tickets/new',
-    '/portal/chat', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete']) {
+    '/portal/chat', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete',
+    '/portal/send', '/portal/send/review', '/portal/schedules', '/portal/schedules/new']) {
     test(`apex ${path} carries the root 404 head`, async ({ request }) => {
       const root = await request.get(`/no-such-page-${randomBytes(6).toString('hex')}`);
       expect(root.status()).toBe(404);

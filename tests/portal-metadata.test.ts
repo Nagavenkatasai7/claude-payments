@@ -92,6 +92,10 @@ const PAGES: ReadonlyArray<[string, () => Promise<{ generateMetadata?: GenMeta }
   ['privacy/page.tsx', () => import('@/app/portal/privacy/page'), {}],
   ['privacy/export/page.tsx', () => import('@/app/portal/privacy/export/page'), {}],
   ['privacy/delete/page.tsx', () => import('@/app/portal/privacy/delete/page'), {}],
+  ['send/page.tsx', () => import('@/app/portal/send/page'), { referrer: 'no-referrer' }],
+  ['send/review/page.tsx', () => import('@/app/portal/send/review/page'), { referrer: 'no-referrer' }],
+  ['schedules/page.tsx', () => import('@/app/portal/schedules/page'), {}],
+  ['schedules/new/page.tsx', () => import('@/app/portal/schedules/new/page'), {}],
 ];
 
 describe('every portal page and the layout', () => {

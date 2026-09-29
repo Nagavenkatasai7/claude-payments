@@ -16,6 +16,8 @@ import { Button, Card, Money, PageHeader, StatusPill } from '@/components/ds';
 import { cancelTransferPortalAction, emailReceiptAction, requestRecallPortalAction, requestRefundPortalAction } from './actions';
 import { ActionForm, RecallForm } from './transfer-actions';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { sendAgainAction } from '../../send/actions';
+import { SendAgainForm } from '../../send/send-again-form';
 
 export const generateMetadata = () => portalMetadata('portal.detail.title', { referrer: 'no-referrer' });
 
@@ -172,6 +174,14 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
               </>
             ) : null}
             <p className="text-[13px] text-ds-ink-muted">{t('portal.detail.stepUpNote')}</p>
+          </Card>
+        ) : null}
+
+        {transfer.status !== 'blocked' && transfer.transferType !== 'b2b' ? (
+          <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
+            <h2 data-send-again className="text-[17px] font-bold text-ds-ink">{t('portal.send.sendAgainTitle')}</h2>
+            <p className="text-[14px] text-ds-ink-muted">{t('portal.send.sendAgainBody')}</p>
+            <SendAgainForm action={sendAgainAction.bind(null, transfer.id)} requestKey={key()} />
           </Card>
         ) : null}
 

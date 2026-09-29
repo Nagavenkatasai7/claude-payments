@@ -1,4 +1,5 @@
 import { createHmac, hkdfSync } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import type { Db, DbOrTx } from '@/db/client';
 import { createAuditRepo, createRecipientRepo } from '@/db/repos/aux-repos';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
@@ -205,6 +206,19 @@ export async function recordRecipientAudit(
 
 // ── Delete (owner O12) ────────────────────────────────────────────────────────
 
+/**
+ * UI redesign M2-10: the per-(tenant, sender) address-book lock, a transaction-scoped advisory lock
+ * under its own key prefix (the mint's sender lock is `<partner>:<phone>`, store.ts). A recipient
+ * delete, a portal recipient edit and a portal schedule create take it first, so a schedule is never
+ * created to a recipient whose delete is committing (the delete's schedule sweep would miss it) or
+ * with an account an edit is replacing. If the create commits first, the delete waits here and its
+ * sweep (READ COMMITTED, a fresh snapshot per statement) sees and cancels the new schedule. The
+ * scheduled mint never takes this lock, so there is no cycle with the sender lock.
+ */
+export async function lockRecipientBook(tx: DbOrTx, partnerId: PartnerId, phone: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`recipient-book:${partnerId}:${phone}`}))`);
+}
+
 const LIVE_SCHEDULE: ReadonlySet<string> = new Set(['active', 'paused']);
 
 /** Active + paused schedules per NORMALIZED recipient phone (the delete dialog's "cancels N" count). */
@@ -233,6 +247,7 @@ export async function deleteRecipientWithSchedules(
 ): Promise<{ ok: true; schedulesCancelled: number } | { ok: false }> {
   if (!isRid(rid)) return { ok: false };
   return db.transaction(async (tx) => {
+    await lockRecipientBook(tx, partnerId, phone); // M2-10: serialized with a portal schedule create
     const recipient = await findByRid(tx, partnerId, phone, rid);
     if (!recipient) return { ok: false as const };
     const target = normalizePhone(recipient.recipientPhone);
