@@ -51,14 +51,18 @@ vi.mock('@/lib/partner-store', async () => {
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 // M3-10 follow-up: a switch that makes the sender screening read throw (a failed lookup).
-const screeningRead = { fail: false };
+// M3-10 claim re-check: `afterRead` runs right after the (real) pre-check read returns, i.e. after
+// the action decided the sender is clean and before the guarded claim.
+const screeningRead: { fail: boolean; afterRead: null | (() => Promise<unknown>) } = { fail: false, afterRead: null };
 vi.mock('@/db/repos/customer-repo', async () => {
   const actual = await vi.importActual<typeof import('@/db/repos/customer-repo')>('@/db/repos/customer-repo');
   return {
     ...actual,
-    readSenderScreeningFlags: (...a: Parameters<typeof actual.readSenderScreeningFlags>) => {
+    readSenderScreeningFlags: async (...a: Parameters<typeof actual.readSenderScreeningFlags>) => {
       if (screeningRead.fail) throw new Error('connection reset');
-      return actual.readSenderScreeningFlags(...a);
+      const r = await actual.readSenderScreeningFlags(...a);
+      if (screeningRead.afterRead) await screeningRead.afterRead();
+      return r;
     },
   };
 });
@@ -103,6 +107,7 @@ beforeEach(async () => {
   cookieJar.clear();
   revalidated.length = 0;
   screeningRead.fail = false;
+  screeningRead.afterRead = null;
   host.value = 'smartremit.ai';
   db = await freshDb();
   store = createStore(redis, db);
@@ -348,5 +353,34 @@ describe('releaseHoldAction: double submit', () => {
     expect((await transferRow('tr_heldA1')).status).toBe('cancelled');
     expect(await count(outbox)).toBe(0);
     expect(await count(auditEvents)).toBe(0);
+  });
+});
+
+// M3-10 follow-up (owner, 2026-09-29): the guarded claim re-checks the sender flags in the SAME
+// UPDATE, so a flag raised after the action's pre-check read still refuses the release.
+describe('releaseHoldAction: sender flag raised between the pre-check and the claim', () => {
+  it.each(['pep_hit', 'watchlist_hit'] as const)('%s set after the pre-check read: notAllowed, stays in_review, zero audit and outbox rows', async (col) => {
+    await asAdmin();
+    screeningRead.afterRead = () => flagSender('pa', col);
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: false, error: t('partner.release.notAllowed') });
+    expect((await transferRow('tr_heldA1')).status).toBe('in_review');
+    expect(await count(auditEvents)).toBe(0);
+    expect(await count(outbox)).toBe(0);
+  });
+
+  it('the sender row deleted after the pre-check read: notAllowed, nothing written', async () => {
+    await asAdmin();
+    screeningRead.afterRead = () => db.execute(sql`DELETE FROM customers WHERE partner_id = 'pa'`);
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: false, error: t('partner.release.notAllowed') });
+    expect((await transferRow('tr_heldA1')).status).toBe('in_review');
+    expect(await count(auditEvents)).toBe(0);
+    expect(await count(outbox)).toBe(0);
+  });
+
+  it('another tenant flagging the same phone after the pre-check does not block this tenant', async () => {
+    await asAdmin();
+    screeningRead.afterRead = () => flagSender('pb', 'pep_hit');
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: true });
+    expect((await transferRow('tr_heldA1')).status).toBe('paid');
   });
 });

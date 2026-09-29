@@ -33,9 +33,11 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  * sanctions or AML reason, an unknown or empty list, a blocked row ⇒ refused), re-checked by the
  * legacy canReleaseHeld rule as defence in depth. M3-10 follow-up: the transfer SENDER's customer
  * row (read inside the session tenant) must exist and carry no PEP / watchlist hit; a missing row
- * or a failed lookup is refused (fail closed). Known residuals: (1) the flags are read before the
- * guarded claim and the claim does not re-check them, so a flag raised by the Persona webhook in
- * that window is not seen (the same read-then-claim shape as the kycMode check); (2) a sandbox mint
+ * or a failed lookup is refused (fail closed), and the guarded claim re-checks both in the same
+ * UPDATE (releaseTransfer's partnerRelease), so a flag raised after this read still refuses, up
+ * to the claim statement's snapshot (see markPaidIfInReview for the ms-wide window left until the
+ * release transaction commits). Known residuals: (1) the kycMode check is still read-then-claim;
+ * (2) a sandbox mint
  * writes no customer row (partner-api-service.ts, live only), so a sandbox hold is never
  * partner-releasable.
  *
@@ -78,7 +80,9 @@ export async function releaseHoldAction(formData: FormData): Promise<ActionResul
   }
 
   try {
-    await releaseTransfer(getStore(), getDb(), transfer.id, { actor: ctx.username, reason });
+    // The session tenant rides into the guarded claim: it re-checks the sender's PEP / watchlist
+    // flags inside the same UPDATE, so a flag raised after the read above still refuses.
+    await releaseTransfer(getStore(), getDb(), transfer.id, { actor: ctx.username, reason }, { partnerId: ctx.partnerId });
   } catch (err) {
     // Lost the guarded claim (a double submit or a concurrent release/reject): nothing moved.
     if (err instanceof Error && err.message.startsWith('Cannot release')) return notAllowed;
