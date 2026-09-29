@@ -1,4 +1,6 @@
-import { getDb } from '@/db/client';
+import { eq } from 'drizzle-orm';
+import { getDb, type DbOrTx } from '@/db/client';
+import { partners } from '@/db/schema';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { env } from '@/lib/env';
 import {
@@ -163,10 +165,21 @@ export interface WhatsappWriteOpts {
  * KEEP stored secrets, so without this a config could never be cleared).
  * R3a: audited in the same transaction — actor + partnerId only.
  */
+/**
+ * M3-15a review M1: saveIntegrations rewrites the WHOLE row (integrations-repo.ts saveIntegrations),
+ * so a writer must not write back payment/KYC columns it read before its transaction: a settlement
+ * secret rotated meanwhile (partner-settlement-endpoint.ts, same lock) would be silently undone. Lock
+ * the tenant's partners row (the per-tenant mutex those writers share) and re-read inside the tx.
+ */
+async function lockedIntegrations(tx: DbOrTx, partnerId: PartnerId) {
+  await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).for('update');
+  return createPartnerIntegrationsStore(tx).getIntegrations(partnerId);
+}
+
 export async function disconnectWhatsapp(partnerId: PartnerId, actor: string, opts: WhatsappWriteOpts = {}): Promise<void> {
-  const existing = await getPartnerIntegrationsStore().getIntegrations(partnerId);
   await getDb().transaction(async (tx) => {
-    await createPartnerIntegrationsStore(tx).saveIntegrations(partnerId, { ...existing, whatsapp: {} });
+    const fresh = await lockedIntegrations(tx, partnerId);
+    await createPartnerIntegrationsStore(tx).saveIntegrations(partnerId, { ...fresh, whatsapp: {} });
     await createAuditRepo(tx).record({
       partnerId,
       actor,
@@ -215,7 +228,9 @@ export async function saveWhatsappConfig(
   try {
     // R3a (M4): the write and its audit row commit together, or neither does.
     await getDb().transaction(async (tx) => {
-      await createPartnerIntegrationsStore(tx).saveIntegrations(partnerId, { ...existing, whatsapp });
+      // Only the WhatsApp fields come from this write; every other column is re-read under the lock.
+      const fresh = await lockedIntegrations(tx, partnerId);
+      await createPartnerIntegrationsStore(tx).saveIntegrations(partnerId, { ...fresh, whatsapp });
       await createAuditRepo(tx).record({
         partnerId,
         actor,

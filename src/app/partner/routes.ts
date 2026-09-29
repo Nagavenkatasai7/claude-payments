@@ -27,6 +27,8 @@ export const PARTNER_ROUTES = Object.freeze({
   branding: { href: '/partner/branding', labelKey: 'partner.nav.branding', policy: PARTNER_ADMIN, nav: true },
   integrations: { href: '/partner/integrations', labelKey: 'partner.nav.integrations', policy: PARTNER_ADMIN, nav: true },
   integrationsWhatsapp: { href: '/partner/integrations/whatsapp', labelKey: 'partner.integrations.whatsapp.title', policy: PARTNER_ADMIN, nav: false },
+  integrationsApiKeys: { href: '/partner/integrations/api-keys', labelKey: 'partner.integrations.apiKeys.title', policy: PARTNER_ADMIN, nav: false },
+  integrationsWebhooks: { href: '/partner/integrations/webhooks', labelKey: 'partner.integrations.webhooks.title', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 

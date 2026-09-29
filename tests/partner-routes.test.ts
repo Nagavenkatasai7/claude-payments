@@ -25,6 +25,10 @@ describe('PARTNER_ROUTES', () => {
       for (const r of nav) expect(r.policy.roles).toContain(role);
     }
   });
+  it('the webhooks page is admin-only and out of the nav (M3-15a)', () => {
+    for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('integrationsWebhooks', role)).toBe(role === 'admin');
+    expect(PARTNER_ROUTES.integrationsWebhooks.nav).toBe(false);
+  });
   it('partnerNav keeps the fixed order, home first', () => {
     expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/transfers', '/partner/customers', '/partner/reports', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/security']);
     expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
