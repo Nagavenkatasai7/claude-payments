@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -532,3 +532,45 @@ export function createCustomerRepo(
 }
 
 export type CustomerRepo = ReturnType<typeof createCustomerRepo>;
+
+/** The two customer-level screening flags (kyc-state-machine sets them from Persona reports). */
+export interface SenderScreeningFlags {
+  watchlistHit: boolean | null;
+  pepHit: boolean | null;
+}
+
+/**
+ * M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release.
+ * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns (no
+ * PII column, no decrypt). null when this tenant has no row for the phone. Throws on a DB error:
+ * the caller (lib/sender-screening.ts) turns that into a fail-closed null.
+ */
+export async function readSenderScreeningFlags(db: DbOrTx, partnerId: PartnerId, phone: string): Promise<SenderScreeningFlags | null> {
+  const rows = await db
+    .select({ watchlistHit: customers.watchlistHit, pepHit: customers.pepHit })
+    .from(customers)
+    .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * M3-10 Task 10.3: the batch form of readSenderScreeningFlags for the legacy compliance page (one
+ * query for every held row's sender). TENANT-SCOPED: partner_id is in the WHERE, so a phone that
+ * has a row only under another tenant is absent from the map. Selects only the phone and the two
+ * flags. An empty list makes no query. Throws on a DB error (the lib wrapper fails closed).
+ */
+export async function readSenderScreeningFlagsForPhones(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phones: readonly string[],
+): Promise<Map<string, SenderScreeningFlags>> {
+  const out = new Map<string, SenderScreeningFlags>();
+  if (phones.length === 0) return out;
+  const rows = await db
+    .select({ phone: customers.phone, watchlistHit: customers.watchlistHit, pepHit: customers.pepHit })
+    .from(customers)
+    .where(and(eq(customers.partnerId, partnerId), inArray(customers.phone, [...phones])));
+  for (const r of rows) out.set(r.phone, { watchlistHit: r.watchlistHit, pepHit: r.pepHit });
+  return out;
+}
