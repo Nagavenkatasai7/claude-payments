@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
+import { auditEvents, customers, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
@@ -106,6 +106,15 @@ const fundingGate = () =>
  * edit predicates' unfunded test. A bound PSP intent counts as possibly
  * charged (the sender may have confirmed an ACH debit that lands days later).
  */
+/**
+ * M3-10 follow-up: the partner-release predicates for markPaidIfInReview — the transfer is in
+ * `partnerId`'s tenant AND its sender's customer row there exists with no PEP / watchlist hit.
+ */
+const senderClearForPartnerRelease = (partnerId: PartnerId) => [
+  eq(transfers.partnerId, partnerId),
+  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE)`,
+];
+
 const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
 
 /**
@@ -760,8 +769,22 @@ export function createTransferRepo(
      * hold-time value would make the first sweep after releasing any hold
      * older than 15 min enqueue reinstruct:<id> next to instruct:<id> and raise
      * a false recon: alert. No migration: transfers has no updated_at column.
+     *
+     * M3-10 follow-up (owner, 2026-09-29): `partnerRelease` is passed for a
+     * PARTNER-scoped release ONLY. It adds two predicates to the SAME UPDATE:
+     * the row belongs to that tenant, and the SENDER's customer row (same
+     * tenant, same phone; PK (partner_id, phone)) EXISTS with pep_hit and
+     * watchlist_hit both NOT TRUE (NULL = never flagged, as in
+     * isScreeningCustomerHold). A flag raised after the caller's pre-check
+     * (loadSenderScreening) but before this statement therefore refuses the
+     * claim, and a missing row refuses it (fail closed). Both correlated
+     * columns are table-qualified ("transfers"."phone"), so they can never
+     * bind to customers' own phone / partner_id. Omitted (platform staff) ⇒
+     * the statement is byte-identical to before (test-pinned). Drizzle 0.45:
+     * sql`` embeds tables/columns as qualified identifiers —
+     * node_modules/drizzle-orm/sql/sql.d.ts.
      */
-    async markPaidIfInReview(id: string): Promise<Transfer | null> {
+    async markPaidIfInReview(id: string, partnerRelease?: { partnerId: PartnerId }): Promise<Transfer | null> {
       const rows = await db
         .update(transfers)
         .set({ status: 'paid', paidAt: sql`now()` })
@@ -770,6 +793,7 @@ export function createTransferRepo(
           eq(transfers.status, 'in_review'),
           ne(transfers.complianceStatus, 'blocked'),
           fundingGate(),
+          ...(partnerRelease ? senderClearForPartnerRelease(partnerRelease.partnerId) : []),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;

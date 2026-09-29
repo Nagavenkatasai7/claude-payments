@@ -5,7 +5,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { buildStage1Message } from '@/lib/payment';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
-import type { Transfer } from '@/lib/types';
+import type { PartnerId, Transfer } from '@/lib/types';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
 //
@@ -262,15 +262,21 @@ export async function settleOrHold(
  * released, or rejected — nothing moves, nothing is enqueued.
  * Callers hand this the RAIL partner's integrations (settlementPartnerId ??
  * partnerId), the same rule as every other settlement caller.
+ * M3-10 follow-up: `partnerRelease` is passed ONLY for a PARTNER-scoped
+ * release; the claim then also requires, in the same UPDATE, that the row is
+ * in that tenant and its sender's customer row exists there with no PEP /
+ * watchlist hit (markPaidIfInReview). A refused claim is 'already': nothing
+ * moves, nothing is audited or enqueued. Platform staff pass nothing.
  */
 export async function releaseHold(
   db: Db,
   transfer: Transfer,
   integrations: PartnerIntegrations,
   audit?: StaffAuditCtx,
+  partnerRelease?: { partnerId: PartnerId },
 ): Promise<ReleaseResult> {
   return db.transaction(async (tx): Promise<ReleaseResult> => {
-    const paid = await createTransferRepo(tx).markPaidIfInReview(transfer.id);
+    const paid = await createTransferRepo(tx).markPaidIfInReview(transfer.id, partnerRelease);
     if (!paid) return { kind: 'already' }; // nothing moved ⇒ nothing audited
     // Program-Fix 28: the staff decision's durable row, keyed on the OWNING
     // partner, in THIS transaction (a failed insert rolls the release back).

@@ -11,7 +11,7 @@ export type { StaffAuditCtx } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
-import type { Partner, Transfer } from './types';
+import type { Partner, PartnerId, Transfer } from './types';
 import { isPartnerReleasableHold } from './compliance-config';
 
 /**
@@ -180,8 +180,20 @@ export function canReleaseHeld(
  * (guards double-release / wrong status) — the status check is re-done by the
  * guarded claim inside releaseHold, so a race can never release twice.
  * Called by the compliance dashboard "Release" action (admin-gated, audited).
+ * M3-10 follow-up: PARTNER-scoped callers (the /partner release action and a
+ * partner-scoped legacy release) MUST pass `partnerRelease` with the session
+ * tenant: the guarded claim then re-checks, atomically, that the sender's
+ * customer row in that tenant exists with no PEP / watchlist hit, so a flag
+ * raised after the caller's pre-check still refuses (the same "Cannot
+ * release" error, nothing written). Platform staff pass nothing (unchanged).
  */
-export async function releaseTransfer(store: Store, db: Db, id: string, audit: StaffAuditCtx): Promise<void> {
+export async function releaseTransfer(
+  store: Store,
+  db: Db,
+  id: string,
+  audit: StaffAuditCtx,
+  partnerRelease?: { partnerId: PartnerId },
+): Promise<void> {
   // Program-Fix 43 follow-up (defence in depth behind releaseTransferAction):
   // every release records WHO and WHY, so no audit context or a blank reason
   // is refused before any read or write.
@@ -197,9 +209,13 @@ export async function releaseTransfer(store: Store, db: Db, id: string, audit: S
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
-  const r = await releaseHold(db, transfer, railIntegrations, audit);
+  const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
   if (r.kind === 'already') {
-    throw new Error('Cannot release: transfer is not in_review (it moved concurrently)');
+    throw new Error(
+      partnerRelease
+        ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
+        : 'Cannot release: transfer is not in_review (it moved concurrently)',
+    );
   }
   pokeWorker(); // fast path for the rail effect — the per-minute cron drains it regardless
 }
