@@ -26,7 +26,8 @@ export const metadata: Metadata = { title: t('partner.webhooks.title'), robots: 
 // M3-15b adds, for a partner-operated rail only: the delivery log (the worker's
 // partner_webhook_deliveries rows for this tenant AS THE RAIL OWNER, keyset-paged on a strict id
 // cursor: transfer id, outcome, HTTP status, latency, attempt, time; never a URL, body or outbox
-// payload) and the failed (dead) instructions with Replay (id, time and attempts only).
+// payload) and the failed (dead) instructions with Replay (transfer id, time and attempts; the
+// outbox id is only the hidden form value).
 
 const H2 = 'text-[17px] font-semibold text-ds-ink';
 const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
@@ -157,14 +158,14 @@ function DeliveryLog({ page, before }: { page: { rows: DeliveryView[]; nextBefor
   );
 }
 
-function DeadList({ rows }: { rows: Array<{ id: number; createdAt: Date; attempts: number }> }) {
+function DeadList({ rows }: { rows: Array<{ id: number; transferId: string; createdAt: Date; attempts: number }> }) {
   if (rows.length === 0) return <EmptyState title={t('partner.webhooks.dead.empty')} />;
   return (
     <ul className="flex flex-col gap-3">
       {rows.map((r) => (
         <Card as="li" key={r.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <div>
-            <p className="text-[15px] font-semibold text-ds-ink">{t('partner.webhooks.dead.item', { id: r.id })}</p>
+            <p className="text-[15px] font-semibold break-all text-ds-ink">{t('partner.webhooks.dead.item', { ref: r.transferId })}</p>
             <p className="mt-1 text-[13.5px] text-ds-ink-muted">{t('partner.webhooks.dead.meta', { when: whenUtc(r.createdAt.toISOString()), attempts: r.attempts })}</p>
           </div>
           <ReplayControl id={r.id} />
@@ -178,11 +179,9 @@ export default async function PartnerWebhooksPage({ searchParams }: { searchPara
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.integrationsWebhooks.policy);
   const pid = ctx.partnerId;
   const before = parseDeliveryCursor((await searchParams)?.before);
-  const [cfg, pings, log, dead] = await Promise.all([
+  const [cfg, pings] = await Promise.all([
     safe('config', pid, () => createPartnerIntegrationsStore(getDb()).getIntegrations(pid)),
     safe('pings', pid, () => listRecentPings(getDb(), pid, 10)),
-    safe('deliveries', pid, () => listDeliveries(getDb(), pid, { before })),
-    safe('dead', pid, () => createOutboxRepo(getDb()).listDeadInstructionsForPartner(pid, DEAD_LIMIT)),
   ]);
 
   const header = (
@@ -225,6 +224,12 @@ export default async function PartnerWebhooksPage({ searchParams }: { searchPara
       </>
     );
   }
+
+  // Only a partner-operated rail reaches here: the delivery and dead-letter reads run after that check.
+  const [log, dead] = await Promise.all([
+    safe('deliveries', pid, () => listDeliveries(getDb(), pid, { before })),
+    safe('dead', pid, () => createOutboxRepo(getDb()).listDeadInstructionsForPartner(pid, DEAD_LIMIT)),
+  ]);
 
   return (
     <>

@@ -142,13 +142,27 @@ describe('replay × reconcileSweep (one re-instruction per transfer: dedupe key 
     ]);
   });
 
-  it('with the replayed row pending or done, repeated sweeps add at most the ONE reinstruct row, ever', async () => {
+  it('while the REPLAYED row is live (pending, then failed/backing off), the sweep adds NO reinstruct: one POST per drain, never two back to back', async () => {
     await store.saveTransfer(transfer());
     const original = await deadRow('instruct:rp_t1');
     expect(await replayDeadInstruction(db, 'pa', actor, original, { redis })).toEqual({ ok: true });
-    await reconcileSweep(db); // pending replayed row
-    fetchFn.mockImplementation(async () => new Response('down', { status: 503 })); // the rail stays silent: still paid
+    await reconcileSweep(db); // the worker route sweeps before it drains
+    expect((await instructRows()).map((r) => r.key)).toEqual(['instruct:rp_t1']);
+    fetchFn.mockImplementation(async () => new Response('down', { status: 503 })); // the rail stays down: still paid
     await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1); // only the replayed row was sent
+    expect(await statusOf(original)).toBe('failed');
+    await reconcileSweep(db);
+    await reconcileSweep(db);
+    expect((await instructRows()).map((r) => r.key)).toEqual(['instruct:rp_t1']);
+  });
+
+  it('after the replayed row goes dead again, the sweep can still enqueue its ONE reinstruct, and never a second', async () => {
+    await store.saveTransfer(transfer());
+    const original = await deadRow('instruct:rp_t1');
+    expect(await replayDeadInstruction(db, 'pa', actor, original, { redis })).toEqual({ ok: true });
+    await reconcileSweep(db);
+    await db.execute(sql`UPDATE outbox SET status = 'dead' WHERE id = ${original}`); // exhausted its retries again
     await reconcileSweep(db);
     await reconcileSweep(db);
     const keys = (await instructRows()).map((r) => r.key);

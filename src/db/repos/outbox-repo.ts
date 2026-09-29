@@ -560,12 +560,14 @@ export function createOutboxRepo(db: DbOrTx) {
     /**
      * UI redesign M3-15b: the dead settlement instructions whose transfer settles on `partnerId`'s
      * rail (`coalesce(settlement_partner_id, partner_id)`, the partner whose endpoint the worker
-     * called), newest first. `{ id, createdAt, attempts }` ONLY: never the payload or last_error.
+     * called), newest first. `{ id, transferId, createdAt, attempts }` ONLY: never the rest of the
+     * payload or last_error. The transfer id is what the partner is shown (its rail already received
+     * it); the global sequential outbox id stays a hidden form value.
      */
-    async listDeadInstructionsForPartner(partnerId: string, limit: number): Promise<Array<{ id: number; createdAt: Date; attempts: number }>> {
+    async listDeadInstructionsForPartner(partnerId: string, limit: number): Promise<Array<{ id: number; transferId: string; createdAt: Date; attempts: number }>> {
       const n = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.floor(limit))) : 1;
       return db
-        .select({ id: outbox.id, createdAt: outbox.createdAt, attempts: outbox.attempts })
+        .select({ id: outbox.id, transferId: sql<string>`${outbox.payload} ->> 'transferId'`, createdAt: outbox.createdAt, attempts: outbox.attempts })
         .from(outbox)
         .where(deadInstructionOnRail(partnerId))
         .orderBy(desc(outbox.id))
@@ -585,6 +587,21 @@ export function createOutboxRepo(db: DbOrTx) {
         .set({ status: 'pending', attempts: 0, nextAttemptAt: new Date(), lastError: null, leaseUntil: null, leaseOwner: null })
         .where(and(eq(outbox.id, id), deadInstructionOnRail(partnerId)))
         .returning({ id: outbox.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * M3-15b review MEDIUM-1: true while a settlement.instruct row for this transfer is LIVE
+     * (pending / processing / failed, i.e. queued, running or backing off). The reconcile sweep
+     * checks it under the transfer lock so it never adds its recovery re-instruction beside a live
+     * one (e.g. a partner Replay). Ids only; no payload is returned.
+     */
+    async hasLiveInstruction(transferId: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(sql`${outbox.kind} = 'settlement.instruct' AND ${outbox.status} IN ('pending','processing','failed') AND (${outbox.payload} ->> 'transferId') = ${transferId}`)
+        .limit(1);
       return rows.length > 0;
     },
 

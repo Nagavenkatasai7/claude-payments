@@ -230,6 +230,9 @@ describe('compliance pin (compliance-11)', () => {
     const stuck = await createTransferRepo(db).findStuckPaid(15);
     expect(stuck.map((x) => [x.id, x.complianceStatus])).toEqual([['c_rel', 'flagged']]);
 
+    // The release's own instruction already went out (the rail's callback is what is late). M3-15b:
+    // while that row is still LIVE the sweep holds its one re-instruction back (see reconcile.test.ts).
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:c_rel'`);
     expect((await reconcileSweep(db)).reinstructed).toBe(1);
     expect((await reconcileSweep(db)).reinstructed).toBe(0);
     const keys = (await rows<{ dedupe_key: string }>(sql`SELECT dedupe_key FROM outbox WHERE kind = 'settlement.instruct' ORDER BY id`))

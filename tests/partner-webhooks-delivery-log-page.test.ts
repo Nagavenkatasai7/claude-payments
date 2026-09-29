@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Staff, Transfer } from '@/lib/types';
 
@@ -158,8 +158,10 @@ describe('/partner/integrations/webhooks: failed instructions + Replay (M3-15b)'
     await signInAs({});
     const html = await render();
     expect(html).toContain(t('partner.webhooks.dead.title'));
-    expect(html).toContain(t('partner.webhooks.dead.item', { id: paRow }));
-    expect(html).not.toContain(t('partner.webhooks.dead.item', { id: pbRow }));
+    // Named by the TRANSFER id (the rail owner already has it), never the global sequential outbox id.
+    expect(html).toContain(t('partner.webhooks.dead.item', { ref: 't_pa' }));
+    expect(html).not.toContain(`#${paRow}`);
+    expect(html).not.toContain(`#${pbRow}`);
     expect(html).toContain(t('partner.webhooks.replay'));
     for (const leak of ['LAST-ERROR-MARKER', '919876543210', 'Anita', '123456789012', 't_pb']) expect(html).not.toContain(leak);
   });
@@ -169,6 +171,16 @@ describe('/partner/integrations/webhooks: failed instructions + Replay (M3-15b)'
     const html = await render();
     expect(html).toContain(t('partner.webhooks.dead.empty'));
     expect(html).not.toContain(`>${t('partner.webhooks.replay')}<`);
+  });
+
+  it('a SmartRemit-managed rail never runs the delivery or dead-letter queries', async () => {
+    await createPartnerIntegrationsStore(db).saveIntegrations('pa', rail('simulator'));
+    await signInAs({});
+    const stop = captureQueries();
+    await render();
+    const q = stop().map((x) => x.sql.toLowerCase());
+    expect(q.some((x) => x.includes('partner_webhook_deliveries') && x.includes('settlement.instruct'))).toBe(false);
+    expect(q.some((x) => x.includes('from "outbox"'))).toBe(false);
   });
 
   it('a SmartRemit-managed rail shows neither section', async () => {

@@ -73,9 +73,10 @@ describe('listDeadInstructionsForPartner', () => {
     expect(pa.map((r) => r.id)).not.toContain(paWhatsapp);
   });
 
-  it('returns { id, createdAt, attempts } ONLY: never the payload or last_error', async () => {
+  it('returns { id, transferId, createdAt, attempts } ONLY: never the rest of the payload or last_error', async () => {
     const [r] = await outbox.listDeadInstructionsForPartner('pb', 50);
-    expect(Object.keys(r).sort()).toEqual(['attempts', 'createdAt', 'id']);
+    expect(Object.keys(r).sort()).toEqual(['attempts', 'createdAt', 'id', 'transferId']);
+    expect(r.transferId).toBe('t_pb');
     expect(r.attempts).toBe(8);
     expect(r.createdAt).toBeInstanceOf(Date);
     expect(JSON.stringify(r)).not.toContain('15551230000');

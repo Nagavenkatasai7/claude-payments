@@ -96,6 +96,33 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     expect(await outboxRows()).toHaveLength(2);
   });
 
+  it('M3-15b: while an instruct row for the transfer is still LIVE (pending/processing/failed), the sweep does NOT re-instruct; once it is dead, it re-instructs ONCE', async () => {
+    await store.saveTransfer(fixture());
+    const outbox = createOutboxRepo(db);
+    await outbox.enqueue('settlement.instruct', { transferId: 'rc_t1' }, { dedupeKey: 'instruct:rc_t1' });
+    for (const status of ['pending', 'processing', 'failed']) {
+      await db.execute(sql`UPDATE outbox SET status = ${status} WHERE dedupe_key = 'instruct:rc_t1'`);
+      expect((await reconcileSweep(db)).reinstructed, status).toBe(0);
+      expect((await outboxRows()).map((x) => x.dedupe_key), status).not.toContain('reinstruct:rc_t1');
+    }
+    const alert = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'recon:rc_t1'`);
+    const msg = String((alert as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0].payload.message);
+    expect(msg).toContain('still queued or retrying');
+    expect(msg).not.toContain('Re-instructed');
+    // The live row dies: the sweep's one recovery re-instruction is still available, exactly once.
+    await db.execute(sql`UPDATE outbox SET status = 'dead' WHERE dedupe_key = 'instruct:rc_t1'`);
+    expect((await reconcileSweep(db)).reinstructed).toBe(1);
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect((await outboxRows()).filter((x) => x.dedupe_key === 'reinstruct:rc_t1')).toHaveLength(1);
+  });
+
+  it('M3-15b: a DONE instruct row (the rail took it, the callback is late) does not block the one re-instruction', async () => {
+    await store.saveTransfer(fixture());
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'rc_t1' }, { dedupeKey: 'instruct:rc_t1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:rc_t1'`);
+    expect((await reconcileSweep(db)).reinstructed).toBe(1);
+  });
+
   it('a RELEASED hour-old compliance hold is NOT stuck: the first sweep after release re-instructs nothing and raises no recon alert', async () => {
     const t = fixture({ id: 'rc_rel', status: 'awaiting_payment', complianceStatus: 'flagged', paidAt: undefined });
     await store.saveTransfer(t);
