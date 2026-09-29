@@ -12,7 +12,7 @@ import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, Transfer } from './types';
-import { isScreeningHold } from './compliance-config';
+import { isPartnerReleasableHold } from './compliance-config';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -145,24 +145,29 @@ export async function resendPaymentLink(
  * WHO may release a compliance hold. OWNER DECISION (2026-09-16): releasing a
  * transfer that SmartRemit's OWN screening flagged — owning partner kycMode
  * 'ours', which is also the default when kycMode is unset — requires PLATFORM
- * staff. A partner-scoped admin may release only a 'delegated'-mode partner's
- * hold. A missing partner row fails CLOSED for partner-scoped staff.
+ * staff. A missing partner row fails CLOSED for partner-scoped staff.
  * Program-Fix 43 follow-up: even under 'delegated', a hold whose reasons came
  * from sanctions / name screening (isScreeningHold — KYC may be delegated,
  * sanctions may not) stays PLATFORM-only; a hold with no reasons fails closed.
+ * UI redesign M3-10 Task 10.3 / O8: a PARTNER-scoped admin follows exactly the
+ * /partner rule, isPartnerReleasableHold — a delegated partner's in_review,
+ * non-blocked hold whose EVERY reason is in PARTNER_RELEASABLE_REASONS (so the
+ * AML hold and any unknown reason are refused), and whose SENDER customer row
+ * (`sender`, read in the owning tenant) exists with no PEP / watchlist hit.
+ * PLATFORM staff are unchanged: `sender` is ignored for them.
  * Sanctions-blocked rows stay unreleasable for everyone regardless of this
  * (markPaidIfInReview carries compliance_status <> 'blocked').
- * Pure: the server action (authoritative gate) and the compliance page (which
- * hides the Release button) both call it, so the UI can never drift from it.
+ * Pure: the server actions (authoritative gate) and the compliance page (which
+ * hides the Release button) all call it, so the UI can never drift from it.
  */
 export function canReleaseHeld(
   scope: Scope,
   owner: Pick<Partner, 'kycMode'> | null | undefined,
-  transfer: Pick<Transfer, 'complianceReasons'>,
+  transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
+  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
 ): boolean {
   if (scope.kind === 'platform') return true;
-  if (owner?.kycMode !== 'delegated') return false;
-  return !isScreeningHold(transfer);
+  return isPartnerReleasableHold(transfer, owner, sender);
 }
 
 /**

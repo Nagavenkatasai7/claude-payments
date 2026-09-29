@@ -32,3 +32,17 @@ export async function partnerMfaEnrolmentPending(
   }
   return true;
 }
+
+/**
+ * UI redesign M3-9 (O10): the invite marker ALONE, for a partner-scoped account. Used by the
+ * post-login landing and the legacy /admin-dashboard gates, which must honour "first login forces MFA
+ * enrolment" without reading loop A's global policy (policyRequired is forced off here). A platform
+ * account (no tenant, or a malformed empty one) is never pending and costs no Redis call.
+ */
+export async function inviteMfaPending(
+  staff: Staff,
+  deps: { redis?: RedisLike; isEnrolled?: (username: string) => Promise<boolean> } = {},
+): Promise<boolean> {
+  if (!staff.partnerId) return false;
+  return partnerMfaEnrolmentPending(staff, { ...deps, policyRequired: () => false });
+}

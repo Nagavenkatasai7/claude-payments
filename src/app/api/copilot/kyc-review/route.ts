@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getCurrentStaff } from '@/lib/auth';
+import { inviteMfaPending } from '@/lib/partner-mfa-gate';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getRedis } from '@/lib/redis';
@@ -32,6 +33,8 @@ export async function POST(req: NextRequest) {
   if (staff.role !== 'support' && staff.role !== 'admin') {
     return NextResponse.json({ ok: false }, { status: 403 });
   }
+  // UI redesign M3-9 (O10): an invite-accepted account must enrol in two-step sign-in first.
+  if (await inviteMfaPending(staff)) return NextResponse.json({ ok: false }, { status: 403 });
 
   // 60 calls/hour per staff member; FAIL-OPEN on limiter errors (a Redis
   // outage must never take the copilot down — same posture as the others).
