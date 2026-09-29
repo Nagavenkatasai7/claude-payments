@@ -319,7 +319,10 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
   if (!customer) throw new Error('Customer not found.');
 
   const nowIso = new Date().toISOString();
-  const value = validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso };
+  // UI redesign M3-12: setScope 'platform' marks a SmartRemit decision, which a partner admin can
+  // never overwrite or clear while it is live (an entry without it is treated the same way).
+  const value =
+    validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso, setScope: 'platform' as const };
   await getDb().transaction(async (tx) => {
     // tx-bound repos ONLY inside the transaction (a root-handle call here would
     // deadlock PGlite's single connection / hold a second Neon pool connection).
