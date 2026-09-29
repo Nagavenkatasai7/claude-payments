@@ -978,6 +978,14 @@ export async function wizardCreatePartnerAction(
       // UI redesign M3-21: a platform-wizard partner is approved for go-live at creation (it gets a
       // live key below), committed with the partner itself.
       await upsertApprovedGoLive(tx, id, staff.username);
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.go_live.approve',
+        subjectId: id,
+        meta: { reason: 'platform setup wizard', actorScope: 'platform' },
+      });
       if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},

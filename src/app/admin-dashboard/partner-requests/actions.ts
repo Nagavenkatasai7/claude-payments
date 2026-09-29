@@ -246,7 +246,7 @@ async function createPartnerFromRequest(
   const store = getStaffInviteStore();
   let issued: { token: string; hash: string };
   try {
-    const r = await store.issue({ partnerId, username, name, role: 'admin', invitedBy: actor });
+    const r = await store.issue({ partnerId, username, name, role: 'admin', invitedBy: actor, inviterScope: 'platform' });
     if ('error' in r) return 'failed'; // a brand-new tenant has no pending invites
     issued = r;
   } catch (err) {

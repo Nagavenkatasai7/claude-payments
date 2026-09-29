@@ -113,7 +113,7 @@ const DECISION_FLASH: Record<string, string> = {
 
 /** UI redesign M3-21: the flash line after "Create partner and invite its admin" (?create=…). */
 const CREATE_FLASH: Record<string, string> = {
-  created: 'Partner created and its admin invited by email (single-use link, 72 hours). It stays in the sandbox until go-live is approved.',
+  created: 'Partner created and its admin invited by email (single-use link, 72 hours). It gets no live API keys until go-live is approved.',
   exists: 'A partner was already created from this request. Nothing changed.',
   not_approved: 'Only an approved request can become a partner.',
   reason_required: `Add a reason of at least ${STAFF_REASON_MIN} characters.`,
@@ -274,8 +274,8 @@ export default async function PartnerApplicationPage({
                 <CardTitle>Create the partner and invite its admin</CardTitle>
                 <CardDescription>
                   Creates the partner from this request (company name and source countries) and emails a single-use,
-                  72-hour admin invite to {request.email}. No API key is issued: the partner works in the sandbox until
-                  it requests go-live and SmartRemit approves it.
+                  72-hour admin invite to {request.email}. No API key is issued, and live API keys stay unavailable
+                  until the partner requests go-live and SmartRemit approves it.
                 </CardDescription>
               </CardHeader>
               <CardContent>

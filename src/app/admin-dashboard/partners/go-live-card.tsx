@@ -55,7 +55,7 @@ export function GoLiveCard({
       <CardHeader>
         <CardTitle className="flex items-center gap-2.5">Go-live {badge}</CardTitle>
         <CardDescription>
-          Live API keys are issued only after SmartRemit approves go-live. Until then the partner works in the sandbox.
+          Live API keys are issued only after SmartRemit approves go-live. Until then the partner can use sandbox keys only.
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 text-[13px]">

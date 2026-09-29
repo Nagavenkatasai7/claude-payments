@@ -21,8 +21,8 @@ export function partnerIdForRequest(requestId: string): string {
 
 /**
  * The wizard's defaults for a partner with no branding and no integrations yet: active (so its
- * invited admin can sign in and set it up), SmartRemit KYC, the send gate off. Sandbox-only until
- * go-live is approved (partner_go_live, M3-14).
+ * invited admin can sign in and set it up), SmartRemit KYC, the send gate off. No LIVE API keys
+ * until go-live is approved (partner_go_live, M3-14); go-live does not gate channel/settlement setup.
  */
 export function partnerRecordFromRequest(
   request: { companyName: string; corridors: string[] },

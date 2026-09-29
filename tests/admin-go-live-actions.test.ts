@@ -45,6 +45,18 @@ vi.mock('@/lib/staff-mfa-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
   return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
 });
+// A switch that makes the outbox enqueue report a dedupe miss (the rollback path).
+const failEnqueue = vi.hoisted(() => ({ on: false }));
+vi.mock('@/db/repos/outbox-repo', async (orig) => {
+  const actual = await orig<typeof import('@/db/repos/outbox-repo')>();
+  return {
+    ...actual,
+    createOutboxRepo: (d: Parameters<typeof actual.createOutboxRepo>[0]) => {
+      const repo = actual.createOutboxRepo(d);
+      return { ...repo, enqueue: (async (...a: Parameters<typeof repo.enqueue>) => (failEnqueue.on ? null : repo.enqueue(...a))) as typeof repo.enqueue };
+    },
+  };
+});
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
@@ -124,6 +136,7 @@ beforeEach(async () => {
   for (const k of [...redis.sets.keys()]) await redis.del(k);
   cookieJar.clear();
   pokeWorkerMock.mockReset();
+  failEnqueue.on = false;
   db = await freshDb();
   pgPartnerStore = createPartnerStore(db);
   await db.execute(sql`TRUNCATE partner_requests, partner_applications RESTART IDENTITY CASCADE`);
@@ -338,5 +351,21 @@ describe('createPartnerFromRequestAction', () => {
     expect((await partnerRows()).filter((r) => r.id === NEW_PID)).toHaveLength(1);
     expect(await invites().listForPartner(NEW_PID)).toHaveLength(1);
     expect(await emailRows()).toHaveLength(1);
+  });
+
+  it('a failed commit rolls everything back and revokes the minted invite (no live link left)', async () => {
+    await asPlatformAdmin();
+    failEnqueue.on = true;
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=failed`);
+    expect(await pgPartnerStore.getPartner(NEW_PID)).toBeNull();
+    expect(await getGoLive(db, NEW_PID)).toBeNull();
+    expect(await emailRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+    expect(await invites().listForPartner(NEW_PID)).toEqual([]);
+    expect(inviteKeys().filter((k) => k.startsWith('staffinvite:'))).toEqual([]);
+    expect(pokeWorkerMock).not.toHaveBeenCalled();
+    // A retry then succeeds.
+    failEnqueue.on = false;
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=created`);
   });
 });
