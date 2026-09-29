@@ -13,6 +13,8 @@ import { newRequestKey } from '@/lib/portal-request-key';
 import { portalPayUrl } from '@/lib/send-seam';
 import {
   capCopy,
+  canVerifyInProfile,
+  routeKycCopy,
   limitsCopy,
   loadSendReview,
   maskPhone,
@@ -129,6 +131,8 @@ export default async function PortalSendReviewPage() {
   ]);
   const gated = portalKycGate(partner, customer, site.brand);
   if (gated) return shell(<Refusal copy={gated} />);
+  // M2-14 (#413 L1): any later 'verify' card that Profile could not act on becomes the contact card.
+  const kycRoute = (c: SendCopy) => routeKycCopy(c, canVerifyInProfile(partner, customer), site.brand);
 
   let recipient: { name: string; phone: string } | null;
   if (review.recipient.kind === 'saved') {
@@ -151,7 +155,7 @@ export default async function PortalSendReviewPage() {
 
   const limits = await sendLimitsForPortal(owner, { amountSource: review.amountSource, sourceCurrency: review.sourceCurrency });
   const limitRefusal = limitsCopy(limits, site.brand);
-  if (limitRefusal) return shell(<Refusal copy={limitRefusal} />);
+  if (limitRefusal) return shell(<Refusal copy={kycRoute(limitRefusal)} />);
 
   let q;
   try {
@@ -164,10 +168,10 @@ export default async function PortalSendReviewPage() {
   } catch {
     return shell(<Refusal copy={{ error: 'portal.send.fx_unavailable' }} />);
   }
-  if (q.kind === 'kyc_required') return shell(<Refusal copy={{ error: 'portal.send.kycBody', kyc: 'verify' }} />);
+  if (q.kind === 'kyc_required') return shell(<Refusal copy={kycRoute({ error: 'portal.send.kycBody', kyc: 'verify' })} />);
   if (q.kind === 'cap') {
     const ev = q.evaluation;
-    return shell(<Refusal copy={capCopy(ev.reason, { todayRemainingUsd: ev.todayRemainingCents / 100, perTransferCapUsd: ev.perTransferCapCents / 100 }, site.brand)} />);
+    return shell(<Refusal copy={kycRoute(capCopy(ev.reason, { todayRemainingUsd: ev.todayRemainingCents / 100, perTransferCapUsd: ev.perTransferCapCents / 100 }, site.brand))} />);
   }
   if (q.kind === 'fx_unavailable') return shell(<Refusal copy={{ error: 'portal.send.fx_unavailable' }} />);
   if (q.kind === 'invalid_request') return shell(<Refusal copy={{ error: 'portal.send.amount_not_allowed' }} />);
