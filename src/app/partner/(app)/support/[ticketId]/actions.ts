@@ -34,6 +34,9 @@ import type { ActionResult } from '../../../action-result';
 // ones the platform ticket actions enqueue (same text, same dedupe keys), so a ticket worked on
 // both surfaces never double-sends.
 
+/** Statuses a partner may not move a ticket out of (the platform escalation is SmartRemit's). */
+const PARTNER_LOCKED_STATUSES = ['waiting_admin'] as const;
+
 const notFound = (): ActionResult => ({ ok: false, error: t('partner.support.notFound') });
 const failed = (): ActionResult => ({ ok: false, error: t('partner.support.failed') });
 
@@ -66,7 +69,11 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
           body,
           internal: false,
         });
-        if (waiting) await repo.updateStatus(ticket.id, 'pending');
+        // "Waiting on customer" never de-escalates: an escalated (waiting_admin) ticket keeps its
+        // status (checked atomically in the UPDATE); the reply itself is still posted.
+        const movedToPending = waiting
+          ? (await repo.updateStatus(ticket.id, 'pending', { notFrom: PARTNER_LOCKED_STATUSES })) !== null
+          : false;
         if (ticket.customerPhone) {
           await createOutboxRepo(tx).enqueue(
             'whatsapp.text',
@@ -86,7 +93,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
           actorType: 'staff',
           action: 'ticket.reply',
           subjectId: ticket.id,
-          meta: { actorScope: 'partner', waiting },
+          meta: { actorScope: 'partner', waiting: movedToPending },
         });
         return String(msg.id);
       }),
@@ -146,7 +153,8 @@ export async function internalNoteAction(formData: FormData): Promise<ActionResu
 
 /**
  * Move a customer ticket to open / pending / resolved / closed. The repo guard refuses a same-state
- * move and anything out of closed (terminal); a refusal writes nothing. Resolving enqueues the
+ * move and anything out of closed (terminal), and this action refuses any move out of waiting_admin
+ * (the platform escalation); a refusal writes nothing. Resolving enqueues the
  * once-only resolve nudge (deduped on the ticket id, as the platform action does).
  */
 export async function setStatusAction(formData: FormData): Promise<ActionResult> {
@@ -154,13 +162,15 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // An escalation (waiting_admin) is SmartRemit's to handle: a partner cannot move it out.
+  if (ticket.status === 'waiting_admin') return { ok: false, error: t('partner.support.statusRefused') };
   const status = parsePartnerTicketStatus(formData.get('status'));
   if (!status) return { ok: false, error: t('partner.support.statusInvalid') };
 
   let nudged = false;
   try {
     await getDb().transaction(async (tx) => {
-      const updated = await createTicketRepo(tx).updateStatus(ticket.id, status);
+      const updated = await createTicketRepo(tx).updateStatus(ticket.id, status, { notFrom: PARTNER_LOCKED_STATUSES });
       if (!updated) throw new StatusRefusedError();
       if (status === 'resolved' && ticket.customerPhone) {
         nudged = await createOutboxRepo(tx).enqueue(
