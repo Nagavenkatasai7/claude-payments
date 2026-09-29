@@ -6,6 +6,7 @@ import { createStaffRepo } from '@/db/repos/staff-repo';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
+import { partnerGoLive, partnerPortalSettings, partnerReportJobs, partnerSites, partnerSlugTombstones, partnerWebhookDeliveries } from '@/db/schema';
 
 // Program-Fix 45 P5: the staff ledger's partner_id FK means the smoke
 // partner's staff row (copied in on read) must go before the partner, and the
@@ -38,6 +39,21 @@ describe('clean-smoke-partner', () => {
     await cleanSmokePartners(db, () => {});
     expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(0);
     expect(await count(`SELECT count(*)::int AS n FROM staff WHERE partner_id = 'p_smoke'`)).toBe(0);
+  });
+
+  it('removes the partner-app children added by 0026-0028 (after /migrate-prod every partner has a go-live row)', async () => {
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    await db.insert(partnerGoLive).values({ partnerId: 'p_smoke' }).onConflictDoNothing();
+    await db.insert(partnerSites).values({ partnerId: 'p_smoke' }).onConflictDoNothing();
+    await db.insert(partnerPortalSettings).values({ partnerId: 'p_smoke' }).onConflictDoNothing();
+    await db.insert(partnerSlugTombstones).values({ slug: 'smoke-old', partnerId: 'p_smoke', releasedBy: 'test' });
+    await db.insert(partnerReportJobs).values({ id: '00000000-0000-4000-8000-000000000001', partnerId: 'p_smoke', kind: 'settlements', params: {}, requestedBy: 'test' });
+    await db.insert(partnerWebhookDeliveries).values({ partnerId: 'p_smoke', kind: 'ping', attempt: 1, outcome: 'ok' });
+    await cleanSmokePartners(db, () => {});
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(0);
+    for (const t of ['partner_go_live', 'partner_sites', 'partner_portal_settings', 'partner_slug_tombstones', 'partner_report_jobs', 'partner_webhook_deliveries']) {
+      expect(await count(`SELECT count(*)::int AS n FROM ${t} WHERE partner_id = 'p_smoke'`), t).toBe(0);
+    }
   });
 
   it('is one transaction: a refusal part-way leaves every row in place', async () => {

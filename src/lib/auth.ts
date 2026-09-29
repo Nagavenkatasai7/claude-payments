@@ -10,6 +10,7 @@ import { getStaffMfaStore } from './staff-mfa-store';
 import type { Staff } from './types';
 import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';
 import { partnerMfaEnrolmentPending } from './partner-mfa-gate';
+import { isLegacyDashboardStaff } from './legacy-dashboard-staff';
 
 /**
  * Program-Fix 45 P1: the session's username from the `__Host-` cookie, else the
@@ -48,6 +49,7 @@ export async function getCurrentStaff(): Promise<Staff | null> {
 export async function requireStaff(): Promise<Staff> {
   const staff = await getCurrentStaff();
   if (!staff) redirect('/login');
+  if (!isLegacyDashboardStaff(staff)) redirect(staff.role === 'finance' ? '/partner' : '/login');
   return staff;
 }
 
@@ -128,4 +130,18 @@ export async function requirePartnerStaff(policy: PartnerPolicy, opts: { skipMfa
   const d = decidePartnerAccess(staff, policy, { pending, skip: opts.skipMfa });
   if (!d.ok) redirect(d.redirectTo);
   return d.ctx;
+}
+
+// UI redesign M3-6: the finance role. 'finance' is a /partner-only role, so every legacy
+// /admin-dashboard gate (all of them resolve the session through requireStaff) refuses it.
+// isLegacyDashboardStaff is a CLOSED allowlist: a role outside it fails closed to /login in
+// requireStaff (never /partner, which would bounce a platform-scoped record back to /admin-dashboard).
+//
+// Today's requireStaff behaviour (any role), for the self-service account actions ONLY (MFA
+// enrolment and the own-password change), so a finance member can enrol at /partner/security.
+// A role outside the closed set (legacy roles + finance) is refused here too.
+export async function requireStaffSelf(): Promise<Staff> {
+  const staff = await getCurrentStaff();
+  if (!staff || !(isLegacyDashboardStaff(staff) || staff.role === 'finance')) redirect('/login');
+  return staff;
 }

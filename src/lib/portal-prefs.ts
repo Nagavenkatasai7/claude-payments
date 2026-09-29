@@ -82,3 +82,35 @@ export async function verifiedReceiptEmail(
   if (!email) return null;
   return sameTag(prefs.emailVerifiedTag, emailVerifiedTag(customer.partnerId, customer.senderPhone, email)) ? email : null;
 }
+
+// ── Writers (UI redesign M2-11, Task 11.4). Each is ONE upsert keyed (partner_id, phone): the prefs
+// row is created on first use and only the named columns change. The customers FK means a write for
+// a (tenant, phone) with no customer row throws, never lands elsewhere.
+
+async function upsertPrefs(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  set: Partial<Pick<typeof customerPortalPrefs.$inferInsert, 'emailReceipts' | 'emailVerifiedAt' | 'emailVerifiedTag'>>,
+): Promise<void> {
+  const now = new Date();
+  await db
+    .insert(customerPortalPrefs)
+    .values({ partnerId, phone, ...set, updatedAt: now })
+    .onConflictDoUpdate({ target: [customerPortalPrefs.partnerId, customerPortalPrefs.phone], set: { ...set, updatedAt: now } });
+}
+
+/** The address changed: verification is void (the receipts choice itself is kept, dormant until re-verified). */
+export async function clearEmailVerification(db: DbOrTx, partnerId: PartnerId, phone: string): Promise<void> {
+  await upsertPrefs(db, partnerId, phone, { emailVerifiedAt: null, emailVerifiedTag: null });
+}
+
+/** The verify link was confirmed for the address whose tag is `tag` (emailVerifiedTag()). */
+export async function markEmailVerified(db: DbOrTx, partnerId: PartnerId, phone: string, tag: string): Promise<void> {
+  await upsertPrefs(db, partnerId, phone, { emailVerifiedAt: new Date(), emailVerifiedTag: tag });
+}
+
+/** The "email me receipts" choice. Callers refuse it unless verifiedReceiptEmail() is non-null. */
+export async function setEmailReceipts(db: DbOrTx, partnerId: PartnerId, phone: string, on: boolean): Promise<void> {
+  await upsertPrefs(db, partnerId, phone, { emailReceipts: on });
+}

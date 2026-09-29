@@ -17,7 +17,7 @@ let db: Db;
 let partnerStore: import('@/lib/partner-store').PartnerStore;
 let auditStore: import('@/lib/audit-log-store').AuditLogStore;
 
-vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor, requireStaff: async () => actor }));
+vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor, requireStaffSelf: async () => actor }));
 // Program-Fix 17a: the password actions read the client IP + set the session
 // cookie, reserve attempts on the staff-login guard, write auth.* audit rows and
 // run the breach check. All on in-memory fakes (no network, no Upstash).
@@ -150,6 +150,19 @@ describe('createStaffAction', () => {
     expect(feed[0]).toMatchObject({ actor: 'boss', action: 'created', target: 'pa-1', partnerId: 'acme', actorScope: 'platform' });
   });
 
+  it('M3-6: refuses role=finance (never a platform Team role), platform or partner scope, writing nothing', async () => {
+    await partnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    for (const partnerId of ['', 'acme']) {
+      await expect(
+        createStaffAction(form({ username: 'fin1', name: 'F', password: 'a-long-password-1', role: 'finance', partnerId })),
+      ).rejects.toThrow('Invalid role.');
+    }
+    expect(await authStore.getStaff('fin1')).toBeNull();
+  });
+
   it('rejects an unknown partner scope', async () => {
     await expect(
       createStaffAction(form({ username: 'xxx', name: 'X', password: 'a-long-password-1', role: 'agent', partnerId: 'ghost' })),
@@ -219,6 +232,12 @@ describe('updateStaffAction', () => {
     await updateStaffAction(form({ username: 'a', role: 'agent', canResend: 'on' }));
     const got = await authStore.getStaff('a');
     expect(got?.permissions.canResend).toBe(true);
+  });
+
+  it('M3-6: refuses changing a member to role=finance, leaving the record unchanged', async () => {
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent', partnerId: undefined }));
+    await expect(updateStaffAction(form({ username: 'a', role: 'finance' }))).rejects.toThrow('Invalid role.');
+    expect((await authStore.getStaff('a'))?.role).toBe('agent');
   });
 
   it('refuses to demote the only platform admin', async () => {

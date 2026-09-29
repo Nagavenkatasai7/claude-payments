@@ -26,12 +26,19 @@ describe('PARTNER_ROUTES', () => {
     }
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/customers', '/partner/audit', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/transfers', '/partner/customers', '/partner/support', '/partner/audit', '/partner/security']);
+    expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
     expect(partnerNav('support').map((r) => r.href)).not.toContain('/partner/customers');
   });
   it('an unknown role gets no nav at all (fails closed)', () => {
-    expect(partnerNav('finance' as never)).toEqual([]);
+    expect(partnerNav('root' as never)).toEqual([]);
+  });
+  it('M3-6: finance gets home + security, and only routes whose policy admits finance', () => {
+    const hrefs = partnerNav('finance').map((r) => r.href);
+    expect(hrefs[0]).toBe('/partner');
+    expect(hrefs).toContain('/partner/security');
+    for (const r of partnerNav('finance')) expect(r.policy.roles).toContain('finance');
   });
   it('hrefs are static paths (no tenant, no query string)', () => {
     for (const r of Object.values(PARTNER_ROUTES)) expect(r.href).toMatch(/^\/partner(\/[a-z-]+)*$/);

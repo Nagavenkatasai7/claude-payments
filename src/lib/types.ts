@@ -265,7 +265,9 @@ export interface Schedule {
 // 'support' (NEW): tickets-only staff — answers customer queries, escalates to
 // admins. ENFORCED at requireScope (every ops/money page bounces support to the
 // ticket queue); nav hiding alone is never the guard.
-export type StaffRole = 'admin' | 'agent' | 'support';
+// 'finance' (UI redesign M3-6): a /partner-only role (money reads + reports). Every legacy
+// /admin-dashboard surface refuses it (auth.ts requireStaff sends it to /partner).
+export type StaffRole = 'admin' | 'agent' | 'support' | 'finance';
 
 // Reversible account state. Absent ⇒ 'active' (no migration; lazy default on read),
 // so existing staff records keep working. 'suspended' = access revoked but the record
@@ -287,6 +289,14 @@ export interface StaffPermissions {
 // Support staff get no money permissions — hasPermission() must resolve false
 // for every money action without special-casing the role at call sites.
 export const SUPPORT_DEFAULT_PERMISSIONS: StaffPermissions = {
+  canCancel: false,
+  canResend: false,
+  canAssign: false,
+  canRevealPii: false,
+};
+
+// Finance staff get no money-action permissions either (reads come from the /partner role sets).
+export const FINANCE_DEFAULT_PERMISSIONS: StaffPermissions = {
   canCancel: false,
   canResend: false,
   canAssign: false,

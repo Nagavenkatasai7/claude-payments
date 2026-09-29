@@ -139,7 +139,8 @@ describe('/partner layout: the gate (chrome only; pages re-gate)', () => {
     await expect(shell()).rejects.toThrow('REDIRECT:/login');
   });
   it('an unknown role fails closed → /login', async () => {
-    await signInAs({ partnerId: TENANT, role: 'finance' as Staff['role'] });
+    // M3-6 made 'finance' a known role; the fail-closed case now uses a role outside the set.
+    await signInAs({ partnerId: TENANT, role: 'root' as Staff['role'] });
     await expect(shell()).rejects.toThrow('REDIRECT:/login');
   });
   it('MFA pending: the layout still renders (no loop); the home page sends to enrolment', async () => {

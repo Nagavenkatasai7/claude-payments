@@ -27,6 +27,7 @@ import { boundStaffNote } from '@/lib/send-limits';
 import type { StaffAuditCtx } from '@/lib/dashboard-ops';
 import type { Staff, StaffPermissions } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 
 async function requirePermission(
   permission: keyof StaffPermissions,
@@ -99,6 +100,10 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
   // …and who is still active (don't orphan work on a suspended account).
   if (assigneeStaff.status === 'suspended') {
     throw new Error('Cannot assign: staff member is inactive.');
+  }
+  // …and whose role can open the legacy transfer surfaces (UI redesign M3-6: finance cannot).
+  if (!isLegacyDashboardStaff(assigneeStaff)) {
+    throw new Error('Cannot assign: staff member cannot work transfers.');
   }
   await assignTransfer(store, id, assignee, note);
   revalidatePath('/admin-dashboard', 'layout');

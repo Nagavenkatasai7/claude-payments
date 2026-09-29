@@ -2,13 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { requireCustomer } from '@/lib/customer-auth';
-import { env } from '@/lib/env';
-import { getStore } from '@/lib/store';
-import { getCustomerStore } from '@/lib/customer-store';
-import { getKycCaseStore } from '@/lib/kyc-case-store';
-import { sendGateActive } from '@/lib/kyc-gate';
-import { getPartnerStore } from '@/lib/partner-store';
-import { getKycProvider } from '@/lib/providers/kyc-provider';
+import { startCustomerVerification } from '@/lib/customer-verification';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
@@ -19,39 +13,13 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
  * phone — the spine that ties the webhook back to this account), records
  * `inquiry_started` + the inquiry id (audit-logged), then redirects to the
  * Persona hosted flow where raw PII is captured (never on our servers).
+ * The steps live in startCustomerVerification (shared with the customer
+ * portal, UI redesign M2-11); this action's behaviour is unchanged.
  */
 export async function startVerificationAction(): Promise<void> {
   await refuseOnSiteHost();
   const customer = await requireCustomer();
-
-  // KYC is partner OPT-IN — and server actions are public POST endpoints, so
-  // hiding the verify page is not a gate. Read the customer's partner ROW and
-  // refuse BEFORE touching the provider (startVerification creates a REAL
-  // Persona inquiry). Gate off ⇒ bounce home; nothing is created or recorded.
-  const partner =
-    (await getPartnerStore().getPartner(customer.partnerId)) ??
-    (await getPartnerStore().ensureDefaultPartner());
-  if (!sendGateActive(partner)) redirect('/account');
-
-  const customers = getCustomerStore(getStore());
-  const provider = getKycProvider(customers, env.appBaseUrl);
-
-  const { url, providerRef } = await provider.startVerification({
-    customerId: customer.senderPhone,
-    senderPhone: customer.senderPhone,
-  });
-
-  await getKycCaseStore(getStore()).applyDelta(
-    customer.partnerId,
-    customer.senderPhone,
-    {
-      kycInquiryId: providerRef,
-      kycProviderRef: providerRef,
-      kycReviewState: 'inquiry_started',
-      kycSubmittedAt: new Date().toISOString(),
-    },
-    { actor: customer.senderPhone, action: 'kyc.start' },
-  );
-
-  redirect(url); // off to the Persona hosted flow
+  const res = await startCustomerVerification(customer, { actor: customer.senderPhone });
+  if (res.kind === 'gate_off') redirect('/account');
+  redirect(res.url); // off to the Persona hosted flow
 }
