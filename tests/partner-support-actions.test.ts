@@ -330,6 +330,18 @@ describe('LOW-4: a partner cannot move a ticket out of waiting_admin (the escala
   });
 });
 
+describe('a reply on an escalated (waiting_admin) ticket never de-escalates it', () => {
+  it('"waiting on customer" is ignored: the reply is stored, the status stays waiting_admin', async () => {
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    await signInAs({ role: 'admin' });
+    expect(await replyAction(replyForm('tk_a1', { waiting: 'on' }))).toEqual({ ok: true });
+    expect((await ticketRow('tk_a1')).status).toBe('waiting_admin');
+    const msgs = await createTicketRepo(db).listMessages('tk_a1', { includeInternal: false });
+    expect(msgs.map((m) => m.body)).toContain('Thanks, we are on it.');
+    expect((await audits())[0].meta).toMatchObject({ actorScope: 'partner', waiting: false });
+  });
+});
+
 describe("LOW-5: a partner pinned to the 'default' tenant has no Contact SmartRemit surface", () => {
   it('creating a thread is refused before any write', async () => {
     await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });

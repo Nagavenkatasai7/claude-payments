@@ -96,7 +96,7 @@ function TextForm({
   );
 }
 
-export function ReplyForm({ id, requestKey }: { id: string; requestKey: string }) {
+export function ReplyForm({ id, requestKey, withWaiting = true }: { id: string; requestKey: string; withWaiting?: boolean }) {
   return (
     <TextForm
       submit={replySubmit}
@@ -107,7 +107,7 @@ export function ReplyForm({ id, requestKey }: { id: string; requestKey: string }
       submitLabel={t('partner.support.replySubmit')}
       savedKey="partner.support.replySent"
       testId="partner-support-reply"
-      withWaiting
+      withWaiting={withWaiting}
     />
   );
 }

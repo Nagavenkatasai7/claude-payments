@@ -34,6 +34,9 @@ import type { ActionResult } from '../../../action-result';
 // ones the platform ticket actions enqueue (same text, same dedupe keys), so a ticket worked on
 // both surfaces never double-sends.
 
+/** Statuses a partner may not move a ticket out of (the platform escalation is SmartRemit's). */
+const PARTNER_LOCKED_STATUSES = ['waiting_admin'] as const;
+
 const notFound = (): ActionResult => ({ ok: false, error: t('partner.support.notFound') });
 const failed = (): ActionResult => ({ ok: false, error: t('partner.support.failed') });
 
@@ -66,7 +69,11 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
           body,
           internal: false,
         });
-        if (waiting) await repo.updateStatus(ticket.id, 'pending');
+        // "Waiting on customer" never de-escalates: an escalated (waiting_admin) ticket keeps its
+        // status (checked atomically in the UPDATE); the reply itself is still posted.
+        const movedToPending = waiting
+          ? (await repo.updateStatus(ticket.id, 'pending', { notFrom: PARTNER_LOCKED_STATUSES })) !== null
+          : false;
         if (ticket.customerPhone) {
           await createOutboxRepo(tx).enqueue(
             'whatsapp.text',
@@ -86,7 +93,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
           actorType: 'staff',
           action: 'ticket.reply',
           subjectId: ticket.id,
-          meta: { actorScope: 'partner', waiting },
+          meta: { actorScope: 'partner', waiting: movedToPending },
         });
         return String(msg.id);
       }),
@@ -163,7 +170,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
   let nudged = false;
   try {
     await getDb().transaction(async (tx) => {
-      const updated = await createTicketRepo(tx).updateStatus(ticket.id, status);
+      const updated = await createTicketRepo(tx).updateStatus(ticket.id, status, { notFrom: PARTNER_LOCKED_STATUSES });
       if (!updated) throw new StatusRefusedError();
       if (status === 'resolved' && ticket.customerPhone) {
         nudged = await createOutboxRepo(tx).enqueue(

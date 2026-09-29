@@ -266,6 +266,15 @@ describe("LOW-5: a partner pinned to the 'default' tenant never sees SmartRemit'
     const html = await contact();
     expect(html).not.toContain('Platform internal question');
     expect(html).toContain('No conversations yet');
+    // No form to start a thread: a short note instead.
+    expect(html).not.toContain('name="subject"');
+    expect(html).toContain('Contact SmartRemit is not available for this workspace.');
+  });
+  it('the support queue does not link to Contact SmartRemit', async () => {
+    await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });
+    expect(await list()).not.toContain('/partner/support/contact');
+    await signInAs({ role: 'admin' });
+    expect(await list()).toContain('/partner/support/contact');
   });
   it('opening the question by id is not found', async () => {
     await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });
@@ -281,5 +290,8 @@ describe('LOW-4: an escalated (waiting_admin) ticket offers no partner status ch
     const html = await ticket('tk_a1');
     expect(html).toContain('Escalated');
     expect(html).not.toContain('name="status"');
+    // The reply form stays, without the "waiting on customer" box (that would move the status).
+    expect(html).toContain('name="body"');
+    expect(html).not.toContain('name="waiting"');
   });
 });
