@@ -55,7 +55,11 @@ export async function resolveDirectOtpChannel(
   try {
     integrations = await d.getIntegrations(partnerId);
   } catch (err) {
-    if (partnerId === DEFAULT_PARTNER_ID) return { ok: true, creds: undefined };
+    if (partnerId === DEFAULT_PARTNER_ID) {
+      // The default tenant's number IS the shared one; logged so ops still sees the failed read.
+      logWarn(scope, 'default channel read failed; shared number', { error: err instanceof Error ? err.name : 'error' });
+      return { ok: true, creds: undefined };
+    }
     logWarn(scope, 'partner channel read failed; confirmation code not sent (fail closed)', {
       partnerId,
       error: err instanceof Error ? err.name : 'error',
