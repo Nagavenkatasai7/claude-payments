@@ -71,6 +71,45 @@ function pick(
 }
 
 /**
+ * UI redesign M3-12: the most a PARTNER-set per-customer value may be for one field — the platform
+ * ladder value, lowered further by a live, valid SmartRemit partner-level value (a partner-level
+ * RAISE never lifts it above the platform). The ONE place this rule lives: the write-time clamp
+ * (partner-send-limits.ts clampToPlatform) and the resolve-time clamp below both call it.
+ * `partnerLevelValue` must come from a LIVE partner entry (or be undefined).
+ */
+export function partnerSetBound(
+  partnerLevelValue: unknown,
+  platform: number,
+): { value: number; source: 'partner' | 'platform' } {
+  const p = validCents(partnerLevelValue);
+  return p !== null && p < platform ? { value: p, source: 'partner' } : { value: platform, source: 'platform' };
+}
+
+/** A live partner-level entry (or null), for callers outside the resolver (the write-time clamp). */
+export function livePartnerLevel(
+  partner: { sendLimits?: PartnerSendLimits } | null | undefined,
+  now: Date,
+): PartnerSendLimits | null {
+  return liveEntry(partner?.sendLimits, now);
+}
+
+/**
+ * Resolve ONE field of a partner-set customer entry: min(customer value, partnerSetBound). A tie
+ * reports 'customer' (the value the entry names is the one applied). A missing or garbage customer
+ * value falls through to the partner level / platform exactly as pick() does.
+ */
+function pickPartnerSet(
+  customerValue: unknown,
+  partnerLevelValue: unknown,
+  platform: number,
+): { value: number; source: SendLimitSource } {
+  const c = validCents(customerValue);
+  if (c === null) return pick([{ source: 'partner', value: partnerLevelValue }], platform, SEND_LIMIT_HARD_CEILING_CENTS);
+  const bound = partnerSetBound(partnerLevelValue, platform);
+  return c <= bound.value ? { value: c, source: 'customer' } : bound;
+}
+
+/**
  * The send limits that apply to ONE sender (Program fix 16b), per field:
  * the customer's override, else the partner's default, else the platform
  * ladder. An expired entry is skipped as a whole.
@@ -95,16 +134,25 @@ export function resolveEffectiveSendLimits(
   const p = liveEntry(partner?.sendLimits, now);
   const c = liveEntry(customer?.sendLimitOverride, now);
 
-  const perTransfer = pick(
-    [{ source: 'customer', value: c?.perTransferCapCents }, { source: 'partner', value: p?.perTransferCapCents }],
-    PLATFORM_SEND_LIMITS.perTransferCapCents,
-    SEND_LIMIT_HARD_CEILING_CENTS,
-  );
-  const t1 = pick(
-    [{ source: 'customer', value: c?.t1DailyCapCents }, { source: 'partner', value: p?.t1DailyCapCents }],
-    PLATFORM_SEND_LIMITS.t1DailyCapCents,
-    SEND_LIMIT_HARD_CEILING_CENTS,
-  );
+  // UI redesign M3-12 (review R6): a PARTNER-set customer entry never wins over a lower SmartRemit
+  // level. It is re-clamped here, at read, so a later tightening of the partner level (or the
+  // platform ladder) is never escaped by an override written before it. Every other entry (no
+  // setScope, 'platform', or any other value) takes the unchanged fix-16b path.
+  const partnerSet = c?.setScope === 'partner';
+  const perTransfer = partnerSet
+    ? pickPartnerSet(c?.perTransferCapCents, p?.perTransferCapCents, PLATFORM_SEND_LIMITS.perTransferCapCents)
+    : pick(
+        [{ source: 'customer', value: c?.perTransferCapCents }, { source: 'partner', value: p?.perTransferCapCents }],
+        PLATFORM_SEND_LIMITS.perTransferCapCents,
+        SEND_LIMIT_HARD_CEILING_CENTS,
+      );
+  const t1 = partnerSet
+    ? pickPartnerSet(c?.t1DailyCapCents, p?.t1DailyCapCents, PLATFORM_SEND_LIMITS.t1DailyCapCents)
+    : pick(
+        [{ source: 'customer', value: c?.t1DailyCapCents }, { source: 'partner', value: p?.t1DailyCapCents }],
+        PLATFORM_SEND_LIMITS.t1DailyCapCents,
+        SEND_LIMIT_HARD_CEILING_CENTS,
+      );
   const t0 = pick(
     [{ source: 'partner', value: p?.t0DailyCapCents }],
     PLATFORM_SEND_LIMITS.t0DailyCapCents,
@@ -122,6 +170,38 @@ export function resolveEffectiveSendLimits(
       t0DailyCapCents: t0.source,
     },
   };
+}
+
+/** The UTC date of an ISO expiry, as the admin form's date-only field posts it back (null if unparseable). */
+function expiryDay(iso: string): string | null {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * UI redesign M3-12 follow-up: true when `next` (a validated admin raise-form value) names
+ * EXACTLY the caps and expiry of a PARTNER-set customer entry, i.e. the admin re-saved the
+ * prefilled form without changing a value. The admin action then writes nothing, so a
+ * partner-set entry is never silently converted into a SmartRemit (setScope 'platform') override
+ * that locks the partner out. Compared: perTransferCapCents, t1DailyCapCents (absent equals
+ * absent) and the expiry by its UTC DATE (the form posts a date, the validator stores the end of
+ * that day). setBy / setAt / setScope and the reason are ignored. Every non-partner entry
+ * (platform, legacy, unknown scope), a missing entry, a clear and an unparseable stored expiry are
+ * NOT unchanged: they take the audited write exactly as before.
+ */
+export function isUnchangedPartnerSetEntry(
+  previous: SendLimitOverride | null | undefined,
+  next: Pick<SendLimitOverride, 'perTransferCapCents' | 't1DailyCapCents' | 'expiresAt'> | null,
+): boolean {
+  if (!previous || typeof previous !== 'object' || previous.setScope !== 'partner' || next === null) return false;
+  if (previous.perTransferCapCents !== next.perTransferCapCents) return false;
+  if (previous.t1DailyCapCents !== next.t1DailyCapCents) return false;
+  const prevExp = typeof previous.expiresAt === 'string' ? previous.expiresAt : undefined;
+  if (prevExp === undefined || next.expiresAt === undefined) return prevExp === next.expiresAt;
+  // Exactly the value the date-only prefill round-trips to (end of the stored UTC day): a hand-built
+  // POST with another time on the same day is a change, not a no-op.
+  const prevDay = expiryDay(prevExp);
+  return prevDay !== null && next.expiresAt === `${prevDay}T23:59:59.999Z`;
 }
 
 /**

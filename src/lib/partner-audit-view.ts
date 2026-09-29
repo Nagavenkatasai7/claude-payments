@@ -25,6 +25,7 @@ const ACTION_LABELS = Object.freeze({
   'api_key.revoke': 'partner.audit.action.apiKeyRevoke',
   'partner.whatsapp_config': 'partner.audit.action.whatsappConfig',
   'partner.whatsapp.disconnect': 'partner.audit.action.whatsappDisconnect',
+  'partner.whatsapp.test': 'partner.audit.action.whatsappTest',
   'partner.support_config': 'partner.audit.action.supportConfig',
   'partner.alert_email.update': 'partner.audit.action.alertEmail',
   'partner.disclosure_config': 'partner.audit.action.disclosureConfig',
@@ -32,6 +33,8 @@ const ACTION_LABELS = Object.freeze({
   'partner.theme.update': 'partner.audit.action.theme',
   'partner.logo.update': 'partner.audit.action.logo',
   'partner.slug.update': 'partner.audit.action.slug',
+  'partner.slug.claim': 'partner.audit.action.slugClaim', // M3-18: meta is { slug, previousSlug, actorScope }, not shown
+  'partner.support_contact.update': 'partner.audit.action.supportContact',
   'partner.settlement_endpoint.update': 'partner.audit.action.settlementEndpoint',
   'partner.settlement_secret.rotate': 'partner.audit.action.settlementSecret',
   'partner.go_live.request': 'partner.audit.action.goLiveRequest',
@@ -69,7 +72,7 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'pii.reveal': ['field'],
   'pii.view': ['fields'],
   'report.request': ['kind'],
-  'webhook.replay': ['deliveryId'],
+  'webhook.replay': ['outboxId'],
 });
 
 const MASK = '••••'; // ••••

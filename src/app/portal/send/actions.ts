@@ -28,6 +28,8 @@ import {
   portalKycGate,
   portalToolContext,
   prepareResultCopy,
+  canVerifyInProfile,
+  routeKycCopy,
   PORTAL_SEND_LIMIT,
   recordSendAudit,
   saveSendReview,
@@ -211,8 +213,10 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   // Review round 1, M5: the bot reaches a web draft only through repeat_transfer, which runs this
   // same cap + EDD check first. This action is a public POST, so it runs it itself, BEFORE runOnce.
   const limits = await sendLimitsForPortal(owner, { amountSource: review.amountSource, sourceCurrency: review.sourceCurrency });
+  // M2-14 (PR 413 L1): any later 'verify' card that Profile could not act on becomes the contact card.
+  const kycRoute = (c: SendCopy) => routeKycCopy(c, canVerifyInProfile(partner, customer), site.brand);
   const limitRefusal = limitsCopy(limits, site.brand);
-  if (limitRefusal) return refuse(limitRefusal);
+  if (limitRefusal) return refuse(kycRoute(limitRefusal));
 
   const input = toPrepareSendInput({
     recipientPhone,
@@ -261,7 +265,7 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   if (outcome.kind === 'already_sent') return refuse({ error: 'portal.send.already_sent' });
   if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) redirect(portalPayUrl(outcome.draftId));
   // A replay of a refusal has no evaluation in hand: the neutral line.
-  return refuse(fresh ? prepareResultCopy(fresh, site.brand) : { error: 'portal.send.cannot_complete' });
+  return refuse(fresh ? kycRoute(prepareResultCopy(fresh, site.brand)) : { error: 'portal.send.cannot_complete' });
 }
 
 // ── Send again (Task 9.4) ─────────────────────────────────────────────────────
@@ -333,5 +337,6 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
     return refuse({ error: 'portal.send.failed' });
   }
   if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) redirect(portalPayUrl(outcome.draftId));
-  return refuse(copy ?? { error: 'portal.send.cannot_complete' });
+  // M2-14 (PR 413 L1): a dead-end 'verify' card becomes the contact card.
+  return refuse(copy ? routeKycCopy(copy, canVerifyInProfile(partner, customer), site.brand) : { error: 'portal.send.cannot_complete' });
 }

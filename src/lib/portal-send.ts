@@ -8,6 +8,7 @@ import { getCustomerStore } from './customer-store';
 import { getStore, type RedisLike } from './store';
 import { env } from './env';
 import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
+import { resolveKycMode } from './partner-config';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import { auditSubjectId } from './customer-ref';
@@ -390,9 +391,29 @@ const contactPartner = (brand: string): SendCopy => ({ error: 'portal.send.conta
 const verifyCard: SendCopy = { error: 'portal.send.kycBody', kyc: 'verify' };
 
 /**
+ * M2-14 (PR 413 L1): does the verify card lead anywhere? Two dead ends, exactly: a DELEGATED partner
+ * (the partner verifies; Profile shows the provider copy) and a GRANDFATHERED customer (Profile shows
+ * them as verified, with no start control). A customer in review keeps the card: Profile says
+ * "In review" and they only have to wait. (Rejected is routed to contact before this.)
+ */
+export function canVerifyInProfile(
+  partner: Partner | null | undefined,
+  customer: Pick<Customer, 'kycStatus'> | null | undefined,
+): boolean {
+  if (resolveKycMode(partner).mode === 'delegated') return false;
+  return customer?.kycStatus !== 'grandfathered';
+}
+
+/** A 'verify' card that would be a dead end becomes the contact-the-partner card. */
+export function routeKycCopy(copy: SendCopy, canVerify: boolean, brand: string): SendCopy {
+  return copy.kyc === 'verify' && !canVerify ? contactPartner(brand) : copy;
+}
+
+/**
  * The bot's verify-before-send gate as PURE reads (kyc-gate.ts), run before any seam call so a gated
  * customer never reaches startVerificationForTurn. A rejected customer is told to contact the partner
- * and is never offered a retry (owner decision 2026-09-28).
+ * and is never offered a retry (owner decision 2026-09-28); so is anyone whose Profile could not start
+ * verification (M2-14, PR 413 L1).
  */
 export function portalKycGate(
   partner: Partner | null | undefined,
@@ -400,7 +421,8 @@ export function portalKycGate(
   brand: string,
 ): SendCopy | null {
   if (!sendGateActive(partner) || isSendVerified(customer)) return null;
-  return customer?.kycStatus === 'rejected' ? contactPartner(brand) : verifyCard;
+  if (customer?.kycStatus === 'rejected') return contactPartner(brand);
+  return routeKycCopy(verifyCard, canVerifyInProfile(partner, customer), brand);
 }
 
 /** The cap copy per reason; the limits are USD-equivalent (the cap basis), shown through formatMoney. */

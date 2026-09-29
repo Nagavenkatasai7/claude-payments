@@ -1,4 +1,5 @@
-import { getDb } from '@/db/client';
+import { sql } from 'drizzle-orm';
+import { getDb, type Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { newTransferId } from './id';
@@ -127,18 +128,11 @@ export async function requestRecallFor(
   const gate = await stepUpGate();
   if (gate !== 'ok') return { kind: 'step_up', failure: gate };
 
-  const repo = createTicketRepo(getDb());
-  const mine = await repo.listByCustomer(customer.senderPhone);
-  const open = mine.filter((t) => OPEN_STATUSES.has(t.status) && (!opts.tenantScopedCap || t.partnerId === customer.partnerId));
-  if (open.length >= MAX_OPEN_TICKETS) return { kind: 'cap' };
-
   const reasonLabel = REASON_LABEL[reason] ?? reason;
   // partnerId + customerPhone come from the caller's SESSION; transferId was re-validated above.
-  const ticket = await repo.createTicket({
-    id: `tk_${newTransferId()}`,
+  const r = await openRecallTicketLocked(getDb(), {
     partnerId: customer.partnerId,
-    kind: 'customer',
-    customerPhone: customer.senderPhone,
+    phone: customer.senderPhone,
     transferId: transfer.id,
     subject: `Recall request: ${reason}`,
     body:
@@ -146,10 +140,50 @@ export async function requestRecallFor(
       `Reason: ${reasonLabel} (${reason}).\n` +
       `The customer reports a problem with a delivered transfer within the 24h recall window. ` +
       `Recovery is not guaranteed — please review and follow up.`,
-    category: 'refund',
+    // M2-14 (PR 397 L1): the portal's cap counts in SQL with the tenant in the WHERE; the legacy
+    // receipt keeps counting every ticket on the phone.
+    capScope: opts.tenantScopedCap ? 'tenant' : 'phone',
   });
+  return r.kind === 'cap' ? { kind: 'cap' } : { kind: 'opened', ticketId: r.ticketId };
+}
 
-  // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
-  await enqueueTriage(getDb(), ticket.id);
-  return { kind: 'opened', ticketId: ticket.id };
+export type RecallTicketResult = { kind: 'opened'; ticketId: string; reused: boolean } | { kind: 'cap' };
+
+/**
+ * M2-14 (PR 397 L2): open ONE recall ticket per transfer, shared by the receipt/portal core and the
+ * chat/bot tool. The check and the insert run under a per-transfer advisory lock in ONE transaction,
+ * so two tabs, two request keys or a chat racing the portal can't both insert: the second gets the
+ * first open ticket back (`reused`). The lock is not a ledger row lock. The subject MUST start with
+ * "Recall request:" (findOpenRecallForTransfer matches that prefix). The triage row commits with it.
+ */
+export async function openRecallTicketLocked(
+  db: Db,
+  input: { partnerId: string; phone: string; transferId: string; subject: string; body: string; capScope: 'tenant' | 'phone' },
+): Promise<RecallTicketResult> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`recall:${input.partnerId}:${input.transferId}`}))`);
+    const repo = createTicketRepo(tx);
+    const existing = await repo.findOpenRecallForTransfer(input.partnerId, input.phone, input.transferId);
+    if (existing) return { kind: 'opened', ticketId: existing.id, reused: true } as const;
+
+    const openCount =
+      input.capScope === 'tenant'
+        ? await repo.countOpenByCustomerInTenant(input.partnerId, input.phone)
+        : (await repo.listByCustomer(input.phone)).filter((t) => OPEN_STATUSES.has(t.status)).length;
+    if (openCount >= MAX_OPEN_TICKETS) return { kind: 'cap' } as const;
+
+    const ticket = await repo.createTicket({
+      id: `tk_${newTransferId()}`,
+      partnerId: input.partnerId,
+      kind: 'customer',
+      customerPhone: input.phone,
+      transferId: input.transferId,
+      subject: input.subject,
+      body: input.body,
+      category: 'refund',
+    });
+    // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
+    await enqueueTriage(tx, ticket.id);
+    return { kind: 'opened', ticketId: ticket.id, reused: false } as const;
+  });
 }

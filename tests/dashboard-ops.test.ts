@@ -723,45 +723,72 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
 describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
   const PLATFORM = { kind: 'platform' } as const;
   const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
-  const AMOUNT = { complianceReasons: ['Large transfer amount.'] };
-  const SCREEN = { complianceReasons: ['Large transfer amount.', POSSIBLE_MATCH_REASON] };
+  type Held = Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>;
+  const held = (complianceReasons: string[], o: Partial<Held> = {}): Held => ({ status: 'in_review', complianceStatus: 'flagged', complianceReasons, ...o });
+  const AMOUNT = held(['Large transfer amount.']);
+  const SCREEN = held(['Large transfer amount.', POSSIBLE_MATCH_REASON]);
+  // The sender customer's screening flags (M3-10 follow-up).
+  const CLEAR = { watchlistHit: null, pepHit: null };
+  const PEP = { watchlistHit: null, pepHit: true };
 
-  it("platform staff may release any hold (ours, delegated, or an unknown partner)", () => {
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, AMOUNT)).toBe(true);
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
-    expect(canReleaseHeld(PLATFORM, null, AMOUNT)).toBe(true);
+  it("platform staff may release any hold (ours, delegated, or an unknown partner), whatever the sender's flags", () => {
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, AMOUNT, CLEAR)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT, CLEAR)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, null, AMOUNT, CLEAR)).toBe(true);
+    // Platform behaviour is unchanged by Task 10.3: AML, a PEP sender, and no sender lookup at all.
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, held([AML_HOLD_REASON]), CLEAR)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT, PEP)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT, null)).toBe(true);
   });
 
   it("a partner-scoped admin may NOT release a hold SmartRemit's own screening flagged (kycMode 'ours', or unset ⇒ 'ours')", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' }, AMOUNT)).toBe(false);
-    expect(canReleaseHeld(PARTNER, {}, AMOUNT)).toBe(false); // absent kycMode defaults to 'ours'
+    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' }, AMOUNT, CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, {}, AMOUNT, CLEAR)).toBe(false); // absent kycMode defaults to 'ours'
   });
 
   it('fails CLOSED for a partner-scoped admin when the owning partner row is missing', () => {
-    expect(canReleaseHeld(PARTNER, null, AMOUNT)).toBe(false);
-    expect(canReleaseHeld(PARTNER, undefined, AMOUNT)).toBe(false);
+    expect(canReleaseHeld(PARTNER, null, AMOUNT, CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, undefined, AMOUNT, CLEAR)).toBe(false);
   });
 
-  it("a partner-scoped admin may release a kycMode 'delegated' partner's non-screening hold", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [AML_HOLD_REASON] })).toBe(true);
+  it("a partner-scoped admin may release a kycMode 'delegated' partner's ALLOWLISTED hold only", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT, CLEAR)).toBe(true);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['High transfer velocity.', 'edd_required']), CLEAR)).toBe(true);
+  });
+
+  // M3-10 Task 10.3 / O8 (review L1 on #422): the legacy path now follows the /partner allowlist
+  // (isPartnerReleasableHold). This FLIPS the old expectation that a delegated partner scope could
+  // release an AML hold.
+  it('Task 10.3: a partner-scoped admin may NOT release an AML hold, an unknown reason, a blocked row or a non-held row', () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held([AML_HOLD_REASON]), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['Large transfer amount.', AML_HOLD_REASON]), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['Something new.']), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['Large transfer amount.'], { complianceStatus: 'blocked' }), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['Large transfer amount.'], { status: 'paid' }), CLEAR)).toBe(false);
+  });
+
+  it('Task 10.3: a partner-scoped admin may NOT release when the sender is PEP/watchlist-flagged, or the sender row is missing', () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT, PEP)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT, { watchlistHit: true, pepHit: null })).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT, null)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT, undefined)).toBe(false);
   });
 
   it("a hold for a missing sender identity is PLATFORM-only, even for a 'delegated' partner", () => {
-    const MISSING = { complianceReasons: [SENDER_IDENTITY_MISSING_REASON] };
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, MISSING)).toBe(false);
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: ['Large transfer amount.', SENDER_IDENTITY_MISSING_REASON] })).toBe(false);
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, MISSING)).toBe(true);
+    const MISSING = held([SENDER_IDENTITY_MISSING_REASON]);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, MISSING, CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held(['Large transfer amount.', SENDER_IDENTITY_MISSING_REASON]), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, MISSING, CLEAR)).toBe(true);
   });
 
   // Program-Fix 43 follow-up: sanctions / name-screening holds are PLATFORM-only,
   // whatever the partner's KYC mode.
   it("a partner-scoped admin may NOT release a delegated partner's SCREENING hold; platform still may", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, SCREEN)).toBe(false);
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [LIST_UNAVAILABLE_REASON] })).toBe(false);
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [] })).toBe(false); // fail closed
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, SCREEN)).toBe(true);
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, SCREEN)).toBe(true);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, SCREEN, CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held([LIST_UNAVAILABLE_REASON]), CLEAR)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held([]), CLEAR)).toBe(false); // fail closed
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, SCREEN, CLEAR)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, SCREEN, CLEAR)).toBe(true);
   });
 });
 

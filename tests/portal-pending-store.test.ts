@@ -33,6 +33,36 @@ describe('portal pending store', () => {
     now += 301_000;
     expect(await store.peek(token, 'pa', 'login')).toBeNull();
   });
+  it('M2-14 (#394 L7): extend() restarts a live login token\'s 5-minute clock (resend), capped at 30 minutes from creation', async () => {
+    let now = 1_000_000;
+    const store = createPortalPendingStore(fakeRedis(), { now: () => now });
+    const token = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'login' });
+    now += 240_000;
+    expect(await store.extend(token, 'pa', 'login')).toBe(true);
+    now += 240_000; // 8 min after creation, 4 after the resend
+    expect(await store.peek(token, 'pa', 'login')).not.toBeNull();
+    now += 120_000; // 6 min after the resend
+    expect(await store.peek(token, 'pa', 'login')).toBeNull();
+    expect(await store.extend(token, 'pa', 'login')).toBe(false); // dead tokens stay dead
+
+    const t2 = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'login' });
+    for (let i = 0; i < 10; i++) {
+      now += 240_000;
+      await store.extend(t2, 'pa', 'login');
+    }
+    // 40 minutes after creation: past the 30-minute cap, so the last extensions did nothing.
+    expect(await store.peek(t2, 'pa', 'login')).toBeNull();
+  });
+  it('M2-14: extend() on another partner, another purpose, or a consumed token does nothing (never revives it)', async () => {
+    const store = createPortalPendingStore(fakeRedis());
+    const token = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'login' });
+    expect(await store.extend(token, 'pb', 'login')).toBe(false);
+    expect(await store.extend(token, 'pa', 'mfa')).toBe(false);
+    await store.consume(token);
+    expect(await store.extend(token, 'pa', 'login')).toBe(false);
+    expect(await store.peek(token, 'pa', 'login')).toBeNull();
+    expect(await store.take(token, 'pa', 'login')).toBeNull();
+  });
   it('a step-up token carries the session id and is bound to it', async () => {
     const store = createPortalPendingStore(fakeRedis());
     const token = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'stepup', sid: 'c'.repeat(32) });

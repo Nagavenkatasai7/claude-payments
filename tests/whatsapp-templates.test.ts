@@ -214,10 +214,18 @@ describe('OTP copy — brand interpolated (Program-Fix 49A)', () => {
   it('no brand (or a blank one) keeps the SmartRemit default byte-for-byte', async () => {
     const { otpMessage, transactionOtpMessage } = await import('@/lib/whatsapp-templates');
     expect(otpMessage('482913')).toBe(
-      "Your SmartRemit verification code is 482913. It expires in 10 minutes. Don't share it with anyone.",
+      "Your SmartRemit verification code is 482913. It expires in 5 minutes. Don't share it with anyone.",
     );
     expect(otpMessage('482913', '  ')).toBe(otpMessage('482913'));
     expect(transactionOtpMessage('123456')).toContain('Your SmartRemit confirmation code is 123456');
+  });
+
+  it('M2-14 X13: each message states the lifetime of the store that issues its code', async () => {
+    const { otpMessage, transactionOtpMessage } = await import('@/lib/whatsapp-templates');
+    // otp-store (sign-in codes): CODE_TTL_MS = 300_000 → 5 minutes.
+    expect(otpMessage('482913')).toContain('expires in 5 minutes');
+    // transaction-otp (pay-page codes): TTL_S = 10 * 60 → 10 minutes (unchanged).
+    expect(transactionOtpMessage('123456')).toContain('expires in 10 minutes');
   });
 });
 

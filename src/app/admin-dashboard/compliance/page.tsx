@@ -15,6 +15,7 @@ import { SenderCell } from '../sender-cell';
 import { money } from '../format';
 import { MaskedDestination } from '../masked-destination';
 import { canReleaseHeld } from '@/lib/dashboard-ops';
+import { loadSenderScreeningMap, type SenderScreeningFlags } from '@/lib/sender-screening';
 import {
   releaseTransferAction,
   rejectTransferAction,
@@ -151,7 +152,16 @@ export default async function CompliancePage() {
   const partnersById = new Map(partners.map((p) => [p.id, p]));
   // Program-Fix 43 follow-up: a sanctions / name-screening hold is PLATFORM-only
   // in every KYC mode — canReleaseHeld reads the transfer's hold reasons.
-  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId), t);
+  // M3-10 Task 10.3: a PARTNER-scoped admin also needs each held row's SENDER
+  // customer flags (no PEP / watchlist hit, row present), read in ONE
+  // tenant-scoped query; a failed read is an empty map ⇒ every button hidden.
+  // Platform staff never need them (canReleaseHeld ignores `sender` for them).
+  const senderFlags =
+    scoped.scope.kind === 'partner'
+      ? await loadSenderScreeningMap(getDb(), scoped.scope.partnerId, inReview.map((t) => t.phone))
+      : new Map<string, SenderScreeningFlags>();
+  const canRelease = (t: Transfer) =>
+    canReleaseHeld(scoped.scope, partnersById.get(t.partnerId), t, t.partnerId === tenant ? senderFlags.get(t.phone) : null);
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
       .filter((c) => c !== 'IN')

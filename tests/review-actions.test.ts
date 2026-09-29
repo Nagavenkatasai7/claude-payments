@@ -5,6 +5,8 @@ import { createStore, type Store } from '@/lib/store';
 import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON } from '@/lib/compliance';
+import { AML_HOLD_REASON } from '@/lib/aml-hold';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 import type { Db } from '@/db/client';
 
 // pg-backed store rebuilt per test (freshDb truncates); the hoisted mock
@@ -83,6 +85,13 @@ function form(values: Record<string, string>): FormData {
   return fd;
 }
 
+// M3-10 follow-up / Task 10.3: a partner-scoped legacy release needs the SENDER's customer row
+// (makeTransfer's phone) in the owning tenant, unflagged.
+const SENDER = '15551234567';
+const seedSender = (partnerId: string) => createCustomerRepo(db, async () => null).ensureCustomer(partnerId, SENDER);
+const flagSender = (partnerId: string, col: 'pep_hit' | 'watchlist_hit') =>
+  db.execute(sql`UPDATE customers SET ${sql.raw(col)} = true WHERE partner_id = ${partnerId} AND phone = ${SENDER}`);
+
 beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
@@ -146,6 +155,7 @@ describe('releaseTransferAction — platform staff required for an ours-mode hol
   it("a PARTNER-scoped admin can still release a kycMode 'delegated' partner's own hold", async () => {
     await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
       VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
+    await seedSender('delg');
     mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
     await store.saveTransfer(makeTransfer({ id: 'del1', partnerId: 'delg' }));
 
@@ -172,6 +182,7 @@ describe('releaseTransferAction — mandatory reason + screening holds are platf
   async function delegatedPartner() {
     await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
       VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
+    await seedSender('delg');
   }
 
   it.each([
@@ -254,6 +265,81 @@ describe('releaseTransferAction — mandatory reason + screening holds are platf
 
     expect((await store.getTransfer('sc2'))?.status).toBe('paid');
     expect(await auditRows()).toEqual([{ action: 'transfer.release' }]);
+  });
+});
+
+// UI redesign M3-10 Task 10.3 / O8 (review L1 on #422): for PARTNER-scoped staff the legacy release
+// follows the same rule as /partner (isPartnerReleasableHold, incl. the sender PEP/watchlist check).
+// Platform staff are unchanged.
+describe('releaseTransferAction — partner scope follows the /partner allowlist (M3-10 Task 10.3)', () => {
+  async function outboxRows() {
+    const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
+    return (r as unknown as { rows: Array<{ kind: string }> }).rows;
+  }
+  async function auditRows() {
+    const r = await db.execute(sql`SELECT action FROM audit_events ORDER BY id`);
+    return (r as unknown as { rows: Array<{ action: string }> }).rows;
+  }
+  beforeEach(async () => {
+    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
+      VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
+    await seedSender('delg');
+  });
+  const asPartnerAdmin = () => mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
+  const asPlatform = () => mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
+  const refused = async (id: string) => {
+    await expect(releaseTransferAction(form({ id, note: 'reviewed by the partner team' }))).rejects.toThrow(/permission/i);
+    expect((await store.getTransfer(id))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+  };
+
+  it.each([
+    ['an AML hold', [AML_HOLD_REASON]],
+    ['an AML hold mixed with an allowlisted reason', ['Large transfer amount.', AML_HOLD_REASON]],
+    ['an unknown reason', ['Something new.']],
+    ['a screening hold', [POSSIBLE_MATCH_REASON]],
+  ])('refuses a partner-scoped admin releasing %s: stays in_review, no outbox, no audit', async (_l, reasons) => {
+    asPartnerAdmin();
+    await store.saveTransfer(makeTransfer({ id: 'n1', partnerId: 'delg', complianceReasons: reasons }));
+    await refused('n1');
+  });
+
+  it.each(['pep_hit', 'watchlist_hit'] as const)('refuses a partner-scoped admin when the sender has %s (allowlisted reasons)', async (col) => {
+    await flagSender('delg', col);
+    asPartnerAdmin();
+    await store.saveTransfer(makeTransfer({ id: 'n2', partnerId: 'delg' }));
+    await refused('n2');
+  });
+
+  it('refuses a partner-scoped admin when the sender customer row is missing (fail closed)', async () => {
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'delg'`);
+    asPartnerAdmin();
+    await store.saveTransfer(makeTransfer({ id: 'n3', partnerId: 'delg' }));
+    await refused('n3');
+  });
+
+  it('a partner-scoped admin still releases an allowlisted hold of an unflagged sender', async () => {
+    asPartnerAdmin();
+    await store.saveTransfer(makeTransfer({ id: 'n4', partnerId: 'delg', complianceReasons: ['High transfer velocity.', 'edd_required'] }));
+    await releaseTransferAction(form({ id: 'n4', note: 'reviewed by the partner team' }));
+    expect((await store.getTransfer('n4'))?.status).toBe('paid');
+    expect(await auditRows()).toEqual([{ action: 'transfer.release' }]);
+  });
+
+  it('PLATFORM staff are unchanged: an AML hold of a PEP-flagged sender still releases', async () => {
+    await flagSender('delg', 'pep_hit');
+    asPlatform();
+    await store.saveTransfer(makeTransfer({ id: 'n5', partnerId: 'delg', complianceReasons: [AML_HOLD_REASON] }));
+    await releaseTransferAction(form({ id: 'n5', note: 'cleared by platform compliance' }));
+    expect((await store.getTransfer('n5'))?.status).toBe('paid');
+  });
+
+  it('PLATFORM staff are unchanged: a hold whose sender has NO customer row still releases', async () => {
+    asPlatform();
+    await store.saveTransfer(makeTransfer({ id: 'n6', partnerId: 'delg', phone: '15550009999', complianceReasons: [AML_HOLD_REASON] }));
+    await releaseTransferAction(form({ id: 'n6', note: 'cleared by platform compliance' }));
+    expect((await store.getTransfer('n6'))?.status).toBe('paid');
   });
 });
 

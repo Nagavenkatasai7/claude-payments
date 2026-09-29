@@ -22,7 +22,7 @@ const SRC = join(ROOT, 'src');
 /** Files that enqueue but do not poke → the exported functions whose callers must. */
 const HELPERS: Record<string, string[]> = {
   // Only ever run inside an /api/worker invocation.
-  'src/lib/reconcile.ts': ['reconcileSweep', 'enqueueReinstructLocked'],
+  'src/lib/reconcile.ts': ['reconcileSweep', 'enqueueReinstructLocked', 'reinstructLocked'],
   'src/lib/aml-sweep.ts': ['amlSweep'],
   'src/lib/rate-staleness.ts': ['sweepStaleRates', 'sweepFxHealth'],
   'src/lib/worker-cadence.ts': ['checkCronQuiet', 'sweepDrainGap'],
@@ -39,6 +39,10 @@ const HELPERS: Record<string, string[]> = {
   // R2a: the partner alert email.send — called from drainOnce (the worker) and
   // the inbound webhook path (whatsapp-inbound.ts, which pokes).
   'src/lib/channel-health.ts': ['recordChannelHealth'],
+  // UI redesign M2-11b: the automatic receipt row, enqueued inside the delivered
+  // transition. Only Store.updateTransferFromWebhook calls it, reached from the
+  // payment-webhook route (which pokes) and the worker's mock.settle.
+  'src/lib/delivery-receipt.ts': ['deliverTransfer'],
 };
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';

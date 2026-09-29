@@ -20,11 +20,13 @@ import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
 import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
-import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { resolvePartnerBranding, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { settleOrHold } from '@/lib/settlement';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
+import { resolveWaChannel } from '@/lib/whatsapp-creds';
+import { recordChannelHealth } from '@/lib/channel-health';
+import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
@@ -468,53 +470,92 @@ export async function POST(
       // The owning partner scopes the per-phone code budget (Program-Fix 45) and
       // picks the sending number (WL2). The draft carries its tenant (fix 1); a
       // pre-deploy draft resolves by the oldest-row rule.
-      let otpPartnerId: string | undefined;
+      // M2-14 (PR 393 ENABLEMENT BLOCKER): the tenant and its channel are resolved
+      // BEFORE a code is minted, and FAIL CLOSED: a tenant that can't be resolved,
+      // a non-default partner whose creds read throws, or a half-configured
+      // channel never falls back to the shared number (the customer is paying the
+      // partner's brand). Nothing is minted, so no issue budget is burned.
+      const otpSendFailed = () => NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
+      let otpPartnerId: string;
       try {
-        otpPartnerId = otpDraft
-          ? await draftTenant(otpDraft, store.legacyTenantOf)
-          : (await store.getTransfer(transferId))?.partnerId;
-      } catch { /* budget falls back to the default partner; send to the shared env number */ }
+        otpPartnerId =
+          (otpDraft ? await draftTenant(otpDraft, store.legacyTenantOf) : otpTransfer?.partnerId) ?? DEFAULT_PARTNER_ID;
+      } catch {
+        logWarn('pay.otp-channel', 'tenant unresolved; confirmation code not sent (fail closed)', {});
+        return otpSendFailed();
+      }
+      // WL2: the code arrives from the number the customer is mid-payment with.
+      let otpCreds: WaCreds | undefined;
+      try {
+        const channel = resolveWaChannel(otpPartnerId, await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
+        if (channel.kind === 'incomplete') {
+          await recordChannelHealth(otpPartnerId, 'incomplete_config');
+          logWarn('pay.otp-channel', 'partner channel incomplete; confirmation code not sent (fail closed)', { partnerId: otpPartnerId });
+          return otpSendFailed();
+        }
+        otpCreds = channel.kind === 'own' ? channel.creds : undefined;
+      } catch {
+        if (otpPartnerId !== DEFAULT_PARTNER_ID) {
+          logWarn('pay.otp-channel', 'partner channel read failed; confirmation code not sent (fail closed)', { partnerId: otpPartnerId });
+          return otpSendFailed();
+        }
+        // The default tenant's number IS the shared env number.
+      }
+      // Program-Fix 49A: the partner's name on the free-form text, on the partner's
+      // OWN number only (the shared number keeps its wording). Best-effort: a read
+      // error keeps the neutral default wording.
+      let otpBrand: string | undefined;
+      if (otpCreds) {
+        try {
+          otpBrand = resolvePartnerBranding(await getPartnerStore().getPartner(otpPartnerId)).brand;
+        } catch { /* the default brand */ }
+      }
+      // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
+      // template (read by THIS transfer's partner only) carries the code, so a
+      // customer outside the 24-h window still receives it. M2-14: without a template
+      // (none recorded, or the read failed) the free-form text on the SAME partner
+      // number is sent only inside the window (outside it Meta accepts, then drops,
+      // the text): otherwise 502, nothing minted.
+      let otpTemplate: { name: string; lang: string } | undefined;
+      if (otpCreds) {
+        try {
+          otpTemplate = portalAuthTemplate(await getPortalSettings(getDb(), otpPartnerId));
+        } catch (err) {
+          logWarn(
+            'pay.otp-template-lookup',
+            `partner auth template lookup failed; free-form on the partner number inside the window only: ${err instanceof Error ? err.name : 'unknown error'}`,
+            { partnerId: otpPartnerId },
+          );
+        }
+        // M2-14: no template (none recorded, or the read failed) means a free-form text on the
+        // partner's number, which only arrives inside the 24-h window: outside it, 502, nothing minted.
+        if (!otpTemplate && !(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
+      }
       const otpStore = getTransactionOtpStore();
-      const issued = await otpStore.issue(transferId, otpPhone, {
-        kind: 'pay',
-        partnerId: otpPartnerId ?? DEFAULT_PARTNER_ID,
-      });
+      const issued = await otpStore.issue(transferId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });
       // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
       // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
       if (!issued.ok && issued.reason === 'locked') {
         return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
       }
       if (issued.ok) {
-        // WL2: the code arrives from the number the customer is mid-payment with.
-        let otpCreds: WaCreds | undefined;
+        const tenant = otpPartnerId;
         try {
-          if (otpPartnerId) {
-            otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
-          }
-        } catch { /* fall back to the shared env number */ }
-        // M2-6: on the partner's OWN number, the partner's approved AUTHENTICATION
-        // template (read by THIS transfer's partner only) carries the code, so a
-        // customer outside the 24-h window still receives it. Best-effort: a lookup
-        // error keeps today's free-form send on the same number.
-        let otpTemplate: { name: string; lang: string } | undefined;
-        if (otpCreds && otpPartnerId) {
-          try {
-            otpTemplate = portalAuthTemplate(await getPortalSettings(getDb(), otpPartnerId));
-          } catch (err) {
-            logWarn(
-              'pay.otp-template-lookup',
-              `partner auth template lookup failed; sending free-form on the partner number: ${err instanceof Error ? err.message : 'unknown error'}`,
-              { partnerId: otpPartnerId },
-            );
-          }
-        }
-        try {
-          await sendTransactionOtp(otpPhone, issued.code, otpCreds, undefined, otpTemplate);
+          await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
+            // PR 393: outside the window a free-form fallback is accepted, then dropped.
+            inWindow: () => isInServiceWindow(store, tenant, otpPhone),
+            // PR 393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx
+            // only. A 5xx, a timeout or a non-Graph error is transient, not the partner's to fix.
+            onTemplateFailure: async ({ status, code }) => {
+              if (status === undefined || status < 400 || status >= 500) return;
+              await recordChannelHealth(tenant, 'auth_template_failed', code !== undefined ? { code } : {});
+            },
+          });
         } catch {
           // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
           // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.
           try { await otpStore.shortenCooldown(transferId); } catch { /* the 30-s cooldown simply runs out */ }
-          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
+          return otpSendFailed();
         }
       }
       return NextResponse.json({ ok: true, sent: true });

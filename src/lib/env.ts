@@ -197,6 +197,11 @@ export const env = {
     // route 404s, and the proxy does not route the portal paths (src/lib/site-routes.ts).
     return process.env.CUSTOMER_PORTAL_ENABLED === '1';
   },
+  get customerPasswordSunset(): string | undefined {
+    // M2-14: the ISO date (YYYY-MM-DD) apex /account password sign-in ends (portal launch + 30
+    // days). Set ⇒ /account shows a notice; unset or invalid ⇒ nothing (password-sunset.ts).
+    return process.env.CUSTOMER_PASSWORD_SUNSET || undefined;
+  },
   get customerDataRightsEnabled(): boolean {
     // '1' ⇒ the portal shows the Privacy (data requests) page. Default off (SPEC §6b).
     return process.env.CUSTOMER_DATA_RIGHTS_ENABLED === '1';

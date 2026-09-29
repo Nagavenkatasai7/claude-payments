@@ -16,6 +16,9 @@ vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
 const scrubOldOutboxPayloads = vi.hoisted(() => vi.fn(async () => 3));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// UI redesign M3-16: the daily partner-report expiry (tests/partner-report-repo.test.ts covers the SQL).
+const expireDue = vi.hoisted(() => vi.fn(async () => 1));
+vi.mock('@/db/repos/partner-report-repo', () => ({ createPartnerReportRepo: () => ({ expireDue }) }));
 // partner-demo R3a: the daily storage cap-watch (tests/storage-watch.test.ts covers it on PGlite).
 const checkStorageCap = vi.hoisted(() => vi.fn(async () => ({ bytes: 0, mb: 0, level: 0, alerted: false })));
 vi.mock('@/lib/storage-watch', () => ({ checkStorageCap }));
@@ -43,7 +46,9 @@ describe('/api/cron Bearer gate', () => {
     expect(expireUnpaidLinks).not.toHaveBeenCalled();
     expect(auditRecord).not.toHaveBeenCalled(); // an unauthenticated caller cannot grow audit_events
     expect(checkStorageCap).not.toHaveBeenCalled();
+    expect(expireDue).not.toHaveBeenCalled();
   });
+
 
   it('the right Bearer passes the gate and runs the schedules', async () => {
     const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
@@ -95,5 +100,18 @@ describe('/api/cron Bearer gate', () => {
     scrubOldOutboxPayloads.mockClear();
     await GET(req({ authorization: 'Bearer nope' }));
     expect(scrubOldOutboxPayloads).not.toHaveBeenCalled();
+  });
+});
+
+describe('/api/cron partner report expiry (M3-16)', () => {
+  it('M3-16: an authorized run expires due partner reports; a throw there is fail-soft', async () => {
+    expireDue.mockClear();
+    const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    expect(expireDue).toHaveBeenCalledTimes(1);
+    expireDue.mockRejectedValueOnce(new Error('db down'));
+    const again = await GET(req({ authorization: `Bearer ${SECRET}` }));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ ok: true, scrubbed: 3 });
   });
 });

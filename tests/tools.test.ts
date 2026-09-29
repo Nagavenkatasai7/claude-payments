@@ -94,6 +94,8 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     // out-of-band 'ticket.triage' effect on, bound to the PGlite db (the prod
     // fallback would build one over getDb()'s Neon Pool).
     outboxRepo: createOutboxRepo(db),
+    // M2-14: the database the locked one-recall-per-transfer transaction runs on (PGlite here).
+    recallDb: db,
     // Program-Fix 15 PR C seam: the locked sender cancel, bound to PGlite.
     senderCancel: (p: string, id: string) => cancelWithinWindow(db, p, id, { via: 'bot' }),
   };
@@ -2892,6 +2894,37 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(ticket.transferId).toBe(id);
     expect(ticket.category).toBe('refund');
     expect(ticket.subject.toLowerCase()).toContain('recall');
+  });
+
+  it('M2-14 (#403 L3): web chat honours the partner support switch like the receipt/portal recall (no ticket); WhatsApp unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    await ctx.partnerStore.ensureDefaultPartner();
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig(ctx.partnerId, (prev) => ({ ...prev, enableSupportPortal: false }));
+    const web = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, { ...ctx, channel: 'web' as const });
+    expect(web.opened).toBeUndefined();
+    expect(web.error_code).toBe('support_off');
+    expect((await createTicketRepo(db).listByCustomer(ctx.phone)).filter((t) => t.transferId === id)).toHaveLength(0);
+    const wa = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, ctx);
+    expect(wa.opened).toBe(true);
+  });
+
+  it('M2-14 (PR 397 L2): one open recall per transfer — concurrent calls, or a later call, reuse the first case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    const [a, b] = await Promise.all([
+      executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, ctx),
+      executeTool('open_recall_dispute', { transfer_id: id, reason: 'wrong_amount' }, ctx),
+    ]);
+    expect(a.opened).toBe(true);
+    expect(b.opened).toBe(true);
+    expect(b.case_id).toBe(a.case_id);
+    const again = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+    expect(again.case_id).toBe(a.case_id);
+    expect((await createTicketRepo(db).listByCustomer(ctx.phone)).filter((t) => t.transferId === id)).toHaveLength(1);
+    const triage = await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'ticket.triage'`);
+    expect((triage as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(1);
   });
 
   it('no transfer_id: resolves the latest delivered-within-window transfer', async () => {
