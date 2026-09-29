@@ -14,6 +14,8 @@ import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { getStaffLoginGuard, isSeedAdminRecord, seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
+import { getRedis } from '@/lib/redis';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import {
   assertStaffPasswordPolicy,
@@ -273,6 +275,9 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
   await store.deleteStaff(username);
   await store.deleteAllSessionsFor(username);
   await getStaffMfaStore().reset(username); // Program-Fix 17b
+  // M3-9-fu: also drop the invite's enrolment marker, so a later account of the same name is not
+  // born with a stale "must enrol" flag (same clear as the partner-scoped remove).
+  await getRedis().del(`${MFA_PENDING_PREFIX}${username}`);
   await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`, target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
