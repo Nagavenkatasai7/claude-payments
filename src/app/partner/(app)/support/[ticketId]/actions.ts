@@ -146,7 +146,8 @@ export async function internalNoteAction(formData: FormData): Promise<ActionResu
 
 /**
  * Move a customer ticket to open / pending / resolved / closed. The repo guard refuses a same-state
- * move and anything out of closed (terminal); a refusal writes nothing. Resolving enqueues the
+ * move and anything out of closed (terminal), and this action refuses any move out of waiting_admin
+ * (the platform escalation); a refusal writes nothing. Resolving enqueues the
  * once-only resolve nudge (deduped on the ticket id, as the platform action does).
  */
 export async function setStatusAction(formData: FormData): Promise<ActionResult> {
@@ -154,6 +155,8 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // An escalation (waiting_admin) is SmartRemit's to handle: a partner cannot move it out.
+  if (ticket.status === 'waiting_admin') return { ok: false, error: t('partner.support.statusRefused') };
   const status = parsePartnerTicketStatus(formData.get('status'));
   if (!status) return { ok: false, error: t('partner.support.statusInvalid') };
 

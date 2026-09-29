@@ -134,10 +134,13 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
                 <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.noteTitle')}</h2>
                 <NoteForm id={ticket.id} requestKey={requestKeys.note} />
               </Card>
-              <Card as="section" className="p-4 sm:p-6">
-                <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.statusTitle')}</h2>
-                <StatusForm id={ticket.id} options={statusOptions} />
-              </Card>
+              {/* An escalated (waiting_admin) ticket is SmartRemit's to move: no partner status change. */}
+              {ticket.status === 'waiting_admin' ? null : (
+                <Card as="section" className="p-4 sm:p-6">
+                  <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.statusTitle')}</h2>
+                  <StatusForm id={ticket.id} options={statusOptions} />
+                </Card>
+              )}
             </>
           ) : ticket.openedBy === ctx.username ? (
             <Card as="section" className="p-4 sm:p-6">

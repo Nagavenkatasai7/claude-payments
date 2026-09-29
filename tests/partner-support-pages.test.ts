@@ -56,6 +56,7 @@ vi.mock('@/lib/partner-tickets', async () => {
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { KNOWN_PARTNER_ROLES } from '@/lib/partner-access';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import SupportPage from '@/app/partner/(app)/support/page';
 import TicketPage from '@/app/partner/(app)/support/[ticketId]/page';
@@ -252,5 +253,33 @@ describe('/partner/support/contact', () => {
     await signInAs({ role: 'admin' });
     fail.list = true;
     expect(await contact()).toContain('Conversations could not be loaded');
+  });
+});
+
+describe("LOW-5: a partner pinned to the 'default' tenant never sees SmartRemit's internal questions", () => {
+  beforeEach(async () => {
+    // SmartRemit's own staff file their questions under 'default' (admin-dashboard/employee-questions).
+    await createTicketRepo(db).createTicket({ id: 'tk_plat_q', partnerId: DEFAULT_PARTNER_ID, kind: 'internal', openedBy: 'platformbob', subject: 'Platform internal question', body: 'internal only' });
+  });
+  it('the contact list is empty for a default-tenant admin', async () => {
+    await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });
+    const html = await contact();
+    expect(html).not.toContain('Platform internal question');
+    expect(html).toContain('No conversations yet');
+  });
+  it('opening the question by id is not found', async () => {
+    await signInAs({ username: 'dadm', role: 'admin', partnerId: DEFAULT_PARTNER_ID });
+    await expect(ticket('tk_plat_q')).rejects.toThrow('NOT_FOUND');
+  });
+});
+
+describe('LOW-4: an escalated (waiting_admin) ticket offers no partner status change', () => {
+  it('the status form is not rendered', async () => {
+    await signInAs({ role: 'admin' });
+    expect(await ticket('tk_a1')).toContain('name="status"');
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    const html = await ticket('tk_a1');
+    expect(html).toContain('Escalated');
+    expect(html).not.toContain('name="status"');
   });
 });
