@@ -3,11 +3,13 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import type { Db } from '@/db/client';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import {
   CONTACT_SUBJECT_MAX,
   REPLY_MAX,
   canViewTicket,
   claimOnce,
+  contactAvailable,
   getTenantTicket,
   getVisibleTicket,
   isTicketId,
@@ -132,6 +134,29 @@ describe('getVisibleTicket / listVisibleCustomerTickets / listContactThreads', (
     expect((await listContactThreads(ctx('support', 'sup1'), db)).map((t) => t.id)).toEqual(['tk_ai']);
     expect((await listContactThreads(ctx('agent', 'zz'), db)).map((t) => t.id)).toEqual([]);
     expect((await listContactThreads(ctx('support', 'sup1', PB), db)).map((t) => t.id)).toEqual(['tk_bi']);
+  });
+});
+
+describe("LOW-5: the 'default' tenant has no Contact SmartRemit surface", () => {
+  // SmartRemit's own staff file their internal questions under the 'default' tenant
+  // (admin-dashboard/employee-questions). A partner-scoped record pinned to 'default' must never
+  // read them: the Contact surface is closed for that tenant, whatever the role or the opener.
+  const dctx = (role: 'admin' | 'agent' | 'support', username: string) => ({ role, username, partnerId: DEFAULT_PARTNER_ID });
+  beforeEach(async () => {
+    await seedTicket({ id: 'tk_plat_q', partnerId: DEFAULT_PARTNER_ID, kind: 'internal', openedBy: 'platformbob' });
+    await seedTicket({ id: 'tk_own_q', partnerId: DEFAULT_PARTNER_ID, kind: 'internal', openedBy: 'dsup' });
+  });
+  it('lists no internal threads for any role (not even the viewer\'s own)', async () => {
+    expect(await listContactThreads(dctx('admin', 'dadm'), db)).toEqual([]);
+    expect(await listContactThreads(dctx('support', 'dsup'), db)).toEqual([]);
+  });
+  it('an internal id is a miss by id, for any role', async () => {
+    expect(await getVisibleTicket(dctx('admin', 'dadm'), 'tk_plat_q', 'internal', db)).toBeNull();
+    expect(await getVisibleTicket(dctx('support', 'dsup'), 'tk_own_q', 'internal', db)).toBeNull();
+  });
+  it('contactAvailable is false only for the default tenant', () => {
+    expect(contactAvailable(DEFAULT_PARTNER_ID)).toBe(false);
+    expect(contactAvailable(PA)).toBe(true);
   });
 });
 

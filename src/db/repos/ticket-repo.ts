@@ -1,4 +1,4 @@
-import { and, desc, eq, asc, sql, count, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, asc, sql, count, inArray, notInArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
@@ -302,8 +302,13 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
      * to any non-equal state (support workflows legitimately bounce between
      * open/pending/waiting_admin/resolved). Returns null when the guard
      * refuses (already closed / same state / missing).
+     *
+     * `notFrom` (optional) refuses the move when the CURRENT status is one of the listed states,
+     * checked in the same UPDATE's WHERE (atomic: no read-then-write race). The partner surface
+     * passes ['waiting_admin'] so an escalation landing mid-request is never overwritten.
      */
-    async updateStatus(id: string, status: TicketStatus): Promise<Ticket | null> {
+    async updateStatus(id: string, status: TicketStatus, guard: { notFrom?: readonly TicketStatus[] } = {}): Promise<Ticket | null> {
+      const notFrom = guard.notFrom ?? [];
       const rows = await db
         .update(tickets)
         .set({
@@ -315,6 +320,7 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
           eq(tickets.id, id),
           sql`${tickets.status} <> 'closed'`,
           sql`${tickets.status} <> ${status}`,
+          notFrom.length > 0 ? notInArray(tickets.status, [...notFrom]) : undefined,
         ))
         .returning();
       return rows[0] ? rowToTicket(rows[0]) : null;

@@ -185,6 +185,7 @@ export const en = {
   'partner.contact.followUpSent': 'Message sent.',
   'partner.contact.readOnly': 'Only the person who started this conversation can add to it.',
   'partner.contact.closed': 'This conversation is closed.',
+  'partner.contact.unavailable': 'Contact SmartRemit is not available for this workspace.',
   'partner.nav.label': 'Partner workspace',
   'partner.nav.menu': 'Menu',
   'partner.nav.home': 'Home',
