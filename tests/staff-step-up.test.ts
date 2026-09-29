@@ -188,6 +188,28 @@ describe('verify', () => {
     await s.verify(attempt('123456'));
     expect(record).toHaveBeenCalledTimes(1);
   });
+  it('a failed refund does not block the success; the audit row is written before the marker', async () => {
+    refund.mockImplementationOnce(async () => {
+      throw new Error('redis down');
+    });
+    const order: string[] = [];
+    const set = redis.set.bind(redis);
+    redis.set = async (k: string, v: string, o?: { ex?: number; nx?: boolean }) => {
+      if (k.startsWith('staff_stepup:')) order.push('mark');
+      return set(k, v, o);
+    };
+    record.mockImplementationOnce(async () => {
+      order.push('audit');
+    });
+    try {
+      const s = make();
+      expect(await s.verify(attempt('123456'))).toEqual({ outcome: 'ok', factor: 'totp' });
+      expect(order).toEqual(['audit', 'mark']);
+      expect(await s.isFresh(TOKEN, 'pa-admin')).toBe(true);
+    } finally {
+      redis.set = set;
+    }
+  });
   it('a Redis error while verifying propagates (the caller refuses)', async () => {
     reserve.mockImplementation(async () => {
       throw new Error('redis down');

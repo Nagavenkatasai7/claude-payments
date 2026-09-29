@@ -73,20 +73,27 @@ function IssueResult({ flow }: { flow: ReturnType<typeof useStepUpAction<KeyIssu
 export function CreateKeyForm({ liveAllowed }: { liveAllowed: boolean }) {
   const flow = useStepUpAction<KeyIssueResult>((fd) => createKeyAction(null, fd));
   const radio = 'mt-1 size-4 shrink-0 accent-ds-primary';
+  // Controlled (see EndpointForm): the choice shown is the one a step-up retry issues; changing it
+  // while the prompt is open drops the prompt.
+  const [mode, setMode] = React.useState<'test' | 'live'>('test');
+  const pick = (m: 'test' | 'live') => {
+    setMode(m);
+    if (flow.stepUp) flow.dismiss();
+  };
   return (
     <div>
       <form action={flow.run} className="mt-4 flex flex-col gap-4">
         <fieldset className="flex flex-col gap-3">
           <legend className="mb-2 text-[14px] font-semibold text-ds-ink">{t('partner.keys.mode')}</legend>
           <label className="flex min-h-11 items-start gap-3 text-[14px] text-ds-ink">
-            <input type="radio" name="mode" value="test" defaultChecked className={radio} />
+            <input type="radio" name="mode" value="test" checked={mode === 'test'} onChange={() => pick('test')} className={radio} />
             <span>
               <span className="font-semibold">{t('partner.keys.mode.test')}</span>
               <span className="block text-ds-ink-muted">{t('partner.keys.modeHint.test')}</span>
             </span>
           </label>
           <label className={`flex min-h-11 items-start gap-3 text-[14px] ${liveAllowed ? 'text-ds-ink' : 'text-ds-ink-subtle'}`}>
-            <input type="radio" name="mode" value="live" disabled={!liveAllowed} className={radio} />
+            <input type="radio" name="mode" value="live" checked={mode === 'live'} onChange={() => pick('live')} disabled={!liveAllowed} className={radio} />
             <span>
               <span className="font-semibold">{t('partner.keys.mode.live')}</span>
               <span className="block text-ds-ink-muted">{liveAllowed ? t('partner.keys.modeHint.live') : t('partner.keys.liveLocked')}</span>

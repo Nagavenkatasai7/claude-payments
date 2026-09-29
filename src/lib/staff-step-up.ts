@@ -113,9 +113,15 @@ export function createStaffStepUp(deps: StaffStepUpDeps) {
         await deps.audit.record({ ...base, action: 'auth.stepup.failed', meta });
         return { outcome: 'invalid', factor };
       }
-      await self.mark(a.token, a.staff.username);
-      await deps.guard.refund(reservation.keys);
+      // Refund and audit BEFORE the marker: a success is never left fresh-but-unaudited. The refund is
+      // best-effort (a missed refund only costs this user one attempt); the audit never throws.
+      try {
+        await deps.guard.refund(reservation.keys);
+      } catch {
+        /* the reservation expires with its bucket */
+      }
       await deps.audit.record({ ...base, action: 'auth.stepup', meta });
+      await self.mark(a.token, a.staff.username);
       return { outcome: 'ok', factor };
     },
   };

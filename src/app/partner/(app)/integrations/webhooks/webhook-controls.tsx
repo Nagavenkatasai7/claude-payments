@@ -39,6 +39,9 @@ function Alert({ text }: { text: string }) {
 export function EndpointForm({ current }: { current: string | null }) {
   const flow = useStepUpAction<ActionResult>((fd) => saveEndpointAction(null, fd));
   const result = flow.stepUp ? null : flow.result;
+  // Controlled: a function-action form resets after it runs, and the field must keep showing the
+  // URL the step-up retry will save. Editing the URL while the prompt is open drops the prompt.
+  const [url, setUrl] = React.useState(current ?? '');
   return (
     <div>
       <form action={flow.run} className="mt-4 flex flex-col gap-4">
@@ -54,7 +57,11 @@ export function EndpointForm({ current }: { current: string | null }) {
               spellCheck={false}
               required
               maxLength={2048}
-              defaultValue={current ?? ''}
+              value={url}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (flow.stepUp) flow.dismiss();
+              }}
               placeholder="https://"
             />
           )}

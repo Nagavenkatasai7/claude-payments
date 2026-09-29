@@ -273,6 +273,24 @@ describe.each(RUNNERS)('$name: the 15-minute step-up', ({ run, done, target }) =
     expect(pokeSpy).not.toHaveBeenCalled();
   });
 
+  it('a Redis error while verifying a submitted code → refused, the action did NOT run', async () => {
+    await signInAs();
+    const secret = await enrol();
+    const incr = redis.incr.bind(redis);
+    redis.incr = async (k: string) => {
+      if (k.startsWith('staff_lf:')) throw new Error('redis down');
+      return incr(k);
+    };
+    try {
+      const before = await snapshot();
+      expect(await run({ [STEP_UP_FIELD]: nextCode(secret) })).toEqual({ ok: false, error: t('partner.stepUp.unavailable') });
+      expect(await snapshot()).toBe(before);
+      expect(pokeSpy).not.toHaveBeenCalled();
+    } finally {
+      redis.incr = incr;
+    }
+  });
+
   it('an enrolled account can NOT step up with its password', async () => {
     await signInAs();
     await enrol();
