@@ -273,4 +273,21 @@ describe('releaseHoldAction: double submit', () => {
     expect(await count(outbox)).toBe(1);
     expect((await releaseRows()).length).toBe(1);
   });
+
+  it('a row that moved after the tenant read (stale object) is refused with notAllowed, nothing written', async () => {
+    await asAdmin();
+    const real = pgPartnerStore;
+    // The owner lookup runs AFTER the tenant read: move the row under the action's feet there.
+    pgPartnerStore = {
+      ...real,
+      getPartner: async (id: string) => {
+        await db.execute(sql`UPDATE transfers SET status = 'cancelled' WHERE id = 'tr_heldA1'`);
+        return real.getPartner(id);
+      },
+    } as PartnerStore;
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: false, error: t('partner.release.notAllowed') });
+    expect((await transferRow('tr_heldA1')).status).toBe('cancelled');
+    expect(await count(outbox)).toBe(0);
+    expect(await count(auditEvents)).toBe(0);
+  });
 });
