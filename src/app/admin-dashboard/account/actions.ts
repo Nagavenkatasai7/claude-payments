@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { requireStaff } from '@/lib/auth';
+import { requireStaffSelf } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { verifyPassword } from '@/lib/password';
@@ -17,7 +17,7 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
 /**
  * Program-Fix 17b: TOTP enrolment for the signed-in staff member (any role,
  * from /admin-dashboard/account). Public POST endpoints: each self-gates with
- * requireStaff and acts ONLY on the session's own username (never a form
+ * requireStaffSelf (UI redesign M3-6: any role, incl. finance) and acts ONLY on the session's own username (never a form
  * field). The secret is generated server-side, returned once in the action
  * state for the authenticator app (manual key + otpauth URI; no QR library),
  * held sealed in Redis for 10 minutes, and turned on only by a valid code.
@@ -39,7 +39,7 @@ const UNAVAILABLE = 'Two-step verification is unavailable right now. Try again l
  */
 export async function beginMfaEnrolmentAction(_prev: MfaEnrolState, formData: FormData): Promise<MfaEnrolState> {
   await refuseOnSiteHost();
-  const me = await requireStaff();
+  const me = await requireStaffSelf();
   const current = String(formData.get('currentPassword') ?? '');
   if (!current) return { ok: false, message: 'Enter your current password.' };
   const fresh = await getAuthStore().getStaff(me.username);
@@ -89,7 +89,7 @@ export async function beginMfaEnrolmentAction(_prev: MfaEnrolState, formData: Fo
 
 export async function confirmMfaEnrolmentAction(_prev: MfaEnrolState, formData: FormData): Promise<MfaEnrolState> {
   await refuseOnSiteHost();
-  const me = await requireStaff();
+  const me = await requireStaffSelf();
   const code = String(formData.get('code') ?? '').replace(/\s+/g, '');
   let outcome;
   try {

@@ -102,6 +102,12 @@ export interface CreateTransferInput {
   // best-rate routed, and a claim-first same-id replay across environments is
   // refused (TransferIdConflictError), never returned.
   environment?: TransferEnvironment;
+  // UI redesign M2-10 (#398 review L2): set ONLY by the scheduled run (cron-run.ts). Inside the
+  // locked mint, before sanctions or any write, the schedule is re-read FOR SHARE and must still be
+  // 'active' (and not carry an account for a recipient the sender deleted), else
+  // ScheduleMintRefusedError with nothing written. Its address-book refresh never clears a
+  // tombstone. Absent ⇒ unchanged for every other caller.
+  scheduleId?: string;
 }
 
 /**
@@ -196,6 +202,18 @@ export class PartnerPulledConsumerError extends Error {
  * but insertTransfer is an upsert, so this refuses instead of overwriting.
  * The partner API maps it to 409; nothing is written.
  */
+/**
+ * UI redesign M2-10 (#398 review L2): a scheduled mint refused by the in-transaction schedule
+ * re-check. Nothing was written. 'inactive' = paused, cancelled or gone since the run's read;
+ * 'recipient_deleted' = the schedule still carries an account for a recipient the sender deleted.
+ */
+export class ScheduleMintRefusedError extends Error {
+  constructor(readonly reason: 'inactive' | 'recipient_deleted') {
+    super(`schedule_mint_refused:${reason}`);
+    this.name = 'ScheduleMintRefusedError';
+  }
+}
+
 export class TransferIdConflictError extends Error {
   constructor() {
     super('transfer_id_conflict');
@@ -335,7 +353,7 @@ export async function createTransferWithOutcome(
         payoutMethod: input.payoutMethod,
         payoutDestination: transfer.payoutDestination,
         lastUsedAt: new Date().toISOString(),
-      });
+      }, input.scheduleId ? { keepTombstone: true } : undefined);
     } catch (err) {
       logWarn('transfer.upsert_recipient', err, { transferId: transfer.id });
     }
@@ -392,6 +410,12 @@ async function mintLocked(
       if ((existing.environment ?? 'live') !== (input.environment ?? 'live')) throw new TransferIdConflictError();
       return { transfer: existing, replayed: true };
     }
+  }
+  // M2-10 (#398 review L2): a scheduled mint re-checks its schedule under the lock, BEFORE the
+  // sanctions screen, so a refused run leaves no blocked row or evidence behind.
+  if (input.scheduleId) {
+    const check = await ops.scheduleMintCheck(input.scheduleId, input.recipientPhone);
+    if (check !== 'ok') throw new ScheduleMintRefusedError(check);
   }
   const now = new Date();
   const totals = await ops.totals(now);

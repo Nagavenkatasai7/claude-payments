@@ -317,6 +317,14 @@ describe('assignTicketAction', () => {
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBeUndefined();
   });
 
+  it('M3-6: rejects a finance assignee (a /partner-only role cannot open the legacy ticket surfaces)', async () => {
+    const t = await makeTicket('p1');
+    currentStaff = staff({ partnerId: 'p1' });
+    await authStore.saveStaff(staff({ username: 'fin1', role: 'finance' as Staff['role'], partnerId: 'p1' }));
+    await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'fin1' }))).rejects.toThrow(/cannot work/i);
+    expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBeUndefined();
+  });
+
   it('empty assignee unassigns', async () => {
     const t = await makeTicket('p1');
     currentStaff = staff({ partnerId: 'p1' });
