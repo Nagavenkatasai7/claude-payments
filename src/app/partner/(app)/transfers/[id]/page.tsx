@@ -7,7 +7,9 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { loadPartnerTransferDetail } from '@/db/repos/partner-transfer-reads';
 import { getAuthStore } from '@/lib/auth-store';
-import { PARTNER_OPS } from '@/lib/partner-access';
+import { PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
+import { getPartnerStore } from '@/lib/partner-store';
+import { isPartnerReleasableHold } from '@/lib/compliance-config';
 import {
   fundingEventView,
   fundingView,
@@ -27,6 +29,7 @@ import { Badge, Card, Money, PageHeader, StatusPill, buttonVariants } from '@/co
 import type { PartnerId } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import { NoteForm } from './note-form';
+import { ReleaseDialog } from './release-dialog';
 
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
@@ -88,6 +91,11 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const timeline = transferTimeline(transfer, detail.audit, tenant);
   const held = isHeld(transfer);
   const canNote = held && PARTNER_OPS.roles.includes(ctx.role);
+  // M3-10: the Release button is UX only; releaseHoldAction re-runs the same predicate as the guard.
+  // The owner lookup runs only for an in_review hold (the only status the predicate can accept).
+  const owner = transfer.status === 'in_review' ? await getPartnerStore().getPartner(ctx.partnerId) : null;
+  const releasable = isPartnerReleasableHold(transfer, owner);
+  const canRelease = releasable && PARTNER_ADMIN.roles.includes(ctx.role);
   const reasons = holdReasonKeys(transfer.complianceReasons);
   const funding = fundingView(transfer);
   const events = detail.fundingEvents.map(fundingEventView);
@@ -165,7 +173,15 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 <li key={k}>{t(k)}</li>
               ))}
             </ul>
-            <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.transfers.holdRelease')}</p>
+            {canRelease ? (
+              <div className="mt-4">
+                <ReleaseDialog id={transfer.id} />
+              </div>
+            ) : (
+              <p className="mt-3 text-[13px] text-ds-ink-muted">
+                {t(releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
+              </p>
+            )}
           </Section>
         ) : null}
 

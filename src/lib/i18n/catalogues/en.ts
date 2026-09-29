@@ -275,6 +275,7 @@ export const en = {
   'partner.release.released': 'Hold released. The transfer is on its way.',
   'partner.release.reasonTooShort': 'Give a reason of at least 10 characters.',
   'partner.release.reasonHasNumber': 'Remove phone or account numbers from the reason.',
+  'partner.release.adminOnly': 'An admin on your team can release this hold.',
   'partner.release.notAllowed': 'This hold cannot be released here. SmartRemit compliance reviews it.',
   'portal.nav.label': 'Your account',
   'portal.nav.home': 'Home',

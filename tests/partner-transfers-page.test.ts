@@ -274,3 +274,44 @@ describe('the page reads never cross tenants (query-level)', () => {
     expect((await db.select({ n: sql<number>`count(*)::int` }).from(auditEvents))[0].n).toBe(before);
   });
 });
+
+describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is the guard)', () => {
+  const RELEASE = 'data-testid="partner-release"';
+  const delegate = (id: string) => db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = ${id}`);
+  const seedHold = (id: string, reasons: string[]) =>
+    seedPartnerTransfer(db, { id, partnerId: 'pa', status: 'in_review', complianceStatus: 'flagged', complianceReasons: reasons });
+
+  it('shows for an admin on a delegated partner’s EDD-class hold', async () => {
+    await delegate('pa');
+    await seedHold('tr_A_edd', ['Large transfer amount.', 'edd_required']);
+    await asAdmin();
+    const html = await detail('tr_A_edd');
+    expect(html).toContain(RELEASE);
+    expect(html).toContain('Release hold');
+    expectNoPii(html);
+  });
+
+  it('hidden for an agent (who is told an admin can release it)', async () => {
+    await delegate('pa');
+    await seedHold('tr_A_edd', ['Large transfer amount.']);
+    await asAgent();
+    const html = await detail('tr_A_edd');
+    expect(html).not.toContain(RELEASE);
+    expect(html).toContain('An admin on your team can release this hold.');
+  });
+
+  it('hidden on a screening hold, an AML hold, a free-text reason and for a kycMode ours partner', async () => {
+    await delegate('pa');
+    await seedHold('tr_A_scr', ['Large transfer amount.', 'Name screening needs manual review.']);
+    await seedHold('tr_A_aml', ['Additional review required.']);
+    await asAdmin();
+    for (const id of ['tr_A_scr', 'tr_A_aml', 'tr_A_held']) {
+      const html = await detail(id);
+      expect(html, id).not.toContain(RELEASE);
+      expect(html, id).toContain('SmartRemit compliance reviews and releases this hold.');
+    }
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'ours' WHERE id = 'pa'`);
+    await seedHold('tr_A_edd', ['Large transfer amount.']);
+    expect(await detail('tr_A_edd')).not.toContain(RELEASE);
+  });
+});
