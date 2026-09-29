@@ -17,12 +17,7 @@
   "git": {
     "deploymentEnabled": {
       "main": true,
-      "feat/**": false,
-      "fix/**": false,
-      "dependabot/**": false,
-      "component/**": false,
-      "loop/**": false,
-      "chore/**": false
+      "**": false
     }
   }
 }

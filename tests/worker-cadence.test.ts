@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, matchesGlob } from 'node:path';
 import { sql } from 'drizzle-orm';
-import { matchesGlob } from 'node:path';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -88,15 +87,10 @@ describe('vercel.json — no preview deployments for PR branches', () => {
   };
 
   it('pins the rule set byte-for-byte', () => {
-    expect(rules).toEqual({
-      main: true,
-      'feat/**': false,
-      'fix/**': false,
-      'dependabot/**': false,
-      'component/**': false,
-      'loop/**': false,
-      'chore/**': false,
-    });
+    // Default-deny: every branch except main is off (review of #435: the repo also uses docs/,
+    // spec/, review/, pr/, archive/ and GitHub's revert-* branches). main matches both rules and
+    // one is true, so it still deploys.
+    expect(rules).toEqual({ main: true, '**': false });
   });
 
   it.each([
@@ -106,6 +100,9 @@ describe('vercel.json — no preview deployments for PR branches', () => {
     'component/money-paths',
     'loop/claims-audit-20260707',
     'chore/re-enable-overnight-bug-hunt',
+    'docs/x',
+    'spec/ui-redesign',
+    'revert-12-feat/a/b',
   ])('%s builds no deployment', (branch) => {
     expect(deploys(branch)).toBe(false);
   });
