@@ -174,6 +174,21 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
 });
 
+// UI redesign M3-9: the public invite page. A random, never-issued token renders the ONE dead-invite
+// sheet (200, noindex, no Referer), with no stack trace and nothing of the accept form. The page only
+// peeks, so this GET changes nothing.
+test('a random /partner/invite/<token> renders the dead-invite sheet (noindex, no-referrer, no form)', async ({ page }) => {
+  const token = Array.from({ length: 43 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[Math.floor(Math.random() * 64)]).join('');
+  const res = await page.goto(`/partner/invite/${token}`);
+  expect(res?.status()).toBe(200);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('This invite link is not valid');
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
+  await expect(page.locator('meta[name="referrer"]')).toHaveAttribute('content', 'no-referrer');
+  await expect(page.locator('[data-testid="partner-invite-form"]')).toHaveCount(0);
+  await expect(page.locator('input[name="password"]')).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(/\bat [\w.]+ \(|Error:/);
+});
+
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
 // every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
 // M2-7 adds the transfers pages (a made-up id: the 404 is the host gate's, never a lookup); M2-8 the recipients pages;

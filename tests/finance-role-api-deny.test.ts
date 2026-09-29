@@ -20,7 +20,12 @@ vi.mock('@/db/client', async () => {
   const actual = await vi.importActual<typeof import('@/db/client')>('@/db/client');
   return { ...actual, getDb: () => db };
 });
-vi.mock('@/lib/redis', () => ({ getRedis: () => ({}) }));
+// M3-9: the routes read the invite MFA marker (exists) for partner-scoped accounts.
+vi.mock('@/lib/redis', async () => {
+  const { fakeRedis } = await import('./helpers');
+  const r = fakeRedis();
+  return { getRedis: () => r };
+});
 vi.mock('@/lib/ticket-ai', async () => {
   const actual = await vi.importActual<typeof import('@/lib/ticket-ai')>('@/lib/ticket-ai');
   return { ...actual, checkCopilotRateLimit: async () => true };
