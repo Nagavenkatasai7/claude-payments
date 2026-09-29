@@ -14,7 +14,7 @@ import {
   isReservedStaffUsername,
   feedActorLabel,
 } from '@/lib/partner-staff-policy';
-import { SUPPORT_DEFAULT_PERMISSIONS, type Staff } from '@/lib/types';
+import { FINANCE_DEFAULT_PERMISSIONS, SUPPORT_DEFAULT_PERMISSIONS, type Staff } from '@/lib/types';
 
 function staff(over: Partial<Staff>): Staff {
   return {
@@ -140,8 +140,12 @@ describe('newStaffRecord', () => {
     expect(() => newStaffRecord('', { ...input, role: 'agent' })).toThrow();
     expect(() => newStaffRecord('acme', { ...input, role: 'root' as never })).toThrow(/role/i);
   });
-  it('M3-6: refuses finance WITH a valid tenant (the partner-staff create stays closed to finance until the M3-7 migration)', () => {
-    expect(() => newStaffRecord('acme', { ...input, role: 'finance' })).toThrow('Invalid role.');
+  it('M3-8: accepts finance (migration 0028 allows the role) with the no-money finance permissions', () => {
+    const r = newStaffRecord('acme', { ...input, role: 'finance' });
+    expect(r.role).toBe('finance');
+    expect(r.partnerId).toBe('acme');
+    expect(r.permissions).toEqual({ ...FINANCE_DEFAULT_PERMISSIONS });
+    expect(r.permissions).not.toBe(FINANCE_DEFAULT_PERMISSIONS);
   });
 });
 

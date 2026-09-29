@@ -45,8 +45,12 @@ import {
   testWhatsappConnectionAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
+  changePartnerSlugAction,
 } from '../actions';
+import { getPartnerSite } from '@/db/repos/partner-site-repo';
 import { SendLimitsCard } from '../../send-limits-card';
+import { enablePartnerPortalAction, recordPortalAuthTemplateAction } from '../portal-actions';
+import { getPortalSettings, type PortalSettings } from '@/db/repos/portal-settings-repo';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
@@ -184,6 +188,14 @@ export default async function PartnerDetailPage({
         })
       : Promise.resolve([]),
   ]);
+  // M3-18: the partner's web address, platform admins only (the change is platform-only).
+  const site =
+    isPlatformAdmin && partner.id !== 'default'
+      ? await getPartnerSite(getDb(), partner.id).catch((err: unknown) => {
+          logWarn('admin.partner_slug', err, { partnerId: partner.id });
+          return null;
+        })
+      : null;
   const nowMs = Date.now();
   const recents = recentPage.items;
   // R2a: the WhatsApp channel (own / shared / incomplete, from the integrations
@@ -191,6 +203,14 @@ export default async function PartnerDetailPage({
   // partner.id is scope-checked above; the reads are best-effort (a Redis or
   // audit hiccup renders "no signals", never a broken page).
   const channel = resolveWaChannel(partner.id, integrations);
+  // M2-14 Task 14.1: the customer-portal enablement card (platform admins only).
+  // Best-effort read: an error renders "unavailable", never a broken page.
+  const portalSettings: PortalSettings | null | 'error' = isPlatformAdmin
+    ? await getPortalSettings(getDb(), partner.id).catch((err: unknown) => {
+        logWarn('admin.portal_settings', err, { partnerId: partner.id });
+        return 'error' as const;
+      })
+    : null;
   const [channelHealth, channelTest, signature] = await Promise.all([
     partner.id === 'default'
       ? Promise.resolve(null)
@@ -287,6 +307,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
             {/* partner-demo R5 (A1-4): send limits are SmartRemit governance, platform admins only. */}
             {isPlatformAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
+            {isPlatformAdmin && partner.id !== 'default' && <TabsTrigger value="web-address">Web address</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -575,6 +596,60 @@ export default async function PartnerDetailPage({
                   </div>
                 </CardContent>
               </Card>
+              {isPlatformAdmin && portalSettings !== null && (
+                <Card className="mb-6">
+                  <CardHeader>
+                    <CardTitle>Customer portal</CardTitle>
+                    <CardDescription>
+                      Platform admins only. Record the partner&rsquo;s approved WhatsApp authentication template,
+                      then switch its customer portal on. The portal also stays off until
+                      CUSTOMER_PORTAL_ENABLED is set for the whole platform.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {portalSettings === 'error' ? (
+                      <p className="text-sm text-muted-foreground">Portal settings are unavailable right now.</p>
+                    ) : (
+                      <>
+                        <dl className={DL_CLASS}>
+                          <dt>Platform switch</dt>
+                          <dd>{env.customerPortalEnabled ? 'on' : 'off'}</dd>
+                          <dt>Auth template</dt>
+                          <dd>
+                            {portalSettings.authTemplateName && portalSettings.authTemplateLang
+                              ? `${portalSettings.authTemplateName} (${portalSettings.authTemplateLang})`
+                              : 'not recorded'}
+                          </dd>
+                          <dt>Portal</dt>
+                          <dd>
+                            {portalSettings.portalEnabledAt
+                              ? `enabled ${portalSettings.portalEnabledAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+                              : 'not enabled'}
+                          </dd>
+                        </dl>
+                        <form action={recordPortalAuthTemplateAction} className="mt-4 grid gap-3 sm:grid-cols-[1fr_8rem_auto] sm:items-end">
+                          <input type="hidden" name="id" value={partner.id} />
+                          <div className="space-y-1">
+                            <Label htmlFor="portal-template-name">Template name</Label>
+                            <Input id="portal-template-name" name="name" autoComplete="off" defaultValue={portalSettings.authTemplateName ?? ''} />
+                          </div>
+                          <div className="space-y-1">
+                            <Label htmlFor="portal-template-lang">Language</Label>
+                            <Input id="portal-template-lang" name="lang" autoComplete="off" defaultValue={portalSettings.authTemplateLang ?? ''} placeholder="en" />
+                          </div>
+                          <Button type="submit" variant="outline">Save template</Button>
+                        </form>
+                        {!portalSettings.portalEnabledAt && (
+                          <form action={enablePartnerPortalAction} className="mt-4">
+                            <input type="hidden" name="id" value={partner.id} />
+                            <Button type="submit">Enable customer portal</Button>
+                          </form>
+                        )}
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
             </TabsContent>
           )}
 
@@ -629,6 +704,40 @@ export default async function PartnerDetailPage({
                 hidden={{ id: partner.id }}
                 showT0
               />
+            </TabsContent>
+          )}
+
+          {/* ── Web address (M3-18): the partner claims once; only SmartRemit changes it ── */}
+          {isPlatformAdmin && partner.id !== 'default' && (
+            <TabsContent value="web-address">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Web address</CardTitle>
+                  <CardDescription>
+                    The partner claims its address once. Changing it here retires the old address for good: it is never
+                    reused, by this partner or any other. A reason is required and audited.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p className="mb-4 text-sm">
+                    Current: <span className="font-mono">{site?.slug ? `${site.slug}.smartremit.ai` : 'not claimed yet'}</span>
+                  </p>
+                  <form action={changePartnerSlugAction} className="grid max-w-xl gap-3">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="p-slug">New address</Label>
+                      <Input id="p-slug" name="slug" required minLength={3} maxLength={30} placeholder="acme-pay" autoComplete="off" />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="p-slug-reason">Reason (at least 10 characters)</Label>
+                      <Input id="p-slug-reason" name="reason" required minLength={10} maxLength={500} autoComplete="off" />
+                    </div>
+                    <div>
+                      <Button type="submit" variant="outline">Change web address</Button>
+                    </div>
+                  </form>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 

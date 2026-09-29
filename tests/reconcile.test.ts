@@ -335,6 +335,19 @@ describe('reconcileSweep — stale compliance reviews', () => {
     await reconcileSweep(db);
     expect(await outboxRows()).toHaveLength(1);
   });
+
+  it('ignores a SANDBOX (test-environment) in_review transfer older than 24h; a live one next to it still alerts', async () => {
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+    await store.saveTransfer(fixture({
+      id: 'rc_sbrev', status: 'in_review', environment: 'test', createdAt: hoursAgo(49), paidAt: hoursAgo(48),
+    }));
+    await store.saveTransfer(fixture({
+      id: 'rc_liverev', status: 'in_review', createdAt: hoursAgo(49), paidAt: hoursAgo(48),
+    }));
+    const r = await reconcileSweep(db);
+    expect(r.staleReviews).toBe(1);
+    expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'review:rc_liverev' }]);
+  });
 });
 
 describe('reconcileSweep — crash-resume (charged but never settled)', () => {
@@ -623,6 +636,13 @@ describe('getOpsSnapshot', () => {
     expect(snap.refundsFailed.map((t) => t.id)).toEqual(['rc_fail1']);
     expect(snap.pendingOutbox).toBe(1); // 'processing' is not "pending" — unchanged
     expect(snap.staleLocks.map((o) => o.kind)).toEqual(['agent.turn']);
+  });
+
+  it('staleReviews lists live holds only: a sandbox in_review row older than 24h is not an ops item', async () => {
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+    await store.saveTransfer(fixture({ id: 'rc_sbrev', status: 'in_review', environment: 'test', paidAt: hoursAgo(30) }));
+    await store.saveTransfer(fixture({ id: 'rc_liverev', status: 'in_review', paidAt: hoursAgo(30) }));
+    expect((await getOpsSnapshot(db)).staleReviews.map((t) => t.id)).toEqual(['rc_liverev']);
   });
 });
 

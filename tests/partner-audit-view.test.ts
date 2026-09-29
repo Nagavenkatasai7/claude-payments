@@ -121,6 +121,7 @@ describe('TENANT_AUDIT_ACTIONS', () => {
     expect(TENANT_AUDIT_ACTIONS).toContain('transfer.release');
     expect(TENANT_AUDIT_ACTIONS).toContain('api_key.issue');
     expect(TENANT_AUDIT_ACTIONS).toContain('partner.support_contact.update'); // M3-17
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.slug.claim'); // M3-18
     expect(Object.isFrozen(TENANT_AUDIT_ACTIONS)).toBe(true);
     for (const a of TENANT_AUDIT_ACTIONS) expect(t(actionLabelKey(a)), a).not.toBe(actionLabelKey(a));
   });

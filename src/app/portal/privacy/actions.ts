@@ -9,7 +9,7 @@ import { requirePortalSite } from '@/lib/portal-site';
 import { requireFreshPortalAuth } from '@/lib/portal-auth';
 import { runOnce, BadRequestKeyError, RequestInFlightError } from '@/lib/portal-request-key';
 import { isReasonValid, DEFAULT_REASON_MIN } from '@/lib/ui/confirm-reason';
-import { checkIpRateLimit } from '@/lib/ip-rate-limit';
+import { checkIpRateLimit, refundIpRateLimit } from '@/lib/ip-rate-limit';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { PORTAL_AUTH_ACTOR } from '@/lib/portal-auth-audit';
 import { dataRequestAlertMessage, dataRequestDedupeKey, isDataRequestKind, PORTAL_PRIVACY_LIMIT } from '@/lib/portal-data-rights';
@@ -36,8 +36,10 @@ export async function requestDataAction(kind: string, requestKey: string, formDa
   await requirePortalSite();
   if (!env.customerDataRightsEnabled) notFound();
   if (!isDataRequestKind(kind)) notFound();
-  const ctx = await requireFreshPortalAuth('/portal/privacy');
-  if (!isReasonValid(formData.get('reason'), DEFAULT_REASON_MIN)) redirect('/portal/privacy?status=reason');
+  const ctx = await requireFreshPortalAuth(`/portal/privacy/${kind}`); // M2-14 (PR 401 L3)
+  // M2-14 (PR 401 L5): a forged call may carry no FormData at all; that is a bad reason, not a 500.
+  const reason = formData instanceof FormData ? formData.get('reason') : null;
+  if (!isReasonValid(reason, DEFAULT_REASON_MIN)) redirect('/portal/privacy?status=reason');
 
   const partnerId = ctx.site.partnerId;
   const phone = ctx.session.phone;
@@ -52,21 +54,29 @@ export async function requestDataAction(kind: string, requestKey: string, formDa
         });
         if (!rl.allowed) return { status: 'rate_limited' };
         const db = getDb();
-        await db.transaction(async (tx) => {
-          await createAuditRepo(tx).record({
-            partnerId,
-            actor: PORTAL_AUTH_ACTOR,
-            actorType: 'system',
-            action: 'customer.data_request',
-            subjectId,
-            meta: { kind },
+        try {
+          await db.transaction(async (tx) => {
+            await createAuditRepo(tx).record({
+              partnerId,
+              actor: PORTAL_AUTH_ACTOR,
+              actorType: 'system',
+              action: 'customer.data_request',
+              subjectId,
+              meta: { kind },
+            });
+            await createOutboxRepo(tx).enqueue(
+              'ops.alert',
+              { message: dataRequestAlertMessage(kind, partnerId, subjectId) },
+              { dedupeKey: dataRequestDedupeKey(subjectId, kind, Date.now()) },
+            );
           });
-          await createOutboxRepo(tx).enqueue(
-            'ops.alert',
-            { message: dataRequestAlertMessage(kind, partnerId, subjectId) },
-            { dedupeKey: dataRequestDedupeKey(subjectId, kind, Date.now()) },
-          );
-        });
+        } catch (err) {
+          // M2-14 (PR 401 L4): nothing was filed, so the attempt gives its unit back.
+          try {
+            await refundIpRateLimit(getRedis(), PORTAL_PRIVACY_LIMIT.scope, subjectId, { windowSec: PORTAL_PRIVACY_LIMIT.windowSec });
+          } catch { /* the unit simply stays spent */ }
+          throw err;
+        }
         pokeWorker();
         return { status: 'requested' };
       })

@@ -1,15 +1,13 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ChevronRight, LifeBuoy } from 'lucide-react';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { listPortalTickets, portalSupportEnabled, portalTicketOwner, ticketStatusView } from '@/lib/portal-tickets';
 import { t } from '@/lib/i18n';
 import { Badge, Button, EmptyState, PageHeader } from '@/components/ds';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export async function generateMetadata(): Promise<Metadata> {
-  return (await getPortalSite()) ? { title: t('portal.help.tickets.title') } : {};
-}
+export const generateMetadata = () => portalMetadata('portal.help.tickets.title');
 
 const dateFmt = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 

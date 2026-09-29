@@ -70,6 +70,16 @@ vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import(
 vi.mock('@/lib/kyc-case-store', async (orig) => ({ ...(await orig<typeof import('@/lib/kyc-case-store')>()), getKycCaseStore: () => h.kcs }));
 vi.mock('@/lib/providers/kyc-provider', () => ({ getKycProvider: () => ({ startVerification: h.startVerification }) }));
 vi.mock('@/lib/customer-mfa', async (orig) => ({ ...(await orig<typeof import('@/lib/customer-mfa')>()), getCustomerMfaStore: () => h.mfa }));
+// M2-14 (#399 L2): the portal enrolment also signs out the legacy /account sessions of this phone
+// when that legacy account belongs to THIS partner.
+const legacyAuth = vi.hoisted(() => ({ partnerId: 'pa' as string | null, deleteAllSessions: vi.fn(async () => undefined) }));
+vi.mock('@/lib/customer-auth-store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/customer-auth-store')>()),
+  getCustomerAuthStore: () => ({
+    getCustomer: async () => (legacyAuth.partnerId ? { partnerId: legacyAuth.partnerId } : null),
+    deleteAllSessions: legacyAuth.deleteAllSessions,
+  }),
+}));
 vi.mock('@/lib/portal-session-store', async (orig) => ({
   ...(await orig<typeof import('@/lib/portal-session-store')>()),
   getPortalSessionStore: () => h.sessions,
@@ -128,6 +138,8 @@ beforeEach(async () => {
   h.mfa = createCustomerMfaStore(redis, cs, { now: () => clock });
   h.stale = false;
   h.sessions.revokeAll.mockClear();
+  legacyAuth.partnerId = 'pa';
+  legacyAuth.deleteAllSessions.mockClear();
   h.sessions.markStepUp.mockClear();
   h.startVerification.mockClear();
   await cs.setFullNameIfUnset('pa', phone, NAME_A);
@@ -237,6 +249,26 @@ describe('revealPortalLegalNameAction', () => {
     expect(await revealPortalLegalNameAction()).toEqual({ value: NAME_B });
     expect((await audits('pii.reveal'))[0].partnerId).toBe('pb');
   });
+  it('M2-14 (#399 L6): the reveal audit write fails → an error, and the name is NEVER returned (fail closed)', async () => {
+    const real = h.db as Db;
+    h.db = new Proxy(real, {
+      get(t, k) {
+        if (k === 'insert') return () => { throw new Error('db down'); };
+        return Reflect.get(t, k);
+      },
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const r = await revealPortalLegalNameAction();
+      expect(r).toEqual({ error: 'unavailable' });
+      expect(JSON.stringify(r)).not.toContain(NAME_A);
+    } finally {
+      h.db = real;
+      warn.mockRestore();
+    }
+    expect(await audits('pii.reveal')).toHaveLength(0);
+  });
+
   it('no name on file → one error, no audit row', async () => {
     await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, fullName: undefined });
     await signIn('pa');
@@ -316,10 +348,25 @@ describe('TOTP enrolment (step-up; partner brand issuer)', () => {
     expect(await cs.isMfaEnrolled('pa', phone)).toBe(true);
     expect(await cs.isMfaEnrolled('pb', phone)).toBe(false);
     expect(h.sessions.revokeAll).toHaveBeenCalledWith('pa', phone, 'sid-pa');
+    expect(legacyAuth.deleteAllSessions).toHaveBeenCalledWith(phone); // M2-14 (#399 L2)
     expect(h.sessions.markStepUp).toHaveBeenCalledWith('tok-pa', 'pa', { totp: true });
     const rows = await db.select().from(auditEvents).where(and(eq(auditEvents.action, 'customer.mfa.enroll'), eq(auditEvents.partnerId, 'pa')));
     expect(rows).toHaveLength(1);
     expect(rows[0].subjectId).toBe(auditSubjectId('pa', phone));
+    expect(rows[0].actor).toBe('system:customer-portal'); // M2-14 (#399 L3): the portal actor
+  });
+  it("M2-14 (#399 L2): a legacy account under ANOTHER partner is left alone; a failed legacy revoke is reported", async () => {
+    legacyAuth.partnerId = 'pb';
+    let begun = await beginPortalMfaEnrolmentAction({ ok: false }, fd());
+    clock += 31_000;
+    expect(await confirmPortalMfaEnrolmentAction({ ok: false }, fd({ code: totpAt(base32Decode(begun.secret!), clock) }))).toEqual({ ok: true, notice: 'portal.mfa.on' });
+    expect(legacyAuth.deleteAllSessions).not.toHaveBeenCalled();
+
+    await signIn('pb');
+    legacyAuth.deleteAllSessions.mockRejectedValueOnce(new Error('redis down'));
+    begun = await beginPortalMfaEnrolmentAction({ ok: false }, fd());
+    clock += 31_000;
+    expect(await confirmPortalMfaEnrolmentAction({ ok: false }, fd({ code: totpAt(base32Decode(begun.secret!), clock) }))).toEqual({ ok: true, notice: 'portal.mfa.on_revoke_failed' });
   });
   it('if signing out the other sessions fails, the notice says so (never claims the devices were signed out)', async () => {
     h.sessions.revokeAll.mockRejectedValueOnce(new Error('redis down'));

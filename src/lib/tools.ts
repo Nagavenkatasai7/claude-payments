@@ -28,7 +28,8 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
-import { getDb } from '@/db/client';
+import { getDb, type Db } from '@/db/client';
+import { openRecallTicketLocked } from './receipt-cores';
 import { refundDisposition } from './refund-policy';
 import { cancelWithinWindow, type SenderCancelResult } from './sender-cancel';
 import { CANCEL_REPLY_HINT } from './legal/cancel-drafts';
@@ -1156,6 +1157,10 @@ export interface ToolContext {
   // (sender-cancel.ts cancelWithinWindow, via 'bot'). Absent ⇒ it runs over the
   // shared Pool (getDb()); tests inject one bound to PGlite.
   senderCancel?: (partnerId: PartnerId, transferId: string) => Promise<SenderCancelResult>;
+  // M2-14 (PR 397 L2) seam: the database open_recall_dispute's locked one-recall-per-transfer
+  // transaction runs on (receipt-cores openRecallTicketLocked). Absent ⇒ getDb() — unless a
+  // ticketRepo is injected without it (a repo-only unit seam), which keeps the plain repo path.
+  recallDb?: Db;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -2994,42 +2999,81 @@ async function openRecallDisputeTool(
   const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
   if (stepUpRefusal) return stepUpRefusal;
 
-  // recall_eligible — open the case. Respect the per-customer open-case cap.
-  const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
-  // Count only THIS tenant's cases (fix 1 review): another partner's open tickets
-  // for the same phone must neither block this customer nor leak through the cap.
-  const mine = (await repo.listByCustomer(ctx.phone)).filter((t) => t.partnerId === ctx.partnerId);
-  if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
-    return {
-      error_code: 'too_many_open_cases',
-      reply_hint:
-        'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
-    };
+  // M2-14 (PR 403 L3): on the web (account and portal chat) the partner's support switch applies,
+  // exactly as the receipt and portal recall actions apply it (receipt-cores portalDisabled). The
+  // WhatsApp bot is unchanged.
+  if (ctx.channel === 'web') {
+    const partner = (await ctx.partnerStore.getPartner(ctx.partnerId)) ?? (await ctx.partnerStore.ensureDefaultPartner());
+    if (partner.supportConfig?.enableSupportPortal === false) {
+      return {
+        error_code: 'support_off',
+        reply_hint: 'online support cases are turned off for this service — ask them to contact the provider directly',
+      };
+    }
   }
 
   const amount = formatRecallAmount(transfer);
   const who = (transfer.recipientName ?? '').trim() || 'the recipient';
   const reasonLabel = RECALL_REASON_LABEL[reason];
-  const ticket = await repo.createTicket({
-    id: `tk_${newTransferId()}`,
-    partnerId: transfer.partnerId,
-    kind: 'customer',
-    customerPhone: ctx.phone,
-    transferId: transfer.id,
-    subject: `Recall request: ${reason}`,
-    body: `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`,
-    category: 'refund',
-  });
+  const subject = `Recall request: ${reason}`;
+  const body = `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`;
+  let ticket: { id: string };
+  if (ctx.recallDb || !ctx.ticketRepo) {
+    // M2-14 (PR 397 L2): the SAME locked path as the receipt/portal recall: one open recall per
+    // transfer (a second call reuses the open case), the tenant-scoped cap, and the triage row
+    // committed with the ticket.
+    const r = await openRecallTicketLocked(ctx.recallDb ?? getDb(), {
+      partnerId: transfer.partnerId,
+      phone: ctx.phone,
+      transferId: transfer.id,
+      subject,
+      body,
+      capScope: 'tenant',
+    });
+    if (r.kind === 'cap') {
+      return {
+        error_code: 'too_many_open_cases',
+        reply_hint:
+          'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
+      };
+    }
+    ticket = { id: r.ticketId };
+  } else {
+    // recall_eligible — open the case. Respect the per-customer open-case cap.
+    const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
+    // Count only THIS tenant's cases (fix 1 review): another partner's open tickets
+    // for the same phone must neither block this customer nor leak through the cap.
+    const mine = (await repo.listByCustomer(ctx.phone)).filter((t) => t.partnerId === ctx.partnerId);
+    if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
+      return {
+        error_code: 'too_many_open_cases',
+        reply_hint:
+          'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
+      };
+    }
 
-  // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker
-  // drains (NEVER an inline Ollama call — this tool runs in the agent turn and
-  // must stay fast). Deduped on the ticket id; setTriage is idempotent, so
-  // re-confirming over the pre-filled 'refund' category is safe.
-  await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
-    'ticket.triage',
-    { ticketId: ticket.id },
-    { dedupeKey: `triage:${ticket.id}` },
-  );
+    const created = await repo.createTicket({
+      id: `tk_${newTransferId()}`,
+      partnerId: transfer.partnerId,
+      kind: 'customer',
+      customerPhone: ctx.phone,
+      transferId: transfer.id,
+      subject,
+      body,
+      category: 'refund',
+    });
+
+    // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker
+    // drains (NEVER an inline Ollama call — this tool runs in the agent turn and
+    // must stay fast). Deduped on the ticket id; setTriage is idempotent, so
+    // re-confirming over the pre-filled 'refund' category is safe.
+    await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+      'ticket.triage',
+      { ticketId: created.id },
+      { dedupeKey: `triage:${created.id}` },
+    );
+    ticket = created;
+  }
   pokeWorker();
 
   return {

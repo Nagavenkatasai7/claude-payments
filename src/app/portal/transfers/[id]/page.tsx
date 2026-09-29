@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Check, Circle, CircleDot, OctagonAlert } from 'lucide-react';
@@ -16,10 +15,11 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Card, Money, PageHeader, StatusPill } from '@/components/ds';
 import { cancelTransferPortalAction, emailReceiptAction, requestRecallPortalAction, requestRefundPortalAction } from './actions';
 import { ActionForm, RecallForm } from './transfer-actions';
+import { portalMetadata } from '@/lib/portal-metadata';
 import { sendAgainAction } from '../../send/actions';
 import { SendAgainForm } from '../../send/send-again-form';
 
-export const metadata: Metadata = { title: t('portal.detail.title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.detail.title', { referrer: 'no-referrer' });
 
 const RECALL_LABEL: Record<(typeof RECALL_REASON_VALUES)[number], MessageKey> = {
   not_received: 'portal.recall.reason.not_received',

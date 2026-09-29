@@ -472,3 +472,21 @@ describe('limiter errors raise an ops alert and still fail open (Program-Fix 45)
     });
   });
 });
+
+// ── M2-14 (#401 L4): refund one reserved unit ──────────────────────────────
+import { refundIpRateLimit } from '@/lib/ip-rate-limit';
+describe('refundIpRateLimit', () => {
+  it('gives one unit back in the same window; an expired counter is never left negative', async () => {
+    const r = fakeRedis();
+    const now = Date.UTC(2026, 8, 29, 12);
+    const opts = { limit: 1, windowSec: 3600, now };
+    expect((await checkIpRateLimit(r, 's', 'k', opts)).allowed).toBe(true);
+    await refundIpRateLimit(r, 's', 'k', { windowSec: 3600, now });
+    expect((await checkIpRateLimit(r, 's', 'k', opts)).allowed).toBe(true);
+    expect((await checkIpRateLimit(r, 's', 'k', opts)).allowed).toBe(false);
+
+    const r2 = fakeRedis();
+    await refundIpRateLimit(r2, 's', 'k', { windowSec: 3600, now });
+    expect([...r2.dump.keys()].filter((k) => k.startsWith('iprl|'))).toEqual([]);
+  });
+});

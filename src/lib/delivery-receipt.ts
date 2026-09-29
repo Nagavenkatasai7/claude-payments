@@ -10,6 +10,8 @@ import { getPortalPrefs, verifiedReceiptEmail } from './portal-prefs';
 import { receiptView, renderReceiptText } from './portal-transfers';
 import { resolvePartnerBranding } from './partner-config';
 import { t } from './i18n';
+import { env } from './env';
+import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { logWarn } from './log';
 import type { PartnerId, Transfer } from './types';
 
@@ -77,6 +79,10 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
     if (transfer.environment === 'test') return null;
     const partnerId = transfer.partnerId;
     const phone = transfer.phone;
+    // M2-14 (PR 417 L2): receipts are a portal feature. The portal switched off (the platform flag, or
+    // this partner not enabled) means no receipt, whatever the saved preference says.
+    if (!env.customerPortalEnabled) return null;
+    if (!(await getPortalSettings(db, partnerId)).portalEnabledAt) return null;
     const prefs = await getPortalPrefs(db, partnerId, phone);
     if (!prefs?.emailReceipts) return null;
     const blob = await customerEmailBlob(db, partnerId, phone);
@@ -95,7 +101,8 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
 
 /** Render + seal the receipt for `transfer` as it will read once delivered. Pure apart from the seal. */
 export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: string): DeliveryReceipt {
-  const body = renderReceiptText(receiptView({ ...transfer, status: 'delivered' }), brand);
+  // M2-14 (PR 417 L2): an automatic email says how to stop it.
+  const body = `${renderReceiptText(receiptView({ ...transfer, status: 'delivered' }), brand)}\n\n${t('portal.receipt.autoFooter', { brand })}`;
   return {
     partnerId: transfer.partnerId,
     phone: transfer.phone,

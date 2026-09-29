@@ -122,7 +122,7 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
 // loading.md "Status Codes"; .../04-functions/redirect.md). So this checks where
 // the browser lands, not the status: anonymous → /login, with nothing of the
 // partner page on screen. Every new /partner page is added to this list.
-for (const path of ['/partner', '/partner/security', '/partner/audit', '/partner/transfers', '/partner/transfers/tr_smoke_missing', '/partner/customers', '/partner/customers/cref_smoke_missing', '/partner/support', '/partner/support/contact', '/partner/support/tk_smoke_missing', '/partner/branding', '/partner/integrations', '/partner/integrations/whatsapp', '/partner/integrations/api-keys', '/partner/integrations/webhooks']) {
+for (const path of ['/partner', '/partner/security', '/partner/audit', '/partner/transfers', '/partner/transfers/tr_smoke_missing', '/partner/customers', '/partner/customers/cref_smoke_missing', '/partner/support', '/partner/support/contact', '/partner/support/tk_smoke_missing', '/partner/branding', '/partner/integrations', '/partner/integrations/whatsapp', '/partner/staff', '/partner/reports', '/partner/integrations/api-keys', '/partner/integrations/webhooks']) {
   test(`anonymous ${path} ends on /login and shows nothing of the partner app`, async ({ page, baseURL }) => {
     test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
     await page.goto(path);
@@ -172,6 +172,21 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
   expect(res?.status()).toBe(200);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('This link is no longer active');
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
+});
+
+// UI redesign M3-9: the public invite page. A random, never-issued token renders the ONE dead-invite
+// sheet (200, noindex, no Referer), with no stack trace and nothing of the accept form. The page only
+// peeks, so this GET changes nothing.
+test('a random /partner/invite/<token> renders the dead-invite sheet (noindex, no-referrer, no form)', async ({ page }) => {
+  const token = Array.from({ length: 43 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[Math.floor(Math.random() * 64)]).join('');
+  const res = await page.goto(`/partner/invite/${token}`);
+  expect(res?.status()).toBe(200);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('This invite link is not valid');
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
+  await expect(page.locator('meta[name="referrer"]')).toHaveAttribute('content', 'no-referrer');
+  await expect(page.locator('[data-testid="partner-invite-form"]')).toHaveCount(0);
+  await expect(page.locator('input[name="password"]')).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText(/\bat [\w.]+ \(|Error:/);
 });
 
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
@@ -227,3 +242,29 @@ for (const path of ['/portal/schedules', '/portal/schedules/new']) {
     await expect(page.locator('body')).not.toContainText(/smartremit/i);
   });
 }
+// M2 follow-up L8: an apex portal 404's HEAD must match an unmatched URL's exactly: the same <title>,
+// the same title in the RSC payload (it once said "Sign in" on /portal/login) and the same robots
+// metas (the portal layout's noindex,nofollow once showed too). Compared against the live root 404,
+// never a hardcoded string, over the raw HTML (what a crawler sees before hydration).
+test.describe('apex portal 404 heads match the root 404 (L8)', () => {
+  const head = (html: string) => ({
+    title: [...html.matchAll(/<title>([^<]*)<\/title>/g)].map((m) => m[1]),
+    rscTitle: [...html.matchAll(/\\"title\\",\\"0\\",\{\\"children\\":\\"([^\\]*)/g)].map((m) => m[1]),
+    robots: [...html.matchAll(/<meta name="robots"[^>]*>/g)].map((m) => m[0]),
+  });
+  for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456',
+    '/portal/transfers/AbCdEf123456/receipt', '/portal/recipients', '/portal/recipients/new', '/portal/profile',
+    '/portal/notifications', '/portal/devices', '/portal/help', '/portal/help/tickets', '/portal/help/tickets/new',
+    '/portal/chat', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete',
+    '/portal/send', '/portal/send/review', '/portal/schedules', '/portal/schedules/new']) {
+    test(`apex ${path} carries the root 404 head`, async ({ request }) => {
+      const root = await request.get(`/no-such-page-${randomBytes(6).toString('hex')}`);
+      expect(root.status()).toBe(404);
+      const want = head(await root.text());
+      expect(want.title).toEqual(['Page not found']);
+      const res = await request.get(path);
+      expect(res.status()).toBe(404);
+      expect(head(await res.text())).toEqual(want);
+    });
+  }
+});

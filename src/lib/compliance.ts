@@ -6,6 +6,8 @@ import {
   LIST_UNAVAILABLE_REASON,
   RECIPIENT_WATCHLIST_REASON,
   SENDER_WATCHLIST_REASON,
+  LARGE_AMOUNT_REASON,
+  VELOCITY_REASON,
 } from './compliance-config';
 import {
   type SanctionsHit,
@@ -130,10 +132,10 @@ export async function screenTransfer(input: {
     reasons.push(POSSIBLE_MATCH_REASON);
   }
   if (input.amountUsd >= rules.largeAmountUsd) {
-    reasons.push('Large transfer amount.');
+    reasons.push(LARGE_AMOUNT_REASON);
   }
   if (input.transfersToday >= rules.velocityLimit) {
-    reasons.push('High transfer velocity.');
+    reasons.push(VELOCITY_REASON);
   }
   if (reasons.length > 0) return { status: 'flagged', reasons, evidence };
   return { status: 'cleared', reasons: [], evidence };

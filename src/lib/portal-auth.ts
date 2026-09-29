@@ -65,7 +65,7 @@ export async function requirePortalCustomer(): Promise<PortalCustomerContext> {
  * only (no `//`, no `..`, no query). Anything else → /portal.
  */
 const NEXT_RE =
-  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers\/[A-Za-z0-9_-]{6,64}|profile|notifications|devices|privacy))?$/;
+  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers\/[A-Za-z0-9_-]{6,64}|profile|notifications|devices|privacy|privacy\/(?:export|delete)))?$/;
 
 export function safePortalNext(next: unknown): string {
   return typeof next === 'string' && NEXT_RE.test(next) ? next : '/portal';

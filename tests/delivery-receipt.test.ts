@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
@@ -106,6 +106,12 @@ beforeEach(async () => {
   // The end-customer brand is displayName → brandName → SmartRemit (resolvePartnerBranding).
   await db.execute(sql`UPDATE partners SET display_name = 'Partner A' WHERE id = 'pa'`);
   await db.execute(sql`UPDATE partners SET display_name = 'Partner B' WHERE id = 'pb'`);
+  // M2-14 (#417 L2): receipts need the portal ON (platform switch + this partner enabled).
+  process.env.CUSTOMER_PORTAL_ENABLED = '1';
+  await db.execute(sql`INSERT INTO partner_portal_settings (partner_id, portal_enabled_at) VALUES ('pa', now()), ('pb', now())`);
+});
+afterEach(() => {
+  delete process.env.CUSTOMER_PORTAL_ENABLED;
 });
 
 describe('automatic receipt on delivery — the shared delivered transition (Store.updateTransferFromWebhook)', () => {
@@ -120,6 +126,30 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     expect(rows[0].payload.to).toEqual([EMAIL]);
     expect(rows[0].payload.subject).toBe('Your Partner A transfer receipt');
     expect(rows[0].payload.text).toBe('{{receipt_body}}');
+  });
+
+  it('M2-14 (#417 L2): the portal switched off (platform flag, or this partner not enabled) → delivered, no email', async () => {
+    await optIn('pa');
+    delete process.env.CUSTOMER_PORTAL_ENABLED;
+    await store().saveTransfer(transfer());
+    expect((await store().updateTransferFromWebhook('rc_t1', 'delivered'))?.status).toBe('delivered');
+    expect(await emailRows()).toHaveLength(0);
+
+    process.env.CUSTOMER_PORTAL_ENABLED = '1';
+    await db.execute(sql`UPDATE partner_portal_settings SET portal_enabled_at = NULL WHERE partner_id = 'pa'`);
+    await store().saveTransfer(transfer({ id: 'rc_t2' }));
+    expect((await store().updateTransferFromWebhook('rc_t2', 'delivered'))?.status).toBe('delivered');
+    expect(await emailRows()).toHaveLength(0);
+  });
+
+  it('M2-14 (#417 L2): the receipt body ends with how to stop these emails', async () => {
+    await optIn('pa');
+    await store().saveTransfer(transfer());
+    await store().updateTransferFromWebhook('rc_t1', 'delivered');
+    const rows = await emailRows();
+    const body = renderSealedText(String(rows[0].payload.text), rows[0].payload.sealed);
+    expect(body).toMatch(/turn off email receipts/i);
+    expect(body).toContain('Notifications');
   });
 
   it('the body is sealed at rest and carries the MASKED destination only', async () => {

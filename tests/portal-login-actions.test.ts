@@ -32,6 +32,8 @@ const h = vi.hoisted(() => {
     redis: null as unknown as Record<string, (...a: unknown[]) => unknown>,
     ops: [] as string[],
     failPotp: false,
+    /** M2-14: every Redis call on a key with this prefix throws. */
+    failPrefix: '' as string,
     db: null as unknown,
     ready: { ready: true, creds: { phoneNumberId: '555000', token: 'tok' }, template: { name: 'acme_login', lang: 'en' } } as Record<string, unknown>,
     sends: [] as Array<{ partnerId: string; phone: string; code: string }>,
@@ -47,6 +49,7 @@ const h = vi.hoisted(() => {
         (...a: unknown[]) => {
           state.ops.push(`${k} ${String(a[0])}`);
           if (state.failPotp && String(a[0]).startsWith('potp:')) throw new Error('redis down');
+          if (state.failPrefix && String(a[0]).startsWith(state.failPrefix)) throw new Error('redis down');
           return state.redis[k](...a);
         },
     },
@@ -167,6 +170,7 @@ beforeEach(async () => {
   h.afterQ = [];
   h.ops = [];
   h.failPotp = false;
+  h.failPrefix = '';
   h.sends = [];
   h.sendHang = false;
   h.mfaEnrolled = new Set();
@@ -501,6 +505,52 @@ describe('8. TOTP-enrolled customers', () => {
     expect(await auditCount('pa', 'portal.auth.mfa_failure')).toBe(5);
     expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
   });
+  it('M2-14 (#394 L2): the per-(partner, phone) TOTP budget spans tokens: at the daily ceiling even the right code is refused', async () => {
+    const { createPortalTotpBudget, PORTAL_TOTP_FAILS_PER_DAY } = await import('@/lib/portal-totp-budget');
+    const budget = createPortalTotpBudget(redis);
+    // Earlier tokens already spent all but one unit today.
+    for (let i = 0; i < PORTAL_TOTP_FAILS_PER_DAY - 1; i++) await budget.reserve('pa', KNOWN);
+    const s = await (await codeStep(KNOWN)).verify();
+    expect((await verifyMfaAction(null, fd({ pending: s.pending!, code: '111111' }))).error).toBe('portal.login.mfa_invalid');
+    expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.try_later' });
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+    // Another partner's budget for the same phone is untouched.
+    expect(await budget.reserve('pb', KNOWN)).toBe(true);
+  });
+  it('M2-14: a success refunds its budget unit (a frequent signer-in is never locked)', async () => {
+    const { createPortalTotpBudget, PORTAL_TOTP_FAILS_PER_DAY } = await import('@/lib/portal-totp-budget');
+    const budget = createPortalTotpBudget(redis);
+    for (let i = 0; i < PORTAL_TOTP_FAILS_PER_DAY - 1; i++) await budget.reserve('pa', KNOWN);
+    for (let i = 0; i < 3; i++) {
+      h.jar = new Map();
+      let t = Date.now() + 61_000 * (i + 1); // past the send cooldown
+      vi.spyOn(Date, 'now').mockImplementation(() => t++);
+      const s = await (await codeStep(KNOWN)).verify();
+      await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid })), '/portal');
+      vi.restoreAllMocks();
+    }
+  });
+  it('M2-14 (#394 L4): a Redis error in the TOTP step answers cant_send (never a 500) and never signs in', async () => {
+    const s = await (await codeStep(KNOWN)).verify();
+    h.failPrefix = 'ppend';
+    expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.cant_send' });
+    h.failPrefix = 'ptotp:';
+    expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.cant_send' });
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+  });
+  it('M2-14 (#394 L4): a Redis error creating the mfa pending after a correct WhatsApp code → cant_send', async () => {
+    const { verify } = await codeStep(KNOWN);
+    const orig = h.redis.set;
+    h.redis.set = (...a: unknown[]) => {
+      if (String(a[0]).startsWith('ppend:')) throw new Error('redis down');
+      return orig(...a);
+    };
+    try {
+      expect(await verify()).toEqual({ step: 'phone', error: 'portal.login.cant_send' });
+    } finally {
+      h.redis.set = orig;
+    }
+  });
   it("an mfa token from A's host is dead on B's", async () => {
     const { verify } = await codeStep(KNOWN);
     const s = await verify();
@@ -520,6 +570,18 @@ describe('resendCodeAction', () => {
     expect(r).toEqual({ step: 'code', pending: s.pending, last4: '0101', notice: 'portal.login.code_sent_if_possible' });
     await flushAfter();
     expect(sendsTo(KNOWN)).toHaveLength(2);
+    vi.restoreAllMocks();
+  });
+  it('M2-14 (#394 L7): a resend restarts the 5-minute sign-in window, so the NEW code still works after the first 5 minutes', async () => {
+    let t = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => t);
+    const s = await requestCodeAction(null, fd({ phone: KNOWN }));
+    await flushAfter();
+    t += 240_000;
+    await resendCodeAction(null, fd({ pending: s.pending! }));
+    await flushAfter();
+    t += 180_000; // 7 minutes after the first request, 3 after the resend
+    await expectRedirect(verifyCodeAction(null, fd({ pending: s.pending!, code: lastCode(KNOWN)! })), '/portal');
     vi.restoreAllMocks();
   });
   it('an unknown token → expired', async () => {

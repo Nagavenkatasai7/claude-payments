@@ -1,8 +1,7 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { LifeBuoy } from 'lucide-react';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { getPortalTicket, listPortalTicketMessages, portalSupportEnabled, portalTicketOwner, ticketStatusView } from '@/lib/portal-tickets';
 import { newRequestKey } from '@/lib/portal-request-key';
@@ -11,10 +10,9 @@ import { dsCn } from '@/lib/ui/ds-cn';
 import { Badge, Card, EmptyState, PageHeader } from '@/components/ds';
 import { replyPortalTicketAction } from '../actions';
 import { ReplyForm } from '../ticket-forms';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export async function generateMetadata(): Promise<Metadata> {
-  return (await getPortalSite()) ? { title: t('portal.help.tickets.title') } : {};
-}
+export const generateMetadata = () => portalMetadata('portal.help.tickets.title');
 
 const dateFmt = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 const stampFmt = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });

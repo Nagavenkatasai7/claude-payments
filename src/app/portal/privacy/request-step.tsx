@@ -3,7 +3,9 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import { env } from '@/lib/env';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
+import { portalMetadata } from '@/lib/portal-metadata';
+import { NOT_FOUND_METADATA } from '@/lib/not-found-metadata';
 import { requireFreshPortalAuth } from '@/lib/portal-auth';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { DEFAULT_REASON_MIN } from '@/lib/ui/confirm-reason';
@@ -14,10 +16,10 @@ import { requestDataAction } from './actions';
 
 /**
  * The privacy pages' metadata: the title only when the page can render (a portal site AND the flag
- * on). Otherwise empty, so a 404 on the apex or with the flag off carries nothing page-specific.
+ * on). Otherwise the root 404's, so a 404 on the apex or with the flag off carries nothing page-specific.
  */
 export async function privacyMetadata(title: MessageKey): Promise<Metadata> {
-  return env.customerDataRightsEnabled && (await getPortalSite()) ? { title: t(title) } : {};
+  return env.customerDataRightsEnabled ? portalMetadata(title) : NOT_FOUND_METADATA;
 }
 
 const COPY = {
@@ -33,7 +35,7 @@ const COPY = {
 export async function RequestStep({ kind }: { kind: DataRequestKind }) {
   await requirePortalSite();
   if (!env.customerDataRightsEnabled) notFound();
-  await requireFreshPortalAuth('/portal/privacy');
+  await requireFreshPortalAuth(`/portal/privacy/${kind}`); // M2-14 (PR 401 L3): back to this step
   const copy = COPY[kind];
   const action = requestDataAction.bind(null, kind, newRequestKey());
 

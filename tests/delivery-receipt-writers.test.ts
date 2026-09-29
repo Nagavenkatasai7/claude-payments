@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
@@ -122,6 +122,10 @@ async function receiptRows(): Promise<Row[]> {
 }
 const statusOf = async () => (await createStore(redis, db).getTransfer('rw_t1'))!.status;
 
+afterEach(() => {
+  delete process.env.CUSTOMER_PORTAL_ENABLED;
+});
+
 beforeEach(async () => {
   db = await freshDb();
   redis = fakeRedis();
@@ -129,6 +133,9 @@ beforeEach(async () => {
   sendText.mockClear(); sendTemplate.mockClear(); sendEmail.mockClear();
   await seedPartner(db, 'acme');
   await db.execute(sql`UPDATE partners SET display_name = 'Acme Remit' WHERE id = 'acme'`);
+  // M2-14 (#417 L2): receipts need the portal ON (platform switch + this partner enabled).
+  process.env.CUSTOMER_PORTAL_ENABLED = '1';
+  await db.execute(sql`INSERT INTO partner_portal_settings (partner_id, portal_enabled_at) VALUES ('acme', now())`);
   await createIntegrationsRepo(db).saveIntegrations('acme', {
     kyc: {},
     payment: {
