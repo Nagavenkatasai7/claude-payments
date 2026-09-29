@@ -50,10 +50,23 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
+// M3-10 follow-up: a switch that makes the sender screening read throw (a failed lookup).
+const screeningRead = { fail: false };
+vi.mock('@/db/repos/customer-repo', async () => {
+  const actual = await vi.importActual<typeof import('@/db/repos/customer-repo')>('@/db/repos/customer-repo');
+  return {
+    ...actual,
+    readSenderScreeningFlags: (...a: Parameters<typeof actual.readSenderScreeningFlags>) => {
+      if (screeningRead.fail) throw new Error('connection reset');
+      return actual.readSenderScreeningFlags(...a);
+    },
+  };
+});
 
 import { releaseHoldAction } from '@/app/partner/(app)/transfers/[id]/release-actions';
 import { auditEvents, outbox, transfers } from '@/db/schema';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { EDD_REQUIRED_REASON as EDD, LARGE_AMOUNT_REASON as LARGE, SCREENING_REASONS } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { t } from '@/lib/i18n';
@@ -76,6 +89,11 @@ const snapshot = async () => ({
   tb: await transferRow('tr_heldB1'),
 });
 
+// Every seeded transfer's sender (seedPartnerTransfer's default phone) has a customer row per tenant.
+const SENDER = '14155550101';
+const seedSender = (partnerId: string) => createCustomerRepo(db, async () => null).ensureCustomer(partnerId, SENDER);
+const flagSender = (partnerId: string, col: 'pep_hit' | 'watchlist_hit') =>
+  db.execute(sql`UPDATE customers SET ${sql.raw(col)} = true WHERE partner_id = ${partnerId} AND phone = ${SENDER}`);
 const setKyc = (id: string, mode: 'ours' | 'delegated') => db.execute(sql`UPDATE partners SET kyc_mode = ${mode} WHERE id = ${id}`);
 const seedHeld = (id: string, partnerId: string, reasons: string[], o: Record<string, unknown> = {}) =>
   seedPartnerTransfer(db, { id, partnerId, status: 'in_review', complianceStatus: 'flagged', complianceReasons: reasons, paidAt: new Date().toISOString(), ...o });
@@ -84,6 +102,7 @@ beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   revalidated.length = 0;
+  screeningRead.fail = false;
   host.value = 'smartremit.ai';
   db = await freshDb();
   store = createStore(redis, db);
@@ -99,6 +118,8 @@ beforeEach(async () => {
   });
   await seedHeld('tr_heldA1', 'pa', [LARGE]);
   await seedHeld('tr_heldB1', 'pb', [LARGE]);
+  await seedSender('pa');
+  await seedSender('pb');
 });
 
 const asAdmin = () => signInAs(redis, cookieJar, { username: 'pa-admin', partnerId: 'pa', role: 'admin' });
@@ -196,6 +217,37 @@ describe('releaseHoldAction: refusals (no money moves, no audit row, no outbox r
     await refuses(form('tr_blkA1'), notAllowed());
   });
 
+  // M3-10 follow-up (owner, 2026-09-29): a customer-level PEP / watchlist hit keeps the release
+  // PLATFORM-only even when every transfer reason is KYC-class.
+  it.each(['pep_hit', 'watchlist_hit'] as const)('a sender with %s on an otherwise-releasable hold is refused, nothing written', async (col) => {
+    await flagSender('pa', col);
+    await asAdmin();
+    await refuses(form('tr_heldA1'), notAllowed());
+    expect((await transferRow('tr_heldA1')).status).toBe('in_review');
+    expect(await count(auditEvents)).toBe(0);
+    expect(await count(outbox)).toBe(0);
+  });
+
+  it('another tenant’s PEP flag on the same phone does not leak into this tenant’s decision', async () => {
+    await flagSender('pb', 'pep_hit');
+    await asAdmin();
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: true });
+  });
+
+  it('a missing sender customer row is refused (fail closed)', async () => {
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'pa'`);
+    await asAdmin();
+    await refuses(form('tr_heldA1'), notAllowed());
+  });
+
+  it('a failed sender lookup is refused (fail closed), nothing written', async () => {
+    screeningRead.fail = true;
+    await asAdmin();
+    await refuses(form('tr_heldA1'), notAllowed());
+    expect(await count(auditEvents)).toBe(0);
+    expect(await count(outbox)).toBe(0);
+  });
+
   it('a transfer that is not in_review is refused', async () => {
     await seedPartnerTransfer(db, { id: 'tr_paidA1', partnerId: 'pa', status: 'paid', complianceStatus: 'flagged', complianceReasons: [LARGE] });
     await asAdmin();
@@ -235,6 +287,13 @@ describe('releaseHoldAction: success', () => {
     expect(meta).not.toContain('000011112222');
     expect(meta).not.toContain('Samplesurname');
     expect(revalidated).toEqual(['/partner/transfers', '/partner/transfers/tr_heldA1']);
+  });
+
+  it('an explicitly unflagged sender (pep_hit = false, watchlist_hit = false) still releases', async () => {
+    await db.execute(sql`UPDATE customers SET pep_hit = false, watchlist_hit = false WHERE partner_id = 'pa'`);
+    await asAdmin();
+    expect(await releaseHoldAction(form('tr_heldA1'))).toEqual({ ok: true });
+    expect((await transferRow('tr_heldA1')).status).toBe('paid');
   });
 
   it('an edd_required hold is releasable (owner O1), and a velocity + large hold', async () => {

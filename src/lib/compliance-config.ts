@@ -77,12 +77,21 @@ export const PARTNER_RELEASABLE_REASONS: readonly string[] = Object.freeze([
  * reasons list, ANY screening reason (isScreeningHold) or ANY reason outside
  * PARTNER_RELEASABLE_REASONS ⇒ false. Pure: the /partner release action (the
  * guard) and the transfer detail page (which hides the button) both call it.
+ *
+ * M3-10 follow-up (owner, 2026-09-29): `sender` is the transfer SENDER's
+ * customer row flags, read in the owner's tenant (lib/sender-screening.ts). A
+ * PEP or watchlist hit on the sender (isScreeningCustomerHold) is a screening
+ * matter, so it stays PLATFORM-only even when every transfer reason is
+ * KYC-class. REQUIRED, and a missing row or failed lookup (null / undefined)
+ * ⇒ false.
  */
 export function isPartnerReleasableHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
   owner: { kycMode?: string | null } | null | undefined,
+  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
 ): boolean {
   if (!owner || owner.kycMode !== 'delegated') return false;
+  if (!sender || isScreeningCustomerHold(sender)) return false;
   if (t.status !== 'in_review' || t.complianceStatus === 'blocked') return false;
   const r = t.complianceReasons;
   if (!Array.isArray(r) || r.length === 0) return false;
