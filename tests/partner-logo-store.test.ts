@@ -109,6 +109,10 @@ describe('savePartnerLogo', () => {
     await expect(savePartnerLogo(db, 'pa', PNG, null as unknown as string)).rejects.toThrow();
     expect(await logoOf('pa')).toBeNull();
   });
+  it('M3-17: an optional actorScope is recorded in the audit meta (partner-surface writers)', async () => {
+    expect(await savePartnerLogo(db, 'pa', PNG, 'admin-a', { actorScope: 'partner' })).toEqual({ ok: true });
+    expect((await logoAudits())[0]!.meta).toEqual({ bytes: PNG_BYTES.length, actorScope: 'partner' });
+  });
   it('runs on a caller transaction without nesting', async () => {
     await db.transaction(async (tx) => {
       expect(await savePartnerLogo(tx, 'pa', WEBP, 'admin-a')).toEqual({ ok: true });

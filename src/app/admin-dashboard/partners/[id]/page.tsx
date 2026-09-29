@@ -229,8 +229,10 @@ export default async function PartnerDetailPage({
   // already loaded above — surfaces a partner before they churn. The AI
   // narration ("why + outreach") is best-effort: a model outage just omits it,
   // the band + signals always render. The 'default' platform partner is not a
-  // reseller, so its health is meaningless — skip it.
-  const showHealth = partner.id !== 'default';
+  // reseller, so its health is meaningless — skip it. UI redesign M3-22: the
+  // churn read and its AI outreach are SmartRemit-internal, so partner-scoped
+  // staff never get the card, and neither the scorer nor the model runs for them.
+  const showHealth = partner.id !== 'default' && scopeOf(staff).kind === 'platform';
   const health = showHealth
     ? scorePartnerHealth({ summary, apiKeys, rates, now: nowMs })
     : null;
