@@ -90,13 +90,14 @@ describe('claimJob', () => {
     const repo = createPartnerReportRepo(db);
     const id = await job('pa');
     const claim = (await repo.claimJob(id, NOW()))!;
-    expect(await repo.completeJob(id, new Date(claim.claimedAt.getTime() + 1), { contentEnc: 'x', rowCount: 1, params: {}, expiresAt: new Date() })).toBe(false);
+    const claimedAt = claim.claimedAt!;
+    expect(await repo.completeJob(id, new Date(claimedAt.getTime() + 1), { contentEnc: 'x', rowCount: 1, params: {}, expiresAt: new Date() })).toBe(false);
     expect(await repo.failJob(id, new Date(0), 'generation_failed')).toBe(false);
     const expiresAt = new Date(Date.now() + 1000);
-    expect(await repo.completeJob(id, claim.claimedAt, { contentEnc: 'x', rowCount: 3, params: { truncated: true }, expiresAt })).toBe(true);
+    expect(await repo.completeJob(id, claimedAt, { contentEnc: 'x', rowCount: 3, params: { truncated: true }, expiresAt })).toBe(true);
     const row = (await repo.getJobForPartner('pa', id))!;
     expect(row).toMatchObject({ status: 'ready', rowCount: 3, contentEnc: 'x', params: { truncated: true } });
-    expect(await repo.failJob(id, claim.claimedAt, 'generation_failed')).toBe(false); // no longer running
+    expect(await repo.failJob(id, claimedAt, 'generation_failed')).toBe(false); // no longer running
   });
 });
 

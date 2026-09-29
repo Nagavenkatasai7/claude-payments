@@ -276,3 +276,64 @@ export function reportFilename(kind: ReportKind, at: Date): string {
 /** Job ids are v4-shaped uuids; anything else is a 404 before any query (a bad uuid cast is a 500). */
 export const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isJobId = (v: unknown): v is string => typeof v === 'string' && JOB_ID_RE.test(v);
+
+// ── The Reports list (pure view) ────────────────────────────────────────────
+
+export type ReportDisplayStatus = 'queued' | 'running' | 'ready' | 'failed' | 'expired' | 'stale';
+
+export interface ReportListRow {
+  id: string;
+  kind: ReportKind;
+  range: string;
+  status: ReportDisplayStatus;
+  downloadable: boolean;
+  truncated: boolean;
+  rowCount: number | null;
+  createdAt: Date;
+  expiresAt: Date | null;
+}
+
+/** The job fields the list reads (never the sealed content). */
+export interface ReportJobInput {
+  id: string;
+  kind: string;
+  params: unknown;
+  status: string;
+  rowCount: number | null;
+  createdAt: Date;
+  expiresAt: Date | null;
+}
+
+const ymd = (iso: unknown): string => (typeof iso === 'string' && !isNaN(Date.parse(iso)) ? new Date(iso).toISOString().slice(0, 10) : '—');
+
+/**
+ * One list row. `expired` is decided from expires_at here too (the daily expiry sweep can lag), and
+ * a queued/running job older than the active window is `stale` (its effect never ran). Null for a
+ * kind this build does not know.
+ */
+export function reportView(j: ReportJobInput, now: Date): ReportListRow | null {
+  if (!isReportKind(j.kind)) return null;
+  const p = (j.params && typeof j.params === 'object' ? j.params : {}) as Record<string, unknown>;
+  let range: string;
+  if (j.kind === 'fees_monthly') range = typeof p.month === 'string' ? p.month : '—';
+  else {
+    const to = typeof p.to === 'string' && !isNaN(Date.parse(p.to)) ? new Date(Date.parse(p.to) - DAY_MS).toISOString() : undefined;
+    range = `${ymd(p.from)} – ${ymd(to)}`;
+  }
+  let status: ReportDisplayStatus;
+  if (j.status === 'ready') status = j.expiresAt && j.expiresAt.getTime() > now.getTime() ? 'ready' : 'expired';
+  else if (j.status === 'queued' || j.status === 'running') {
+    status = now.getTime() - j.createdAt.getTime() > ACTIVE_JOB_WINDOW_MS ? 'stale' : (j.status as ReportDisplayStatus);
+  } else status = j.status === 'failed' ? 'failed' : 'expired';
+  return {
+    id: j.id,
+    kind: j.kind,
+    range,
+    status,
+    downloadable: status === 'ready',
+    truncated: p.truncated === true,
+    rowCount: j.rowCount,
+    createdAt: j.createdAt,
+    expiresAt: j.expiresAt,
+  };
+}

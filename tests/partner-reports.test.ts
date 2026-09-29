@@ -9,6 +9,7 @@ import {
   reportFilename,
   reportPolicy,
   rowsToCsv,
+  reportView,
   transferExportRow,
 } from '@/lib/partner-reports';
 import { csvCell } from '@/lib/settlement-statement';
@@ -160,5 +161,21 @@ describe('limits and names', () => {
   it('starts the row cap at 10k and names files without tenant data', () => {
     expect(MAX_REPORT_ROWS).toBe(10_000);
     expect(reportFilename('settlements', new Date('2026-09-29T12:00:00Z'))).toBe('smartremit-settlements-2026-09-29.csv');
+  });
+});
+
+describe('reportView (the list row, pure)', () => {
+  const base = { id: '0b7c2f7e-1a2b-4c3d-8e9f-001122334455', kind: 'settlements', params: { from: '2026-08-01T00:00:00.000Z', to: '2026-09-01T00:00:00.000Z' }, rowCount: null, createdAt: new Date(NOW.getTime() - 60_000), expiresAt: null } as const;
+  it('ready and unexpired → downloadable; past expires_at → expired (even before the sweep)', () => {
+    const ready = reportView({ ...base, status: 'ready', rowCount: 3, expiresAt: new Date(NOW.getTime() + 1000) }, NOW);
+    expect(ready).toMatchObject({ status: 'ready', downloadable: true, rowCount: 3, range: '2026-08-01 – 2026-08-31', truncated: false });
+    expect(reportView({ ...base, status: 'ready', expiresAt: new Date(NOW.getTime() - 1) }, NOW)).toMatchObject({ status: 'expired', downloadable: false });
+  });
+  it('queued/running older than the active window → stale; fees show the month; truncated flag', () => {
+    expect(reportView({ ...base, status: 'queued', createdAt: new Date(NOW.getTime() - 2 * 3_600_000) }, NOW)!.status).toBe('stale');
+    expect(reportView({ ...base, status: 'running' }, NOW)!.status).toBe('running');
+    expect(reportView({ ...base, kind: 'fees_monthly', params: { month: '2026-08' }, status: 'failed' }, NOW)).toMatchObject({ range: '2026-08', status: 'failed' });
+    expect(reportView({ ...base, status: 'ready', params: { ...base.params, truncated: true }, expiresAt: new Date(NOW.getTime() + 1) }, NOW)!.truncated).toBe(true);
+    expect(reportView({ ...base, kind: 'bogus', status: 'ready' }, NOW)).toBeNull();
   });
 });
