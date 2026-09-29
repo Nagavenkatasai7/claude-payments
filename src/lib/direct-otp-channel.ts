@@ -4,6 +4,7 @@ import type { PartnerId } from './types';
 import { resolveWaChannel } from './whatsapp-creds';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { recordChannelHealth } from './channel-health';
+import { pokeWorker } from './outbox';
 import { logWarn } from './log';
 import { DEFAULT_PARTNER_ID } from './defaults';
 
@@ -38,7 +39,11 @@ export interface DirectOtpChannelDeps {
 
 const defaultDeps = (): DirectOtpChannelDeps => ({
   getIntegrations: (id) => getPartnerIntegrationsStore().getIntegrations(id),
-  recordIncomplete: (id) => recordChannelHealth(id, 'incomplete_config'),
+  // recordChannelHealth may enqueue the partner's alert email (an outbox row): poke the worker
+  // when it did, so the email does not wait for the cron (outbox-poke-coverage).
+  recordIncomplete: async (id) => {
+    if (await recordChannelHealth(id, 'incomplete_config')) pokeWorker();
+  },
 });
 
 export async function resolveDirectOtpChannel(
