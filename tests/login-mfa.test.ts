@@ -38,6 +38,8 @@ const redirectMock = vi.hoisted(() =>
   }),
 );
 vi.mock('next/navigation', () => ({ redirect: redirectMock }));
+// UI redesign M3-9: postLoginTarget reads the invite marker through getRedis().
+vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
@@ -167,6 +169,21 @@ describe('staff sign-in second step (Program-Fix 17b)', { retry: 0 }, () => {
     expect(await pw('ops')).toBe(OK);
     expect(cookieJar.has(SESSION_COOKIE)).toBe(true);
     expect(cookieJar.has(MFA_PENDING_COOKIE)).toBe(false);
+  });
+
+  it('M3-9: a partner account carrying the invite marker, not enrolled → a session, then enrolment', async () => {
+    await pgPartnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await getAuthStore().saveStaff(row({ username: 'invitee', role: 'agent', partnerId: 'acme' }));
+    await redis.set('staffmfa:pending:invitee', '1');
+    expect(await pw('invitee')).toBe('REDIRECT:/partner/security?enroll=1');
+    expect(cookieJar.has(SESSION_COOKIE)).toBe(true);
+    // Unmarked partner staff and platform staff land exactly as before.
+    await getAuthStore().saveStaff(row({ username: 'teammate', role: 'agent', partnerId: 'acme' }));
+    expect(await pw('teammate')).toBe(OK);
+    expect(await pw('ops')).toBe(OK);
   });
 
   it('enrolled → the password mints NO session; a pending cookie sends it to /login/mfa', async () => {

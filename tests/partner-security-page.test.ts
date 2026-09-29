@@ -184,9 +184,19 @@ describe('src/app/partner imports (landing look, no legacy UI, no admin actions)
       }
     }
   });
+  // M3-9: the ONE public page (the emailed invite link: no session exists yet). It must be rate-limited
+  // before any read and never read a staff session.
+  const PUBLIC_PAGES = [join('src/app/partner/invite/[token]/page.tsx')];
   it('every page calls requirePartnerStaff (nav hiding is never the guard)', () => {
-    for (const f of files('src/app/partner').filter((p) => p.endsWith('page.tsx'))) {
+    for (const f of files('src/app/partner').filter((p) => p.endsWith('page.tsx') && !PUBLIC_PAGES.includes(p))) {
       expect(readFileSync(f, 'utf8'), f).toMatch(/await requirePartnerStaff\(/);
+    }
+  });
+  it('M3-9: the public invite page is rate-limited first and reads no staff session', () => {
+    for (const f of PUBLIC_PAGES) {
+      const src = readFileSync(f, 'utf8');
+      expect(src, f).toMatch(/await isIpRateLimited\(/);
+      expect(src, f).not.toMatch(/getCurrentStaff|requireStaff|requirePartnerStaff|cookies\(/);
     }
   });
 });
