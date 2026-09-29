@@ -36,6 +36,14 @@ class CustomerGoneError extends Error {
   }
 }
 
+/** Thrown INSIDE the transaction when a clear finds nothing to clear: rolls back, no audit row. */
+class NothingToClearError extends Error {
+  constructor() {
+    super('nothing_to_clear');
+    this.name = 'NothingToClearError';
+  }
+}
+
 /**
  * Set or clear the send limit of one of THIS tenant's customers (UI redesign M3-12, SPEC §3.4).
  * A MONEY-path write, in order:
@@ -48,7 +56,8 @@ class CustomerGoneError extends Error {
  *  4. ONE transaction: the single-column writer reads the previous value FOR UPDATE; a live
  *     override not marked 'partner' (every SmartRemit raise) throws a sentinel, so nothing is
  *     written; else the server-built value { caps, expiresAt, setBy, setAt, setScope: 'partner' }
- *     (or null) and ONE audit row (hashed customer subject, actorScope 'partner').
+ *     (or null) and ONE audit row (hashed customer subject, actorScope 'partner'). A clear with
+ *     no override on file rolls back: ok, nothing written, no audit row.
  * Only the dollar caps move; the resolver re-clamps partner-set entries at read
  * (send-limits.ts resolveEffectiveSendLimits). Sanctions, EDD, the tier gates and the velocity
  * counters are untouched.
@@ -106,6 +115,8 @@ export async function setCustomerLimitAction(formData: FormData): Promise<Action
       );
       if (!found) throw new CustomerGoneError(); // raced a delete: nothing written
       if (!partnerMayWriteOverride(previous, now)) throw new SetBySmartRemitError();
+      // M3-12 follow-up (review LOW-B): a clear with no override on file changes nothing.
+      if (previous === null && value === null) throw new NothingToClearError();
       await createAuditRepo(tx).record({
         partnerId: ctx.partnerId,
         actor: ctx.username,
@@ -128,6 +139,7 @@ export async function setCustomerLimitAction(formData: FormData): Promise<Action
   } catch (err) {
     if (err instanceof SetBySmartRemitError) return { ok: false, error: t('partner.limits.setBySmartRemit') };
     if (err instanceof CustomerGoneError) return notFound;
+    if (err instanceof NothingToClearError) return { ok: true };
     // The error NAME only: a failed query's message carries its bound params.
     logWarn('partner.customers.limit', errName(err), { partnerId: ctx.partnerId });
     return { ok: false, error: t('partner.common.failed') };
