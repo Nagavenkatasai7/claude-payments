@@ -1,11 +1,14 @@
 import type { ReactNode } from 'react';
 import { Badge, type Tone } from '@/components/ds';
 import { curlExample, formatExample, operationAnchor, schemaAnchor } from '@/lib/docs/api-reference';
+import { isTryItOperation } from '@/lib/docs/try-it';
 import type { HttpMethod, SpecOperation } from '@/lib/openapi/types';
+import { TryIt } from './TryIt';
 
-// One Partner API operation, rendered at build from openapi.yaml. Server component: no client JS.
+// One Partner API operation, rendered at build from openapi.yaml. Server component.
 // Wide content (tables, JSON, curl) scrolls inside its own box, so the page never scrolls sideways
-// on a phone.
+// on a phone. PR-5: an allowlisted sandbox operation also gets the <TryIt> client island (the only
+// client JS on the page); the rest of the page stays prerendered HTML.
 
 const METHOD_TONE: Record<HttpMethod, Tone> = { GET: 'info', POST: 'success', PUT: 'warning', PATCH: 'warning', DELETE: 'danger' };
 const H4 = 'mt-6 text-[13px] font-bold uppercase tracking-[0.08em] text-ds-ink-faint';
@@ -149,6 +152,10 @@ export function Operation({ op, serverUrl }: { op: SpecOperation; serverUrl: str
 
       <h4 className={H4}>curl</h4>
       <CodeBlock label={`${op.summary}: curl example`}>{curlExample(op, serverUrl)}</CodeBlock>
+
+      {op.sandbox && isTryItOperation(op.operationId) ? (
+        <TryIt operationId={op.operationId} exampleBody={op.method === 'POST' ? formatExample(op.requestExample ?? {}) : null} />
+      ) : null}
     </section>
   );
 }

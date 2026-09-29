@@ -41,7 +41,7 @@ describe('RateCalculator — featured send partner', () => {
 
   it('test mode: a test-send button to the partner portal, a TEST badge and the test-mode note', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'test' } });
-    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN', WA_HREF]);
+    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/portal/send?amount=1000.00&to=IN', WA_HREF]);
     expect(html).toContain('Try a test send with Acme Pay');
     expect(html).toContain('TEST — no real money');
     expect(html).toContain('Test mode — no money moves.');
@@ -54,7 +54,7 @@ describe('RateCalculator — featured send partner', () => {
       ...BASE,
       featured: { displayName: 'Acme Pay', legalName: 'Acme Money Services LLC', slug: 'acme-pay', mode: 'live' },
     });
-    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN', WA_HREF]);
+    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/portal/send?amount=1000.00&to=IN', WA_HREF]);
     expect(html).toContain('Send with Acme Pay');
     expect(html).not.toContain('Try a test send');
     expect(html).not.toContain('TEST — no real money');

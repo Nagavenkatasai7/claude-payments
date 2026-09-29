@@ -25,23 +25,23 @@ describe('isHandoffSlug', () => {
 describe('buildSendHandoffUrl', () => {
   it('builds the partner portal send link with a 2-decimal amount and the ISO2 destination', () => {
     expect(buildSendHandoffUrl({ slug: 'acme-pay', amount: 1000, to: 'IN' })).toBe(
-      'https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN',
+      'https://acme-pay.smartremit.ai/portal/send?amount=1000.00&to=IN',
     );
     expect(buildSendHandoffUrl({ slug: 'acme', amount: 12.5, to: 'IN' })).toBe(
-      'https://acme.smartremit.ai/send?amount=12.50&to=IN',
+      'https://acme.smartremit.ai/portal/send?amount=12.50&to=IN',
     );
   });
   it('accepts the exact amount bounds', () => {
-    expect(buildSendHandoffUrl({ slug: 'acme', amount: 1, to: 'IN' })).toBe('https://acme.smartremit.ai/send?amount=1.00&to=IN');
+    expect(buildSendHandoffUrl({ slug: 'acme', amount: 1, to: 'IN' })).toBe('https://acme.smartremit.ai/portal/send?amount=1.00&to=IN');
     expect(buildSendHandoffUrl({ slug: 'acme', amount: 10000, to: 'IN' })).toBe(
-      'https://acme.smartremit.ai/send?amount=10000.00&to=IN',
+      'https://acme.smartremit.ai/portal/send?amount=10000.00&to=IN',
     );
   });
   it('drops an amount that is not a finite number within 1..10000 (checked on the emitted value)', () => {
     for (const amount of [NaN, Infinity, -Infinity, 0, -5, 0.999, 0.994, 10000.001, 10000.01, 20000, undefined, null, '100']) {
       expect({ amount, url: buildSendHandoffUrl({ slug: 'acme', amount: amount as unknown as number, to: 'IN' }) }).toEqual({
         amount,
-        url: 'https://acme.smartremit.ai/send?to=IN',
+        url: 'https://acme.smartremit.ai/portal/send?to=IN',
       });
     }
   });
@@ -49,13 +49,13 @@ describe('buildSendHandoffUrl', () => {
     for (const to of ['US', 'in', 'IND', 'MX', 'Other', '', 'IN&x=1', undefined, null, 5]) {
       expect({ to, url: buildSendHandoffUrl({ slug: 'acme', amount: 50, to: to as unknown as string }) }).toEqual({
         to,
-        url: 'https://acme.smartremit.ai/send?amount=50.00',
+        url: 'https://acme.smartremit.ai/portal/send?amount=50.00',
       });
     }
   });
-  it('drops both parameters to a bare /send link', () => {
-    expect(buildSendHandoffUrl({ slug: 'acme', amount: NaN, to: 'XX' })).toBe('https://acme.smartremit.ai/send');
-    expect(buildSendHandoffUrl({ slug: 'acme' })).toBe('https://acme.smartremit.ai/send');
+  it('drops both parameters to a bare /portal/send link', () => {
+    expect(buildSendHandoffUrl({ slug: 'acme', amount: NaN, to: 'XX' })).toBe('https://acme.smartremit.ai/portal/send');
+    expect(buildSendHandoffUrl({ slug: 'acme' })).toBe('https://acme.smartremit.ai/portal/send');
   });
   it('returns null for a slug that is not a valid partner_sites slug', () => {
     for (const slug of ['', 'Acme', 'xn--abc', 'acme.evil.com', 'evil.com/x', 'a', '-ab', undefined, null]) {
@@ -69,10 +69,21 @@ describe('buildSendHandoffUrl', () => {
     const url = new URL(buildSendHandoffUrl({ slug: 'acme', amount: 250, to: 'IN' })!);
     expect(url.protocol).toBe('https:');
     expect(url.host).toBe('acme.smartremit.ai');
-    expect(url.pathname).toBe('/send');
+    expect(url.pathname).toBe('/portal/send');
     expect([...url.searchParams.keys()]).toEqual(['amount', 'to']);
   });
   it('supports exactly the calculator corridor (USD to India)', () => {
     expect([...CALCULATOR_DESTINATIONS]).toEqual(['IN']);
+  });
+});
+
+describe('the handoff target stays on the partner-site allowlist', () => {
+  it('the built path is ALLOWED on a partner subdomain (SITE_ROUTES), so the link can never drift to a denied path', async () => {
+    const { classifySitePath } = await import('@/lib/site-routes');
+    for (const input of [{ slug: 'acme', amount: 25, to: 'IN' }, { slug: 'acme' }]) {
+      const url = new URL(buildSendHandoffUrl(input)!);
+      expect(classifySitePath(url.pathname), url.pathname).toMatchObject({ kind: 'allow' });
+      expect(url.pathname).toBe('/portal/send');
+    }
   });
 });
