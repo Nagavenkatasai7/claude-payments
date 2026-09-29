@@ -48,6 +48,11 @@ describe('projectAuditRow', () => {
       for (const v of ['203.0.113', '5550001111', 'Jane', 'jane@', 'old-brand', '#123456']) expect(s, action).not.toContain(v);
     }
   });
+  it('webhook.replay (M3-15b) shows the replayed outbox id only; actorScope and anything else is dropped', () => {
+    const p = projectAuditRow(row({ action: 'webhook.replay', subjectId: '42', meta: { outboxId: 42, actorScope: 'partner', lastError: 'rejected for +15550001111' } }), tenant);
+    expect(p.detail).toBe('outboxId=42');
+    expect(JSON.stringify(p)).not.toContain('5550001111');
+  });
   it('detail values are cut at 80 characters and arrays are joined', () => {
     const p = projectAuditRow(row({ action: 'pii.view', meta: { fields: ['full_name', 'date_of_birth'] } }), tenant);
     expect(p.detail).toBe('fields=full_name date_of_birth');

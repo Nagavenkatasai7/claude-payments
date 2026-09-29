@@ -283,6 +283,8 @@ async function run(req: NextRequest): Promise<NextResponse> {
     leaseMarked = true;
     await markLease(gate, workerId, invocationStart + maxDuration * 1000 + LEASE_MS + LEASE_MARK_SLACK_MS);
   };
+  // UI redesign M3-16: at most one partner report builds per invocation (money rows first).
+  const reportSlot = { reportStarted: false };
   let completed = false;
   let leftover = false;
   try {
@@ -290,7 +292,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     // is only CLAIMED while a row could still be started — a claim we cannot
     // start would sit under its lease until the next drain reclaimed it.
     for (;;) {
-      const r = await drainOnce(deps, workerId, 10, { stopAfter, hardStopAt, onClaim });
+      const r = await drainOnce(deps, workerId, 10, { stopAfter, hardStopAt, onClaim, reportSlot });
       processed += r.processed;
       failed += r.failed;
       dead += r.dead;

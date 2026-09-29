@@ -365,3 +365,29 @@ describe('setCustomerLimitAction: success (item 6)', () => {
     expect(await overrideOf('pa', SHARED)).toBeNull();
   });
 });
+
+// M3-12 follow-up (review LOW-B): clearing when there is nothing to clear is not a change.
+describe('setCustomerLimitAction: a clear with no existing override', () => {
+  it('returns ok and writes nothing: no audit row, the row (and updated_at) untouched', async () => {
+    await asAdmin();
+    const updatedAt = async () =>
+      ((await db.execute(sql`SELECT updated_at FROM customers WHERE partner_id = 'pa' AND phone = ${SHARED}`)) as unknown as { rows: Array<{ updated_at: unknown }> }).rows[0].updated_at;
+    const before = await snap();
+    const beforeUpdatedAt = await updatedAt();
+    expect(await setCustomerLimitAction(form(REF_A(), { clear: 'on' }))).toEqual({ ok: true });
+    expect(await snap()).toEqual(before);
+    expect(await updatedAt()).toEqual(beforeUpdatedAt);
+    expect(await limitAudits()).toHaveLength(0);
+  });
+
+  it('clearing an EXPIRED entry is still a real, audited clear', async () => {
+    const lapsed: SendLimitOverride = { perTransferCapCents: 40_000, setBy: 'pa-admin', setAt: '2026-09-01T00:00:00.000Z', setScope: 'partner', expiresAt: past() };
+    await plantOverride('pa', SHARED, lapsed);
+    await asAdmin();
+    expect(await setCustomerLimitAction(form(REF_A(), { clear: 'on' }))).toEqual({ ok: true });
+    expect(await overrideOf('pa', SHARED)).toBeNull();
+    const rows = await limitAudits();
+    expect(rows.map((r) => r.action)).toEqual(['send_limits.clear']);
+    expect(rows[0].meta).toMatchObject({ old: lapsed, new: null });
+  });
+});

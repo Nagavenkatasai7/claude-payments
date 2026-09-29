@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, matchesGlob } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -32,6 +32,7 @@ const ROOT = join(__dirname, '..');
 const VERCEL_JSON = JSON.parse(readFileSync(join(ROOT, 'vercel.json'), 'utf8')) as {
   crons: Array<{ path: string; schedule: string }>;
   ignoreCommand: string;
+  git?: { deploymentEnabled?: Record<string, boolean> };
 };
 
 // `* * * * *` is 1; `*&#47;N * * * *` (every N minutes) is N. Anything else is not a per-minute schedule.
@@ -70,6 +71,44 @@ describe('vercel.json — the cron config (test 1)', () => {
     expect(VERCEL_JSON.ignoreCommand).toBe(
       'if [ "${VERCEL_GIT_COMMIT_REF#component/}" != "$VERCEL_GIT_COMMIT_REF" ]; then exit 0; else exit 1; fi',
     );
+  });
+});
+
+// Owner cost rules (2026-09-29): PR branches build no Vercel preview; main keeps deploying.
+// git.deploymentEnabled takes minimatch patterns, and a branch deploys when ANY matching rule is
+// true (https://vercel.com/docs/project-configuration/git-configuration). Our branches are two
+// levels deep (feat/<component>/<slug>), so the patterns need `**`, not `*`. node:path matchesGlob
+// (Node 24, @types/node path.d.ts) has the same `*` / `**` semantics as minimatch for these patterns.
+describe('vercel.json — no preview deployments for PR branches', () => {
+  const rules = VERCEL_JSON.git?.deploymentEnabled ?? {};
+  const deploys = (branch: string): boolean => {
+    const hits = Object.entries(rules).filter(([pattern]) => matchesGlob(branch, pattern));
+    return hits.length === 0 || hits.some(([, on]) => on);
+  };
+
+  it('pins the rule set byte-for-byte', () => {
+    // Default-deny: every branch except main is off (review of #435: the repo also uses docs/,
+    // spec/, review/, pr/, archive/ and GitHub's revert-* branches). main matches both rules and
+    // one is true, so it still deploys.
+    expect(rules).toEqual({ main: true, '**': false });
+  });
+
+  it.each([
+    'feat/admin-dashboard/partner-staff',
+    'fix/platform-security/skip-pr-previews',
+    'dependabot/npm_and_yarn/undici-6.29.0',
+    'component/money-paths',
+    'loop/claims-audit-20260707',
+    'chore/re-enable-overnight-bug-hunt',
+    'docs/x',
+    'spec/ui-redesign',
+    'revert-12-feat/a/b',
+  ])('%s builds no deployment', (branch) => {
+    expect(deploys(branch)).toBe(false);
+  });
+
+  it('main still deploys', () => {
+    expect(deploys('main')).toBe(true);
   });
 });
 

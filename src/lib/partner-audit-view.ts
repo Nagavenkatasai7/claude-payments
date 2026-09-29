@@ -72,7 +72,7 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'pii.reveal': ['field'],
   'pii.view': ['fields'],
   'report.request': ['kind'],
-  'webhook.replay': ['deliveryId'],
+  'webhook.replay': ['outboxId'],
 });
 
 const MASK = '••••'; // ••••
