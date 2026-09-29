@@ -9,13 +9,13 @@ import { PARTNER_ROUTES } from '../../routes';
 export const metadata: Metadata = { title: t('partner.integrations.title'), robots: { index: false, follow: false } };
 
 // /partner/integrations (UI redesign M3-13): the hub for the three integration pages. Admin only;
-// it reads no tenant data. A tab links only to a route present in PARTNER_ROUTES (webhooks arrive
-// with M3-15; until then it is text).
+// it reads no tenant data. A tab links only to a route present in PARTNER_ROUTES (a tab without an
+// href renders a "coming soon" badge).
 type Tab = { key: string; title: MessageKey; body: MessageKey; Icon: typeof MessageCircle; href?: string };
 const TABS: readonly Tab[] = [
   { key: 'whatsapp', title: 'partner.integrations.whatsapp.title', body: 'partner.integrations.whatsapp.body', Icon: MessageCircle, href: PARTNER_ROUTES.integrationsWhatsapp.href },
   { key: 'api-keys', title: 'partner.integrations.apiKeys.title', body: 'partner.integrations.apiKeys.body', Icon: KeyRound, href: PARTNER_ROUTES.integrationsApiKeys.href },
-  { key: 'webhooks', title: 'partner.integrations.webhooks.title', body: 'partner.integrations.webhooks.body', Icon: Webhook },
+  { key: 'webhooks', title: 'partner.integrations.webhooks.title', body: 'partner.integrations.webhooks.body', Icon: Webhook, href: PARTNER_ROUTES.integrationsWebhooks.href },
 ];
 
 export default async function PartnerIntegrationsPage() {
