@@ -13,7 +13,9 @@ import { revalidatePath } from 'next/cache';
 import { notFound, redirect } from 'next/navigation';
 import { requirePlatformAdmin } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { eq } from 'drizzle-orm';
 import { getDb } from '@/db/client';
+import { partners } from '@/db/schema';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { approveGoLive, getGoLive, getGoLiveForUpdate } from '@/db/repos/partner-go-live-repo';
 import { loadOnboardingFacts } from '@/db/repos/partner-onboarding-facts';
@@ -76,6 +78,9 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
     const row = await getGoLiveForUpdate(tx, id);
     if (!row || !row.requestedAt) return 'not_requested';
     if (row.approvedAt) return 'already';
+    // Re-read the status under a share lock: a suspend between the precheck and here refuses.
+    const [p] = await tx.select({ status: partners.status }).from(partners).where(eq(partners.id, id)).limit(1).for('share');
+    if (!p || p.status !== 'active') return 'not_active';
     if (!(await approveGoLive(tx, id, staff.username))) return 'not_requested';
     await createAuditRepo(tx).record({
       partnerId: id,
