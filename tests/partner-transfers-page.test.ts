@@ -49,6 +49,7 @@ import { auditEvents, fundingEvents, transfers } from '@/db/schema';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { encodeTransferCursor } from '@/lib/partner-transfers';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 
 const PHONE = '14155550101';
 const list = async (sp: Record<string, string> = {}) => renderToStaticMarkup(await ListPage({ searchParams: Promise.resolve(sp) }));
@@ -280,6 +281,10 @@ describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is 
   const delegate = (id: string) => db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = ${id}`);
   const seedHold = (id: string, reasons: string[]) =>
     seedPartnerTransfer(db, { id, partnerId: 'pa', status: 'in_review', complianceStatus: 'flagged', complianceReasons: reasons });
+  // M3-10 follow-up: the sender's customer row (unflagged) for the default seeded phone.
+  beforeEach(async () => {
+    await createCustomerRepo(db, async () => null).ensureCustomer('pa', PHONE);
+  });
 
   it('shows for an admin on a delegated partner’s EDD-class hold', async () => {
     await delegate('pa');
@@ -289,6 +294,19 @@ describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is 
     expect(html).toContain(RELEASE);
     expect(html).toContain('Release hold');
     expectNoPii(html);
+  });
+
+  it.each(['pep_hit', 'watchlist_hit'])('hidden when the SENDER customer has %s (M3-10 follow-up), and when the sender row is missing', async (col) => {
+    await delegate('pa');
+    await seedHold('tr_A_edd', ['Large transfer amount.']);
+    await asAdmin();
+    expect(await detail('tr_A_edd')).toContain(RELEASE);
+    await db.execute(sql`UPDATE customers SET ${sql.raw(col)} = true WHERE partner_id = 'pa'`);
+    const html = await detail('tr_A_edd');
+    expect(html).not.toContain(RELEASE);
+    expect(html).toContain('SmartRemit compliance reviews and releases this hold.');
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'pa'`);
+    expect(await detail('tr_A_edd')).not.toContain(RELEASE);
   });
 
   it('hidden for an agent (who is told an admin can release it)', async () => {

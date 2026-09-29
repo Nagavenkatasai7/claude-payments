@@ -532,3 +532,24 @@ export function createCustomerRepo(
 }
 
 export type CustomerRepo = ReturnType<typeof createCustomerRepo>;
+
+/** The two customer-level screening flags (kyc-state-machine sets them from Persona reports). */
+export interface SenderScreeningFlags {
+  watchlistHit: boolean | null;
+  pepHit: boolean | null;
+}
+
+/**
+ * M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release.
+ * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns (no
+ * PII column, no decrypt). null when this tenant has no row for the phone. Throws on a DB error:
+ * the caller (lib/sender-screening.ts) turns that into a fail-closed null.
+ */
+export async function readSenderScreeningFlags(db: DbOrTx, partnerId: PartnerId, phone: string): Promise<SenderScreeningFlags | null> {
+  const rows = await db
+    .select({ watchlistHit: customers.watchlistHit, pepHit: customers.pepHit })
+    .from(customers)
+    .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
+    .limit(1);
+  return rows[0] ?? null;
+}

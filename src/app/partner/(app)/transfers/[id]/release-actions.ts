@@ -9,6 +9,7 @@ import { getStore } from '@/lib/store';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { isPartnerReleasableHold } from '@/lib/compliance-config';
+import { loadSenderScreening } from '@/lib/sender-screening';
 import { canReleaseHeld, releaseTransfer } from '@/lib/dashboard-ops';
 import { scopeOf } from '@/lib/staff-scope';
 import { requireStaffReason, STAFF_REASON_MIN } from '@/lib/send-limits';
@@ -30,7 +31,9 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  * (the reason lands in append-only audit_events.meta); the owning partner's KYC is DELEGATED; and
  * every hold reason is in PARTNER_RELEASABLE_REASONS (isPartnerReleasableHold: any screening /
  * sanctions or AML reason, an unknown or empty list, a blocked row ⇒ refused), re-checked by the
- * legacy canReleaseHeld rule as defence in depth.
+ * legacy canReleaseHeld rule as defence in depth. M3-10 follow-up: the transfer SENDER's customer
+ * row (read inside the session tenant) must exist and carry no PEP / watchlist hit; a missing row
+ * or a failed lookup is refused (fail closed).
  *
  * The money movement is NOT forked: releaseTransfer (dashboard-ops.ts) → settlement.releaseHold
  * commits the guarded in_review → paid claim, the rail effect and the ONE `transfer.release` audit
@@ -65,7 +68,8 @@ export async function releaseHoldAction(formData: FormData): Promise<ActionResul
 
   // The guard. One generic refusal for screening, AML, 'ours', blocked, not held and unknown.
   const owner = await getPartnerStore().getPartner(ctx.partnerId);
-  if (!isPartnerReleasableHold(transfer, owner) || !canReleaseHeld(scopeOf(ctx.staff), owner, transfer)) {
+  const sender = await loadSenderScreening(getDb(), ctx.partnerId, transfer.phone);
+  if (!isPartnerReleasableHold(transfer, owner, sender) || !canReleaseHeld(scopeOf(ctx.staff), owner, transfer)) {
     return notAllowed;
   }
 
