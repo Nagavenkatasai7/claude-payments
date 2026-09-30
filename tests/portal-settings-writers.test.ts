@@ -83,6 +83,26 @@ describe('setPortalEnabled', () => {
     expect((await getPortalSettings(db, 'pa')).portalEnabledAt).toBeNull();
   });
 
+  // Owner decision 2026-09-29: SmartRemit's own tenant may enable without a recorded template
+  // (its codes go as free-form chat text inside the 24h window). Non-default partners unchanged.
+  it('the default tenant on the shared number may enable WITHOUT a recorded template', async () => {
+    expect(await setPortalEnabled(db, 'default', true, 'staff:alice', deps(SHARED))).toEqual({ ok: true });
+    expect((await getPortalSettings(db, 'default')).portalEnabledAt).toBeInstanceOf(Date);
+    expect(await auditRows(db, 'default', 'partner.portal.enabled')).toHaveLength(1);
+  });
+
+  it('a non-default partner without a template is still not_ready on every channel', async () => {
+    for (const integ of [OWN, SHARED, INCOMPLETE]) {
+      expect(await setPortalEnabled(db, 'pa', true, 'staff:alice', deps(integ))).toEqual({ ok: false, reason: 'not_ready' });
+    }
+    expect((await getPortalSettings(db, 'pa')).portalEnabledAt).toBeNull();
+  });
+
+  it('the default tenant without a template still fails closed on an integrations read error', async () => {
+    const boom = { getIntegrations: async () => { throw new Error('db down'); } };
+    expect(await setPortalEnabled(db, 'default', true, 'staff:alice', boom)).toEqual({ ok: false, reason: 'not_ready' });
+  });
+
   it('the default tenant on the shared number is ready once its template is set', async () => {
     await setPortalAuthTemplate(db, 'default', { name: 'login_otp', lang: 'en' }, 'staff:alice');
     expect(await setPortalEnabled(db, 'default', true, 'staff:alice', deps(SHARED))).toEqual({ ok: true });

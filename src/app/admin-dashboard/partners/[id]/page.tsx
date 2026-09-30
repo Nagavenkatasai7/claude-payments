@@ -15,6 +15,7 @@ import { feedActorLabel, listTenantStaff } from '@/lib/partner-staff-policy';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { env } from '@/lib/env';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
@@ -652,7 +653,9 @@ export default async function PartnerDetailPage({
                           <dd>
                             {portalSettings.authTemplateName && portalSettings.authTemplateLang
                               ? `${portalSettings.authTemplateName} (${portalSettings.authTemplateLang})`
-                              : 'not recorded'}
+                              : partner.id === DEFAULT_PARTNER_ID
+                                ? 'not recorded: SmartRemit’s own tenant sends sign-in codes as chat messages, only inside the 24h window, until a template is recorded'
+                                : 'not recorded'}
                           </dd>
                           <dt>Portal</dt>
                           <dd>
