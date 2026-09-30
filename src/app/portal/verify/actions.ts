@@ -72,7 +72,8 @@ export async function stepUpRequestAction(_prev: PortalStepUpState | null, formD
     return { step: 'start', next, error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4): never a 500
   }
   await issueAndSendAfterResponse(pid, phone, 'stepup', ipOk, ready);
-  return { step: 'code', next, pending, notice: 'portal.verify.codeSent' };
+  // Freeform mode (the default tenant without a template): the same hint on every request.
+  return { step: 'code', next, pending, notice: ready.mode === 'freeform' ? 'portal.verify.codeSentChat' : 'portal.verify.codeSent' };
 }
 
 /** The WhatsApp step-up code. */

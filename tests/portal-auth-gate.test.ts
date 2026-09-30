@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
-import { auditEvents } from '@/db/schema';
+import { auditEvents, outbox } from '@/db/schema';
 import { freshDb, seedPartner } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
@@ -38,6 +38,8 @@ const h = vi.hoisted(() => {
     mfaThrow: false,
     mfaValid: '654321',
     redisProxy: null as unknown,
+    inWindow: new Set<string>(),
+    windowReads: [] as string[],
   };
   state.redisProxy = new Proxy(
     {},
@@ -86,7 +88,16 @@ vi.mock('@/lib/portal-site', () => ({
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => h.redisProxy }));
 vi.mock('@/db/client', () => ({ getDb: () => h.db }));
-vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/store')>()), getStore: () => ({}) }));
+vi.mock('@/lib/store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/store')>()),
+  // The 24h service-window marker (freeform mode only): in window iff the phone is in h.inWindow.
+  getStore: () => ({
+    getLastInboundAt: async (_pid: string, phone: string) => {
+      h.windowReads.push(phone);
+      return h.inWindow.has(phone) ? new Date().toISOString() : null;
+    },
+  }),
+}));
 vi.mock('@/lib/customer-store', async () => {
   const { createCustomerRepo } = await import('@/db/repos/customer-repo');
   return { getCustomerStore: () => createCustomerRepo(h.db as never, async () => null) };
@@ -159,6 +170,8 @@ beforeEach(async () => {
   h.afterQ = [];
   h.ops = [];
   h.sends = [];
+  h.inWindow = new Set();
+  h.windowReads = [];
   h.mfaEnrolled = new Set();
   h.mfaThrow = false;
   now = Date.now();
@@ -406,6 +419,29 @@ describe('step-up', () => {
     }
     await flushAfter();
     expect(h.sends).toEqual([]);
+  });
+
+  it('freeform mode (default tenant, no template): the chat notice; in window → sent; outside → nothing issued, no alert', async () => {
+    h.site = SITE('default', 'smartremit');
+    await createCustomerRepo(db, async () => null).upsertOnFirstInbound('default', PHONE);
+    await signedIn('default');
+    h.ready = { ready: true, mode: 'freeform', creds: undefined };
+    try {
+      const out = await stepUpRequestAction(null, fd({ next: '/portal/send' }));
+      expect(out).toMatchObject({ step: 'code', next: '/portal/send', notice: 'portal.verify.codeSentChat' });
+      expect(h.windowReads).toEqual([]); // the window is read only after the response
+      await flushAfter();
+      expect(h.sends).toEqual([]);
+      expect(await auditCount('default', 'portal.auth.otp_send_failed')).toBe(1);
+      expect((await db.select().from(outbox).where(eq(outbox.kind, 'ops.alert'))).length).toBe(0);
+
+      h.inWindow.add(PHONE);
+      await stepUpRequestAction(null, fd({ next: '/portal/send' }));
+      await flushAfter();
+      expect(h.sends.map((x) => [x.partnerId, x.phone])).toEqual([['default', PHONE]]);
+    } finally {
+      h.ready = { ready: true, creds: { phoneNumberId: '555000', token: 'tok' }, template: { name: 'acme_login', lang: 'en' } };
+    }
   });
 
   it('channel not ready → cant_send, nothing issued', async () => {

@@ -41,6 +41,8 @@ const h = vi.hoisted(() => {
     mfaEnrolled: new Set<string>(),
     mfaValid: '654321',
     redisProxy: null as unknown,
+    inWindow: new Set<string>(),
+    windowReads: [] as string[],
   };
   state.redisProxy = new Proxy(
     {},
@@ -90,7 +92,16 @@ vi.mock('@/lib/portal-site', () => ({
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => h.redisProxy }));
 vi.mock('@/db/client', () => ({ getDb: () => h.db }));
-vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/store')>()), getStore: () => ({}) }));
+vi.mock('@/lib/store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/store')>()),
+  // The 24h service-window marker (freeform mode only): in window iff the phone is in h.inWindow.
+  getStore: () => ({
+    getLastInboundAt: async (_pid: string, phone: string) => {
+      h.windowReads.push(phone);
+      return h.inWindow.has(phone) ? new Date().toISOString() : null;
+    },
+  }),
+}));
 vi.mock('@/lib/customer-store', async () => {
   const { createCustomerRepo } = await import('@/db/repos/customer-repo');
   return { getCustomerStore: () => createCustomerRepo(h.db as never, async () => null) };
@@ -173,6 +184,8 @@ beforeEach(async () => {
   h.failPrefix = '';
   h.sends = [];
   h.sendHang = false;
+  h.inWindow = new Set();
+  h.windowReads = [];
   h.mfaEnrolled = new Set();
   h.ready = { ready: true, creds: { phoneNumberId: '555000', token: 'tok' }, template: { name: 'acme_login', lang: 'en' } };
   await repo().upsertOnFirstInbound('pa', KNOWN); // a known, opted-in customer of pa
@@ -292,6 +305,69 @@ describe('requestCodeAction: enumeration safety', () => {
     }
     expect(h.ops).toEqual([]);
     expect(h.afterQ).toEqual([]);
+  });
+});
+
+// Owner decision 2026-09-29: SmartRemit's own tenant has no approved AUTHENTICATION template yet,
+// so its codes go as free-form chat text, only inside the 24h window. The window is phone-dependent,
+// so it is read ONLY inside after(); the request path answers one chat notice for every phone.
+describe('requestCodeAction: freeform mode (the default tenant without a template)', () => {
+  const IN_WIN = KNOWN;
+  const OUT_WIN = UNKNOWN;
+  const CHAT_NOTICE = 'portal.login.code_sent_if_possible_chat';
+  beforeEach(async () => {
+    h.site = SITE('default', 'smartremit');
+    h.ready = { ready: true, mode: 'freeform', creds: undefined };
+    await repo().upsertOnFirstInbound('default', KNOWN);
+    h.inWindow = new Set([IN_WIN]);
+  });
+
+  it('every phone (in / out of the window, known / unknown) gets the SAME chat notice; no window read on the request path', async () => {
+    const states: PortalLoginState[] = [];
+    for (const phone of [IN_WIN, OUT_WIN]) states.push(await requestCodeAction(null, fd({ phone })));
+    for (const s of states) expect(strip(s)).toEqual({ step: 'code', last4: '0101', notice: CHAT_NOTICE, pending: undefined });
+    expect(h.windowReads).toEqual([]);
+    expect(h.sends).toEqual([]);
+  });
+
+  it('request-path purity in freeform mode: the identical Redis call sequence in and out of the window', async () => {
+    const seqs: string[][] = [];
+    let n = 0;
+    for (const phone of [IN_WIN, OUT_WIN]) {
+      h.ip = `198.51.100.${++n}`;
+      h.ops = [];
+      await requestCodeAction(null, fd({ phone }));
+      expect(h.ops.some((o) => o.split(' ')[1].startsWith('potp:') || o.split(' ')[1].startsWith('lastmsg:')), phone).toBe(false);
+      seqs.push(h.ops.map((o) => o.split(' ')[0]));
+    }
+    expect(seqs[1]).toEqual(seqs[0]);
+  });
+
+  it('after the response: in window → sent; outside → no code issued, audited outside_window, NO ops alert', async () => {
+    await requestCodeAction(null, fd({ phone: IN_WIN }));
+    await requestCodeAction(null, fd({ phone: OUT_WIN }));
+    await flushAfter();
+    expect(h.sends.map((s) => [s.partnerId, s.phone])).toEqual([['default', IN_WIN]]);
+    expect(await auditCount('default', 'portal.auth.otp_sent')).toBe(1);
+    expect(await auditCount('default', 'portal.auth.otp_send_failed')).toBe(1);
+    expect(await db.select().from(outbox).where(eq(outbox.kind, 'ops.alert'))).toHaveLength(0);
+    // Nothing was issued for the out-of-window phone, so no cooldown was claimed: after the customer
+    // messages us, an immediate new request gets a code.
+    h.inWindow.add(OUT_WIN);
+    await requestCodeAction(null, fd({ phone: OUT_WIN }));
+    await flushAfter();
+    expect(sendsTo(OUT_WIN)).toHaveLength(1);
+  });
+
+  it('resend in freeform mode answers the same chat notice', async () => {
+    const s = await requestCodeAction(null, fd({ phone: IN_WIN }));
+    const r = await resendCodeAction(null, fd({ pending: s.pending! }));
+    expect(r).toMatchObject({ step: 'code', last4: '0101', notice: CHAT_NOTICE });
+  });
+
+  it('template mode keeps the original notice', async () => {
+    h.ready = { ready: true, mode: 'template', creds: undefined, template: { name: 'sr_login', lang: 'en' } };
+    expect((await requestCodeAction(null, fd({ phone: OUT_WIN }))).notice).toBe('portal.login.code_sent_if_possible');
   });
 });
 
