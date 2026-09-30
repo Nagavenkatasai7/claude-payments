@@ -46,6 +46,15 @@ export interface PortalLoginState {
   error?: MessageKey;
 }
 
+/**
+ * The "code sent" notice. It depends on the PARTNER's delivery mode only (never the phone), so every
+ * phone gets the same copy. Freeform mode (the default tenant without a template) adds the "message
+ * us first" hint for EVERY request: whether this phone is inside the 24h window is never revealed.
+ */
+function codeSentNotice(ready: { mode?: 'template' | 'freeform' }): MessageKey {
+  return ready.mode === 'freeform' ? 'portal.login.code_sent_if_possible_chat' : 'portal.login.code_sent_if_possible';
+}
+
 /** Step 1: send a code. The SAME answer for every well-formed phone (see the module note). */
 export async function requestCodeAction(_prev: PortalLoginState | null, formData: FormData): Promise<PortalLoginState> {
   const site = await requirePortalSite();
@@ -75,7 +84,7 @@ export async function requestCodeAction(_prev: PortalLoginState | null, formData
     return { step: 'phone', error: 'portal.login.cant_send' };
   }
   await issueAndSendAfterResponse(pid, phone, 'login', ipOk, ready);
-  return { step: 'code', pending, last4: phone.slice(-4), notice: 'portal.login.code_sent_if_possible' };
+  return { step: 'code', pending, last4: phone.slice(-4), notice: codeSentNotice(ready) };
 }
 
 /** "Send a new code" on the code step: the same after() discipline, keyed by the pending token. */
@@ -101,7 +110,7 @@ export async function resendCodeAction(_prev: PortalLoginState | null, formData:
     return { step: 'phone', error: 'portal.login.cant_send' };
   }
   await issueAndSendAfterResponse(pid, rec.phone, 'login', ipOk, ready);
-  return { step: 'code', pending: pendingToken, last4: rec.phone.slice(-4), notice: 'portal.login.code_sent_if_possible' };
+  return { step: 'code', pending: pendingToken, last4: rec.phone.slice(-4), notice: codeSentNotice(ready) };
 }
 
 /** After a proven code (and TOTP where enrolled): consent if needed, else the session. */

@@ -17,12 +17,13 @@ vi.mock('@/lib/channel-health', async (orig) => ({
 }));
 vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {} }));
 
-import { alertPortalOtpFailure, portalOtpChannelReady, sendPortalOtp } from '@/lib/portal-otp-sender';
+import { alertPortalOtpFailure, portalOtpChannelReady, portalOtpDeliverable, sendPortalOtp } from '@/lib/portal-otp-sender';
 
 const OWN: PartnerIntegrations = { ...EMPTY_PARTNER_INTEGRATIONS, whatsapp: { phoneNumberId: '555000', token: 'partner-token' } };
 const SHARED = EMPTY_PARTNER_INTEGRATIONS;
 const INCOMPLETE: PartnerIntegrations = { ...EMPTY_PARTNER_INTEGRATIONS, whatsapp: { phoneNumberId: '555000' } };
 const TEMPLATE = { authTemplateName: 'acme_login', authTemplateLang: 'en_US', portalEnabledAt: new Date() };
+const NO_TEMPLATE = null;
 
 function deps(o: { integrations?: PartnerIntegrations; settings?: typeof TEMPLATE | null; health?: string | null; throwOn?: 'integrations' | 'settings' | 'health' } = {}) {
   return {
@@ -52,6 +53,7 @@ describe('portalOtpChannelReady', () => {
   it('own channel + template → ready with THE PARTNER creds and template', async () => {
     expect(await portalOtpChannelReady('pa', deps())).toEqual({
       ready: true,
+      mode: 'template',
       creds: { phoneNumberId: '555000', token: 'partner-token' },
       template: { name: 'acme_login', lang: 'en_US' },
     });
@@ -62,6 +64,7 @@ describe('portalOtpChannelReady', () => {
   it('the default tenant on the shared number → ready with creds undefined (the env number is its own)', async () => {
     expect(await portalOtpChannelReady('default', deps({ integrations: SHARED }))).toEqual({
       ready: true,
+      mode: 'template',
       creds: undefined,
       template: { name: 'acme_login', lang: 'en_US' },
     });
@@ -71,6 +74,37 @@ describe('portalOtpChannelReady', () => {
   });
   it('no template → not ready', async () => {
     expect(await portalOtpChannelReady('pa', deps({ settings: null }))).toEqual({ ready: false, why: 'no_template' });
+  });
+
+  // Owner decision 2026-09-29: SmartRemit's own tenant has no approved AUTHENTICATION template yet,
+  // so its codes go as free-form chat text inside the 24h window. Every other partner is unchanged.
+  it('the DEFAULT tenant with no template → ready in freeform mode, on the shared (env) number', async () => {
+    expect(await portalOtpChannelReady('default', deps({ integrations: SHARED, settings: NO_TEMPLATE }))).toEqual({
+      ready: true,
+      mode: 'freeform',
+      creds: undefined,
+    });
+  });
+  it('a NON-default partner with no template → still no_template (own, shared or incomplete channel)', async () => {
+    for (const integrations of [OWN, SHARED, INCOMPLETE]) {
+      expect(await portalOtpChannelReady('pa', deps({ integrations, settings: NO_TEMPLATE }))).toEqual({ ready: false, why: 'no_template' });
+    }
+  });
+  it('the default tenant in freeform mode still honours the health auth-error window', async () => {
+    const recent = JSON.stringify({ auth_error: { at: new Date(Date.now() - 10 * 60_000).toISOString(), count: 1, code: 190 } });
+    expect(await portalOtpChannelReady('default', deps({ integrations: SHARED, settings: NO_TEMPLATE, health: recent }))).toEqual({
+      ready: false,
+      why: 'health_auth_error',
+    });
+  });
+  it.each(['integrations', 'settings', 'health'] as const)('the default tenant: a %s read that throws → lookup_failed', async (throwOn) => {
+    expect(await portalOtpChannelReady('default', deps({ integrations: SHARED, settings: NO_TEMPLATE, throwOn }))).toEqual({
+      ready: false,
+      why: 'lookup_failed',
+    });
+  });
+  it('a recorded template always wins for the default tenant (template mode, not freeform)', async () => {
+    expect(await portalOtpChannelReady('default', deps({ integrations: SHARED }))).toMatchObject({ ready: true, mode: 'template' });
   });
   it('an auth_error health mark within the hour → not ready; an older one is ignored', async () => {
     const recent = JSON.stringify({ auth_error: { at: new Date(Date.now() - 10 * 60_000).toISOString(), count: 1, code: 190 } });
@@ -84,7 +118,7 @@ describe('portalOtpChannelReady', () => {
 });
 
 describe('sendPortalOtp', () => {
-  const ready = { ready: true as const, creds: { phoneNumberId: '555000', token: 'partner-token' }, template: { name: 'acme_login', lang: 'en_US' } };
+  const ready = { ready: true as const, mode: 'template' as const, creds: { phoneNumberId: '555000', token: 'partner-token' }, template: { name: 'acme_login', lang: 'en_US' } };
 
   it('sends ONE authentication template with the partner creds and template name', async () => {
     w.sendAuthTemplate.mockResolvedValue(undefined);
@@ -119,6 +153,85 @@ describe('sendPortalOtp', () => {
     vi.stubEnv('OTP_DEV_MODE', 'true');
     expect(await sendPortalOtp('pa', '14155550101', '123456', ready)).toEqual({ ok: true });
     expect(w.sendAuthTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendPortalOtp: freeform mode (the default tenant without a template)', () => {
+  const freeform = { ready: true as const, mode: 'freeform' as const, creds: undefined };
+  const PHONE = '14155550101';
+  const CODE = '482913';
+  const store = (inWindow: boolean | 'throw') => ({
+    getLastInboundAt: vi.fn(async (_pid: string, _phone: string) => {
+      if (inWindow === 'throw') throw new Error('redis down');
+      return inWindow ? new Date().toISOString() : null;
+    }),
+  });
+
+  it('inside the 24h window → ONE free-form sendText on the default (env) creds; the code is never logged', async () => {
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
+    w.sendText.mockResolvedValue(undefined);
+    const st = store(true);
+    expect(await sendPortalOtp('default', PHONE, CODE, freeform, { store: st })).toEqual({ ok: true });
+    expect(st.getLastInboundAt).toHaveBeenCalledWith('default', PHONE);
+    expect(w.sendText).toHaveBeenCalledTimes(1);
+    const [to, text, creds] = w.sendText.mock.calls[0];
+    expect(to).toBe(PHONE);
+    expect(String(text)).toContain(CODE);
+    expect(creds).toBeUndefined();
+    expect(w.sendAuthTemplate).not.toHaveBeenCalled();
+    expect(w.sendOtpCode).not.toHaveBeenCalled();
+    for (const spy of spies) {
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(CODE);
+      spy.mockRestore();
+    }
+  });
+
+  it('outside the window → NO send at all and the distinct outside_window outcome', async () => {
+    expect(await sendPortalOtp('default', PHONE, CODE, freeform, { store: store(false) })).toEqual({ ok: false, reason: 'outside_window' });
+    expect(w.sendText).not.toHaveBeenCalled();
+    expect(w.sendAuthTemplate).not.toHaveBeenCalled();
+  });
+
+  it('a window read that fails counts as outside (the conservative isInServiceWindow answer)', async () => {
+    expect(await sendPortalOtp('default', PHONE, CODE, freeform, { store: store('throw') })).toEqual({ ok: false, reason: 'outside_window' });
+    expect(w.sendText).not.toHaveBeenCalled();
+  });
+
+  it('a Graph error on the free-form send → ok:false with the code (never the OTP) and a 190 health mark', async () => {
+    w.sendText.mockRejectedValue(new WhatsAppSendError('x (401): y', { status: 401, code: 190 }));
+    const out = await sendPortalOtp('default', PHONE, CODE, freeform, { store: store(true) });
+    expect(out).toEqual({ ok: false, code: 190 });
+    expect(JSON.stringify(out)).not.toContain(CODE);
+    expect(w.recordChannelHealth).toHaveBeenCalledWith('default', 'auth_error', { code: 190 });
+    expect(w.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a 131047 re-engagement error', new WhatsAppSendError('x (400): y', { status: 400, code: 131047 })],
+    ['a legacy HTTP 470', new WhatsAppSendError('x (470): y', { status: 470 })],
+  ])("Meta's own window rejection (%s) → outside_window, no health mark (the marker said in, Meta said out)", async (_l, err) => {
+    w.sendText.mockRejectedValue(err);
+    expect(await sendPortalOtp('default', PHONE, CODE, freeform, { store: store(true) })).toEqual({ ok: false, reason: 'outside_window' });
+    expect(w.recordChannelHealth).not.toHaveBeenCalled();
+  });
+
+  it('template mode for the default tenant → the template path, never free-form, even on failure', async () => {
+    const tpl = { ready: true as const, mode: 'template' as const, creds: undefined, template: { name: 'sr_login', lang: 'en' } };
+    w.sendAuthTemplate.mockRejectedValue(new WhatsAppSendError('x (400): y', { status: 400, code: 132001 }));
+    const st = store(true);
+    expect(await sendPortalOtp('default', PHONE, CODE, tpl, { store: st })).toEqual({ ok: false, code: 132001 });
+    expect(w.sendAuthTemplate).toHaveBeenCalledTimes(1);
+    expect(w.sendText).not.toHaveBeenCalled();
+    expect(st.getLastInboundAt).not.toHaveBeenCalled(); // no window gate on the template path
+  });
+
+  it('portalOtpDeliverable: template → true without a window read; freeform → the window answer', async () => {
+    const tpl = { ready: true as const, mode: 'template' as const, creds: undefined, template: { name: 'sr_login', lang: 'en' } };
+    const st = store(false);
+    expect(await portalOtpDeliverable('default', PHONE, tpl, { store: st })).toBe(true);
+    expect(st.getLastInboundAt).not.toHaveBeenCalled();
+    expect(await portalOtpDeliverable('default', PHONE, freeform, { store: st })).toBe(false);
+    expect(await portalOtpDeliverable('default', PHONE, freeform, { store: store(true) })).toBe(true);
   });
 });
 

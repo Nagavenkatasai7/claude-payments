@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { freshDb } from './helpers-db';
+import { eq } from 'drizzle-orm';
 import { partners, partnerSites } from '@/db/schema';
 import type { Db } from '@/db/client';
 import {
@@ -11,7 +12,7 @@ import {
 } from '@/lib/featured-send-partner';
 
 // Home-Send H1: the home-page "Send with <partner>" button appears ONLY for a valid
-// featured partner (env-configured, active, not the demo tenant, with a servable
+// featured partner (env-configured, active — SmartRemit's own tenant only in test mode — with a servable
 // partner_sites slug). Every doubt — and every error — resolves to null: no button.
 
 const ENV = (over: Record<string, string | undefined> = {}) => ({ FEATURED_SEND_PARTNER_ID: 'acme', ...over });
@@ -62,7 +63,7 @@ describe('resolveFeaturedSendPartner', () => {
       { partnerId: 'acme', slug: 'acme-pay' },
       { partnerId: 'off', slug: 'off-pay' },
       { partnerId: 'noslug', slug: null, accentColor: '#0e7490' },
-      { partnerId: 'default', slug: 'demo' },
+      { partnerId: 'default', slug: 'send' },
     ]);
   });
   afterEach(() => vi.restoreAllMocks());
@@ -108,13 +109,29 @@ describe('resolveFeaturedSendPartner', () => {
     expect(await resolveFeaturedSendPartner({ env: {}, db: throwingDb() })).toBeNull();
   });
 
-  it('unknown, inactive, demo, no-site and no-slug partners ⇒ null', async () => {
-    for (const id of ['ghost', 'off', 'default', 'nosite', 'noslug']) {
+  it('unknown, inactive, no-site and no-slug partners ⇒ null', async () => {
+    for (const id of ['ghost', 'off', 'nosite', 'noslug']) {
       expect({ id, got: await resolveFeaturedSendPartner({ env: ENV({ FEATURED_SEND_PARTNER_ID: id }), db }) }).toEqual({
         id,
         got: null,
       });
     }
+  });
+
+  it("SmartRemit's own tenant (default) is featured, in TEST mode only", async () => {
+    const got = await resolveFeaturedSendPartner({ env: ENV({ FEATURED_SEND_PARTNER_ID: 'default' }), db });
+    expect(got).toMatchObject({ slug: 'send', mode: 'test' });
+    expect(got?.legalName).toBeUndefined();
+  });
+
+  it('the default tenant is NEVER live, even with live + confirmed + a configured licensed entity', async () => {
+    await db
+      .update(partners)
+      .set({ supportConfig: { disclosure: { licensedEntity: 'SmartRemit Inc' } } })
+      .where(eq(partners.id, 'default'));
+    const got = await resolveFeaturedSendPartner({ env: ENV({ FEATURED_SEND_PARTNER_ID: 'default', ...LIVE }), db });
+    expect(got?.mode).toBe('test');
+    expect(got?.legalName).toBeUndefined();
   });
 
   it('a slug that is not servable ⇒ null (defence in depth over the DB check)', async () => {

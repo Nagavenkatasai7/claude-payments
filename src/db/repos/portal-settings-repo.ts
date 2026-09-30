@@ -109,7 +109,8 @@ export interface PortalEnableDeps {
 /**
  * Switch the partner's portal on or off (audited `partner.portal.enabled` / `.disabled`).
  * Enabling is REFUSED (`not_ready`) unless the auth template is recorded AND the partner sends from
- * its OWN WhatsApp number; the default tenant counts as own on the shared number (owner O2). Any
+ * its OWN WhatsApp number; the default tenant counts as own on the shared number (owner O2) and, alone,
+ * may enable without a template (owner 2026-09-29: free-form codes inside the 24h window). Any
  * readiness read that throws also refuses (fail closed). A repeat enable keeps the first stamp.
  */
 export async function setPortalEnabled(
@@ -122,7 +123,9 @@ export async function setPortalEnabled(
   if (!(await partnerExists(db, partnerId))) return { ok: false, reason: 'not_found' };
   if (enabled) {
     const s = await getPortalSettings(db, partnerId);
-    if (!s.authTemplateName || !s.authTemplateLang) return { ok: false, reason: 'not_ready' };
+    // Owner decision 2026-09-29: the default tenant may enable without a template (its codes go as
+    // free-form chat text inside the 24h window; portal-otp-sender.ts). Every other partner needs one.
+    if ((!s.authTemplateName || !s.authTemplateLang) && partnerId !== DEFAULT_PARTNER_ID) return { ok: false, reason: 'not_ready' };
     let own: boolean;
     try {
       const integrations = await (deps?.getIntegrations ?? ((id: PartnerId) => createIntegrationsRepo(db).getIntegrations(id)))(partnerId);
