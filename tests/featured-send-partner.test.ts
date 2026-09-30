@@ -12,7 +12,7 @@ import {
 } from '@/lib/featured-send-partner';
 
 // Home-Send H1: the home-page "Send with <partner>" button appears ONLY for a valid
-// featured partner (env-configured, active, not the demo tenant, with a servable
+// featured partner (env-configured, active — SmartRemit's own tenant only in test mode — with a servable
 // partner_sites slug). Every doubt — and every error — resolves to null: no button.
 
 const ENV = (over: Record<string, string | undefined> = {}) => ({ FEATURED_SEND_PARTNER_ID: 'acme', ...over });
@@ -63,7 +63,7 @@ describe('resolveFeaturedSendPartner', () => {
       { partnerId: 'acme', slug: 'acme-pay' },
       { partnerId: 'off', slug: 'off-pay' },
       { partnerId: 'noslug', slug: null, accentColor: '#0e7490' },
-      { partnerId: 'default', slug: 'demo' },
+      { partnerId: 'default', slug: 'send' },
     ]);
   });
   afterEach(() => vi.restoreAllMocks());
@@ -120,7 +120,7 @@ describe('resolveFeaturedSendPartner', () => {
 
   it("SmartRemit's own tenant (default) is featured, in TEST mode only", async () => {
     const got = await resolveFeaturedSendPartner({ env: ENV({ FEATURED_SEND_PARTNER_ID: 'default' }), db });
-    expect(got).toMatchObject({ slug: 'demo', mode: 'test' });
+    expect(got).toMatchObject({ slug: 'send', mode: 'test' });
     expect(got?.legalName).toBeUndefined();
   });
 
