@@ -10,7 +10,8 @@
 // 'true' (owner sets it only after a licensed partner + real-money switches, home-send
 // SPEC §3), and the partner has a configured licensed entity. Anything else renders
 // the test copy, so the page never calls a test partner "a licensed money transmitter".
-// The partner is VALID only if it exists, is active, is not the demo tenant, and
+// SmartRemit's own (default) tenant may be featured, but only ever in test mode.
+// The partner is VALID only if it exists, is active, and
 // has a partner_sites slug that is a servable host label. Anything else — and any
 // error — resolves to null: FAIL-CLOSED to "no button".
 //
@@ -61,7 +62,9 @@ export async function resolveFeaturedSendPartner(
   // Unset ⇒ return before any db work: zero cost while nothing is featured.
   const config = readFeaturedSendConfig(deps.env ?? processEnv());
   if (!config) return null;
-  if (config.partnerId === DEFAULT_PARTNER_ID) return null; // the demo tenant is never a licensed transmitter
+  // SmartRemit's own tenant may be featured for testing, but it is never a licensed transmitter:
+  // it is always TEST mode and never carries a legal name (owner 2026-09-29).
+  const isDefault = config.partnerId === DEFAULT_PARTNER_ID;
   try {
     const db = deps.db ?? getDb();
     const partner = await createPartnerRepo(db).getPartner(config.partnerId);
@@ -70,7 +73,7 @@ export async function resolveFeaturedSendPartner(
     const slug = site?.slug;
     if (!isHandoffSlug(slug)) return null;
     const disclosure = resolvePartnerDisclosure(partner);
-    const legalName = disclosure.configured ? disclosure.licensedEntity : null;
+    const legalName = !isDefault && disclosure.configured ? disclosure.licensedEntity : null;
     return {
       displayName: resolvePartnerBranding(partner).brand,
       ...(legalName ? { legalName } : {}),
