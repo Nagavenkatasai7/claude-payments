@@ -2,7 +2,7 @@ import { getDb, type DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { sendAuthTemplate, sendText, type WaCreds } from './whatsapp';
 import { authenticationTemplateParams, otpMessage } from './whatsapp-templates';
-import { isInServiceWindow, WhatsAppSendError } from './whatsapp-errors';
+import { isInServiceWindow, isWindowError, WhatsAppSendError } from './whatsapp-errors';
 import { resolveWaChannel } from './whatsapp-creds';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { parseHealthMarks, recordChannelHealth } from './channel-health';
@@ -135,6 +135,8 @@ export async function sendPortalOtp(
     }
     return { ok: true };
   } catch (err) {
+    // The marker said in-window but Meta said out (131047 / 470): the customer's state, not a fault.
+    if (ready.mode === 'freeform' && isWindowError(err)) return { ok: false, reason: 'outside_window' };
     const graphCode = err instanceof WhatsAppSendError ? err.code : undefined;
     if (graphCode === 190) await recordChannelHealth(partnerId, 'auth_error', { code: 190 });
     return graphCode === undefined ? { ok: false } : { ok: false, code: graphCode };

@@ -206,6 +206,15 @@ describe('sendPortalOtp: freeform mode (the default tenant without a template)',
     expect(w.sendText).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['a 131047 re-engagement error', new WhatsAppSendError('x (400): y', { status: 400, code: 131047 })],
+    ['a legacy HTTP 470', new WhatsAppSendError('x (470): y', { status: 470 })],
+  ])("Meta's own window rejection (%s) → outside_window, no health mark (the marker said in, Meta said out)", async (_l, err) => {
+    w.sendText.mockRejectedValue(err);
+    expect(await sendPortalOtp('default', PHONE, CODE, freeform, { store: store(true) })).toEqual({ ok: false, reason: 'outside_window' });
+    expect(w.recordChannelHealth).not.toHaveBeenCalled();
+  });
+
   it('template mode for the default tenant → the template path, never free-form, even on failure', async () => {
     const tpl = { ready: true as const, mode: 'template' as const, creds: undefined, template: { name: 'sr_login', lang: 'en' } };
     w.sendAuthTemplate.mockRejectedValue(new WhatsAppSendError('x (400): y', { status: 400, code: 132001 }));
