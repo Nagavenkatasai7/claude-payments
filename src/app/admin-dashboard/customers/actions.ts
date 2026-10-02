@@ -10,11 +10,8 @@ import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
 import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { notifyKycReviewDecision } from '@/lib/kyc-notify';
 import { canDecideCustomerKyc } from '@/lib/compliance-config';
-import { sendGateActive } from '@/lib/kyc-gate';
-import { sendVerificationStatus } from '@/lib/whatsapp';
-import { optOutSuppresses } from '@/lib/consent-gate';
-import { partnerWaContext } from '@/lib/whatsapp-creds';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -167,20 +164,9 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
     { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.review.${decision}`, source: 'persona_review', allowScreeningHold: platformStaff },
   );
   if (!reviewed) throw new Error('Customer not found.');
-  // KYC is partner OPT-IN: the decision + audit above stand regardless, but the
-  // customer-facing WhatsApp notify only fires when the partner's
-  // verify-before-send gate is ON. Fail-soft — a notify hiccup never voids the review.
-  const partner =
-    (await getPartnerStore().getPartner(customer.partnerId)) ??
-    (await getPartnerStore().ensureDefaultPartner());
-  // Program-Fix 49A: the decision notice is nonessential (not sent after
-  // STOP) and leaves from the owning partner's own number (fail-soft resolver).
-  if (sendGateActive(partner) && !optOutSuppresses(customer, 'nonessential')) {
-    const { waCreds } = await partnerWaContext(customer.partnerId);
-    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName, waCreds).catch(
-      () => {},
-    );
-  }
+  // KYC is partner OPT-IN: the decision + audit above stand regardless; the gated,
+  // fail-soft customer notice is shared with the /partner decision (lib/kyc-notify.ts).
+  await notifyKycReviewDecision(customer, phone, decision);
 
   revalidatePath('/admin-dashboard/compliance');
   revalidatePath('/admin-dashboard/customers');
