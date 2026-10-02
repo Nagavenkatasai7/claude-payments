@@ -52,6 +52,12 @@ export interface PartnerActionContract {
   disallowedRole: StaffRole;
   /** Everything the action could change (rows, counts); compared before and after each refusal. */
   snapshot: () => Promise<unknown>;
+  /**
+   * For a TENANT-ONLY action (no target id: the target IS the session's tenant, e.g. a settings
+   * save). Item 3 then becomes: a form naming B (form(foreignId)) acts on A only, so it succeeds,
+   * the latest audit row is A's, and `foreignSnapshot` (B's rows) is unchanged.
+   */
+  tenantOnly?: { foreignSnapshot: () => Promise<unknown> };
 }
 
 async function latestAudit(db: Db) {
@@ -82,11 +88,19 @@ export async function expectPartnerActionContract(o: PartnerActionContract): Pro
 
   // 3. foreign id (another tenant's row) → the not-found result, nothing written
   await signInAs(o.redis, o.cookieJar, { username: 'contract-allowed', partnerId: 'pa', role: o.allowedRole });
-  const auditBefore = await latestAudit(o.db);
-  const foreign = (await o.action(o.form(o.foreignId))) as { ok?: boolean };
-  expect(foreign.ok).toBe(false);
-  expect(JSON.stringify(await o.snapshot())).toBe(before);
-  expect((await latestAudit(o.db))?.id ?? null).toBe(auditBefore?.id ?? null);
+  if (o.tenantOnly) {
+    const foreignBefore = JSON.stringify(await o.tenantOnly.foreignSnapshot());
+    const named = (await o.action(o.form(o.foreignId))) as { ok?: boolean };
+    expect(named.ok).toBe(true);
+    expect(JSON.stringify(await o.tenantOnly.foreignSnapshot())).toBe(foreignBefore);
+    expect((await latestAudit(o.db))?.partnerId).toBe('pa');
+  } else {
+    const auditBefore = await latestAudit(o.db);
+    const foreign = (await o.action(o.form(o.foreignId))) as { ok?: boolean };
+    expect(foreign.ok).toBe(false);
+    expect(JSON.stringify(await o.snapshot())).toBe(before);
+    expect((await latestAudit(o.db))?.id ?? null).toBe(auditBefore?.id ?? null);
+  }
 
   // 4. forged tenant fields on A's own id → the write lands on A only
   const fd = o.form(o.ownId);
