@@ -66,6 +66,8 @@ vi.mock('@/lib/staff-mfa-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
   return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
 });
+const logSpy = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/log', async (orig) => ({ ...(await orig<typeof import('@/lib/log')>()), logWarn: logSpy }));
 vi.mock('@/lib/whatsapp', async () => {
   const actual = await vi.importActual<typeof import('@/lib/whatsapp')>('@/lib/whatsapp');
   return { ...actual, sendVerificationStatus: notify };
@@ -120,6 +122,7 @@ beforeEach(async () => {
   cookieJar.clear();
   revalidated.length = 0;
   notify.mockClear();
+  logSpy.mockClear();
   host.value = 'smartremit.ai';
   db = await freshDb();
   store = createStore(redis, db);
@@ -190,14 +193,21 @@ describe('decideKycAction: D3 refusals (nothing written)', () => {
     await refuses(form(refA(), 'reject'), t('partner.kyc.notAllowed'));
   });
 
-  it.each(['pep_hit', 'watchlist_hit'] as const)('a customer with %s is refused, with the same message as ours-mode', async (col) => {
+  it.each(['pep_hit', 'watchlist_hit'] as const)('a customer with %s gets the fixed referred result: nothing written, a fixed log tag', async (col) => {
     await flag('pa', col);
     await asAdmin();
-    await refuses(form(refA()), t('partner.kyc.notAllowed'));
-    await refuses(form(refA(), 'reject'), t('partner.kyc.notAllowed'));
+    await refuses(form(refA()), t('partner.kyc.referred'));
+    await refuses(form(refA(), 'reject'), t('partner.kyc.referred'));
+    expect(await kycAudit()).toEqual([]);
+    expect(logSpy).toHaveBeenCalledWith('partner.kyc.decide', 'referred', { partnerId: 'pa' });
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain(PHONE_A);
   });
 
-  it('a screening flag raised after the pre-check is caught on the locked row: refused, nothing written', async () => {
+  it('the referred copy names no screening detail', () => {
+    expect(t('partner.kyc.referred').toLowerCase()).not.toMatch(/watchlist|pep|screen|sanction|politic|hit/);
+  });
+
+  it('a screening flag raised after the pre-check is caught on the locked row: the same referred result, nothing written', async () => {
     await asAdmin();
     const real = pgPartnerStore;
     // The owner lookup runs after the customer read: raise the flag there.
@@ -209,7 +219,7 @@ describe('decideKycAction: D3 refusals (nothing written)', () => {
       },
     } as PartnerStore;
     const before = { a: await row('pa'), audit: await auditCount() };
-    expect(await decideKycAction(form(refA()))).toEqual({ ok: false, error: t('partner.kyc.notAllowed') });
+    expect(await decideKycAction(form(refA()))).toEqual({ ok: false, error: t('partner.kyc.referred') });
     expect({ a: await row('pa'), audit: await auditCount() }).toEqual(before);
     expect(notify).not.toHaveBeenCalled();
   });
@@ -264,7 +274,7 @@ describe('decideKycAction: success', () => {
 });
 
 describe('/partner/customers/[ref]: the decision block', () => {
-  const page = async () => renderToStaticMarkup(await CustomerDetailPage({ params: Promise.resolve({ ref: refA() }) }));
+  const page = async (ref = refA()) => renderToStaticMarkup(await CustomerDetailPage({ params: Promise.resolve({ ref }) }));
   const block = (html: string) => {
     const m = html.match(/<div[^>]*data-testid="partner-kyc-decision"[^>]*>[\s\S]*?<\/div>/);
     return m ? m[0] : null;
@@ -279,18 +289,31 @@ describe('/partner/customers/[ref]: the decision block', () => {
     expect(html).not.toContain(t('partner.reviews.neutral'));
   });
 
-  it("ours-mode and a screening hit render the SAME single neutral line (no tipping off)", async () => {
+  it('ours-mode renders the single neutral line and no controls', async () => {
     await asAdmin();
     await setKyc('pa', 'ours');
     const ours = block(await page());
-    await setKyc('pa', 'delegated');
-    await flag('pa', 'watchlist_hit');
-    const screening = block(await page());
     expect(ours).not.toBeNull();
     expect(ours).toContain(t('partner.reviews.neutral'));
-    expect(screening).toBe(ours);
-    expect(screening).not.toContain('data-testid="partner-kyc-decision-dialog"');
-    expect(screening!.toLowerCase()).not.toMatch(/watchlist|pep|screen|sanction/);
+    expect(ours).not.toContain('data-testid="partner-kyc-decision-dialog"');
+  });
+
+  it.each(['pep_hit', 'watchlist_hit'] as const)('delegated: a customer with %s renders the SAME controls as one without', async (col) => {
+    await asAdmin();
+    for (const state of [
+      { kyc_status: 'pending', kyc_review_state: 'pending_review' },
+      { kyc_status: 'not_started', kyc_review_state: 'none' },
+      { kyc_status: 'verified', kyc_review_state: 'approved' },
+    ]) {
+      await db.execute(sql`UPDATE customers SET pep_hit = false, watchlist_hit = false, kyc_status = ${state.kyc_status}, kyc_review_state = ${state.kyc_review_state} WHERE partner_id = 'pa'`);
+      const ref = refA(); // one sealed ref (each seal is randomised) so only the customer differs
+      const clean = await page(ref);
+      await flag('pa', col);
+      const hit = await page(ref);
+      expect(hit).toBe(clean);
+      expect(hit).toContain('data-testid="partner-kyc-decision-dialog"');
+      expect(hit).not.toContain(t('partner.reviews.neutral'));
+    }
   });
 
   it('a non-admin sees no decision block at all', async () => {

@@ -8,6 +8,7 @@ import {
   isKycQueueState,
   kycQueueCounts,
   partnerKycDecision,
+  partnerKycOfferedDecisions,
   partnerMayRejectHold,
 } from '@/lib/partner-reviews';
 import {
@@ -97,6 +98,45 @@ describe('partnerKycDecision (D3)', () => {
     const screening = partnerKycDecision(delegated, cust({ pepHit: true }), 'approve');
     expect(ourMode).toEqual(screening);
     expect(Object.keys(screening)).toEqual(['ok']);
+  });
+});
+
+describe('partnerKycOfferedDecisions (what the page OFFERS; never reads the screening flags)', () => {
+  const states: Array<Partial<Customer>> = [
+    { kycReviewState: 'pending_review', kycStatus: 'pending' },
+    { kycReviewState: 'needs_review', kycStatus: 'pending' },
+    { kycReviewState: 'none', kycStatus: 'not_started' },
+    { kycReviewState: 'approved', kycStatus: 'verified' },
+    { kycReviewState: 'approved', kycStatus: 'grandfathered' },
+    { kycReviewState: 'rejected', kycStatus: 'rejected' },
+  ];
+
+  it('a delegated tenant is offered the same decisions for a flagged and an unflagged customer', () => {
+    for (const s of states) {
+      const clean = partnerKycOfferedDecisions(delegated, cust(s));
+      for (const hit of [{ pepHit: true }, { watchlistHit: true }, { pepHit: true, watchlistHit: true }]) {
+        expect(partnerKycOfferedDecisions(delegated, cust({ ...s, ...hit }))).toEqual(clean);
+      }
+    }
+  });
+
+  it('offers by mode and the no-op rules only', () => {
+    expect(partnerKycOfferedDecisions(delegated, cust())).toEqual(['approve', 'reject']);
+    expect(partnerKycOfferedDecisions(delegated, cust({ kycReviewState: 'approved', kycStatus: 'verified' }))).toEqual(['reject']);
+    expect(partnerKycOfferedDecisions(delegated, cust({ kycReviewState: 'rejected', kycStatus: 'rejected' }))).toEqual(['approve']);
+    expect(partnerKycOfferedDecisions(delegated, cust({ pepHit: true }))).toEqual(['approve', 'reject']);
+  });
+
+  it("offers nothing outside delegated mode or without a customer", () => {
+    for (const owner of [ours, null, undefined, {}, { kycMode: 'DELEGATED' }]) {
+      expect(partnerKycOfferedDecisions(owner, cust())).toEqual([]);
+      expect(partnerKycOfferedDecisions(owner, cust({ pepHit: true }))).toEqual([]);
+    }
+    expect(partnerKycOfferedDecisions(delegated, null)).toEqual([]);
+  });
+
+  it('the decision rule stays stricter: an offered decision on a flagged customer is still refused', () => {
+    expect(partnerKycDecision(delegated, cust({ pepHit: true }), 'approve')).toEqual({ ok: false });
   });
 });
 

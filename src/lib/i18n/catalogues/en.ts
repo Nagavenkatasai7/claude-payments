@@ -1686,6 +1686,7 @@ export const en = {
   'partner.kyc.reject.confirm': 'Reject customer',
   'partner.kyc.reject.done': 'Customer rejected.',
   'partner.kyc.notAllowed': 'This decision cannot be made here. SmartRemit compliance reviews this.',
+  'partner.kyc.referred': 'SmartRemit compliance reviews this customer. Nothing was changed here.',
   'partner.kyc.invalidDecision': 'Choose approve or reject.',
   'partner.kyc.reasonTooShort': 'Give a reason of at least 10 characters.',
   'partner.kyc.reasonHasNumber': 'Remove phone or account numbers from the reason.',

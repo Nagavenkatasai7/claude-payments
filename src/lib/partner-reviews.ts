@@ -19,27 +19,48 @@ export function isKycQueueState(s: unknown): boolean {
 }
 
 /**
- * D3: may a partner admin record this KYC decision? Only when the owning partner's KYC mode is
- * exactly 'delegated' AND the customer carries no PEP / watchlist hit (isScreeningCustomerHold;
- * the caller re-checks this on the LOCKED row with allowScreeningHold:false). A customer in the
- * queue is decided through the Persona-review slug; any other customer through the manual
- * override slug, where a no-op (approve a verified or grandfathered customer, reject a rejected
- * one) is refused so no audit row is written for nothing. Fails closed on a missing owner or
- * customer and on an unknown decision.
+ * D3, the OFFER: which decision may the page show a partner admin? Only when the owning partner's
+ * KYC mode is exactly 'delegated'. A customer in the queue is decided through the Persona-review
+ * slug; any other customer through the manual override slug, where a no-op (approve a verified or
+ * grandfathered customer, reject a rejected one) is refused so no audit row is written for nothing.
+ * It NEVER reads the screening flags, so a flagged and an unflagged customer are offered the same
+ * controls. Fails closed on a missing owner or customer and on an unknown decision.
+ */
+export function partnerKycOffer(
+  owner: { kycMode?: string | null } | null | undefined,
+  customer: Pick<Customer, 'kycStatus' | 'kycReviewState'> | null | undefined,
+  decision: KycDecision,
+): PartnerKycDecision {
+  const no = { ok: false } as const;
+  if (decision !== 'approve' && decision !== 'reject') return no;
+  if (!owner || owner.kycMode !== 'delegated') return no;
+  if (!customer) return no;
+  if (isKycQueueState(customer.kycReviewState)) return { ok: true, slug: `kyc.review.${decision}`, source: 'persona_review' };
+  if (decision === 'approve' && (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered')) return no;
+  if (decision === 'reject' && customer.kycStatus === 'rejected') return no;
+  return { ok: true, slug: `kyc.manual_override.${decision}`, source: 'manual' };
+}
+
+/** The decisions the customer page offers: partnerKycOffer for each (no screening input). */
+export function partnerKycOfferedDecisions(
+  owner: { kycMode?: string | null } | null | undefined,
+  customer: Pick<Customer, 'kycStatus' | 'kycReviewState'> | null | undefined,
+): KycDecision[] {
+  return (['approve', 'reject'] as const).filter((d) => partnerKycOffer(owner, customer, d).ok);
+}
+
+/**
+ * D3, the DECISION: may a partner admin record it? The offer above AND no PEP / watchlist hit on
+ * the customer (isScreeningCustomerHold; the writer re-checks this on the LOCKED row with
+ * allowScreeningHold:false).
  */
 export function partnerKycDecision(
   owner: { kycMode?: string | null } | null | undefined,
   customer: Pick<Customer, 'kycStatus' | 'kycReviewState' | 'pepHit' | 'watchlistHit'> | null | undefined,
   decision: KycDecision,
 ): PartnerKycDecision {
-  const no = { ok: false } as const;
-  if (decision !== 'approve' && decision !== 'reject') return no;
-  if (!owner || owner.kycMode !== 'delegated') return no;
-  if (!customer || isScreeningCustomerHold(customer)) return no;
-  if (isKycQueueState(customer.kycReviewState)) return { ok: true, slug: `kyc.review.${decision}`, source: 'persona_review' };
-  if (decision === 'approve' && (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered')) return no;
-  if (decision === 'reject' && customer.kycStatus === 'rejected') return no;
-  return { ok: true, slug: `kyc.manual_override.${decision}`, source: 'manual' };
+  if (!customer || isScreeningCustomerHold(customer)) return { ok: false };
+  return partnerKycOffer(owner, customer, decision);
 }
 
 /**

@@ -15,7 +15,7 @@ import { customerDetailView } from '@/lib/partner-customer-view';
 import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits, type SendLimitSource } from '@/lib/send-limits';
 import { partnerMayWriteOverride } from '@/lib/partner-send-limits';
-import { partnerKycDecision } from '@/lib/partner-reviews';
+import { partnerKycOfferedDecisions } from '@/lib/partner-reviews';
 import { formatMoney } from '@/lib/ui/money';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Card, MaskedValue, PageHeader, buttonVariants } from '@/components/ds';
@@ -88,12 +88,11 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
   const canEditLimits = PARTNER_ADMIN.roles.includes(ctx.role);
-  // Merge plan 2c (D3): the KYC decision is offered to admins only, with exactly the decisions
-  // partnerKycDecision allows (decideKycAction re-checks everything). When none is allowed ('ours'
-  // mode or a screening hit) the admin sees ONE neutral line, identical in both cases.
-  const kycDecisions = canEditLimits
-    ? (['approve', 'reject'] as const).filter((d) => partnerKycDecision(partner, customer, d).ok)
-    : [];
+  // Merge plan 2c (D3): the KYC decision is offered to admins only, by KYC mode and the no-op rules
+  // (partnerKycOfferedDecisions never reads the screening flags, so the controls are the same with
+  // or without a hit). decideKycAction re-checks everything. When nothing is offered ('ours' mode or
+  // a no-op) the admin sees ONE neutral line.
+  const kycDecisions = canEditLimits ? partnerKycOfferedDecisions(partner, customer) : [];
   const override = customer.sendLimitOverride;
   const partnerSetExpiry =
     !setBySmartRemit && override?.setScope === 'partner' && typeof override.expiresAt === 'string' ? override.expiresAt : null;
