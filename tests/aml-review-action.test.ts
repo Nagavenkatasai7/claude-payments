@@ -100,7 +100,6 @@ describe('reviewAmlAlertAction', () => {
     await createAuditRepo(db).record({ partnerId: 'A', actor: 'x', actorType: 'staff', action: 'transfer.released', subjectId: 'tr_a' });
     const r = await db.execute(sql`SELECT max(id)::int AS id FROM audit_events`);
     const other = (r.rows[0] as { id: number }).id;
-    currentStaff = staff({ username: 'a-admin', partnerId: 'A' });
     await expect(reviewAmlAlertAction(form({ alertId: String(other), disposition: 'no_action' }))).rejects.toThrow('Alert not found');
   });
 
@@ -112,22 +111,21 @@ describe('reviewAmlAlertAction', () => {
     expect(await rows('aml.reviewed')).toEqual([]);
   });
 
-  it("own-tenant review writes one aml.reviewed row under the ALERT's tenant, with a bounded note", async () => {
-    currentStaff = staff({ username: 'a-agent', role: 'agent', partnerId: 'A' });
-    await reviewAmlAlertAction(form({ alertId: String(alertA), disposition: 'escalated', note: 'x'.repeat(900) }));
-    const r = await rows('aml.reviewed');
-    expect(r).toHaveLength(1);
-    expect(r[0]).toMatchObject({ partner_id: 'A', actor: 'a-agent', actor_type: 'staff', subject_id: 'tr_a' });
-    expect(r[0].meta).toMatchObject({ alertId: alertA, disposition: 'escalated' });
-    expect(String(r[0].meta.note).length).toBeLessThanOrEqual(500);
-  });
-
   it('platform staff may review any tenant; a second review of the same alert writes nothing', async () => {
     await reviewAmlAlertAction(form({ alertId: String(alertB), disposition: 'no_action' }));
     await reviewAmlAlertAction(form({ alertId: String(alertB), disposition: 'escalated' }));
     const r = await rows('aml.reviewed');
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ partner_id: 'B', subject_id: 'tr_b' });
+  });
+
+  it("the review row lands under the ALERT's tenant, with the staff actor and a bounded note", async () => {
+    await reviewAmlAlertAction(form({ alertId: String(alertA), disposition: 'escalated', note: 'x'.repeat(900) }));
+    const r = await rows('aml.reviewed');
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatchObject({ partner_id: 'A', actor: 'root', actor_type: 'staff', subject_id: 'tr_a' });
+    expect(r[0].meta).toMatchObject({ alertId: alertA, disposition: 'escalated' });
+    expect(String(r[0].meta.note).length).toBeLessThanOrEqual(500);
   });
 });
 

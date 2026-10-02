@@ -160,7 +160,7 @@ describe('scope pinning (404-never-403)', () => {
 describe('replyAction', () => {
   it('appends a public staff message and enqueues exactly ONE deduped nudge', async () => {
     const t = await makeTicket('p1', { customerPhone: '15559998888' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
 
     const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
@@ -180,7 +180,7 @@ describe('replyAction', () => {
 
   it('each reply gets its own nudge (per-message dedupe keys differ)', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'first' }));
     await replyAction(form({ ticketId: t.id, body: 'second' }));
     const rows = await outboxRows();
@@ -190,7 +190,7 @@ describe('replyAction', () => {
 
   it('status flips to pending ONLY when the waiting box is checked', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'no box' }));
     expect((await createTicketRepo(db).getTicket(t.id))?.status).toBe('open');
     await replyAction(form({ ticketId: t.id, body: 'with box', waiting: 'on' }));
@@ -199,7 +199,7 @@ describe('replyAction', () => {
 
   it('skips the nudge silently when the customer phone is empty', async () => {
     const t = await makeTicket('p1', { customerPhone: '' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'reply anyway' }));
     expect(await outboxRows()).toHaveLength(0);
     const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
@@ -208,7 +208,7 @@ describe('replyAction', () => {
 
   it('records copilot provenance audits (accept / edit)', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'verbatim', copilot: 'accepted' }));
     await replyAction(form({ ticketId: t.id, body: 'tweaked', copilot: 'edited' }));
     const actions = (await auditRows()).map((r) => r.action);
@@ -221,7 +221,7 @@ describe('replyAction', () => {
 describe('internalNoteAction', () => {
   it('appends an internal note and never nudges the customer', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await internalNoteAction(form({ ticketId: t.id, body: 'internal context' }));
     const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
     expect(msgs[1].internal).toBe(true);
@@ -235,7 +235,7 @@ describe('internalNoteAction', () => {
 describe('escalate / resolve transitions', () => {
   it('escalate flips to waiting_admin and appends the internal system message', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await escalateAction(form({ ticketId: t.id, reason: 'needs an admin call' }));
     expect((await createTicketRepo(db).getTicket(t.id))?.status).toBe('waiting_admin');
     const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
@@ -246,7 +246,7 @@ describe('escalate / resolve transitions', () => {
 
   it('resolve flips to resolved and sends the final nudge exactly ONCE ever', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await resolveAction(form({ ticketId: t.id }));
     expect((await createTicketRepo(db).getTicket(t.id))?.status).toBe('resolved');
     let nudges = (await outboxRows()).filter((r) => r.dedupeKey === `ticketresolved:${t.id}`);
@@ -260,7 +260,7 @@ describe('escalate / resolve transitions', () => {
 
   it('escalating an already-escalated ticket refuses (same-state guard)', async () => {
     const t = await makeTicket('p1', { status: 'waiting_admin' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await expect(escalateAction(form({ ticketId: t.id, reason: 'again' }))).rejects.toThrow(
       /cannot be escalated/i,
     );
@@ -270,7 +270,7 @@ describe('escalate / resolve transitions', () => {
 describe('closed is terminal', () => {
   it('every mutation refuses on a closed ticket', async () => {
     const t = await makeTicket('p1', { status: 'closed' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await expect(replyAction(form({ ticketId: t.id, body: 'x' }))).rejects.toThrow(/closed/i);
     await expect(internalNoteAction(form({ ticketId: t.id, body: 'x' }))).rejects.toThrow(/closed/i);
     await expect(escalateAction(form({ ticketId: t.id, reason: 'x' }))).rejects.toThrow(/cannot/i);
@@ -287,7 +287,7 @@ describe('closed is terminal', () => {
 describe('assignTicketAction', () => {
   it('assigns to an active, scope-compatible support teammate', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await authStore.saveStaff(staff({ username: 'sup2', partnerId: 'p1' }));
     await assignTicketAction(form({ ticketId: t.id, assignee: 'sup2' }));
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBe('sup2');
@@ -295,7 +295,7 @@ describe('assignTicketAction', () => {
 
   it('an AGENT is now a valid assignee (agents are first-class ticket handlers)', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await authStore.saveStaff(staff({ username: 'agentx', name: 'Venkat', role: 'agent', partnerId: 'p1' }));
     await assignTicketAction(form({ ticketId: t.id, assignee: 'agentx' }));
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBe('agentx');
@@ -303,7 +303,7 @@ describe('assignTicketAction', () => {
 
   it('rejects unknown, suspended, and cross-partner assignees', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'ghost' }))).rejects.toThrow(
       /unknown/i,
     );
@@ -320,7 +320,7 @@ describe('assignTicketAction', () => {
 
   it('M3-6: rejects a finance assignee (a /partner-only role cannot open the legacy ticket surfaces)', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await authStore.saveStaff(staff({ username: 'fin1', role: 'finance' as Staff['role'], partnerId: 'p1' }));
     await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'fin1' }))).rejects.toThrow(/cannot work/i);
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBeUndefined();
@@ -328,7 +328,7 @@ describe('assignTicketAction', () => {
 
   it('empty assignee unassigns', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await authStore.saveStaff(staff({ username: 'sup2', partnerId: 'p1' }));
     await assignTicketAction(form({ ticketId: t.id, assignee: 'sup2' }));
     await assignTicketAction(form({ ticketId: t.id, assignee: '' }));
@@ -339,7 +339,7 @@ describe('assignTicketAction', () => {
 describe('agent assignee-scoping (agents work ONLY their assigned tickets)', () => {
   it('an agent CANNOT work a ticket not assigned to them (404-never-403)', async () => {
     const t = await makeTicket('p1'); // unassigned
-    currentStaff = staff({ username: 'venkat', role: 'agent', partnerId: 'p1' });
+    currentStaff = staff({ username: 'venkat', role: 'agent' }); // platform agent
     await expect(replyAction(form({ ticketId: t.id, body: 'hi' }))).rejects.toThrow(/not found/i);
     await expect(resolveAction(form({ ticketId: t.id }))).rejects.toThrow(/not found/i);
     await expect(closeAction(form({ ticketId: t.id }))).rejects.toThrow(/not found/i);
@@ -352,7 +352,7 @@ describe('agent assignee-scoping (agents work ONLY their assigned tickets)', () 
   it('an agent CAN work a ticket assigned to them', async () => {
     const t = await makeTicket('p1');
     await createTicketRepo(db).assign(t.id, 'venkat');
-    currentStaff = staff({ username: 'venkat', role: 'agent', partnerId: 'p1' });
+    currentStaff = staff({ username: 'venkat', role: 'agent' }); // platform agent
     await replyAction(form({ ticketId: t.id, body: 'on it' }));
     expect(await createTicketRepo(db).listMessages(t.id, { includeInternal: true })).toHaveLength(2);
     await resolveAction(form({ ticketId: t.id }));
@@ -361,7 +361,7 @@ describe('agent assignee-scoping (agents work ONLY their assigned tickets)', () 
 
   it('support/admins are NOT assignee-restricted (work any in-scope ticket)', async () => {
     const t = await makeTicket('p1'); // unassigned
-    currentStaff = staff({ partnerId: 'p1' }); // support
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'support reply' }));
     expect(await createTicketRepo(db).listMessages(t.id, { includeInternal: true })).toHaveLength(2);
   });
@@ -370,7 +370,7 @@ describe('agent assignee-scoping (agents work ONLY their assigned tickets)', () 
 describe('applyTriageAction', () => {
   it('clamps to the closed lists — off-list values are refused outright', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await expect(
       applyTriageAction(form({ ticketId: t.id, category: 'hacking', priority: 'normal' })),
     ).rejects.toThrow(/invalid/i);
@@ -387,7 +387,7 @@ describe('applyTriageAction', () => {
 describe('audit trail', () => {
   it('every action writes an append-only audit_events row', async () => {
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await authStore.saveStaff(staff({ username: 'sup2', partnerId: 'p1' }));
     await replyAction(form({ ticketId: t.id, body: 'r' }));
     await internalNoteAction(form({ ticketId: t.id, body: 'n' }));
@@ -425,7 +425,7 @@ describe('nudge payloads never carry a secret (fix 11 / F58)', () => {
   it('replyAction: the nudge payload names ticket.partnerId and carries no creds/token', async () => {
     await byoWhatsApp('p1');
     const t = await makeTicket('p1', { customerPhone: '15559998888' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
     const rows = await outboxRows();
     expect(rows).toHaveLength(1);
@@ -439,7 +439,7 @@ describe('nudge payloads never carry a secret (fix 11 / F58)', () => {
   it('resolveAction: the ticketresolved nudge names ticket.partnerId and carries no creds/token', async () => {
     await byoWhatsApp('p1');
     const t = await makeTicket('p1');
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await resolveAction(form({ ticketId: t.id }));
     const nudge = (await outboxRows()).find((r) => r.dedupeKey === `ticketresolved:${t.id}`)!;
     const payload = nudge.payload as Record<string, unknown>;
@@ -477,7 +477,7 @@ describe('one customer portal: the nudge links to the owning partner portal when
     await portalOn('p1', 'p1-pay');
     await portalOn('p2', 'p2-pay');
     const t = await makeTicket('p1', { customerPhone: '15559998888' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
     await resolveAction(form({ ticketId: t.id }));
     const bodies = (await outboxRows()).map((r) => (r.payload as { body: string }).body);
@@ -491,7 +491,7 @@ describe('one customer portal: the nudge links to the owning partner portal when
 
   it('a partner without a live portal keeps the /account/support link', async () => {
     const t = await makeTicket('p1', { customerPhone: '15559998888' });
-    currentStaff = staff({ partnerId: 'p1' });
+    currentStaff = staff({}); // platform support
     await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
     const [row] = await outboxRows();
     expect((row.payload as { body: string }).body).toContain(`/account/support/${t.id}`);

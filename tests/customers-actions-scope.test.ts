@@ -132,26 +132,11 @@ describe('manualKycDecisionAction partner scope (H3 + fix 1, moved from markCust
     expect(await auditRows()).toEqual([]);
   });
 
-  it('lets a partner-admin verify their OWN customer', async () => {
-    await cs.saveCustomer(makeCustomer('15553334444', 'B'));
-    currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await manualKycDecisionAction(form({ phone: '15553334444', partnerId: 'B', decision: 'approve', reason: REASON }));
-    expect((await cs.getCustomer('B', '15553334444'))?.kycStatus).toBe('verified');
-  });
-
   it('lets a platform admin verify any customer', async () => {
     await cs.saveCustomer(makeCustomer('15555556666', 'A'));
     currentStaff = staff({ username: 'plat' });
     await manualKycDecisionAction(form({ phone: '15555556666', partnerId: 'A', decision: 'approve', reason: REASON }));
     expect((await cs.getCustomer('A', '15555556666'))?.kycStatus).toBe('verified');
-  });
-
-  it('a partner-admin is PINNED to their tenant: a hostile partnerId field cannot reach another tenant\'s row', async () => {
-    await seedPartner(db, 'acme'); await seedPartner(db, 'beta');
-    await cs.saveCustomer(makeCustomer('15559990000', 'beta'));
-    currentStaff = staff({ partnerId: 'acme' });
-    await expect(manualKycDecisionAction(form({ phone: '15559990000', partnerId: 'beta', decision: 'approve', reason: REASON }))).rejects.toThrow(/not found/i);
-    expect((await cs.getCustomer('beta', '15559990000'))!.kycStatus).toBe('not_started');
   });
 
   it('platform staff MUST name the tenant: a form without partnerId is refused and the row is untouched', async () => {
@@ -171,29 +156,12 @@ describe('manualKycDecisionAction partner scope (H3 + fix 1, moved from markCust
 });
 
 // Program-Fix 43 follow-up: a customer held by a Persona WATCHLIST or PEP
-// match is PLATFORM-only to decide. Partner-scoped admins are refused before
-// any mutation (generic permission copy) on both KYC decision actions; a
-// non-screening needs_review stays decidable by the partner as today.
+// match is PLATFORM-only to decide. Partner staff never reach these
+// admin-dashboard actions (requireStaff redirects them to /partner); the
+// partner-side refusal lives in tests/partner-kyc-decision-action.test.ts.
 describe('screening customer holds (watchlist / PEP) are platform-only', () => {
   const held = (phone: string, partnerId: string, over: Partial<Customer>): Customer => ({
     ...makeCustomer(phone, partnerId), kycStatus: 'pending', kycReviewState: 'needs_review', ...over,
-  });
-
-  it.each([
-    ['watchlist', { watchlistHit: true }],
-    ['PEP', { pepHit: true }],
-  ] as const)('refuses a partner admin on a %s hold via reviewKycAction and manualKycDecisionAction: untouched, no audit row', async (_k, flag) => {
-    await cs.saveCustomer(held('15552220001', 'B', flag));
-    currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    for (const decision of ['approve', 'reject']) {
-      await expect(reviewKycAction(form({ phone: '15552220001', partnerId: 'B', decision, reason: REASON }))).rejects.toThrow(/permission/i);
-      await expect(manualKycDecisionAction(form({ phone: '15552220001', partnerId: 'B', decision, reason: REASON }))).rejects.toThrow(/permission/i);
-    }
-    const c = await cs.getCustomer('B', '15552220001');
-    expect(c?.kycStatus).toBe('pending');
-    expect(c?.kycReviewState).toBe('needs_review');
-    expect(await auditRows()).toEqual([]);
-    expect(notify).not.toHaveBeenCalled();
   });
 
   it('a platform admin may decide a watchlist hold (reviewKycAction) and a PEP hold (manualKycDecisionAction)', async () => {
@@ -205,14 +173,6 @@ describe('screening customer holds (watchlist / PEP) are platform-only', () => {
     expect((await cs.getCustomer('B', '15552220002'))?.kycStatus).toBe('rejected');
     expect((await cs.getCustomer('B', '15552220003'))?.kycStatus).toBe('verified');
     expect((await auditRows()).map((r) => r.action)).toEqual(['kyc.review.reject', 'kyc.manual_override.approve']);
-  });
-
-  it('a non-screening needs_review hold stays decidable by the partner admin, as today', async () => {
-    await cs.saveCustomer(held('15552220004', 'B', {}));
-    currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await reviewKycAction(form({ phone: '15552220004', partnerId: 'B', decision: 'approve', reason: REASON }));
-    expect((await cs.getCustomer('B', '15552220004'))?.kycStatus).toBe('verified');
-    expect((await auditRows()).map((r) => r.action)).toEqual(['kyc.review.approve']);
   });
 });
 
@@ -305,18 +265,6 @@ describe('createCustomerAction — creating an already-verified customer needs a
 describe('openCustomerAction (Program-Fix 37)', () => {
   beforeEach(() => vi.mocked(redirect).mockClear());
 
-  it('in scope: redirects to /admin-dashboard/customers/v2.k0.<ref> with no phone, and the ref opens to the row', async () => {
-    await cs.saveCustomer(makeCustomer('15551230000', 'A'));
-    currentStaff = staff({ username: 'pa', partnerId: 'A' });
-    await openCustomerAction(form({ phone: '15551230000', partnerId: 'A' }));
-    expect(redirect).toHaveBeenCalledTimes(1);
-    const target = vi.mocked(redirect).mock.calls[0][0] as string;
-    expect(target.startsWith('/admin-dashboard/customers/v2.k0.')).toBe(true); // Program-Fix 46B
-    expect(target).not.toContain('15551230000');
-    expect(target).not.toContain('?');
-    expect(openCustomerRef(target.slice('/admin-dashboard/customers/'.length))).toEqual({ partnerId: 'A', phone: '15551230000' });
-  });
-
   it('partner-A staff opening a partner-B customer gets "Customer not found" and no redirect (pinned, even with a hostile partnerId)', async () => {
     await cs.saveCustomer(makeCustomer('15554445555', 'B'));
     currentStaff = staff({ username: 'pa', partnerId: 'A' });
@@ -329,7 +277,11 @@ describe('openCustomerAction (Program-Fix 37)', () => {
     await cs.saveCustomer(makeCustomer('15556667777', 'B'));
     currentStaff = staff({ username: 'plat' });
     await openCustomerAction(form({ phone: '15556667777', partnerId: 'B' }));
+    expect(redirect).toHaveBeenCalledTimes(1);
     const target = vi.mocked(redirect).mock.calls[0][0] as string;
+    expect(target.startsWith('/admin-dashboard/customers/v2.k0.')).toBe(true); // Program-Fix 46B
+    expect(target).not.toContain('15556667777');
+    expect(target).not.toContain('?');
     expect(openCustomerRef(target.slice('/admin-dashboard/customers/'.length))).toEqual({ partnerId: 'B', phone: '15556667777' });
   });
 

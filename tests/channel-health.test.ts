@@ -241,19 +241,18 @@ describe('parseChannelTest', () => {
 describe('channelBannerModel (the banner a page renders)', () => {
   it('ok ⇒ null (no banner, no layout row)', async () => {
     const { channelBannerModel } = await import('@/lib/channel-health');
-    expect(channelBannerModel({ level: 'ok', items: [] }, 'acme')).toBeNull();
+    expect(channelBannerModel({ level: 'ok', items: [] })).toBeNull();
   });
 
-  it('error ⇒ destructive banner linking to the partner WhatsApp tab, one line per item', async () => {
+  it('error ⇒ destructive banner, one line per item', async () => {
     const { channelBannerModel } = await import('@/lib/channel-health');
     const s = summarizeChannelHealth({
       channel: { kind: 'incomplete', missing: ['token'] },
       marks: { auth_error: { at: NOW.toISOString(), count: 2, code: 190 } },
       now: NOW,
     });
-    const m = channelBannerModel(s, 'acme')!;
+    const m = channelBannerModel(s)!;
     expect(m.variant).toBe('destructive');
-    expect(m.href).toBe('/admin-dashboard/partners/acme');
     expect(m.title).toMatch(/needs attention/i);
     expect(m.lines).toHaveLength(2);
     expect(m.lines[1]).toContain('×2');
@@ -262,6 +261,6 @@ describe('channelBannerModel (the banner a page renders)', () => {
   it('warn ⇒ default banner', async () => {
     const { channelBannerModel } = await import('@/lib/channel-health');
     const s = summarizeChannelHealth({ marks: { no_phone: { at: NOW.toISOString(), count: 1 } }, now: NOW });
-    expect(channelBannerModel(s, 'acme')!.variant).toBe('default');
+    expect(channelBannerModel(s)!.variant).toBe('default');
   });
 });

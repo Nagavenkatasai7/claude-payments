@@ -111,15 +111,6 @@ describe('saveSupportConfigAction keeps the disclosure block (the clobber fix)',
       actorScope: 'platform', // the session's scope (src/lib/partner-support-settings.ts)
     });
   });
-
-  it("an out-of-scope partner is 'not found': no write, no audit row", async () => {
-    await ps.savePartner(basePartner());
-    await ps.savePartner(basePartner({ id: 'rival', name: 'Rival' }));
-    currentStaff = { username: 'p1admin', role: 'admin', partnerId: 'p1' };
-    await expect(saveSupportConfigAction(form({ id: 'rival', enableSupportPortal: 'on' }))).rejects.toThrow(/not found/i);
-    expect((await ps.getPartner('rival'))?.supportConfig).toBeUndefined();
-    expect(await auditRows()).toEqual([]);
-  });
 });
 
 describe('saveDisclosureConfigAction (Reg E provider identity, draft)', () => {
@@ -190,16 +181,6 @@ describe('saveDisclosureConfigAction (Reg E provider identity, draft)', () => {
     const entity = (await ps.getPartner('p1'))?.supportConfig?.disclosure?.licensedEntity ?? '';
     expect(entity).not.toContain('\n');
     expect([...entity].length).toBeLessThanOrEqual(120);
-  });
-
-  it("scope gate: a partner admin saves their OWN block; another tenant's is 'not found'", async () => {
-    await ps.savePartner(basePartner());
-    await ps.savePartner(basePartner({ id: 'rival', name: 'Rival' }));
-    currentStaff = { username: 'p1admin', role: 'admin', partnerId: 'p1' };
-    await saveDisclosureConfigAction(disclosureForm());
-    expect((await ps.getPartner('p1'))?.supportConfig?.disclosure?.licensedEntity).toBe('Acme Money Services LLC');
-    await expect(saveDisclosureConfigAction(disclosureForm({ id: 'rival' }))).rejects.toThrow(/not found/i);
-    expect((await ps.getPartner('rival'))?.supportConfig).toBeUndefined();
   });
 
   it('the route-bound id is authoritative: an unknown id writes nothing', async () => {

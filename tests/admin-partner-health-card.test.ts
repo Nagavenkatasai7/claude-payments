@@ -9,8 +9,9 @@ import type { Staff } from '@/lib/types';
 
 // UI redesign M3-22 (spec §3.10 removals): the legacy admin partner page's
 // churn-risk card and its "Suggested outreach (AI)" narration are platform-only.
-// Partner-scoped staff never get the card, and neither the deterministic scorer
-// nor the model call runs for them. Platform staff are unchanged.
+// Partner-scoped staff never reach this page (requireStaff redirects them to
+// /partner; tests/partner-app-no-internal-cards.test.ts keeps the card out of
+// /partner). Platform staff are unchanged.
 const redis = fakeRedis();
 let db: Db;
 let pgPartnerStore: PartnerStore;
@@ -94,20 +95,6 @@ beforeEach(async () => {
 });
 
 describe('admin partner page: churn / AI outreach card is platform-only (M3-22)', () => {
-  it.each([
-    ['partner admin', staff({ username: 'alpha.admin', partnerId: PA })],
-    ['partner agent', staff({ username: 'alpha.agent', role: 'agent', partnerId: PA })],
-  ])('%s: no card, and neither the scorer nor the model is called', async (_label, s) => {
-    currentStaff = s;
-    const html = await render();
-    expect(html).toContain('Alpha Remit'); // the page itself rendered
-    expect(html).not.toContain('churn-risk');
-    expect(html).not.toContain('Suggested outreach');
-    expect(html).not.toContain('Integration health');
-    expect(health.score).not.toHaveBeenCalled();
-    expect(health.narrate).not.toHaveBeenCalled();
-  });
-
   it('platform admin: the card and the AI narration still render (unchanged)', async () => {
     currentStaff = staff({ username: 'platform.admin' });
     const html = await render();

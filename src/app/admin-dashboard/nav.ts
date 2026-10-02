@@ -24,7 +24,6 @@ export type SidebarActive =
   | 'rates'
   | 'team'
   | 'api-keys'
-  | 'my-partner'
   | 'tickets'
   | 'my-queue'
   | 'employee-questions'
@@ -40,6 +39,10 @@ export interface NavGroup {
 }
 
 export function visibleNavGroups(staff: Staff): NavGroup[] {
+  // UI M5: requireStaff (src/lib/auth.ts) sends partner-scoped staff to
+  // /partner, so they never render this nav. Show them nothing rather than
+  // platform links if that ever changes.
+  if (staff.partnerId) return [];
   // Support staff are tickets-only: their nav shows nothing else, and the
   // requireScope bounce in src/lib/auth.ts ENFORCES it server-side (the nav
   // is presentation, never the guard). Employee-questions is where support
@@ -50,52 +53,33 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
       { label: 'Help', items: ['employee-questions'] },
     ];
   }
-  if (!staff.partnerId) {
-    // Platform IA: Home/Operations · Money · People · Insights · Platform.
-    return [
-      { items: ['overview', 'ops'] },
-      { label: 'Money', items: ['transactions', 'schedules', 'refunds'] },
-      { label: 'People', items: ['customers', 'kyc', 'compliance'] },
-      {
-        label: 'Support',
-        items: [
-          // Agents are ticket handlers of their OWN assigned tickets only — they
-          // get My queue, never the global queue (the queue page redirects them).
-          ...(staff.role !== 'agent' ? (['tickets'] as NavItem[]) : []),
-          'my-queue',
-          ...(staff.role === 'admin' ? (['employee-questions'] as NavItem[]) : []),
-        ],
-      },
-      { label: 'Insights', items: ['analytics'] },
-      {
-        label: 'Platform',
-        items: [
-          'partners',
-          'corridors',
-          'rates', // platform-wide cross-tenant pricing — never shown to partner-scoped staff
-          'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
-          // partner-requests + waitlist are SmartRemit's own inbound lists — platform admins only.
-          ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys'] as NavItem[]) : []),
-        ],
-      },
-    ];
-  }
-  // Partner-scoped staff: same operational groups, their own partner instead
-  // of the platform section.
+  // Platform IA: Home/Operations · Money · People · Insights · Platform.
   return [
-    { items: ['overview'] },
+    { items: ['overview', 'ops'] },
     { label: 'Money', items: ['transactions', 'schedules', 'refunds'] },
     { label: 'People', items: ['customers', 'kyc', 'compliance'] },
     {
       label: 'Support',
       items: [
-        'tickets',
+        // Agents are ticket handlers of their OWN assigned tickets only — they
+        // get My queue, never the global queue (the queue page redirects them).
+        ...(staff.role !== 'agent' ? (['tickets'] as NavItem[]) : []),
         'my-queue',
         ...(staff.role === 'admin' ? (['employee-questions'] as NavItem[]) : []),
       ],
     },
     { label: 'Insights', items: ['analytics'] },
-    { label: 'Partner', items: ['my-partner'] },
+    {
+      label: 'Platform',
+      items: [
+        'partners',
+        'corridors',
+        'rates', // platform-wide cross-tenant pricing — never shown to partner-scoped staff
+        'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
+        // partner-requests + waitlist are SmartRemit's own inbound lists — platform admins only.
+        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys'] as NavItem[]) : []),
+      ],
+    },
   ];
 }
 
@@ -128,7 +112,6 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   waitlist:     { label: 'Waitlist',     icon: 'queue',        hrefFor: () => '/admin-dashboard/waitlist' },
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
-  'my-partner': { label: 'My partner',   icon: 'partners',     hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
   tickets:      { label: 'Tickets',      icon: 'tickets',      hrefFor: () => '/admin-dashboard/tickets' },
   'my-queue':   { label: 'My queue',     icon: 'queue',        hrefFor: () => '/admin-dashboard/tickets/my-queue' },
   'employee-questions': { label: 'Employee questions', icon: 'question', hrefFor: () => '/admin-dashboard/employee-questions' },

@@ -29,10 +29,8 @@ describe('support role — nav', () => {
     expect(items).toContain('transactions'); // money intact for admins
   });
 
-  it('partner agents get tickets but NOT the admin-only employee-questions queue', () => {
-    const items = visibleNavItems(partnerAgent);
-    expect(items).toContain('tickets');
-    expect(items).not.toContain('employee-questions');
+  it('partner agents get no legacy nav at all (UI M5: they work in /partner)', () => {
+    expect(visibleNavItems(partnerAgent)).toEqual([]);
   });
 
   it('every nav item resolves meta (label/icon/href)', () => {

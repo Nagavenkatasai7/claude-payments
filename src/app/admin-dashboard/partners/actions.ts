@@ -1,7 +1,6 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { redirect } from 'next/navigation';
 import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { eq } from 'drizzle-orm';
@@ -23,7 +22,6 @@ import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
-import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
@@ -91,8 +89,8 @@ function supportActor(staff: Staff): SupportSettingsActor {
   return { username: staff.username, actorScope: scopeOf(staff).kind };
 }
 
-// Shared gate for every partner-config action: admin role + same-partner scope
-// (a partner-admin configures only their OWN partner; a platform admin any).
+// Shared gate for every partner-config action: a platform admin, and the
+// partner must exist (canSee stays as defence in depth).
 async function gatePartnerConfig(id: string): Promise<Awaited<ReturnType<typeof requireAdmin>>> {
   // UI M5: partner admins configure their tenant in /partner; this legacy surface is platform-only.
   const staff = await requirePlatformAdmin();
@@ -190,11 +188,11 @@ export async function setPartnerStatusAction(formData: FormData): Promise<void> 
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
-// ── partner-demo R5: partner-managed staff ──────────────────────────────────
-// A partner ADMIN adds/removes staff in their OWN tenant; a platform admin in
-// any tenant. The tenant always comes from the session (resolveStaffTenant):
-// the bound partnerId is a selector only. Suspend, password/MFA reset,
-// permissions and role edits stay platform-only (the Team page).
+// ── partner-demo R5: partner staff, managed by SmartRemit ───────────────────
+// A platform admin adds/removes staff in any tenant (partner admins do it in
+// /partner/staff since UI M5). The tenant always comes from the session
+// (resolveStaffTenant): the bound partnerId is a selector only. Suspend,
+// password/MFA reset, permissions and role edits stay on the Team page.
 
 const STAFF_NOT_FOUND = 'Partner not found.';
 const USERNAME_UNAVAILABLE = 'That username is not available. Choose another username.';
@@ -203,23 +201,12 @@ const STAFF_CREATE_LIMIT = 20;
 const STAFF_CREATE_WINDOW_SEC = 60 * 60;
 
 /**
- * Who may manage partner staff. R7: the actor kind is decided BEFORE
- * requirePlatformAdmin(), which would redirect a partner admin.
- *   - platform scope → requirePlatformAdmin() (keeps the fix-17b step-up);
- *   - partner scope  → the same STAFF_MFA_REQUIRED step-up (partnerAdmins
- *     option, default off), same exemptions.
- * requireAdmin() first redirects agents, support and signed-out callers.
+ * Who may manage partner staff here: a platform admin (requirePlatformAdmin
+ * keeps the fix-17b step-up). UI M5: requireStaff sends partner staff to
+ * /partner, so the old partner-admin branch was unreachable and is gone.
  */
 async function requireStaffManager(): Promise<Staff> {
-  const staff = await requireAdmin();
-  if (scopeOf(staff).kind === 'platform') return requirePlatformAdmin();
-  if (
-    mfaEnrolmentRequired(staff, { partnerAdmins: true }) &&
-    !(await getStaffMfaStore().isEnrolled(staff.username))
-  ) {
-    redirect('/admin-dashboard/account?enroll=1');
-  }
-  return staff;
+  return requirePlatformAdmin();
 }
 
 /**
@@ -527,8 +514,8 @@ export async function savePricingAction(formData: FormData): Promise<void> {
 }
 
 // ── Send limits: the audited PLATFORM-ADMIN partner default (Program fix 16b) ──
-// NOT gatePartnerConfig (which admits partner admins): a raise is platform
-// governance, like setPartnerStatusAction. Same steps as the customer action:
+// Gated by requirePlatformAdmin directly: a raise is platform governance, like
+// setPartnerStatusAction. Same steps as the customer action:
 // gate → validate (reason first) → re-read the target → ONE transaction with the
 // single-column UPDATE + the audit row (old, new, actor, reason, expiresAt).
 // The partner shape also carries T0, tighten-only (<= the platform $500).
