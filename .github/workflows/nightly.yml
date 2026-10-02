@@ -127,12 +127,13 @@ jobs:
           retention-days: 7
 
       - name: Production has applied every migration the served build expects
-        # WARNING-ONLY, like the post-deploy smoke's step: catches a pending
-        # migration whose smoke warning was missed, and divergence after a
-        # rollback. One read of GET /api/version/migrations (Bearer
-        # CRON_SECRET); no SHA match, whatever production serves is checked.
+        # BLOCKING, like the post-deploy smoke's step: fails the nightly when
+        # production is behind the served build's journal (a red smoke that
+        # was missed, or a later rollback), or when the check cannot run.
+        # Divergence (applied rows the journal does not list) only warns.
+        # One read of GET /api/version/migrations (Bearer CRON_SECRET); no SHA
+        # match, whatever production serves is checked.
         if: ${{ !cancelled() }}
-        continue-on-error: true
         timeout-minutes: 2
         shell: bash
         env:
@@ -141,8 +142,8 @@ jobs:
         run: |
           set -u
           if [[ -z "${CRON_SECRET:-}" ]]; then
-            echo "::warning title=Migration check skipped::The CRON_SECRET repository secret is not available to this run."
-            exit 0
+            echo "::error title=Migration check could not run::The CRON_SECRET repository secret is not available to this run, so production's migrations were NOT checked."
+            exit 1
           fi
           body_file="$(mktemp)"
           trap 'rm -f "$body_file"' EXIT
@@ -151,8 +152,8 @@ jobs:
               -o "$body_file" -w '%{http_code}' \
               "${MIGRATIONS_URL}?cb=$(date +%s)-${RANDOM}")" || code="error"
           if [[ "$code" != "200" ]]; then
-            echo "::warning title=Migration check inconclusive::${MIGRATIONS_URL} answered HTTP ${code}; migration status was NOT checked."
-            exit 0
+            echo "::error title=Migration check inconclusive::${MIGRATIONS_URL} answered HTTP ${code}; migration status was NOT checked."
+            exit 1
           fi
           sha="$(jq -r '.sha // "unknown"' "$body_file")"
           unknown="$(jq -r '.unknownApplied | length' "$body_file")"
@@ -162,5 +163,6 @@ jobs:
           if [[ "$(jq -r '.ok' "$body_file")" == "true" ]]; then
             echo "Production has applied all $(jq -r '.expected' "$body_file") migrations build ${sha} expects."
           else
-            echo "::warning title=Prod migrations behind::Production has $(jq -r '.pending | length' "$body_file") migration(s) pending that build ${sha} expects: $(jq -r '.pending | join(", ")' "$body_file"). Apply via /migrate-prod."
+            echo "::error title=Prod migrations behind::Production has $(jq -r '.pending | length' "$body_file") migration(s) pending that build ${sha} expects: $(jq -r '.pending | join(", ")' "$body_file"). Apply via /migrate-prod."
+            exit 1
           fi

@@ -271,18 +271,22 @@ jobs:
 
       - name: Production has applied every migration this build expects
         if: steps.dedupe.outputs.covered != 'true'
-        # WARNING-ONLY for now (owner decision): this step never fails the job
-        # and never skips Playwright. It reads GET /api/version/migrations
+        # BLOCKING: this step fails the smoke (and so skips Playwright) when
+        # production has not applied every migration the served build
+        # expects, because drizzle selects explicit column lists and an
+        # unapplied migration breaks every query on the altered table
+        # (2026-06-11 outage). It reads GET /api/version/migrations
         # (src/app/api/version/migrations/route.ts, Bearer CRON_SECRET), which
         # compares the journal bundled into the SERVED build with
         # drizzle.__drizzle_migrations on prod Neon. Migrations are applied by
         # hand (/migrate-prod), so it polls for up to GRACE_SECONDS while the
-        # answer is pending, from another build or unreadable, then warns with
-        # the pending tags. Applied rows the journal does not know (divergence,
-        # or a rollback to an older build) also warn. The secret goes only in
-        # the header; curl never runs verbose.
+        # answer is pending, from another build or unreadable, then fails with
+        # the pending tags. A missing or rejected CRON_SECRET also fails: an
+        # unchecked deploy must not pass as a checked one. Applied rows the
+        # journal does not know (divergence, or a rollback to an older build)
+        # only warn, so a rollback redeploy is not red. The secret goes only
+        # in the header; curl never runs verbose.
         timeout-minutes: 7
-        continue-on-error: true
         shell: bash
         env:
           TARGET_SHORT: ${{ needs.target.outputs.short }}
@@ -294,8 +298,8 @@ jobs:
           set -u
           target="$(printf '%s' "$TARGET_SHORT" | tr 'A-F' 'a-f')"
           if [[ -z "${CRON_SECRET:-}" ]]; then
-            echo "::warning title=Migration check skipped::The CRON_SECRET repository secret is not available to this run."
-            exit 0
+            echo "::error title=Migration check could not run::The CRON_SECRET repository secret is not available to this run, so production's migrations were NOT checked."
+            exit 1
           fi
 
           body_file="$(mktemp)"
@@ -316,8 +320,8 @@ jobs:
                 "${MIGRATIONS_URL}?vcrrForceStable=true&cb=$(date +%s)-${polls}-${RANDOM}")" || code="error"
 
             if [[ "$code" == "401" ]]; then
-              echo "::warning title=Migration check unauthorized::${MIGRATIONS_URL} answered 401: the CRON_SECRET repository secret does not match production's. Migration status was NOT checked."
-              exit 0
+              echo "::error title=Migration check unauthorized::${MIGRATIONS_URL} answered 401: the CRON_SECRET repository secret does not match production's. Migration status was NOT checked."
+              exit 1
             fi
 
             seen="-"; ok="-"
@@ -347,11 +351,11 @@ jobs:
               if [[ "$code" == "200" && "$seen" == "$target" ]]; then
                 count="$(jq -r '.pending | length' "$body_file")"
                 tags="$(jq -r '.pending | join(", ")' "$body_file")"
-                echo "::warning title=Prod migrations behind::Production has ${count} migration(s) pending that build ${target} expects: ${tags}. Apply via /migrate-prod, then re-run: gh workflow run smoke.yml -f sha=${target}"
+                echo "::error title=Prod migrations behind::Production has ${count} migration(s) pending that build ${target} expects: ${tags}. Apply via /migrate-prod, then re-run: gh workflow run smoke.yml -f sha=${target}"
               else
-                echo "::warning title=Migration check inconclusive::Could not read migration status for build ${target} within $(( GRACE_SECONDS / 60 )) min (last poll: ${last})."
+                echo "::error title=Migration check inconclusive::Could not read migration status for build ${target} within $(( GRACE_SECONDS / 60 )) min (last poll: ${last}). Check GET /api/version/migrations by hand, then re-run: gh workflow run smoke.yml -f sha=${target}"
               fi
-              exit 0
+              exit 1
             fi
             sleep "$POLL_INTERVAL_SECONDS"
           done
