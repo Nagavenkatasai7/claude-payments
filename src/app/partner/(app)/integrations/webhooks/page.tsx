@@ -5,6 +5,8 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { getDb } from '@/db/client';
+import { env } from '@/lib/env';
+import { statusCallbackUrl } from '@/lib/partner-integration-urls';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { listRecentPings, type PingView } from '@/lib/partner-settlement-endpoint';
 import { webhookConfigView, type SecretState } from '@/lib/partner-webhooks-view';
@@ -28,6 +30,7 @@ export const metadata: Metadata = { title: t('partner.webhooks.title'), robots: 
 // cursor: transfer id, outcome, HTTP status, latency, attempt, time; never a URL, body or outbox
 // payload) and the failed (dead) instructions with Replay (transfer id, time and attempts; the
 // outbox id is only the hidden form value).
+// 2f adds the read-only status callback URL (partner-integration-urls.ts) for a partner-operated rail.
 
 const H2 = 'text-[17px] font-semibold text-ds-ink';
 const whenUtc = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
@@ -244,6 +247,13 @@ export default async function PartnerWebhooksPage({ searchParams }: { searchPara
             <dd className="font-mono text-[13.5px] break-all text-ds-ink">{view.endpoint ?? t('partner.webhooks.endpointNone')}</dd>
           </dl>
           <EndpointForm current={view.endpoint} />
+        </Card>
+        <Card as="section" className="p-5 sm:p-6">
+          <h2 className={H2}>{t('partner.webhooks.callbackTitle')}</h2>
+          <p className="mt-1 text-[14px] leading-relaxed text-ds-ink-muted">{t('partner.webhooks.callbackHint')}</p>
+          <code data-testid="webhooks-callback-url" className="mt-3 block select-all rounded-ds-inner border border-ds-border bg-ds-ground px-4 py-3 font-mono text-[13.5px] break-all text-ds-ink">
+            {statusCallbackUrl(env.appBaseUrl, cfg.payment.providerType)}
+          </code>
         </Card>
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.webhooks.secretsTitle')}</h2>

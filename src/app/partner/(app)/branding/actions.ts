@@ -6,6 +6,7 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getDb } from '@/db/client';
 import { savePartnerTheme } from '@/db/repos/partner-site-repo';
 import { setPartnerSupportContact } from '@/db/repos/partner-support-contact';
+import { setPartnerDisplayName, setPartnerPersona } from '@/lib/partner-brand-text';
 import { savePartnerLogo } from '@/lib/partner-logo-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { scopeOf } from '@/lib/staff-scope';
@@ -102,6 +103,51 @@ export async function saveSupportContactAction(formData: FormData): Promise<Acti
     return failed();
   }
   if (!r.ok) return r.reason === 'not_found' ? notFound() : { ok: false, error: t('partner.branding.contactInvalid') };
+  done();
+  return { ok: true };
+}
+
+// 2f (partner-dashboard merge): the display name and the assistant voice, ported from the legacy
+// "My partner" form. Both reach the bot's SYSTEM prompt, so the rules are partner-brand-text's
+// (bounded; the persona refused on a web address or a rule-override phrase), and each writer is a
+// column-only UPDATE with its lengths-only audit row in the same transaction.
+
+export async function saveDisplayNameAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_ROUTES.branding.policy);
+  const raw = formData.get('displayName');
+  if (typeof raw !== 'string') return failed(); // a missing field never clears the name
+  if (!(await tenantExists(ctx))) return notFound();
+  let r: Awaited<ReturnType<typeof setPartnerDisplayName>>;
+  try {
+    r = await setPartnerDisplayName(getDb(), ctx.partnerId, raw, ctx.username, {
+      actorScope: scopeOf(ctx.staff).kind,
+    });
+  } catch (err) {
+    logWarn('partner.branding.display_name', errName(err), { partnerId: ctx.partnerId });
+    return failed();
+  }
+  if (!r.ok) return notFound();
+  done();
+  return { ok: true };
+}
+
+export async function savePersonaAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_ROUTES.branding.policy);
+  const raw = formData.get('botPersona');
+  if (typeof raw !== 'string') return failed(); // a missing field never clears the voice
+  if (!(await tenantExists(ctx))) return notFound();
+  let r: Awaited<ReturnType<typeof setPartnerPersona>>;
+  try {
+    r = await setPartnerPersona(getDb(), ctx.partnerId, raw, ctx.username, {
+      actorScope: scopeOf(ctx.staff).kind,
+    });
+  } catch (err) {
+    logWarn('partner.branding.persona', errName(err), { partnerId: ctx.partnerId });
+    return failed();
+  }
+  if (!r.ok) return r.reason === 'not_found' ? notFound() : { ok: false, error: t('partner.branding.personaRefused') };
   done();
   return { ok: true };
 }

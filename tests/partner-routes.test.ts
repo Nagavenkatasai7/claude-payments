@@ -30,7 +30,7 @@ describe('PARTNER_ROUTES', () => {
     expect(PARTNER_ROUTES.integrationsWebhooks.nav).toBe(false);
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/customers', '/partner/reports', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/customers', '/partner/reports', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/settings', '/partner/security']);
     expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/branding');
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
@@ -45,6 +45,12 @@ describe('PARTNER_ROUTES', () => {
   it('M3-16: Reports is a money read (admin, agent, finance); support never sees it', () => {
     for (const role of ['admin', 'agent', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).toContain('/partner/reports');
     expect(partnerNav('support').map((r) => r.href)).not.toContain('/partner/reports');
+  });
+  it('2f: Settings is admin-only, in the nav right before security', () => {
+    for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('settings', role)).toBe(role === 'admin');
+    const hrefs = partnerNav('admin').map((r) => r.href);
+    expect(hrefs[hrefs.indexOf('/partner/security') - 1]).toBe('/partner/settings');
+    for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/settings');
   });
   it('an unknown role gets no nav at all (fails closed)', () => {
     expect(partnerNav('root' as never)).toEqual([]);
