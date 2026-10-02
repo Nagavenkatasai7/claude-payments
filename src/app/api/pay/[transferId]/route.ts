@@ -19,6 +19,8 @@ import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
+import { isInfraError } from '@/lib/infra-error';
+import { retryOnceOnInfra } from '@/lib/infra-retry';
 import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
 import { resolvePartnerBranding, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
@@ -455,7 +457,8 @@ export async function POST(
     // ── Phase 3 Part B: per-transaction OTP step-up ──────────────────────────
     // Resolve the sender phone from the id (draft PEEK — never consumes — else
     // an existing transfer) so the code is bound to this exact transaction.
-    const otpDraft = await getDraftStore().getDraft(transferId);
+    // Fix D: the PEEK is idempotent, so a Redis blip gets one retry.
+    const otpDraft = await retryOnceOnInfra(() => getDraftStore().getDraft(transferId));
     const otpTransfer = otpDraft ? null : await store.getTransfer(transferId);
     // Program-Fix 44 P2: a SANDBOX (test-key) transfer is never payable here —
     // no OTP to the partner-supplied phone, no capture. Same answer as a dead link.
@@ -867,6 +870,15 @@ export async function POST(
     return await processTransferPayment(store, created);
   } catch (err) {
     logError('pay.route', err, { transferId });
+    // Fix D: an infrastructure error (Redis / Neon) is retryable, not a refusal.
+    // The copy never says nothing was charged: this catch also wraps post-capture
+    // code, and a re-POST converges (claim-first replay / refuseUnlessAwaiting).
+    if (isInfraError(err)) {
+      return NextResponse.json(
+        { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
 }

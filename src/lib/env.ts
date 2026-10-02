@@ -30,6 +30,15 @@ export const env = {
     return process.env.OPS_ALERT_WEBHOOK_URL ?? '';
   },
   /**
+   * External dead-man's-switch ping URL (Healthchecks.io style): GET after each
+   * COMPLETED cron-sourced full worker run (src/lib/dead-man-ping.ts). OPTIONAL,
+   * never boot-asserted; unset ⇒ no ping. https only. A secret: anyone holding
+   * it can fake liveness, so it is never logged.
+   */
+  get workerHeartbeatUrl(): string {
+    return (process.env.WORKER_HEARTBEAT_URL ?? '').trim();
+  },
+  /**
    * Sentry DSN for server error reports (Program-Fix 26). Documented here for the
    * env contract only: src/lib/error-report.ts reads process.env.SENTRY_DSN
    * DIRECTLY so it stays edge-safe. Unset ⇒ no error is ever sent.

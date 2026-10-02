@@ -403,7 +403,9 @@ secret-bearing payload shape.
 **Worker** (`/api/worker` → `drainOnce`): claims batches via
 `FOR UPDATE SKIP LOCKED` (concurrent drains are safe by construction), executes by
 kind, exponential backoff `2^attempts` (cap 1h), **dead at 8 attempts** → exactly one
-deduped WhatsApp ops alert to `OPS_ALERT_PHONE`.
+deduped WhatsApp ops alert to `OPS_ALERT_PHONE`. `settlement.instruct` has its own
+policy (56 attempts, 30-min cap, about a day) so a partner rail outage self-heals, and
+raises one deduped `railfail:<partner>:<hour>` ops alert from its third attempt.
 
 **Worker clock**: a Vercel cron (`vercel.json`) GETs the worker every minute and an hourly GitHub Actions heartbeat backs it up;
 `pokeWorker()` (a best-effort `after()` fetch) makes the common case drain in seconds.

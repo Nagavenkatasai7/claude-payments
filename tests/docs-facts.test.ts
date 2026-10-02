@@ -27,7 +27,13 @@ describe('docs FACTS equal the source constants', () => {
   it('outbox retry budget and backoff cap', async () => {
     const { FACTS } = await import('@/content/docs/facts');
     expect(FACTS.outboxMaxAttempts).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const MAX_ATTEMPTS = ([\d_]+)/)));
-    expect(FACTS.outboxBackoffCapSec).toBe(num(extract('src/db/repos/outbox-repo.ts', /Math\.min\(2 \*\* attempts, ([\d_]+)\)/)));
+    expect(FACTS.outboxBackoffCapSec).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const BACKOFF_CAP_SEC = ([\d_]+)/)));
+  });
+
+  it('settlement instruction retry budget and backoff cap (about a day)', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    expect(FACTS.instructMaxAttempts).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const INSTRUCT_MAX_ATTEMPTS = ([\d_]+)/)));
+    expect(FACTS.instructBackoffCapSec).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const INSTRUCT_BACKOFF_CAP_SEC = ([\d_]+)/)));
   });
 
   it('rail ack deadline (seconds) equals RAIL_TIMEOUT_MS / 1000', async () => {

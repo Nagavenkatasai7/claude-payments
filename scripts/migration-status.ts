@@ -7,12 +7,11 @@
  *
  *   set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/migration-status.ts [--check "SELECT 1"]
  */
-import { readFileSync } from 'node:fs';
 import { getDb } from '@/db/client';
+import { compareMigrations, JOURNAL_ENTRIES, readAppliedMigrations } from '@/db/migration-status';
 import { sql } from 'drizzle-orm';
 
 type Row = Record<string, unknown>;
-type Journal = { entries: Array<{ idx: number; when: number; tag: string }> };
 
 async function main() {
   if (!process.env.DATABASE_URL) {
@@ -23,28 +22,27 @@ async function main() {
   const q = async (s: ReturnType<typeof sql>): Promise<Row[]> =>
     ((await db.execute(s)) as unknown as { rows: Row[] }).rows;
 
-  const journal = JSON.parse(readFileSync('drizzle/meta/_journal.json', 'utf8')) as Journal;
-  let applied: Row[] = [];
+  let applied: unknown[] = [];
   try {
-    applied = await q(sql`SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY created_at`);
+    applied = await readAppliedMigrations(db);
   } catch (e) {
     console.error('drizzle.__drizzle_migrations is not readable (fresh database?):', (e as Error).message);
   }
-  const appliedWhen = new Set(applied.map((r) => Number(r.created_at)));
+  // Same rule as GET /api/version/migrations (src/db/migration-status.ts).
+  const status = compareMigrations(JOURNAL_ENTRIES, applied);
+  const pendingTags = new Set(status.pending);
   const host = (() => { try { return new URL(process.env.DATABASE_URL ?? '').host; } catch { return '?'; } })();
 
   console.log(`\nMigration status against ${host}\n`);
-  let pending = 0;
-  for (const e of journal.entries) {
-    const ok = appliedWhen.has(e.when);
-    if (!ok) pending++;
-    console.log(`  ${ok ? 'APPLIED' : 'PENDING'}  ${e.tag}`);
+  for (const e of JOURNAL_ENTRIES) {
+    console.log(`  ${pendingTags.has(e.tag) ? 'PENDING' : 'APPLIED'}  ${e.tag}`);
   }
-  const extra = applied.filter((r) => !journal.entries.some((e) => e.when === Number(r.created_at)));
+  const extra = status.unknownApplied;
   if (extra.length > 0) {
-    console.log(`\n  NOTE: ${extra.length} applied row(s) are not in the journal (created_at: ${extra.map((r) => String(r.created_at)).join(', ')}).`);
+    console.log(`\n  NOTE: ${extra.length} applied row(s) are not in the journal (created_at: ${extra.map((w) => String(w)).join(', ')}).`);
     console.log('  Journal and database have diverged — investigate before applying anything.');
   }
+  const pending = status.pending.length;
   console.log(pending > 0 ? `\n${pending} PENDING — apply via /migrate-prod (approval-gated).` : '\nAll journal migrations are applied.');
 
   const i = process.argv.indexOf('--check');

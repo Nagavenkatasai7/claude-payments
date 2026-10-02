@@ -4,13 +4,13 @@ import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { sql } from 'drizzle-orm';
-import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
-import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
+import { drainOnce, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -19,6 +19,7 @@ import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { OllamaHttpError } from '@/lib/llm-provider-error';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -243,7 +244,16 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { ret
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('rail failure → retry with backoff; at MAX_ATTEMPTS → dead + EXACTLY ONE ops alert', async () => {
+  const alertRows = async () =>
+    ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: unknown }>;
+    }).rows;
+  const failInstructAt = async (attempt: number, key = 'instruct:wk_t1') => {
+    await db.execute(sql`UPDATE outbox SET attempts = ${attempt - 1}, next_attempt_at = now() WHERE dedupe_key = ${key}`);
+    return drainOnce(deps(), 'w1');
+  };
+
+  it('rail failure → retry with backoff; survives the default ceiling; at INSTRUCT_MAX_ATTEMPTS → dead + ONE dead alert', async () => {
     fetchFn.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' });
 
@@ -253,24 +263,119 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { ret
     expect(r.dead).toBe(0);
     expect(await outbox.listDead()).toHaveLength(0);
 
-    // Fast-forward to the brink of death, then fail once more.
+    // fix B: the default ceiling (MAX_ATTEMPTS) no longer kills an instruct row.
     await db.execute(
       sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`,
     );
     r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(await outbox.listDead()).toHaveLength(0);
+
+    // Fast-forward to the brink of the instruct ceiling, then fail once more.
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${INSTRUCT_MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`,
+    );
+    r = await drainOnce(deps(), 'w1');
     expect(r.dead).toBe(1);
     expect(await outbox.listDead()).toHaveLength(1);
+    // One rail-failing alert (raised while it was still retrying) and one dead alert; the death adds no railfail.
+    const keys = (await alertRows()).map((a) => a.dedupe_key);
+    expect(keys.filter((k) => k.startsWith('railfail:'))).toHaveLength(1);
+    expect(keys.filter((k) => /^dead:\d+$/.test(k))).toHaveLength(1);
+    expect(keys).toHaveLength(2);
 
     // The death enqueued a deduped ops.alert; with OPS_ALERT_PHONE set it sends.
     process.env.OPS_ALERT_PHONE = '15715466207';
     r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
-    expect(sendText).toHaveBeenCalledTimes(1);
-    expect((sendText.mock.calls[0] as unknown[])[0]).toBe('15715466207');
-    expect((sendText.mock.calls[0] as unknown[])[1]).toContain('DEAD');
+    expect(r.processed).toBeGreaterThanOrEqual(1);
+    const sent = sendText.mock.calls.filter((c) => String((c as unknown[])[1]).includes('DEAD'));
+    expect(sent).toHaveLength(1);
+    expect((sent[0] as unknown[])[0]).toBe('15715466207');
     // Re-dying the same row can never alert twice (dedupe key).
     const again = await outbox.enqueue('ops.alert', { message: 'dup' }, { dedupeKey: `dead:${(await outbox.listDead())[0].id}` });
     expect(again).toBe(false);
+  });
+
+  // fix B: one deduped 'rail failing' ops alert per settlement partner per hour, from attempt 3.
+  describe('rail failing alert (railfail:<partner>:<hour>)', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('attempts 1 and 2 raise nothing; attempt 3 raises ONE alert naming the partner and transfer, never the URL or body', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      expect(RAILFAIL_ALERT_MIN_ATTEMPT).toBe(3);
+      fetchFn.mockResolvedValue({ ok: false, status: 503, text: async () => 'rail body down' });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await failInstructAt(1)).failed).toBe(1);
+      expect((await failInstructAt(2)).failed).toBe(1);
+      expect(await alertRows()).toHaveLength(0);
+      expect((await failInstructAt(3)).failed).toBe(1);
+      const rows = await alertRows();
+      expect(rows.map((a) => a.dedupe_key)).toEqual([`railfail:acme:${Math.floor(Date.now() / 3_600_000)}`]);
+      const msg = JSON.stringify(rows[0].payload);
+      expect(msg).toContain('acme');
+      expect(msg).toContain('wk_t1');
+      expect(msg).not.toContain('rail.example');
+      expect(msg).not.toContain('rail body down');
+      expect(msg).not.toContain('123456789012');
+    });
+
+    it('a second transfer on the same rail adds no alert this hour; the next hour raises a new one', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      fetchFn.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
+      await store.saveTransfer({ ...transferFixture(), id: 'wk_t2' });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t2' }, { dedupeKey: 'instruct:wk_t2' });
+      await db.execute(sql`UPDATE outbox SET attempts = 3, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(2);
+      const hour = Math.floor(Date.now() / 3_600_000);
+      expect((await alertRows()).map((a) => a.dedupe_key)).toEqual([`railfail:acme:${hour}`]);
+
+      vi.setSystemTime(Date.now() + 3_600_000);
+      await failInstructAt(5, 'instruct:wk_t2');
+      expect((await alertRows()).map((a) => a.dedupe_key)).toEqual([`railfail:acme:${hour}`, `railfail:acme:${hour + 1}`]);
+    });
+
+    it('a missing settlement URL counts as rail failing; last_error is unchanged', async () => {
+      await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+        kyc: {},
+        payment: { providerType: 'simulator', credentials: {}, webhookSecret: 'whk' },
+        whatsapp: {},
+      });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await failInstructAt(3)).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect((await alertRows()).map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^railfail:acme:\d+$/)]);
+      const err = (await db.execute(sql`SELECT last_error FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+        rows: Array<{ last_error: string }>;
+      };
+      expect(err.rows[0].last_error).toBe('Settlement endpoint not configured.');
+    });
+
+    it('a network error (fetch rejects) counts as rail failing and keeps its message', async () => {
+      fetchFn.mockRejectedValue(new Error('connect ECONNREFUSED'));
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await failInstructAt(4)).failed).toBe(1);
+      expect((await alertRows()).map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^railfail:acme:\d+$/)]);
+      const err = (await db.execute(sql`SELECT last_error FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+        rows: Array<{ last_error: string }>;
+      };
+      expect(err.rows[0].last_error).toBe('connect ECONNREFUSED');
+    });
+
+    it.each(['pending', 'failed'])('a HELD row (debit %s) at attempt 3+ is not a rail failure: no railfail alert', async (state) => {
+      await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_wk', funding_state = ${state} WHERE id = 'wk_t1'`);
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await failInstructAt(5)).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(await alertRows()).toHaveLength(0);
+    });
+
+    it('a refund-requested hold at attempt 3+ is not a rail failure either', async () => {
+      await store.saveTransfer({ ...transferFixture(), refundStatus: 'requested' });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await failInstructAt(5)).failed).toBe(1);
+      expect(await alertRows()).toHaveLength(0);
+    });
   });
 });
 
@@ -462,6 +567,17 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     const expectedSig = createHmac('sha256', 'railp_sgn').update(raw).digest('hex');
     expect((init.headers as Record<string, string>)['x-signature']).toBe(expectedSig);
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('railp-ref');
+  });
+
+  it('fix B: a routed rail failing at attempt 3+ raises railfail for the SETTLEMENT partner, not the owner', async () => {
+    fetchFn.mockResolvedValue({ ok: false, status: 502, text: async () => 'bad gateway' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = 2, next_attempt_at = now() WHERE dedupe_key = 'instruct:wk_t1'`);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    const keys = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as {
+      rows: Array<{ dedupe_key: string }>;
+    };
+    expect(keys.rows.map((k) => k.dedupe_key)).toEqual([expect.stringMatching(/^railfail:railp:\d+$/)]);
   });
 });
 
@@ -933,7 +1049,7 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(r.processed).toBe(2);
     expect(runAgentTurn).toHaveBeenCalledWith(
       '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
-      expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal) }),
+      expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal), onFallback: expect.any(Function) }),
     );
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
@@ -1280,7 +1396,7 @@ describe('drainOnce — settlement URL fails CLOSED (Program-Fix 22, acceptance 
     });
   }
 
-  it('settlement.instruct: a stored http://10.0.0.5 URL never reaches fetchFn; the row fails with a fixed reason, backs off, dies at MAX_ATTEMPTS with the ops alert, and providerRef is never written', async () => {
+  it('settlement.instruct: a stored http://10.0.0.5 URL never reaches fetchFn; the row fails with a fixed reason, backs off, dies at INSTRUCT_MAX_ATTEMPTS with the ops alert, and providerRef is never written', async () => {
     await store.saveTransfer(transferFixture());
     await railAt('http://10.0.0.5/settle');
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
@@ -1295,7 +1411,7 @@ describe('drainOnce — settlement URL fails CLOSED (Program-Fix 22, acceptance 
     expect(row.last_error).toBe('settlement_url_refused:scheme'); // the reason only — never the URL
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
 
-    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    await db.execute(sql`UPDATE outbox SET attempts = ${INSTRUCT_MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
     r = await drainOnce(deps(), 'w1');
     expect(r.dead).toBe(1);
     row = await lastError('settlement.instruct');
@@ -1655,6 +1771,48 @@ describe('drainOnce — poison rows dead-letter on reclaim (Program-Fix 12 / Tas
     expect(await alertKeys()).toEqual([`dead:${row.id}`]);
   });
 
+  async function instructRail(): Promise<void> {
+    await store.saveTransfer(transferFixture());
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    fetchFn.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
+  }
+
+  it('fix B: a settlement.instruct row claimed past the DEFAULT ceiling still runs (its ceiling is INSTRUCT_MAX_ATTEMPTS)', async () => {
+    await instructRail();
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, next_attempt_at = now() WHERE dedupe_key = 'instruct:wk_t1'`);
+    const r = await drainOnce(deps(), 'w_next');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    const after = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+      rows: Array<{ status: string; attempts: number }>;
+    };
+    expect(after.rows[0]).toEqual({ status: 'failed', attempts: MAX_ATTEMPTS + 1 });
+    expect((await alertKeys()).filter((k) => k.startsWith('dead:'))).toEqual([]);
+  });
+
+  it('fix B: a settlement.instruct row at INSTRUCT_MAX_ATTEMPTS with an expired lease is dead-lettered without running, ONE dead:<id> alert', async () => {
+    await instructRail();
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${INSTRUCT_MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    const r = await drainOnce(deps(), 'w_next');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const after = (await db.execute(sql`SELECT status, attempts, last_error FROM outbox WHERE id = ${row.id}`)) as unknown as {
+      rows: Array<{ status: string; attempts: number; last_error: string }>;
+    };
+    expect(after.rows[0]).toMatchObject({ status: 'dead', attempts: INSTRUCT_MAX_ATTEMPTS + 1 });
+    expect(after.rows[0].last_error).toMatch(/reclaimed past/);
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+
   it('a row reclaimed BELOW the ceiling still runs (a reclaim is an ordinary retry)', async () => {
     await outbox.enqueue('whatsapp.text', { to: '15551230000', text: 'fine' });
     const [row] = await outbox.claimBatch(1, 'w_killed');
@@ -1942,6 +2100,38 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     expect(alerts[0].dedupe_key).toMatch(/^botfallback:\d+$/);
     expect(String(alerts[0].payload.message)).not.toContain(P);
     expect((await outboxRows('whatsapp.text'))).toHaveLength(2); // both customers still get the line
+  });
+
+  it('a permanent provider fallback (402) raises ONE llmdown:402:<hour> alert and NO botfallback; customers still get the line', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(402, 'out of credit'));
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'b', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.filter((a) => String(a.dedupe_key).startsWith('botfallback:'))).toHaveLength(0);
+    const down = alerts.filter((a) => String(a.dedupe_key).startsWith('llmdown:'));
+    expect(down).toHaveLength(1);
+    expect(down[0].dedupe_key).toMatch(/^llmdown:402:\d+$/);
+    expect(Object.keys(down[0].payload)).toEqual(['message']);
+    expect(String(down[0].payload.message)).not.toContain(P);
+    expect(String(down[0].payload.message)).not.toContain('15559990000');
+    expect(String(down[0].payload.message)).not.toContain('out of credit');
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual([FALLBACK_REPLY, FALLBACK_REPLY]);
+  });
+
+  it('a transient provider fallback (503) raises botfallback only, never llmdown', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(503, 'busy'));
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const keys = (await outboxRows('ops.alert')).map((a) => String(a.dedupe_key));
+    expect(keys.filter((k) => k.startsWith('botfallback:'))).toHaveLength(1);
+    expect(keys.filter((k) => k.startsWith('llmdown:'))).toHaveLength(0);
   });
 });
 

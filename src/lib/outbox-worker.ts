@@ -1,5 +1,5 @@
 import type { Db } from '@/db/client';
-import { createOutboxRepo, LEASE_MS, MAX_ATTEMPTS, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, LEASE_MS, retryPolicy, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -31,6 +31,7 @@ import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn, scrub } from '@/lib/log';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
+import { llmDownAlertFor } from '@/lib/llm-alert';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
@@ -91,6 +92,8 @@ export interface WorkerDeps {
       signal?: AbortSignal;
       /** The tenant that owns the receiving number (null ⇒ the shared/default number) — fix 1. */
       routedPartnerId?: PartnerId | null;
+      /** Receives the caught error when the turn degrades to FALLBACK_REPLY (picks llmdown vs botfallback). */
+      onFallback?: (err: unknown) => void;
     },
   ) => Promise<string>;
   /**
@@ -211,6 +214,22 @@ export class TurnBusyError extends Error {
   constructor(readonly delaySec: number = TURN_BUSY_DEFER_SEC) {
     super('turn_busy');
     this.name = 'TurnBusyError';
+  }
+}
+
+/**
+ * fix B: a settlement.instruct failure AT THE RAIL (endpoint missing or refused,
+ * network error / timeout, non-2xx). Carries the rail partner the handler
+ * resolved; the message is the original one, so last_error is unchanged. Holds
+ * stay plain Errors and never count as the rail failing.
+ */
+export class RailInstructError extends Error {
+  constructor(
+    readonly railPartnerId: string,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'RailInstructError';
   }
 }
 
@@ -397,6 +416,7 @@ async function runTurnForReply(
   signal: RowSignal,
   routedPartnerId: PartnerId | null,
   partner: PartnerResolver,
+  onFallback: (err: unknown) => void,
 ): Promise<string> {
   const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
   return deps.runAgentTurn(
@@ -404,7 +424,7 @@ async function runTurnForReply(
     str(p.messageText),
     (p.turn ?? {}) as TurnContext,
     waCreds,
-    { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
+    { signal, routedPartnerId, onFallback }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
   );
 }
 
@@ -574,8 +594,12 @@ async function handle(
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
-      if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
-      assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
+      if (!settlementUrl) throw new RailInstructError(railPartnerId, 'Settlement endpoint not configured.');
+      try {
+        assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
+      } catch (e) {
+        throw new RailInstructError(railPartnerId, e);
+      }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it. Built after the fail-closed URL
       // check; loadComplianceBlock never throws (fail open, originator null).
@@ -596,10 +620,12 @@ async function handle(
         },
         body: rawBody,
         signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
-      }));
+      })).catch((e: unknown) => {
+        throw new RailInstructError(railPartnerId, e);
+      });
       if (!res.ok) {
         await logged; // never rejects; capped
-        throw new Error(`Settlement instruction rejected (${res.status})`);
+        throw new RailInstructError(railPartnerId, `Settlement instruction rejected (${res.status})`);
       }
       let providerRef = `rail-${transferId}`;
       try {
@@ -965,8 +991,11 @@ async function handle(
         logWarn('worker.agent', 'agent.turn blocked past the wait bound — fallback reply queued', { id: row.id, kind: row.kind });
         return;
       }
+      let fallbackErr: unknown;
       try {
-        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner);
+        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner, (e) => {
+          fallbackErr = e;
+        });
         // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
         // and the row is already dead — never send its late reply (a second
         // customer message for the same inbound). The COOPERATIVE path is not
@@ -1001,12 +1030,25 @@ async function handle(
         } else {
           await createConversationLogRepo(deps.db).append({ ...outLog, text: CARD_MARKER });
         }
+        // A permanent provider rejection (401/402/403) raises its own llmdown
+        // alert INSTEAD of the generic botfallback. Enqueued only after the
+        // reply committed, and a failed insert is logged, never thrown: a
+        // throw here would re-run the (non-idempotent) turn.
         if (reply === FALLBACK_REPLY) {
-          await outbox.enqueue(
-            'ops.alert',
-            { message: '⚠️ SmartRemit ops: the WhatsApp bot answered with its fallback line ("having trouble") at least once this hour. Check the model and worker logs.' },
-            { dedupeKey: `botfallback:${hourBucket()}` },
-          );
+          try {
+            const down = llmDownAlertFor(fallbackErr, hourBucket());
+            if (down) {
+              await outbox.enqueue('ops.alert', { message: down.message }, { dedupeKey: down.dedupeKey });
+            } else {
+              await outbox.enqueue(
+                'ops.alert',
+                { message: '⚠️ SmartRemit ops: the WhatsApp bot answered with its fallback line ("having trouble") at least once this hour. Check the model and worker logs.' },
+                { dedupeKey: `botfallback:${hourBucket()}` },
+              );
+            }
+          } catch {
+            logWarn('worker.agent', 'fallback alert enqueue failed', { id: row.id, kind: row.kind });
+          }
         }
         return;
       } finally {
@@ -1160,6 +1202,36 @@ const deadCodeKey = (code: number): string => `deadcode:${code}:${hourBucket()}`
 /** R2a: an incomplete channel refuses EVERY row of that partner — coalesce its dead alerts per (partner, hour). */
 const incompleteKey = (partnerId: string): string => `waincomplete:${partnerId}:${hourBucket()}`;
 
+/** fix B: a settlement rail failing raises one ops alert per (rail partner, hour), from this attempt on. */
+export const RAILFAIL_ALERT_MIN_ATTEMPT = 3;
+const railFailKey = (partnerId: string): string => `railfail:${partnerId}:${hourBucket()}`;
+
+/**
+ * fix B: settlement.instruct retries for about a day, so its dead:<id> alert
+ * comes late. A row still retrying at RAILFAIL_ALERT_MIN_ATTEMPT+ after a rail
+ * failure raises one coalesced alert per rail partner per hour. Ids, counts and
+ * a trimmed error only; best-effort (never aborts the batch).
+ */
+async function alertRailFailing(outbox: OutboxRepo, row: OutboxRow, err: RailInstructError): Promise<void> {
+  if (row.attempts < RAILFAIL_ALERT_MIN_ATTEMPT) return;
+  const p = row.payload as Payload;
+  try {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: the settlement rail for partner ${err.railPartnerId} is failing (transfer ${str(p.transferId)}, ` +
+          `attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}: ${err.message.slice(0, 140)}). ` +
+          'Instructions keep retrying for about a day, then dead-letter (partner Replay / ops Retry). ' +
+          'Further failures on this rail this hour are coalesced into this alert.',
+      },
+      { dedupeKey: railFailKey(err.railPartnerId) },
+    );
+  } catch (e) {
+    logWarn('worker.railfail', 'rail-failing alert not enqueued', { id: row.id, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 /** R2a: the tenant a whatsapp.text/template row sends for ('' ⇒ none / the shared number). */
 function sendTenant(row: OutboxRow): string {
   if (row.kind !== 'whatsapp.text' && row.kind !== 'whatsapp.template') return '';
@@ -1215,9 +1287,10 @@ export async function drainOnce(
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (row.attempts > MAX_ATTEMPTS) {
+    if (row.attempts > retryPolicy(row.kind).maxAttempts) {
       // POISON RECLAIM (Task 8 / Program-Fix 12). claimBatch has no attempts
-      // filter, but markFailed dead-letters at >= MAX_ATTEMPTS and retryDead
+      // filter, but markFailed dead-letters at >= the kind's ceiling
+      // (retryPolicy: MAX_ATTEMPTS, or INSTRUCT_MAX_ATTEMPTS) and retryDead
       // resets attempts to 0, so a claimed row past the ceiling can only be a
       // reclaim: its every run KILLED the function before markFailed could
       // write. Running it again would kill this one too — dead-letter it
@@ -1229,6 +1302,7 @@ export async function drainOnce(
         row.attempts,
         'reclaimed past MAX_ATTEMPTS: killed on every recorded attempt (the last run may have completed) — check the effect before retrying',
         workerId,
+        { kind: row.kind },
       );
       if (status === 'dead') {
         result.dead++;
@@ -1312,16 +1386,17 @@ export async function drainOnce(
       // (duplicate send, double mock.settle, double refund).
       const status = await outbox.markFailed(
         row.id,
-        terminal ? MAX_ATTEMPTS : row.attempts,
+        terminal ? retryPolicy(row.kind).maxAttempts : row.attempts,
         message,
         workerId,
-        deadline ? { minBackoffSec: Math.ceil(LEASE_MS / 1000) } : {},
+        { kind: row.kind, ...(deadline ? { minBackoffSec: Math.ceil(LEASE_MS / 1000) } : {}) },
       );
       if (status === 'lost') {
         logWarn('worker.lease', 'markFailed refused: lease no longer ours', { id: row.id, kind: row.kind });
         continue;
       }
       await noteSendHealth(deps, row, err, status === 'dead');
+      if (status === 'failed' && err instanceof RailInstructError) await alertRailFailing(outbox, row, err);
       if (status === 'dead') {
         result.dead++;
         // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.

@@ -29,11 +29,13 @@
       "src/lib/agent.ts", "src/lib/prompt.ts", "src/lib/tools.ts", "src/lib/ollama.ts", "src/lib/whatsapp*", "src/lib/web-chat.ts",
       "src/lib/draft-store.ts", "src/lib/sender-names.ts", "src/lib/providers/meta-signature-verify.ts",
       "src/lib/agent-fallback.ts", "src/lib/inbound-throttle.ts", "tests/inbound-throttle*",
+      "src/lib/llm-alert.ts", "src/lib/llm-provider-error.ts", "tests/llm-*", "tests/ollama*",
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [
       "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/worker-cadence.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
       "src/app/api/worker/", "src/app/api/cron/", ".github/workflows/worker-heartbeat.yml", "scripts/outbox-status.ts",
+      "src/lib/health.ts", "src/lib/dead-man-ping.ts", "src/app/api/health/", "tests/health*", "tests/dead-man-ping*",
       "tests/outbox*", "tests/reconcile*", "tests/cron-*", "tests/worker*"
     ]},
     "money-paths": { "branch": "component/money-paths", "paths": [
@@ -72,11 +74,11 @@
     ]},
     "platform-security": { "branch": "component/platform-security", "paths": [
       "src/proxy.ts", "src/instrumentation.ts", "src/lib/boot-assert.ts", "src/lib/field-crypto.ts", "src/lib/ip-rate-limit.ts",
-      "src/lib/settlement-url.ts", "src/lib/safe-fetch.ts", "scripts/audit-settlement-urls.ts", "tests/settlement-url*", "tests/safe-fetch*",
+      "src/lib/settlement-url.ts", "src/lib/safe-fetch.ts", "src/lib/infra-error.ts", "src/lib/infra-retry.ts", "tests/infra-*", "scripts/audit-settlement-urls.ts", "tests/settlement-url*", "tests/safe-fetch*",
       "src/lib/blob.ts", "src/app/admin-dashboard/partner-requests/[id]/documents/", "scripts/migrate-partner-docs-private.ts", "tests/partner-docs-*",
       "src/lib/redis.ts", "src/lib/store.ts", "src/lib/scoped-store.ts", "src/lib/seed.ts", "next.config.*", "vitest.config.*", "playwright.config.*",
       "eslint.config.*", "tsconfig.json", ".github/", "tests/e2e/", "tests/boot-assert*", "tests/field-crypto*", "tests/ip-rate-limit*", "tests/security*", "tests/middleware*", "tests/proxy*"
     ]},
-    "db-layer": { "branch": "component/db-layer", "paths": [ "src/db/", "drizzle/", "drizzle.config.ts", "scripts/migration-status.ts" ]}
+    "db-layer": { "branch": "component/db-layer", "paths": [ "src/db/", "drizzle/", "drizzle.config.ts", "scripts/migration-status.ts", "src/app/api/version/migrations/", "tests/migration-status*", "tests/version-migrations*" ]}
   }
 }

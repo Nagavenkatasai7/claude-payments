@@ -77,6 +77,20 @@ describe('isInfraError — infrastructure errors (⇒ 500, Meta retries)', () =>
     expect(isInfraError(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))).toBe(true);
   });
 
+  // 2026-09-29 prod: undici's TypeError('fetch failed') whose cause is a Node
+  // dns error ({ code: 'EBUSY', errno: -16, syscall: 'getaddrinfo' }). 'EBUSY'
+  // fits the 5-char SQLSTATE shape, so it must be decided by its syscall first.
+  it('getaddrinfo EBUSY (bare, and as the cause of a fetch TypeError)', () => {
+    const dns = Object.assign(new Error('getaddrinfo EBUSY x.upstash.io'), { code: 'EBUSY', errno: -16, syscall: 'getaddrinfo' });
+    expect(isInfraError(dns)).toBe(true);
+    expect(isInfraError(new TypeError('fetch failed', { cause: dns }))).toBe(true);
+  });
+
+  it('getaddrinfo with any other errno (EAI_FAIL)', () => {
+    const dns = Object.assign(new Error('getaddrinfo EAI_FAIL x'), { code: 'EAI_FAIL', syscall: 'getaddrinfo' });
+    expect(isInfraError(new TypeError('fetch failed', { cause: dns }))).toBe(true);
+  });
+
   it('Upstash: a non-JSON gateway body, or a request-limit error', () => {
     expect(isInfraError(Object.assign(new Error('<html>502</html>'), { name: 'UpstashJSONParseError' }))).toBe(true);
     expect(isInfraError(Object.assign(new Error('ERR max requests limit exceeded. Limit: 10000, Usage: 10000, command was: ["get"]'), { name: 'UpstashError' }))).toBe(true);
@@ -93,6 +107,11 @@ describe('isInfraError — everything else (⇒ acknowledged + audited)', () => 
   ])('SQLSTATE %s', (_label, code) => {
     expect(isInfraError(withCode(code))).toBe(false);
     expect(isInfraError(wrapped(withCode(code)))).toBe(false);
+  });
+
+  it('a filesystem EBUSY (not getaddrinfo) stays not infra', () => {
+    expect(isInfraError(Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY', syscall: 'open' }))).toBe(false);
+    expect(isInfraError(Object.assign(new Error('EBUSY'), { code: 'EBUSY' }))).toBe(false);
   });
 
   it('a plain code bug (TypeError without a network cause)', () => {

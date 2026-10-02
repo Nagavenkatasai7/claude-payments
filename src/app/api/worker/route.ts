@@ -45,6 +45,7 @@ import {
 import { newTransferId } from '@/lib/id';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { safeFetch } from '@/lib/safe-fetch';
+import { pingDeadMan } from '@/lib/dead-man-ping';
 import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -72,6 +73,9 @@ export const maxDuration = 60;
 // Either one also runs full when `worker:lastFullAt` (written after every
 // completed full run) is missing, unreadable or older than 30 min.
 // The gate only skips INVOCATIONS, never rows, and fails open.
+// A COMPLETED cron-sourced full run then pings WORKER_HEARTBEAT_URL (the
+// external dead-man's switch, src/lib/dead-man-ping.ts; fail-open, bounded by
+// hardStopAt); GET /api/health is its pull-side twin.
 // Claiming uses FOR UPDATE SKIP LOCKED and a 5-minute LEASE, so overlapping
 // invocations are safe and a killed invocation's rows are reclaimed. Auth
 // mirrors /api/cron: Bearer CRON_SECRET when configured — Vercel sends exactly
@@ -177,6 +181,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
         partnerStore: getPartnerStore(),
         waCreds, // WL2: interactive sends + replies leave from the partner's number
         partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID, // fix 1: the turn runs under the routed tenant
+        ...(opts?.onFallback ? { onFallback: opts.onFallback } : {}), // the fallback's cause picks llmdown vs botfallback
       });
       // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
       return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });
@@ -324,10 +329,19 @@ async function run(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  // The external dead-man's switch: only a cron-sourced run that got here (a
+  // thrown drain propagates past the finally) pings, AFTER the marks above. A
+  // poke or GitHub-workflow full run must not mask a dead Vercel cron.
+  const deadManPing =
+    source === 'cron'
+      ? await pingDeadMan({ rawUrl: env.workerHeartbeatUrl, fetchFn: safeFetch, budgetMs: hardStopAt - Date.now() })
+      : 'skipped';
+
   // Nothing parses this body (the heartbeat curls to /dev/null; the poke ignores
   // it), so adding fields is safe across a rolling release.
   return NextResponse.json({
     ok: true, source, gated: false, processed, failed, dead, released, sweep, aml, staleRates, escalated, fxHealth, drainGap, cronQuiet,
+    deadManPing,
   });
 }
 

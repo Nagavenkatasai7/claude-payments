@@ -1,5 +1,6 @@
 import { env } from './env';
 import type { ChatMessage, ChatTool } from './types';
+import { OllamaHttpError } from './llm-provider-error';
 
 /**
  * LLM call budget (bot-03). The agent's chatWithRetry (agent.ts) calls chat()
@@ -52,7 +53,8 @@ export async function chat(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Ollama request failed (${res.status}): ${body}`);
+    // Typed so callers can tell a permanent 401/402/403 from a transient 429/5xx.
+    throw new OllamaHttpError(res.status, body);
   }
 
   const data = (await res.json()) as {

@@ -162,3 +162,61 @@ describe('/pay/[transferId] — guard runs before any read (Program-Fix 23)', ()
     expect(await render(NEW_ID, ip)).toContain('This link is no longer active');
   });
 });
+
+// Fix D: a Redis blip on the draft read gets ONE retry; a persistent infra
+// failure (Redis or Neon) renders a friendly "temporary problem" sheet with
+// default branding instead of the root error page. Non-infra errors still
+// throw. Real timers for setTimeout (only Date is faked above).
+describe('/pay/[transferId] — infrastructure errors (fix D)', () => {
+  const DRAFT_ID = 'Dr_9-Cd_E-fG0hIjKlMnOp';
+  const draft = {
+    senderPhone: '15551234567',
+    partnerId: 'p_acme',
+    recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+    amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    fundingMethod: 'bank_transfer',
+    quote: { feeUsd: 0, fxRate: 84.5, amountInr: 8450, feeSource: 0, totalChargeSource: 100 },
+  } as unknown as Draft;
+  const dnsBlip = () =>
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('getaddrinfo EBUSY x.upstash.io'), { code: 'EBUSY', errno: -16, syscall: 'getaddrinfo' }),
+    });
+
+  it('the draft read fails once with an infra error, then succeeds: the payment sheet renders', async () => {
+    getDraft.mockRejectedValueOnce(dnsBlip()).mockResolvedValueOnce(draft);
+    const html = await render(DRAFT_ID, FRESH_IP);
+    expect(html).toContain('Secure payment');
+    expect(getDraft).toHaveBeenCalledTimes(2);
+  });
+
+  it('the draft read fails persistently: the temporary-problem sheet, default brand, a Try again link', async () => {
+    getDraft.mockRejectedValue(dnsBlip());
+    const html = await render(DRAFT_ID, FRESH_IP);
+    expect(html).toContain('having a temporary problem');
+    expect(html).toContain('Please try again in a moment.');
+    expect(html).toContain(`href="/pay/${DRAFT_ID}"`);
+    expect(html).toContain('SmartRemit');
+    expect(html).not.toContain('This link is no longer active');
+    expect(html).not.toContain('Something went wrong');
+    expect(getDraft).toHaveBeenCalledTimes(2);
+  });
+
+  it('a NON-infra draft error still throws (falls to the root error page), read once', async () => {
+    getDraft.mockRejectedValue(new Error('boom'));
+    await expect(render(DRAFT_ID, FRESH_IP)).rejects.toThrow('boom');
+    expect(getDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Neon infra error (SQLSTATE 08006) on the transfer read: the temporary-problem sheet, no retry', async () => {
+    getTransfer.mockRejectedValue(Object.assign(new Error('connection failure'), { code: '08006' }));
+    const html = await render(NEW_ID, FRESH_IP);
+    expect(html).toContain('having a temporary problem');
+    expect(getTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Next control-flow error (notFound) is rethrown, never turned into the sheet', async () => {
+    const { notFound } = await import('next/navigation');
+    getDraft.mockImplementation(async () => notFound());
+    await expect(render(DRAFT_ID, FRESH_IP)).rejects.toMatchObject({ digest: expect.stringContaining('NEXT_HTTP_ERROR_FALLBACK') });
+  });
+});

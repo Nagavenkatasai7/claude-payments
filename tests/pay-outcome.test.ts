@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
 
 // Review S2 (Program-Fix 32): the pay route's contract is fixed (ruling 7) — a
 // POST on a row that is no longer awaiting payment answers 200
@@ -33,6 +33,13 @@ describe('payErrorMessage', () => {
       expect(m, JSON.stringify(body)).toMatch(/verification/i);
       expect(m).toMatch(/WhatsApp/);
     }
+  });
+
+  it('temporarily_unavailable (the 503 on an infra error) asks to try again, never claims nothing was charged', () => {
+    const m = payErrorMessage({ ok: false, reason: 'temporarily_unavailable', error: 'x' });
+    expect(m).toBe(PAY_TEMPORARY_COPY);
+    expect(m).toMatch(/try again/i);
+    expect(m).not.toMatch(/charged/i);
   });
 
   it('never echoes server text and returns null for anything else', () => {

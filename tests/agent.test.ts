@@ -10,6 +10,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
+import { OllamaHttpError } from '@/lib/llm-provider-error';
 import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
@@ -244,6 +245,83 @@ describe('createAgent', () => {
     const reply = await agent.runAgentTurn(PHONE, 'hello');
     expect(reply).toBe('Back online — how can I help?');
     expect(calls).toBe(2); // failed once, retried once
+  });
+
+  it('a permanent provider error (402) is NOT retried; onFallback gets that error; history is saved', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const err402 = new OllamaHttpError(402, 'out of credit');
+    let calls = 0;
+    const onFallback = vi.fn();
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => { calls += 1; throw err402; },
+      onFallback,
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'hello');
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(calls).toBe(1);
+    expect(onFallback).toHaveBeenCalledTimes(1);
+    expect(onFallback).toHaveBeenCalledWith(err402);
+    const saved = await store.getConversation('default', PHONE);
+    expect(saved.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
+  });
+
+  it('a transient OllamaHttpError (503) is still retried once, then reported via onFallback', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let calls = 0;
+    const onFallback = vi.fn();
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => { calls += 1; throw new OllamaHttpError(503, 'busy'); },
+      onFallback,
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
+    expect(calls).toBe(2);
+    expect(onFallback).toHaveBeenCalledTimes(1);
+    expect((onFallback.mock.calls[0][0] as OllamaHttpError).status).toBe(503);
+  });
+
+  it('onFallback is not called on a normal reply nor on the empty-reply fallback', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const onFallback = vi.fn();
+    let content = 'Hi there';
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => ({ role: 'assistant', content }),
+      onFallback,
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Hi there');
+    content = '';
+    expect(await agent.runAgentTurn(PHONE, 'hello again')).toBe(FALLBACK_REPLY);
+    expect(onFallback).not.toHaveBeenCalled();
+  });
+
+  it('an onFallback that throws never changes the fallback reply or drops history', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => { throw new OllamaHttpError(402, 'x'); },
+      onFallback: () => { throw new Error('reporter broke'); },
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
+    const saved = await store.getConversation('default', PHONE);
+    expect(saved.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
   });
 
   it('injects the [UNVERIFIED SENDER] guard note for an unverified customer', async () => {
