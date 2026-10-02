@@ -77,11 +77,14 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
       for (const m of html.matchAll(/<a [^>]*target="_blank"[^>]*>/g)) expect(m[0]).toContain('rel="noopener noreferrer"');
   });
 
-  it('the login menu still points partners at /docs (swap is post-demo)', async () => {
+  it('the login menu and footer point Partners at the partner dashboard (owner, 2026-10-02)', async () => {
     const { LOGIN_MENU } = await import('@/components/site/site-links');
-    expect(LOGIN_MENU.map((i) => i.href)).toEqual(['/account/login', '/login', '/docs']);
-    const { header } = await render();
-    expect(header).toMatch(/href="\/docs"[^>]*>(<span[^>]*>)?Partners/);
+    expect(LOGIN_MENU.map((i) => i.href)).toEqual(['/account/login', '/login', '/partner']);
+    const { header, footer } = await render();
+    expect(header).toMatch(/href="\/partner"[^>]*>(<span[^>]*>)?Partners/);
+    expect(footer).toMatch(/href="\/partner"[^>]*>Partners/);
+    // The integration docs stay reachable from the footer.
+    expect(footer).toMatch(/href="\/docs"[^>]*>Partner docs/);
   });
 
   it('footer carries the columns, the non-custodial disclaimer and the legal nav', async () => {
