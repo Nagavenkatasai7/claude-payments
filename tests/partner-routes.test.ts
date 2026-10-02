@@ -30,7 +30,7 @@ describe('PARTNER_ROUTES', () => {
     expect(PARTNER_ROUTES.integrationsWebhooks.nav).toBe(false);
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/customers', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/settings', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/refunds', '/partner/schedules', '/partner/customers', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/settings', '/partner/security']);
     expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/branding');
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
@@ -57,6 +57,15 @@ describe('PARTNER_ROUTES', () => {
     const hrefs = partnerNav('admin').map((r) => r.href);
     expect(hrefs[hrefs.indexOf('/partner/security') - 1]).toBe('/partner/settings');
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/settings');
+  });
+  it('merge plan 2a/2b: Schedules and Refunds are money reads (admin, agent, finance); support never sees them', () => {
+    expect(PARTNER_ROUTES.schedules).toMatchObject({ href: '/partner/schedules', labelKey: 'partner.nav.schedules', nav: true });
+    expect(PARTNER_ROUTES.refunds).toMatchObject({ href: '/partner/refunds', labelKey: 'partner.nav.refunds', nav: true });
+    for (const key of ['schedules', 'refunds'] as const) {
+      for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows(key, role)).toBe(role !== 'support');
+      for (const role of ['admin', 'agent', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).toContain(PARTNER_ROUTES[key].href);
+      expect(partnerNav('support').map((r) => r.href)).not.toContain(PARTNER_ROUTES[key].href);
+    }
   });
   it('an unknown role gets no nav at all (fails closed)', () => {
     expect(partnerNav('root' as never)).toEqual([]);
