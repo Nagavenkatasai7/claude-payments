@@ -15,12 +15,14 @@ import { customerDetailView } from '@/lib/partner-customer-view';
 import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits, type SendLimitSource } from '@/lib/send-limits';
 import { partnerMayWriteOverride } from '@/lib/partner-send-limits';
+import { partnerKycDecision } from '@/lib/partner-reviews';
 import { formatMoney } from '@/lib/ui/money';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Card, MaskedValue, PageHeader, buttonVariants } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../../routes';
 import { revealCustomerFieldAction } from './actions';
 import { LimitForm } from './limit-form';
+import { KycDecisionDialog } from './kyc-decision-dialog';
 
 export const metadata: Metadata = {
   title: t('partner.customers.detailTitle'),
@@ -86,6 +88,12 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
   const canEditLimits = PARTNER_ADMIN.roles.includes(ctx.role);
+  // Merge plan 2c (D3): the KYC decision is offered to admins only, with exactly the decisions
+  // partnerKycDecision allows (decideKycAction re-checks everything). When none is allowed ('ours'
+  // mode or a screening hit) the admin sees ONE neutral line, identical in both cases.
+  const kycDecisions = canEditLimits
+    ? (['approve', 'reject'] as const).filter((d) => partnerKycDecision(partner, customer, d).ok)
+    : [];
   const override = customer.sendLimitOverride;
   const partnerSetExpiry =
     !setBySmartRemit && override?.setScope === 'partner' && typeof override.expiresAt === 'string' ? override.expiresAt : null;
@@ -128,6 +136,21 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
             <Row label={t('partner.customers.verifiedAt')}>{when(view.kycVerifiedAt)}</Row>
             <Row label={t('partner.customers.firstSeen')}>{when(view.firstSeenAt)}</Row>
           </dl>
+          {canEditLimits ? (
+            <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-decision">
+              <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.kyc.decisionTitle')}</h3>
+              {kycDecisions.length > 0 ? (
+                <>
+                  <p className="mb-3 text-[13px] text-ds-ink-muted">{t('partner.kyc.decisionSub')}</p>
+                  <KycDecisionDialog customerRef={view.ref} decisions={kycDecisions} />
+                </>
+              ) : (
+                <p role="note" className="text-[14px] text-ds-ink-muted">
+                  {t('partner.reviews.neutral')}
+                </p>
+              )}
+            </div>
+          ) : null}
         </Section>
       </div>
       <div className="mt-5">

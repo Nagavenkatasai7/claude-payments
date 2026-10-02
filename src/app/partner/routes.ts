@@ -38,12 +38,14 @@ export const PARTNER_ROUTES = Object.freeze({
   // Merge plan 2a/2b: money reads; every pause/resume/cancel and refund decision is PARTNER_ADMIN (D1).
   schedules: { href: '/partner/schedules', labelKey: 'partner.nav.schedules', policy: PARTNER_MONEY_READ, nav: true },
   refunds: { href: '/partner/refunds', labelKey: 'partner.nav.refunds', policy: PARTNER_MONEY_READ, nav: true },
+  // 2c: held transfers + the KYC queue (ops); KYC decisions, reject & refund and AML alerts are admin only.
+  reviews: { href: '/partner/reviews', labelKey: 'partner.nav.reviews', policy: PARTNER_OPS, nav: true },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
-// The final order (UI M5): home, onboarding, transfers, refunds, schedules, reviews, customers, reports,
+// The final order (UI M5): home, onboarding, transfers, refunds, schedules, customers, reviews, reports,
 // analytics, support, staff, audit, integrations, branding, settings, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'refunds', 'schedules', 'customers', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'settings', 'security'];
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'refunds', 'schedules', 'customers', 'reviews', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'settings', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

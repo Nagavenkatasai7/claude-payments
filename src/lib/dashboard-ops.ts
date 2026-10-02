@@ -228,8 +228,18 @@ export async function releaseTransfer(
  * reject. Uncharged legacy rows keep the old cancel-only behavior.
  * Called by the compliance dashboard "Reject" action.
  * Throws if the transfer is not exactly in_review.
+ * Merge plan 2c (D4): the /partner reject action passes `partnerReject` with the session tenant:
+ * the claim then re-checks, atomically, the tenant, a non-blocked row and the sender's customer
+ * row (present, no PEP / watchlist hit), and the audit meta carries actorScope 'partner'. Omitted
+ * (platform and legacy callers) ⇒ unchanged.
  */
-export async function rejectTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function rejectTransfer(
+  store: Store,
+  db: Db,
+  id: string,
+  audit?: StaffAuditCtx,
+  partnerReject?: { partnerId: PartnerId },
+): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -245,9 +255,17 @@ export async function rejectTransfer(store: Store, db: Db, id: string, audit?: S
   // can never leave a cancelled, charged, UNREFUNDED transfer.
   const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+    // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
+    // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
+    const cancelled = partnerReject
+      ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
+      : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
     if (!cancelled) {
-      throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      throw new Error(
+        partnerReject
+          ? 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)'
+          : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+      );
     }
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
     // branches record the decision in this transaction.
@@ -256,6 +274,7 @@ export async function rejectTransfer(store: Store, db: Db, id: string, audit?: S
         previousStatus: 'in_review',
         newStatus: 'cancelled',
         refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+        ...(partnerReject ? { actorScope: 'partner' } : {}),
       });
     }
     if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only

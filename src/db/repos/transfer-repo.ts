@@ -805,6 +805,28 @@ export function createTransferRepo(
     },
 
     /**
+     * Merge plan 2c (owner D4): the PARTNER reject claim — in_review → cancelled with the same
+     * predicates a partner release carries (markPaidIfInReview with `partnerRelease`): the row is
+     * in `partnerId`'s tenant, not sanctions-blocked, and the SENDER's customer row there EXISTS
+     * with no PEP / watchlist hit. A flag raised after the caller's pre-check therefore refuses
+     * the reject (null ⇒ the caller throws and enqueues nothing). Platform and legacy rejects keep
+     * updateIfStatus (unchanged). The same snapshot residual as the release claim applies.
+     */
+    async cancelInReviewForPartner(id: string, partnerId: PartnerId, adminNote: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'cancelled', adminNote })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'in_review'),
+          ne(transfers.complianceStatus, 'blocked'),
+          ...senderClearForPartnerRelease(partnerId),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Status-GUARDED staff edit: ONE `UPDATE … WHERE id = $1 AND status =
      * $expected RETURNING`. Staff actions read the row first (to validate and
      * to decide), and a full-row saveTransfer of that read would silently
