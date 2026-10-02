@@ -118,6 +118,28 @@ describe('Home', () => {
     expect(html).toContain('data-empty');
     expect(html).not.toContain('/portal/transfers/');
   });
+  it('one customer portal: the four tiles, from THIS customer on THIS partner only', async () => {
+    const html = await home();
+    expect(html).toContain('data-stat-tiles');
+    for (const label of ['Sent this month', 'Daily limit left', 'Transfers', 'Pending refunds']) expect(html).toContain(label);
+    // A's fixture: two live transfers (B's two are on another partner and never counted).
+    expect(html).toMatch(/>Transfers<\/p><p[^>]*>2<\/p>/);
+  });
+  it('one customer portal: saved recipients with Send again (masked, rid link), never another partner\'s', async () => {
+    const html = await home();
+    expect(html).toContain('data-saved-recipients');
+    expect(html).toContain('Recipient PA');
+    expect(html).not.toContain('Recipient PB');
+    expect(html).not.toContain(FULL_ACCOUNT);
+    expect(html).toMatch(/href="\/portal\/send\?r=[^"]+"[^>]*>Send again</);
+  });
+  it('one customer portal: no Send again while sending is blocked by the identity check', async () => {
+    signIn('pa', phone, 'pending');
+    await db.execute(sql`UPDATE partners SET require_kyc_before_send = true WHERE id = 'pa'`);
+    const html = await home();
+    expect(html).toContain('data-kyc-banner');
+    expect(html).not.toContain('data-saved-recipients');
+  });
   it('apex → 404; signed out → sign-in', async () => {
     h.site = null;
     await expect(PortalHomePage()).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');

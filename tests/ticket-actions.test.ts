@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { scopeOf } from '@/lib/staff-scope';
@@ -49,7 +49,8 @@ import {
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createAuthStore } from '@/lib/auth-store';
-import { outbox, auditEvents } from '@/db/schema';
+import { outbox, auditEvents, partnerSites, partnerPortalSettings } from '@/db/schema';
+import { resetCustomerPortalOriginCache } from '@/lib/customer-portal-url';
 
 // Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
 // them as on the apex.
@@ -455,5 +456,44 @@ describe('nudge payloads never carry a secret (fix 11 / F58)', () => {
     const payload = (await outboxRows())[0].payload as Record<string, unknown>;
     expect(payload.partnerId).toBe('p2');
     expect(JSON.stringify(payload)).not.toContain('tok_p2');
+  });
+});
+
+describe('one customer portal: the nudge links to the owning partner portal when it is live', () => {
+  async function portalOn(partnerId: string, slug: string) {
+    await db.insert(partnerSites).values({ partnerId, slug });
+    await db.insert(partnerPortalSettings).values({ partnerId, portalEnabledAt: new Date() });
+  }
+  beforeEach(() => {
+    resetCustomerPortalOriginCache();
+    vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetCustomerPortalOriginCache();
+  });
+
+  it('reply and resolve nudges open the ticket in the portal of the TICKET partner', async () => {
+    await portalOn('p1', 'p1-pay');
+    await portalOn('p2', 'p2-pay');
+    const t = await makeTicket('p1', { customerPhone: '15559998888' });
+    currentStaff = staff({ partnerId: 'p1' });
+    await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
+    await resolveAction(form({ ticketId: t.id }));
+    const bodies = (await outboxRows()).map((r) => (r.payload as { body: string }).body);
+    expect(bodies).toHaveLength(2);
+    for (const b of bodies) {
+      expect(b).toContain(`https://p1-pay.smartremit.ai/portal/help/tickets/${t.id}`);
+      expect(b).not.toContain('/account/support');
+      expect(b).not.toContain('p2-pay');
+    }
+  });
+
+  it('a partner without a live portal keeps the /account/support link', async () => {
+    const t = await makeTicket('p1', { customerPhone: '15559998888' });
+    currentStaff = staff({ partnerId: 'p1' });
+    await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
+    const [row] = await outboxRows();
+    expect((row.payload as { body: string }).body).toContain(`/account/support/${t.id}`);
   });
 });

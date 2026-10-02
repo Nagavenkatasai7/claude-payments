@@ -1,4 +1,7 @@
+import { redirect } from 'next/navigation';
 import { RegisterForm } from '../account-forms';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { customerPortalOrigin, portalUrl } from '@/lib/customer-portal-url';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -18,6 +21,12 @@ export default async function AccountRegisterPage({
 }: {
   searchParams: Promise<{ token?: string }>;
 }) {
+  // One customer portal (Oct 2): new customers sign up through SmartRemit's own portal (the first
+  // WhatsApp-code sign-in creates the account). Only while that portal is live; otherwise the legacy
+  // form below renders as before.
+  const origin = await customerPortalOrigin(DEFAULT_PARTNER_ID);
+  if (origin) redirect(portalUrl(origin, '/portal/login'));
+
   const { token } = await searchParams;
   let prefillPhone: string | undefined;
   if (token) {

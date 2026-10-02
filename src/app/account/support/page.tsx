@@ -37,7 +37,7 @@ const STATUS_TONE: Record<string, BadgeTone> = {
 };
 
 export default async function SupportListPage() {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/help/tickets' });
 
   // Admin kill switch (enableSupportPortal default-true when absent): when the
   // partner turned the portal off, support stays in WhatsApp.

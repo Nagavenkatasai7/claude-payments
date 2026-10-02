@@ -9,7 +9,7 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
-import { env } from '@/lib/env';
+import { customerTicketUrl } from '@/lib/customer-portal-url';
 import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
@@ -76,9 +76,13 @@ async function audit(
   });
 }
 
-/** The customer-facing nudge link — /account/support is the customer portal view. */
-function supportUrl(ticketId: string): string {
-  return `${env.appBaseUrl}/account/support/${ticketId}`;
+/**
+ * The customer-facing nudge link: the ticket in the owning partner's customer portal when it is
+ * live, else the legacy /account/support page (one customer portal, Oct 2). Resolved BEFORE the
+ * transaction that enqueues the nudge.
+ */
+function supportUrl(partnerId: string, ticketId: string): Promise<string> {
+  return customerTicketUrl(partnerId, ticketId);
 }
 
 /**
@@ -100,6 +104,7 @@ export async function replyAction(formData: FormData): Promise<void> {
   assertCanWork(staff, ticket);
   requireOpen(ticket);
 
+  const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
   const db = getDb();
   // The nudge rides the OWNING partner's WhatsApp number (brand-side), exactly
   // like reconcile's customer-facing sends. Only ticket.partnerId is persisted
@@ -120,7 +125,7 @@ export async function replyAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `You have a new reply from support — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
+          body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
           partnerId: ticket.partnerId,
           // Program-Fix 49A: nonessential — suppressed after STOP (B5).
           category: 'nonessential',
@@ -220,6 +225,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
+  const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
   const db = getDb();
   // Owner tenant only (fix 11 / F58); creds resolve at drain.
   await db.transaction(async (tx) => {
@@ -230,7 +236,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
+          body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
           partnerId: ticket.partnerId,
           category: 'nonessential', // Program-Fix 49A (B5)
         },

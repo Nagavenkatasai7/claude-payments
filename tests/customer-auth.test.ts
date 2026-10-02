@@ -26,6 +26,13 @@ vi.mock('@/lib/customer-auth-store', async () => {
   return { ...actual, getCustomerAuthStore: () => authStore };
 });
 
+// One customer portal (Oct 2): null (the default) is a partner without a live portal.
+const portalOrigin = vi.hoisted(() => vi.fn(async (_partnerId: string): Promise<string | null> => null));
+vi.mock('@/lib/customer-portal-url', async (orig) => ({
+  ...(await orig<object>()),
+  customerPortalOrigin: (partnerId: string) => portalOrigin(partnerId),
+}));
+
 import { getCurrentCustomer, requireCustomer } from '@/lib/customer-auth';
 import {
   createCustomerAuthStore,
@@ -60,6 +67,8 @@ beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   redirectMock.mockClear();
+  portalOrigin.mockReset();
+  portalOrigin.mockImplementation(async () => null);
   const db = await freshDb();
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   authStore = createCustomerAuthStore(redis, cs);
@@ -103,6 +112,39 @@ describe('requireCustomer', () => {
     cookieJar.set(CUSTOMER_SESSION_COOKIE, token);
     const c = await requireCustomer();
     expect(c.senderPhone).toBe(NORM);
+  });
+
+  async function signedIn() {
+    await seedCustomer();
+    cookieJar.set(CUSTOMER_SESSION_COOKIE, await getCustomerAuthStore().createSession(NORM, 'default'));
+  }
+
+  it('with a portalPath: sends the customer to THEIR partner portal when it is live', async () => {
+    await signedIn();
+    portalOrigin.mockImplementation(async (p) => (p === 'default' ? 'https://send.smartremit.ai' : null));
+    await expect(requireCustomer({ portalPath: '/portal/transfers/AbC%2F1' })).rejects.toThrow(
+      'REDIRECT:https://send.smartremit.ai/portal/transfers/AbC%2F1',
+    );
+    expect(portalOrigin).toHaveBeenCalledWith('default');
+  });
+
+  it('with a portalPath but no live portal: returns the customer (legacy page stays)', async () => {
+    await signedIn();
+    const c = await requireCustomer({ portalPath: '/portal' });
+    expect(c.senderPhone).toBe(NORM);
+  });
+
+  it('signed out: the sign-in redirect wins and the portal is never looked up', async () => {
+    portalOrigin.mockImplementation(async () => 'https://send.smartremit.ai');
+    await expect(requireCustomer({ portalPath: '/portal' })).rejects.toThrow('REDIRECT:/account/login');
+    expect(portalOrigin).not.toHaveBeenCalled();
+  });
+
+  it('without a portalPath the portal is never looked up', async () => {
+    await signedIn();
+    portalOrigin.mockImplementation(async () => 'https://send.smartremit.ai');
+    expect((await requireCustomer()).senderPhone).toBe(NORM);
+    expect(portalOrigin).not.toHaveBeenCalled();
   });
 });
 

@@ -33,6 +33,7 @@ import { getRedis } from '@/lib/redis';
 import { customerEmailCtx } from '@/lib/crypto-context';
 import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/customer-mfa';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { customerPortalOrigin, portalUrl } from '@/lib/customer-portal-url';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -166,6 +167,17 @@ function setSessionCookie(jar: Awaited<ReturnType<typeof cookies>>, token: strin
     path: '/',
     maxAge: COOKIE_MAX_AGE,
   });
+}
+
+/**
+ * One customer portal (Oct 2): passwords end where the customer's partner runs a live portal. Called
+ * at every session mint, AFTER every factor is proven (so it tells nobody without the password
+ * anything), it mints NO session and sends the customer to their portal's WhatsApp-code sign-in.
+ * Partners without a portal (customerPortalOrigin null) keep password sign-in unchanged.
+ */
+async function handOffToPortal(partnerId: PartnerId): Promise<void> {
+  const origin = await customerPortalOrigin(partnerId);
+  if (origin) redirect(portalUrl(origin, '/portal/login?from=account'));
 }
 
 /** Register: store owns collision/policy/breach/Argon2id/email-encryption. On
@@ -306,6 +318,7 @@ export async function loginAction(
   }
 
   await auth.clearLoginFailures(phone, ip);
+  await handOffToPortal(customer.partnerId);
   const token = await auth.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');
@@ -361,6 +374,7 @@ export async function verifyMfaAction(
     return { step: 'login', error: SESSION_EXPIRED };
   }
   await auth.clearLoginFailures(phone, ip);
+  await handOffToPortal(customer.partnerId);
   const token = await auth.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');
@@ -404,6 +418,7 @@ export async function verifyOtpAction(
   const customer = await authStore.markPhoneVerified(phone);
   if (!customer) return { step: 'login', error: SESSION_EXPIRED };
 
+  await handOffToPortal(customer.partnerId);
   const token = await authStore.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');

@@ -66,6 +66,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
   const requestKey = formData.get('requestKey');
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
+  const nudgeUrl = ticket.customerPhone ? await ticketNudgeUrl(ticket.partnerId, ticket.id) : '';
   try {
     const outcome = await claimOnce(getRedis(), staffClaimKey('reply', ctx.partnerId, ctx.username, requestKey, `${ticket.id}|${waiting}|${body}`), async () =>
       getDb().transaction(async (tx) => {
@@ -87,7 +88,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
             'whatsapp.text',
             {
               to: ticket.customerPhone,
-              body: `You have a new reply from support — view it in your SmartRemit dashboard: ${ticketNudgeUrl(ticket.id)}`,
+              body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
               // The ticket's own tenant (a repo value, never a form field); creds resolve at drain.
               partnerId: ticket.partnerId,
               category: 'nonessential',
@@ -176,6 +177,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
   if (!status) return { ok: false, error: t('partner.support.statusInvalid') };
 
   let nudged = false;
+  const nudgeUrl = status === 'resolved' && ticket.customerPhone ? await ticketNudgeUrl(ticket.partnerId, ticket.id) : '';
   try {
     await getDb().transaction(async (tx) => {
       const updated = await createTicketRepo(tx).updateStatus(ticket.id, status, { notFrom: PARTNER_LOCKED_STATUSES });
@@ -185,7 +187,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
           'whatsapp.text',
           {
             to: ticket.customerPhone,
-            body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${ticketNudgeUrl(ticket.id)}`,
+            body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
             partnerId: ticket.partnerId,
             category: 'nonessential',
           },

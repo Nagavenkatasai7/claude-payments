@@ -56,7 +56,8 @@ export default async function SupportThreadPage({
   params: Promise<{ ticketId: string }>;
   searchParams: Promise<{ error?: string }>;
 }) {
-  const customer = await requireCustomer();
+  const { ticketId } = await params;
+  const customer = await requireCustomer({ portalPath: `/portal/help/tickets/${encodeURIComponent(ticketId)}` });
 
   // Admin kill switch — same gate as the support landing; the action re-checks.
   const partner =
@@ -75,7 +76,6 @@ export default async function SupportThreadPage({
     );
   }
 
-  const { ticketId } = await params;
   const repo = createTicketRepo(getDb());
   const ticket = await repo.getTicket(ticketId);
   if (!ticket || ticket.kind !== 'customer' || ticket.customerPhone !== customer.senderPhone) {

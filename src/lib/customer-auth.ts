@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import type { Customer } from './types';
 import { getCustomerAuthStore } from './customer-auth-store';
 import { CUSTOMER_SESSION_COOKIE } from './customer-session-cookie';
+import { customerPortalOrigin, portalUrl } from './customer-portal-url';
 
 /**
  * Resolve the logged-in Customer from the `__Host-sr_session` cookie, or null.
@@ -16,8 +17,20 @@ export async function getCurrentCustomer(): Promise<Customer | null> {
   return getCustomerAuthStore().resolveSession(token);
 }
 
-export async function requireCustomer(): Promise<Customer> {
+/**
+ * The signed-in legacy /account customer, or a redirect to /account/login.
+ *
+ * One customer portal (Oct 2): a page passes `portalPath`, its matching page in the customer portal.
+ * When the customer's OWN partner (from the session, never the URL) runs a live portal
+ * (customerPortalOrigin), the customer is sent there instead; partners without a portal keep the
+ * legacy page. The portal re-checks the session and ownership itself.
+ */
+export async function requireCustomer(opts: { portalPath?: `/portal${string}` } = {}): Promise<Customer> {
   const customer = await getCurrentCustomer();
   if (!customer) redirect('/account/login');
+  if (opts.portalPath) {
+    const origin = await customerPortalOrigin(customer.partnerId);
+    if (origin) redirect(portalUrl(origin, opts.portalPath));
+  }
   return customer;
 }
