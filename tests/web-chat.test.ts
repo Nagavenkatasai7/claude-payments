@@ -14,6 +14,8 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
+import { FALLBACK_REPLY } from '@/lib/agent';
+import { OllamaHttpError } from '@/lib/llm-provider-error';
 
 // web-chat (B5) — the dashboard chat thread is keyed conv:web:<phone>, fully
 // separate from the WhatsApp thread at conv:<phone>; the agent runs with the
@@ -127,6 +129,32 @@ describe('webThreadStore', () => {
 });
 
 describe('createWebChat', () => {
+  it('a permanent provider error (402): FALLBACK_REPLY, alertLlmDown awaited once with that error, the out row logged', async () => {
+    const deps = buildDeps();
+    const err402 = new OllamaHttpError(402, 'out of credit');
+    let settled = false;
+    const alertLlmDown = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      settled = true;
+    });
+    const log = createConversationLogRepo(db);
+    const webChat = createWebChat({ ...deps, conversationLog: log, alertLlmDown, chat: async () => { throw err402; } });
+    const reply = await webChat.runTurn(customerFixture(), 'hi');
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(alertLlmDown).toHaveBeenCalledTimes(1);
+    expect(alertLlmDown).toHaveBeenCalledWith(err402);
+    expect(settled).toBe(true); // awaited before runTurn returned
+    expect((await log.listThread('default', PHONE)).map((m) => m.text)).toEqual(['hi', FALLBACK_REPLY]);
+  });
+
+  it('a successful turn never calls alertLlmDown', async () => {
+    const deps = buildDeps();
+    const alertLlmDown = vi.fn(async () => {});
+    const webChat = createWebChat({ ...deps, alertLlmDown, chat: async () => ({ role: 'assistant', content: 'ok' }) });
+    expect(await webChat.runTurn(customerFixture(), 'hi')).toBe('ok');
+    expect(alertLlmDown).not.toHaveBeenCalled();
+  });
+
   it('runs a turn on the web thread; the WhatsApp thread never changes', async () => {
     const deps = buildDeps();
     await deps.store.saveConversation('default', PHONE, [{ role: 'user', content: 'wa history' }]);

@@ -20,6 +20,7 @@ import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { env } from './env';
 import { BRAND_MAX, boundUntrustedText, hasModelHost, hasWebAddress, stripModelHosts } from './untrusted-text';
+import { isPermanentProviderError } from './llm-provider-error';
 
 const MAX_TOOL_ROUNDS = 6;
 // fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
@@ -54,6 +55,10 @@ export interface AgentDeps {
   // Portal chat step-up (M2 enablement): the customer portal chat's session freshness, handed to
   // the tools (ToolContext.webStepUp). Absent ⇒ the legacy account chat or WhatsApp, unchanged.
   webStepUp?: WebStepUp;
+  // Called synchronously, at most once per turn, with the caught error when
+  // runAgentTurn degrades to FALLBACK_REPLY because something threw (the
+  // worker and web chat use it to raise the llmdown alert). Absent ⇒ unchanged.
+  onFallback?: (err: unknown) => void;
 }
 
 // Injected as a system message on EVERY round of a web-channel turn (not
@@ -121,7 +126,8 @@ export function createAgent(deps: AgentDeps) {
     try {
       return await deps.chat(messages, tools, { signal });
     } catch (err) {
-      if (signal?.aborted) throw err;
+      // A 401/402/403 can never succeed on retry: one provider call, not two.
+      if (signal?.aborted || isPermanentProviderError(err)) throw err;
       console.warn('chat() failed once — retrying:', err);
       return await deps.chat(messages, tools, { signal });
     }
@@ -144,6 +150,11 @@ export function createAgent(deps: AgentDeps) {
       return await completeTurn(phone, turn, history, opts.signal);
     } catch (err) {
       console.error('runAgentTurn failed — returning fallback:', err);
+      try {
+        deps.onFallback?.(err);
+      } catch {
+        // reporting never breaks the fallback
+      }
       try {
         await deps.store.saveConversation(partnerId, phone, history);
       } catch (saveErr) {

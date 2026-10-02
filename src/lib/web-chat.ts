@@ -1,5 +1,6 @@
 import { createAgent, type AgentDeps } from './agent';
 import { chat } from './ollama';
+import { raiseLlmDownAlert } from './llm-alert';
 import { env } from './env';
 import { getStore, type Store } from './store';
 import { getCustomerStore } from './customer-store';
@@ -42,13 +43,19 @@ export function webThreadStore(base: Store): Store {
   };
 }
 
-export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'> & {
+export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId' | 'onFallback'> & {
   /**
    * Partner-Demo R3b: the sealed, permanent conversation log. REQUIRED, so a
    * caller cannot silently skip logging; production wires the Neon repo
    * (runWebChatTurn).
    */
   conversationLog: Pick<ConversationLogRepo, 'append'>;
+  /**
+   * Raises the deduped llmdown ops alert for a fallback's cause (a no-op unless
+   * it is a permanent provider error; never throws, bounded). Default
+   * raiseLlmDownAlert; tests inject a spy.
+   */
+  alertLlmDown?: (err: unknown) => Promise<void>;
 };
 
 /**
@@ -66,12 +73,16 @@ export type WebChatTurnOptions = { webStepUp?: WebStepUp };
  * ledger, recipients and counters the tools may read.
  */
 export function createWebChat(deps: WebChatDeps) {
-  const { conversationLog, ...agentDeps } = deps;
+  const { conversationLog, alertLlmDown = raiseLlmDownAlert, ...agentDeps } = deps;
   const store = webThreadStore(agentDeps.store);
   return {
     async runTurn(customer: Customer, text: string, opts?: WebChatTurnOptions): Promise<string> {
+      let fallbackErr: unknown;
       const agent = createAgent({
         ...agentDeps,
+        onFallback: (e) => {
+          fallbackErr = e;
+        },
         store,
         channel: 'web',
         partnerId: customer.partnerId,
@@ -85,6 +96,8 @@ export function createWebChat(deps: WebChatDeps) {
       await conversationLog.append({ ...entry, direction: 'in', text });
       const isNewConversation = (await store.getConversation(customer.partnerId, phone)).length === 0;
       const reply = await agent.runAgentTurn(phone, text, { isNewConversation });
+      // Same llmdown key as the WhatsApp worker, so one outage hour is one alert.
+      if (fallbackErr !== undefined) await alertLlmDown(fallbackErr);
       await conversationLog.append({ ...entry, direction: 'out', text: reply.trim() ? reply : CARD_MARKER });
       return reply;
     },

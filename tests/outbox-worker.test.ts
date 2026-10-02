@@ -19,6 +19,7 @@ import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { OllamaHttpError } from '@/lib/llm-provider-error';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -1048,7 +1049,7 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(r.processed).toBe(2);
     expect(runAgentTurn).toHaveBeenCalledWith(
       '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
-      expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal) }),
+      expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal), onFallback: expect.any(Function) }),
     );
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
@@ -2099,6 +2100,38 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     expect(alerts[0].dedupe_key).toMatch(/^botfallback:\d+$/);
     expect(String(alerts[0].payload.message)).not.toContain(P);
     expect((await outboxRows('whatsapp.text'))).toHaveLength(2); // both customers still get the line
+  });
+
+  it('a permanent provider fallback (402) raises ONE llmdown:402:<hour> alert and NO botfallback; customers still get the line', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(402, 'out of credit'));
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'b', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.filter((a) => String(a.dedupe_key).startsWith('botfallback:'))).toHaveLength(0);
+    const down = alerts.filter((a) => String(a.dedupe_key).startsWith('llmdown:'));
+    expect(down).toHaveLength(1);
+    expect(down[0].dedupe_key).toMatch(/^llmdown:402:\d+$/);
+    expect(Object.keys(down[0].payload)).toEqual(['message']);
+    expect(String(down[0].payload.message)).not.toContain(P);
+    expect(String(down[0].payload.message)).not.toContain('15559990000');
+    expect(String(down[0].payload.message)).not.toContain('out of credit');
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual([FALLBACK_REPLY, FALLBACK_REPLY]);
+  });
+
+  it('a transient provider fallback (503) raises botfallback only, never llmdown', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(503, 'busy'));
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const keys = (await outboxRows('ops.alert')).map((a) => String(a.dedupe_key));
+    expect(keys.filter((k) => k.startsWith('botfallback:'))).toHaveLength(1);
+    expect(keys.filter((k) => k.startsWith('llmdown:'))).toHaveLength(0);
   });
 });
 

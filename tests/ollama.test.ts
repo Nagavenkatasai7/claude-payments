@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { chat, OLLAMA_TIMEOUT_MS } from '@/lib/ollama';
+import { OllamaHttpError, isPermanentProviderError } from '@/lib/llm-provider-error';
 import { toolSchemas } from '@/lib/tools';
 
 afterEach(() => {
@@ -39,6 +40,36 @@ describe('chat', () => {
     await expect(
       chat([{ role: 'user', content: 'hi' }], toolSchemas),
     ).rejects.toThrow(/500/);
+  });
+
+  it('a 402 rejects with a permanent OllamaHttpError (status kept, message prefix unchanged)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 402, text: async () => 'out of credit' })));
+    const err = await chat([{ role: 'user', content: 'hi' }], toolSchemas).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OllamaHttpError);
+    expect((err as OllamaHttpError).status).toBe(402);
+    expect((err as OllamaHttpError).permanent).toBe(true);
+    expect((err as Error).message).toMatch(/Ollama request failed \(402\)/);
+  });
+
+  it.each([401, 402, 403])('HTTP %i is a permanent provider error', (status) => {
+    expect(new OllamaHttpError(status, '').permanent).toBe(true);
+  });
+
+  it.each([429, 500, 503])('HTTP %i stays transient', (status) => {
+    expect(new OllamaHttpError(status, '').permanent).toBe(false);
+  });
+
+  it('isPermanentProviderError: only a permanent OllamaHttpError', () => {
+    expect(isPermanentProviderError(new OllamaHttpError(402, 'x'))).toBe(true);
+    expect(isPermanentProviderError(new OllamaHttpError(500, 'x'))).toBe(false);
+    expect(isPermanentProviderError(new Error('Ollama request timed out after 20000ms'))).toBe(false);
+    expect(isPermanentProviderError(new Error('Ollama request failed (402): x'))).toBe(false);
+    expect(isPermanentProviderError(undefined)).toBe(false);
+  });
+
+  it('caps the response body in the error message at 500 chars', () => {
+    const err = new OllamaHttpError(500, 'x'.repeat(10_000));
+    expect(err.message.length).toBeLessThan(600);
   });
 
   it('passes AbortSignal.timeout to fetch, sized so chatWithRetry (2 calls) fits ROW_DEADLINE_MS', async () => {
