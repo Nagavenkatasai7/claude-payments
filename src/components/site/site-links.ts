@@ -13,11 +13,11 @@ export const NAV_LINKS = [
   { href: '/about', label: 'About', hide: 760 },
 ] as const;
 
-/** The "Log in" menu. Partners still go to /docs until the post-demo swap. */
+/** The "Log in" menu. Partners go to the partner dashboard; the docs stay in the footer. */
 export const LOGIN_MENU = [
   { href: '/account/login', title: 'Customers', sub: 'Track transfers & receipts' },
   { href: '/login', title: 'Employee portal', sub: 'Staff & partner dashboards' },
-  { href: '/docs', title: 'Partners', sub: 'Integration docs & API' },
+  { href: '/partner', title: 'Partners', sub: 'Partner dashboard & API keys' },
 ] as const;
 
 export const REGISTER_HREF = '/account/register';
@@ -45,7 +45,7 @@ export const FOOTER_COLUMNS: readonly FooterColumn[] = [
     links: [
       { href: '/account/login', label: 'Customers' },
       { href: '/login', label: 'Employee portal' },
-      { href: '/docs', label: 'Partners' },
+      { href: '/partner', label: 'Partners' },
     ],
   },
   {

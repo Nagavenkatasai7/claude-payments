@@ -133,9 +133,9 @@ function LoginMenu() {
             <span className="text-[14px] font-semibold text-[#0b1b3f]">Employee portal</span>
             <span className="text-[12px] text-[#475569]">Staff &amp; partner dashboards</span>
           </a>
-          <a className={item} href="/docs">
+          <a className={item} href="/partner">
             <span className="text-[14px] font-semibold text-[#0b1b3f]">Partners</span>
-            <span className="text-[12px] text-[#475569]">Integration docs &amp; API</span>
+            <span className="text-[12px] text-[#475569]">Partner dashboard &amp; API keys</span>
           </a>
         </div>
       </div>
@@ -874,7 +874,7 @@ export default async function LandingPage({
                 </a>
               </li>
               <li>
-                <a className="hover:text-[#0b1b3f]" href="/docs">
+                <a className="hover:text-[#0b1b3f]" href="/partner">
                   Partners
                 </a>
               </li>
