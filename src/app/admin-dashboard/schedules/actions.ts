@@ -5,9 +5,8 @@ import { requireStaff } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getScheduleStore } from '@/lib/schedule-store';
-import { decideScheduleAction, SCHEDULE_REFUSAL, type ScheduleAction } from '@/lib/schedule-control';
-import { createScheduleRepo } from '@/db/repos/schedule-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import type { ScheduleAction } from '@/lib/schedule-control';
+import { applyStaffScheduleTransition } from '@/lib/staff-schedule-ops';
 import { getDb } from '@/db/client';
 import type { Schedule, Staff } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
@@ -23,11 +22,11 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
  *   2. load the schedule by the FORM id — the only trusted body field — and
  *      check partner scope; a miss and an out-of-scope row are the SAME generic
  *      'Schedule not found' (404-never-403, no tenant disclosure);
- *   3. decideScheduleAction: the one transition table (pure);
- *   4. ONE transaction: the CONDITIONAL single-column status write (`WHERE id
- *      AND partner_id AND status IN (from)`, partnerId from the LOADED row) and
- *      the audit row. A lost race writes nothing and says so; a failed audit
- *      insert rolls the status write back (the bar fix 16b set).
+ *   3-4. applyStaffScheduleTransition (src/lib/staff-schedule-ops.ts): the one
+ *      transition table, then ONE transaction with the CONDITIONAL single-column
+ *      status write (`WHERE id AND partner_id AND status IN (from)`, partnerId
+ *      from the LOADED row) and the audit row. A lost race writes nothing and
+ *      says so; a failed audit insert rolls the status write back (fix 16b).
  * The audit meta names states and the optional reason only — never the payout
  * destination or the customer's phone.
  */
@@ -60,29 +59,10 @@ async function transition(action: ScheduleAction, formData: FormData): Promise<v
   const staff = await requireCanCancel();
   const id = String(formData.get('id') ?? '');
   const schedule = await getScopedSchedule(staff, id);
-  const decision = decideScheduleAction(schedule.status, action);
-  if (!decision.ok) throw new Error(decision.reason);
-  const reason = readReason(formData);
-
-  await getDb().transaction(async (tx) => {
-    // tx-bound repos ONLY inside the transaction: the guarded write and its
-    // audit row commit together or not at all.
-    const updated = await createScheduleRepo(tx).setStatusIf(
-      schedule.id,
-      schedule.partnerId,
-      decision.from,
-      decision.to,
-    );
-    if (!updated) throw new Error(SCHEDULE_REFUSAL.changed);
-    await createAuditRepo(tx).record({
-      partnerId: schedule.partnerId,
-      actor: staff.username,
-      actorType: 'staff',
-      action: `schedule.${action}`,
-      subjectId: schedule.id,
-      meta: reason ? { from: schedule.status, to: decision.to, reason } : { from: schedule.status, to: decision.to },
-    });
-  });
+  // The decision, the conditional write and the audit row (one transaction) live in the shared
+  // staff writer, which /partner/schedules uses too.
+  const r = await applyStaffScheduleTransition(getDb(), schedule, action, { username: staff.username, reason: readReason(formData) });
+  if (!r.ok) throw new Error(r.reason);
   // 'layout' revalidates every page under /admin-dashboard (the overview's
   // due-soon card reads schedules too), not just this list.
   revalidatePath('/admin-dashboard', 'layout');
