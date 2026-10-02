@@ -539,10 +539,15 @@ export function createTransferRepo(
      * pending→completed|failed. Returns null when the stored state isn't a
      * legal predecessor — concurrent ops clicks and webhook replays become
      * harmless no-ops. The forward-only `status` machine is untouched.
+     *
+     * `opts.from` narrows the move to exactly ONE prior state (it must also be a legal one): a
+     * staff decision that read `requested` claims requested → pending, so a row another decision
+     * already moved (say to `none`) is not claimed. Omitted = every legal predecessor (unchanged).
      */
     async updateRefund(
       id: string,
       next: { refundStatus: RefundStatus; refundRef?: string; refundedAt?: string },
+      opts: { from?: RefundStatus } = {},
     ): Promise<Transfer | null> {
       const legalFrom: Record<RefundStatus, RefundStatus[]> = {
         requested: ['none'],
@@ -551,6 +556,10 @@ export function createTransferRepo(
         completed: ['pending'],
         failed: ['pending'],
       };
+      const allowed = opts.from === undefined
+        ? legalFrom[next.refundStatus]
+        : legalFrom[next.refundStatus].filter((s) => s === opts.from);
+      if (allowed.length === 0) return null;
       const rows = await db
         .update(transfers)
         .set({
@@ -560,7 +569,7 @@ export function createTransferRepo(
         })
         .where(and(
           eq(transfers.id, id),
-          sql`${transfers.refundStatus} IN (${sql.join(legalFrom[next.refundStatus].map((s) => sql`${s}`), sql`, `)})`,
+          sql`${transfers.refundStatus} IN (${sql.join(allowed.map((s) => sql`${s}`), sql`, `)})`,
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;

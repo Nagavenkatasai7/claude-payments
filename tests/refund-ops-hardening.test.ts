@@ -106,6 +106,40 @@ describe('lost race (the guarded write claims nothing)', () => {
   });
 });
 
+describe('each decision claims its exact prior state', () => {
+  it('approve after a committed dismiss (stale requested read): refused, no funding.refund effect, no approve row', async () => {
+    await seed('c1', 'pa', 'requested');
+    await dismissRefund(db, 'c1', AUDIT); // committed first: requested → none
+    stale.status = 'requested';
+    await expect(approveRefund(db, 'c1', AUDIT)).rejects.toThrow(/not awaiting approval/);
+    stale.status = null;
+    expect(await refundStatus('c1')).toBe('none');
+    expect(await refundEffects()).toEqual([]);
+    expect((await audits()).map((a) => a.action)).toEqual(['refund.dismiss']);
+  });
+  it('approve with a stale requested read on a row that is none: refused, nothing written', async () => {
+    await seed('c2', 'pa', 'none');
+    stale.status = 'requested';
+    await expect(approveRefund(db, 'c2', AUDIT, { partnerId: 'pa' })).rejects.toThrow(/not awaiting approval/);
+    stale.status = null;
+    expect(await refundStatus('c2')).toBe('none');
+    expect(await refundEffects()).toEqual([]);
+    expect(await audits()).toEqual([]);
+  });
+  it('retry claims failed only: a stale failed read on a none or requested row is refused, nothing written', async () => {
+    await seed('c3', 'pa', 'none');
+    await seed('c4', 'pa', 'requested');
+    stale.status = 'failed';
+    await expect(retryRefund(db, 'c3', AUDIT)).rejects.toThrow(/not in a failed state/);
+    await expect(retryRefund(db, 'c4', AUDIT)).rejects.toThrow(/not in a failed state/);
+    stale.status = null;
+    expect(await refundStatus('c3')).toBe('none');
+    expect(await refundStatus('c4')).toBe('requested');
+    expect(await refundEffects()).toEqual([]);
+    expect(await audits()).toEqual([]);
+  });
+});
+
 describe('actor scope in the audit row', () => {
   it('is recorded when given and absent otherwise', async () => {
     await seed('s1', 'pa', 'requested');
