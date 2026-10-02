@@ -72,6 +72,9 @@ vi.mock('@/lib/outbox-worker', async (orig) => {
     },
   };
 });
+// The dead-man ping goes out through safeFetch (the URL policy lives there).
+const fetchStub = vi.hoisted(() => vi.fn<typeof fetch>());
+vi.mock('@/lib/safe-fetch', async (orig) => ({ ...(await orig<typeof import('@/lib/safe-fetch')>()), safeFetch: fetchStub }));
 vi.mock('@/lib/aml-sweep', async (orig) => {
   const real = await orig<typeof import('@/lib/aml-sweep')>();
   const { fakeAmlRedis } = await import('./helpers-aml-redis');
@@ -113,10 +116,13 @@ beforeEach(async () => {
   Object.assign(box, { db, redis, gate, neonThrows: false, gateCtorThrows: false, drainThrows: false });
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network disabled in test')));
+  fetchStub.mockReset();
+  fetchStub.mockImplementation(async () => new Response(null, { status: 200 }));
 });
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 async function body(res: Response): Promise<Record<string, unknown>> {
@@ -321,5 +327,71 @@ describe('post-drain marks', () => {
     box.drainThrows = true;
     await expect(POST(pokeReq())).rejects.toThrow(/connection reset/);
     expect(await isWorkDue(gate, Date.now() + 1_000)).toBe(true);
+  });
+});
+
+describe('dead-man ping (WORKER_HEARTBEAT_URL)', () => {
+  const PING = 'https://hc-ping.example/dead-man-uuid';
+  const pings = () => fetchStub.mock.calls.filter(([u]) => u === PING);
+
+  it('a completed cron full run on the :17 backstop pings exactly once, after lastFullAt is written', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(17);
+    gate.strings.delete(LAST_FULL_KEY);
+    let lastFullAtPing: string | undefined;
+    fetchStub.mockImplementation(async (u) => {
+      if (u === PING) lastFullAtPing = gate.strings.get(LAST_FULL_KEY);
+      return new Response(null, { status: 200 });
+    });
+    expect(await body(await GET(cronReq()))).toMatchObject({ source: 'cron', gated: false, deadManPing: 'sent' });
+    expect(pings()).toHaveLength(1);
+    expect(pings()[0][1]).toMatchObject({ method: 'GET' });
+    expect(lastFullAtPing).toBe(new Date(Date.now()).toISOString());
+  });
+
+  it('a gated cron tick does not ping (body unchanged)', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(3);
+    expect(await body(await GET(cronReq()))).toEqual({ ok: true, source: 'cron', gated: true });
+    expect(pings()).toHaveLength(0);
+  });
+
+  it('a POST poke full run does not ping', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(3);
+    expect(await body(await POST(pokeReq()))).toMatchObject({ source: 'poke', gated: false, deadManPing: 'skipped' });
+    expect(pings()).toHaveLength(0);
+  });
+
+  it('a GitHub-heartbeat full run (stale cron marker) does not ping: it must not mask a dead cron', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(17);
+    await redis.set(CRON_MARKER_KEY, new Date(Date.now() - 45 * 60_000).toISOString());
+    expect(await body(await GET(heartbeatReq()))).toMatchObject({ source: 'heartbeat', gated: false, deadManPing: 'skipped' });
+    expect(pings()).toHaveLength(0);
+  });
+
+  it('a drain that THROWS does not ping', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(17);
+    box.drainThrows = true;
+    await expect(GET(cronReq())).rejects.toThrow(/connection reset/);
+    expect(pings()).toHaveLength(0);
+  });
+
+  it("URL unset: no fetch at all, deadManPing 'unset'", async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', '');
+    at(17);
+    expect(await body(await GET(cronReq()))).toMatchObject({ source: 'cron', gated: false, deadManPing: 'unset' });
+    expect(fetchStub).not.toHaveBeenCalled();
+  });
+
+  it('a ping that rejects still answers 200 ok and keeps lastFullAt', async () => {
+    vi.stubEnv('WORKER_HEARTBEAT_URL', PING);
+    at(17);
+    gate.strings.delete(LAST_FULL_KEY);
+    fetchStub.mockRejectedValue(new Error('settlement_fetch_failed:ECONNRESET'));
+    expect(await body(await GET(cronReq()))).toMatchObject({ ok: true, source: 'cron', deadManPing: 'failed' });
+    expect(gate.strings.get(LAST_FULL_KEY)).toBe(new Date(Date.now()).toISOString());
   });
 });

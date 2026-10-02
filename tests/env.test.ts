@@ -80,4 +80,18 @@ describe('env', () => {
     });
   });
 
+  describe('workerHeartbeatUrl (the dead-man ping, optional)', () => {
+    afterEach(() => {
+      delete process.env.WORKER_HEARTBEAT_URL;
+    });
+    it("returns '' when unset", () => {
+      delete process.env.WORKER_HEARTBEAT_URL;
+      expect(env.workerHeartbeatUrl).toBe('');
+    });
+    it('returns the trimmed value when set', () => {
+      process.env.WORKER_HEARTBEAT_URL = '  https://hc-ping.example/abc  ';
+      expect(env.workerHeartbeatUrl).toBe('https://hc-ping.example/abc');
+    });
+  });
+
 });
