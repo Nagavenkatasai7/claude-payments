@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { requireSupportOrAdmin, requireTicketWorker } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
-import { scopeOf, canSee, type Scope } from '@/lib/staff-scope';
+import type { Scope } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -13,7 +13,7 @@ import { env } from '@/lib/env';
 import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
-import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
+import { ticketAssigneeRefusal, type AssigneeRefusal } from '@/lib/ticket-assignable';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -25,6 +25,13 @@ import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 // the admin employee-questions surface.
 
 const PRIORITIES: readonly TicketPriority[] = ['low', 'normal', 'urgent'];
+
+const ASSIGN_REFUSAL_COPY: Record<AssigneeRefusal, string> = {
+  unknown: 'Cannot assign: unknown staff member.',
+  inactive: 'Cannot assign: staff member is inactive.',
+  scope: 'Cannot assign: staff member is outside this ticket’s scope.',
+  role: 'Cannot assign: staff member cannot work tickets.',
+};
 
 async function getScopedTicket(scope: Scope, id: string): Promise<Ticket> {
   if (!id) throw new Error('Ticket not found');
@@ -167,18 +174,10 @@ export async function assignTicketAction(formData: FormData): Promise<void> {
   const assignee = String(formData.get('assignee') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
   if (assignee) {
-    const assigneeStaff = await getAuthStore().getStaff(assignee);
-    if (!assigneeStaff) throw new Error('Cannot assign: unknown staff member.');
-    if (assigneeStaff.status === 'suspended') {
-      throw new Error('Cannot assign: staff member is inactive.');
-    }
-    if (!canSee(scopeOf(assigneeStaff), ticket.partnerId)) {
-      throw new Error('Cannot assign: staff member is outside this ticket’s scope.');
-    }
-    // UI redesign M3-6: a /partner-only role (finance) cannot open the ticket it would be given.
-    if (!isLegacyDashboardStaff(assigneeStaff)) {
-      throw new Error('Cannot assign: staff member cannot work tickets.');
-    }
+    // The shared rule (lib/ticket-assignable; /partner's assignAction uses it too). UI redesign
+    // M3-6: a /partner-only role (finance) cannot open the ticket it would be given ('role').
+    const refusal = ticketAssigneeRefusal(await getAuthStore().getStaff(assignee), ticket.partnerId);
+    if (refusal) throw new Error(ASSIGN_REFUSAL_COPY[refusal]);
   }
   const updated = await createTicketRepo(getDb()).assign(ticket.id, assignee || null);
   if (!updated) throw new Error('Ticket is closed.');

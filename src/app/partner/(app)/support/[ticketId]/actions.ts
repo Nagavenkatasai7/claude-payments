@@ -15,13 +15,21 @@ import {
   StatusRefusedError,
   claimOnce,
   errName,
+  escalationNote,
   getVisibleTicket,
   isRequestKey,
+  parseAssigneeField,
+  parseEscalationReason,
   parsePartnerTicketStatus,
   parseStaffText,
   staffClaimKey,
   ticketNudgeUrl,
 } from '@/lib/partner-tickets';
+import { getAuthStore } from '@/lib/auth-store';
+import { PARTNER_TICKET_LEADS } from '@/lib/partner-access';
+import { scopeOf } from '@/lib/staff-scope';
+import { isTenantTicketAssignee } from '@/lib/ticket-assignable';
+import type { Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
 
@@ -199,6 +207,121 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
     return failed();
   }
   if (nudged) pokeWorker();
+  refresh(ticket.id);
+  return { ok: true };
+}
+
+/** Thrown inside the assign transaction when the compare-and-set loses (rolls it back). */
+class AssignRaceError extends Error {
+  constructor() {
+    super('Assignment changed');
+    this.name = 'AssignRaceError';
+  }
+}
+
+/**
+ * (Re)assign or unassign a customer ticket (merge plan 2e; ported from the legacy
+ * assignTicketAction). Admin and support only: an agent is bounced by the gate (PARTNER_TICKET_LEADS).
+ * The assignee must be an active, ticket-capable MEMBER of the session tenant
+ * (isTenantTicketAssignee: never another tenant's staff, never a SmartRemit account); every refusal
+ * is one fixed message. The write is a compare-and-set on the assignee this request read, so a
+ * double submit or a concurrent reassignment never writes twice; the same assignee again is a no-op.
+ */
+export async function assignAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_TICKET_LEADS);
+  const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
+  if (!ticket) return notFound();
+  if (ticket.status === 'closed') return { ok: false, error: t('partner.support.closed') };
+  const parsed = parseAssigneeField(formData.get('assignee'));
+  if (!parsed.ok) return { ok: false, error: t('partner.support.assigneeInvalid') };
+  const { assignee } = parsed;
+  if (assignee !== null) {
+    let staff: Staff | null = null;
+    try {
+      staff = await getAuthStore().getStaff(assignee);
+    } catch {
+      staff = null; // An unreadable record is not assignable (fail closed).
+    }
+    if (!isTenantTicketAssignee(staff, ctx.partnerId)) return { ok: false, error: t('partner.support.assigneeInvalid') };
+  }
+  const from = ticket.assignedTo ?? null;
+  if (from === assignee) return { ok: true };
+
+  try {
+    await getDb().transaction(async (tx) => {
+      const updated = await createTicketRepo(tx).assign(ticket.id, assignee, { from });
+      if (!updated) throw new AssignRaceError();
+      await createAuditRepo(tx).record({
+        partnerId: ctx.partnerId,
+        actor: ctx.username,
+        actorType: 'staff',
+        action: 'ticket.assign',
+        subjectId: ticket.id,
+        meta: { actorScope: scopeOf(ctx.staff).kind, assignee },
+      });
+    });
+  } catch (err) {
+    if (err instanceof AssignRaceError) {
+      // Lost the compare-and-set: already this assignee (a double submit) is success; anything
+      // else (closed meanwhile, reassigned by someone else) asks for a reload. Nothing was written.
+      const now = await getVisibleTicket(ctx, ticket.id, 'customer').catch(() => null);
+      if (now && now.status !== 'closed' && (now.assignedTo ?? null) === assignee) return { ok: true };
+      return { ok: false, error: t('partner.support.assignStale') };
+    }
+    logWarn('partner.support.assign', errName(err), { ticketId: ticket.id });
+    return failed();
+  }
+  refresh(ticket.id);
+  return { ok: true };
+}
+
+/**
+ * Escalate a customer ticket to SmartRemit (merge plan 2e; ported from the legacy escalateAction):
+ * the status moves to waiting_admin (the platform queue) and an internal system note carries the
+ * typed reason, with ONE audit row, all in one transaction. Same worker rules as reply (an agent
+ * works only tickets assigned to them). A ticket already escalated is refused by the guarded status
+ * move, so a repeat writes nothing. The reason stays in the sealed note, never the audit meta.
+ */
+export async function escalateAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
+  const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
+  if (!ticket) return notFound();
+  if (ticket.status === 'closed') return { ok: false, error: t('partner.support.closed') };
+  const alreadyEscalated: ActionResult = { ok: false, error: t('partner.support.alreadyEscalated') };
+  if (ticket.status === 'waiting_admin') return alreadyEscalated;
+  const parsed = parseEscalationReason(formData.get('reason'));
+  if (!parsed.ok) {
+    return { ok: false, error: t(parsed.error === 'number' ? 'partner.support.reasonHasNumber' : 'partner.support.reasonTooShort') };
+  }
+
+  try {
+    await getDb().transaction(async (tx) => {
+      const repo = createTicketRepo(tx);
+      // Refuses closed and an already-escalated ticket atomically (same-state move).
+      if (!(await repo.updateStatus(ticket.id, 'waiting_admin'))) throw new StatusRefusedError();
+      await repo.appendMessage({
+        ticketId: ticket.id,
+        actorType: 'system',
+        actorId: 'system',
+        body: escalationNote(parsed.reason),
+        internal: true,
+      });
+      await createAuditRepo(tx).record({
+        partnerId: ctx.partnerId,
+        actor: ctx.username,
+        actorType: 'staff',
+        action: 'ticket.escalate',
+        subjectId: ticket.id,
+        meta: { actorScope: scopeOf(ctx.staff).kind, from: ticket.status },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StatusRefusedError) return alreadyEscalated;
+    logWarn('partner.support.escalate', errName(err), { ticketId: ticket.id });
+    return failed();
+  }
   refresh(ticket.id);
   return { ok: true };
 }
