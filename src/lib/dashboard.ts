@@ -82,7 +82,10 @@ function isSameDay(a: Date, b: Date): boolean {
   );
 }
 
-export function nextDueAt(schedule: Schedule, now: number): number {
+/** The fields the due-date rule reads (a full Schedule, or a destination-free partner read). */
+export type DueSchedule = Pick<Schedule, 'status' | 'frequency' | 'dayOfMonth' | 'dayOfWeek' | 'lastRunAt'>;
+
+export function nextDueAt(schedule: DueSchedule, now: number): number {
   const ref = new Date(now);
   const todayStart = startOfDay(now);
 
@@ -109,11 +112,11 @@ export function nextDueAt(schedule: Schedule, now: number): number {
   return next.getTime();
 }
 
-export function schedulesDueInRange(
-  schedules: Schedule[],
+export function schedulesDueInRange<S extends DueSchedule>(
+  schedules: S[],
   now: number,
   days: number,
-): Schedule[] {
+): S[] {
   const cutoff = now + days * 86400000;
   const todayStart = startOfDay(now);
   return schedules
