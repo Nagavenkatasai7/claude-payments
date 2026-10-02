@@ -51,7 +51,7 @@ An endpoint that breaks these rules is refused before the instruction is sent; t
 
 ## Retries
 
-Instructions are delivered at least once. A failed attempt is retried with exponential backoff: roughly `2^n` seconds after the n-th attempt, capped at <Fact name="outboxBackoffCapSec" /> seconds between attempts. After <Fact name="outboxMaxAttempts" /> attempts the instruction stops retrying and SmartRemit's operations team is alerted to resolve it with you.
+Instructions are delivered at least once. A failed attempt is retried with exponential backoff: roughly `2^n` seconds after the n-th attempt, capped at <Fact name="instructBackoffCapSec" /> seconds between attempts. After <Fact name="instructMaxAttempts" /> attempts (about a day in total) the instruction stops retrying and SmartRemit's operations team is alerted to resolve it with you.
 
 ## Status callbacks
 

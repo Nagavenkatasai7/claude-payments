@@ -13,8 +13,12 @@ export const FACTS = {
   signatureHeader: 'x-smartremit-signature',
   /** src/db/repos/outbox-repo.ts MAX_ATTEMPTS (then dead-lettered with an ops alert). */
   outboxMaxAttempts: 8,
-  /** src/db/repos/outbox-repo.ts backoff: 2^attempts seconds, capped at this. */
+  /** src/db/repos/outbox-repo.ts BACKOFF_CAP_SEC: 2^attempts seconds, capped at this. */
   outboxBackoffCapSec: 3600,
+  /** src/db/repos/outbox-repo.ts INSTRUCT_MAX_ATTEMPTS (settlement instructions; then dead-lettered with an ops alert). */
+  instructMaxAttempts: 56,
+  /** src/db/repos/outbox-repo.ts INSTRUCT_BACKOFF_CAP_SEC (settlement instructions: about a day in total). */
+  instructBackoffCapSec: 1800,
   /** src/lib/providers/http-payment-provider.ts RAIL_TIMEOUT_MS / 1000. */
   railAckTimeoutSec: 15,
   /** src/lib/safe-fetch.ts MAX_ACK_BYTES / 1024 (the settlement acknowledgement cap). */
