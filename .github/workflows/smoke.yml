@@ -96,9 +96,10 @@ jobs:
   smoke:
     needs: target
     runs-on: ubuntu-latest
-    # Up to 25 min waiting for the build + rolling release (below), plus the
-    # few minutes the install and Playwright run need.
-    timeout-minutes: 32
+    # Up to 25 min waiting for the build + rolling release (below), up to 5
+    # min for the migration check, plus the few minutes the install and
+    # Playwright run need.
+    timeout-minutes: 38
     # One smoke per commit at a time. A second run for the same commit (a
     # deployment_status event, or a dispatch while the push run is going)
     # waits instead of racing it. GitHub keeps at most ONE waiting job per
@@ -264,6 +265,93 @@ jobs:
             if (( $(date +%s) >= deadline )); then
               echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the Vercel production build failed or is still queued; or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments and its Rolling Release, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
               exit 1
+            fi
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
+
+      - name: Production has applied every migration this build expects
+        if: steps.dedupe.outputs.covered != 'true'
+        # WARNING-ONLY for now (owner decision): this step never fails the job
+        # and never skips Playwright. It reads GET /api/version/migrations
+        # (src/app/api/version/migrations/route.ts, Bearer CRON_SECRET), which
+        # compares the journal bundled into the SERVED build with
+        # drizzle.__drizzle_migrations on prod Neon. Migrations are applied by
+        # hand (/migrate-prod), so it polls for up to GRACE_SECONDS while the
+        # answer is pending, from another build or unreadable, then warns with
+        # the pending tags. Applied rows the journal does not know (divergence,
+        # or a rollback to an older build) also warn. The secret goes only in
+        # the header; curl never runs verbose.
+        timeout-minutes: 7
+        continue-on-error: true
+        shell: bash
+        env:
+          TARGET_SHORT: ${{ needs.target.outputs.short }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MIGRATIONS_URL: https://smartremit.ai/api/version/migrations
+          GRACE_SECONDS: '300'
+          POLL_INTERVAL_SECONDS: '20'
+        run: |
+          set -u
+          target="$(printf '%s' "$TARGET_SHORT" | tr 'A-F' 'a-f')"
+          if [[ -z "${CRON_SECRET:-}" ]]; then
+            echo "::warning title=Migration check skipped::The CRON_SECRET repository secret is not available to this run."
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+          start="$(date +%s)"
+          deadline=$(( start + GRACE_SECONDS ))
+          polls=0
+          last="none"
+          diverged_warned=0
+
+          while true; do
+            polls=$(( polls + 1 ))
+            : > "$body_file"
+            code="$(curl -sS --max-time 15 \
+                -H "Authorization: Bearer ${CRON_SECRET}" \
+                -H 'Cache-Control: no-cache' \
+                -o "$body_file" -w '%{http_code}' \
+                "${MIGRATIONS_URL}?vcrrForceStable=true&cb=$(date +%s)-${polls}-${RANDOM}")" || code="error"
+
+            if [[ "$code" == "401" ]]; then
+              echo "::warning title=Migration check unauthorized::${MIGRATIONS_URL} answered 401: the CRON_SECRET repository secret does not match production's. Migration status was NOT checked."
+              exit 0
+            fi
+
+            seen="-"; ok="-"
+            if [[ "$code" == "200" ]]; then
+              seen="$(jq -r '.sha // empty' "$body_file" 2>/dev/null || true)"
+              ok="$(jq -r '.ok' "$body_file" 2>/dev/null || true)"
+            fi
+            elapsed=$(( $(date +%s) - start ))
+            last="HTTP ${code}, sha=${seen}, ok=${ok}"
+            echo "poll ${polls} (+${elapsed}s): ${last}"
+
+            if [[ "$code" == "200" && "$seen" == "$target" ]]; then
+              expected="$(jq -r '.expected' "$body_file")"
+              applied="$(jq -r '.applied' "$body_file")"
+              unknown="$(jq -r '.unknownApplied | length' "$body_file")"
+              if [[ "$unknown" != "0" && "$diverged_warned" == "0" ]]; then
+                diverged_warned=1
+                echo "::warning title=Prod migrations diverged::Production has ${unknown} applied migration row(s) that build ${target}'s journal does not list (created_at: $(jq -r '.unknownApplied | map(tostring) | join(", ")' "$body_file")). Investigate before applying anything."
+              fi
+              if [[ "$ok" == "true" ]]; then
+                echo "Production has applied all ${expected} migrations build ${target} expects (${applied} applied)."
+                exit 0
+              fi
+            fi
+
+            if (( $(date +%s) >= deadline )); then
+              if [[ "$code" == "200" && "$seen" == "$target" ]]; then
+                count="$(jq -r '.pending | length' "$body_file")"
+                tags="$(jq -r '.pending | join(", ")' "$body_file")"
+                echo "::warning title=Prod migrations behind::Production has ${count} migration(s) pending that build ${target} expects: ${tags}. Apply via /migrate-prod, then re-run: gh workflow run smoke.yml -f sha=${target}"
+              else
+                echo "::warning title=Migration check inconclusive::Could not read migration status for build ${target} within $(( GRACE_SECONDS / 60 )) min (last poll: ${last})."
+              fi
+              exit 0
             fi
             sleep "$POLL_INTERVAL_SECONDS"
           done
