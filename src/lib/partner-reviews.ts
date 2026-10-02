@@ -57,25 +57,20 @@ export function partnerMayRejectHold(
 }
 
 export interface KycQueueCounts {
-  /** Awaiting a human decision (one count: the queue is never split by why a customer is in it). */
+  /** Awaiting a human decision: ONE count, never split by why a customer is in the queue. */
   awaiting: number;
-  /** Still in the hosted verification flow. */
-  inProgress: number;
 }
 
-/** The KYC status tiles, over THIS tenant's rows only (another tenant's row is ignored). */
+/** The KYC status tile, over THIS tenant's rows only (another tenant's row is ignored). */
 export function kycQueueCounts(
   customers: ReadonlyArray<Pick<Customer, 'partnerId' | 'kycReviewState'>>,
   partnerId: PartnerId,
 ): KycQueueCounts {
   let awaiting = 0;
-  let inProgress = 0;
   for (const c of customers) {
-    if (c.partnerId !== partnerId) continue;
-    if (isKycQueueState(c.kycReviewState)) awaiting += 1;
-    else if (c.kycReviewState === 'inquiry_started') inProgress += 1;
+    if (c.partnerId === partnerId && isKycQueueState(c.kycReviewState)) awaiting += 1;
   }
-  return { awaiting, inProgress };
+  return { awaiting };
 }
 
 /** D5: the ONLY thing a partner admin sees about an AML rule is one label. A closed map. */
@@ -90,4 +85,20 @@ export function amlRuleKey(rule: unknown): MessageKey {
   return typeof rule === 'string' && Object.hasOwn(AML_RULE_KEYS, rule)
     ? AML_RULE_KEYS[rule as AmlRule]
     : 'partner.reviews.aml.rule.other';
+}
+
+/** Program-Fix 43: the closed list of AML alert outcomes (shared with the legacy compliance action). */
+export const AML_DISPOSITIONS = Object.freeze(['no_action', 'escalated'] as const);
+export type AmlDisposition = (typeof AML_DISPOSITIONS)[number];
+
+export function isAmlDisposition(v: unknown): v is AmlDisposition {
+  return typeof v === 'string' && (AML_DISPOSITIONS as readonly string[]).includes(v);
+}
+
+/** An alert id from a form: a positive safe integer of at most 15 digits, else null. */
+export function parseAmlAlertId(raw: FormDataEntryValue | null): number | null {
+  const s = typeof raw === 'string' ? raw.trim() : '';
+  if (!/^[1-9]\d{0,14}$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
 }

@@ -20,7 +20,7 @@ let db: Db;
 let store: Store;
 let pgPartnerStore: PartnerStore;
 const revalidated: string[] = [];
-const notify = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const notify = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => ({ ok: true })));
 
 vi.mock('next/headers', () => ({
   cookies: async () => ({

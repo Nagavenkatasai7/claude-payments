@@ -9,6 +9,7 @@ import { boundStaffNote } from '@/lib/send-limits';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { isAmlDisposition, parseAmlAlertId } from '@/lib/partner-reviews';
 
 /**
  * Program-Fix 43 (compliance-09, partial): close an AML review item.
@@ -32,23 +33,15 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
  * hold (owner decision), and it never reaches the customer or the partner API.
  */
 
-const DISPOSITIONS = ['no_action', 'escalated'] as const;
-type Disposition = (typeof DISPOSITIONS)[number];
-
-function parseAlertId(raw: FormDataEntryValue | null): number | null {
-  const s = typeof raw === 'string' ? raw.trim() : '';
-  if (!/^[1-9]\d{0,14}$/.test(s)) return null;
-  const n = Number(s);
-  return Number.isSafeInteger(n) ? n : null;
-}
+// The id parser and the disposition list are shared with the /partner port (lib/partner-reviews.ts).
 
 export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const { staff, scope } = await requireScope();
-  const alertId = parseAlertId(formData.get('alertId'));
+  const alertId = parseAmlAlertId(formData.get('alertId'));
   if (alertId === null) throw new Error('Alert not found');
-  const disposition = String(formData.get('disposition') ?? '') as Disposition;
-  if (!DISPOSITIONS.includes(disposition)) throw new Error('Invalid disposition');
+  const disposition = String(formData.get('disposition') ?? '');
+  if (!isAmlDisposition(disposition)) throw new Error('Invalid disposition');
   const note = boundStaffNote(formData.get('note'));
 
   const db = getDb();

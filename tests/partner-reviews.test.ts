@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AML_DISPOSITIONS,
   AML_RULE_KEYS,
   amlRuleKey,
+  isAmlDisposition,
+  parseAmlAlertId,
   isKycQueueState,
   kycQueueCounts,
   partnerKycDecision,
@@ -155,7 +158,7 @@ describe('kycQueueCounts', () => {
   const c = (partnerId: string, kycReviewState: KycReviewState | undefined, kycStatus: KycStatus = 'pending') =>
     ({ partnerId, kycReviewState, kycStatus }) as Pick<Customer, 'partnerId' | 'kycReviewState' | 'kycStatus'>;
 
-  it('counts the tenant’s customers awaiting a decision and those still in the hosted flow', () => {
+  it('counts the tenant’s customers awaiting a decision (not those still in the hosted flow or decided)', () => {
     const rows = [
       c('pa', 'pending_review'),
       c('pa', 'needs_review'),
@@ -163,15 +166,15 @@ describe('kycQueueCounts', () => {
       c('pa', 'approved', 'verified'),
       c('pa', undefined, 'not_started'),
     ];
-    expect(kycQueueCounts(rows, 'pa')).toEqual({ awaiting: 2, inProgress: 1 });
+    expect(kycQueueCounts(rows, 'pa')).toEqual({ awaiting: 2 });
   });
 
   it('ignores another tenant’s rows (defence in depth)', () => {
-    expect(kycQueueCounts([c('pb', 'pending_review'), c('pb', 'inquiry_started')], 'pa')).toEqual({ awaiting: 0, inProgress: 0 });
+    expect(kycQueueCounts([c('pb', 'pending_review'), c('pb', 'needs_review')], 'pa')).toEqual({ awaiting: 0 });
   });
 
   it('never splits the queue by why it is there (no tipping off)', () => {
-    expect(Object.keys(kycQueueCounts([], 'pa')).sort()).toEqual(['awaiting', 'inProgress']);
+    expect(Object.keys(kycQueueCounts([], 'pa'))).toEqual(['awaiting']);
   });
 });
 
@@ -191,5 +194,23 @@ describe('amlRuleKey (closed map, D5)', () => {
 
   it('every key has English copy', () => {
     for (const k of [...Object.values(AML_RULE_KEYS), amlRuleKey('x')]) expect(t(k)).not.toBe(k);
+  });
+});
+
+describe('AML alert form parsing (shared with the legacy compliance action)', () => {
+  it('parseAmlAlertId accepts only a positive safe integer string', () => {
+    expect(parseAmlAlertId('1')).toBe(1);
+    expect(parseAmlAlertId(' 42 ')).toBe(42);
+    expect(parseAmlAlertId('900719925474099')).toBe(900719925474099);
+    for (const v of ['0', '-1', '01', '1.5', '1e3', 'abc', '', '9999999999999999', null, 7 as unknown as string]) {
+      expect(parseAmlAlertId(v as never)).toBeNull();
+    }
+  });
+
+  it('isAmlDisposition is the closed list no_action | escalated', () => {
+    expect(AML_DISPOSITIONS).toEqual(['no_action', 'escalated']);
+    expect(isAmlDisposition('no_action')).toBe(true);
+    expect(isAmlDisposition('escalated')).toBe(true);
+    for (const v of ['', 'cleared', 'NO_ACTION', 'constructor', null, undefined, 1]) expect(isAmlDisposition(v)).toBe(false);
   });
 });
