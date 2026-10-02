@@ -10,6 +10,7 @@ import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { clearMfaPendingCookie, readMfaPendingToken } from '@/lib/staff-mfa-cookie';
 import { completeStaffSignIn, staffSignInBlocked } from '@/lib/staff-sign-in';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { postLoginTarget } from '@/lib/post-login-target';
 
 // Program-Fix 17b: the sign-in's second step (a public POST endpoint, like
 // every server action). The ONLY input trusted for WHO is signing in is the
@@ -104,5 +105,8 @@ export async function verifyMfa(_prev: string | null, formData: FormData): Promi
   await guard.refund(reservation.keys);
   await guard.clear(staff.username, ip);
   await completeStaffSignIn(staff, ip, { mfa: true });
-  redirect('/admin-dashboard');
+  // UI M5: the same landing as a password-only sign-in (partner staff → /partner). Resolved before
+  // the redirect, which stays outside any try (next/dist/docs/.../redirect.md "Behavior").
+  const target = await postLoginTarget(staff);
+  redirect(target);
 }
