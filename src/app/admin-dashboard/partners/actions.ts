@@ -37,13 +37,18 @@ import {
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
+import { boundUntrustedText, BRAND_MAX } from '@/lib/untrusted-text';
+import { boundedDisplayName, boundedPersona, personaAuditEvent } from '@/lib/partner-brand-text';
 import {
-  boundUntrustedText,
-  BRAND_MAX,
-  hasOverridePhrase,
-  hasWebAddress,
-  PERSONA_MAX,
-} from '@/lib/untrusted-text';
+  parseAlertEmail,
+  parseDisclosureForm,
+  parseSupportPortal,
+  setAlertEmail,
+  setDisclosure,
+  setSupportKnobs,
+  type DisclosureParseReason,
+  type SupportSettingsActor,
+} from '@/lib/partner-support-settings';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
@@ -58,14 +63,11 @@ import {
   testWhatsappConnection,
   whatsappAuditMeta,
 } from '@/lib/partner-whatsapp-config';
-import { normalizeAlertEmail } from '@/lib/channel-health';
-import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import type {
   Partner,
   PartnerStatus,
   PartnerId,
-  PartnerSupportConfig,
-  PartnerDisclosureConfig,
   Staff,
   StaffRole,
   KycMode,
@@ -81,29 +83,12 @@ function keepOrUpdate(submitted: string, existing: string | undefined): string |
   return v !== '' ? v : existing;
 }
 
-// Program-Fix 38: the bot persona is partner-written text that lands in the
-// bot's SYSTEM prompt. After fix 5's clamp it may set tone only — a web address
-// or a rule-override phrase ("ignore the rules above") is REFUSED before any
-// write. One generic message, whichever check tripped.
-const PERSONA_REFUSAL = 'Bot voice can describe tone only — no web addresses or instructions about rules.';
-function boundedPersona(raw: unknown): string | undefined {
-  const persona = boundUntrustedText(raw, PERSONA_MAX);
-  if (persona !== '' && (hasWebAddress(persona) || hasOverridePhrase(persona))) {
-    throw new Error(PERSONA_REFUSAL);
-  }
-  return persona || undefined;
-}
+// Program-Fix 38 / fix 5: the brand text (persona, display name) rules and the persona audit event
+// live in src/lib/partner-brand-text.ts, shared with /partner/branding.
 
-/** The audit row for a persona change: who, which tenant, and the lengths — never the text. */
-function personaAuditEvent(partnerId: string, actor: string, oldPersona: string | undefined, newPersona: string | undefined) {
-  return {
-    partnerId,
-    actor,
-    actorType: 'staff' as const,
-    action: 'partner.persona.update',
-    subjectId: partnerId,
-    meta: { oldLength: [...(oldPersona ?? '')].length, newLength: [...(newPersona ?? '')].length },
-  };
+/** The support_config writers' actor: the session username and its scope (never from input). */
+function supportActor(staff: Staff): SupportSettingsActor {
+  return { username: staff.username, actorScope: scopeOf(staff).kind };
 }
 
 // Shared gate for every partner-config action: admin role + same-partner scope
@@ -157,7 +142,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
     countries: submittedCountries.length > 0 ? submittedCountries : existing.countries,
     brandName: boundUntrustedText(formData.get('brandName'), BRAND_MAX) || undefined,
-    displayName: boundUntrustedText(formData.get('displayName'), BRAND_MAX) || undefined,
+    displayName: boundedDisplayName(formData.get('displayName')),
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
     botPersona,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
@@ -625,29 +610,14 @@ export async function saveSupportConfigAction(formData: FormData): Promise<void>
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-
-  const submitted: Pick<PartnerSupportConfig, 'enableSupportPortal' | 'autoAssign'> = {
-    enableSupportPortal: formData.get('enableSupportPortal') === 'on',
+  // Program-Fix 15 PR B: MERGED into the stored jsonb under a row lock (never rebuilt from these
+  // two fields — that erased the disclosure block) and audited in the same transaction
+  // (src/lib/partner-support-settings.ts).
+  const r = await setSupportKnobs(getDb(), id, supportActor(staff), {
+    enableSupportPortal: parseSupportPortal(formData.get('enableSupportPortal')),
     autoAssign: formData.get('autoAssign') === 'round_robin' ? 'round_robin' : 'none',
-  };
-  // Program-Fix 15 PR B: MERGE into the stored jsonb under a row lock (never
-  // rebuild it from these two fields — that erased the disclosure block), and
-  // audit the change in the same transaction.
-  await getDb().transaction(async (tx) => {
-    const { found, previous } = await createPartnerStore(tx).updateSupportConfig(id, (prev) => ({ ...prev, ...submitted }));
-    if (!found) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
-    await createAuditRepo(tx).record({
-      partnerId: id,
-      actor: staff.username,
-      actorType: 'staff',
-      action: 'partner.support_config',
-      subjectId: id,
-      meta: {
-        old: { enableSupportPortal: previous.enableSupportPortal ?? null, autoAssign: previous.autoAssign ?? null },
-        new: submitted,
-      },
-    });
   });
+  if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
@@ -659,121 +629,36 @@ export async function saveAlertEmailAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const next = normalizeAlertEmail(String(formData.get('alertEmail') ?? ''));
-  if (next === undefined) throw new Error('Enter one valid email address (or leave it blank to turn alert emails off).');
-  await getDb().transaction(async (tx) => {
-    const { found, previous } = await createPartnerStore(tx).updateSupportConfig(id, (prev) => {
-      const { alertEmail: _old, ...rest } = prev;
-      void _old;
-      return next ? { ...rest, alertEmail: next } : rest;
-    });
-    if (!found) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
-    await createAuditRepo(tx).record({
-      partnerId: id,
-      actor: staff.username,
-      actorType: 'staff',
-      action: 'partner.alert_email.update',
-      subjectId: id,
-      meta: { set: next !== null, hadPrevious: Boolean(previous.alertEmail) },
-    });
-  });
+  const parsed = parseAlertEmail(String(formData.get('alertEmail') ?? ''));
+  if (!parsed.ok) throw new Error('Enter one valid email address (or leave it blank to turn alert emails off).');
+  const r = await setAlertEmail(getDb(), id, supportActor(staff), parsed.value);
+  if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
 // ── Reg E disclosure: the licensed partner's identity (Program-Fix 15 PR B) ──
 // Shown to customers on the pay page and the receipt via resolvePartnerDisclosure
-// (the 'default' tenant always shows the demo note instead). Partner-written
-// text is bounded (untrusted-text), URLs must be https, phones digits-only with
-// separators. An all-blank form clears the block. Merged into support_config
-// under a row lock — the support knobs are never touched — and audited.
-
-const DISCLOSURE_TEXT_MAX = 120;
-
-function optionalText(formData: FormData, key: string): string | undefined {
-  const v = boundUntrustedText(formData.get(key), DISCLOSURE_TEXT_MAX);
-  return v === '' ? undefined : v;
-}
-
-function optionalHttps(formData: FormData, key: string, label: string): string | undefined {
-  const v = String(formData.get(key) ?? '').trim();
-  if (v === '') return undefined;
-  if (!isHttpsUrl(v)) throw new Error(`${label} website must be a full https:// address.`);
-  return v;
-}
-
-function optionalPhone(formData: FormData, key: string, label: string): string | undefined {
-  const v = String(formData.get(key) ?? '').trim();
-  if (v === '') return undefined;
-  if (!isDisclosurePhone(v)) throw new Error(`${label} phone must be 7-15 digits (spaces, dashes, dots, brackets and a leading + allowed).`);
-  return v;
-}
-
-/** Form → config, or undefined for an all-blank form. Throws on invalid input (before any write). */
-function parseDisclosureForm(formData: FormData): PartnerDisclosureConfig | undefined {
-  const licensedEntity = optionalText(formData, 'licensedEntity');
-  const licenseIds = String(formData.get('licenseIds') ?? '')
-    .split(/[,\n]/)
-    .map((x) => boundUntrustedText(x, DISCLOSURE_TEXT_MAX))
-    .filter((x) => x !== '')
-    .slice(0, 20);
-  const phone = optionalPhone(formData, 'phone', 'Provider');
-  const website = optionalHttps(formData, 'website', 'Provider');
-  const regulatorName = optionalText(formData, 'regulatorName');
-  const regulatorPhone = optionalPhone(formData, 'regulatorPhone', 'Regulator');
-  const regulatorWebsite = optionalHttps(formData, 'regulatorWebsite', 'Regulator');
-  const rawDays = String(formData.get('deliveryBusinessDays') ?? '').trim();
-  let businessDays: number | undefined;
-  if (rawDays !== '') {
-    const n = Number(rawDays);
-    if (!Number.isInteger(n) || n < 0 || n > MAX_DELIVERY_BUSINESS_DAYS) {
-      throw new Error(`Delivery estimate must be a whole number of business days from 0 to ${MAX_DELIVERY_BUSINESS_DAYS}.`);
-    }
-    businessDays = n;
-  }
-  if ((regulatorPhone || regulatorWebsite) && !regulatorName) {
-    throw new Error('Enter the state regulator name before its phone or website.');
-  }
-  const anyDetail = licenseIds.length > 0 || phone || website || regulatorName || businessDays !== undefined;
-  if (!licensedEntity) {
-    if (anyDetail) throw new Error('Enter the licensed entity name before its other details.');
-    return undefined; // all blank ⇒ clear
-  }
-  const out: PartnerDisclosureConfig = { licensedEntity };
-  if (licenseIds.length > 0) out.licenseIds = licenseIds;
-  if (phone) out.phone = phone;
-  if (website) out.website = website;
-  if (regulatorName) {
-    out.stateRegulator = { name: regulatorName };
-    if (regulatorPhone) out.stateRegulator.phone = regulatorPhone;
-    if (regulatorWebsite) out.stateRegulator.website = regulatorWebsite;
-  }
-  if (businessDays !== undefined) out.deliveryEstimate = { businessDays };
-  return out;
-}
+// (the 'default' tenant always shows the demo note instead). The parser and the
+// writer live in src/lib/partner-support-settings.ts (shared with
+// /partner/settings); this action maps the parser's reason to its copy.
+const DISCLOSURE_ERROR: Record<DisclosureParseReason, string> = {
+  provider_phone: 'Provider phone must be 7-15 digits (spaces, dashes, dots, brackets and a leading + allowed).',
+  regulator_phone: 'Regulator phone must be 7-15 digits (spaces, dashes, dots, brackets and a leading + allowed).',
+  provider_website: 'Provider website must be a full https:// address.',
+  regulator_website: 'Regulator website must be a full https:// address.',
+  delivery_days: `Delivery estimate must be a whole number of business days from 0 to ${MAX_DELIVERY_BUSINESS_DAYS}.`,
+  regulator_name_required: 'Enter the state regulator name before its phone or website.',
+  entity_required: 'Enter the licensed entity name before its other details.',
+};
 
 export async function saveDisclosureConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const disclosure = parseDisclosureForm(formData); // validate BEFORE any write
-
-  await getDb().transaction(async (tx) => {
-    const { found, previous } = await createPartnerStore(tx).updateSupportConfig(id, (prev) => {
-      const next: PartnerSupportConfig = { ...prev };
-      if (disclosure) next.disclosure = disclosure;
-      else delete next.disclosure;
-      return next;
-    });
-    if (!found) throw new Error('Partner not found.');
-    await createAuditRepo(tx).record({
-      partnerId: id,
-      actor: staff.username,
-      actorType: 'staff',
-      action: 'partner.disclosure_config',
-      subjectId: id,
-      meta: { old: previous.disclosure ?? null, new: disclosure ?? null },
-    });
-  });
+  const parsed = parseDisclosureForm(formData); // validate BEFORE any write
+  if (!parsed.ok) throw new Error(DISCLOSURE_ERROR[parsed.reason]);
+  const r = await setDisclosure(getDb(), id, supportActor(staff), parsed.value);
+  if (!r.ok) throw new Error('Partner not found.');
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
@@ -930,7 +815,7 @@ export async function wizardCreatePartnerAction(
     status: 'active',
     // fix 5 (F43): the same save-side clamp as updatePartnerAction.
     brandName: boundUntrustedText(input.brandName, BRAND_MAX) || undefined,
-    displayName: boundUntrustedText(input.displayName, BRAND_MAX) || undefined,
+    displayName: boundedDisplayName(input.displayName),
     supportContact: clean(input.supportContact),
     botPersona,
     primaryColor: clean(input.primaryColor),
