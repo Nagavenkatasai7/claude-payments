@@ -1,6 +1,6 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
-import { schedules } from '@/db/schema';
+import { customers, schedules } from '@/db/schema';
 import { isScheduleId } from '@/lib/portal-schedules';
 import type { PartnerScheduleRecord } from '@/lib/partner-schedules';
 import type { CurrencyCode, PartnerId, ScheduleFrequency, ScheduleStatus } from '@/lib/types';
@@ -33,7 +33,14 @@ const COLUMNS = {
   endDate: schedules.endDate,
   lastRunAt: schedules.lastRunAt,
   createdAt: schedules.createdAt,
+  // Scheduled-send name nudge (2026-10-02): whether the owner has NO legal name on file in this
+  // tenant, computed in SQL from the LEFT JOIN below. Only the boolean leaves the database; the name
+  // ciphertext is never selected or decrypted. No customer row counts as no name.
+  needsSenderName: sql<boolean>`(${customers.fullNameEnc} is null or ${customers.fullNameEnc} = '')`,
 };
+
+/** The owner's row in the SAME tenant (partner_id and phone), never another tenant's. */
+const OWNER_JOIN = and(eq(customers.partnerId, schedules.partnerId), eq(customers.phone, schedules.phone));
 
 type Row = {
   id: string;
@@ -50,6 +57,7 @@ type Row = {
   endDate: string | null;
   lastRunAt: Date | null;
   createdAt: Date;
+  needsSenderName: boolean;
 };
 
 function toRecord(r: Row): PartnerScheduleRecord {
@@ -64,6 +72,7 @@ function toRecord(r: Row): PartnerScheduleRecord {
     frequency: r.frequency as ScheduleFrequency,
     status: r.status as ScheduleStatus,
     createdAt: r.createdAt.toISOString(),
+    needsSenderName: r.needsSenderName === true,
   };
   if (r.dayOfMonth !== null) s.dayOfMonth = r.dayOfMonth;
   if (r.dayOfWeek !== null) s.dayOfWeek = r.dayOfWeek;
@@ -76,7 +85,7 @@ function toRecord(r: Row): PartnerScheduleRecord {
 export async function listPartnerSchedules(db: DbOrTx, partnerId: PartnerId, opts: { limit?: number } = {}): Promise<PartnerScheduleRecord[]> {
   requireTenant(partnerId);
   const limit = Math.min(Math.max(1, Math.trunc(opts.limit ?? DEFAULT_LIMIT) || 1), MAX_LIMIT);
-  const rows = await db.select(COLUMNS).from(schedules).where(eq(schedules.partnerId, partnerId)).orderBy(desc(schedules.createdAt), desc(schedules.id)).limit(limit);
+  const rows = await db.select(COLUMNS).from(schedules).leftJoin(customers, OWNER_JOIN).where(eq(schedules.partnerId, partnerId)).orderBy(desc(schedules.createdAt), desc(schedules.id)).limit(limit);
   return rows.map(toRecord);
 }
 
@@ -84,7 +93,7 @@ export async function listPartnerSchedules(db: DbOrTx, partnerId: PartnerId, opt
 export async function getPartnerSchedule(db: DbOrTx, partnerId: PartnerId, id: unknown): Promise<PartnerScheduleRecord | null> {
   requireTenant(partnerId);
   if (!isScheduleId(id)) return null;
-  const rows = await db.select(COLUMNS).from(schedules).where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId))).limit(1);
+  const rows = await db.select(COLUMNS).from(schedules).leftJoin(customers, OWNER_JOIN).where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId))).limit(1);
   return rows[0] ? toRecord(rows[0]) : null;
 }
 

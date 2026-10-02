@@ -1581,6 +1581,8 @@ export const en = {
   'partner.schedules.status.active': 'Active',
   'partner.schedules.status.paused': 'Paused',
   'partner.schedules.status.cancelled': 'Cancelled',
+  'partner.schedules.needsName': 'Needs sender name',
+  'partner.schedules.needsNameHint': 'Runs are skipped until the customer gives their full legal name in chat or on their portal.',
   'partner.schedules.notYet': 'Not yet',
   'partner.schedules.endsOn': 'Ends {date}',
   'partner.schedules.emptyTitle': 'No recurring transfers',
