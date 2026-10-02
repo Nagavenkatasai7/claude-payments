@@ -13,7 +13,11 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { PayForm } from './pay-form';
 import { RemittanceDisclosure } from './remittance-disclosure';
 import { headers } from 'next/headers';
+import { unstable_rethrow } from 'next/navigation';
 import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
+import { isInfraError } from '@/lib/infra-error';
+import { retryOnceOnInfra } from '@/lib/infra-retry';
+import { logWarn } from '@/lib/log';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -65,6 +69,26 @@ function InactiveSheet({ branding }: { branding: ResolvedBranding }) {
   );
 }
 
+/**
+ * Fix D: a Redis / Neon infrastructure failure while loading the page. Default
+ * branding (the tenant is unknown when the read failed); a plain link retries
+ * with no client JS.
+ */
+function TemporaryProblemSheet({ transferId }: { transferId: string }) {
+  return (
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
+        <Brand branding={resolvePartnerBranding(null)} />
+        <h1 className={headingClasses}>We&apos;re having a temporary problem</h1>
+        <p className="mb-5 text-sm leading-normal text-[#8696a0]">Please try again in a moment.</p>
+        <a href={`/pay/${encodeURIComponent(transferId)}`} className="text-sm leading-normal font-semibold text-[#25d366]">
+          Try again
+        </a>
+      </div>
+    </main>
+  );
+}
+
 function Row({
   label,
   value,
@@ -106,12 +130,29 @@ function formatMoney(amount: number, currency: string): string {
   }
 }
 
-export default async function PayPage({
-  params,
-}: {
-  params: Promise<{ transferId: string }>;
-}) {
+type PayPageProps = { params: Promise<{ transferId: string }> };
+
+/**
+ * Fix D: an infrastructure error anywhere in the render shows the
+ * temporary-problem sheet instead of the root error page. Next's own
+ * control-flow errors (unstable_rethrow, node_modules/next/dist/docs/01-app/
+ * 03-api-reference/04-functions/unstable_rethrow.md:46-62) and every non-infra
+ * error are rethrown untouched. No JSX inside the try.
+ */
+export default async function PayPage({ params }: PayPageProps) {
   const { transferId } = await params;
+  let page: Awaited<ReturnType<typeof renderPayPage>> | null = null;
+  try {
+    page = await renderPayPage(transferId);
+  } catch (err) {
+    unstable_rethrow(err);
+    if (!isInfraError(err)) throw err;
+    logWarn('pay.page-infra', err, { transferId });
+  }
+  return page ?? <TemporaryProblemSheet transferId={transferId} />;
+}
+
+async function renderPayPage(transferId: string) {
   // Program-Fix 23: fail-open per-IP guard BEFORE any ledger/draft read. Over
   // budget ⇒ the same sheet as not-found (default brand), never a 429, no log.
   // `headers()` is `Promise<ReadonlyHeaders>` (next/dist/server/request/headers.d.ts:11).
@@ -193,7 +234,8 @@ export default async function PayPage({
     };
   } else {
     // Dual-lookup: treat the segment as a draftId
-    const draft = await getDraftStore().getDraft(transferId);
+    // Fix D: an idempotent PEEK, so a Redis blip gets one retry.
+    const draft = await retryOnceOnInfra(() => getDraftStore().getDraft(transferId));
     if (draft) {
       // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
       brandPartnerId = await draftTenant(draft, getStore().legacyTenantOf);

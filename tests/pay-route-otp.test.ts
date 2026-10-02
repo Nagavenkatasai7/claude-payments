@@ -36,7 +36,9 @@ vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/st
 vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import('@/lib/customer-store')>()), getCustomerStore: () => customerStore }));
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
 // No draft for these ids → otpPhone resolves from the existing transfer.
-vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
+// Hoisted so the fix D cases can make the PEEK fail (reset to null in beforeEach).
+const getDraft = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 // WL1: existing-transfer branch resolves the owning partner for the gate toggle
 // (default ⇒ gate ON). Plain-object stub — no partner row ⇒ ensureDefaultPartner's
 // default (kycMode 'ours' ⇒ gate ON).
@@ -88,6 +90,7 @@ beforeEach(async () => {
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);
   sendTransactionOtp.mockClear();
+  getDraft.mockReset().mockResolvedValue(null);
 });
 
 // "Charged" is now observable in the LEDGER (Stage 2c beginSettlement): the
@@ -251,5 +254,60 @@ describe('POST /api/pay/[transferId] — request_otp send honesty (Program-Fix 2
     const res = await POST(req({ action: 'request_otp' }), ctx);
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
+  });
+});
+
+// Fix D: a Redis blip on the draft PEEK gets ONE retry; a persistent infra
+// failure answers 503 temporarily_unavailable (was 400 'Payment failed'). Real
+// timers: the retry waits INFRA_RETRY_DELAY_MS.
+describe('POST /api/pay/[transferId] — infrastructure errors (fix D)', { retry: 0 }, () => {
+  const dnsBlip = () =>
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('getaddrinfo EBUSY x.upstash.io'), { code: 'EBUSY', errno: -16, syscall: 'getaddrinfo' }),
+    });
+
+  it('the peek fails once with an infra error, then succeeds: request_otp still sends', async () => {
+    getDraft.mockRejectedValueOnce(dnsBlip());
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(getDraft).toHaveBeenCalledTimes(2);
+  });
+
+  it('the peek fails persistently: 503 temporarily_unavailable, no OTP issued or verified, never charged', async () => {
+    getDraft.mockRejectedValue(dnsBlip());
+    const issue = vi.spyOn(txOtp, 'issue');
+    const verify = vi.spyOn(txOtp, 'verify');
+    const res = await POST(req({ otp: '654321' }), ctx);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ ok: false, reason: 'temporarily_unavailable' });
+    expect(getDraft).toHaveBeenCalledTimes(2);
+    expect(issue).not.toHaveBeenCalled();
+    expect(verify).not.toHaveBeenCalled();
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(await status()).toBe('awaiting_payment');
+  });
+
+  it('a Neon infra error (SQLSTATE 57P01) on the transfer read: 503 temporarily_unavailable', async () => {
+    vi.spyOn(store, 'getTransfer').mockRejectedValueOnce(Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01' }));
+    const res = await POST(req({ otp: '654321' }), ctx);
+    expect(res.status).toBe(503);
+    expect((await res.json()).reason).toBe('temporarily_unavailable');
+  });
+
+  it('a non-infra throw still answers 400 Payment failed (unchanged contract)', async () => {
+    vi.spyOn(store, 'getTransfer').mockRejectedValueOnce(new Error('boom'));
+    const res = await POST(req({ otp: '654321' }), ctx);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: 'Payment failed' });
+  });
+
+  it('OTP stays single-use: a valid code charges once, the same code again gets 403 otp', async () => {
+    await txOtp.issue(TID, PHONE);
+    expect((await POST(req({ otp: '654321' }), ctx)).status).toBe(200);
+    expect(await status()).toBe('paid');
+    const again = await POST(req({ otp: '654321' }), ctx);
+    expect(again.status).toBe(403);
+    expect((await again.json()).reason).toBe('otp');
   });
 });

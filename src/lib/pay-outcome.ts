@@ -22,6 +22,10 @@ export const PAY_SENDER_NAME_REQUIRED_COPY =
   'We need your full legal name before this transfer can go ahead. Reply in the WhatsApp chat with your full legal name as on your ID, then open this link again.';
 export const PAY_KYC_REQUIRED_COPY =
   'Please complete verification before sending. Reply in the WhatsApp chat to finish verifying, then open this link again.';
+// Fix D: the route's 503 on an infrastructure error. It never claims nothing
+// was charged: the route's outer catch also wraps post-capture code.
+export const PAY_TEMPORARY_COPY =
+  'We hit a temporary problem on our side. Please try again in a moment. If your code no longer works, tap Resend for a new one.';
 
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
 export function payErrorMessage(body: unknown): string | null {
@@ -29,5 +33,6 @@ export function payErrorMessage(body: unknown): string | null {
   const b = body as { reason?: unknown; kyc_required?: unknown };
   if (b.reason === 'sender_name_required') return PAY_SENDER_NAME_REQUIRED_COPY;
   if (b.kyc_required === true || b.reason === 'kyc_required') return PAY_KYC_REQUIRED_COPY;
+  if (b.reason === 'temporarily_unavailable') return PAY_TEMPORARY_COPY;
   return null;
 }
