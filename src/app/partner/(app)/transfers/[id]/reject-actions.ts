@@ -17,6 +17,8 @@ import { isReasonValid } from '@/lib/ui/confirm-reason';
 import { isPartnerNoteShaped, isTransferId } from '@/lib/partner-transfers';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
+import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
 import type { ActionResult } from '../../../action-result';
 
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
@@ -30,7 +32,9 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  *    (it lands in append-only audit meta);
  *  - D4: only a hold the partner may release (partnerMayRejectHold, the isPartnerReleasableHold
  *    rule: delegated KYC, KYC-class reasons only, a present and unflagged sender), re-checked by
- *    canReleaseHeld. Sanctions, screening and AML holds stay PLATFORM-only. One generic refusal.
+ *    canReleaseHeld. Sanctions, screening and AML holds stay PLATFORM-only. One generic refusal;
+ *  - a fresh 15-minute step-up (owner D2, target 'transfer.reject'), checked after the checks
+ *    above and before any write; a stale session gets step_up_required.
  *
  * The money path is NOT forked: rejectTransfer (dashboard-ops.ts) commits the guarded
  * in_review → cancelled claim, the ONE `transfer.reject` audit row (actor, reason, actorScope
@@ -40,7 +44,7 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  * repeated submit loses the claim and is reported as not allowed. Known residual (as release):
  * the kycMode check is read-then-claim.
  */
-export async function rejectHoldAction(formData: FormData): Promise<ActionResult> {
+export async function rejectHoldAction(formData: FormData): Promise<ActionResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(PARTNER_ADMIN);
   const notFound: ActionResult = { ok: false, error: t('partner.common.notFound') };
@@ -67,6 +71,11 @@ export async function rejectHoldAction(formData: FormData): Promise<ActionResult
   if (!partnerMayRejectHold(transfer, owner, sender) || !canReleaseHeld(scopeOf(ctx.staff), owner, transfer, sender)) {
     return notAllowed;
   }
+
+  // D2: a reject can start a refund, so it needs a fresh step-up (after the input and rule checks,
+  // before any write), as refund approve / retry do.
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'transfer.reject');
+  if (stepUp) return stepUp;
 
   try {
     await rejectTransfer(getStore(), getDb(), transfer.id, { actor: ctx.username, reason }, { partnerId: ctx.partnerId });
