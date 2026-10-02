@@ -31,6 +31,7 @@ import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn, scrub } from '@/lib/log';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
+import { llmDownAlertFor } from '@/lib/llm-alert';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
@@ -91,6 +92,8 @@ export interface WorkerDeps {
       signal?: AbortSignal;
       /** The tenant that owns the receiving number (null ⇒ the shared/default number) — fix 1. */
       routedPartnerId?: PartnerId | null;
+      /** Receives the caught error when the turn degrades to FALLBACK_REPLY (picks llmdown vs botfallback). */
+      onFallback?: (err: unknown) => void;
     },
   ) => Promise<string>;
   /**
@@ -397,6 +400,7 @@ async function runTurnForReply(
   signal: RowSignal,
   routedPartnerId: PartnerId | null,
   partner: PartnerResolver,
+  onFallback: (err: unknown) => void,
 ): Promise<string> {
   const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
   return deps.runAgentTurn(
@@ -404,7 +408,7 @@ async function runTurnForReply(
     str(p.messageText),
     (p.turn ?? {}) as TurnContext,
     waCreds,
-    { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
+    { signal, routedPartnerId, onFallback }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
   );
 }
 
@@ -965,8 +969,11 @@ async function handle(
         logWarn('worker.agent', 'agent.turn blocked past the wait bound — fallback reply queued', { id: row.id, kind: row.kind });
         return;
       }
+      let fallbackErr: unknown;
       try {
-        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner);
+        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner, (e) => {
+          fallbackErr = e;
+        });
         // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
         // and the row is already dead — never send its late reply (a second
         // customer message for the same inbound). The COOPERATIVE path is not
@@ -1001,12 +1008,25 @@ async function handle(
         } else {
           await createConversationLogRepo(deps.db).append({ ...outLog, text: CARD_MARKER });
         }
+        // A permanent provider rejection (401/402/403) raises its own llmdown
+        // alert INSTEAD of the generic botfallback. Enqueued only after the
+        // reply committed, and a failed insert is logged, never thrown: a
+        // throw here would re-run the (non-idempotent) turn.
         if (reply === FALLBACK_REPLY) {
-          await outbox.enqueue(
-            'ops.alert',
-            { message: '⚠️ SmartRemit ops: the WhatsApp bot answered with its fallback line ("having trouble") at least once this hour. Check the model and worker logs.' },
-            { dedupeKey: `botfallback:${hourBucket()}` },
-          );
+          try {
+            const down = llmDownAlertFor(fallbackErr, hourBucket());
+            if (down) {
+              await outbox.enqueue('ops.alert', { message: down.message }, { dedupeKey: down.dedupeKey });
+            } else {
+              await outbox.enqueue(
+                'ops.alert',
+                { message: '⚠️ SmartRemit ops: the WhatsApp bot answered with its fallback line ("having trouble") at least once this hour. Check the model and worker logs.' },
+                { dedupeKey: `botfallback:${hourBucket()}` },
+              );
+            }
+          } catch {
+            logWarn('worker.agent', 'fallback alert enqueue failed', { id: row.id, kind: row.kind });
+          }
         }
         return;
       } finally {
