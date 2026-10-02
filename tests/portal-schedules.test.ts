@@ -24,7 +24,7 @@ import {
 import { executeTool, type ToolContext } from '@/lib/tools';
 import type { Customer, Schedule } from '@/lib/types';
 import { fakeRedis } from './helpers';
-import { freshDb, seedSender } from './helpers-db';
+import { freshDb, seedSender, clearLegalName } from './helpers-db';
 import { seedTwoPartners, TWO_PARTNER_PHONE, type TwoPartnerFixture } from './helpers-portal-two-partner';
 
 // UI redesign M2-10: the customer portal's schedules library. Creates go through the bot's own
@@ -164,9 +164,7 @@ describe('createPortalSchedule', () => {
     const big = good(recipientRid('pa', PHONE, A_RP), { amount: '5000' });
     if (!big.ok) throw new Error('form');
     expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, big.value)).toEqual({ ok: false, code: 'amount' });
-    const cs = createCustomerStore(db, createStore(fakeRedis(), db));
-    const c = (await cs.getCustomer('pa', PHONE)) as Customer;
-    await cs.saveCustomer({ ...c, fullName: undefined });
+    await clearLegalName(db, 'pa', PHONE);
     const ok = good(recipientRid('pa', PHONE, A_RP));
     if (!ok.ok) throw new Error('form');
     expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, ok.value)).toEqual({ ok: false, code: 'sender_name' });

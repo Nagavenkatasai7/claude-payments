@@ -17,7 +17,7 @@ import { buildSystemPrompt } from '@/lib/prompt';
 import { WEB_CHANNEL_NOTE } from '@/lib/agent';
 import type { Db } from '@/db/client';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { freshDb, seedPartner, clearLegalName } from './helpers-db';
 
 // Sender identity is required before screening: a consumer send never builds
 // an approval card, a pay link, or a transfer for a sender whose legal name is
@@ -134,8 +134,7 @@ describe('sender identity is required before screening — approval card', { ret
     const tap = { ...named, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: first.draft_id as string } } };
     const minted = await runLegacyCreateTransferForTests({}, tap);
     expect(typeof minted.transfer_id).toBe('string');
-    const c = await named.customerStore.getCustomer('default', PHONE);
-    await named.customerStore.saveCustomer({ ...c!, fullName: undefined });
+    await clearLegalName(db, 'default', PHONE);
 
     const r = await executeTool('repeat_transfer', { transfer_id: minted.transfer_id }, named);
     expect(r.needs_sender_name).toBe(true);
@@ -312,8 +311,7 @@ describe('sender identity is required before screening — mint paths', { retry:
     const draftId = r.draft_id as string;
     // A draft that was built before the name was required (or whose name was
     // cleared since): the customer row now has no name on file.
-    const c = await ctx.customerStore.getCustomer('default', PHONE);
-    await ctx.customerStore.saveCustomer({ ...c!, fullName: undefined });
+    await clearLegalName(db, 'default', PHONE);
     return { ctx, draftId };
   }
 

@@ -1,4 +1,4 @@
-import { buildSystemPrompt } from './prompt';
+import { buildSystemPrompt, SCHEDULE_NEEDS_NAME_NOTE } from './prompt';
 import { resolveEffectiveSendLimits } from './send-limits';
 import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext, type WebStepUp } from './tools';
 import { buildToolContext } from './tool-context';
@@ -16,6 +16,8 @@ import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
+import { hasSenderName } from './sender-identity';
+import { logWarn } from './log';
 import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { env } from './env';
@@ -182,6 +184,16 @@ export function createAgent(deps: AgentDeps) {
     const notePartner =
       (await deps.partnerStore.getPartner(partnerId)) ?? (await deps.partnerStore.ensureDefaultPartner());
     const sendCurrencies = allowedSendCurrencies(notePartner);
+    // Scheduled-send name nudge (2026-10-02): an active schedule that cannot run
+    // for want of the owner's legal name. Fail-soft: a read error injects nothing.
+    let scheduleNeedsName = false;
+    if (!hasSenderName(noteCustomer)) {
+      try {
+        scheduleNeedsName = (await deps.scheduleStore.listForCustomer(partnerId, phone)).some((s) => s.status === 'active');
+      } catch (err) {
+        logWarn('agent.schedule-name-check', err instanceof Error ? err.name : 'unknown');
+      }
+    }
 
     // WL1 white-label: resolve the partner's brand + KYC posture ONCE. The
     // default/unconfigured partner ⇒ brand 'SmartRemit', persona '', gate ON —
@@ -282,6 +294,9 @@ export function createAgent(deps: AgentDeps) {
           content:
             "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
         });
+      }
+      if (round === 0 && scheduleNeedsName) {
+        messages.push({ role: 'system', content: SCHEDULE_NEEDS_NAME_NOTE });
       }
       // These two notes LEAD with verify-before-send; only inject them when our
       // KYC gate is active. A 'delegated' partner (gateActive=false) handles KYC

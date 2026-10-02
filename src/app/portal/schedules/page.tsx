@@ -11,6 +11,8 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, Button, buttonVariants, Card, ConfirmDialog, EmptyState, PageHeader } from '@/components/ds';
 import { cancelScheduleAction, pauseScheduleAction, resumeScheduleAction } from './actions';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { hasSenderName } from '@/lib/sender-identity';
+import { ScheduleNameCard } from './name-card';
 
 export const generateMetadata = () => portalMetadata('portal.schedules.title');
 
@@ -20,6 +22,7 @@ const DONE: Record<string, MessageKey> = {
   paused: 'portal.schedules.done_paused',
   resumed: 'portal.schedules.done_resumed',
   cancelled: 'portal.schedules.done_cancelled',
+  name_saved: 'portal.schedules.done_name_saved',
 };
 const ERROR: Record<string, MessageKey> = {
   not_found: 'portal.schedules.not_found',
@@ -82,6 +85,7 @@ export default async function PortalSchedulesPage({ searchParams }: { searchPara
           {t(error)}
         </p>
       ) : null}
+      {hasSenderName(ctx.customer) ? null : <ScheduleNameCard back="/portal/schedules" />}
       {rows.length === 0 ? (
         <EmptyState icon={<CalendarClock className="size-5" />} title={t('portal.schedules.emptyTitle')} body={t('portal.schedules.emptyBody')} action={addLink} />
       ) : (

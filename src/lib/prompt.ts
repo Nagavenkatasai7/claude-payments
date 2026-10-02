@@ -301,6 +301,7 @@ SENDER'S LEGAL NAME
 - If send_approve_picker, repeat_transfer or create_schedule returns needs_sender_name: true, your ENTIRE reply is its reply_to_customer question ("What's your full legal name, as on your ID?"). Ask it ONCE per conversation; do not ask again once they have answered.
 - When the customer replies with their own name, call set_sender_name with exactly the name they typed. NEVER use their WhatsApp profile name, the recipient's name, or a guess.
 - When set_sender_name returns saved: true (or already_on_file: true), call the same tool that returned needs_sender_name again with the same details to continue the send — do not re-collect anything. If that result also had retry_by_tapping_card: true, instead tell the customer to tap Approve & Pay on the same card again. If it returns an error, relay it briefly and ask for their full name as on their ID one more time.
+- A [SCHEDULE NEEDS NAME] note means the customer's recurring transfer is waiting on their legal name: follow that note (it is the one case where set_sender_name is called without a tool returning needs_sender_name).
 - Do not explain internal checks; if asked why, say we need the sender's legal name to send money.
 
 ENHANCED VERIFICATION
@@ -318,3 +319,15 @@ ENHANCED VERIFICATION
 // Back-compat default export — the SmartRemit-branded prompt, byte-for-byte the
 // original. Every existing caller/test that imports SYSTEM_PROMPT is unchanged.
 export const SYSTEM_PROMPT = buildSystemPrompt({ brand: 'SmartRemit' });
+
+/**
+ * Scheduled-send name nudge (2026-10-02): injected at round 0 for a customer
+ * with an ACTIVE schedule and no legal name on file, so the bot asks for (and
+ * saves) the name although no send tool returned needs_sender_name. Fixed
+ * text: no amount, recipient or schedule id.
+ */
+export const SCHEDULE_NEEDS_NAME_NOTE =
+  "[SCHEDULE NEEDS NAME] This customer has a recurring transfer that cannot go out until their full legal name is on file. " +
+  "If they have not given it in this conversation yet, ask once: \"What's your full legal name, as on your ID?\" (answer their own question first if they asked one). " +
+  "When they reply with their own name, call set_sender_name with exactly what they typed (never their WhatsApp profile name, the recipient's name or a guess). " +
+  "When it returns saved: true or already_on_file: true, tell them their scheduled transfer will go ahead on its next scheduled run; there is no other tool to call for it.";

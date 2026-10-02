@@ -28,6 +28,8 @@ export interface PartnerScheduleRecord {
   endDate?: string;
   lastRunAt?: string;
   createdAt: string;
+  /** The owner has no legal name on file in this tenant, so a due run mints nothing (2026-10-02). */
+  needsSenderName?: boolean;
 }
 
 export type ScheduleOp = ScheduleAction;
@@ -74,6 +76,8 @@ export interface PartnerScheduleRow {
   status: ScheduleStatus;
   lastRunAt: string | null;
   endDate: string | null;
+  /** An ACTIVE schedule whose runs are skipped until the owner gives their legal name. */
+  needsSenderName: boolean;
   controls: ScheduleControls;
 }
 
@@ -90,6 +94,7 @@ export function toPartnerScheduleRow(s: PartnerScheduleRecord, role: PartnerRole
     status: s.status,
     lastRunAt: s.lastRunAt ?? null,
     endDate: s.endDate ?? null,
+    needsSenderName: s.status === 'active' && s.needsSenderName === true,
     controls: scheduleControls(s.status, role),
   };
 }

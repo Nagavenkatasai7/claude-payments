@@ -138,13 +138,27 @@ export async function startSendReviewAction(_prev: SendFormState, formData: Form
 // ── Step 2: the sender's legal name (set-once) ────────────────────────────────
 
 /**
+ * The pages that host the legal-name form (2026-10-02: the Schedules pages too, so a customer whose
+ * scheduled send waits on the name can give it there). `path` is the step-up return, `done` the
+ * redirect after a save. Keyed by the exact posted value; nothing posted is redirected to.
+ */
+const NAME_FORM_BACK: Record<string, { path: string; done: string }> = {
+  '/portal/send/review': { path: '/portal/send/review', done: '/portal/send/review' },
+  '/portal/schedules': { path: '/portal/schedules', done: '/portal/schedules?done=name_saved' },
+  '/portal/schedules/new': { path: '/portal/schedules/new', done: '/portal/schedules/new' },
+};
+
+/**
  * The review's "Your legal name" step: the bot's own set_sender_name (own tenant + phone, set-once,
  * sealed). The tool writes no audit, so this action adds `customer.sender_name.set` (no value in meta).
  */
 export async function setSenderNameAction(_prev: NameFormState, formData: FormData): Promise<NameFormState> {
   await requirePortalSite();
   await requirePortalCustomer();
-  const ctx = await requireFreshPortalAuth('/portal/send/review');
+  // Where the form came from: a fixed allow-list (anything else is the review), never echoed.
+  const posted = text(formData, 'back');
+  const back = Object.hasOwn(NAME_FORM_BACK, posted) ? NAME_FORM_BACK[posted] : NAME_FORM_BACK['/portal/send/review'];
+  const ctx = await requireFreshPortalAuth(back.path);
   const owner = ownerOf(ctx);
   const fullName = normalizeSenderName(text(formData, 'fullName'));
   if (fullName === null) return { error: 'portal.send.legal_name_invalid' };
@@ -164,7 +178,7 @@ export async function setSenderNameAction(_prev: NameFormState, formData: FormDa
       logWarn('portal.send.name_audit', 'audit failed');
     }
   }
-  redirect('/portal/send/review');
+  redirect(back.done);
 }
 
 // ── Step 3: Continue to pay ───────────────────────────────────────────────────

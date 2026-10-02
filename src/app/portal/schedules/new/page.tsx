@@ -17,6 +17,8 @@ import { buttonVariants, Card, EmptyState, PageHeader } from '@/components/ds';
 import { createScheduleAction } from '../actions';
 import { ScheduleForm } from '../schedule-form';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { hasSenderName } from '@/lib/sender-identity';
+import { ScheduleNameCard } from '../name-card';
 
 export const generateMetadata = () => portalMetadata('portal.schedules.newTitle');
 
@@ -44,6 +46,7 @@ export default async function NewSchedulePage() {
   return (
     <div className="flex w-full max-w-xl flex-col gap-6">
       <PageHeader title={t('portal.schedules.newTitle')} sub={t('portal.schedules.newSub')} />
+      {hasSenderName(ctx.customer) ? null : <ScheduleNameCard back="/portal/schedules/new" />}
       {recipients.length === 0 ? (
         <EmptyState
           icon={<Users className="size-5" />}

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { captureQueries, freshDb } from './helpers-db';
 import { seedTwoTenants, seedPartnerTransfer } from './helpers-partner-app';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { getPartnerSchedule, listPartnerSchedules } from '@/db/repos/partner-schedule-reads';
 import { listPartnerRefunds } from '@/db/repos/partner-transfer-reads';
 import type { Db } from '@/db/client';
@@ -81,6 +82,33 @@ describe('listPartnerSchedules', () => {
     await expect(listPartnerSchedules(db, '')).rejects.toThrow(/tenant/);
     await expect(listPartnerSchedules(db, undefined as never)).rejects.toThrow(/tenant/);
     await expect(getPartnerSchedule(db, '', 'sa1')).rejects.toThrow(/tenant/);
+  });
+});
+
+// Scheduled-send name nudge (2026-10-02): each row says whether its owner has a legal name on file
+// in THIS tenant, as a boolean computed in SQL (the name ciphertext is never selected or decrypted).
+describe('needsSenderName', () => {
+  const OWNER = '15550009999';
+  it('true with no customer row, false once the owner has a name in this tenant', async () => {
+    await createCustomerRepo(db, async () => null).ensureCustomer('pa', OWNER);
+    expect((await getPartnerSchedule(db, 'pa', 'sa1'))?.needsSenderName).toBe(true);
+    await createCustomerRepo(db, async () => null).setFullNameIfUnset('pa', OWNER, 'Alex Rivera');
+    expect((await getPartnerSchedule(db, 'pa', 'sa1'))?.needsSenderName).toBe(false);
+    expect((await listPartnerSchedules(db, 'pa')).map((s) => s.needsSenderName)).toEqual([false, false]);
+  });
+  it("another tenant's name does not count", async () => {
+    const repo = createCustomerRepo(db, async () => null);
+    await repo.ensureCustomer('pb', OWNER);
+    await repo.setFullNameIfUnset('pb', OWNER, 'Alex Rivera');
+    expect((await getPartnerSchedule(db, 'pa', 'sa1'))?.needsSenderName).toBe(true);
+    expect((await getPartnerSchedule(db, 'pb', 'sb1'))?.needsSenderName).toBe(false);
+  });
+  it('never returns the name or its ciphertext', async () => {
+    const repo = createCustomerRepo(db, async () => null);
+    await repo.ensureCustomer('pa', OWNER);
+    await repo.setFullNameIfUnset('pa', OWNER, 'Alex Rivera');
+    const s = await getPartnerSchedule(db, 'pa', 'sa1');
+    expect(JSON.stringify(s)).not.toMatch(/Rivera|full_name|fullName/);
   });
 });
 

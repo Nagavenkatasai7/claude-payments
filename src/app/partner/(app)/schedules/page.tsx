@@ -39,6 +39,15 @@ function StatusBadge({ status }: { status: ScheduleStatus }) {
   return <Badge tone={STATUS_TONE[status] ?? 'neutral'}>{t(`partner.schedules.status.${status}` as MessageKey)}</Badge>;
 }
 
+/** An active schedule whose runs are skipped until the owner gives their legal name (2026-10-02). */
+function NeedsNameBadge({ r }: { r: PartnerScheduleRow }) {
+  return r.needsSenderName ? (
+    <span className="mt-1 block" title={t('partner.schedules.needsNameHint')}>
+      <Badge tone="warning">{t('partner.schedules.needsName')}</Badge>
+    </span>
+  ) : null;
+}
+
 function Cadence({ r }: { r: PartnerScheduleRow }) {
   const ends = when(r.endDate);
   return (
@@ -149,6 +158,7 @@ export default async function PartnerSchedulesPage({ searchParams }: { searchPar
                       <td className="px-4 py-3 text-ds-ink-muted">{when(r.lastRunAt) ?? t('partner.schedules.notYet')}</td>
                       <td className="px-4 py-3">
                         <StatusBadge status={r.status} />
+                        <NeedsNameBadge r={r} />
                       </td>
                       <td className="px-4 py-3">
                         <Actions r={r} isAdmin={isAdmin} />
@@ -176,7 +186,10 @@ export default async function PartnerSchedulesPage({ searchParams }: { searchPar
                     <Cadence r={r} />
                   </span>
                   <span className="flex flex-wrap items-center justify-between gap-2">
-                    <StatusBadge status={r.status} />
+                    <span className="flex flex-wrap items-center gap-2">
+                      <StatusBadge status={r.status} />
+                      <NeedsNameBadge r={r} />
+                    </span>
                     <span className="text-[13px] text-ds-ink-muted">
                       {t('partner.schedules.col.lastRun')}: {when(r.lastRunAt) ?? t('partner.schedules.notYet')}
                     </span>

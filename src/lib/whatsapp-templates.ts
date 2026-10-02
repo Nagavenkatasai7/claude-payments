@@ -104,6 +104,27 @@ export function formatSourceAmount(amount: number, currency: CurrencyCode | stri
   }
 }
 
+const DUE_DAY = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+
+/**
+ * Scheduled-send name nudge (2026-10-02): free-form text (no approved template
+ * yet, so it only lands inside the customer's 24-hour window). Fixed copy with
+ * the partner's brand and the source amount only, never the recipient's
+ * outsider-written name. `dueAt` is any instant on the Eastern due day.
+ */
+export function scheduleNameNeededText(
+  brand: string,
+  schedule: Pick<Schedule, 'amountUsd' | 'amountSource' | 'sourceCurrency'>,
+  timing: { dueToday: boolean; dueAt: number },
+): string {
+  const amount = formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD');
+  return timing.dueToday
+    ? `Your scheduled ${brand} transfer of ${amount} couldn't go out today because we need your full legal name first. ` +
+        `Reply here with your full name as on your ID and we'll send your payment link on the next scheduled run.`
+    : `Your scheduled ${brand} transfer of ${amount} is due on ${DUE_DAY.format(timing.dueAt)}. Before then we need your full legal name. ` +
+        `Reply here with your full name as on your ID so it can go out on time.`;
+}
+
 /**
  * §3.2 transfer_delivered_sender — sender delivery confirmation.
  * Body: "Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}."

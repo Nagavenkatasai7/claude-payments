@@ -103,6 +103,13 @@ describe('toPartnerScheduleRow', () => {
   it('no stored last 4 → a bare mask, never an empty or raw value', () => {
     expect(toPartnerScheduleRow(rec({ payoutDestinationLast4: '' }), 'admin').destination).toBe('****');
   });
+  it('flags a missing sender name on active schedules only', () => {
+    expect(toPartnerScheduleRow(rec({ needsSenderName: true }), 'agent').needsSenderName).toBe(true);
+    expect(toPartnerScheduleRow(rec({ needsSenderName: false }), 'agent').needsSenderName).toBe(false);
+    expect(toPartnerScheduleRow(rec(), 'agent').needsSenderName).toBe(false);
+    expect(toPartnerScheduleRow(rec({ needsSenderName: true, status: 'paused' }), 'agent').needsSenderName).toBe(false);
+    expect(toPartnerScheduleRow(rec({ needsSenderName: true, status: 'cancelled' }), 'agent').needsSenderName).toBe(false);
+  });
   it('a non-admin row has no controls', () => {
     expect(toPartnerScheduleRow(rec(), 'agent').controls).toEqual({ pause: false, resume: false, cancel: false });
   });

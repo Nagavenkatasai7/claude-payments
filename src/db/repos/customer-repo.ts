@@ -233,10 +233,19 @@ export function createCustomerRepo(
 
     async saveCustomer(customer: Customer): Promise<void> {
       const row = customerToRow(customer);
+      // A whole-row upsert, EXCEPT the legal name: a save that carries no name
+      // (blank or whitespace) keeps the one on file, so a copy read before
+      // set_sender_name landed can never write the old empty name back and
+      // stop the owner's scheduled sends again (2026-10-02). A save that
+      // carries a name still writes it.
+      const carriesName = (customer.fullName ?? '').trim() !== '';
       await db
         .insert(customers)
         .values(row)
-        .onConflictDoUpdate({ target: [customers.partnerId, customers.phone], set: row });
+        .onConflictDoUpdate({
+          target: [customers.partnerId, customers.phone],
+          set: carriesName ? row : { ...row, fullNameEnc: sql`${customers.fullNameEnc}` },
+        });
     },
 
     /**
