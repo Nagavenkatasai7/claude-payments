@@ -2,6 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
+import { isPartnerNoteShaped } from './partner-transfers';
+import { requireStaffReason, STAFF_REASON_MIN } from './send-limits';
+import { isReasonValid } from './ui/confirm-reason';
 import type { RedisLike } from './store';
 import type { PartnerRole } from './partner-access';
 import type { PartnerId, Ticket, TicketKind, TicketStatus } from './types';
@@ -99,10 +102,13 @@ export async function getVisibleTicket(
 
 export const QUEUE_LIMIT = 100;
 
-/** The customer-ticket queue this viewer may see. An agent's list is their assigned tickets. */
+/**
+ * The customer-ticket queue this viewer may see. An agent's list is their assigned tickets; `mine`
+ * narrows an admin's or support member's queue to the tickets assigned to them (merge plan 2e).
+ */
 export async function listVisibleCustomerTickets(
   viewer: TenantViewer,
-  opts: { status?: TicketStatus },
+  opts: { status?: TicketStatus; mine?: boolean },
   db: DbOrTx = getDb(),
 ): Promise<Ticket[]> {
   if (!TICKET_ROLES.includes(viewer.role)) return [];
@@ -111,7 +117,7 @@ export async function listVisibleCustomerTickets(
     {
       kind: 'customer',
       status: opts.status,
-      ...(viewer.role === 'agent' ? { assignedTo: viewer.username } : {}),
+      ...(viewer.role === 'agent' || opts.mine === true ? { assignedTo: viewer.username } : {}),
       limit: QUEUE_LIMIT,
     },
     db,
@@ -184,6 +190,60 @@ export function parsePartnerTicketStatus(v: unknown): PartnerTicketStatus | null
 const ALL_STATUSES: readonly TicketStatus[] = ['open', 'pending', 'waiting_admin', 'resolved', 'closed'];
 export function parseQueueStatus(v: unknown): TicketStatus | undefined {
   return typeof v === 'string' && (ALL_STATUSES as readonly string[]).includes(v) ? (v as TicketStatus) : undefined;
+}
+
+// ── Merge plan 2e: assign, escalate, the "mine" filter ───────────────────────────────────────
+
+/** The page's ?mine=1: only admin and support (an agent's queue is already their own). */
+export function parseMineFilter(v: unknown, role: PartnerRole): boolean {
+  return v === '1' && (role === 'admin' || role === 'support');
+}
+
+const SUPPORT_HREF = '/partner/support';
+
+/** A queue link from the closed filter set (status from parseQueueStatus, mine from parseMineFilter). */
+export function supportQueueHref(f: { status?: TicketStatus; mine?: boolean }): string {
+  const q = new URLSearchParams();
+  if (f.status) q.set('status', f.status);
+  if (f.mine) q.set('mine', '1');
+  const s = q.toString();
+  return s ? `${SUPPORT_HREF}?${s}` : SUPPORT_HREF;
+}
+
+const ASSIGNEE_MAX = 128;
+const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+
+/**
+ * The assign form's value: '' (or blank) unassigns; anything else is a username to look up (the
+ * action then requires a tenant member, isTenantTicketAssignee). Bounded and refused, never cut.
+ */
+export function parseAssigneeField(v: unknown): { ok: true; assignee: string | null } | { ok: false } {
+  if (typeof v !== 'string') return { ok: false };
+  const s = v.trim();
+  if (s === '') return { ok: true, assignee: null };
+  if (s.length > ASSIGNEE_MAX || CONTROL_RE.test(s)) return { ok: false };
+  return { ok: true, assignee: s };
+}
+
+/**
+ * An escalation reason: the shared staff-reason rule (STAFF_REASON_MIN code points, collapsed,
+ * cut at the staff-reason maximum) and no phone/account-length number (isPartnerNoteShaped). The
+ * reason lands only in the ticket's sealed internal system note.
+ */
+export function parseEscalationReason(v: unknown): { ok: true; reason: string } | { ok: false; error: 'short' | 'number' } {
+  let reason: string;
+  try {
+    if (!isReasonValid(v, STAFF_REASON_MIN)) throw new Error('short');
+    reason = requireStaffReason(v);
+  } catch {
+    return { ok: false, error: 'short' };
+  }
+  return isPartnerNoteShaped(reason) ? { ok: true, reason } : { ok: false, error: 'number' };
+}
+
+/** The internal system note an escalation appends (SmartRemit's queue reads it). */
+export function escalationNote(reason: string): string {
+  return `Escalated to SmartRemit: ${reason}`;
 }
 
 // ── Double-submit guard ──────────────────────────────────────────────────────────────────────

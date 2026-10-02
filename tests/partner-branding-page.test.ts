@@ -174,6 +174,24 @@ describe('/partner/branding for a partner admin', () => {
   });
 });
 
+describe('/partner/branding display name and assistant voice (2f)', () => {
+  beforeEach(async () => {
+    await signInAs({});
+  });
+  it('renders both forms with A’s stored values as escaped text, and nothing of B’s', async () => {
+    await box.db!.update(partners).set({ displayName: 'Alpha Remit', botPersona: 'warm <i>and</i> brief' }).where(eq(partners.id, PA));
+    await box.db!.update(partners).set({ botPersona: 'BRAVO-VOICE' }).where(eq(partners.id, PB));
+    const html = await render();
+    for (const id of ['branding-display-name-form', 'branding-persona-form']) expect(html).toContain(`data-testid="${id}"`);
+    expect(html).toContain('name="displayName"');
+    expect(html).toContain('value="Alpha Remit"');
+    expect(html).toContain('name="botPersona"');
+    expect(html).toContain('warm &lt;i&gt;and&lt;/i&gt; brief');
+    expect(html).not.toContain('<i>and</i>');
+    for (const leak of ['Bravo Remit', 'BRAVO-VOICE']) expect(html).not.toContain(leak);
+  });
+});
+
 // Carry-forward from the PR #381 review: a stored logo is safe only as an <img> data URI (a PNG+HTML
 // polyglot passes the signature check). No app route may serve it.
 describe('/partner/branding web address (M3-18)', () => {

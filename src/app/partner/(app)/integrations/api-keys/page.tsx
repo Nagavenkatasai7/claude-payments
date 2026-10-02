@@ -5,6 +5,8 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { getDb } from '@/db/client';
+import { env } from '@/lib/env';
+import { partnerApiBaseUrl } from '@/lib/partner-integration-urls';
 import { isLiveApproved } from '@/db/repos/partner-go-live-repo';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { keyRowsView, type KeyRowView } from '@/lib/partner-api-keys-view';
@@ -107,6 +109,13 @@ export default async function PartnerApiKeysPage() {
     <>
       {header}
       <div className="flex flex-col gap-4 lg:gap-6">
+        <Card as="section" className="p-5 sm:p-6">
+          <h2 className={H2}>{t('partner.keys.baseUrlTitle')}</h2>
+          <p className="mt-1 text-[14px] leading-relaxed text-ds-ink-muted">{t('partner.keys.baseUrlHint')}</p>
+          <code data-testid="api-base-url" className="mt-3 block select-all rounded-ds-inner border border-ds-border bg-ds-ground px-4 py-3 font-mono text-[13.5px] break-all text-ds-ink">
+            {partnerApiBaseUrl(env.appBaseUrl)}
+          </code>
+        </Card>
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.keys.createTitle')}</h2>
           <CreateKeyForm liveAllowed={liveApproved === true} />

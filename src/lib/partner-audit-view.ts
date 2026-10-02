@@ -30,6 +30,7 @@ const ACTION_LABELS = Object.freeze({
   'partner.alert_email.update': 'partner.audit.action.alertEmail',
   'partner.disclosure_config': 'partner.audit.action.disclosureConfig',
   'partner.persona.update': 'partner.audit.action.persona',
+  'partner.display_name.update': 'partner.audit.action.displayName', // 2f: meta { oldLength, newLength, actorScope }, not shown
   'partner.theme.update': 'partner.audit.action.theme',
   'partner.logo.update': 'partner.audit.action.logo',
   'partner.slug.update': 'partner.audit.action.slug',

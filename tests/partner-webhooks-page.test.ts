@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { env } from '@/lib/env';
+import { statusCallbackUrl } from '@/lib/partner-integration-urls';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -132,6 +134,21 @@ describe('/partner/integrations/webhooks: a partner-operated rail', () => {
     expect(html).not.toContain('>599<');
     expect(html.indexOf('>211<')).toBeLessThan(html.indexOf('>202<'));
     expect(html).toContain(t('partner.webhooks.outcome.ok'));
+  });
+});
+
+describe('/partner/integrations/webhooks: the status callback URL (2f)', () => {
+  it('a partner-operated rail shows the read-only status callback URL, computed like the legacy guide', async () => {
+    await seedHttpRail();
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain(t('partner.webhooks.callbackTitle'));
+    expect(html).toContain(`data-testid="webhooks-callback-url"`);
+    expect(html).toContain(statusCallbackUrl(env.appBaseUrl, 'http'));
+  });
+  it('a SmartRemit-managed rail does not show it', async () => {
+    await signInAs({});
+    expect(decode(await render())).not.toContain(t('partner.webhooks.callbackTitle'));
   });
 });
 

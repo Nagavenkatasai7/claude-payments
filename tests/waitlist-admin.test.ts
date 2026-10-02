@@ -118,9 +118,9 @@ describe('the page gate', () => {
     await expect(WaitlistPage()).rejects.toThrow('REDIRECT:/login');
   });
 
-  it('partner-scoped staff (even an admin) → 404, never 403', async () => {
+  it('partner-scoped staff (even an admin) → sent to /partner (UI M5), never 403', async () => {
     await signIn(staff({ username: 'pa', role: 'admin', partnerId: 'acme' }));
-    await expect(WaitlistPage()).rejects.toThrow('NOT_FOUND');
+    await expect(WaitlistPage()).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
 
   it('support staff → bounced to tickets (requireScope)', async () => {
@@ -161,11 +161,9 @@ describe('/admin-dashboard/waitlist/export', () => {
     expect(await auditRows()).toHaveLength(0);
   });
 
-  it('POST partner-scoped admin → 404 body (not 403), no audit row', async () => {
+  it('POST partner-scoped admin → sent to /partner (UI M5; not 403), no export, no audit row', async () => {
     await signIn(staff({ username: 'pa', role: 'admin', partnerId: 'acme' }));
-    const res = await exportPost(postReq());
-    expect(res.status).toBe(404);
-    expect(res.headers.get('content-type') ?? '').not.toMatch(/csv/);
+    await expect(exportPost(postReq())).rejects.toThrow(/^REDIRECT:\/partner$/);
     expect(await auditRows()).toHaveLength(0);
   });
 

@@ -282,6 +282,61 @@ describe("LOW-5: a partner pinned to the 'default' tenant never sees SmartRemit'
   });
 });
 
+describe('merge plan 2e: the "mine" filter, assign and escalate on the pages', () => {
+  it('?mine=1 narrows an admin/support queue to their own tickets; the link is offered to them only', async () => {
+    await createTicketRepo(db).assign('tk_a2', 'sup1');
+    await signInAs({ role: 'support', username: 'sup1' });
+    const all = await list();
+    expect(all).toContain('href="/partner/support?mine=1"');
+    const mine = await list({ mine: '1' });
+    expect(mine).toContain('Change recipient');
+    expect(mine).not.toContain('Where is my money');
+    // The status links keep the filter.
+    expect(mine).toContain('href="/partner/support?status=open&amp;mine=1"');
+    await signInAs({ role: 'admin', username: 'adm1' });
+    expect(await list({ mine: '1' })).toContain('No requests are assigned to you.');
+    await signInAs({ role: 'agent', username: 'ag1' });
+    const agent = await list({ mine: '1' });
+    expect(agent).not.toContain('mine=1');
+    expect(agent).toContain('Where is my money');
+  });
+  it('admin and support get the assign picker listing ONLY the tenant’s eligible staff', async () => {
+    await saveStaff({ username: 'pb-sup', role: 'support', partnerId: PB });
+    await saveStaff({ username: 'pa-fin', role: 'finance' as Staff['role'] });
+    for (const role of ['admin', 'support'] as const) {
+      await signInAs({ role, username: `lead-${role}` });
+      const html = await ticket('tk_a1');
+      expect(html).toContain('name="assignee"');
+      expect(html).toContain('<option value="ag1" selected="">');
+      expect(html).toContain('value="sup1"');
+      expect(html).not.toContain('platformbob');
+      expect(html).not.toContain('pb-sup');
+      expect(html).not.toContain('pa-fin');
+      expect(html).toContain('name="reason"');
+    }
+  });
+  it('an agent gets no assign picker but may escalate their own ticket', async () => {
+    await signInAs({ role: 'agent', username: 'ag1' });
+    const html = await ticket('tk_a1');
+    expect(html).not.toContain('name="assignee"');
+    expect(html).toContain('name="reason"');
+  });
+  it('a ticket assigned to SmartRemit staff shows "SmartRemit", never the username', async () => {
+    await createTicketRepo(db).assign('tk_a1', 'platformbob');
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_a1');
+    expect(html).toContain('Assigned to SmartRemit');
+    expect(html).not.toContain('platformbob');
+  });
+  it('an escalated ticket shows a status line instead of the escalate form', async () => {
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_a1');
+    expect(html).toContain('This request is with SmartRemit.');
+    expect(html).not.toContain('name="reason"');
+  });
+});
+
 describe('LOW-4: an escalated (waiting_admin) ticket offers no partner status change', () => {
   it('the status form is not rendered', async () => {
     await signInAs({ role: 'admin' });

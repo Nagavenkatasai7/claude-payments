@@ -41,7 +41,7 @@ describe('projectAuditRow', () => {
       previousSlug: 'old-brand',
       primaryColor: '#123456',
     };
-    for (const action of ['auth.mfa.enroll', 'partner.disclosure_config', 'send_limits.set', 'transfer.release', 'partner.slug.update', 'partner.theme.update']) {
+    for (const action of ['auth.mfa.enroll', 'partner.disclosure_config', 'send_limits.set', 'transfer.release', 'partner.slug.update', 'partner.theme.update', 'partner.display_name.update', 'partner.alert_email.update']) {
       const p = projectAuditRow(row({ action, meta: pii }), tenant);
       expect(p.detail, action).toBeNull();
       const s = JSON.stringify(p);
@@ -122,6 +122,8 @@ describe('TENANT_AUDIT_ACTIONS', () => {
     expect(TENANT_AUDIT_ACTIONS).toContain('api_key.issue');
     expect(TENANT_AUDIT_ACTIONS).toContain('partner.support_contact.update'); // M3-17
     expect(TENANT_AUDIT_ACTIONS).toContain('partner.slug.claim'); // M3-18
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.display_name.update'); // 2f
+    expect(t(actionLabelKey('partner.display_name.update'))).toBe('Display name changed');
     expect(Object.isFrozen(TENANT_AUDIT_ACTIONS)).toBe(true);
     for (const a of TENANT_AUDIT_ACTIONS) expect(t(actionLabelKey(a)), a).not.toBe(actionLabelKey(a));
   });

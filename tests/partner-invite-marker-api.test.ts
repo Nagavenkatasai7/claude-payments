@@ -21,6 +21,20 @@ vi.mock('@/lib/ticket-ai', async () => {
   const actual = await vi.importActual<typeof import('@/lib/ticket-ai')>('@/lib/ticket-ai');
   return { ...actual, checkCopilotRateLimit: copilotLimit };
 });
+// The summary poll's two aggregates, so a platform session can be pinned to a real 200.
+const transfersSummary = vi.hoisted(() =>
+  vi.fn(async () => ({ total: 0, byStatus: {}, needsAttention: 0, latest: null })),
+);
+const ticketStamp = vi.hoisted(() => vi.fn(async () => null));
+vi.mock('@/lib/store', () => ({ getStore: () => ({ transfersSummary }) }));
+vi.mock('@/db/client', async () => {
+  const actual = await vi.importActual<typeof import('@/db/client')>('@/db/client');
+  return { ...actual, getDb: () => ({}) };
+});
+vi.mock('@/db/repos/ticket-repo', async () => {
+  const actual = await vi.importActual<typeof import('@/db/repos/ticket-repo')>('@/db/repos/ticket-repo');
+  return { ...actual, createTicketRepo: () => ({ ticketStamp }) };
+});
 
 import { GET as summary } from '@/app/api/dashboard/summary/route';
 import { POST as draftReply } from '@/app/api/copilot/draft-reply/route';
@@ -51,6 +65,8 @@ const COPILOT = { draftReply, summarize, reviewTriage, kycReview } as const;
 beforeEach(() => {
   redis.dump.clear();
   copilotLimit.mockClear();
+  transfersSummary.mockClear();
+  ticketStamp.mockClear();
   current = agent();
 });
 
@@ -68,7 +84,8 @@ describe('legacy staff API routes and the invite marker (M3-9, O10)', () => {
       expect(res.status).toBe(403);
       expect(copilotLimit).not.toHaveBeenCalled();
     });
-    it(`copilot ${name}: an unmarked account passes the marker check (reaches the rate-limit step)`, async () => {
+    it(`copilot ${name}: an unmarked platform account passes the marker check (reaches the rate-limit step)`, async () => {
+      current = agent({ partnerId: undefined });
       await handler(req()).catch(() => undefined);
       expect(copilotLimit).toHaveBeenCalled();
     });
@@ -79,8 +96,54 @@ describe('legacy staff API routes and the invite marker (M3-9, O10)', () => {
     expect(res.status).toBe(403);
     expect(copilotLimit).not.toHaveBeenCalled();
   });
-  it('/api/dashboard/summary: an unmarked partner account passes the marker check', async () => {
-    const res = await summary().catch(() => null);
-    expect(res?.status).not.toBe(401);
+  it('/api/dashboard/summary: an unmarked platform account passes the marker check (200)', async () => {
+    current = agent({ partnerId: undefined });
+    const res = await summary();
+    expect(res.status).toBe(200);
+    expect(transfersSummary).toHaveBeenCalledWith(undefined);
+  });
+});
+
+// UI M5 (one partner dashboard): these routes serve the legacy dashboard, which is SmartRemit-only.
+// Every partner-scoped session (enrolled, unmarked, any legacy role) gets the summary's anonymous
+// 401 and the copilots' 403, before any aggregate is read or any copilot budget is spent.
+describe('UI M5: legacy staff API routes refuse partner sessions', () => {
+  for (const role of ['admin', 'agent', 'support'] as const) {
+    it(`/api/dashboard/summary: a partner ${role} → 401 {ok:false}, no aggregate read`, async () => {
+      current = agent({ role });
+      const res = await summary();
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ ok: false });
+      expect(transfersSummary).not.toHaveBeenCalled();
+      expect(ticketStamp).not.toHaveBeenCalled();
+    });
+    for (const [name, handler] of Object.entries(COPILOT)) {
+      it(`copilot ${name}: a partner ${role} → 403 {ok:false}, no budget used`, async () => {
+        current = agent({ role });
+        const res = await handler(req());
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ ok: false });
+        expect(copilotLimit).not.toHaveBeenCalled();
+      });
+    }
+  }
+  it('an empty-string partnerId is never platform scope: summary 401, copilots 403', async () => {
+    current = agent({ partnerId: '' });
+    expect((await summary()).status).toBe(401);
+    for (const handler of Object.values(COPILOT)) expect((await handler(req())).status).toBe(403);
+    expect(copilotLimit).not.toHaveBeenCalled();
+  });
+  it('platform sessions are unchanged: summary 200, every copilot reaches the rate-limit step', async () => {
+    for (const role of ['admin', 'agent', 'support'] as const) {
+      current = agent({ role, partnerId: undefined });
+      expect((await summary()).status).toBe(200);
+    }
+    current = agent({ role: 'admin', partnerId: undefined });
+    for (const handler of Object.values(COPILOT)) {
+      copilotLimit.mockClear();
+      const res = await handler(req()).catch(() => null);
+      expect(res?.status).not.toBe(403);
+      expect(copilotLimit).toHaveBeenCalledTimes(1);
+    }
   });
 });

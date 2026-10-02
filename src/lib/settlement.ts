@@ -40,6 +40,8 @@ import type { PartnerId, Transfer } from '@/lib/types';
 export interface StaffAuditCtx {
   actor: string;
   reason?: string | null;
+  /** Recorded in the meta when given (the /partner actions derive it from the session). */
+  actorScope?: 'platform' | 'partner';
 }
 
 /**
@@ -61,7 +63,7 @@ export async function recordStaffTransferAudit(
     actorType: 'staff',
     action,
     subjectId: transfer.id,
-    meta: { ...meta, reason: audit.reason ?? null },
+    meta: { ...meta, reason: audit.reason ?? null, ...(audit.actorScope ? { actorScope: audit.actorScope } : {}) },
   });
 }
 

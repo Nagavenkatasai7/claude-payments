@@ -135,7 +135,8 @@ export function holdReasonKeys(reasons: readonly string[]): MessageKey[] {
 }
 
 // ── Timeline ────────────────────────────────────────────────────────────────
-export const TIMELINE_AUDIT_ACTIONS = Object.freeze(['transfer.hold.note', 'transfer.release'] as const);
+// Merge plan 2c: 'transfer.reject' (a partner's or SmartRemit's reject) shows as one row, never its reason.
+export const TIMELINE_AUDIT_ACTIONS = Object.freeze(['transfer.hold.note', 'transfer.release', 'transfer.reject'] as const);
 
 export interface TimelineAuditRow {
   at: Date;
@@ -144,7 +145,7 @@ export interface TimelineAuditRow {
   actorType?: string;
   meta: unknown;
 }
-export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'delivered' | 'refunded';
+export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'delivered' | 'refunded';
 export interface TimelineRow {
   at: string;
   kind: TimelineKind;
@@ -184,6 +185,8 @@ export function transferTimeline(tr: Transfer, audit: readonly TimelineAuditRow[
       rows.push({ at: at.toISOString(), kind: 'note', label: 'partner.transfers.timeline.note', by, ...(typeof raw === 'string' ? { note: raw } : {}) });
     } else if (a.action === 'transfer.release') {
       rows.push({ at: at.toISOString(), kind: 'release', label: 'partner.transfers.timeline.release', by });
+    } else if (a.action === 'transfer.reject') {
+      rows.push({ at: at.toISOString(), kind: 'reject', label: 'partner.transfers.timeline.reject', by });
     }
   }
   return rows.sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
