@@ -88,8 +88,9 @@ export function railCallbackTransferId(body: unknown): string | null {
  * The signed instruction body POSTed to the partner's settlement endpoint.
  *
  * fix 6 (ctx-01) LAST-LINE BACKSTOPS — a row written before fix 6 fails loudly
- * in its settlement.instruct outbox row (2^n backoff → dead at 8 → deduped ops
- * alert, plus reconcile's stuck-paid alert) instead of instructing:
+ * in its settlement.instruct outbox row (2^n backoff, 30-min cap → dead at 56,
+ * about a day → deduped ops alert, plus reconcile's stuck-paid alert) instead
+ * of instructing:
  *   • a display placeholder ("****9012", "account on file") as the payout; and
  *   • a partner-pulled funding leg (ach_pull / bank_pull) on a CONSUMER row —
  *     the pay route never charged it, and only a B2B bill may be pulled.

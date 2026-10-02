@@ -14,7 +14,9 @@ import type { DbOrTx } from '@/db/client';
 //   markDone    — terminal success
 //   markDone/markFailed — compare-and-set on lease_owner when the caller
 //                 passes one (a worker that lost its lease cannot clobber)
-//   markFailed  — exponential backoff (2^attempts s, cap 1h); at maxAttempts
+//   markFailed  — exponential backoff (2^attempts s), capped per kind
+//                 (retryPolicy): default 8 attempts, 1h cap; settlement.instruct
+//                 56 attempts, 30-min cap (about a day). At the kind's ceiling
 //                 the row goes 'dead' (the caller enqueues the ops alert)
 //
 // dedupe_key (UNIQUE where not null) makes effects idempotent BY CONSTRUCTION:
@@ -65,12 +67,39 @@ export function secretShapePaths(value: unknown, path = '$', depth = 0, out: str
 }
 
 export const MAX_ATTEMPTS = 8;
+/** Default backoff cap: 2^attempts seconds, never more than this between attempts. */
+export const BACKOFF_CAP_SEC = 3600;
+/**
+ * fix B: settlement.instruct retries for about a day (2+4+…+1024 s, then 30-min
+ * steps: ~23 h of backoff), so a rail outage of hours does not dead-letter
+ * every paid transfer. The rail must dedupe by transfer id (already required).
+ */
+export const INSTRUCT_MAX_ATTEMPTS = 56;
+export const INSTRUCT_BACKOFF_CAP_SEC = 1800;
+
+export interface RetryPolicy {
+  maxAttempts: number;
+  backoffCapSec: number;
+}
+
+/** The retry ceiling and backoff cap for an outbox kind. */
+export function retryPolicy(kind: string): RetryPolicy {
+  return kind === 'settlement.instruct'
+    ? { maxAttempts: INSTRUCT_MAX_ATTEMPTS, backoffCapSec: INSTRUCT_BACKOFF_CAP_SEC }
+    : { maxAttempts: MAX_ATTEMPTS, backoffCapSec: BACKOFF_CAP_SEC };
+}
+
+/** Seconds until the next attempt after `attempts` failures: 2^n, capped per kind, floored by `minBackoffSec`. */
+export function retryBackoffSec(kind: string, attempts: number, minBackoffSec = 0): number {
+  return Math.max(Math.min(2 ** attempts, retryPolicy(kind).backoffCapSec), minBackoffSec);
+}
 /**
  * Lease length for a claimed row. 5× the worker's hard ceiling (maxDuration =
  * 60 at src/app/api/worker/route.ts:27): a worker that is still legally
  * running can NEVER have its row stolen. A row whose lease has expired was
  * abandoned (function killed mid-row) and is reclaimed by the next claimBatch —
- * attempts++ as on any retry, so a poison row still dies at MAX_ATTEMPTS.
+ * attempts++ as on any retry, so a poison row still dies at its kind's
+ * ceiling (retryPolicy).
  */
 export const LEASE_MS = 5 * 60_000;
 const LEASE_SEC = LEASE_MS / 1000;
@@ -232,7 +261,9 @@ export function createOutboxRepo(db: DbOrTx) {
     },
 
     /**
-     * Record a failure: backoff-and-retry until MAX_ATTEMPTS, then 'dead'.
+     * Record a failure: backoff-and-retry until the kind's ceiling, then 'dead'.
+     * The caller passes the row's `kind` (retryPolicy); without one the default
+     * policy applies (MAX_ATTEMPTS, BACKOFF_CAP_SEC).
      * Returns the resulting status so the worker can fire the ops alert on
      * death — or 'lost' when `owner` no longer holds the lease (the new owner's
      * outcome wins; nothing was written).
@@ -247,10 +278,11 @@ export function createOutboxRepo(db: DbOrTx) {
       attempts: number,
       error: string,
       owner?: string,
-      opts: { minBackoffSec?: number } = {},
+      opts: { minBackoffSec?: number; kind?: string } = {},
     ): Promise<'failed' | 'dead' | 'lost'> {
-      const status = attempts >= MAX_ATTEMPTS ? 'dead' : 'failed';
-      const backoffSec = Math.max(Math.min(2 ** attempts, 3600), opts.minBackoffSec ?? 0);
+      const kind = opts.kind ?? '';
+      const status = attempts >= retryPolicy(kind).maxAttempts ? 'dead' : 'failed';
+      const backoffSec = retryBackoffSec(kind, attempts, opts.minBackoffSec);
       const rows = await db
         .update(outbox)
         .set({

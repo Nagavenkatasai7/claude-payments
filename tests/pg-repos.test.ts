@@ -14,7 +14,16 @@ import {
   createIdempotencyRepo,
   createAuditRepo,
 } from '@/db/repos/aux-repos';
-import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
+import {
+  createOutboxRepo,
+  MAX_ATTEMPTS,
+  LEASE_MS,
+  BACKOFF_CAP_SEC,
+  INSTRUCT_MAX_ATTEMPTS,
+  INSTRUCT_BACKOFF_CAP_SEC,
+  retryPolicy,
+  retryBackoffSec,
+} from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { EMPTY_PARTNER_INTEGRATIONS } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -506,6 +515,58 @@ describe('outbox-repo (durability backbone)', () => {
     expect(reclaimed[0].lockedBy).toBe('w_new');
     expect(reclaimed[0].attempts).toBe(2);
     expect(reclaimed[0].leaseOwner).toBe('w_new');
+  });
+
+  // fix B: settlement.instruct retries for about a day; every other kind keeps 8 attempts / 1h cap.
+  it('retryPolicy: settlement.instruct gets 56 attempts / 30-min cap; every other kind keeps the default', () => {
+    expect(retryPolicy('settlement.instruct')).toEqual({ maxAttempts: 56, backoffCapSec: 1800 });
+    expect(INSTRUCT_MAX_ATTEMPTS).toBe(56);
+    expect(INSTRUCT_BACKOFF_CAP_SEC).toBe(1800);
+    for (const kind of ['rail.callback', 'whatsapp.text', 'agent.turn', 'funding.refund', 'ops.alert', '']) {
+      expect(retryPolicy(kind)).toEqual({ maxAttempts: MAX_ATTEMPTS, backoffCapSec: BACKOFF_CAP_SEC });
+    }
+    expect(MAX_ATTEMPTS).toBe(8);
+    expect(BACKOFF_CAP_SEC).toBe(3600);
+  });
+
+  it('retryBackoffSec: 2^n capped per kind, floored by minBackoffSec', () => {
+    expect(retryBackoffSec('rail.callback', 1)).toBe(2);
+    expect(retryBackoffSec('rail.callback', 12)).toBe(3600);
+    expect(retryBackoffSec('settlement.instruct', 10)).toBe(1024);
+    expect(retryBackoffSec('settlement.instruct', 11)).toBe(1800);
+    expect(retryBackoffSec('settlement.instruct', 55)).toBe(1800);
+    expect(retryBackoffSec('settlement.instruct', 1, 300)).toBe(300);
+    expect(retryBackoffSec('whatsapp.text', 1, 300)).toBe(300);
+  });
+
+  it('retry windows: instruct covers about a day; the default schedule is unchanged (under 10 min)', () => {
+    let instruct = 0;
+    for (let n = 1; n < INSTRUCT_MAX_ATTEMPTS; n++) instruct += retryBackoffSec('settlement.instruct', n);
+    expect(instruct).toBeGreaterThan(22 * 3600);
+    expect(instruct).toBeLessThan(25 * 3600);
+    let generic = 0;
+    for (let n = 1; n < MAX_ATTEMPTS; n++) generic += retryBackoffSec('rail.callback', n);
+    expect(generic).toBeLessThan(10 * 60);
+  });
+
+  it('markFailed with kind settlement.instruct survives the default ceiling and dies at INSTRUCT_MAX_ATTEMPTS', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('settlement.instruct', { transferId: 'tr_k' });
+    const [row] = await r.claimBatch(1, 'w1');
+    const waitS = async (): Promise<number> => {
+      const res = await db.execute(
+        sql`SELECT extract(epoch FROM (next_attempt_at - now()))::float AS wait_s FROM outbox WHERE id = ${row.id}`,
+      );
+      return (res as unknown as { rows: Array<{ wait_s: number }> }).rows[0].wait_s;
+    };
+    const kind = { kind: 'settlement.instruct' };
+    expect(await r.markFailed(row.id, MAX_ATTEMPTS, 'down', undefined, kind)).toBe('failed');
+    expect(await waitS()).toBeGreaterThan(256 - 10);
+    expect(await waitS()).toBeLessThan(256 + 10);
+    expect(await r.markFailed(row.id, INSTRUCT_MAX_ATTEMPTS - 1, 'down', undefined, kind)).toBe('failed');
+    expect(await waitS()).toBeGreaterThan(1800 - 10);
+    expect(await waitS()).toBeLessThan(1800 + 10);
+    expect(await r.markFailed(row.id, INSTRUCT_MAX_ATTEMPTS, 'down', undefined, kind)).toBe('dead');
   });
 
   it('markFailed minBackoffSec parks the row at least that long (deadline failures: past any abandoned handler)', async () => {
