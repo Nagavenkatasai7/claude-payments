@@ -46,6 +46,18 @@ import { cancelWithinWindow } from '@/lib/sender-cancel';
 import { beginHold, beginSettlement } from '@/lib/settlement';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
+// One customer portal (Oct 2): list_recent_transfers asks customerHistoryUrl for the "all
+// transfers" link. Unset (null) ⇒ the real helper (flag off in tests ⇒ /account/history).
+const historyOverride = vi.hoisted(() => ({ fn: null as null | ((partnerId: string) => Promise<string>) }));
+vi.mock('@/lib/customer-portal-url', async (orig) => {
+  const actual = await orig<typeof import('@/lib/customer-portal-url')>();
+  return {
+    ...actual,
+    customerHistoryUrl: (partnerId: string) =>
+      historyOverride.fn ? historyOverride.fn(partnerId) : actual.customerHistoryUrl(partnerId),
+  };
+});
+
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
 const SENDER_FULL_NAME = 'Alex Rivera';
@@ -3257,6 +3269,22 @@ describe('list_recent_transfers (web-only history lookup)', () => {
     const ctx = { ...base, channel: 'web' as const };
     const r = await executeTool('list_recent_transfers', { recipient: 'nobody' }, ctx);
     expect(r).toEqual({ transfers: [], count: 0, history_url: HISTORY_URL });
+  });
+
+  it("history_url is the customer's OWN partner portal when it is live", async () => {
+    const seen: string[] = [];
+    historyOverride.fn = async (partnerId) => {
+      seen.push(partnerId);
+      return 'https://send.smartremit.ai/portal/transfers';
+    };
+    try {
+      const base = await buildCtx(fakeRedis());
+      const r = await executeTool('list_recent_transfers', {}, { ...base, channel: 'web' as const });
+      expect(r.history_url).toBe('https://send.smartremit.ai/portal/transfers');
+      expect(seen).toEqual([base.partnerId]);
+    } finally {
+      historyOverride.fn = null;
+    }
   });
 
   it("NEVER returns another customer's transfers (own-phone scoping)", async () => {

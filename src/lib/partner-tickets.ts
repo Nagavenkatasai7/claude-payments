@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
-import { env } from './env';
 import type { RedisLike } from './store';
 import type { PartnerRole } from './partner-access';
 import type { PartnerId, Ticket, TicketKind, TicketStatus } from './types';
+import { customerTicketUrl } from './customer-portal-url';
 
 /**
  * partner-tickets: the tenant-scoped STAFF reads and input rules behind /partner/support
@@ -273,9 +273,14 @@ export function errName(e: unknown): string {
   return e instanceof Error ? e.name : 'error';
 }
 
-/** The customer-facing link in a ticket nudge (the same one the platform ticket actions send). */
-export function ticketNudgeUrl(ticketId: string): string {
-  return `${env.appBaseUrl}/account/support/${ticketId}`;
+/**
+ * The customer-facing link in a ticket nudge (the same one the platform ticket actions send): the
+ * ticket in the OWNING partner's customer portal when it is live, else the legacy /account page
+ * (one customer portal, Oct 2; customerTicketUrl). Resolve it BEFORE the transaction that enqueues
+ * the nudge, so the lookup never holds the transaction open.
+ */
+export function ticketNudgeUrl(partnerId: string, ticketId: string): Promise<string> {
+  return customerTicketUrl(partnerId, ticketId);
 }
 
 /**

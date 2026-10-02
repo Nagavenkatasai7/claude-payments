@@ -14,9 +14,9 @@ import {
   buildDeterministicSummary,
 } from '@/lib/customer-summary';
 import { maskAccount } from '@/lib/tools';
-import { easternMonth } from '@/lib/dates';
+import { monthlyBuckets } from '@/lib/customer-stats';
 import { waLink, WA_MESSAGES } from '@/app/landing/wa';
-import type { Customer, Transfer } from '@/lib/types';
+import type { Customer } from '@/lib/types';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -45,43 +45,6 @@ export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Your account · SmartRemit' };
 
 const WA_HREF = waLink(WA_MESSAGES.generic);
-
-/**
- * USD-equivalent amount of a transfer, for the cross-currency monthly trend.
- * Only money that actually left the customer counts toward "sent" — pending,
- * cancelled, blocked, and awaiting-payment transfers are excluded so the
- * "Sent this month" total never inflates beyond what was really sent.
- */
-function sentUsd(t: Transfer): number {
-  if (t.status !== 'paid' && t.status !== 'delivered') return 0;
-  return t.amountUsd ?? t.amountSource ?? 0;
-}
-
-/**
- * Last 6 calendar months of send volume (USD-equiv), oldest → newest. Buckets
- * by EASTERN month (easternMonth) — the same basis as the admin analytics — so
- * a late-evening send near a month boundary lands in the same month everywhere.
- */
-function monthlyBuckets(
-  transfers: Transfer[],
-  now: Date,
-): { key: string; month: string; volumeUsd: number }[] {
-  const buckets: { key: string; month: string; volumeUsd: number }[] = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    buckets.push({
-      key: easternMonth(d.getTime()),
-      month: d.toLocaleDateString('en-US', { month: 'short' }),
-      volumeUsd: 0,
-    });
-  }
-  const byKey = new Map(buckets.map((b) => [b.key, b]));
-  for (const t of transfers) {
-    const bucket = byKey.get(easternMonth(Date.parse(t.createdAt)));
-    if (bucket) bucket.volumeUsd += sentUsd(t);
-  }
-  return buckets.map((b) => ({ ...b, volumeUsd: Math.round(b.volumeUsd * 100) / 100 }));
-}
 
 /**
  * Smart-summary card — streamed in behind <Suspense> so a cold cache never
@@ -170,7 +133,7 @@ function SummarySkeleton() {
 }
 
 export default async function AccountHomePage() {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal' });
 
   // KYC is partner OPT-IN (sendGateActive) — the customer's partner ROW decides
   // whether the verification card exists at all. Gate off ⇒ no card; the verify

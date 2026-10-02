@@ -225,7 +225,7 @@ export function AiMock() {
           </div>
           <div className="max-w-[92%] self-start rounded-[12px] rounded-bl-[4px] bg-white px-3 py-2 text-[12.5px] leading-snug text-[#0b1b3f]">
             Yes — delivered at 2:14 PM ✓<br />
-            <span className="font-mono text-[11px] text-[#0c5bd2]">smartremit.ai/account</span>
+            <span className="font-mono text-[11px] text-[#0c5bd2]">send.smartremit.ai/portal</span>
           </div>
         </div>
       </div>

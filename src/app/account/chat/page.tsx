@@ -11,7 +11,7 @@ export const metadata = { title: 'AI assistant · SmartRemit' };
 // requireCustomer-gated (and the middleware already gates /account/**); the
 // API route the client talks to (/api/account/chat) self-gates separately.
 export default async function AccountChatPage() {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/chat' });
   return (
     <AccountShell active="support" customer={customer}>
       <PageHeader title="AI assistant" sub="Ask about your transfers" />

@@ -41,7 +41,7 @@ export default async function AccountSettingsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/profile' });
   const sp = await searchParams;
   const notice = typeof sp.ok === 'string' ? OK_COPY[sp.ok] : undefined;
   const error = typeof sp.err === 'string' ? ERR_COPY[sp.err] : undefined;

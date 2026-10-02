@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -51,7 +51,8 @@ import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { KNOWN_PARTNER_ROLES } from '@/lib/partner-access';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
-import { auditEvents, outbox, tickets, ticketMessages } from '@/db/schema';
+import { auditEvents, outbox, tickets, ticketMessages, partnerSites, partnerPortalSettings } from '@/db/schema';
+import { resetCustomerPortalOriginCache } from '@/lib/customer-portal-url';
 import { internalNoteAction, replyAction, setStatusAction } from '@/app/partner/(app)/support/[ticketId]/actions';
 import { contactFollowUpAction, contactSmartRemitAction } from '@/app/partner/(app)/support/contact/actions';
 
@@ -314,6 +315,35 @@ describe('setStatusAction specifics', () => {
     await setStatusAction(statusForm('tk_a1', { status: 'pending' }));
     expect((await audits())[0].meta).toEqual({ actorScope: 'partner', status: 'pending', from: 'open' });
     expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('one customer portal: the nudge opens the ticket in the owning partner portal when it is live', () => {
+  beforeEach(() => {
+    resetCustomerPortalOriginCache();
+    vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetCustomerPortalOriginCache();
+  });
+  it('reply and resolve nudges link to the portal ticket; without a live portal, /account/support', async () => {
+    await db.insert(partnerSites).values({ partnerId: PA, slug: 'alpha-pay' });
+    await db.insert(partnerPortalSettings).values({ partnerId: PA, portalEnabledAt: new Date() });
+    await signInAs({ role: 'admin' });
+    await replyAction(replyForm('tk_a1'));
+    await setStatusAction(statusForm('tk_a2'));
+    const bodies = (await outboxRows()).map((r) => (r.payload as { body: string }).body);
+    expect(bodies).toHaveLength(2);
+    expect(bodies.some((b) => b.includes('https://alpha-pay.smartremit.ai/portal/help/tickets/tk_a1'))).toBe(true);
+    expect(bodies.some((b) => b.includes('https://alpha-pay.smartremit.ai/portal/help/tickets/tk_a2'))).toBe(true);
+    for (const b of bodies) expect(b).not.toContain('/account/support');
+
+    await signInAs({ partnerId: PB, role: 'admin' });
+    await replyAction(replyForm('tk_b1'));
+    const bravo = (await outboxRows()).map((r) => (r.payload as { body: string }).body).filter((b) => b.includes('tk_b1'));
+    expect(bravo).toHaveLength(1);
+    expect(bravo[0]).toContain('/account/support/tk_b1');
   });
 });
 
