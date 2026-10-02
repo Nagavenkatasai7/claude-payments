@@ -8,7 +8,7 @@ import type { ActionResult } from '../../../action-result';
 import { decideKycAction } from './kyc-actions';
 
 // The KYC decision dialogs (merge plan 2c, D3). The page renders this only for a PARTNER_ADMIN and
-// only with the decisions partnerKycDecision allows; that is UX. The server action re-gates,
+// only with the decisions partnerKycOfferedDecisions offers; that is UX. The server action re-gates,
 // re-scopes the opaque ref to the session tenant, re-checks the reason and the rule, and the
 // writer re-checks the screening flags on the locked row, so nothing here is trusted.
 

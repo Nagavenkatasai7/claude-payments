@@ -90,6 +90,28 @@ describe('updateRefund — guarded lifecycle', () => {
   });
 });
 
+describe('updateRefund with an explicit prior state (from)', () => {
+  it('moves only from exactly that state', async () => {
+    await repo.saveTransfer(fixture({ id: 'f1' }));
+    // none → pending is legal without `from`, but not when the caller claims requested → pending
+    expect(await repo.updateRefund('f1', { refundStatus: 'pending' }, { from: 'requested' })).toBeNull();
+    expect((await repo.getTransfer('f1'))?.refundStatus).toBe('none');
+    await repo.updateRefund('f1', { refundStatus: 'requested' });
+    expect((await repo.updateRefund('f1', { refundStatus: 'pending' }, { from: 'requested' }))?.refundStatus).toBe('pending');
+    await repo.updateRefund('f1', { refundStatus: 'failed' });
+    expect(await repo.updateRefund('f1', { refundStatus: 'pending' }, { from: 'requested' })).toBeNull();
+    expect((await repo.updateRefund('f1', { refundStatus: 'pending' }, { from: 'failed' }))?.refundStatus).toBe('pending');
+  });
+
+  it('a from that is not a legal predecessor never writes', async () => {
+    await repo.saveTransfer(fixture({ id: 'f2' }));
+    await repo.updateRefund('f2', { refundStatus: 'requested' });
+    // requested → completed is not a legal move, so claiming it changes nothing
+    expect(await repo.updateRefund('f2', { refundStatus: 'completed' }, { from: 'requested' })).toBeNull();
+    expect((await repo.getTransfer('f2'))?.refundStatus).toBe('requested');
+  });
+});
+
 describe('refund queues + crash-resume query', () => {
   it('listByRefundStatus returns only the asked-for state', async () => {
     await repo.saveTransfer(fixture({ id: 'q1' }));

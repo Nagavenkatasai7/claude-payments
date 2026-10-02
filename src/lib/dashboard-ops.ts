@@ -368,9 +368,10 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'requested') {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
-    // The guarded write is the claim: a concurrent decision that committed after the read above
-    // leaves nothing to claim, so this call throws (rolls back) instead of auditing a no-op.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }))) {
+    // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
+    // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
+    // call throws (rolls back) instead of starting a refund or auditing a no-op.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
     await createOutboxRepo(tx).enqueue(
@@ -402,7 +403,7 @@ export async function dismissRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (scope && !(await loadForRefund(repo, id, scope))) {
       throw new Error('Cannot dismiss: refund is not awaiting approval.');
     }
-    const updated = await repo.updateRefund(id, { refundStatus: 'none' });
+    const updated = await repo.updateRefund(id, { refundStatus: 'none' }, { from: 'requested' });
     if (!updated || (scope && updated.partnerId !== scope.partnerId)) {
       throw new Error('Cannot dismiss: refund is not awaiting approval.');
     }
@@ -437,9 +438,10 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'failed') {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
-    // The guarded write is the claim. Each retry mints a UNIQUE dedupe key, so this check (not the
-    // key) is what keeps a concurrent second retry from enqueueing a second refund effect.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }))) {
+    // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
+    // this check (not the key) is what keeps a concurrent second retry from enqueueing a second
+    // refund effect.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
     await createOutboxRepo(tx).enqueue(

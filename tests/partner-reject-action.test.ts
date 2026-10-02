@@ -10,7 +10,8 @@ import type { Db } from '@/db/client';
 // Merge plan 2c (owner D4): rejectHoldAction — reject & refund of a held transfer from /partner. A
 // MONEY write that reuses the ONE reject path (dashboard-ops rejectTransfer: the guarded cancel,
 // the `transfer.reject` audit row and, when charged, refund pending + funding.refund in one
-// transaction). Allowed only on holds the partner may release.
+// transaction). Allowed only on holds the partner may release, behind a fresh 15-minute step-up
+// (owner D2: an action that can start a refund needs one).
 const redis = fakeRedis();
 const cookieJar = new Map<string, string>();
 const host = { value: 'smartremit.ai' };
@@ -25,7 +26,7 @@ vi.mock('next/headers', () => ({
     set: (n: string, v: string) => cookieJar.set(n, v),
     delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
-  headers: async () => new Headers({ host: host.value }),
+  headers: async () => new Headers({ host: host.value, 'x-forwarded-for': '203.0.113.9' }),
 }));
 vi.mock('next/navigation', () => ({
   redirect: (p: string) => {
@@ -71,8 +72,14 @@ import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { EDD_REQUIRED_REASON as EDD, LARGE_AMOUNT_REASON as LARGE, SCREENING_REASONS } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { t } from '@/lib/i18n';
+import { getAuthStore } from '@/lib/auth-store';
+import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { staffStepUpKey } from '@/lib/staff-step-up';
+import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
+import { hashPassword } from '@/lib/password';
 
 const REASON = 'Sender could not show the source of funds.';
+const PASSWORD = 'correct horse battery staple';
 const form = (id: string, reason = REASON) => {
   const fd = new FormData();
   fd.set('id', id);
@@ -118,7 +125,22 @@ beforeEach(async () => {
   await seedSender('pb');
 });
 
-const asAdmin = () => signInAs(redis, cookieJar, { username: 'pa-admin', partnerId: 'pa', role: 'admin' });
+/** Mark the CURRENT cookie's session as freshly stepped up (the 15-minute window). */
+async function markFresh(): Promise<void> {
+  const token = cookieJar.get(SESSION_COOKIE);
+  if (!token) return;
+  const user = await getAuthStore().getSessionUser(token);
+  if (user) await redis.set(staffStepUpKey(token), `${user}:${Date.now()}`, { ex: 900 });
+}
+/** The action with a fresh step-up on whatever session is current (the contract helper re-signs in). */
+const freshAction = async (fd: FormData) => {
+  await markFresh();
+  return rejectHoldAction(fd);
+};
+const asAdmin = async (fresh = true) => {
+  await signInAs(redis, cookieJar, { username: 'pa-admin', partnerId: 'pa', role: 'admin', passwordHash: await hashPassword(PASSWORD) });
+  if (fresh) await markFresh();
+};
 
 describe('rejectHoldAction: the shared action contract', () => {
   it('runs checklist items 1-4 (gate, role, foreign id, forged tenant fields)', async () => {
@@ -126,7 +148,7 @@ describe('rejectHoldAction: the shared action contract', () => {
       db,
       redis,
       cookieJar,
-      action: rejectHoldAction,
+      action: freshAction,
       form: (id) => form(id),
       ownId: 'tr_heldA1',
       foreignId: 'tr_heldB1',
@@ -302,5 +324,54 @@ describe('rejectHoldAction: sender flag raised between the pre-check and the cla
     await asAdmin();
     screeningRead.afterRead = () => flagSender('pb', 'pep_hit');
     expect(await rejectHoldAction(form('tr_heldA1'))).toEqual({ ok: true });
+  });
+});
+
+describe('rejectHoldAction: the step-up (D2)', () => {
+  const stepUpAudits = async () =>
+    ((await db.execute(sql`SELECT action FROM audit_events ORDER BY id`)) as unknown as { rows: Array<{ action: string }> }).rows.map((r) => r.action);
+
+  it('a stale session → step_up_required (charged and uncharged), nothing cancelled, no refund row, no audit row', async () => {
+    await seedHeld('tr_chgA5', 'pa', [LARGE], { fundingRef: 'mockfund-chgA5' });
+    await asAdmin(false);
+    const before = await snapshot();
+    for (const id of ['tr_chgA5', 'tr_heldA1']) {
+      const r = await rejectHoldAction(form(id));
+      expect(isStepUpRequired(r)).toBe(true);
+      expect(r).toMatchObject({ factor: 'password' });
+    }
+    expect(await snapshot()).toEqual(before);
+    expect((await transferRow('tr_chgA5')).status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+  });
+
+  it('a wrong password is refused with nothing moved; the right one rejects and refunds once', async () => {
+    await seedHeld('tr_chgA6', 'pa', [LARGE], { fundingRef: 'mockfund-chgA6' });
+    await asAdmin(false);
+    const wrong = form('tr_chgA6');
+    wrong.set(STEP_UP_FIELD, 'not the password');
+    expect(isStepUpRequired(await rejectHoldAction(wrong))).toBe(true);
+    expect((await transferRow('tr_chgA6')).status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await stepUpAudits()).toEqual(['auth.stepup.failed']);
+
+    const right = form('tr_chgA6');
+    right.set(STEP_UP_FIELD, PASSWORD);
+    expect(await rejectHoldAction(right)).toEqual({ ok: true });
+    expect((await transferRow('tr_chgA6')).status).toBe('cancelled');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:tr_chgA6' }]);
+    expect(await stepUpAudits()).toEqual(['auth.stepup.failed', 'auth.stepup', 'transfer.reject']);
+    const all = await db.select().from(auditEvents);
+    expect(JSON.stringify(all)).not.toContain(PASSWORD);
+    const su = all.find((r) => r.action === 'auth.stepup');
+    expect(su?.meta).toMatchObject({ target: 'transfer.reject' });
+  });
+
+  it('the parse and the hold rule run before the step-up: a refused hold on a stale session is notAllowed, no prompt', async () => {
+    await setKyc('pa', 'ours');
+    await asAdmin(false);
+    expect(await rejectHoldAction(form('tr_heldA1'))).toEqual({ ok: false, error: t('partner.reject.notAllowed') });
+    expect(await rejectHoldAction(form('tr_heldA1', 'too short'))).toEqual({ ok: false, error: t('partner.reject.reasonTooShort') });
+    expect(await count(auditEvents)).toBe(0);
   });
 });
