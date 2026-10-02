@@ -232,6 +232,7 @@ describe('OTP copy — brand interpolated (Program-Fix 49A)', () => {
 // Program-Fix 45 (P2): the pay-page confirmation code is free-form in-session
 // text (no Meta template), so the "never share" line is added to the text itself.
 import { transactionOtpMessage } from '@/lib/whatsapp-templates';
+import { scheduleNameNeededText } from '@/lib/whatsapp-templates';
 
 describe('transactionOtpMessage — never-share wording (fix 45)', () => {
   it('tells the customer never to share the code and that the brand never asks for it', () => {
@@ -249,5 +250,38 @@ describe('transactionOtpMessage — never-share wording (fix 45)', () => {
 
   it('a blank brand falls back to SmartRemit', () => {
     expect(transactionOtpMessage('123456', '   ')).toContain('SmartRemit will never ask for it');
+  });
+});
+
+// Scheduled-send name nudge (2026-10-02): fixed copy, the partner's brand and
+// the source amount only (never the recipient's outsider-written name).
+describe('scheduleNameNeededText', () => {
+  const s = {
+    id: 's1', phone: '15550007777', amountUsd: 200, amountSource: 200, sourceCurrency: 'USD',
+    recipientName: 'Mom <script>', recipientPhone: '919133001840',
+    payoutMethod: 'upi', payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer',
+    frequency: 'monthly', dayOfMonth: 21, status: 'active',
+    createdAt: '2026-01-01T00:00:00.000Z', partnerId: 'default',
+  } as const;
+
+  it('due today: says it could not go out and asks for the legal name', () => {
+    const text = scheduleNameNeededText('Acme Remit', s, { dueToday: true, dueAt: Date.parse('2026-05-21T16:00:00Z') });
+    expect(text).toBe(
+      "Your scheduled Acme Remit transfer of $200.00 couldn't go out today because we need your full legal name first. " +
+        "Reply here with your full name as on your ID and we'll send your payment link on the next scheduled run.",
+    );
+  });
+
+  it('ahead of the day: names the Eastern due date', () => {
+    const text = scheduleNameNeededText('Acme Remit', s, { dueToday: false, dueAt: Date.parse('2026-05-23T16:00:00Z') });
+    expect(text).toBe(
+      'Your scheduled Acme Remit transfer of $200.00 is due on Saturday, May 23. Before then we need your full legal name. ' +
+        'Reply here with your full name as on your ID so it can go out on time.',
+    );
+  });
+
+  it('never carries the recipient name', () => {
+    const text = scheduleNameNeededText('Acme Remit', s, { dueToday: true, dueAt: Date.now() });
+    expect(text).not.toContain('Mom');
   });
 });

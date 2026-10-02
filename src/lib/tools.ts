@@ -1098,7 +1098,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'set_sender_name',
       description:
-        "Save the customer's OWN full legal name (as on their ID). Call this ONLY after a tool returned needs_sender_name: true and the customer replied with their name. Pass exactly what the customer typed as their own name — never a WhatsApp profile name, never the recipient's name, never a guess. It never replaces a name already on file. After it returns saved: true, call the tool that returned needs_sender_name again with the same details.",
+        "Save the customer's OWN full legal name (as on their ID). Call this ONLY after a tool returned needs_sender_name: true (or a [SCHEDULE NEEDS NAME] note asked for the name) and the customer replied with their name. Pass exactly what the customer typed as their own name — never a WhatsApp profile name, never the recipient's name, never a guess. It never replaces a name already on file. After it returns saved: true, call the tool that returned needs_sender_name again with the same details (after a [SCHEDULE NEEDS NAME] note there is none: just confirm their scheduled transfer will go ahead).",
       parameters: {
         type: 'object',
         properties: {

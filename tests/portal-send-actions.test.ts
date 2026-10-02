@@ -452,6 +452,22 @@ describe('setSenderNameAction', () => {
     expect(await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera' })))).toBe('/portal/verify?next=/portal/send/review');
   });
 
+  it('from the Schedules pages: returns there (allow-listed), with the step-up coming back too', async () => {
+    await db.execute(sql`UPDATE customers SET full_name_enc = NULL WHERE partner_id = 'pa'`);
+    expect(await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera', back: '/portal/schedules' })))).toBe('/portal/schedules?done=name_saved');
+    expect((await createCustomerStore(db, createStore(redis, db)).getCustomer('pa', phone))?.fullName).toBe('Alex Rivera');
+    expect(await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera', back: '/portal/schedules/new' })))).toBe('/portal/schedules/new');
+    h.stale = true;
+    expect(await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera', back: '/portal/schedules' })))).toBe('/portal/verify?next=/portal/schedules');
+  });
+
+  it('any other back value is ignored (no open redirect): the review is the target', async () => {
+    await db.execute(sql`UPDATE customers SET full_name_enc = NULL WHERE partner_id = 'pa'`);
+    for (const back of ['https://evil.example/x', '//evil.example', '/portal/transfers', '/portal/schedules?x=1', 'constructor', '__proto__', 'toString']) {
+      expect(await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera', back })))).toBe('/portal/send/review');
+    }
+  });
+
   it('the name is the HOST tenant\'s only (B\'s row untouched)', async () => {
     await db.execute(sql`UPDATE customers SET full_name_enc = NULL`);
     await redirectOf(setSenderNameAction({}, fd({ fullName: 'Alex Rivera' })));

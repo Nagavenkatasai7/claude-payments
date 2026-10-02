@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { isScheduleDueToday } from './schedule';
+import { isScheduleDueToday, upcomingDueDay } from './schedule';
 import { createTransfer, ScheduleMintRefusedError } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, sendGateActive } from './kyc-gate';
@@ -18,6 +18,19 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { ScheduleStore } from './schedule-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { Customer, Schedule, Transfer } from './types';
+
+/**
+ * When a schedule owner with no legal name on file is told about it: on the
+ * due day itself (the run was just skipped), or ahead of it (`dueAt` is the
+ * instant of Eastern noon on the due day).
+ */
+export interface NameNeededTiming {
+  dueToday: boolean;
+  dueAt: number;
+}
+
+/** How many days before a due run a nameless owner gets the early warning. */
+export const NAME_WARNING_DAYS = 3;
 
 export interface CronDeps {
   // Task 9: the ledger handle a refused run's deduped ops alert is enqueued on.
@@ -40,6 +53,10 @@ export interface CronDeps {
     owner: Customer | null,
     kycUrl: string,
   ) => Promise<void>;
+  // Scheduled-send name nudge (2026-10-02): tell an owner with no legal name on
+  // file that their scheduled send needs it — on the due day (beside the ops
+  // alert) and up to NAME_WARNING_DAYS before it. Fail-soft: a throw is logged.
+  sendScheduledNameNeeded?: (schedule: Schedule, timing: NameNeededTiming) => Promise<void>;
 }
 
 export async function runDueSchedules(
@@ -61,7 +78,10 @@ export async function runDueSchedules(
         continue;
       }
     }
-    if (!isScheduleDueToday(schedule, deps.now)) continue;
+    if (!isScheduleDueToday(schedule, deps.now)) {
+      await warnNamelessOwnerAhead(deps, schedule);
+      continue;
+    }
     // Item 4: a business-initiated send to an opted-out customer is not allowed.
     // Skip silently — do NOT count as fired, do NOT touch lastRunAt (the schedule
     // stays active so it resumes if the customer re-subscribes with START).
@@ -119,6 +139,7 @@ export async function runDueSchedules(
     if (senderName === undefined) {
       failed++;
       await alertScheduleNotCreated(deps, schedule.id, 'sender_name_missing', 'schedule-sender-name');
+      await nudgeNamelessOwner(deps, schedule, { dueToday: true, dueAt: deps.now });
       continue;
     }
     try {
@@ -263,6 +284,48 @@ async function claimKycNudge(deps: Pick<CronDeps, 'db' | 'now'>, schedule: Sched
   } catch (err) {
     logError('cron.kyc-nudge-claim', err, { scheduleId: schedule.id });
     return false;
+  }
+}
+
+/**
+ * The early warning: a schedule NOT due today whose next run falls within
+ * NAME_WARNING_DAYS, owned by a customer with no legal name on file, who has
+ * not opted out, under an active partner. Nothing is counted, alerted or
+ * marked; only the nudge (deduped per due date) goes out.
+ */
+async function warnNamelessOwnerAhead(deps: CronDeps, schedule: Schedule): Promise<void> {
+  if (!deps.sendScheduledNameNeeded) return;
+  const dueAt = upcomingDueDay(schedule, deps.now, NAME_WARNING_DAYS);
+  if (dueAt === null) return;
+  try {
+    const owner = await deps.customerStore.getCustomer(schedule.partnerId, schedule.phone);
+    if (owner?.optedOutAt || hasSenderName(owner)) return;
+    const partner = await deps.partnerStore.getPartner(schedule.partnerId);
+    if (!partner || partner.status !== 'active') return;
+  } catch (err) {
+    logError('cron.name-warning', err, { scheduleId: schedule.id });
+    return;
+  }
+  await nudgeNamelessOwner(deps, schedule, { dueToday: false, dueAt });
+}
+
+/**
+ * Tell the owner their scheduled send needs their legal name. CLAIM-FIRST and
+ * deduped per schedule per due date and kind (due-day vs early), under the
+ * reserved 'sched:' prefix with a non-transfer marker value, like the KYC
+ * nudge: a crash after the claim under-messages, never double-messages. A
+ * failing claim or send is logged and swallowed; the run carries on.
+ */
+async function nudgeNamelessOwner(deps: CronDeps, schedule: Schedule, timing: NameNeededTiming): Promise<void> {
+  if (!deps.sendScheduledNameNeeded) return;
+  const marker = `namenudge_${randomUUID()}`;
+  const key = `sched:${schedule.id}:${easternDay(timing.dueAt)}:${timing.dueToday ? 'name-due' : 'name-early'}`;
+  try {
+    const bound = await createIdempotencyRepo(deps.db).claim(schedule.partnerId, key, marker);
+    if (bound !== marker) return;
+    await deps.sendScheduledNameNeeded(schedule, timing);
+  } catch (err) {
+    logError('cron.name-nudge', err, { scheduleId: schedule.id });
   }
 }
 

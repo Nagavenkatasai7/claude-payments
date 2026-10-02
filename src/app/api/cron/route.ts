@@ -17,11 +17,12 @@ import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
-import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
+import { sendTemplateWithButton, sendTemplateOrText, sendText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
   TEMPLATE_SCHEDULED_PAYMENT_READY,
   TEMPLATE_LANG,
   scheduledPaymentReadyParams,
+  scheduleNameNeededText,
 } from '@/lib/whatsapp-templates';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { resolvePartnerBranding } from '@/lib/partner-config';
@@ -76,6 +77,13 @@ export async function GET(req: NextRequest) {
         `Verify your identity to resume your scheduled ${brand} transfer: ${kycUrl}`,
         waCreds,
       );
+    },
+    // Scheduled-send name nudge (2026-10-02): free-form text, so it reaches the
+    // customer only inside their 24-hour window (a rejection is thrown, and
+    // cron-run logs and swallows it). From the partner's own number and brand.
+    sendScheduledNameNeeded: async (schedule, timing) => {
+      const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
+      await sendText(schedule.phone, scheduleNameNeededText(brand, schedule, timing), waCreds);
     },
     sendScheduledLink: async (schedule, transfer, url) => {
       // The scheduled_payment_ready template (docs §3.3) path is now wired, but
