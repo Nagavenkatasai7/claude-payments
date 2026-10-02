@@ -15,6 +15,7 @@ import {
   settlementView,
   isPartnerNoteShaped,
   transfersListHref,
+  TIMELINE_AUDIT_ACTIONS,
 } from '@/lib/partner-transfers';
 import { POSSIBLE_MATCH_REASON, SENDER_WATCHLIST_REASON } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -197,6 +198,21 @@ describe('transferTimeline', () => {
     );
     expect(rows.map((r) => r.kind)).toEqual(['created', 'note', 'refunded']);
     expect(rows[1].note).toBeUndefined();
+  });
+  it('merge plan 2c: a reject row (no reason text, actor masked unless tenant staff); the action is on the read allowlist', () => {
+    const rows = transferTimeline(
+      base({ status: 'cancelled' }),
+      [
+        { at: new Date('2026-09-01T10:01:00.000Z'), action: 'transfer.reject', actor: 'pa-agent', actorType: 'staff', meta: { reason: 'REJECT WHY', actorScope: 'partner' } },
+        { at: new Date('2026-09-01T10:02:00.000Z'), action: 'transfer.reject', actor: 'platform-ops', actorType: 'staff', meta: { reason: 'PLATFORM WHY' } },
+      ],
+      tenant,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['created', 'reject', 'reject']);
+    expect(rows[1]).toMatchObject({ label: 'partner.transfers.timeline.reject', by: 'pa-agent' });
+    expect(rows[2].by).toBe(t('partner.transfers.actor.smartremit'));
+    expect(JSON.stringify(rows)).not.toContain('WHY');
+    expect(TIMELINE_AUDIT_ACTIONS).toContain('transfer.reject');
   });
 });
 

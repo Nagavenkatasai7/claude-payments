@@ -31,6 +31,7 @@ import type { PartnerId } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
+import { RejectDialog } from './reject-dialog';
 
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
@@ -179,8 +180,11 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
               ))}
             </ul>
             {canRelease ? (
-              <div className="mt-4">
+              // Merge plan 2c (D4): reject & refund is offered on exactly the holds the partner may
+              // release (partnerMayRejectHold is the same rule); the action re-checks both.
+              <div className="mt-4 flex flex-wrap items-start gap-3">
                 <ReleaseDialog id={transfer.id} />
+                <RejectDialog id={transfer.id} />
               </div>
             ) : (
               <p className="mt-3 text-[13px] text-ds-ink-muted">
