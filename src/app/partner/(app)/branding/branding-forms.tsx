@@ -5,9 +5,10 @@ import { t } from '@/lib/i18n';
 import { Button, Field, Input } from '@/components/ds';
 import { SUPPORT_CONTACT_MAX } from '@/lib/partner-branding';
 import type { ActionResult } from '../../action-result';
-import { saveLogoAction, saveSupportContactAction, saveThemeAction, type ThemeActionResult } from './actions';
+import { BRAND_MAX, PERSONA_MAX } from '@/lib/untrusted-text';
+import { saveDisplayNameAction, saveLogoAction, savePersonaAction, saveSupportContactAction, saveThemeAction, type ThemeActionResult } from './actions';
 
-// The three Branding forms (UI redesign M3-17). Plain <form action>s: nothing here is trusted. The
+// The Branding forms (UI redesign M3-17). Plain <form action>s: nothing here is trusted. The
 // server actions re-gate, take the tenant from the session and validate every value (colour format
 // + contrast, logo type + magic bytes + size, the support-contact rules). Client-side attributes
 // (pattern, accept, maxLength) are conveniences only. Errors are the server's fixed copy.
@@ -145,6 +146,64 @@ export function ContactForm({ current }: { current: string }) {
             maxLength={SUPPORT_CONTACT_MAX}
             autoComplete="off"
             spellCheck={false}
+          />
+        )}
+      </Field>
+      <div>
+        <SaveButton pending={pending} />
+      </div>
+      <Status state={state} />
+    </form>
+  );
+}
+
+async function submitDisplayName(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | null> {
+  return saveDisplayNameAction(formData);
+}
+
+export function DisplayNameForm({ current }: { current: string }) {
+  const [state, formAction, pending] = useActionState(submitDisplayName, null);
+  return (
+    <form action={formAction} className="flex flex-col gap-4" data-testid="branding-display-name-form">
+      <Field name="displayName" label={t('partner.branding.displayNameLabel')} hint={t('partner.branding.displayNameHint', { max: BRAND_MAX })}>
+        {(ids) => (
+          <Input
+            id={ids.id}
+            name="displayName"
+            defaultValue={current}
+            aria-describedby={ids.describedBy}
+            maxLength={BRAND_MAX}
+            autoComplete="off"
+          />
+        )}
+      </Field>
+      <div>
+        <SaveButton pending={pending} />
+      </div>
+      <Status state={state} />
+    </form>
+  );
+}
+
+async function submitPersona(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | null> {
+  return savePersonaAction(formData);
+}
+
+export function PersonaForm({ current }: { current: string }) {
+  const [state, formAction, pending] = useActionState(submitPersona, null);
+  return (
+    <form action={formAction} className="flex flex-col gap-4" data-testid="branding-persona-form">
+      <Field name="botPersona" label={t('partner.branding.personaLabel')} hint={t('partner.branding.personaHint', { max: PERSONA_MAX })}>
+        {(ids) => (
+          <textarea
+            id={ids.id}
+            name="botPersona"
+            defaultValue={current}
+            aria-describedby={ids.describedBy}
+            aria-invalid={ids.invalid || undefined}
+            maxLength={PERSONA_MAX}
+            rows={3}
+            className={`block min-h-[46px] w-full min-w-0 rounded-ds-inner border border-ds-border-input bg-ds-surface px-4 py-2.5 text-[15px] text-ds-ink placeholder:text-ds-ink-subtle ${FOCUS}`}
           />
         )}
       </Field>

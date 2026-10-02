@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { env } from '@/lib/env';
+import { partnerApiBaseUrl } from '@/lib/partner-integration-urls';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -108,6 +110,16 @@ describe('/partner/integrations/api-keys: listing', () => {
     await signInAs({});
     const html = decode(await render());
     expect(html).toContain(t('partner.keys.empty'));
+  });
+});
+
+describe('/partner/integrations/api-keys: the API base URL (2f)', () => {
+  it('shows the read-only partner API base URL, computed like the legacy guide', async () => {
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain(t('partner.keys.baseUrlTitle'));
+    expect(html).toContain(`data-testid="api-base-url"`);
+    expect(html).toContain(`>${partnerApiBaseUrl(env.appBaseUrl)}<`);
   });
 });
 

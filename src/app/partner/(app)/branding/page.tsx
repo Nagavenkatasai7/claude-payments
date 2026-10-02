@@ -9,13 +9,14 @@ import { MAX_LOGO_FILE_KB } from '@/lib/partner-branding';
 import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
-import { ContactForm, LogoForm, ThemeForm } from './branding-forms';
+import { ContactForm, DisplayNameForm, LogoForm, PersonaForm, ThemeForm } from './branding-forms';
 import { BrandPreview } from './preview';
 import { SlugClaimForm } from './slug-form';
 
 export const metadata: Metadata = { title: t('partner.branding.title'), robots: { index: false, follow: false } };
 
-// /partner/branding (UI redesign M3-17): the tenant's logo, colours and support contact. The page
+// /partner/branding (UI redesign M3-17): the tenant's logo, colours and support contact (2f adds
+// the display name and the assistant voice, both rendered as escaped text in form fields). The page
 // gates itself (admin only, MFA enforced; the layout's gate is chrome only). Everything is read
 // for the SESSION's partner only. Colours come from loadSiteTheme (always re-validated), the logo
 // reaches the page only through SiteBrand as an <img src> (never CSS, never an app route), and the
@@ -63,6 +64,16 @@ export default async function PartnerBrandingPage() {
             <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.contactTitle')}</h2>
             <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.contactIntro')}</p>
             <ContactForm current={branding.supportContact} />
+          </Card>
+          <Card as="section" className="p-5 sm:p-6">
+            <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.displayNameTitle')}</h2>
+            <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.displayNameIntro')}</p>
+            <DisplayNameForm current={partner?.displayName ?? ''} />
+          </Card>
+          <Card as="section" className="p-5 sm:p-6">
+            <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.personaTitle')}</h2>
+            <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.personaIntro')}</p>
+            <PersonaForm current={partner?.botPersona ?? ''} />
           </Card>
         </div>
         <Card as="aside" className="min-w-0 p-5 sm:p-6 lg:sticky lg:top-24">
