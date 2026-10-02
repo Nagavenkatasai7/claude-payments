@@ -22,7 +22,8 @@ export async function GET() {
   // UI redesign M3-6: a /partner-only role (finance) or any role outside the closed legacy set
   // gets the anonymous answer; this endpoint belongs to the legacy dashboard. M3-9 (O10): so does an
   // invite-accepted account that has not enrolled in two-step sign-in yet.
-  if (!staff || !isLegacyDashboardStaff(staff) || (await inviteMfaPending(staff))) {
+  // UI M5: partner staff use /partner only, so a partner-scoped session gets the anonymous answer too.
+  if (!staff || !isLegacyDashboardStaff(staff) || staff.partnerId !== undefined || (await inviteMfaPending(staff))) {
     return NextResponse.json({ ok: false }, { status: 401 });
   }
 

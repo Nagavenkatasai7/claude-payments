@@ -31,6 +31,8 @@ export async function POST(req: NextRequest) {
   }
   // UI redesign M3-9 (O10): an invite-accepted account must enrol in two-step sign-in first.
   if (await inviteMfaPending(staff)) return NextResponse.json({ ok: false }, { status: 403 });
+  // UI M5: the copilots serve the legacy dashboard, which is SmartRemit-only; partner staff are refused.
+  if (staff.partnerId !== undefined) return NextResponse.json({ ok: false }, { status: 403 });
   const scope = scopeOf(staff);
 
   // 60 calls/hour per staff member; FAIL-OPEN on limiter errors (a Redis

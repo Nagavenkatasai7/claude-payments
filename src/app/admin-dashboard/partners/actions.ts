@@ -94,7 +94,8 @@ function supportActor(staff: Staff): SupportSettingsActor {
 // Shared gate for every partner-config action: admin role + same-partner scope
 // (a partner-admin configures only their OWN partner; a platform admin any).
 async function gatePartnerConfig(id: string): Promise<Awaited<ReturnType<typeof requireAdmin>>> {
-  const staff = await requireAdmin();
+  // UI M5: partner admins configure their tenant in /partner; this legacy surface is platform-only.
+  const staff = await requirePlatformAdmin();
   if (!id) throw new Error('Partner id is required.');
   const partner = await getPartnerStore().getPartner(id);
   if (!partner || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');

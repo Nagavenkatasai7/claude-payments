@@ -157,7 +157,8 @@ describe('recordChannelHealth (Redis + deduped audit + daily email)', { retry: 0
     expect(rows).toHaveLength(1);
     expect(rows[0].dedupe_key).toBe('partnerhealth:acme:auth_error:2026-09-25');
     expect(rows[0].payload.to).toEqual(['ops@acme.example']);
-    expect(rows[0].payload.text).toContain('/admin-dashboard/partners/acme');
+    expect(rows[0].payload.text).toContain('/partner/integrations/whatsapp'); // UI M5
+    expect(rows[0].payload.text).not.toContain('/admin-dashboard');
     expect(rows[0].payload.text).not.toMatch(/token\s*[:=]/i);
   });
 
