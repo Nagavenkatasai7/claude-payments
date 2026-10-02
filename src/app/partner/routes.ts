@@ -33,12 +33,15 @@ export const PARTNER_ROUTES = Object.freeze({
   integrationsWebhooks: { href: '/partner/integrations/webhooks', labelKey: 'partner.integrations.webhooks.title', policy: PARTNER_ADMIN, nav: false },
   // Merge plan 2d: charts over the tenant's live transfers (a money read).
   analytics: { href: '/partner/analytics', labelKey: 'partner.nav.analytics', policy: PARTNER_MONEY_READ, nav: true },
+  // Merge plan 2a/2b: money reads; every pause/resume/cancel and refund decision is PARTNER_ADMIN (D1).
+  schedules: { href: '/partner/schedules', labelKey: 'partner.nav.schedules', policy: PARTNER_MONEY_READ, nav: true },
+  refunds: { href: '/partner/refunds', labelKey: 'partner.nav.refunds', policy: PARTNER_MONEY_READ, nav: true },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
 // The final order: home, onboarding, transfers, customers, reports, support, staff, audit,
 // integrations, branding, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'customers', 'reports', 'support', 'staff', 'audit', 'integrations', 'branding', 'analytics', 'security'];
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'customers', 'reports', 'support', 'staff', 'audit', 'integrations', 'branding', 'analytics', 'schedules', 'refunds', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

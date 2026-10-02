@@ -52,7 +52,9 @@ export const staffStepUpLimitKeys = (username: string, token: string, nowMs: num
 export const staffStepUpKey = (token: string) => `staff_stepup:${sha256hex(token)}`;
 
 /** The action a step-up unlocks (audit meta only). */
-export type StepUpTarget = 'api_key.issue' | 'api_key.rotate' | 'webhook.endpoint.save' | 'webhook.secret.rotate' | 'webhook.replay';
+export type StepUpTarget =
+  | 'api_key.issue' | 'api_key.rotate' | 'webhook.endpoint.save' | 'webhook.secret.rotate' | 'webhook.replay'
+  | 'refund.approve' | 'refund.retry';
 
 export interface StaffStepUpDeps {
   redis: RedisLike;
