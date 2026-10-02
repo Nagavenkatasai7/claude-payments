@@ -189,3 +189,11 @@ export async function seedSender(
       set: { firstSeenAt, kycStatus: input.kycStatus ?? 'verified' },
     });
 }
+
+/**
+ * Remove a customer's legal name on file (a fixture for the nameless-sender paths). saveCustomer
+ * keeps a name on file when the saved copy carries none (2026-10-02), so a test clears it directly.
+ */
+export async function clearLegalName(db: Db, partnerId: PartnerId, phone: string): Promise<void> {
+  await db.execute(sql`UPDATE customers SET full_name_enc = NULL WHERE partner_id = ${partnerId} AND phone = ${phone}`);
+}

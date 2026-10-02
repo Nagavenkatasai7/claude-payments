@@ -13,7 +13,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, clearLegalName } from './helpers-db';
 import type { Draft } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -167,8 +167,7 @@ describe('POST /api/pay/<draftId> — fix 6 (ctx-01)', () => {
 
 describe('POST /api/pay/<draftId> — sender identity is required before screening', { retry: 0 }, () => {
   it('a sender with no legal name on file answers 400 sender_name_required and mutates nothing', async () => {
-    const c = await customerStore.getCustomer('default', PHONE);
-    await customerStore.saveCustomer({ ...c!, fullName: undefined });
+    await clearLegalName(db, 'default', PHONE);
     const draftId = await makeDraftWith('HDFC0001234 123456789012');
     const res = await post(draftId);
     expect(res.status).toBe(400);
@@ -180,7 +179,7 @@ describe('POST /api/pay/<draftId> — sender identity is required before screeni
     expect(await draftStore.getDraft(draftId)).not.toBeNull();
 
     // The SAME link works once the name is on file.
-    await customerStore.saveCustomer({ ...c!, fullName: 'Alex Rivera' });
+    await customerStore.setFullNameIfUnset('default', PHONE, 'Alex Rivera');
     expect((await post(draftId)).status).toBe(200);
     expect(await minted(draftId)).not.toBeNull();
   });

@@ -12,7 +12,7 @@ import { auditSubjectId } from '@/lib/customer-ref';
 import { base32Decode, totpAt } from '@/lib/totp';
 import { kycView, maskLegalName, profileView } from '@/lib/portal-profile';
 import type { Customer } from '@/lib/types';
-import { freshDb } from './helpers-db';
+import { freshDb, clearLegalName } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { seedTwoPartners } from './helpers-portal-two-partner';
 
@@ -270,7 +270,7 @@ describe('revealPortalLegalNameAction', () => {
   });
 
   it('no name on file → one error, no audit row', async () => {
-    await cs.saveCustomer({ ...(await cs.getCustomer('pa', phone))!, fullName: undefined });
+    await clearLegalName(db, 'pa', phone);
     await signIn('pa');
     expect(await revealPortalLegalNameAction()).toEqual({ error: 'unavailable' });
     expect(await audits('pii.reveal')).toHaveLength(0);
