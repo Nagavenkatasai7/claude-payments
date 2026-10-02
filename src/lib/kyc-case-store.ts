@@ -72,6 +72,11 @@ export interface DurableReviewOpts {
    * match that lands between the action's read and the lock is still caught.
    */
   allowScreeningHold?: boolean;
+  /**
+   * Merge plan 2c: the deciding staffer's scope, recorded as meta.actorScope. OPTIONAL and set
+   * only by the /partner decision ('partner'); absent ⇒ the meta is byte-identical to before.
+   */
+  actorScope?: 'platform' | 'partner';
 }
 
 /** One line of the customer page's KYC audit trail. */
@@ -286,6 +291,7 @@ export function createKycCaseStore(
             reason,
             source: durable.source,
             reviewerName: reviewer,
+            ...(durable.actorScope ? { actorScope: durable.actorScope } : {}),
           },
         });
         return next;

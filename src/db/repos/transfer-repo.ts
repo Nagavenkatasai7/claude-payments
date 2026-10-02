@@ -539,10 +539,15 @@ export function createTransferRepo(
      * pending→completed|failed. Returns null when the stored state isn't a
      * legal predecessor — concurrent ops clicks and webhook replays become
      * harmless no-ops. The forward-only `status` machine is untouched.
+     *
+     * `opts.from` narrows the move to exactly ONE prior state (it must also be a legal one): a
+     * staff decision that read `requested` claims requested → pending, so a row another decision
+     * already moved (say to `none`) is not claimed. Omitted = every legal predecessor (unchanged).
      */
     async updateRefund(
       id: string,
       next: { refundStatus: RefundStatus; refundRef?: string; refundedAt?: string },
+      opts: { from?: RefundStatus } = {},
     ): Promise<Transfer | null> {
       const legalFrom: Record<RefundStatus, RefundStatus[]> = {
         requested: ['none'],
@@ -551,6 +556,10 @@ export function createTransferRepo(
         completed: ['pending'],
         failed: ['pending'],
       };
+      const allowed = opts.from === undefined
+        ? legalFrom[next.refundStatus]
+        : legalFrom[next.refundStatus].filter((s) => s === opts.from);
+      if (allowed.length === 0) return null;
       const rows = await db
         .update(transfers)
         .set({
@@ -560,7 +569,7 @@ export function createTransferRepo(
         })
         .where(and(
           eq(transfers.id, id),
-          sql`${transfers.refundStatus} IN (${sql.join(legalFrom[next.refundStatus].map((s) => sql`${s}`), sql`, `)})`,
+          sql`${transfers.refundStatus} IN (${sql.join(allowed.map((s) => sql`${s}`), sql`, `)})`,
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -799,6 +808,28 @@ export function createTransferRepo(
           ne(transfers.complianceStatus, 'blocked'),
           fundingGate(),
           ...(partnerRelease ? senderClearForPartnerRelease(partnerRelease.partnerId) : []),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Merge plan 2c (owner D4): the PARTNER reject claim — in_review → cancelled with the same
+     * predicates a partner release carries (markPaidIfInReview with `partnerRelease`): the row is
+     * in `partnerId`'s tenant, not sanctions-blocked, and the SENDER's customer row there EXISTS
+     * with no PEP / watchlist hit. A flag raised after the caller's pre-check therefore refuses
+     * the reject (null ⇒ the caller throws and enqueues nothing). Platform and legacy rejects keep
+     * updateIfStatus (unchanged). The same snapshot residual as the release claim applies.
+     */
+    async cancelInReviewForPartner(id: string, partnerId: PartnerId, adminNote: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'cancelled', adminNote })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'in_review'),
+          ne(transfers.complianceStatus, 'blocked'),
+          ...senderClearForPartnerRelease(partnerId),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;

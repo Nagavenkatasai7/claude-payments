@@ -8,6 +8,7 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { partnerApiBaseUrl, statusCallbackUrl } from '@/lib/partner-integration-urls';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getAuthStore } from '@/lib/auth-store';
 import { getAuditLogStore } from '@/lib/audit-log-store';
@@ -1177,7 +1178,7 @@ export default async function PartnerDetailPage({
                   </pre>
 
                   <div className="mb-2 text-sm font-semibold">3 · Status callbacks (your rail → us)</div>
-                  <CopyField label="Status callback URL (POST lifecycle events here)" value={`${env.appBaseUrl}/api/payment-webhook/${integrations.payment.providerType === 'simulator' ? 'simulator' : 'http'}`} />
+                  <CopyField label="Status callback URL (POST lifecycle events here)" value={statusCallbackUrl(env.appBaseUrl, integrations.payment.providerType)} />
                   <pre className={`${PRE_CLASS} mb-4`}>
 {`POST ...   x-smartremit-signature: t=<unix>,v1=HMAC-SHA256(INBOUND webhook secret, t + "." + body)
 { "reference": "<transfer id>", "status": "created | funded | paid_out",
@@ -1187,7 +1188,7 @@ Duplicates and out-of-order events are ignored.`}
                   </pre>
 
                   <div className="mb-2 text-sm font-semibold">4 · Partner API (your systems → us)</div>
-                  <CopyField label="API base URL" value={`${env.appBaseUrl}/api/partner/v1`} />
+                  <CopyField label="API base URL" value={partnerApiBaseUrl(env.appBaseUrl)} />
                   <pre className={PRE_CLASS}>
 {`# Quote
 curl -X POST ${env.appBaseUrl}/api/partner/v1/quote \\

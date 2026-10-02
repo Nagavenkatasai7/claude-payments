@@ -52,6 +52,7 @@ export async function requireStaff(): Promise<Staff> {
   if (!staff) redirect('/login');
   if (!isLegacyDashboardStaff(staff)) redirect(staff.role === 'finance' ? '/partner' : '/login');
   if (await inviteMfaPending(staff)) redirect('/partner/security?enroll=1'); // M3-9 (O10): invite marker
+  if (staff.partnerId !== undefined) redirect('/partner'); // UI M5: partner staff use /partner only
   return staff;
 }
 

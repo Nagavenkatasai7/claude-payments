@@ -118,7 +118,7 @@ async function attempt(username: string, password: string): Promise<string> {
   try {
     return (await login(null, form(username, password))) ?? 'null';
   } catch (e) {
-    return (e as Error).message; // 'REDIRECT:/admin-dashboard' on success
+    return (e as Error).message; // 'REDIRECT:/admin-dashboard' (platform) or '/partner' (partner) on success
   }
 }
 
@@ -250,7 +250,7 @@ describe('auth.* audit trail (Program-Fix 17a)', { retry: 0 }, () => {
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     await getAuthStore().saveStaff(row({ username: 'pstaff', role: 'agent', partnerId: 'acme' }));
-    expect(await attempt('pstaff', 'correct-password')).toBe(OK);
+    expect(await attempt('pstaff', 'correct-password')).toBe('REDIRECT:/partner'); // UI M5 landing
     expect(audited.at(-1)).toMatchObject({
       action: 'auth.login', actorType: 'staff', actor: 'pstaff', subjectId: 'pstaff', partnerId: 'acme',
     });

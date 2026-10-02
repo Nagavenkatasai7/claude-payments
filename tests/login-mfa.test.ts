@@ -180,10 +180,21 @@ describe('staff sign-in second step (Program-Fix 17b)', { retry: 0 }, () => {
     await redis.set('staffmfa:pending:invitee', '1');
     expect(await pw('invitee')).toBe('REDIRECT:/partner/security?enroll=1');
     expect(cookieJar.has(SESSION_COOKIE)).toBe(true);
-    // Unmarked partner staff and platform staff land exactly as before.
+    // UI M5: unmarked partner staff land on /partner; platform staff keep /admin-dashboard.
     await getAuthStore().saveStaff(row({ username: 'teammate', role: 'agent', partnerId: 'acme' }));
-    expect(await pw('teammate')).toBe(OK);
+    expect(await pw('teammate')).toBe('REDIRECT:/partner');
     expect(await pw('ops')).toBe(OK);
+  });
+
+  it('UI M5: an enrolled partner account lands on /partner after the right code', async () => {
+    await pgPartnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await getAuthStore().saveStaff(row({ username: 'pmfa', role: 'admin', partnerId: 'acme' }));
+    await enrol('pmfa');
+    expect(await pw('pmfa')).toBe(TO_MFA);
+    expect(await code(goodCode('pmfa'))).toBe('REDIRECT:/partner');
   });
 
   it('enrolled → the password mints NO session; a pending cookie sends it to /login/mfa', async () => {

@@ -42,7 +42,17 @@ vi.mock('@/lib/partner-store', async () => {
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 
-import { requirePartnerStaff, requireScope, requireStaff, requireStaffSelf, requireTicketWorker } from '@/lib/auth';
+import {
+  requireAdmin,
+  requireOpsStaff,
+  requirePartnerStaff,
+  requirePlatformAdmin,
+  requireScope,
+  requireStaff,
+  requireStaffSelf,
+  requireSupportOrAdmin,
+  requireTicketWorker,
+} from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { PARTNER_ANY, PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
@@ -107,9 +117,9 @@ describe('requirePartnerStaff', () => {
   });
   it('partner agent on an admin surface → /partner; support on an ops surface → /partner', async () => {
     await signInAs({ partnerId: 'pa', role: 'agent' });
-    await expect(requirePartnerStaff(PARTNER_ADMIN)).rejects.toThrow('REDIRECT:/partner');
+    await expect(requirePartnerStaff(PARTNER_ADMIN)).rejects.toThrow(/^REDIRECT:\/partner$/);
     await signInAs({ username: 'u2', partnerId: 'pa', role: 'support' });
-    await expect(requirePartnerStaff(PARTNER_OPS)).rejects.toThrow('REDIRECT:/partner');
+    await expect(requirePartnerStaff(PARTNER_OPS)).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
   it('invite marker, not enrolled → enrolment; skipMfa (the security page) passes', async () => {
     await signInAs({ partnerId: 'pa', role: 'agent' });
@@ -139,9 +149,9 @@ describe('legacy gates and the invite marker (M3-9, O10)', () => {
     await expect(requireStaff()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
     await expect(requireTicketWorker()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
   });
-  it('an unmarked partner agent is unchanged', async () => {
+  it('UI M5: an unmarked partner agent is sent to /partner by the legacy gates', async () => {
     await signInAs({ partnerId: 'pa', role: 'agent' });
-    await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+    await expect(requireScope()).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
   it('requireStaffSelf admits the marked account (the enrolment actions stay reachable)', async () => {
     await signInAs({ partnerId: 'pa', role: 'agent' });
@@ -162,7 +172,8 @@ describe('legacy gates and the invite marker (M3-9, O10)', () => {
     if (!begun.ok) throw new Error('enrol refused');
     const { base32Decode, totpAt } = await import('@/lib/totp');
     expect(await mfa.confirmEnrolment('u1', totpAt(base32Decode(begun.secretBase32), Date.now()))).toBe('ok');
-    await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+    // Past the marker; UI M5 then sends partner staff to /partner (the marker is still cleared lazily).
+    await expect(requireScope()).rejects.toThrow(/^REDIRECT:\/partner$/);
     expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
   });
 });
@@ -189,9 +200,41 @@ describe('invite acceptance → first sign-in → enrolment (M3-9)', () => {
 
       await expect(requirePartnerStaff(PARTNER_ANY)).resolves.toMatchObject({ partnerId: 'pa', username: 'u1' });
       expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
-      await expect(requireScope()).resolves.toMatchObject({ staff: { username: 'u1' } });
+      await expect(requireScope()).rejects.toThrow(/^REDIRECT:\/partner$/); // UI M5: enrolled, so on to /partner
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// UI M5 (one partner dashboard): /admin-dashboard is SmartRemit-only. Every legacy gate runs through
+// requireStaff, so partner-scoped admin, agent and support staff are all sent to /partner; platform
+// staff are unchanged, and requireStaffSelf (enrolment + own password) still admits partner staff.
+describe('UI M5: the legacy gates send partner staff to /partner', () => {
+  for (const role of ['admin', 'agent', 'support'] as const) {
+    it(`a partner ${role} → /partner from every legacy gate`, async () => {
+      await signInAs({ partnerId: 'pa', role });
+      await expect(requireStaff()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requireScope()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requireTicketWorker()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requireAdmin()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requirePlatformAdmin()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requireSupportOrAdmin()).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(requireOpsStaff()).rejects.toThrow(/^REDIRECT:\/partner$/);
+    });
+    it(`a partner ${role} is still admitted by requireStaffSelf and requirePartnerStaff`, async () => {
+      await signInAs({ partnerId: 'pa', role });
+      await expect(requireStaffSelf()).resolves.toMatchObject({ username: 'u1' });
+      await expect(requirePartnerStaff(PARTNER_ANY)).resolves.toMatchObject({ partnerId: 'pa' });
+    });
+  }
+  it('platform staff are unchanged', async () => {
+    await signInAs({ partnerId: undefined, role: 'admin' });
+    await expect(requireStaff()).resolves.toMatchObject({ username: 'u1' });
+    await expect(requirePlatformAdmin()).resolves.toMatchObject({ username: 'u1' });
+  });
+  it('an empty-string partnerId is never platform scope: sent away from the legacy dashboard', async () => {
+    await signInAs({ partnerId: '', role: 'admin' });
+    await expect(requireStaff()).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
 });

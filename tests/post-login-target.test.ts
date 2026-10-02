@@ -60,18 +60,33 @@ describe('postLoginTarget', () => {
       '/admin-dashboard',
     );
   });
-  it('a partner agent without the marker → /admin-dashboard', async () => {
-    expect(await postLoginTarget(staff(), { redis: fakeRedis(), isEnrolled: async () => false })).toBe('/admin-dashboard');
+  it('a partner agent without the marker → /partner', async () => {
+    expect(await postLoginTarget(staff(), { redis: fakeRedis(), isEnrolled: async () => false })).toBe('/partner');
+  });
+  it('a partner admin and a partner finance member without the marker → /partner', async () => {
+    for (const role of ['admin', 'support', 'finance'] as const) {
+      expect(await postLoginTarget(staff({ role }), { redis: fakeRedis(), isEnrolled: async () => false })).toBe('/partner');
+    }
+  });
+  it('platform agent and support staff → /admin-dashboard', async () => {
+    for (const role of ['agent', 'support'] as const) {
+      expect(await postLoginTarget(staff({ partnerId: undefined, role }), { redis: fakeRedis(), isEnrolled: async () => false })).toBe(
+        '/admin-dashboard',
+      );
+    }
+  });
+  it('an empty-string partnerId is never platform scope → /partner (whose gate sends it to /login)', async () => {
+    expect(await postLoginTarget(staff({ partnerId: '' }), { redis: fakeRedis(), isEnrolled: async () => false })).toBe('/partner');
   });
   it('with the marker, not enrolled → /partner/security?enroll=1', async () => {
     const redis = fakeRedis();
     await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
     expect(await postLoginTarget(staff(), { redis, isEnrolled: async () => false })).toBe('/partner/security?enroll=1');
   });
-  it('with the marker, enrolled → /admin-dashboard', async () => {
+  it('with the marker, enrolled → /partner', async () => {
     const redis = fakeRedis();
     await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
-    expect(await postLoginTarget(staff(), { redis, isEnrolled: async () => true })).toBe('/admin-dashboard');
+    expect(await postLoginTarget(staff(), { redis, isEnrolled: async () => true })).toBe('/partner');
   });
   it('a marked finance member (a /partner-only role) → enrolment too', async () => {
     const redis = fakeRedis();

@@ -7,6 +7,7 @@ import {
   PARTNER_MONEY_READ,
   PARTNER_TICKETS,
   PARTNER_REPORTS,
+  PARTNER_TICKET_LEADS,
   KNOWN_PARTNER_ROLES,
 } from '@/lib/partner-access';
 import type { Staff } from '@/lib/types';
@@ -131,5 +132,16 @@ describe('decidePartnerAccess (SPEC §3 gate, pure)', () => {
   });
   it('the decision takes no request input at all (signature pin: 3 params)', () => {
     expect(decidePartnerAccess.length).toBe(3);
+  });
+});
+
+describe('PARTNER_TICKET_LEADS (merge plan 2e: who may assign tickets)', () => {
+  it('admits admin and support; an agent or finance member is bounced to /partner', () => {
+    expect([...PARTNER_TICKET_LEADS.roles]).toEqual(['admin', 'support']);
+    expect(Object.isFrozen(PARTNER_TICKET_LEADS) && Object.isFrozen(PARTNER_TICKET_LEADS.roles)).toBe(true);
+    for (const role of ['agent', 'finance'] as const) {
+      expect(decidePartnerAccess(mk({ role }), PARTNER_TICKET_LEADS, NO_MFA)).toEqual({ ok: false, redirectTo: '/partner' });
+    }
+    expect(decidePartnerAccess(mk({ partnerId: undefined, role: 'support' }), PARTNER_TICKET_LEADS, NO_MFA)).toEqual({ ok: false, redirectTo: '/admin-dashboard' });
   });
 });

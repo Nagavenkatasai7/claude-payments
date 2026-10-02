@@ -10,6 +10,11 @@ import {
   canViewTicket,
   claimOnce,
   contactAvailable,
+  escalationNote,
+  parseAssigneeField,
+  parseEscalationReason,
+  parseMineFilter,
+  supportQueueHref,
   getTenantTicket,
   getVisibleTicket,
   isTicketId,
@@ -269,5 +274,59 @@ describe('tenantStaffUsernames (who is shown by name)', () => {
     const { tenantStaffUsernames } = await import('@/lib/partner-tickets');
     const names = await tenantStaffUsernames(PA, ['mine'], async () => Promise.reject(new Error('down')));
     expect(names.size).toBe(0);
+  });
+});
+
+// Merge plan 2e: assign / escalate / the "mine" queue filter.
+describe('parseAssigneeField (the assign form value)', () => {
+  it('an empty value is an unassign; a bounded name is kept as typed (trimmed)', () => {
+    expect(parseAssigneeField('')).toEqual({ ok: true, assignee: null });
+    expect(parseAssigneeField('  ')).toEqual({ ok: true, assignee: null });
+    expect(parseAssigneeField(' sup1 ')).toEqual({ ok: true, assignee: 'sup1' });
+  });
+  it('a missing, non-string, over-long or control-character value is refused', () => {
+    for (const bad of [null, undefined, 42, 'x'.repeat(129), 'a\nb', 'a\u0000b']) expect(parseAssigneeField(bad), String(bad)).toEqual({ ok: false });
+  });
+});
+
+describe('parseEscalationReason', () => {
+  it('needs at least the staff-reason minimum, collapsed and bounded', () => {
+    expect(parseEscalationReason('too short')).toEqual({ ok: false, error: 'short' });
+    expect(parseEscalationReason(null)).toEqual({ ok: false, error: 'short' });
+    expect(parseEscalationReason('  Customer   says payout is late  ')).toEqual({ ok: true, reason: 'Customer says payout is late' });
+    const long = parseEscalationReason('word '.repeat(200));
+    expect(long.ok && long.reason.length).toBe(500);
+  });
+  it('refuses a phone- or account-length number', () => {
+    expect(parseEscalationReason('Please call 415 555 0101 99 today')).toEqual({ ok: false, error: 'number' });
+    expect(parseEscalationReason('Account 000011112222 is wrong')).toEqual({ ok: false, error: 'number' });
+  });
+  it('escalationNote is the fixed system-note shape', () => {
+    expect(escalationNote('Payout stuck for two days')).toBe('Escalated to SmartRemit: Payout stuck for two days');
+  });
+});
+
+describe('parseMineFilter + supportQueueHref', () => {
+  it('?mine=1 only for admin and support (an agent’s queue is already theirs)', () => {
+    expect(parseMineFilter('1', 'admin')).toBe(true);
+    expect(parseMineFilter('1', 'support')).toBe(true);
+    expect(parseMineFilter('1', 'agent')).toBe(false);
+    for (const v of ['0', 'true', '', undefined, ['1']]) expect(parseMineFilter(v, 'admin'), String(v)).toBe(false);
+  });
+  it('builds the queue links from the closed filter set', () => {
+    expect(supportQueueHref({})).toBe('/partner/support');
+    expect(supportQueueHref({ status: 'open' })).toBe('/partner/support?status=open');
+    expect(supportQueueHref({ mine: true })).toBe('/partner/support?mine=1');
+    expect(supportQueueHref({ status: 'pending', mine: true })).toBe('/partner/support?status=pending&mine=1');
+  });
+  it("listVisibleCustomerTickets({ mine }) narrows admin/support to their own; an agent's list is unchanged", async () => {
+    const ctx = (role: 'admin' | 'agent' | 'support', username: string) => ({ role, username, partnerId: PA });
+    await createTicketRepo(db).assign('tk_a2', 'sup1');
+    expect((await listVisibleCustomerTickets(ctx('support', 'sup1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a2']);
+    expect(await listVisibleCustomerTickets(ctx('admin', 'adm1'), { mine: true }, db)).toEqual([]);
+    expect((await listVisibleCustomerTickets(ctx('admin', 'adm1'), { mine: false }, db)).map((t) => t.id).sort()).toEqual(['tk_a1', 'tk_a2']);
+    expect((await listVisibleCustomerTickets(ctx('agent', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
+    // Never another tenant's ticket assigned to the same username.
+    expect((await listVisibleCustomerTickets(ctx('support', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
   });
 });

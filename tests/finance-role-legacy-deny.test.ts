@@ -151,15 +151,22 @@ describe('M3-6: legacy dashboard gates deny finance', () => {
     expect(isLegacyDashboardStaff(mk(''))).toBe(false);
   });
 
-  it('existing roles are unchanged by the new branch', async () => {
-    await signInAs({ partnerId: 'pa', role: 'agent' });
+  it('existing platform roles are unchanged by the new branch', async () => {
+    await signInAs({ partnerId: undefined, role: 'agent' });
     await expect(auth.requireScope()).resolves.toMatchObject({ staff: expect.objectContaining({ role: 'agent' }) });
-    await signInAs({ partnerId: 'pa', role: 'support' });
+    await signInAs({ partnerId: undefined, role: 'support' });
     await expect(auth.requireSupportOrAdmin()).resolves.toMatchObject({
       staff: expect.objectContaining({ role: 'support' }),
     });
     await signInAs({ partnerId: undefined, role: 'admin' });
     await expect(auth.requirePlatformAdmin()).resolves.toMatchObject({ role: 'admin' });
+  });
+
+  it('UI M5: partner agent and support are sent to /partner by the legacy gates (not to /login)', async () => {
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await expect(auth.requireScope()).rejects.toThrow(TO_PARTNER);
+    await signInAs({ partnerId: 'pa', role: 'support' });
+    await expect(auth.requireSupportOrAdmin()).rejects.toThrow(TO_PARTNER);
   });
 
   it('requirePartnerStaff admits finance on PARTNER_MONEY_READ and refuses PARTNER_OPS', async () => {

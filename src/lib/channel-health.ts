@@ -242,11 +242,12 @@ const EMAIL_SUBJECT: Record<ChannelHealthKind, string> = {
 };
 
 /** FIXED text only (plus the dashboard link): never a code body, phone or token. */
-export function buildHealthEmail(partnerId: PartnerId, kind: ChannelHealthKind): { subject: string; text: string } {
-  const link = `${env.appBaseUrl}/admin-dashboard/partners/${encodeURIComponent(partnerId)}`;
+export function buildHealthEmail(_partnerId: PartnerId, kind: ChannelHealthKind): { subject: string; text: string } {
+  // UI M5: partners fix their channel in the partner workspace (the legacy dashboard is SmartRemit-only).
+  const link = `${env.appBaseUrl}/partner/integrations/whatsapp`;
   return {
     subject: `SmartRemit: ${EMAIL_SUBJECT[kind]}`,
-    text: `${KIND_MESSAGE[kind]}\n\nOpen your dashboard to see details and fix it:\n${link}\n\nYou receive at most one email per issue per day. Change the alert address on the Support tab.`,
+    text: `${KIND_MESSAGE[kind]}\n\nOpen your dashboard to see details and fix it:\n${link}\n\nYou receive at most one email per issue per day. Change the alert address in Settings.`,
   };
 }
 

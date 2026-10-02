@@ -133,7 +133,7 @@ describe('requirePlatformAdmin', () => {
     await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 
-  it('redirects /admin-dashboard when staff has a partnerId (partner-admin, not platform)', async () => {
+  it('redirects to /partner when staff has a partnerId (partner-admin, not platform; UI M5)', async () => {
     const authStore = getAuthStore();
     const partnerStore = getPartnerStore();
     await partnerStore.savePartner({
@@ -149,6 +149,6 @@ describe('requirePlatformAdmin', () => {
     const token = await authStore.createSession('pa');
     cookieJar.set(SESSION_COOKIE, token);
 
-    await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/admin-dashboard');
+    await expect(requirePlatformAdmin()).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
 });

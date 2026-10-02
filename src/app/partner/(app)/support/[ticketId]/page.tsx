@@ -5,11 +5,13 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { PARTNER_ROUTES } from '../../../routes';
+import { PARTNER_TICKET_LEADS } from '@/lib/partner-access';
 import { t } from '@/lib/i18n';
 import { maskPhoneLast4 } from '@/lib/mask';
 import { newRequestKey } from '@/lib/portal-request-key';
 import {
   PARTNER_TICKET_STATUSES,
+  errName,
   getVisibleTicket,
   isTicketId,
   tenantStaffUsernames,
@@ -17,7 +19,9 @@ import {
 import { Badge, Card, PageHeader } from '@/components/ds';
 import type { Ticket, TicketMessage } from '@/lib/types';
 import { BackLink, TicketStatusBadge, formatWhen, priorityLabel, statusLabel } from '../support-bits';
-import { FollowUpForm, NoteForm, ReplyForm, StatusForm } from './ticket-forms';
+import { AssignForm, EscalateForm, FollowUpForm, NoteForm, ReplyForm, StatusForm } from './ticket-forms';
+import { tenantTicketAssignees } from '@/lib/ticket-assignable';
+import { logWarn } from '@/lib/log';
 
 export const metadata: Metadata = { title: t('partner.support.ticketTitle'), robots: { index: false, follow: false } };
 
@@ -80,9 +84,27 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
   const messages = await createTicketRepo(getDb()).listMessages(ticket.id, { includeInternal: isCustomer });
   const named = await tenantStaffUsernames(
     ctx.partnerId,
-    messages.filter((m) => m.actorType === 'staff').map((m) => m.actorId),
+    [...messages.filter((m) => m.actorType === 'staff').map((m) => m.actorId), ticket.assignedTo ?? ''],
     (u) => getAuthStore().getStaff(u),
   );
+  // Merge plan 2e: admin and support (never an agent) may (re)assign, to the tenant's own eligible
+  // staff only (the action re-checks). A failed staff read shows no picker (fixed copy, no error).
+  const canAssign = isCustomer && ticket.status !== 'closed' && PARTNER_TICKET_LEADS.roles.includes(ctx.role);
+  let assignees: { value: string; label: string }[] | null = null;
+  if (canAssign) {
+    try {
+      assignees = tenantTicketAssignees(await getAuthStore().listStaff(), ctx.partnerId).map((s) => ({
+        value: s.username,
+        label: s.name && s.name !== s.username ? `${s.name} (${s.username})` : s.username,
+      }));
+    } catch (err) {
+      logWarn('partner.support.assignees', errName(err), { partnerId: ctx.partnerId });
+    }
+  }
+  const currentAssignee = ticket.assignedTo ?? '';
+  const assigneeLabel = !ticket.assignedTo
+    ? t('partner.support.unassigned')
+    : t('partner.support.assignedTo', { name: named.has(ticket.assignedTo) ? ticket.assignedTo : t('partner.support.from.platform') });
   const closed = ticket.status === 'closed';
   const requestKeys = { reply: newRequestKey(), note: newRequestKey(), followUp: newRequestKey() };
   const back = isCustomer
@@ -133,6 +155,27 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
               <Card as="section" className="p-4 sm:p-6">
                 <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.noteTitle')}</h2>
                 <NoteForm id={ticket.id} requestKey={requestKeys.note} />
+              </Card>
+              {assignees ? (
+                <Card as="section" className="p-4 sm:p-6">
+                  <h2 className="mb-1 text-[17px] font-semibold text-ds-ink">{t('partner.support.assignTitle')}</h2>
+                  <p className="mb-3 text-[14px] text-ds-ink-muted">{assigneeLabel}</p>
+                  <AssignForm
+                    id={ticket.id}
+                    current={assignees.some((a) => a.value === currentAssignee) ? currentAssignee : ''}
+                    options={assignees}
+                  />
+                </Card>
+              ) : null}
+              <Card as="section" className="p-4 sm:p-6">
+                <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.escalateTitle')}</h2>
+                {ticket.status === 'waiting_admin' ? (
+                  <p role="status" className="text-[15px] text-ds-ink-muted">
+                    {t('partner.support.escalatedNote')}
+                  </p>
+                ) : (
+                  <EscalateForm id={ticket.id} />
+                )}
               </Card>
               {/* An escalated (waiting_admin) ticket is SmartRemit's to move: no partner status change. */}
               {ticket.status === 'waiting_admin' ? null : (

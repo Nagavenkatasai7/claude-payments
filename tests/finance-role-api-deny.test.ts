@@ -92,12 +92,17 @@ describe('M3-6: /api/dashboard/summary refuses finance', () => {
   it('anonymous → 401 (unchanged)', async () => {
     expect((await summaryGET()).status).toBe(401);
   });
-  it('an admin session is not refused (200), and a partner agent reads its own tenant', async () => {
+  it('a platform admin or agent session is not refused (200) and reads unscoped', async () => {
     currentStaff = mk({ role: 'admin' });
     expect((await summaryGET()).status).toBe(200);
-    currentStaff = mk({ role: 'agent', partnerId: 'pa' });
+    currentStaff = mk({ role: 'agent' });
     expect((await summaryGET()).status).toBe(200);
-    expect(transfersSummary).toHaveBeenLastCalledWith('pa');
+    expect(transfersSummary).toHaveBeenLastCalledWith(undefined);
+  });
+  it('UI M5: a partner agent session → 401 (the legacy dashboard is SmartRemit-only), no ledger read', async () => {
+    currentStaff = mk({ role: 'agent', partnerId: 'pa' });
+    expect((await summaryGET()).status).toBe(401);
+    expect(transfersSummary).not.toHaveBeenCalled();
   });
 });
 

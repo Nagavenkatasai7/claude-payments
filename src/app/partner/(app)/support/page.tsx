@@ -11,7 +11,9 @@ import {
   contactAvailable,
   errName,
   listVisibleCustomerTickets,
+  parseMineFilter,
   parseQueueStatus,
+  supportQueueHref,
   tenantStaffUsernames,
 } from '@/lib/partner-tickets';
 import { EmptyState, PageHeader, buttonVariants } from '@/components/ds';
@@ -23,7 +25,8 @@ export const metadata: Metadata = { title: t('partner.support.title'), robots: {
 
 // /partner/support (UI redesign M3-19): the SESSION tenant's customer support queue. Admin and
 // support see the tenant queue; an agent sees only the tickets assigned to them. The customer is
-// shown as ••••last4 only. Read-only here; the work happens on the ticket page.
+// shown as ••••last4 only. Read-only here; the work happens on the ticket page. Merge plan 2e:
+// ?mine=1 narrows an admin's or support member's queue to the tickets assigned to them.
 
 const FILTERS: readonly (TicketStatus | undefined)[] = [undefined, 'open', 'pending', 'resolved', 'closed'];
 const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring';
@@ -31,16 +34,18 @@ const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-
 export default async function PartnerSupportPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string | string[] }>;
+  searchParams: Promise<{ status?: string | string[]; mine?: string | string[] }>;
 }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const sp = await searchParams;
   const status = parseQueueStatus(typeof sp.status === 'string' ? sp.status : undefined);
+  const mine = parseMineFilter(sp.mine, ctx.role);
+  const showMine = parseMineFilter('1', ctx.role);
 
   let rows: Ticket[] | null = null;
   let named = new Set<string>();
   try {
-    rows = await listVisibleCustomerTickets(ctx, { status });
+    rows = await listVisibleCustomerTickets(ctx, { status, mine });
     named = await tenantStaffUsernames(
       ctx.partnerId,
       rows.map((r) => r.assignedTo ?? ''),
@@ -76,7 +81,7 @@ export default async function PartnerSupportPage({
           return (
             <Link
               key={f ?? 'all'}
-              href={f ? `${PARTNER_ROUTES.support.href}?status=${f}` : PARTNER_ROUTES.support.href}
+              href={supportQueueHref({ status: f, mine })}
               aria-current={current ? 'page' : undefined}
               className={dsCn(
                 'inline-flex min-h-10 items-center rounded-full border px-4 text-[13.5px] font-semibold',
@@ -89,12 +94,30 @@ export default async function PartnerSupportPage({
           );
         })}
       </nav>
+      {showMine ? (
+        <nav aria-label={t('partner.support.mineLabel')} className="-mt-2 mb-4 flex flex-wrap gap-2">
+          {[false, true].map((m) => (
+            <Link
+              key={String(m)}
+              href={supportQueueHref({ status, mine: m })}
+              aria-current={m === mine ? 'page' : undefined}
+              className={dsCn(
+                'inline-flex min-h-10 items-center rounded-full border px-4 text-[13.5px] font-semibold',
+                m === mine ? 'border-ds-primary bg-ds-tint text-ds-ink' : 'border-ds-border-strong bg-ds-surface text-ds-ink-muted hover:text-ds-ink',
+                FOCUS,
+              )}
+            >
+              {m ? t('partner.support.filterMine') : t('partner.support.filterAll')}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
       {rows === null ? (
         <LoadError message={t('partner.support.loadError')} />
       ) : rows.length === 0 ? (
         <EmptyState
           title={t('partner.support.emptyTitle')}
-          body={status ? t('partner.support.emptyFiltered') : t('partner.support.emptyBody')}
+          body={mine && !status ? t('partner.support.emptyMine') : status || mine ? t('partner.support.emptyFiltered') : t('partner.support.emptyBody')}
         />
       ) : (
         <section aria-label={t('partner.support.listCaption')}>

@@ -228,8 +228,18 @@ export async function releaseTransfer(
  * reject. Uncharged legacy rows keep the old cancel-only behavior.
  * Called by the compliance dashboard "Reject" action.
  * Throws if the transfer is not exactly in_review.
+ * Merge plan 2c (D4): the /partner reject action passes `partnerReject` with the session tenant:
+ * the claim then re-checks, atomically, the tenant, a non-blocked row and the sender's customer
+ * row (present, no PEP / watchlist hit), and the audit meta carries actorScope 'partner'. Omitted
+ * (platform and legacy callers) ⇒ unchanged.
  */
-export async function rejectTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function rejectTransfer(
+  store: Store,
+  db: Db,
+  id: string,
+  audit?: StaffAuditCtx,
+  partnerReject?: { partnerId: PartnerId },
+): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -245,9 +255,17 @@ export async function rejectTransfer(store: Store, db: Db, id: string, audit?: S
   // can never leave a cancelled, charged, UNREFUNDED transfer.
   const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+    // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
+    // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
+    const cancelled = partnerReject
+      ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
+      : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
     if (!cancelled) {
-      throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      throw new Error(
+        partnerReject
+          ? 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)'
+          : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+      );
     }
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
     // branches record the decision in this transaction.
@@ -256,6 +274,7 @@ export async function rejectTransfer(store: Store, db: Db, id: string, audit?: S
         previousStatus: 'in_review',
         newStatus: 'cancelled',
         refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+        ...(partnerReject ? { actorScope: 'partner' } : {}),
       });
     }
     if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
@@ -324,19 +343,37 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Pr
 }
 
 /**
+ * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
+ * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
+ * missing and nothing is written. Omitted = the existing unscoped reload (legacy callers).
+ */
+export interface RefundScope {
+  partnerId: PartnerId;
+}
+
+function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
+  return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
+}
+
+/**
  * Approve a CUSTOMER-REQUESTED refund: requested → pending + the durable
  * funding.refund effect, one transaction. The state is re-checked inside the
  * transaction, so a double-click (or a refund never requested) throws and
  * enqueues nothing — refunds are never minted from thin air.
  */
-export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, scope?: RefundScope): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    const transfer = await loadForRefund(repo, id, scope);
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'requested') {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
-    await repo.updateRefund(id, { refundStatus: 'pending' });
+    // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
+    // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
+    // call throws (rolls back) instead of starting a refund or auditing a no-op.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
+      throw new Error('Cannot approve: refund is not awaiting approval.');
+    }
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },
@@ -359,11 +396,15 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx): 
  * The guarded updateRefund (legal only from 'requested') is the gate — an
  * in-flight or completed refund can never be "dismissed" away.
  */
-export async function dismissRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function dismissRefund(db: Db, id: string, audit?: StaffAuditCtx, scope?: RefundScope): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const updated = await repo.updateRefund(id, { refundStatus: 'none' });
-    if (!updated) {
+    // A tenant-scoped call resolves the id inside the tenant first; a foreign id writes nothing.
+    if (scope && !(await loadForRefund(repo, id, scope))) {
+      throw new Error('Cannot dismiss: refund is not awaiting approval.');
+    }
+    const updated = await repo.updateRefund(id, { refundStatus: 'none' }, { from: 'requested' });
+    if (!updated || (scope && updated.partnerId !== scope.partnerId)) {
       throw new Error('Cannot dismiss: refund is not awaiting approval.');
     }
     // APPENDED after any existing note (a rail-failure note, a staff note) —
@@ -390,14 +431,19 @@ export async function dismissRefund(db: Db, id: string, audit?: StaffAuditCtx): 
  * provider reported failure), so each retry mints a unique key — while the
  * failed-state check inside the transaction keeps double-clicks to one.
  */
-export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, scope?: RefundScope): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    const transfer = await loadForRefund(repo, id, scope);
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'failed') {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
-    await repo.updateRefund(id, { refundStatus: 'pending' });
+    // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
+    // this check (not the key) is what keeps a concurrent second retry from enqueueing a second
+    // refund effect.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
+      throw new Error('Cannot retry: refund is not in a failed state.');
+    }
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },

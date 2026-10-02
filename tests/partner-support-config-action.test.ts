@@ -108,6 +108,7 @@ describe('saveSupportConfigAction keeps the disclosure block (the clobber fix)',
     expect(rows[0].meta).toEqual({
       old: { enableSupportPortal: true, autoAssign: 'none' },
       new: { enableSupportPortal: false, autoAssign: 'round_robin' },
+      actorScope: 'platform', // the session's scope (src/lib/partner-support-settings.ts)
     });
   });
 
@@ -135,7 +136,7 @@ describe('saveDisclosureConfigAction (Reg E provider identity, draft)', () => {
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ partner_id: 'p1', actor: 'admin', action: 'partner.disclosure_config', subject_id: 'p1' });
-    expect(rows[0].meta).toEqual({ old: null, new: DISCLOSURE });
+    expect(rows[0].meta).toEqual({ old: null, new: DISCLOSURE, actorScope: 'platform' });
   });
 
   it('splits licence ids on commas and new lines, dropping blanks', async () => {

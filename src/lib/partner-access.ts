@@ -30,6 +30,8 @@ export const PARTNER_OPS = policy('admin', 'agent');
 export const PARTNER_MONEY_READ = policy('admin', 'agent', 'finance');
 export const PARTNER_TICKETS = policy('admin', 'agent', 'support');
 export const PARTNER_REPORTS = policy('admin', 'finance');
+/** Merge plan 2e: who may (re)assign a support ticket. Agents never assign (the legacy rule). */
+export const PARTNER_TICKET_LEADS = policy('admin', 'support');
 
 export function decidePartnerAccess(
   staff: Staff | null,

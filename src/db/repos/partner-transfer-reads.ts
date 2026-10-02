@@ -39,6 +39,17 @@ export async function getPartnerTransfer(db: DbOrTx, partnerId: PartnerId, id: u
   return t && t.partnerId === partnerId ? t : null;
 }
 
+/**
+ * Merge plan 2b: THIS tenant's transfers with a refund in any non-'none' state (requested, pending,
+ * completed, failed), newest first. Masked rows (the default read): no decrypted destination or
+ * legal name. The tenant guard keeps this from ever becoming the unscoped all-tenant feed.
+ */
+export async function listPartnerRefunds(db: DbOrTx, partnerId: PartnerId): Promise<Transfer[]> {
+  requireTenant(partnerId);
+  const rows = await createTransferRepo(db).listActiveRefunds({ partnerId });
+  return rows.filter((t) => t.partnerId === partnerId);
+}
+
 export interface PartnerTransferDetail {
   transfer: Transfer;
   audit: TimelineAuditRow[];
