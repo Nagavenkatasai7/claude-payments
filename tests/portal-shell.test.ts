@@ -96,21 +96,31 @@ describe('portal layout', () => {
 });
 
 describe('portal sign-in page', () => {
+  const noQuery = () => ({ searchParams: Promise.resolve({}) });
   it('renders the page title hook, the brand line and the phone step', async () => {
-    const html = renderToStaticMarkup(await PortalLoginPage());
+    const html = renderToStaticMarkup(await PortalLoginPage(noQuery()));
     expect(html).toContain('sh-page-title');
     expect(html).toContain('>Sign in</h1>');
     expect(html).toContain('from Acme Remit');
     expect(html).toContain('name="phone"');
     expect(html).toContain('type="tel"');
     expect(html).not.toContain('name="pending"');
+    expect(html).not.toContain('data-from-account');
+  });
+  it('?from=account (the legacy password sign-in handed over) shows the fixed passwords-retired notice', async () => {
+    const html = renderToStaticMarkup(await PortalLoginPage({ searchParams: Promise.resolve({ from: 'account' }) }));
+    expect(html).toContain('data-from-account');
+    expect(html).toContain('Passwords are retired.');
+    const other = renderToStaticMarkup(await PortalLoginPage({ searchParams: Promise.resolve({ from: '<b>x</b>' }) }));
+    expect(other).not.toContain('data-from-account');
+    expect(other).not.toContain('<b>x</b>');
   });
   it('an already signed-in customer is sent to /portal', async () => {
     h.customer = { customer: {}, session: {}, site: SITE, token: 'x' };
-    await expect(PortalLoginPage()).rejects.toThrow('REDIRECT:/portal');
+    await expect(PortalLoginPage(noQuery())).rejects.toThrow('REDIRECT:/portal');
   });
   it('apex → 404', async () => {
     h.site = null;
-    await expect(PortalLoginPage()).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+    await expect(PortalLoginPage(noQuery())).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
   });
 });

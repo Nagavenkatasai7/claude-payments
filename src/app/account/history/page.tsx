@@ -36,7 +36,7 @@ function formatDate(iso: string): string {
 }
 
 export default async function AccountHistoryPage() {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/transfers' });
   const transfers = await getStore().listTransfersByPhone(customer.partnerId, customer.senderPhone, 50);
 
   return (

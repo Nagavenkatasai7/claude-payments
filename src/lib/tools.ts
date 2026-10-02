@@ -49,6 +49,7 @@ import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 import { BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC, isBillExpired } from './b2b-bill-expiry';
+import { customerHistoryUrl } from './customer-portal-url';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -2583,7 +2584,8 @@ async function listRecentTransfersTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const historyUrl = `${env.appBaseUrl}/account/history`;
+  // One customer portal (Oct 2): the partner's portal Transfers page when live, else /account/history.
+  const historyUrl = await customerHistoryUrl(ctx.partnerId);
   let rows: import('./types').Transfer[];
   try {
     rows = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, RECENT_SCAN); // newest-first, indexed

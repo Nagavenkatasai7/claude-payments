@@ -13,16 +13,25 @@ export const NAV_LINKS = [
   { href: '/about', label: 'About', hide: 760 },
 ] as const;
 
+/**
+ * SmartRemit's own customer portal (one customer portal, Oct 2): every customer link on the main site
+ * opens it, and the first WhatsApp-code sign-in creates the account. `send` is the default tenant's
+ * partner_sites slug; a slug is claimed once and a released one is never reused
+ * (src/lib/partner-slug-policy.ts), so the address is stable. The legacy /account/login stays for
+ * customers of partners without a portal and for old bookmarks.
+ */
+export const CUSTOMER_PORTAL_LOGIN = 'https://send.smartremit.ai/portal/login';
+
 /** The "Log in" menu. Partners go to the partner dashboard; the docs stay in the footer. */
 export const LOGIN_MENU = [
-  { href: '/account/login', title: 'Customers', sub: 'Track transfers & receipts' },
+  { href: CUSTOMER_PORTAL_LOGIN, title: 'Customers', sub: 'Track transfers & receipts' },
   { href: '/login', title: 'Employee portal', sub: 'Staff & partner dashboards' },
   { href: '/partner', title: 'Partners', sub: 'Partner dashboard & API keys' },
 ] as const;
 
-export const REGISTER_HREF = '/account/register';
+export const REGISTER_HREF = CUSTOMER_PORTAL_LOGIN;
 /** Phones (≤760 px) get a plain link here instead of the menu, as on the landing. */
-export const LOGIN_HREF = '/account/login';
+export const LOGIN_HREF = CUSTOMER_PORTAL_LOGIN;
 
 export type FooterLink = { href: string; label: string };
 export type FooterColumn = { heading: string; links: readonly FooterLink[] };
@@ -43,7 +52,7 @@ export const FOOTER_COLUMNS: readonly FooterColumn[] = [
   {
     heading: 'Log in',
     links: [
-      { href: '/account/login', label: 'Customers' },
+      { href: CUSTOMER_PORTAL_LOGIN, label: 'Customers' },
       { href: '/login', label: 'Employee portal' },
       { href: '/partner', label: 'Partners' },
     ],
@@ -51,8 +60,8 @@ export const FOOTER_COLUMNS: readonly FooterColumn[] = [
   {
     heading: 'Account',
     links: [
-      { href: '/account/register', label: 'Create account' },
-      { href: '/account/login', label: 'Customer portal' },
+      { href: CUSTOMER_PORTAL_LOGIN, label: 'Create account' },
+      { href: CUSTOMER_PORTAL_LOGIN, label: 'Customer portal' },
     ],
   },
 ];

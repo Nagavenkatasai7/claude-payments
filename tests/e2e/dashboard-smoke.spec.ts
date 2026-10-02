@@ -65,10 +65,13 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
   // real links. The footer renders all four visibly (the nav copy is a CSS
   // hover menu), so pin the footer instances.
   const footer = page.locator('footer');
-  await expect(footer.locator('a[href="/account/login"]').first()).toBeVisible();
+  // One customer portal (Oct 2): Customers, Create account and Customer portal all open
+  // SmartRemit's own customer portal (src/components/site/site-links.ts CUSTOMER_PORTAL_LOGIN).
+  const portalLogin = footer.locator('a[href="https://send.smartremit.ai/portal/login"]');
+  await expect(portalLogin.first()).toBeVisible();
+  await expect(portalLogin).toHaveCount(3);
   await expect(footer.locator('a[href="/login"]').first()).toBeVisible();
   await expect(footer.locator('a[href="/docs"]').first()).toBeVisible();
-  await expect(footer.locator('a[href="/account/register"]').first()).toBeVisible();
 });
 
 test('staff can log in and reach dashboard pages', async ({ page }) => {

@@ -130,8 +130,8 @@ export default async function ReceiptPage({
   params: Promise<{ transferId: string }>;
   searchParams: Promise<{ error?: string; cancel?: string }>;
 }) {
-  const customer = await requireCustomer();
   const { transferId } = await params;
+  const customer = await requireCustomer({ portalPath: `/portal/transfers/${encodeURIComponent(transferId)}` });
   const { error, cancel } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);

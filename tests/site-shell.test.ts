@@ -33,7 +33,7 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
     const { header } = await render();
     for (const t of ['Log in', 'Create account', 'Start on WhatsApp', 'Partner with us', 'About', 'Customers', 'Employee portal', 'Partners'])
       expect(header).toContain(t);
-    expect(header).toContain('href="/account/register"');
+    expect(header).toContain('href="https://send.smartremit.ai/portal/login"');
     expect(header).toMatch(/<nav[^>]*aria-label="Primary"/);
     expect(header).toContain('alt="SmartRemit.ai"');
   });
@@ -79,7 +79,7 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
 
   it('the login menu and footer point Partners at the partner dashboard (owner, 2026-10-02)', async () => {
     const { LOGIN_MENU } = await import('@/components/site/site-links');
-    expect(LOGIN_MENU.map((i) => i.href)).toEqual(['/account/login', '/login', '/partner']);
+    expect(LOGIN_MENU.map((i) => i.href)).toEqual(['https://send.smartremit.ai/portal/login', '/login', '/partner']);
     const { header, footer } = await render();
     expect(header).toMatch(/href="\/partner"[^>]*>(<span[^>]*>)?Partners/);
     expect(footer).toMatch(/href="\/partner"[^>]*>Partners/);
@@ -102,7 +102,7 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
       expect(header).toContain(cls);
     expect(footer).toContain('max-[760px]:grid-cols-2');
     // Phones (≤760) get a plain Log in link instead of the menu.
-    expect(header).toMatch(/<a[^>]*min-\[761px\]:hidden[^>]*href="\/account\/login"|<a[^>]*href="\/account\/login"[^>]*min-\[761px\]:hidden/);
+    expect(header).toMatch(/<a[^>]*min-\[761px\]:hidden[^>]*href="https:\/\/send\.smartremit\.ai\/portal\/login"|<a[^>]*href="https:\/\/send\.smartremit\.ai\/portal\/login"[^>]*min-\[761px\]:hidden/);
   });
 
   it('uses ds tokens for the landing colours (no raw palette classes)', async () => {

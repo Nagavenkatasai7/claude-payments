@@ -104,7 +104,7 @@ function LoginMenu() {
     <div className="group relative max-[760px]:hidden">
       <a
         className="inline-flex min-h-11 items-center gap-1.5 text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f]"
-        href="/account/login"
+        href="https://send.smartremit.ai/portal/login"
         aria-haspopup="true"
       >
         Log in
@@ -125,7 +125,7 @@ function LoginMenu() {
       {/* CSS-only hover/focus menu — every destination is a real link. */}
       <div className="invisible absolute right-0 top-full z-50 pt-2 opacity-0 transition-[opacity,visibility] duration-150 group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100">
         <div className="w-64 rounded-2xl border border-[#dbe4f0] bg-white p-1.5 shadow-[0_24px_60px_-24px_rgba(11,27,63,0.28)]">
-          <a className={item} href="/account/login">
+          <a className={item} href="https://send.smartremit.ai/portal/login">
             <span className="text-[14px] font-semibold text-[#0b1b3f]">Customers</span>
             <span className="text-[12px] text-[#475569]">Track transfers &amp; receipts</span>
           </a>
@@ -240,13 +240,13 @@ export default async function LandingPage({
             <LoginMenu />
             <a
               className="inline-flex min-h-11 items-center text-[14px] font-medium text-[#475569] transition-colors hover:text-[#0b1b3f] min-[761px]:hidden"
-              href="/account/login"
+              href="https://send.smartremit.ai/portal/login"
             >
               Log in
             </a>
             <a
               className="inline-flex min-h-10 items-center rounded-full border border-[#c5d3e6] px-4 text-[13.5px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white max-[1023px]:hidden"
-              href="/account/register"
+              href="https://send.smartremit.ai/portal/login"
             >
               Create account
             </a>
@@ -864,7 +864,7 @@ export default async function LandingPage({
             </span>
             <ul className={FOOT_LIST}>
               <li>
-                <a className="hover:text-[#0b1b3f]" href="/account/login">
+                <a className="hover:text-[#0b1b3f]" href="https://send.smartremit.ai/portal/login">
                   Customers
                 </a>
               </li>
@@ -886,12 +886,12 @@ export default async function LandingPage({
             </span>
             <ul className={FOOT_LIST}>
               <li>
-                <a className="hover:text-[#0b1b3f]" href="/account/register">
+                <a className="hover:text-[#0b1b3f]" href="https://send.smartremit.ai/portal/login">
                   Create account
                 </a>
               </li>
               <li>
-                <a className="hover:text-[#0b1b3f]" href="/account/login">
+                <a className="hover:text-[#0b1b3f]" href="https://send.smartremit.ai/portal/login">
                   Customer portal
                 </a>
               </li>

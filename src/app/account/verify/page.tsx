@@ -21,7 +21,7 @@ export const metadata = { title: 'Verify your identity · SmartRemit' };
  * submitted, shows the in-review state instead of re-offering the button.
  */
 export default async function VerifyPage() {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/profile' });
   // KYC is partner OPT-IN (sendGateActive) — when the customer's partner doesn't
   // gate sends on KYC there is nothing to verify, so show a friendly note instead
   // of the start-verification UI (the server action enforces the same gate).

@@ -36,7 +36,7 @@ export default async function NewSupportRequestPage({
 }: {
   searchParams: Promise<{ error?: string }>;
 }) {
-  const customer = await requireCustomer();
+  const customer = await requireCustomer({ portalPath: '/portal/help/tickets/new' });
 
   // Admin kill switch — same gate as the support landing; the action re-checks.
   const partner =

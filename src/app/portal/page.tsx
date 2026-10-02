@@ -1,30 +1,74 @@
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { Send, ShieldAlert, Wallet } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { listPortalTransfers, portalOwner } from '@/lib/portal-transfers';
 import { getPartnerStore } from '@/lib/partner-store';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
+import { getStore } from '@/lib/store';
+import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
+import { buildSummaryContext } from '@/lib/customer-summary';
+import { sentThisMonthUsd } from '@/lib/customer-stats';
+import { recipientRid } from '@/lib/portal-recipients';
+import { maskAccount } from '@/lib/tools';
+import { getDb } from '@/db/client';
+import { createRecipientRepo } from '@/db/repos/aux-repos';
 import { t } from '@/lib/i18n';
-import { Button, Card, EmptyState, PageHeader } from '@/components/ds';
+import { formatMoney } from '@/lib/ui/money';
+import { Button, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { TransferRows } from './transfers/transfer-rows';
 import { portalMetadata } from '@/lib/portal-metadata';
 
 export const generateMetadata = () => portalMetadata('portal.home.title');
 
+/** How many transfers the tiles read (the legacy /account home's window). */
+const STATS_SCAN = 200;
+/** Saved recipients shown on the home (the legacy /account home's count). */
+const SAVED_MAX = 6;
+
+/** One number tile: a label, the value, and a small line under it. */
+function StatTile({ label, value, sub }: { label: string; value: ReactNode; sub: string }) {
+  return (
+    <Card className="flex flex-col gap-1 p-4 sm:p-5">
+      <p className="text-[12px] font-semibold uppercase tracking-wide text-ds-ink-muted">{label}</p>
+      <p className="text-[22px] font-bold text-ds-ink tabular-nums">{value}</p>
+      <p className="text-[12px] text-ds-ink-muted">{sub}</p>
+    </Card>
+  );
+}
+
 /**
  * Home (UI redesign M2-7, Task 7.2): quick send, the KYC banner when the partner gates sends and the
  * customer is not verified, and the last 5 transfers (masked). The gates run on every render (the
  * layout is never the guard).
+ *
+ * One customer portal (Oct 2): also the legacy /account home's four tiles (sent this month, daily
+ * limit left, transfers, pending refunds; the same numbers, from the same helpers the bot's
+ * check_send_limit uses) and the saved recipients with "Send again" (the send page pre-selects the
+ * rid, src/app/portal/send/page.tsx). Every read is keyed by the HOST's partner and the SESSION
+ * phone, never by request input; the recipient list shows masked accounts only.
  */
 export default async function PortalHomePage() {
   const site = await requirePortalSite();
   const ctx = await requirePortalCustomer();
-  const [recent, partner] = await Promise.all([
-    listPortalTransfers(portalOwner(ctx), { limit: 5 }),
+  const owner = portalOwner(ctx);
+  const [recent, partner, scanned, todayUsedCents, book] = await Promise.all([
+    listPortalTransfers(owner, { limit: 5 }),
     getPartnerStore().getPartner(site.partnerId),
+    getStore().listTransfersByPhone(owner.partnerId, owner.phone, STATS_SCAN),
+    getDailyVolumeStore().getTodayCents(owner.partnerId, owner.phone),
+    createRecipientRepo(getDb()).listAllForSender(owner.partnerId, owner.phone),
   ]);
-  const kycNeeded = sendGateActive(partner) && !isSendVerified(ctx.customer);
+  const gateActive = sendGateActive(partner);
+  const kycNeeded = gateActive && !isSendVerified(ctx.customer);
+  const cap = buildSummaryContext(ctx.customer, scanned, todayUsedCents, gateActive, resolveEffectiveSendLimits(partner, ctx.customer));
+  const saved = book.slice(0, SAVED_MAX).map((r) => ({
+    rid: recipientRid(owner.partnerId, owner.phone, r.recipientPhone),
+    name: r.name,
+    masked: maskAccount(r.payoutMethod, r.payoutDestination),
+  }));
 
   return (
     <>
@@ -46,6 +90,17 @@ export default async function PortalHomePage() {
             </Button>
           </div>
         ) : null}
+
+        <div data-stat-tiles className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <StatTile label={t('portal.home.stat.sentMonth')} value={<Money amount={sentThisMonthUsd(scanned, new Date())} currency="USD" />} sub={t('portal.home.stat.sentMonthSub')} />
+          <StatTile
+            label={t('portal.home.stat.dailyLeft')}
+            value={<Money amount={cap.dailyRemainingUsd} currency="USD" />}
+            sub={t('portal.home.stat.dailyLeftSub', { limit: formatMoney(cap.dailyLimitUsd, 'USD') })}
+          />
+          <StatTile label={t('portal.home.stat.transfers')} value={scanned.length} sub={t('portal.home.stat.transfersSub')} />
+          <StatTile label={t('portal.home.stat.refunds')} value={cap.pendingRefunds} sub={t('portal.home.stat.refundsSub')} />
+        </div>
 
         <Card className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -79,6 +134,36 @@ export default async function PortalHomePage() {
             </div>
           )}
         </section>
+
+        {saved.length > 0 && !kycNeeded ? (
+          <section aria-labelledby="saved-heading" data-saved-recipients className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="saved-heading" className="text-[18px] font-bold text-ds-ink">
+                {t('portal.home.savedTitle')}
+              </h2>
+              <Link href="/portal/recipients" className="text-[14px] font-semibold text-ds-primary hover:underline">
+                {t('portal.home.viewAll')}
+              </Link>
+            </div>
+            <ul className="grid gap-3 sm:grid-cols-2">
+              {saved.map((r) => (
+                <li key={r.rid}>
+                  <Card className="flex items-center justify-between gap-3 p-4 sm:p-4">
+                    <div className="min-w-0">
+                      <p className="truncate text-[15px] font-semibold text-ds-ink">{r.name}</p>
+                      <p className="truncate text-[13px] text-ds-ink-muted tabular-nums">{r.masked}</p>
+                    </div>
+                    <Button asChild variant="ghost" size="sm">
+                      <Link href={`/portal/send?r=${encodeURIComponent(r.rid)}`} aria-label={t('portal.home.sendAgainTo', { name: r.name })}>
+                        {t('portal.home.sendAgain')}
+                      </Link>
+                    </Button>
+                  </Card>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
       </div>
     </>
   );

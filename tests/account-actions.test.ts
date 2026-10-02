@@ -125,6 +125,14 @@ vi.mock('@/lib/customer-mfa', async () => {
   };
 });
 
+// One customer portal (Oct 2): where the customer's partner runs a live portal, every session mint
+// hands off to it instead. null (the default) is a partner without a portal: behaviour unchanged.
+const portalOrigin = vi.hoisted(() => vi.fn(async (_partnerId: string): Promise<string | null> => null));
+vi.mock('@/lib/customer-portal-url', async (orig) => ({
+  ...(await orig<object>()),
+  customerPortalOrigin: (partnerId: string) => portalOrigin(partnerId),
+}));
+
 import {
   registerAction,
   verifyOtpAction,
@@ -170,6 +178,8 @@ beforeEach(async () => {
   mfaNowMs = Date.now();
   customerStore = createCustomerStore(db, createStore(fakeRedis(), db));
   authStore = createCustomerAuthStore(redis, customerStore);
+  portalOrigin.mockReset();
+  portalOrigin.mockImplementation(async () => null);
 });
 
 describe('OTP delivery uses the owning partner\'s WhatsApp identity (Program-Fix 49A)', () => {
@@ -859,3 +869,68 @@ describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', (
   });
 });
 
+
+describe('one customer portal: passwords end where the partner runs a portal', () => {
+  const ORIGIN = 'https://send.smartremit.ai';
+  const HANDOFF = `REDIRECT:${ORIGIN}/portal/login?from=account`;
+  const WHO = { partnerId: 'default', phone: NORM };
+
+  async function verifiedAccount(): Promise<void> {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    cookieJar.clear();
+    cookieSet.mockClear();
+    sentCodes.length = 0;
+  }
+
+  it('a correct password mints NO session and sends the customer to their portal sign-in', async () => {
+    await verifiedAccount();
+    portalOrigin.mockImplementation(async (p) => (p === 'default' ? ORIGIN : null));
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow(HANDOFF);
+    expect(cookieSet).not.toHaveBeenCalled();
+    expect(portalOrigin).toHaveBeenCalledWith('default');
+  });
+
+  it('a wrong password never asks about the portal (nothing is revealed before the password)', async () => {
+    await verifiedAccount();
+    portalOrigin.mockImplementation(async () => ORIGIN);
+    portalOrigin.mockClear();
+    const s = await loginAction(null, form({ phone: PHONE, password: 'not the password' }));
+    expect(s.step).toBe('login');
+    expect(portalOrigin).not.toHaveBeenCalled();
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('the register code mints NO session where a portal is on', async () => {
+    portalOrigin.mockImplementation(async () => ORIGIN);
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow(HANDOFF);
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('after a correct authenticator code: NO session where a portal is on', async () => {
+    await verifiedAccount();
+    const begun = await getCustomerMfaStore().beginEnrolment(WHO);
+    if (!begun.ok) throw new Error('enrol refused');
+    const secret = base32Decode(begun.secretBase32);
+    expect(await getCustomerMfaStore().confirmEnrolment(WHO, totpAt(secret, mfaNowMs))).toBe('ok');
+    mfaNowMs += 60_000;
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(s.step).toBe('mfa');
+    portalOrigin.mockImplementation(async () => ORIGIN);
+    await expect(
+      verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: totpAt(secret, mfaNowMs) })),
+    ).rejects.toThrow(HANDOFF);
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('a partner WITHOUT a portal keeps password sign-in exactly as today', async () => {
+    await verifiedAccount();
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow('REDIRECT:/account');
+    expect(cookieSet).toHaveBeenCalled();
+  });
+});
