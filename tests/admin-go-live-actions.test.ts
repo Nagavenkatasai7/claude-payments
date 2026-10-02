@@ -181,12 +181,12 @@ afterEach(() => {
 
 // ── approveGoLiveAction ──────────────────────────────────────────────────────
 describe('approveGoLiveAction', () => {
-  it('anonymous → /login; a partner admin (even of the same tenant) → /admin-dashboard, nothing written', async () => {
+  it('anonymous → /login; a partner admin (even of the same tenant) → /partner (UI M5), nothing written', async () => {
     await requestGoLive(db, 'pa', 'pa-owner');
     const before = JSON.stringify([await goLiveRows(), await auditRows()]);
     expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/login');
     await asPartnerAdmin();
-    expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/admin-dashboard');
+    expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/partner');
     await signInAs(redis, cookieJar, { username: 'plat-agent', role: 'agent', partnerId: undefined });
     expect(await run(approveGoLiveAction(goLiveForm('pa')))).toBe('/admin-dashboard');
     expect(JSON.stringify([await goLiveRows(), await auditRows()])).toBe(before);
@@ -271,11 +271,11 @@ describe('createPartnerFromRequestAction', () => {
   const snapshot = async () =>
     JSON.stringify([await partnerRows(), await goLiveRows(), await auditRows(), await emailRows(), inviteKeys()]);
 
-  it('anonymous → /login; a partner admin → /admin-dashboard, nothing written', async () => {
+  it('anonymous → /login; a partner admin → /partner (UI M5), nothing written', async () => {
     const before = await snapshot();
     expect(await run(createPartnerFromRequestAction(createForm()))).toBe('/login');
     await asPartnerAdmin();
-    expect(await run(createPartnerFromRequestAction(createForm()))).toBe('/admin-dashboard');
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe('/partner');
     expect(await snapshot()).toBe(before);
   });
 

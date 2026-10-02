@@ -194,22 +194,20 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   }
 
   // ── Verify isolation AS the partner-scoped agent ─────────────────────────
+  // UI M5 (one partner dashboard): partner staff land on /partner after sign-in, and the legacy
+  // /admin-dashboard is SmartRemit-only: every legacy route sends them to /partner (exact path, so
+  // an enrolment redirect such as /partner/security?enroll=1 cannot satisfy it).
+  const PARTNER_HOME = /\/partner\/?$/;
   await page.context().clearCookies();
   await loginAs(page, SMOKE_USERNAME, PARTNER_PASSWORD);
-  await expect(page).toHaveURL(/\/admin-dashboard/);
+  await expect(page).toHaveURL(PARTNER_HOME, { timeout: 15_000 });
+  await expect(page.locator('.sh-page-title')).toBeVisible();
+  await expect(page.locator('aside.sh-sidebar')).toBeVisible();
 
-  // Sidebar: should NOT contain "Partners" (list) or "Team" links.
-  // (Stricter contains-text assertion avoids matching "My partner" via "Partners".)
-  const sidebar = page.locator('aside.sh-sidebar');
-  await expect(sidebar.getByRole('link', { name: /^team$/i })).toHaveCount(0);
-  await expect(sidebar.getByRole('link', { name: /^partners$/i })).toHaveCount(0);
-
-  // Sidebar: SHOULD contain "My partner".
-  await expect(sidebar.getByRole('link', { name: /my partner/i })).toBeVisible();
-
-  // Visiting /admin-dashboard/partners redirects to /admin-dashboard/partners/<id>.
-  await gotoExpectRedirect(page, '/admin-dashboard/partners', new RegExp(`/admin-dashboard/partners/${partnerId}$`));
-
-  // Visiting /admin-dashboard/team redirects to /admin-dashboard.
-  await gotoExpectRedirect(page, '/admin-dashboard/team', /\/admin-dashboard\/?$/);
+  // The legacy dashboard, its partners list, this agent's own partner page and the Team page all
+  // redirect to /partner.
+  await gotoExpectRedirect(page, '/admin-dashboard', PARTNER_HOME);
+  await gotoExpectRedirect(page, '/admin-dashboard/partners', PARTNER_HOME);
+  await gotoExpectRedirect(page, `/admin-dashboard/partners/${partnerId}`, PARTNER_HOME);
+  await gotoExpectRedirect(page, '/admin-dashboard/team', PARTNER_HOME);
 });

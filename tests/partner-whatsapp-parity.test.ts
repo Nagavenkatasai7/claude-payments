@@ -11,6 +11,8 @@ import { EnvKeyProvider } from '@/lib/field-crypto';
 // action run the SAME core (src/lib/partner-whatsapp-config.ts). Twin tenants get the same input
 // through each surface; the stored config, the audit meta (minus the partner surface's actorScope
 // marker) and the Graph calls must match. Legacy rows stay unmarked (their suites pin that).
+// UI M5: the legacy tab is SmartRemit-only, so its side runs as a platform admin configuring the
+// twin tenant; a partner admin posting to it is sent to /partner (pinned at the end).
 
 const redis = fakeRedis();
 let db: Db;
@@ -62,7 +64,7 @@ import { saveWhatsappAction, testWhatsappAction, disconnectWhatsappAction } from
 // Legacy tenant L, partner-surface tenant P. Distinct numbers (the pnid is unique per tenant).
 const PN = { L: '1111111111111', P: '2222222222222' } as const;
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
-async function signInAs(username: string, partnerId: string): Promise<void> {
+async function signInAs(username: string, partnerId: string | undefined): Promise<void> {
   const s: Staff = { username, name: username, role: 'admin', permissions: perms, passwordHash: 'x', createdAt: new Date().toISOString(), partnerId };
   await getAuthStore().saveStaff(s);
   cookieJar.set(SESSION_COOKIE, await getAuthStore().createSession(s.username));
@@ -86,7 +88,8 @@ const norm = (v: unknown) => JSON.parse(JSON.stringify(v ?? null).replaceAll(PN.
 
 async function run(side: Side, kind: 'save' | 'disconnect' | 'test', fields: Record<string, string> = {}): Promise<{ threw: string | null; result: unknown }> {
   const pid = tenant(side);
-  await signInAs(`${pid}-admin`, pid);
+  if (side === 'L') await signInAs('ops-admin', undefined); // UI M5: the legacy tab is platform-only
+  else await signInAs(`${pid}-admin`, pid);
   const f = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.replace('<PN>', PN[side])]));
   try {
     if (side === 'L') {
@@ -174,6 +177,22 @@ describe('legacy admin tab ≡ /partner surface (one core)', () => {
     const rows = await db.select().from(auditEvents).orderBy(asc(auditEvents.id));
     expect((rows.find((r) => r.partnerId === 'tl')!.meta as Record<string, unknown>).actorScope).toBeUndefined();
     expect((rows.find((r) => r.partnerId === 'tp')!.meta as Record<string, unknown>).actorScope).toBe('partner');
+  });
+
+  it('UI M5: a partner admin (own tenant or another) posting to the legacy tab is sent to /partner, nothing written', async () => {
+    await store().saveIntegrations('tl', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN.L, token: 'EAA-stored', appSecret: 'stored-sec' } });
+    const g = graph();
+    vi.stubGlobal('fetch', g);
+    const before = JSON.stringify(await stateOf('L'));
+    for (const pid of ['tl', 'tp']) {
+      await signInAs(`${pid}-admin`, pid);
+      await expect(saveWhatsappConfigAction(form({ id: 'tl', phoneNumberId: PN.L, token: 'EAA-new' }))).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(saveWhatsappConfigAction(form({ id: 'tl', disconnect: 'on' }))).rejects.toThrow(/^REDIRECT:\/partner$/);
+      await expect(testWhatsappConnectionAction(form({ id: 'tl' }))).rejects.toThrow(/^REDIRECT:\/partner$/);
+    }
+    expect(g).not.toHaveBeenCalled();
+    expect(JSON.stringify(await stateOf('L'))).toBe(before);
+    expect((await db.select().from(auditEvents)).length).toBe(0);
   });
 
   it('the code MOVED: the legacy actions no longer carry the probe or the integrations write', () => {

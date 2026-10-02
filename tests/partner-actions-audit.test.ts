@@ -9,16 +9,30 @@ import { EnvKeyProvider } from '@/lib/field-crypto';
 // key issue/revoke leave an audit row, written in the SAME transaction as the
 // change. Meta is booleans / keyId / last4 / mode only — never a token, a
 // secret, a pnid or a full key. Cross-tenant replays write nothing.
+// UI M5: these legacy actions are platform-only (partner staff are sent to /partner, whose
+// equivalents carry their own audit tests), so the audited actor here is a platform admin.
 
 let currentStaff: { username: string; role: 'admin' | 'agent' | 'support'; partnerId?: string };
+// The REAL rules (src/lib/auth.ts): requireStaff sends ANY partner-scoped staff to /partner (UI M5);
+// requireAdmin / requirePlatformAdmin then need role admin (and no partnerId), else /admin-dashboard.
+const mockRequireStaff = () => {
+  if (currentStaff.partnerId !== undefined) throw new Error('NEXT_REDIRECT:/partner');
+  return currentStaff;
+};
 vi.mock('@/lib/auth', () => ({
-  requireAdmin: async () => currentStaff,
-  requireStaff: async () => currentStaff,
+  requireStaff: async () => mockRequireStaff(),
+  requireAdmin: async () => {
+    const s = mockRequireStaff();
+    if (s.role !== 'admin') throw new Error('NEXT_REDIRECT:/admin-dashboard');
+    return s;
+  },
   requirePlatformAdmin: async () => {
-    if (currentStaff.role !== 'admin' || currentStaff.partnerId !== undefined) throw new Error('NEXT_REDIRECT');
-    return currentStaff;
+    const s = mockRequireStaff();
+    if (s.role !== 'admin' || s.partnerId !== undefined) throw new Error('NEXT_REDIRECT:/admin-dashboard');
+    return s;
   },
 }));
+const TO_PARTNER = /^NEXT_REDIRECT:\/partner$/;
 
 let db: Db;
 vi.mock('@/db/client', async (orig) => {
@@ -85,7 +99,7 @@ beforeEach(async () => {
   await upsertApprovedGoLive(db, 'acme', 'system:0028-backfill');
   await upsertApprovedGoLive(db, 'beta', 'system:0028-backfill');
   integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
-  currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
+  currentStaff = { username: 'plat-admin', role: 'admin' };
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -101,7 +115,7 @@ describe('saveWhatsappConfigAction audits partner.whatsapp_config (booleans only
     expect(graph).not.toHaveBeenCalled();
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'acme-admin', actor_type: 'staff', action: 'partner.whatsapp_config', subject_id: 'acme' });
+    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'plat-admin', actor_type: 'staff', action: 'partner.whatsapp_config', subject_id: 'acme' });
     expect(rows[0].meta).toEqual({ pnidChanged: false, tokenChanged: false, verifyTokenChanged: false, appSecretChanged: false, pnidCleared: false });
   });
 
@@ -149,19 +163,35 @@ describe('saveWhatsappConfigAction audits partner.whatsapp_config (booleans only
     expect((await integrations.getIntegrations('acme')).whatsapp).toEqual({});
     const rows = await auditRows();
     expect(rows).toEqual([
-      { partner_id: 'acme', actor: 'acme-admin', actor_type: 'staff', action: 'partner.whatsapp.disconnect', subject_id: 'acme', meta: null },
+      { partner_id: 'acme', actor: 'plat-admin', actor_type: 'staff', action: 'partner.whatsapp.disconnect', subject_id: 'acme', meta: null },
     ]);
   });
 
-  it("cross-tenant: B's admin saving (or disconnecting) A's WhatsApp ⇒ not found, no write, no row", async () => {
+  // UI M5: B's admin (and A's own) never reach the scope check: sent to /partner. The /partner
+  // WhatsApp actions take the tenant from the session only (tests/partner-whatsapp-actions.test.ts
+  // "a form naming B acts on A only").
+  it("cross-tenant: B's admin (or A's own) saving or disconnecting A's WhatsApp ⇒ sent to /partner, no write, no row", async () => {
     await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored', appSecret: 'sec' } });
-    currentStaff = { username: 'beta-admin', role: 'admin', partnerId: 'beta' };
     const graph = vi.fn();
     vi.stubGlobal('fetch', graph);
-    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, verifyToken: 'evil' }))).rejects.toThrow('Partner not found.');
-    await expect(saveWhatsappConfigAction(form({ id: 'acme', disconnect: 'on' }))).rejects.toThrow('Partner not found.');
+    for (const actor of [
+      { username: 'beta-admin', role: 'admin' as const, partnerId: 'beta' },
+      { username: 'acme-admin', role: 'admin' as const, partnerId: 'acme' },
+    ]) {
+      currentStaff = actor;
+      await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, verifyToken: 'evil' }))).rejects.toThrow(TO_PARTNER);
+      await expect(saveWhatsappConfigAction(form({ id: 'acme', disconnect: 'on' }))).rejects.toThrow(TO_PARTNER);
+    }
     expect(graph).not.toHaveBeenCalled();
     expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBe(PN);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('an unknown partner ⇒ not found for a platform admin, no write, no row', async () => {
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
+    await expect(saveWhatsappConfigAction(form({ id: 'nope', disconnect: 'on' }))).rejects.toThrow('Partner not found.');
+    expect(graph).not.toHaveBeenCalled();
     expect(await auditRows()).toEqual([]);
   });
 });
@@ -171,7 +201,7 @@ describe('issueApiKeyAction / revokeApiKeyAction audit api_key.issue / api_key.r
     const r = await issueApiKeyAction('acme', 'test');
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'acme-admin', actor_type: 'staff', action: 'api_key.issue', subject_id: r.keyId });
+    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'plat-admin', actor_type: 'staff', action: 'api_key.issue', subject_id: r.keyId });
     expect(rows[0].meta).toEqual({ keyId: r.keyId, mode: 'test', last4: r.last4 });
     expect(JSON.stringify(rows)).not.toContain(r.plaintext);
   });
@@ -182,7 +212,7 @@ describe('issueApiKeyAction / revokeApiKeyAction audit api_key.issue / api_key.r
     expect(await createPartnerApiKeyStore(db).authenticate(r.plaintext)).toBeNull();
     const rows = (await auditRows()).filter((x) => x.action === 'api_key.revoke');
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'acme-admin', actor_type: 'staff', subject_id: r.keyId });
+    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'plat-admin', actor_type: 'staff', subject_id: r.keyId });
     expect(rows[0].meta).toEqual({ keyId: r.keyId, last4: r.last4 });
     expect(JSON.stringify(rows)).not.toContain(r.plaintext);
   });
@@ -199,16 +229,34 @@ describe('issueApiKeyAction / revokeApiKeyAction audit api_key.issue / api_key.r
     expect(await auditRows()).toEqual([]);
   });
 
-  it("cross-tenant: A's keyId replayed by B's admin (under B, or under A) ⇒ not found, key still live, no row", async () => {
+  it("cross-partner: A's keyId revoked under B ⇒ not found, key still live, no row (the key is bound to its partner)", async () => {
     const a = await issueApiKeyAction('acme');
     const before = await auditRows();
-    currentStaff = { username: 'beta-admin', role: 'admin', partnerId: 'beta' };
     await expect(revokeApiKeyAction('beta', form({ keyId: a.keyId }))).rejects.toThrow('Key not found.');
-    await expect(revokeApiKeyAction('acme', form({ keyId: a.keyId }))).rejects.toThrow('Partner not found.');
-    await expect(issueApiKeyAction('acme')).rejects.toThrow('Partner not found.');
+    await expect(revokeApiKeyAction('nope', form({ keyId: a.keyId }))).rejects.toThrow('Partner not found.');
     expect(await createPartnerApiKeyStore(db).authenticate(a.plaintext)).toMatchObject({ partnerId: 'acme' });
     expect(await auditRows()).toEqual(before);
     // B's audit listing holds none of A's rows.
+    expect(await createAuditRepo(db).listByPartner('beta')).toEqual([]);
+  });
+
+  // UI M5: partner admins manage keys on /partner/integrations/api-keys (cross-tenant pinned in
+  // tests/partner-api-key-actions.test.ts "3. cross-tenant: B's key id is not found").
+  it("cross-tenant: A's keyId replayed by B's admin (or by A's own admin) ⇒ sent to /partner, key still live, no row", async () => {
+    const a = await issueApiKeyAction('acme');
+    const before = await auditRows();
+    for (const actor of [
+      { username: 'beta-admin', role: 'admin' as const, partnerId: 'beta' },
+      { username: 'acme-admin', role: 'admin' as const, partnerId: 'acme' },
+    ]) {
+      currentStaff = actor;
+      await expect(revokeApiKeyAction('beta', form({ keyId: a.keyId }))).rejects.toThrow(TO_PARTNER);
+      await expect(revokeApiKeyAction('acme', form({ keyId: a.keyId }))).rejects.toThrow(TO_PARTNER);
+      await expect(issueApiKeyAction('acme')).rejects.toThrow(TO_PARTNER);
+      await expect(issueApiKeyAction('beta', 'test')).rejects.toThrow(TO_PARTNER);
+    }
+    expect(await createPartnerApiKeyStore(db).authenticate(a.plaintext)).toMatchObject({ partnerId: 'acme' });
+    expect(await auditRows()).toEqual(before);
     expect(await createAuditRepo(db).listByPartner('beta')).toEqual([]);
   });
 });

@@ -103,11 +103,11 @@ describe('changePartnerSlugAction (platform only)', () => {
   });
   it('a partner admin (any tenant) posting to it is redirected by requirePlatformAdmin, with no write', async () => {
     const before = await snapshot();
-    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow('REDIRECT:/login');
+    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow(/^REDIRECT:\/login$/);
     await signInAs({ username: 'pa-admin', partnerId: PA });
-    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow('REDIRECT:/admin-dashboard');
+    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow(/^REDIRECT:\/partner$/); // UI M5
     await signInAs({ username: 'plat-agent', role: 'agent' });
-    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow('REDIRECT:/admin-dashboard');
+    await expect(changePartnerSlugAction(changeForm())).rejects.toThrow(/^REDIRECT:\/admin-dashboard$/);
     expect(await snapshot()).toEqual(before);
   });
   it('a reason under 10 characters (or none) is refused before any write', async () => {
