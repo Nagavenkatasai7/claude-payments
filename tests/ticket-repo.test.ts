@@ -126,6 +126,18 @@ describe('ticket-repo — lifecycle', () => {
     expect((await repo.updateStatus(t2.id, 'resolved', { notFrom: [] }))?.status).toBe('resolved');
   });
 
+  it('assign with guard.from is a compare-and-set on the current assignee (null = unassigned)', async () => {
+    const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
+    expect(await repo.assign(t.id, 'sup1', { from: 'someone' })).toBeNull();
+    expect((await repo.assign(t.id, 'sup1', { from: null }))?.assignedTo).toBe('sup1');
+    // A second writer that read "unassigned" loses; nothing changes.
+    expect(await repo.assign(t.id, 'sup2', { from: null })).toBeNull();
+    expect((await repo.getTicket(t.id))?.assignedTo).toBe('sup1');
+    expect((await repo.assign(t.id, null, { from: 'sup1' }))?.assignedTo).toBeFalsy();
+    // No guard: unchanged behaviour.
+    expect((await repo.assign(t.id, 'sup3'))?.assignedTo).toBe('sup3');
+  });
+
   it('same-state transition is a no-op returning null', async () => {
     const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
     expect(await repo.updateStatus(t.id, 'open')).toBeNull();

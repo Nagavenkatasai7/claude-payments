@@ -5,7 +5,7 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Checkbox, Field, Select } from '@/components/ds';
 import type { ActionResult } from '../../../action-result';
 import type { TicketStatus } from '@/lib/types';
-import { internalNoteAction, replyAction, setStatusAction } from './actions';
+import { assignAction, escalateAction, internalNoteAction, replyAction, setStatusAction } from './actions';
 import { contactFollowUpAction } from '../contact/actions';
 
 // The /partner/support/[ticketId] forms (UI redesign M3-19). Plain <form action>s carrying the
@@ -23,6 +23,8 @@ const replySubmit = wrap(replyAction);
 const noteSubmit = wrap(internalNoteAction);
 const statusSubmit = wrap(setStatusAction);
 const followUpSubmit = wrap(contactFollowUpAction);
+const assignSubmit = wrap(assignAction);
+const escalateSubmit = wrap(escalateAction);
 
 function Result({ state, savedKey }: { state: ActionResult | null; savedKey: MessageKey }) {
   return (
@@ -138,6 +140,75 @@ export function FollowUpForm({ id, requestKey }: { id: string; requestKey: strin
       savedKey="partner.contact.followUpSent"
       testId="partner-contact-follow-up"
     />
+  );
+}
+
+/** Merge plan 2e: (re)assign. Shown to admin and support only; the action re-gates and re-checks. */
+export function AssignForm({
+  id,
+  current,
+  options,
+}: {
+  id: string;
+  current: string;
+  options: { value: string; label: string }[];
+}) {
+  const [state, formAction, pending] = useActionState(assignSubmit, null);
+  return (
+    <form action={formAction} className="flex flex-col gap-3" data-testid="partner-support-assign">
+      <input type="hidden" name="id" value={id} />
+      <Field name="assignee" label={t('partner.support.assignLabel')} hint={t('partner.support.assignHint')}>
+        {({ id: controlId, describedBy }) => (
+          <Select id={controlId} name="assignee" aria-describedby={describedBy} defaultValue={current}>
+            <option value="">{t('partner.support.assignNone')}</option>
+            {options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <div>
+        <Button type="submit" size="md" variant="ghost" disabled={pending}>
+          {pending ? t('partner.support.saving') : t('partner.support.assignSubmit')}
+        </Button>
+      </div>
+      <Result state={state} savedKey="partner.support.assignSaved" />
+    </form>
+  );
+}
+
+/** Merge plan 2e: escalate to SmartRemit with a typed reason (validated again on the server). */
+export function EscalateForm({ id }: { id: string }) {
+  const [state, formAction, pending] = useActionState(escalateSubmit, null);
+  const fieldId = useId();
+  return (
+    <form action={formAction} className="flex flex-col gap-3" data-testid="partner-support-escalate">
+      <input type="hidden" name="id" value={id} />
+      <label htmlFor={fieldId} className="text-[14px] font-semibold text-ds-ink">
+        {t('partner.support.escalateLabel')}
+      </label>
+      <textarea
+        id={fieldId}
+        name="reason"
+        required
+        minLength={10}
+        maxLength={500}
+        rows={3}
+        aria-describedby={`${fieldId}-hint`}
+        className={TEXTAREA}
+      />
+      <p id={`${fieldId}-hint`} className="text-[13px] text-ds-ink-muted">
+        {t('partner.support.escalateHint')}
+      </p>
+      <div>
+        <Button type="submit" size="md" variant="ghost" disabled={pending}>
+          {pending ? t('partner.support.saving') : t('partner.support.escalateSubmit')}
+        </Button>
+      </div>
+      <Result state={state} savedKey="partner.support.escalateSaved" />
+    </form>
   );
 }
 

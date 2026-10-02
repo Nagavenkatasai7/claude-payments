@@ -25,7 +25,7 @@ import {
   ComplianceDonut,
   FundingMix,
   TopRecipients,
-} from './charts';
+} from '@/components/charts/transfer-charts';
 
 function coerceWindow(raw: string | undefined): WindowDays {
   const n = Number(raw);

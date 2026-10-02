@@ -349,11 +349,21 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
       return rows[0] ? rowToTicket(rows[0]) : null;
     },
 
-    async assign(id: string, assignedTo: string | null): Promise<Ticket | null> {
+    /**
+     * Set (or clear) the assignee of a ticket that is not closed. `guard.from` (optional, merge
+     * plan 2e) makes it a compare-and-set: the UPDATE applies only while the CURRENT assignee is
+     * still `from` (null = unassigned), checked in the same WHERE, so a concurrent reassignment or
+     * a double submit is never silently overwritten (null is returned, nothing written).
+     */
+    async assign(id: string, assignedTo: string | null, guard: { from?: string | null } = {}): Promise<Ticket | null> {
       const rows = await db
         .update(tickets)
         .set({ assignedTo, updatedAt: new Date() })
-        .where(and(eq(tickets.id, id), sql`${tickets.status} <> 'closed'`))
+        .where(and(
+          eq(tickets.id, id),
+          sql`${tickets.status} <> 'closed'`,
+          guard.from === undefined ? undefined : sql`${tickets.assignedTo} IS NOT DISTINCT FROM ${guard.from}`,
+        ))
         .returning();
       return rows[0] ? rowToTicket(rows[0]) : null;
     },
