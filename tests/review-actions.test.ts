@@ -4,7 +4,7 @@ import { fakeRedis } from './helpers';
 import { createStore, type Store } from '@/lib/store';
 import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
-import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON } from '@/lib/compliance';
+import { POSSIBLE_MATCH_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import type { Db } from '@/db/client';
@@ -28,19 +28,6 @@ vi.mock('@/lib/store', async () => {
   return { ...actual, getStore: () => store };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
-// M3-10 claim re-check: `afterRead` runs right after the (real) sender pre-check read returns.
-const screeningHook: { afterRead: null | (() => Promise<unknown>) } = { afterRead: null };
-vi.mock('@/db/repos/customer-repo', async () => {
-  const actual = await vi.importActual<typeof import('@/db/repos/customer-repo')>('@/db/repos/customer-repo');
-  return {
-    ...actual,
-    readSenderScreeningFlags: async (...a: Parameters<typeof actual.readSenderScreeningFlags>) => {
-      const r = await actual.readSenderScreeningFlags(...a);
-      if (screeningHook.afterRead) await screeningHook.afterRead();
-      return r;
-    },
-  };
-});
 vi.mock('@/db/client', async (orig) => ({
   ...(await orig<typeof import('@/db/client')>()),
   getDb: () => db,
@@ -98,8 +85,8 @@ function form(values: Record<string, string>): FormData {
   return fd;
 }
 
-// M3-10 follow-up / Task 10.3: a partner-scoped legacy release needs the SENDER's customer row
-// (makeTransfer's phone) in the owning tenant, unflagged.
+// M3-10 follow-up / Task 10.3: seed / flag the SENDER's customer row (makeTransfer's phone) in the
+// owning tenant.
 const SENDER = '15551234567';
 const seedSender = (partnerId: string) => createCustomerRepo(db, async () => null).ensureCustomer(partnerId, SENDER);
 const flagSender = (partnerId: string, col: 'pep_hit' | 'watchlist_hit') =>
@@ -109,7 +96,6 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   mockRequireAdmin.mockReset();
-  screeningHook.afterRead = null;
 });
 
 describe('releaseTransferAction', () => {
@@ -138,25 +124,17 @@ describe('releaseTransferAction', () => {
 });
 
 // OWNER DECISION (2026-09-16): releasing a transfer that SmartRemit's OWN
-// screening flagged (owning partner kycMode 'ours') requires PLATFORM staff. A
-// partner-scoped admin may release only a 'delegated'-mode partner's hold.
+// screening flagged (owning partner kycMode 'ours') requires PLATFORM staff.
+// Partner staff never reach this admin-dashboard action (requireStaff
+// redirects them to /partner); their release rules are covered by
+// tests/partner-release-action.test.ts and tests/partner-release-claim.test.ts.
 describe('releaseTransferAction — platform staff required for an ours-mode hold', () => {
   async function outboxRows() {
     const r = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
     return (r as unknown as { rows: Array<{ kind: string; dedupe_key: string | null }> }).rows;
   }
 
-  it("refuses a PARTNER-scoped admin releasing a flagged transfer of a kycMode 'ours' partner: row stays in_review, NO outbox row", async () => {
-    mockRequireAdmin.mockResolvedValue({ username: 'padmin', role: 'admin', partnerId: 'default' });
-    await store.saveTransfer(makeTransfer({ id: 'own1', partnerId: 'default' })); // 'default' is kycMode 'ours'
-
-    await expect(releaseTransferAction(form({ id: 'own1' }))).rejects.toThrow(/permission/i);
-
-    expect((await store.getTransfer('own1'))?.status).toBe('in_review');
-    expect(await outboxRows()).toHaveLength(0);
-  });
-
-  it("a PLATFORM admin releases the same ours-mode hold: paid + the rail effect is enqueued", async () => {
+  it("a PLATFORM admin releases an ours-mode hold: paid + the rail effect is enqueued", async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
     await store.saveTransfer(makeTransfer({ id: 'own2', partnerId: 'default' }));
 
@@ -165,25 +143,13 @@ describe('releaseTransferAction — platform staff required for an ours-mode hol
     expect((await store.getTransfer('own2'))?.status).toBe('paid');
     expect(await outboxRows()).toEqual([{ kind: 'mock.settle', dedupe_key: 'mocksettle:own2' }]);
   });
-
-  it("a PARTNER-scoped admin can still release a kycMode 'delegated' partner's own hold", async () => {
-    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
-      VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
-    await seedSender('delg');
-    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
-    await store.saveTransfer(makeTransfer({ id: 'del1', partnerId: 'delg' }));
-
-    await releaseTransferAction(form({ id: 'del1', note: 'docs verified' }));
-
-    expect((await store.getTransfer('del1'))?.status).toBe('paid');
-    expect(await outboxRows()).toEqual([{ kind: 'mock.settle', dedupe_key: 'mocksettle:del1' }]);
-  });
 });
 
 // Program-Fix 43 follow-up (owner-directed): (1) every release records a
-// REASON — refused before any mutation when the bounded note is blank, for
-// platform and partner staff alike; (2) a hold that sanctions / name screening
-// raised is PLATFORM-only to release, even for a kycMode 'delegated' partner.
+// REASON — refused before any mutation when the bounded note is blank; (2) a
+// hold that sanctions / name screening raised is PLATFORM-only to release, even
+// for a kycMode 'delegated' partner (the partner-side refusal is covered in
+// tests/partner-release-action.test.ts).
 describe('releaseTransferAction — mandatory reason + screening holds are platform-only', () => {
   async function outboxRows() {
     const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
@@ -217,59 +183,6 @@ describe('releaseTransferAction — mandatory reason + screening holds are platf
     expect(await auditRows()).toEqual([]);
   });
 
-  it("refuses a delegated partner's admin releasing a blank-note hold too", async () => {
-    await delegatedPartner();
-    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
-    await store.saveTransfer(makeTransfer({ id: 'nr2', partnerId: 'delg' }));
-
-    await expect(releaseTransferAction(form({ id: 'nr2', note: ' ' }))).rejects.toThrow(/reason is required/i);
-    expect((await store.getTransfer('nr2'))?.status).toBe('in_review');
-    expect(await auditRows()).toEqual([]);
-  });
-
-  it("a delegated partner's admin releasing with a reason writes transfer.release with actor + reason", async () => {
-    await delegatedPartner();
-    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
-    await store.saveTransfer(makeTransfer({ id: 'nr3', partnerId: 'delg' }));
-
-    await releaseTransferAction(form({ id: 'nr3', note: 'source of funds verified' }));
-
-    const r = await db.execute(sql`SELECT actor, action, meta FROM audit_events ORDER BY id`);
-    expect((r as unknown as { rows: unknown[] }).rows).toEqual([
-      { actor: 'dadmin', action: 'transfer.release', meta: expect.objectContaining({ reason: 'source of funds verified' }) },
-    ]);
-  });
-
-  it.each([
-    [POSSIBLE_MATCH_REASON],
-    [LIST_UNAVAILABLE_REASON],
-  ])("refuses a delegated partner's admin releasing a SCREENING hold (%s): stays in_review, no outbox, no audit", async (reason) => {
-    await delegatedPartner();
-    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
-    await store.saveTransfer(makeTransfer({ id: 'sc1', partnerId: 'delg', complianceReasons: ['Large transfer amount.', reason] }));
-
-    await expect(releaseTransferAction(form({ id: 'sc1', note: 'looks fine to us' }))).rejects.toThrow(/permission/i);
-
-    expect((await store.getTransfer('sc1'))?.status).toBe('in_review');
-    expect(await outboxRows()).toEqual([]);
-    expect(await auditRows()).toEqual([]);
-  });
-
-  it("a delegated partner's admin releases an EDD-only hold end to end: paid + rail effect + audit with actor and reason", async () => {
-    await delegatedPartner();
-    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
-    await store.saveTransfer(makeTransfer({ id: 'edd1', partnerId: 'delg', complianceReasons: ['edd_required'] }));
-
-    await releaseTransferAction(form({ id: 'edd1', note: 'EDD documents received' }));
-
-    expect((await store.getTransfer('edd1'))?.status).toBe('paid');
-    expect(await outboxRows()).toEqual([{ kind: 'mock.settle' }]);
-    const r = await db.execute(sql`SELECT actor, action, meta FROM audit_events ORDER BY id`);
-    expect((r as unknown as { rows: unknown[] }).rows).toEqual([
-      { actor: 'dadmin', action: 'transfer.release', meta: expect.objectContaining({ reason: 'EDD documents received' }) },
-    ]);
-  });
-
   it('a PLATFORM admin may still release a screening hold (with a reason)', async () => {
     await delegatedPartner();
     mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
@@ -282,64 +195,17 @@ describe('releaseTransferAction — mandatory reason + screening holds are platf
   });
 });
 
-// UI redesign M3-10 Task 10.3 / O8 (review L1 on #422): for PARTNER-scoped staff the legacy release
-// follows the same rule as /partner (isPartnerReleasableHold, incl. the sender PEP/watchlist check).
-// Platform staff are unchanged.
-describe('releaseTransferAction — partner scope follows the /partner allowlist (M3-10 Task 10.3)', () => {
-  async function outboxRows() {
-    const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
-    return (r as unknown as { rows: Array<{ kind: string }> }).rows;
-  }
-  async function auditRows() {
-    const r = await db.execute(sql`SELECT action FROM audit_events ORDER BY id`);
-    return (r as unknown as { rows: Array<{ action: string }> }).rows;
-  }
+// UI redesign M3-10 Task 10.3 / O8 (review L1 on #422): PARTNER-scoped staff follow the /partner
+// allowlist (isPartnerReleasableHold, incl. the sender PEP/watchlist check); those cases live in
+// tests/partner-release-action.test.ts and tests/partner-release-claim.test.ts, since partner staff
+// never reach this admin-dashboard action. Platform staff are unchanged.
+describe('releaseTransferAction — platform staff are unaffected by the partner allowlist (M3-10 Task 10.3)', () => {
   beforeEach(async () => {
     await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
       VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
     await seedSender('delg');
   });
-  const asPartnerAdmin = () => mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
   const asPlatform = () => mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
-  const refused = async (id: string) => {
-    await expect(releaseTransferAction(form({ id, note: 'reviewed by the partner team' }))).rejects.toThrow(/permission/i);
-    expect((await store.getTransfer(id))?.status).toBe('in_review');
-    expect(await outboxRows()).toEqual([]);
-    expect(await auditRows()).toEqual([]);
-  };
-
-  it.each([
-    ['an AML hold', [AML_HOLD_REASON]],
-    ['an AML hold mixed with an allowlisted reason', ['Large transfer amount.', AML_HOLD_REASON]],
-    ['an unknown reason', ['Something new.']],
-    ['a screening hold', [POSSIBLE_MATCH_REASON]],
-  ])('refuses a partner-scoped admin releasing %s: stays in_review, no outbox, no audit', async (_l, reasons) => {
-    asPartnerAdmin();
-    await store.saveTransfer(makeTransfer({ id: 'n1', partnerId: 'delg', complianceReasons: reasons }));
-    await refused('n1');
-  });
-
-  it.each(['pep_hit', 'watchlist_hit'] as const)('refuses a partner-scoped admin when the sender has %s (allowlisted reasons)', async (col) => {
-    await flagSender('delg', col);
-    asPartnerAdmin();
-    await store.saveTransfer(makeTransfer({ id: 'n2', partnerId: 'delg' }));
-    await refused('n2');
-  });
-
-  it('refuses a partner-scoped admin when the sender customer row is missing (fail closed)', async () => {
-    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'delg'`);
-    asPartnerAdmin();
-    await store.saveTransfer(makeTransfer({ id: 'n3', partnerId: 'delg' }));
-    await refused('n3');
-  });
-
-  it('a partner-scoped admin still releases an allowlisted hold of an unflagged sender', async () => {
-    asPartnerAdmin();
-    await store.saveTransfer(makeTransfer({ id: 'n4', partnerId: 'delg', complianceReasons: ['High transfer velocity.', 'edd_required'] }));
-    await releaseTransferAction(form({ id: 'n4', note: 'reviewed by the partner team' }));
-    expect((await store.getTransfer('n4'))?.status).toBe('paid');
-    expect(await auditRows()).toEqual([{ action: 'transfer.release' }]);
-  });
 
   it('PLATFORM staff are unchanged: an AML hold of a PEP-flagged sender still releases', async () => {
     await flagSender('delg', 'pep_hit');
@@ -347,20 +213,6 @@ describe('releaseTransferAction — partner scope follows the /partner allowlist
     await store.saveTransfer(makeTransfer({ id: 'n5', partnerId: 'delg', complianceReasons: [AML_HOLD_REASON] }));
     await releaseTransferAction(form({ id: 'n5', note: 'cleared by platform compliance' }));
     expect((await store.getTransfer('n5'))?.status).toBe('paid');
-  });
-
-  it.each(['pep_hit', 'watchlist_hit'] as const)('a partner-scoped admin is refused when %s is set AFTER the pre-check read (the claim re-checks it): stays in_review, no outbox, no audit', async (col) => {
-    asPartnerAdmin();
-    await store.saveTransfer(makeTransfer({ id: 'n7', partnerId: 'delg' }));
-    screeningHook.afterRead = () => flagSender('delg', col);
-    try {
-      await expect(releaseTransferAction(form({ id: 'n7', note: 'reviewed by the partner team' }))).rejects.toThrow(/Cannot release/);
-    } finally {
-      screeningHook.afterRead = null;
-    }
-    expect((await store.getTransfer('n7'))?.status).toBe('in_review');
-    expect(await outboxRows()).toEqual([]);
-    expect(await auditRows()).toEqual([]);
   });
 
   it('PLATFORM staff are unchanged: a hold whose sender has NO customer row still releases', async () => {

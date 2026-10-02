@@ -125,16 +125,17 @@ describe('schedule actions — gate (test 3)', () => {
     expect(await auditRows()).toEqual([]);
   });
 
-  it('an agent without canCancel is refused; one WITH canCancel (own tenant) may pause', async () => {
+  it('an agent without canCancel is refused; one WITH canCancel may pause', async () => {
     currentStaff = staff({
-      username: 'ag', role: 'agent', partnerId: 'A',
+      username: 'ag', role: 'agent',
       permissions: { canCancel: false, canResend: true, canAssign: true },
     });
     await expect(cancelScheduleAction(form({ id: 'sa' }))).rejects.toThrow('You do not have permission');
     expect(await statusOf('sa')).toBe('active');
+    expect(await auditRows()).toEqual([]);
 
     currentStaff = staff({
-      username: 'ag2', role: 'agent', partnerId: 'A',
+      username: 'ag2', role: 'agent',
       permissions: { canCancel: true, canResend: false, canAssign: false },
     });
     await pauseScheduleAction(form({ id: 'sa' }));

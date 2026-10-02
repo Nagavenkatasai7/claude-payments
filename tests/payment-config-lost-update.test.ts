@@ -179,15 +179,6 @@ describe('savePaymentConfigAction: write and audit commit together', () => {
     for (const s of ['sg_1', 'sg_2', 'wh_1', 'rail2.acme-test.com', 'rail.acme-test.com']) expect(text).not.toContain(s);
   });
 
-  it('a partner admin saving its own tenant is audited with actorScope partner', async () => {
-    currentStaff = { username: 'acme-admin', role: 'admin', partnerId: 'acme' };
-    await savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: '' }));
-    const rows = await auditRows();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].actor).toBe('acme-admin');
-    expect(rows[0].meta).toMatchObject({ settlementUrlChanged: false, signingSecretChanged: false, webhookSecretChanged: false, actorScope: 'partner' });
-  });
-
   it('a refused settlement URL writes nothing: no config change, no audit row', async () => {
     await expect(
       savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: 'http://169.254.169.254/' })),

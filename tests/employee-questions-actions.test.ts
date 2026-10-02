@@ -4,10 +4,11 @@ import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
 // employee-questions actions — the internal-ticket flow (support staff ASK,
-// admins ANSWER/resolve/close) over real PGlite. Covers: creation pinned to
-// the asker's tenant, support staff seeing ONLY their own questions, the admin
-// queue (platform-wide vs partner-pinned), audited answers/status changes, and
-// the 404-never-403 collapse for out-of-scope and customer-kind tickets.
+// admins ANSWER/resolve/close) over real PGlite. Covers: creation attributed
+// to the asker, support staff seeing ONLY their own questions, the platform-wide
+// admin queue, audited answers/status changes, and the 404-never-403 collapse
+// for out-of-scope and customer-kind tickets. Partner staff never reach these
+// admin-dashboard actions (requireStaff redirects them to /partner).
 
 // Mutable staff identity — requireSupportOrAdmin returns {staff, scope}.
 let currentStaff: Staff;
@@ -117,16 +118,6 @@ describe('askQuestionAction', () => {
     expect(msgs[0].body).toBe('Customer asked about X.');
   });
 
-  it("is PINNED to the asker's tenant — a form-smuggled partnerId is ignored", async () => {
-    currentStaff = mkStaff('p1sup', 'support', 'p1');
-    const fd = askForm();
-    fd.set('partnerId', 'p2'); // hostile extra field
-    await askQuestionAction(fd);
-    const all = await createTicketRepo(db).listTickets({ kind: 'internal' });
-    expect(all).toHaveLength(1);
-    expect(all[0].partnerId).toBe('p1');
-  });
-
   it('rejects a missing subject or question', async () => {
     await expect(askQuestionAction(askForm('', 'body'))).rejects.toThrow(/required/i);
     await expect(askQuestionAction(askForm('subject', '  '))).rejects.toThrow(/required/i);
@@ -151,18 +142,13 @@ describe('visibility (listEmployeeQuestions / getEmployeeQuestion)', () => {
     expect(own?.messages).toHaveLength(1);
   });
 
-  it('platform admins see the whole queue; partner admins are pinned to their partner', async () => {
+  it('platform admins see the whole queue', async () => {
     await seedQuestion('default', 'sup1');
     await seedQuestion('p1', 'p1sup');
     await seedQuestion('p2', 'p2sup');
 
     currentStaff = mkStaff('root', 'admin');
     expect(await listEmployeeQuestions(currentStaff)).toHaveLength(3);
-
-    currentStaff = mkStaff('p1admin', 'admin', 'p1');
-    const p1Seen = await listEmployeeQuestions(currentStaff);
-    expect(p1Seen).toHaveLength(1);
-    expect(p1Seen[0].partnerId).toBe('p1');
   });
 
   it('status filter narrows the admin queue', async () => {
