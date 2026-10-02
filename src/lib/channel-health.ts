@@ -212,11 +212,10 @@ export interface ChannelBannerModel {
   variant: 'default' | 'destructive';
   title: string;
   lines: string[];
-  href: string;
 }
 
 /** Pure: what a page's banner shows for a summary (null ⇒ render nothing). */
-export function channelBannerModel(summary: ChannelHealthSummary, partnerId: PartnerId): ChannelBannerModel | null {
+export function channelBannerModel(summary: ChannelHealthSummary): ChannelBannerModel | null {
   if (summary.level === 'ok') return null;
   return {
     variant: summary.level === 'error' ? 'destructive' : 'default',
@@ -227,7 +226,6 @@ export function channelBannerModel(summary: ChannelHealthSummary, partnerId: Par
         .join(' · ');
       return extra ? `${i.message} (${extra})` : i.message;
     }),
-    href: `/admin-dashboard/partners/${encodeURIComponent(partnerId)}`,
   };
 }
 
