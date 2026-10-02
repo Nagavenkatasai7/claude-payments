@@ -15,6 +15,8 @@
 //     "Exhausted all retries"; a non-JSON error body is UpstashJSONParseError;
 //     a JSON error body is UpstashError(`${error}, command was: ...`)
 //     (node_modules/@upstash/redis/chunk-S6LIPXJD.mjs:167-203, v1.38.1).
+//   • Node dns: a failed lookup carries code / errno / syscall 'getaddrinfo'
+//     (e.g. 'EBUSY', which also fits the SQLSTATE shape), so syscall decides first.
 
 /** SQLSTATE classes that mean "the database, not the row": connection (08), resources (53). */
 const INFRA_SQLSTATE_CLASSES = ['08', '53'];
@@ -97,8 +99,10 @@ function classifyLink(e: Record<string, unknown>): Verdict {
   const code = typeof e.code === 'string' ? e.code : '';
   const name = typeof e.name === 'string' ? e.name : '';
   const message = typeof e.message === 'string' ? e.message : '';
+  const syscall = typeof e.syscall === 'string' ? e.syscall : '';
 
   if (code && NETWORK_CODES.has(code)) return 'infra';
+  if (syscall === 'getaddrinfo') return 'infra'; // DNS resolution, whatever the errno
   if (code && SQLSTATE.test(code)) {
     if (INFRA_SQLSTATES.has(code) || INFRA_SQLSTATE_CLASSES.includes(code.slice(0, 2))) return 'infra';
     if (code === SERVER_INTERNAL) return INFRA_MESSAGE.test(message) ? 'infra' : 'not_infra';
