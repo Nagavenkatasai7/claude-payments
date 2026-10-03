@@ -6,7 +6,7 @@ import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
 import { verifiedReceiptEmail } from '@/lib/portal-prefs';
 import { requirePortalCustomer } from '@/lib/portal-auth';
-import { getPortalTransfer, portalOwner, transferTimeline, type TimelineState } from '@/lib/portal-transfers';
+import { getPortalB2bParties, getPortalTransfer, portalOwner, transferTimeline, type TimelineState } from '@/lib/portal-transfers';
 import { refundDisposition } from '@/lib/refund-policy';
 import { payoutMethodLabel } from '@/lib/payout-format';
 import { newRequestKey } from '@/lib/portal-request-key';
@@ -15,6 +15,7 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Card, Money, PageHeader, StatusPill } from '@/components/ds';
 import { cancelTransferPortalAction, emailReceiptAction, requestRecallPortalAction, requestRefundPortalAction } from './actions';
 import { ActionForm, RecallForm } from './transfer-actions';
+import { EntityBadge, fromLabel, fundingLabel } from './b2b-parties';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { sendAgainAction } from '../../send/actions';
 import { SendAgainForm } from '../../send/send-again-form';
@@ -63,11 +64,13 @@ function Row({ label, children, strong }: { label: string; children: ReactNode; 
  */
 export default async function TransferDetailPage({ params }: { params: Promise<{ id: string }> }) {
   await requirePortalSite();
-  const ctx = await requirePortalCustomer();
   const { id } = await params;
+  const ctx = await requirePortalCustomer(`/portal/transfers/${id}`);
   const owner = portalOwner(ctx);
   const transfer = await getPortalTransfer(owner, id);
   if (!transfer) notFound();
+  // Business names: b2b only, one decrypted read that repeats the ownership check (names and enums out).
+  const parties = await getPortalB2bParties(owner, transfer);
   // "Email me a receipt" only for an address verified on THIS partner (the action re-checks it).
   const canEmail = (await verifiedReceiptEmail(getDb(), { partnerId: owner.partnerId, senderPhone: owner.phone, email: ctx.customer.email })) !== null;
 
@@ -96,7 +99,11 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
             <span className="text-[13.5px] text-ds-ink-muted">{when(transfer.createdAt)}</span>
           </div>
           <dl className="divide-y divide-ds-border">
-            <Row label={t('portal.receipt.recipient')}>{transfer.recipientName}</Row>
+            <Row label={t('portal.receipt.recipient')}>
+              {transfer.recipientName}
+              {parties ? <EntityBadge entity={parties.recipientEntity} /> : null}
+            </Row>
+            {parties?.recipientBusinessName ? <Row label={t('portal.b2b.businessName')}>{parties.recipientBusinessName}</Row> : null}
             <Row label={t('portal.receipt.destination')}>
               <span className="font-mono">
                 {payoutMethodLabel(transfer.payoutMethod)} {transfer.payoutDestination}
@@ -116,6 +123,19 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
             </Row>
           </dl>
         </Card>
+
+        {parties ? (
+          <Card as="section" className="p-5 sm:p-6">
+            <h2 data-b2b-payment className="text-[17px] font-bold text-ds-ink">{t('portal.b2b.paymentTitle')}</h2>
+            <dl className="mt-2 divide-y divide-ds-border">
+              <Row label={t('portal.b2b.from')}>
+                {fromLabel(parties, owner.phone)}
+                <EntityBadge entity={parties.senderEntity} />
+              </Row>
+              <Row label={t('portal.b2b.funding')}>{fundingLabel(parties)}</Row>
+            </dl>
+          </Card>
+        ) : null}
 
         <Card as="section" className="p-5 sm:p-6">
           <h2 className="text-[17px] font-bold text-ds-ink">{t('portal.detail.progress')}</h2>

@@ -4,11 +4,14 @@ import { t as msg } from '@/lib/i18n';
 import type { Transfer } from '@/lib/types';
 
 // UI redesign M2-7, Task 7.1: the customer portal's transfer timeline. A pure function over the
-// forward-only status machine plus the refund overlay. It never invents timestamps (only createdAt
-// and refundedAt appear), and a held or blocked transfer shows ONE neutral "under review" step with
-// no sanctions or compliance detail.
+// forward-only status machine plus the refund overlay. It never invents timestamps (a step carries
+// one only when it is done and the row has the matching valid time: createdAt, paidAt, deliveredAt,
+// refundedAt), and a held or blocked transfer shows ONE neutral "under review" step with no
+// sanctions or compliance detail.
 
 const CREATED = '2026-01-02T03:04:05.000Z';
+const PAID = '2026-01-02T03:10:00.000Z';
+const DELIVERED = '2026-01-02T09:00:00.000Z';
 const base = (over: Partial<Transfer>): Transfer =>
   ({ id: 'tx1', status: 'awaiting_payment', createdAt: CREATED, refundStatus: 'none', ...over }) as Transfer;
 
@@ -73,15 +76,42 @@ describe('transferTimeline', () => {
     expect(shape(base({ status: 'cancelled', paidAt: CREATED, refundStatus: 'failed' })).at(-1)).toBe('portal.timeline.refund_in_progress:current');
     expect(shape(base({ status: 'cancelled', paidAt: CREATED, refundStatus: 'completed' })).at(-1)).toBe('portal.timeline.refunded:done');
   });
-  it('never invents timestamps: only created (createdAt) and refunded (refundedAt) carry one', () => {
+  it('never invents timestamps: only done steps with a recorded time carry one', () => {
     const steps = transferTimeline(
-      base({ status: 'cancelled', paidAt: CREATED, deliveredAt: CREATED, refundStatus: 'completed', refundedAt: '2026-01-03T00:00:00.000Z' }),
+      base({ status: 'cancelled', paidAt: PAID, deliveredAt: DELIVERED, refundStatus: 'completed', refundedAt: '2026-01-03T00:00:00.000Z' }),
     );
     expect(steps.find((s) => s.key === 'portal.timeline.created')?.at).toBe(CREATED);
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBe(PAID);
     expect(steps.find((s) => s.key === 'portal.timeline.refunded')?.at).toBe('2026-01-03T00:00:00.000Z');
-    expect(steps.filter((s) => s.at !== undefined)).toHaveLength(2);
+    // Cancelled: no delivered step, so deliveredAt is never shown.
+    expect(steps.find((s) => s.key === 'portal.timeline.delivered')).toBeUndefined();
+    expect(steps.filter((s) => s.at !== undefined)).toHaveLength(3);
     // A completed refund without refundedAt carries no time.
     expect(transferTimeline(base({ status: 'cancelled', refundStatus: 'completed' })).find((s) => s.key === 'portal.timeline.refunded')?.at).toBeUndefined();
+  });
+  it('delivered: the paid and delivered steps carry their times', () => {
+    const steps = transferTimeline(base({ status: 'delivered', paidAt: PAID, deliveredAt: DELIVERED }));
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBe(PAID);
+    expect(steps.find((s) => s.key === 'portal.timeline.delivered')?.at).toBe(DELIVERED);
+  });
+  it('paid: only the paid step carries a time; the current delivery step has none', () => {
+    const steps = transferTimeline(base({ status: 'paid', paidAt: PAID, deliveredAt: DELIVERED }));
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBe(PAID);
+    expect(steps.find((s) => s.key === 'portal.timeline.delivered')?.at).toBeUndefined();
+  });
+  it('in_review: the paid time shows; the upcoming delivery step has none', () => {
+    const steps = transferTimeline(base({ status: 'in_review', paidAt: PAID, deliveredAt: DELIVERED }));
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBe(PAID);
+    expect(steps.find((s) => s.key === 'portal.timeline.delivered')?.at).toBeUndefined();
+  });
+  it('awaiting_payment: a stray paidAt on a current step is never shown', () => {
+    const steps = transferTimeline(base({ paidAt: PAID }));
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBeUndefined();
+  });
+  it('an invalid time string is dropped, not shown', () => {
+    const steps = transferTimeline(base({ status: 'delivered', paidAt: 'not-a-date', deliveredAt: '' }));
+    expect(steps.find((s) => s.key === 'portal.timeline.paid')?.at).toBeUndefined();
+    expect(steps.find((s) => s.key === 'portal.timeline.delivered')?.at).toBeUndefined();
   });
   it('an unknown status degrades to the neutral review step (never a crash, never a raw token)', () => {
     expect(shape(base({ status: 'weird' as Transfer['status'] }))).toEqual([

@@ -10,6 +10,8 @@ import { customerPortalPrefs } from '@/db/schema';
 import { encryptField } from '@/lib/field-crypto';
 import { customerEmailCtx } from '@/lib/crypto-context';
 import { emailVerifiedTag } from '@/lib/portal-prefs';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { newTransferId } from '@/lib/id';
 import { freshDb } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-partner';
@@ -27,6 +29,7 @@ const h = vi.hoisted(() => ({
   redis: null as unknown,
   store: null as unknown,
   ps: null as unknown,
+  returnTo: undefined as string | undefined,
 }));
 vi.mock('@/lib/portal-site', () => ({
   getPortalSite: async () => h.site,
@@ -37,7 +40,8 @@ vi.mock('@/lib/portal-site', () => ({
 }));
 vi.mock('@/lib/portal-auth', () => ({
   getPortalCustomer: async () => h.ctx,
-  requirePortalCustomer: async () => {
+  requirePortalCustomer: async (returnTo?: string) => {
+    h.returnTo = returnTo;
     if (!h.ctx) throw new Error('REDIRECT:/portal/login');
     return h.ctx;
   },
@@ -247,6 +251,87 @@ describe('Printable receipt', () => {
   });
   it("B's transfer → 404", async () => {
     await expect(receipt(B.transferIds[0])).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+  });
+});
+
+// Lost-features p4 B1 + B2: business names, badges and the Payment card on a b2b transfer; paid and
+// delivered times on the receipt. The full account number never renders.
+async function seedOwn(over: Partial<Transfer>): Promise<string> {
+  const id = newTransferId();
+  await createTransferRepo(db).saveTransfer({
+    id, phone, amountUsd: 100, feeUsd: 0, totalChargeUsd: 100, fxRate: 85, amountInr: 8500,
+    recipientName: 'Mumbai Textiles', recipientPhone: '919000000000', payoutMethod: 'bank',
+    payoutDestination: `${FULL_ACCOUNT}|HDFC0000001`, fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
+    complianceReasons: [], status: 'paid', createdAt: new Date().toISOString(), partnerId: 'pa',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 100, feeSource: 0, totalChargeSource: 100, ...over,
+  } as Transfer);
+  return id;
+}
+const B2B: Partial<Transfer> = {
+  transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business', fundingMethod: 'ach_pull',
+  senderBusinessName: 'Acme Imports LLC', recipientBusinessName: 'Mumbai Textiles Pvt',
+};
+
+describe('Business (b2b) transfers: names, badges and the Payment card', () => {
+  it('detail: both business names, the badges and the funding line; never the full account', async () => {
+    const html = await detail(await seedOwn(B2B));
+    expect(html).toContain('Mumbai Textiles Pvt');
+    expect(html).toContain('Acme Imports LLC');
+    expect(html).toContain('data-b2b-payment');
+    expect(html).toContain('Business name');
+    expect(html).toContain('Debited from business account');
+    expect(html).toContain('>Business<');
+    expect(html).not.toContain(FULL_ACCOUNT);
+    expect(html).not.toContain('HDFC0000001');
+  });
+  it('receipt: the same names and Payment block; never the full account', async () => {
+    const html = await receipt(await seedOwn(B2B));
+    expect(html).toContain('Mumbai Textiles Pvt');
+    expect(html).toContain('Acme Imports LLC');
+    expect(html).toContain('data-b2b-payment');
+    expect(html).not.toContain(FULL_ACCOUNT);
+  });
+  it('no sender business name: From is the masked phone, never the full number', async () => {
+    const html = await detail(await seedOwn({ ...B2B, senderEntityType: 'individual', senderBusinessName: undefined }));
+    expect(html).toContain(`\u2022\u2022\u2022\u2022${phone.slice(-4)}`);
+    expect(html).not.toContain(phone);
+    expect(html).toContain('>Individual<');
+  });
+  it('a consumer transfer has no Payment card and no badges', async () => {
+    const html = await detail(A.transferIds[0]);
+    expect(html).not.toContain('data-b2b-payment');
+    expect(html).not.toContain('Business name');
+  });
+});
+
+describe('C1: signed out, each page asks to come back to itself', () => {
+  it('the list, the detail and the receipt pass their own path', async () => {
+    h.ctx = null;
+    const id = A.transferIds[0];
+    await expect(list()).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe('/portal/transfers');
+    await expect(detail(id)).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe(`/portal/transfers/${id}`);
+    await expect(receipt(id)).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe(`/portal/transfers/${id}/receipt`);
+  });
+});
+
+describe('Receipt: paid and delivered times', () => {
+  it('shows each time only when the row has it', async () => {
+    const both = await receipt(await seedOwn({ status: 'delivered', paidAt: '2026-01-02T03:10:00.000Z', deliveredAt: '2026-01-02T09:00:00.000Z' }));
+    expect(both).toContain('>Paid<');
+    expect(both).toContain('Jan 2, 2026, 3:10 AM UTC');
+    expect(both).toContain('>Delivered<');
+    expect(both).toContain('Jan 2, 2026, 9:00 AM UTC');
+    const none = await receipt(await seedOwn({ status: 'awaiting_payment' }));
+    expect(none).not.toContain('>Paid<');
+    expect(none).not.toContain('>Delivered<');
+  });
+  it('the detail timeline shows the paid time on the done step', async () => {
+    const html = await detail(await seedOwn({ status: 'paid', paidAt: '2026-01-02T03:10:00.000Z' }));
+    expect(html).toContain('Jan 2, 2026, 3:10 AM UTC');
   });
 });
 

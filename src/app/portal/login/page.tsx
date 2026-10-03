@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation';
 import { requirePortalSite } from '@/lib/portal-site';
-import { getPortalCustomer } from '@/lib/portal-auth';
+import { getPortalCustomer, safePortalNext } from '@/lib/portal-auth';
 import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { LoginForm } from './login-form';
@@ -13,6 +13,8 @@ export const generateMetadata = () => portalMetadata('portal.login.title');
  * `?from=account` (one customer portal, Oct 2): the legacy /account sign-in handed this customer over
  * after their password (src/app/account/actions.ts handOffToPortal), so say why. A fixed notice:
  * nothing from the query string is rendered.
+ * `?next=` (C1): the page the customer asked for. Only a value on the safePortalNext allow-list is
+ * kept (anything else is /portal), and the sign-in actions check it again on the server.
  */
 export default async function PortalLoginPage({
   searchParams,
@@ -20,8 +22,10 @@ export default async function PortalLoginPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const site = await requirePortalSite();
-  if (await getPortalCustomer()) redirect('/portal');
-  const fromAccount = (await searchParams).from === 'account';
+  const query = await searchParams;
+  const next = safePortalNext(typeof query.next === 'string' ? query.next : undefined);
+  if (await getPortalCustomer()) redirect(next);
+  const fromAccount = query.from === 'account';
   return (
     <div className="mx-auto flex w-full max-w-md flex-col gap-6">
       <PageHeader title={t('portal.login.title')} sub={t('portal.login.sub', { brand: site.brand })} />
@@ -31,7 +35,7 @@ export default async function PortalLoginPage({
         </p>
       ) : null}
       <Card>
-        <LoginForm brand={site.brand} />
+        <LoginForm brand={site.brand} next={next} />
       </Card>
     </div>
   );

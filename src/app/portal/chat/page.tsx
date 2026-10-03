@@ -14,7 +14,7 @@ export const generateMetadata = () => portalMetadata('portal.chat.title');
  */
 export default async function PortalChatPage() {
   const site = await requirePortalSite();
-  await requirePortalCustomer();
+  await requirePortalCustomer('/portal/chat');
   return (
     <>
       <PageHeader title={t('portal.chat.title')} sub={t('portal.chat.sub', { brand: site.brand })} />

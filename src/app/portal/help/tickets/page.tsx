@@ -17,7 +17,7 @@ const dateFmt = (iso: string) => new Date(iso).toLocaleDateString('en-US', { mon
  */
 export default async function PortalTicketsPage() {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/help/tickets');
   if (!(await portalSupportEnabled(site.partnerId))) {
     return (
       <>

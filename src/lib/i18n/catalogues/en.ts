@@ -2002,5 +2002,16 @@ export const en = {
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──
+  'portal.receipt.paidAt': 'Paid',
+  'portal.receipt.deliveredAt': 'Delivered',
+  'portal.b2b.business': 'Business',
+  'portal.b2b.individual': 'Individual',
+  'portal.b2b.businessName': 'Business name',
+  'portal.b2b.paymentTitle': 'Payment',
+  'portal.b2b.from': 'From',
+  'portal.b2b.funding': 'Funding',
+  'portal.b2b.fundingBusinessAccount': 'Debited from business account',
+  'portal.b2b.fundingCardOrBank': 'Card / bank',
+  'portal.transfers.theyGetSr': 'Recipient gets',
   // ── end p4 ──
 } as const;

@@ -140,6 +140,19 @@ describe('requireCustomer', () => {
     expect(portalOrigin).not.toHaveBeenCalled();
   });
 
+  it('C2: signed out (e.g. an expired legacy cookie) with signedOutTo → the continue route, not the password page', async () => {
+    cookieJar.set(CUSTOMER_SESSION_COOKIE, 'f'.repeat(64)); // a cookie whose session is gone
+    await expect(
+      requireCustomer({ portalPath: '/portal/help/tickets/tk_A1', signedOutTo: '/account/continue/support/tk_A1' }),
+    ).rejects.toThrow('REDIRECT:/account/continue/support/tk_A1');
+    expect(portalOrigin).not.toHaveBeenCalled();
+  });
+
+  it('C2: signed in, signedOutTo changes nothing', async () => {
+    await signedIn();
+    expect((await requireCustomer({ signedOutTo: '/account/continue/receipt/AbCdEf12' })).senderPhone).toBe(NORM);
+  });
+
   it('without a portalPath the portal is never looked up', async () => {
     await signedIn();
     portalOrigin.mockImplementation(async () => 'https://send.smartremit.ai');

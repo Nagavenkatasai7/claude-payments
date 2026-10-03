@@ -2,6 +2,7 @@ import { LoginForm } from '../account-forms';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { customerPortalOrigin, portalUrl } from '@/lib/customer-portal-url';
+import { env } from '@/lib/env';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +11,9 @@ export const metadata = { title: 'Sign in · SmartRemit' };
 // One customer portal (Oct 2): SmartRemit's own customers now sign in at SmartRemit's portal with a
 // WhatsApp code (a correct password here hands them over too, actions.ts handOffToPortal). The
 // password form stays for customers of partners that have no portal yet.
+// Lost-features C3: while the portal runs at all, a second neutral line points every OTHER partner's
+// customers to the sign-in link their provider sent (the page cannot know their provider: a phone
+// can be a customer of two partners, so there is no lookup here).
 export default async function AccountLoginPage() {
   const origin = await customerPortalOrigin(DEFAULT_PARTNER_ID);
   return (
@@ -32,6 +36,12 @@ export default async function AccountLoginPage() {
                   Sign in with a WhatsApp code
                 </a>
                 . Passwords are retired.
+              </p>
+            ) : null}
+            {env.customerPortalEnabled ? (
+              <p data-portal-hint-other className="mb-4 rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+                Customer of another provider? Open the sign-in link your provider sent you on WhatsApp. Old links from us now open
+                your provider&apos;s sign-in page.
               </p>
             ) : null}
             <LoginForm />

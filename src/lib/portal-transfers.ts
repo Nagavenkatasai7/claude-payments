@@ -4,7 +4,8 @@ import { t, type MessageKey } from './i18n';
 import { formatMoney } from './ui/money';
 import { transferStatusView } from './ui/transfer-status';
 import { payoutMethodLabel } from './payout-format';
-import type { PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from './types';
+import { isPartnerPulled } from './funding-method';
+import type { EntityType, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from './types';
 
 /**
  * portal-transfers — the customer portal's transfer reads (UI redesign M2-7, Task 7.1).
@@ -112,43 +113,99 @@ export async function getPortalTransfer(owner: PortalOwner, id: unknown, db: DbO
   return t;
 }
 
+// ── Business (B2B) parties ─────────────────────────────────────────────────────────────────────
+
+/**
+ * What a business transfer shows the customer: the two business names, the entity badges and the
+ * funding line. Names and enums only: never the payout destination or the recipient's legal name.
+ */
+export interface PortalB2bParties {
+  senderEntity: EntityType;
+  recipientEntity: EntityType;
+  senderBusinessName?: string;
+  recipientBusinessName?: string;
+  funding: 'business_account' | 'card_or_bank';
+}
+
+/** A shown business name: a masked or failed-decrypt value (`****last4`) or a blank one is dropped. */
+const shownName = (v: string | undefined): string | undefined => {
+  const s = v?.trim();
+  return s && !s.startsWith('****') ? s : undefined;
+};
+
+/** The parties of a b2b transfer (null for a consumer one). Pure. */
+export function b2bParties(
+  t: Pick<Transfer, 'transferType' | 'senderEntityType' | 'recipientEntityType' | 'fundingMethod'>,
+  names: { senderBusinessName?: string; recipientBusinessName?: string } | null,
+): PortalB2bParties | null {
+  if (t.transferType !== 'b2b') return null;
+  const senderBusinessName = shownName(names?.senderBusinessName);
+  const recipientBusinessName = shownName(names?.recipientBusinessName);
+  return {
+    senderEntity: t.senderEntityType ?? 'individual',
+    recipientEntity: t.recipientEntityType ?? 'individual',
+    ...(senderBusinessName ? { senderBusinessName } : {}),
+    ...(recipientBusinessName ? { recipientBusinessName } : {}),
+    funding: isPartnerPulled(t.fundingMethod) ? 'business_account' : 'card_or_bank',
+  };
+}
+
+/**
+ * The business parties of a transfer the caller already loaded with getPortalTransfer. A consumer
+ * transfer is null with no second read. For b2b, ONE explicit decrypted read that repeats the same
+ * ownership checks (host partner, session phone, live row); the decrypted row never leaves this
+ * function (it also holds the full destination), only the names and enums do.
+ */
+export async function getPortalB2bParties(owner: PortalOwner, transfer: Transfer, db: DbOrTx = getDb()): Promise<PortalB2bParties | null> {
+  if (transfer.transferType !== 'b2b') return null;
+  const full = await createTransferRepo(db).getOwnedTransfer(owner.partnerId, transfer.id, { decrypt: true });
+  if (!full || full.phone !== owner.phone || full.partnerId !== owner.partnerId) return null;
+  if ((full.environment ?? 'live') !== 'live') return null;
+  return b2bParties(full, { senderBusinessName: full.senderBusinessName, recipientBusinessName: full.recipientBusinessName });
+}
+
 // ── The timeline (pure) ────────────────────────────────────────────────────────────────────────
 
 export type TimelineState = 'done' | 'current' | 'upcoming' | 'stopped';
 export interface TimelineStep {
   key: MessageKey;
   state: TimelineState;
-  /** Only `created` (createdAt) and `refunded` (refundedAt) ever carry a time: none is invented. */
+  /**
+   * A time only on a DONE step whose row time is a valid date: created (createdAt), paid (paidAt),
+   * delivered (deliveredAt), refunded (refundedAt). None is invented, and a current or upcoming
+   * step never carries one.
+   */
   at?: string;
 }
+
+const validIso = (s: string | undefined): s is string => typeof s === 'string' && Number.isFinite(Date.parse(s));
 
 /**
  * The customer-facing steps of a transfer: the forward-only status machine plus the refund overlay.
  * A held (in_review) or blocked transfer shows ONE neutral "under review" step: never a sanctions
  * or compliance detail.
  */
-export function transferTimeline(t: Pick<Transfer, 'status' | 'createdAt' | 'paidAt' | 'refundStatus' | 'refundedAt'>): TimelineStep[] {
+export function transferTimeline(
+  t: Pick<Transfer, 'status' | 'createdAt' | 'paidAt' | 'deliveredAt' | 'refundStatus' | 'refundedAt'>,
+): TimelineStep[] {
   const created: TimelineStep = { key: 'portal.timeline.created', state: 'done', ...(t.createdAt ? { at: t.createdAt } : {}) };
+  const paidDone: TimelineStep = { key: 'portal.timeline.paid', state: 'done', ...(validIso(t.paidAt) ? { at: t.paidAt } : {}) };
   const steps: TimelineStep[] = [created];
   switch (t.status) {
     case 'awaiting_payment':
       steps.push({ key: 'portal.timeline.paid', state: 'current' }, { key: 'portal.timeline.delivered', state: 'upcoming' });
       break;
     case 'paid':
-      steps.push({ key: 'portal.timeline.paid', state: 'done' }, { key: 'portal.timeline.delivered', state: 'current' });
+      steps.push(paidDone, { key: 'portal.timeline.delivered', state: 'current' });
       break;
     case 'delivered':
-      steps.push({ key: 'portal.timeline.paid', state: 'done' }, { key: 'portal.timeline.delivered', state: 'done' });
+      steps.push(paidDone, { key: 'portal.timeline.delivered', state: 'done', ...(validIso(t.deliveredAt) ? { at: t.deliveredAt } : {}) });
       break;
     case 'in_review':
-      steps.push(
-        { key: 'portal.timeline.paid', state: 'done' },
-        { key: 'portal.timeline.under_review', state: 'stopped' },
-        { key: 'portal.timeline.delivered', state: 'upcoming' },
-      );
+      steps.push(paidDone, { key: 'portal.timeline.under_review', state: 'stopped' }, { key: 'portal.timeline.delivered', state: 'upcoming' });
       break;
     case 'cancelled':
-      if (t.paidAt) steps.push({ key: 'portal.timeline.paid', state: 'done' });
+      if (t.paidAt) steps.push(paidDone);
       steps.push({ key: 'portal.timeline.cancelled', state: 'stopped' });
       break;
     default:

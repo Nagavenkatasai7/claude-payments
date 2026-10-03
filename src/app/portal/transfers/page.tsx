@@ -30,7 +30,7 @@ const GROUP_LABEL: Record<string, MessageKey> = {
  */
 export default async function TransfersPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/transfers');
   const owner = portalOwner(ctx);
   const sp = await searchParams;
   const f = typeof sp.f === 'string' ? sp.f : undefined;

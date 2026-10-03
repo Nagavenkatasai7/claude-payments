@@ -6,7 +6,7 @@ import { getPortalOtpStore, PORTAL_OTP_IP_LIMIT } from '@/lib/portal-otp-store';
 import { field, ipAllowed, issueAndSendAfterResponse, portalAudit as audit, PORTAL_VERIFY_IP_LIMIT as VERIFY_IP_LIMIT } from '@/lib/portal-login-flow';
 import { getPortalPendingStore, PORTAL_PENDING_MAX_ATTEMPTS, type PortalPending } from '@/lib/portal-pending-store';
 import { alertPortalOtpFailure, portalOtpChannelReady } from '@/lib/portal-otp-sender';
-import { afterPortalResponse, completePortalSignIn, portalCustomers } from '@/lib/portal-auth';
+import { afterPortalResponse, completePortalSignIn, portalCustomers, safePortalNext } from '@/lib/portal-auth';
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
 import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
 import { isValidPhone, normalizePhone } from '@/lib/phone';
@@ -32,6 +32,9 @@ import type { PartnerId } from '@/lib/types';
  * ORDER after a correct code (nothing is written for an unknown phone before full authentication):
  * code → TOTP if enrolled → first-sign-in consent (owner O11) if the row has no WhatsApp opt-in →
  * ensureCustomer + setOptedIn + audits → phone verified + session (rotated) + cookie → redirect.
+ *
+ * RETURN TO PAGE (lost-features C1): the redirect goes to the form's hidden `next`, re-checked by
+ * safePortalNext on every use (an allow-list of /portal paths; anything else is /portal).
  */
 
 export type PortalLoginStep = 'phone' | 'code' | 'mfa' | 'consent';
@@ -182,7 +185,7 @@ export async function verifyCodeAction(_prev: PortalLoginState | null, formData:
   }
   const next = await nextAfterProof(pid, phone);
   if (next !== 'signed_in') return next;
-  redirect('/portal');
+  redirect(safePortalNext(field(formData, 'next')));
 }
 
 /** Step 2b (TOTP-enrolled customers): the authenticator code. */
@@ -238,7 +241,7 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
   await pendingStore.consume(pendingToken);
   const next = await nextAfterProof(pid, rec.phone, true);
   if (next !== 'signed_in') return next;
-  redirect('/portal');
+  redirect(safePortalNext(field(formData, 'next')));
 }
 
 /**
@@ -269,7 +272,7 @@ export async function consentAction(_prev: PortalLoginState | null, formData: Fo
   await repo.setOptedIn(pid, phone);
   await audit(pid, phone, 'consent', { whatsapp: true, terms: true });
   await completePortalSignIn(pid, phone);
-  redirect('/portal');
+  redirect(safePortalNext(field(formData, 'next')));
 }
 
 /**

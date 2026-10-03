@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
-import { getPortalTransfer, portalOwner, receiptView } from '@/lib/portal-transfers';
+import { getPortalB2bParties, getPortalTransfer, portalOwner, receiptView } from '@/lib/portal-transfers';
 import { payoutMethodLabel } from '@/lib/payout-format';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
@@ -12,10 +12,12 @@ import { t } from '@/lib/i18n';
 import { Money, PageHeader } from '@/components/ds';
 import { ReceiptDisclosureCard } from '@/app/account/receipt/[transferId]/disclosure-card';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { EntityBadge, fromLabel, fundingLabel } from '../b2b-parties';
 
 export const generateMetadata = () => portalMetadata('portal.receipt.title', { referrer: 'no-referrer' });
 
 const WHEN = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
+const when = (iso?: string) => (iso && Number.isFinite(Date.parse(iso)) ? `${WHEN.format(new Date(iso))} UTC` : undefined);
 
 function Row({ label, children, strong }: { label: string; children: ReactNode; strong?: boolean }) {
   return (
@@ -34,11 +36,13 @@ function Row({ label, children, strong }: { label: string; children: ReactNode; 
  */
 export default async function ReceiptPage({ params }: { params: Promise<{ id: string }> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
   const { id } = await params;
-  const transfer = await getPortalTransfer(portalOwner(ctx), id);
+  const ctx = await requirePortalCustomer(`/portal/transfers/${id}/receipt`);
+  const owner = portalOwner(ctx);
+  const transfer = await getPortalTransfer(owner, id);
   if (!transfer) notFound();
   const v = receiptView(transfer);
+  const parties = await getPortalB2bParties(owner, transfer);
 
   const disclosure = buildReceiptDisclosure(
     {
@@ -76,9 +80,15 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             <Row label={t('portal.receipt.transferId')}>
               <span className="font-mono">{v.id}</span>
             </Row>
-            <Row label={t('portal.receipt.date')}>{Number.isFinite(Date.parse(v.createdAt)) ? `${WHEN.format(new Date(v.createdAt))} UTC` : '—'}</Row>
+            <Row label={t('portal.receipt.date')}>{when(v.createdAt) ?? '—'}</Row>
+            {when(transfer.paidAt) ? <Row label={t('portal.receipt.paidAt')}>{when(transfer.paidAt)}</Row> : null}
+            {when(transfer.deliveredAt) ? <Row label={t('portal.receipt.deliveredAt')}>{when(transfer.deliveredAt)}</Row> : null}
             <Row label={t('portal.receipt.status')}>{t(v.statusKey)}</Row>
-            <Row label={t('portal.receipt.recipient')}>{v.recipientName}</Row>
+            <Row label={t('portal.receipt.recipient')}>
+              {v.recipientName}
+              {parties ? <EntityBadge entity={parties.recipientEntity} /> : null}
+            </Row>
+            {parties?.recipientBusinessName ? <Row label={t('portal.b2b.businessName')}>{parties.recipientBusinessName}</Row> : null}
             <Row label={t('portal.receipt.destination')}>
               <span className="font-mono">
                 {payoutMethodLabel(v.payoutMethod)} {v.maskedDestination}
@@ -101,6 +111,21 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             </Row>
           </dl>
         </section>
+        {parties ? (
+          <section
+            data-b2b-payment
+            className={`rounded-ds-card border border-ds-border bg-ds-surface p-5 sm:p-6 print:mt-4 print:border-0 print:p-0 ${disclosure ? '' : 'sm:col-span-2'}`}
+          >
+            <h2 className="text-[16px] font-bold text-ds-ink">{t('portal.b2b.paymentTitle')}</h2>
+            <dl className="mt-2 divide-y divide-ds-border">
+              <Row label={t('portal.b2b.from')}>
+                {fromLabel(parties, owner.phone)}
+                <EntityBadge entity={parties.senderEntity} />
+              </Row>
+              <Row label={t('portal.b2b.funding')}>{fundingLabel(parties)}</Row>
+            </dl>
+          </section>
+        ) : null}
         {disclosure ? <ReceiptDisclosureCard disclosure={disclosure} /> : null}
       </div>
     </>

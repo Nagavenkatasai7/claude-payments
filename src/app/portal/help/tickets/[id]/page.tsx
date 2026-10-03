@@ -24,7 +24,8 @@ const stampFmt = (iso: string) => new Date(iso).toLocaleString('en-US', { month:
  */
 export default async function PortalTicketPage({ params }: { params: Promise<{ id: string }> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const { id } = await params;
+  const ctx = await requirePortalCustomer(`/portal/help/tickets/${id}`);
   if (!(await portalSupportEnabled(site.partnerId))) {
     return (
       <>
@@ -33,7 +34,6 @@ export default async function PortalTicketPage({ params }: { params: Promise<{ i
       </>
     );
   }
-  const { id } = await params;
   const ticket = await getPortalTicket(portalTicketOwner(ctx), id);
   if (!ticket) notFound();
   const messages = await listPortalTicketMessages(ticket.id);

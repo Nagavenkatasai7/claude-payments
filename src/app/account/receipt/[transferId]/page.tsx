@@ -131,7 +131,10 @@ export default async function ReceiptPage({
   searchParams: Promise<{ error?: string; cancel?: string }>;
 }) {
   const { transferId } = await params;
-  const customer = await requireCustomer({ portalPath: `/portal/transfers/${encodeURIComponent(transferId)}` });
+  const customer = await requireCustomer({
+    portalPath: `/portal/transfers/${encodeURIComponent(transferId)}`,
+    signedOutTo: `/account/continue/receipt/${encodeURIComponent(transferId)}`,
+  });
   const { error, cancel } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);
