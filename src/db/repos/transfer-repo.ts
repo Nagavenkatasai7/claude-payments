@@ -226,14 +226,17 @@ export function createTransferRepo(
       return v === null || v === undefined ? null : Number(v);
     },
 
-    /** Partner-scoped read: null for missing OR out-of-scope (404-never-403). */
-    async getOwnedTransfer(partnerId: PartnerId, id: string): Promise<Transfer | null> {
+    /**
+     * Partner-scoped read: null for missing OR out-of-scope (404-never-403). Masked by default
+     * (like getTransfer); `decrypt: true` is an explicit, caller-audited read (a reveal or a receipt).
+     */
+    async getOwnedTransfer(partnerId: PartnerId, id: string, opts?: { decrypt?: boolean }): Promise<Transfer | null> {
       const rows = await db
         .select()
         .from(transfers)
         .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId)))
         .limit(1);
-      return rows[0] ? toDomain(rows[0]) : null;
+      return rows[0] ? toDomain(rows[0], opts?.decrypt ?? false) : null;
     },
 
     /**

@@ -51,9 +51,10 @@ export type WaitlistEncColumn = 'full_name_enc' | 'email_enc' | 'phone_enc' | 'l
 /**
  * Purpose contexts: values that live outside a table row. `customer_ref` is a
  * short-lived URL token; `outbox.apply_link` is the sealed invite link in an
- * `email.send` outbox payload.
+ * `email.send` outbox payload; `transfer_search` is the short-lived /partner
+ * transfer-search token (the search text never enters a URL in clear).
  */
-export type CryptoPurpose = 'customer_ref' | 'outbox.apply_link';
+export type CryptoPurpose = 'customer_ref' | 'outbox.apply_link' | 'transfer_search';
 
 /**
  * Purposes that keep reading v1 permanently, even once 46B's reject-v1 switch

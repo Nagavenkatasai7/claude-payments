@@ -12,6 +12,7 @@ import {
   pageCustomers,
   reviewStateKey,
   revealableValue,
+  tierView,
 } from '@/lib/partner-customer-view';
 import type { Customer, KycReviewState, KycStatus } from '@/lib/types';
 
@@ -129,6 +130,29 @@ describe('customerDetailView', () => {
     expect(
       customerDetailView(customer({ firstSeenAt: new Date().toISOString(), kycStatus: 'pending' }), 'R', new Date(), true).tierKey,
     ).toBe('partner.customers.tier.T0');
+  });
+});
+
+describe('tierView (the one tier label for the list, the detail page and the transfer list)', () => {
+  const DAY = 86_400_000;
+  const now = new Date('2026-09-10T12:00:00.000Z');
+  const subject = (daysAgo: number, kycStatus: KycStatus) => ({ firstSeenAt: new Date(now.getTime() - daysAgo * DAY).toISOString(), kycStatus });
+  it('T0 carries the day of the 3-day window (1 on the first day, capped at 3)', () => {
+    expect(tierView(subject(0, 'pending'), now, true)).toEqual({ tier: 'T0', key: 'partner.customers.tier.T0', dayOfWindow: 1 });
+    expect(tierView(subject(1.5, 'not_started'), now, true)).toEqual({ tier: 'T0', key: 'partner.customers.tier.T0', dayOfWindow: 2 });
+    expect(tierView(subject(2.99, 'verified'), now, true).dayOfWindow).toBe(3);
+  });
+  it('T1 and Suspended carry no day; the KYC gate decides an unverified customer past the window', () => {
+    expect(tierView(subject(10, 'verified'), now, true)).toEqual({ tier: 'T1', key: 'partner.customers.tier.T1', dayOfWindow: null });
+    expect(tierView(subject(10, 'grandfathered'), now, true).tier).toBe('T1');
+    expect(tierView(subject(10, 'pending'), now, true)).toEqual({ tier: 'Suspended', key: 'partner.customers.tier.Suspended', dayOfWindow: null });
+    expect(tierView(subject(10, 'pending'), now, false).tier).toBe('T1');
+    expect(tierView(subject(0, 'rejected'), now, false)).toEqual({ tier: 'Suspended', key: 'partner.customers.tier.Suspended', dayOfWindow: null });
+  });
+  it('the detail view uses the same label', () => {
+    for (const c of [customer(), customer({ kycStatus: 'rejected' }), customer({ firstSeenAt: now.toISOString(), kycStatus: 'pending' })]) {
+      expect(customerDetailView(c, 'R', now, true).tierKey).toBe(tierView(c, now, true).key);
+    }
   });
 });
 

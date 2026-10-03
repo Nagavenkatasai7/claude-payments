@@ -192,6 +192,19 @@ describe('transfer-repo: tenant scoping + keyset pagination', () => {
     expect(await repo.getOwnedTransfer('rival', 'tr_acme')).toBeNull();
   });
 
+  it('getOwnedTransfer is masked by default and decrypts only on request, still tenant-scoped', async () => {
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'tr_acme', partnerId: 'acme', recipientLegalName: 'Anita Sharma' }));
+    const masked = await repo.getOwnedTransfer('acme', 'tr_acme');
+    expect(masked?.payoutDestination).toBe('****1234');
+    expect(masked?.recipientLegalName).toBeUndefined();
+    const full = await repo.getOwnedTransfer('acme', 'tr_acme', { decrypt: true });
+    expect(full?.payoutDestination).toBe('123456789012|HDFC0001234');
+    expect(full?.recipientLegalName).toBe('Anita Sharma');
+    expect(await repo.getOwnedTransfer('acme', 'tr_acme', { decrypt: false })).toEqual(masked);
+    expect(await repo.getOwnedTransfer('default', 'tr_acme', { decrypt: true })).toBeNull();
+  });
+
   it('listByPartner paginates with a stable keyset cursor', async () => {
     await seedPartner(db, 'acme');
     for (let i = 0; i < 5; i++) {

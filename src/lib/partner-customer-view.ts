@@ -1,8 +1,8 @@
 import { sealCustomerRef } from '@/lib/customer-ref';
 import { maskPhoneLast4 } from '@/lib/mask';
-import { deriveTier } from '@/lib/tier-rules';
+import { deriveTier, observationDay, type CapSubject } from '@/lib/tier-rules';
 import type { MessageKey } from '@/lib/i18n';
-import type { Customer, KycStatus } from '@/lib/types';
+import type { Customer, KycStatus, Tier } from '@/lib/types';
 
 // partner-customer-view (UI redesign M3-11): the PURE shapes behind /partner/customers. The pages
 // render ONLY from these, so what can reach the HTML (or a client component's props) is decided
@@ -86,6 +86,26 @@ const TIER_KEYS: Readonly<Record<string, MessageKey>> = Object.freeze({
   Suspended: 'partner.customers.tier.Suspended',
 });
 
+export interface TierView {
+  tier: Tier;
+  key: MessageKey;
+  /** 1-3 while the customer is in the T0 observation window, else null. */
+  dayOfWindow: number | null;
+}
+
+/**
+ * The ONE tier label for /partner (customer list and detail, transfer list): deriveTier with the
+ * owner's verify-before-send gate (sendGateActive), plus the day of the observation window for T0.
+ */
+export function tierView(subject: CapSubject, now: Date, kycGateActive: boolean): TierView {
+  const tier = deriveTier(subject, now, kycGateActive);
+  return {
+    tier,
+    key: TIER_KEYS[tier] ?? 'partner.customers.tier.unknown',
+    dayOfWindow: tier === 'T0' ? Math.max(1, observationDay(subject, now)) : null,
+  };
+}
+
 /** Initials only ("A. R."): never a whole word of the legal name. */
 export function maskInitials(name: string | undefined): string {
   const words = (name ?? '').trim().split(/\s+/).filter(Boolean);
@@ -148,7 +168,7 @@ export function customerDetailView(c: Customer, ref: string, now: Date, kycGateA
     ],
     kycStatusKey: kycStatusKey(c.kycStatus),
     reviewKey: reviewStateKey(c.kycReviewState),
-    tierKey: TIER_KEYS[deriveTier(c, now, kycGateActive)] ?? 'partner.customers.tier.unknown',
+    tierKey: tierView(c, now, kycGateActive).key,
     kycVerifiedAt: c.kycVerifiedAt ?? null,
     firstSeenAt: c.firstSeenAt,
   };

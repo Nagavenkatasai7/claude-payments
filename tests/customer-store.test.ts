@@ -119,6 +119,18 @@ describe('customer store', () => {
     const all = await cs.listCustomers();
     expect(all.map((c) => c.senderPhone).sort()).toEqual(['15551111111', '15552222222']);
   });
+
+  it("existingPhones answers which of the phones are THIS tenant's customers, in one read, without decrypting", async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    await cs.upsertOnFirstInbound('default', '15551111111');
+    await cs.upsertOnFirstInbound('acme', '15552222222');
+    const found = await cs.existingPhones('default', ['15551111111', '15552222222', '15553333333', '15551111111']);
+    expect([...found]).toEqual(['15551111111']);
+    expect([...(await cs.existingPhones('acme', ['15551111111', '15552222222']))]).toEqual(['15552222222']);
+    expect((await cs.existingPhones('default', [])).size).toBe(0);
+    expect((await cs.existingPhones('', ['15551111111'])).size).toBe(0);
+  });
 });
 
 describe('customer-store P1: senderCountry', () => {

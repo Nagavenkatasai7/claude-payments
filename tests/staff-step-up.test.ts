@@ -143,6 +143,13 @@ describe('verify', () => {
     expect(ev.meta).toEqual({ factor: 'totp', target: 'api_key.issue', actorScope: 'partner' });
     expect(JSON.stringify(record.mock.calls)).not.toContain('123');
   });
+  it('the lost-features targets (issue refund, approve a 2FA recovery) are audited by name', async () => {
+    for (const target of ['refund.issue', 'customer.mfa.recovery.approve'] as const) {
+      record.mockClear();
+      expect(await make().verify({ ...attempt('123456'), target })).toEqual({ outcome: 'ok', factor: 'totp' });
+      expect((record.mock.calls[0][0] as { meta: unknown }).meta).toEqual({ factor: 'totp', target, actorScope: 'partner' });
+    }
+  });
   it('TOTP: a wrong or malformed code is invalid, not marked, audited auth.stepup.failed (no code)', async () => {
     const s = make();
     for (const bad of ['654321', '12345', 'abcdef', '']) {

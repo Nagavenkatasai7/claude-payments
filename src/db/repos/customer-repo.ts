@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -199,6 +199,20 @@ export function createCustomerRepo(
     async getCustomer(partnerId: PartnerId, senderPhone: string): Promise<Customer | null> {
       const rows = await db.select().from(customers).where(tenantKey(partnerId, senderPhone)).limit(1);
       return rows[0] ? rowToCustomer(rows[0]) : null;
+    },
+
+    /**
+     * Which of `phones` are customers of THIS tenant (partnerId in the WHERE), in one read that
+     * selects the key column only (nothing is decrypted). Backs the /partner "Open customer" links.
+     */
+    async existingPhones(partnerId: PartnerId, phones: readonly string[]): Promise<Set<string>> {
+      const wanted = [...new Set(phones.filter((p) => typeof p === 'string' && p.length > 0))];
+      if (!partnerId || wanted.length === 0) return new Set();
+      const rows = await db
+        .select({ phone: customers.phone })
+        .from(customers)
+        .where(and(eq(customers.partnerId, partnerId), inArray(customers.phone, wanted)));
+      return new Set(rows.map((r) => r.phone));
     },
 
     /**

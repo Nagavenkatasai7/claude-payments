@@ -36,6 +36,8 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['staff mfa', ctx.staffMfa('admin'), 'v2|k0|staff_mfa|secret|admin'],
     ['customer_ref', ctx.purpose('customer_ref'), 'v2|k0|purpose|customer_ref|'],
     ['apply_link', ctx.purpose('outbox.apply_link'), 'v2|k0|purpose|outbox.apply_link|'],
+    // Lost-features restore: the sealed /partner transfer-search token (search text never in a URL).
+    ['transfer_search', ctx.purpose('transfer_search'), 'v2|k0|purpose|transfer_search|'],
     // UI redesign M3-16: the sealed partner report CSV, bound to its tenant and job id.
     ['partner report', ctx.partnerReport('acme', '0b7c2f7e-1a2b-4c3d-8e9f-001122334455'), 'v2|k0|partner_report_jobs|content_enc|acme|0b7c2f7e-1a2b-4c3d-8e9f-001122334455'],
     // Partner-Demo R3b: the sealed conversation log. The row parts bind the
@@ -72,6 +74,7 @@ describe('crypto-context v1 exemptions (honoured by 46B)', () => {
     expect(ctx.staffMfa('admin').v1Exempt).toBe(true);
     expect(ctx.purpose('customer_ref').v1Exempt).toBe(true);
     expect(ctx.purpose('outbox.apply_link').v1Exempt).toBeFalsy();
+    expect(ctx.purpose('transfer_search').v1Exempt).toBeFalsy();
     expect(ctx.transfer('t', 'payout_destination_enc').v1Exempt).toBeFalsy();
     expect(ctx.customer('p', '1', 'full_name_enc').v1Exempt).toBeFalsy();
     expect(customerRowCtx({ partnerId: 'p', phone: '1' }, 'mfa_totp_enc').v1Exempt).toBeFalsy();

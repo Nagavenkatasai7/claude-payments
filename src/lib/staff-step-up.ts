@@ -55,8 +55,9 @@ export const staffStepUpKey = (token: string) => `staff_stepup:${sha256hex(token
 export type StepUpTarget =
   | 'api_key.issue' | 'api_key.rotate' | 'webhook.endpoint.save' | 'webhook.secret.rotate' | 'webhook.replay'
   | 'disclosure.save'
-  | 'refund.approve' | 'refund.retry'
-  | 'transfer.reject';
+  | 'refund.approve' | 'refund.retry' | 'refund.issue'
+  | 'transfer.reject'
+  | 'customer.mfa.recovery.approve';
 
 export interface StaffStepUpDeps {
   redis: RedisLike;
