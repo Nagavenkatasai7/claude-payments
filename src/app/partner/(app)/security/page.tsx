@@ -8,6 +8,7 @@ import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { t } from '@/lib/i18n';
 import { Badge, Card, PageHeader, buttonVariants } from '@/components/ds';
 import { EnrolPanel } from './enrol-panel';
+import { PasswordForm } from './password-form';
 
 export const metadata: Metadata = { title: t('partner.security.title'), robots: { index: false, follow: false } };
 
@@ -15,6 +16,8 @@ export const metadata: Metadata = { title: t('partner.security.title'), robots: 
 // It gates with skipMfa only (this IS the enrolment target, so it must not redirect to itself).
 // The enrolment itself is the existing self-gated action pair, which acts only on the session's
 // own username; nothing here reads a username or tenant from the request.
+// Lost-features A14: a "Password" card for every role, shown only once two-step setup is done (its
+// action does not skip MFA, so a pending member is sent to enrolment anyway).
 export default async function PartnerSecurityPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.security.policy, { skipMfa: true });
   // Also clears a stale invite marker once the account is enrolled.
@@ -63,6 +66,15 @@ export default async function PartnerSecurityPage() {
           )}
         </div>
       </Card>
+      {pending ? null : (
+        <Card as="section" aria-labelledby="partner-password-title">
+          <h2 id="partner-password-title" className="text-[17px] font-semibold text-ds-ink">
+            {t('partner.security.password.title')}
+          </h2>
+          <p className="mt-2 mb-5 text-[15px] leading-relaxed text-ds-ink-muted">{t('partner.security.password.intro')}</p>
+          <PasswordForm />
+        </Card>
+      )}
     </div>
     </>
   );

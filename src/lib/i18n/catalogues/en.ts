@@ -2025,6 +2025,22 @@ export const en = {
   'partner.staff.perm.all': 'All (admin)',
   'partner.staff.perm.none': 'None',
   'partner.staff.permNote': 'SmartRemit sets extra permissions. Ask SmartRemit to change them.',
+  'partner.security.password.title': 'Password',
+  'partner.security.password.intro': 'Changing your password signs you out everywhere else. This browser stays signed in.',
+  'partner.security.password.current': 'Current password',
+  'partner.security.password.new': 'New password',
+  'partner.security.password.newHint': '12 to 128 characters. Passwords found in known data breaches are refused.',
+  'partner.security.password.confirm': 'Confirm new password',
+  'partner.security.password.submit': 'Change password',
+  'partner.security.password.submitting': 'Changing…',
+  'partner.security.password.done': 'Password changed. Every other session was signed out.',
+  'partner.security.password.error.missing': 'Enter your current password and a new one.',
+  'partner.security.password.error.mismatch': 'The new passwords do not match.',
+  'partner.security.password.error.throttled': 'Too many attempts. Try again later.',
+  'partner.security.password.error.wrongCurrent': 'Your current password is incorrect.',
+  'partner.security.password.error.same': 'Choose a new password that differs from the current one.',
+  'partner.security.password.error.concurrent': 'Your password was changed somewhere else. Reload the page and try again.',
+  'partner.security.password.error.policy': 'Choose a different password.',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──
