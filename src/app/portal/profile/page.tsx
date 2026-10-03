@@ -97,7 +97,10 @@ export default async function ProfilePage() {
         <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
           <h2 className="text-[17px] font-bold text-ds-ink">{t('portal.mfa.title')}</h2>
           {mfaOn ? (
-            <p className="text-[14px] text-ds-ink-muted">{t('portal.mfa.on_body')}</p>
+            <>
+              <p className="text-[14px] text-ds-ink-muted">{t('portal.mfa.on_body')}</p>
+              <p className="text-[14px] text-ds-ink-muted">{t('portal.mfa.lost_hint')}</p>
+            </>
           ) : (
             <>
               <p className="text-[14px] text-ds-ink-muted">{t('portal.mfa.off_body', { brand: site.brand })}</p>

@@ -36,7 +36,8 @@ export type PortalAuthEvent =
   | 'signout_one'
   | 'signout_all'
   | 'stepup_success'
-  | 'stepup_failure';
+  | 'stepup_failure'
+  | 'mfa_recovery_requested';
 
 const EVENTS: ReadonlySet<string> = new Set<PortalAuthEvent>([
   'otp_sent',
@@ -53,6 +54,7 @@ const EVENTS: ReadonlySet<string> = new Set<PortalAuthEvent>([
   'signout_all',
   'stepup_success',
   'stepup_failure',
+  'mfa_recovery_requested',
 ]);
 
 export const PORTAL_AUTH_ACTOR = 'system:customer-portal';

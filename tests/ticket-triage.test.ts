@@ -509,3 +509,26 @@ describe('ticket.triage — a human_help case keeps its category (fix 34B)', () 
     expect(after!.category).toBe('human_help');
   });
 });
+
+// lost-features p4 B4: a two-step recovery request keeps its category through triage.
+describe('ticket.triage — a two-step recovery request keeps its category', () => {
+  it('sets the priority but NOT the category, and audits category mfa_recovery', async () => {
+    const t = await repo.createTicket({
+      id: 'tk_mfarec1',
+      partnerId: 'p1',
+      kind: 'customer',
+      customerPhone: PHONE,
+      subject: 'Lost authenticator app: turn off two-step verification',
+      body: 'I lost access to my authenticator app.',
+      category: 'mfa_recovery',
+      priority: 'urgent',
+    });
+    chatMock.mockResolvedValue(chatReply('{"category":"kyc","priority":"normal"}'));
+    await createOutboxRepo(db).enqueue('ticket.triage', { ticketId: t.id }, { dedupeKey: `triage:${t.id}` });
+    await drainOnce(deps(), 'w1');
+    const after = await repo.getTicket(t.id);
+    expect(after!.category).toBe('mfa_recovery');
+    const a = (await createAuditRepo(db).listByPartner('p1')).find((x) => x.action === 'ticket.triage');
+    expect(a!.meta).toMatchObject({ source: 'copilot', category: 'mfa_recovery' });
+  });
+});

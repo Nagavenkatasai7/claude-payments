@@ -1,7 +1,7 @@
 import { and, desc, eq, asc, sql, count, inArray, notInArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT, MFA_RECOVERY_CATEGORY } from '@/lib/ticket-category';
 import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
@@ -441,11 +441,17 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
       return m;
     },
 
+    /**
+     * Set the triage fields. A two-step recovery request keeps its category whatever the caller
+     * passes (checked in the same UPDATE): the recovery card and the action locks key on it.
+     */
     async setTriage(id: string, fields: { category?: string; priority?: TicketPriority }): Promise<void> {
       await db
         .update(tickets)
         .set({
-          ...(fields.category !== undefined ? { category: fields.category } : {}),
+          ...(fields.category !== undefined
+            ? { category: sql`CASE WHEN ${tickets.category} = ${MFA_RECOVERY_CATEGORY} THEN ${tickets.category} ELSE ${fields.category} END` }
+            : {}),
           ...(fields.priority !== undefined ? { priority: fields.priority } : {}),
           updatedAt: new Date(),
         })

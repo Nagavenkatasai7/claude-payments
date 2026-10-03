@@ -199,12 +199,14 @@ export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, 
       return true;
     },
 
-    /** Turn MFA off (recovery) and drop its Redis state. Returns whether it was on. */
+    /**
+     * Turn MFA off and drop its Redis state. Returns whether it was on. No app path calls this: a
+     * customer's factor is removed only by a staff-approved recovery (customer-mfa-recovery.ts),
+     * which clears it inside its own transaction. Kept for scripts.
+     */
     async reset(k: CustomerKey): Promise<boolean> {
       const wasOn = await repo.clearMfa(k.partnerId, k.phone);
-      await redis.del(customerMfaKeys.enroll(k));
-      await redis.del(customerMfaKeys.enrollCount(k));
-      await redis.del(customerMfaKeys.last(k));
+      await dropMfaRedisState(redis, k);
       return wasOn;
     },
 
@@ -216,6 +218,16 @@ export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, 
 }
 
 export type CustomerMfaStore = ReturnType<typeof createCustomerMfaStore>;
+
+/**
+ * Drop one row's short-lived MFA state: a pending enrolment, its attempt count and the replay
+ * marker. The factor itself (customers.mfa_totp_enc) is untouched. Used after the factor is cleared.
+ */
+export async function dropMfaRedisState(redis: RedisLike, k: CustomerKey): Promise<void> {
+  await redis.del(customerMfaKeys.enroll(k));
+  await redis.del(customerMfaKeys.enrollCount(k));
+  await redis.del(customerMfaKeys.last(k));
+}
 
 let cached: CustomerMfaStore | null = null;
 

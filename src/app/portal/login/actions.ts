@@ -9,6 +9,7 @@ import { alertPortalOtpFailure, portalOtpChannelReady } from '@/lib/portal-otp-s
 import { afterPortalResponse, completePortalSignIn, portalCustomers, safePortalNext } from '@/lib/portal-auth';
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
 import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
+import { openMfaRecoveryRequest } from '@/lib/customer-mfa-recovery';
 import { isValidPhone, normalizePhone } from '@/lib/phone';
 import type { MessageKey } from '@/lib/i18n';
 import type { PartnerId } from '@/lib/types';
@@ -37,7 +38,7 @@ import type { PartnerId } from '@/lib/types';
  * safePortalNext on every use (an allow-list of /portal paths; anything else is /portal).
  */
 
-export type PortalLoginStep = 'phone' | 'code' | 'mfa' | 'consent';
+export type PortalLoginStep = 'phone' | 'code' | 'mfa' | 'consent' | 'recovery';
 
 export interface PortalLoginState {
   step: PortalLoginStep;
@@ -245,6 +246,39 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
 }
 
 /**
+ * Step 2b alternative (lost-features p4 B4): "Lost your authenticator app?". The customer proved the
+ * WhatsApp code (the 'mfa' pending record exists only after it), so this opens a support request to
+ * turn two-step verification off for the HOST partner and the record's phone; staff approve it after
+ * checking it is them. The token is TAKEN atomically first (single use: no session, no second
+ * request, no authenticator attempt with it afterwards). The sign-in ends here: nobody is signed in.
+ * A new request and one already open give the same answer.
+ */
+export async function requestMfaRecoveryAction(_prev: PortalLoginState | null, formData: FormData): Promise<PortalLoginState> {
+  const site = await requirePortalSite();
+  const pid = site.partnerId;
+  const pendingToken = field(formData, 'pending');
+  let taken: PortalPending | null;
+  try {
+    if (!(await ipAllowed(VERIFY_IP_LIMIT))) return { step: 'phone', error: 'portal.login.try_later' };
+    taken = await getPortalPendingStore().take(pendingToken, pid, 'mfa');
+  } catch {
+    return { step: 'phone', error: 'portal.login.cant_send' };
+  }
+  if (!taken) return { step: 'phone', error: 'portal.login.expired' };
+  const { phone } = taken;
+  let outcome: Awaited<ReturnType<typeof openMfaRecoveryRequest>>;
+  try {
+    outcome = await openMfaRecoveryRequest({ partnerId: pid, phone, via: 'portal' });
+  } catch {
+    return { step: 'phone', error: 'portal.login.cant_send' };
+  }
+  await afterPortalResponse('portal.auth', () => audit(pid, phone, 'mfa_recovery_requested'));
+  if (outcome === 'limited') return { step: 'recovery', error: 'portal.login.recoveryLimit' };
+  // 'not_enrolled' cannot happen at this step; it gets the same answer as the others.
+  return { step: 'recovery', notice: 'portal.login.recoverySent' };
+}
+
+/**
  * Step 3 (first web sign-in only, owner O11): the customer agrees to WhatsApp transfer updates from
  * the partner and confirms the terms and privacy notice. Recorded as the WhatsApp opt-in plus an
  * audit row, BEFORE the first session. The customer row is created here, under the HOST partner.
@@ -288,6 +322,8 @@ export async function portalLoginAction(prev: PortalLoginState | null, formData:
       return resendCodeAction(prev, formData);
     case 'mfa':
       return verifyMfaAction(prev, formData);
+    case 'recover':
+      return requestMfaRecoveryAction(prev, formData);
     case 'consent':
       return consentAction(prev, formData);
     default:

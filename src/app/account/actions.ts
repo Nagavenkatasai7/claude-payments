@@ -31,7 +31,8 @@ import { encryptField, defaultProvider } from '@/lib/field-crypto';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { customerEmailCtx } from '@/lib/crypto-context';
-import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/customer-mfa';
+import { getCustomerMfaStore, customerKey } from '@/lib/customer-mfa';
+import { openMfaRecoveryRequest } from '@/lib/customer-mfa-recovery';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { customerPortalOrigin, portalUrl } from '@/lib/customer-portal-url';
 
@@ -79,6 +80,14 @@ const SESSION_EXPIRED = 'Your session expired — please start again.';
 const MFA_INVALID = 'That code is not valid. Check the time on your phone and try again.';
 const MFA_THROTTLED = 'Too many attempts. Try again later.';
 const MFA_TOO_MANY = 'Too many codes. Please sign in again.';
+// lost-features p4 B4: the recovery request and the reset notice (fixed copy).
+const RECOVERY_SENT =
+  'We sent your request to our support team. They will check it is you before turning two-step verification off, and we will tell you on WhatsApp.';
+const RECOVERY_LIMIT = 'You have sent too many requests today. Please try again tomorrow.';
+const RECOVERY_FAILED = 'We could not send your request. Please try again.';
+const RESET_MFA_ON_NOTICE =
+  'Password reset. Two-step verification is still on, so you will need your authenticator app to sign in. ' +
+  'Lost it? Choose “Lost your authenticator app?” at the code step.';
 const COOKIE_MAX_AGE = 12 * 60 * 60; // 12h absolute (matches the session ceiling)
 // Program-Fix 46A (F70): registrations per client IP per hour (own scope).
 const REGISTER_IP_SCOPE = 'register';
@@ -380,6 +389,52 @@ export async function verifyMfaAction(
   redirect('/account');
 }
 
+/**
+ * lost-features p4 B4: "Lost your authenticator app?" at the code step. The customer proved the
+ * password (the 'mfa' pending token exists only after it, bound to that password hash), so this asks
+ * support to turn two-step verification off for the account's partner and phone; staff approve it
+ * after checking it is them. It costs one login reservation like a code attempt, the token is
+ * consumed (single use), and nobody is signed in. WHO comes only from the token's account row.
+ */
+export async function requestAccountMfaRecoveryAction(
+  _prev: AccountState | null,
+  formData: FormData,
+): Promise<AccountState> {
+  await refuseOnSiteHost();
+  const pendingToken = field(formData, 'pendingToken');
+  const pendingStore = getPendingAuthStore();
+  const pending = await pendingStore.peek(pendingToken);
+  if (!pending || pending.purpose !== 'mfa' || !pending.bind) {
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+  const phone = pending.phone;
+  const auth = getCustomerAuthStore();
+  const mfa = getCustomerMfaStore();
+  // The same re-read as verifyMfaAction: gone, ambiguous, or a changed password ⇒ start over.
+  const customer = await auth.getCustomer(phone);
+  if (!customer?.passwordHash || mfa.passwordTag(customer.passwordHash) !== pending.bind) {
+    await pendingStore.drop(pendingToken);
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+  if (!(await auth.reserveLoginAttempt(phone, await clientIp()))) {
+    return { step: 'mfa', phone, pendingToken, error: MFA_THROTTLED };
+  }
+  // Single use: of two concurrent submits on one token, only one continues.
+  const consumed = await pendingStore.consume(pendingToken);
+  if (!consumed || consumed.purpose !== 'mfa' || consumed.phone !== phone) {
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+  let outcome: Awaited<ReturnType<typeof openMfaRecoveryRequest>>;
+  try {
+    outcome = await openMfaRecoveryRequest({ partnerId: customer.partnerId, phone, via: 'account' });
+  } catch (err) {
+    logWarn('customer.mfa', 'recovery request failed', { error: err instanceof Error ? err.name : 'unknown' });
+    return { step: 'login', error: RECOVERY_FAILED };
+  }
+  if (outcome === 'limited') return { step: 'login', error: RECOVERY_LIMIT };
+  return { step: 'login', notice: RECOVERY_SENT };
+}
+
 /** Login/register step 2: consume the pending-auth token (proves the prior
  * factor), verify the purpose-matched OTP, then mint the session. The phone is
  * derived FROM THE TOKEN, never the form. */
@@ -565,24 +620,17 @@ export async function resetAction(
   // otherwise the NEW password would be refused at home for the rest of the hour.
   await authStore.clearLoginFailures(phone, await clientIp());
 
-  // Program-Fix 49D recovery: the WhatsApp OTP proved the number, so a reset
-  // also turns portal two-step verification off (a lost phone app is the
-  // common reason to be here). Cleared first, then one INSERT-only audit row.
-  // A failure here never undoes the password reset; it is logged, and the
-  // customer can reset again.
+  // Two-step verification stays on: removing it now goes through staff review (the recovery
+  // request at the authenticator step). The notice says which applies; the OTP already proved the
+  // number, so this tells the resetter nothing new. A read error says the safer thing (still on).
+  let mfaOn = true;
   try {
-    const key = customerKey(updated);
-    if (await getCustomerMfaStore().reset(key)) {
-      await recordCustomerMfaAudit('customer.mfa.reset', key, { via: 'password_reset' });
-    }
+    mfaOn = await getCustomerMfaStore().isEnrolled(customerKey(updated));
   } catch (err) {
-    logWarn('customer.mfa', 'reset could not clear two-step verification', {
-      error: err instanceof Error ? err.name : 'unknown',
-    });
+    logWarn('customer.mfa', 'enrolment read failed after a reset', { error: err instanceof Error ? err.name : 'unknown' });
   }
-
   await getPendingAuthStore().consume(pendingToken); // single-use
-  return { step: 'login', notice: 'Password reset. Please sign in with your new password.' };
+  return { step: 'login', notice: mfaOn ? RESET_MFA_ON_NOTICE : 'Password reset. Please sign in with your new password.' };
 }
 
 // ── Settings (customer dashboard B1) ────────────────────────────────────────

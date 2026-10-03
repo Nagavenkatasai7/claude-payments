@@ -173,6 +173,14 @@ describe('ticket-repo — lifecycle', () => {
     expect(read?.category).toBe('refund');
     expect(read?.priority).toBe('urgent');
   });
+
+  it('setTriage never replaces the category of a two-step recovery request (priority still applies)', async () => {
+    const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b', category: 'mfa_recovery' });
+    await repo.setTriage(t.id, { category: 'refund', priority: 'low' });
+    const read = await repo.getTicket(t.id);
+    expect(read?.category).toBe('mfa_recovery');
+    expect(read?.priority).toBe('low');
+  });
 });
 
 describe('ticket-repo — findOpenCustomerTicketByCategory', () => {
