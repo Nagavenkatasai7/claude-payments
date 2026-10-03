@@ -32,6 +32,7 @@ import { isTenantTicketAssignee } from '@/lib/ticket-assignable';
 import type { Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
+import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 
 // /partner/support/[ticketId] actions (UI redesign M3-19): reply, internal note, status. The
 // shared /partner action shape: the site-host guard, then the gate (outside any try); the target
@@ -39,8 +40,8 @@ import type { ActionResult } from '../../../action-result';
 // with the legacy worker rules (an agent works only tickets assigned to them; a Contact SmartRemit
 // thread is not a customer ticket), and every miss is the same not-found; input validated before
 // any write; the write, its outbox nudge and its audit row in ONE transaction. The nudges are the
-// ones the platform ticket actions enqueue (same text, same dedupe keys), so a ticket worked on
-// both surfaces never double-sends.
+// ones the platform ticket actions enqueue (same text from ticket-nudge.ts, same dedupe keys), so a
+// ticket worked on both surfaces never double-sends.
 
 /** Statuses a partner may not move a ticket out of (the platform escalation is SmartRemit's). */
 const PARTNER_LOCKED_STATUSES = ['waiting_admin'] as const;
@@ -88,7 +89,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
             'whatsapp.text',
             {
               to: ticket.customerPhone,
-              body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+              body: ticketReplyNudge(nudgeUrl),
               // The ticket's own tenant (a repo value, never a form field); creds resolve at drain.
               partnerId: ticket.partnerId,
               category: 'nonessential',
@@ -187,7 +188,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
           'whatsapp.text',
           {
             to: ticket.customerPhone,
-            body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+            body: ticketResolvedNudge(nudgeUrl),
             partnerId: ticket.partnerId,
             category: 'nonessential',
           },

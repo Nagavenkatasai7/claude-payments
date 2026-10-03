@@ -176,6 +176,7 @@ describe('replyAction', () => {
     const payload = rows[0].payload as { to: string; body: string };
     expect(payload.to).toBe('15559998888');
     expect(payload.body).toContain(`/account/support/${t.id}`);
+    expect(payload.body).not.toContain('SmartRemit'); // p4 C4: neutral wording (ticket-nudge.ts)
   });
 
   it('each reply gets its own nudge (per-message dedupe keys differ)', async () => {
@@ -251,6 +252,7 @@ describe('escalate / resolve transitions', () => {
     expect((await createTicketRepo(db).getTicket(t.id))?.status).toBe('resolved');
     let nudges = (await outboxRows()).filter((r) => r.dedupeKey === `ticketresolved:${t.id}`);
     expect(nudges).toHaveLength(1);
+    expect((nudges[0].payload as { body: string }).body).not.toContain('SmartRemit'); // p4 C4
     // reopen → re-resolve: the dedupe key is spent, no second nudge
     await createTicketRepo(db).updateStatus(t.id, 'open');
     await resolveAction(form({ ticketId: t.id }));

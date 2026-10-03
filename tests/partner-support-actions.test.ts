@@ -230,6 +230,7 @@ describe('replyAction specifics', () => {
     const msg = visible.find((m) => m.body === 'Thanks, we are on it.')!;
     expect(box[0]).toMatchObject({ kind: 'whatsapp.text', dedupeKey: `ticketmsg:tk_a1:${msg.id}` });
     expect(box[0].payload).toMatchObject({ to: PHONE, partnerId: PA, category: 'nonessential' });
+    expect((box[0].payload as { body: string }).body).not.toContain('SmartRemit'); // p4 C4: neutral wording
     const { pokeWorker } = await import('@/lib/outbox');
     expect(pokeWorker).toHaveBeenCalled();
   });
@@ -297,6 +298,7 @@ describe('setStatusAction specifics', () => {
     const box = await outboxRows();
     expect(box).toHaveLength(1);
     expect(box[0]).toMatchObject({ kind: 'whatsapp.text', dedupeKey: 'ticketresolved:tk_a1' });
+    expect((box[0].payload as { body: string }).body).not.toContain('SmartRemit'); // p4 C4
     expect((await ticketRow('tk_a1')).status).toBe('resolved');
   });
   it('a same-state move or a move out of closed is refused with no audit row', async () => {

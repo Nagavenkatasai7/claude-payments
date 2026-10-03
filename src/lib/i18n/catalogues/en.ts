@@ -2044,5 +2044,7 @@ export const en = {
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──
+  'support.nudge.reply': 'You have a new reply from support. View it here: {url}',
+  'support.nudge.resolved': 'Your support request has been resolved. View it here: {url}',
   // ── end p4 ──
 } as const;
