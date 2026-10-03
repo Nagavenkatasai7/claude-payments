@@ -13,6 +13,7 @@ import {
   reviewStateKey,
   revealableValue,
   tierView,
+  customerProfileView,
 } from '@/lib/partner-customer-view';
 import type { Customer, KycReviewState, KycStatus } from '@/lib/types';
 
@@ -110,11 +111,13 @@ describe('customerDetailView', () => {
     const json = JSON.stringify(v);
     for (const x of PII) expect(json).not.toContain(x);
     expect(json).not.toMatch(/watchlist|pep|sanction/i);
-    expect(v.fields.map((f) => f.field)).toEqual(['phone', 'full_name', 'date_of_birth', 'residential_address']);
+    expect(json).not.toContain('"IN"');
+    expect(v.fields.map((f) => f.field)).toEqual(['phone', 'full_name', 'date_of_birth', 'nationality', 'residential_address']);
     const byField = Object.fromEntries(v.fields.map((f) => [f.field, f]));
     expect(byField.phone.masked).toBe('••••9876');
     expect(byField.full_name.masked).toBe('A. R.');
     expect(byField.date_of_birth.masked).toBe('••••');
+    expect(byField.nationality.masked).toBe('••');
     expect(byField.residential_address.masked).toBe('••••');
     expect(v.kycStatusKey).toBe('partner.customers.kyc.verified');
     expect(v.tierKey).toBe('partner.customers.tier.T1');
@@ -157,11 +160,11 @@ describe('tierView (the one tier label for the list, the detail page and the tra
 });
 
 describe('revealable fields', () => {
-  it('the allowlist is exactly the four plan fields', () => {
-    expect([...REVEALABLE_FIELDS]).toEqual(['full_name', 'date_of_birth', 'residential_address', 'phone']);
+  it('the allowlist is exactly the five plan fields (p2 B5 adds nationality)', () => {
+    expect([...REVEALABLE_FIELDS]).toEqual(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'phone']);
   });
   it('isRevealableField refuses anything else, including prototype keys and non-strings', () => {
-    for (const f of ['email', '__proto__', 'constructor', 'toString', 'govIdNumber', 'nationality', '', 'PHONE']) {
+    for (const f of ['email', '__proto__', 'constructor', 'toString', 'govIdNumber', 'gov_id', 'pep_declared', '', 'PHONE']) {
       expect(isRevealableField(f), f).toBe(false);
     }
     expect(isRevealableField(1)).toBe(false);
@@ -174,6 +177,8 @@ describe('revealable fields', () => {
     expect(revealableValue(c, 'full_name')).toBe(NAME);
     expect(revealableValue(c, 'date_of_birth')).toBe(DOB);
     expect(revealableValue(c, 'residential_address')).toBe(ADDRESS);
+    expect(revealableValue(c, 'nationality')).toBe('IN');
+    expect(revealableValue(customer({ nationality: undefined }), 'nationality')).toBeUndefined();
     expect(revealableValue(customer({ fullName: '  ' }), 'full_name')).toBeUndefined();
   });
 });
@@ -191,5 +196,54 @@ describe('pageCustomers', () => {
     const p3 = pageCustomers(many, { offset: 100, limit: 50, dir: 'desc' });
     expect(p3.rows).toHaveLength(20);
     expect(pageCustomers(many, { offset: 0, limit: 50, dir: 'asc' }).rows[0].senderPhone).toBe('15550000000');
+  });
+});
+
+// Lost-features p2 B6: the profile fields that come back. Closed label keys and masked strings only;
+// never the screening flags, the full ID number, the full verification reference or the rejected reason.
+describe('customerProfileView', () => {
+  const full = customer({
+    govIdType: 'passport',
+    govIdNumber: 'X9981234',
+    idDocType: 'national_id',
+    idLast4: '5678',
+    pepDeclared: false,
+    sourceOfFunds: 'employment',
+    occupation: 'self_employed',
+    kycProviderRef: 'inq_ABCDEFGH7777',
+    kycInquiryId: 'inq_ABCDEFGH7777',
+  });
+  it('closed keys and masked values', () => {
+    expect(customerProfileView(full)).toEqual({
+      country: 'US',
+      govId: { typeKey: 'partner.customers.govId.passport', last4: '••••1234' },
+      pepDeclaredKey: 'partner.customers.pepDeclared.no',
+      sourceOfFundsKey: 'partner.customers.sof.employment',
+      occupationKey: 'partner.customers.occupation.self_employed',
+      verificationRefs: ['****7777'],
+    });
+  });
+  it('falls back to the verified document class and its last 4; two different refs show twice', () => {
+    const v = customerProfileView(customer({ govIdType: undefined, govIdNumber: undefined, idDocType: 'national_id', idLast4: '5678', kycProviderRef: 'prov_1111', kycInquiryId: 'inq_2222' }));
+    expect(v.govId).toEqual({ typeKey: 'partner.customers.govId.national_id', last4: '••••5678' });
+    expect(v.verificationRefs).toEqual(['****1111', '****2222']);
+  });
+  it('absent values give null (the PEP row renders only when the customer answered)', () => {
+    const v = customerProfileView(customer({ govIdType: undefined, govIdNumber: undefined, idDocType: undefined, idLast4: undefined }));
+    expect(v).toMatchObject({ govId: null, pepDeclaredKey: null, sourceOfFundsKey: null, occupationKey: null, verificationRefs: [] });
+    expect(customerProfileView(customer({ pepDeclared: true })).pepDeclaredKey).toBe('partner.customers.pepDeclared.yes');
+  });
+  it('unknown enum values collapse to the unknown key', () => {
+    const v = customerProfileView(customer({ sourceOfFunds: 'crypto' as never, occupation: '__proto__' as never, govIdType: 'weird' as never }));
+    expect(v.sourceOfFundsKey).toBe('partner.customers.sof.unknown');
+    expect(v.occupationKey).toBe('partner.customers.occupation.unknown');
+    expect(v.govId?.typeKey).toBe('partner.customers.govId.unknown');
+  });
+  it('never carries the full ID, the full reference, the rejected reason or a screening flag; identical with the flags flipped', () => {
+    const json = JSON.stringify(customerProfileView(full));
+    for (const x of ['X998', 'ABCDEFGH', 'Matched list', 'watchlist', 'pepHit']) expect(json).not.toContain(x);
+    const a = customerProfileView(customer({ ...full, watchlistHit: true, pepHit: true, kycRejectedReason: 'hit' }));
+    const b = customerProfileView(customer({ ...full, watchlistHit: false, pepHit: false, kycRejectedReason: undefined }));
+    expect(a).toEqual(b);
   });
 });

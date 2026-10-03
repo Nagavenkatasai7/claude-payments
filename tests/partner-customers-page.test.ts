@@ -252,13 +252,33 @@ describe('/partner/customers/[ref]: detail', () => {
     expect(html).not.toMatch(/watchlist|sanction|pep hit|Matched list/i);
     expect(html).toContain('Verified');
   });
-  it('an agent without canRevealPii sees masked values and no Show control; admin gets one per present field', async () => {
-    await signInAs({ partnerId: PA, role: 'agent' });
-    expect(await detail(sealCustomerRef(PA, SHARED))).not.toContain('>Show<');
+  it('p2 B5: an enrolled agent WITHOUT canRevealPii gets one Show control per present field, as does an admin', async () => {
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag' });
+    await redis.set(staffMfaKeys.secret('ag'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
+    expect((await detail(sealCustomerRef(PA, SHARED))).match(/>Show</g)).toHaveLength(4);
     await signInAs({ partnerId: PA, role: 'admin', username: 'adm' });
     await redis.set(staffMfaKeys.secret('adm'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
     const html = await detail(sealCustomerRef(PA, SHARED));
     expect(html.match(/>Show</g)).toHaveLength(4);
+    expect(html).not.toContain('data-reveal-hint');
+  });
+  it('a non-enrolled agent sees masked values, no Show control, and the hint to turn on two-step verification', async () => {
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-nomfa', permissions: { ...perms, canRevealPii: true } });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).not.toContain('>Show<');
+    expect(html).toContain('data-reveal-hint');
+    expect(html).toContain('href="/partner/security"');
+  });
+  it('nationality is masked and revealable when present', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: SHARED, fullName: A_NAME, dateOfBirth: DOB, residentialAddress: ADDR, nationality: 'IN' }),
+    );
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag2' });
+    await redis.set(staffMfaKeys.secret('ag2'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('Nationality');
+    expect(html.match(/>Show</g)).toHaveLength(5);
+    expect(html).not.toMatch(/>IN</);
   });
   it('an admin without two-step verification sees no Show control (the reveal would be refused)', async () => {
     await signInAs({ partnerId: PA, role: 'admin', username: 'adm-nomfa' });
@@ -425,5 +445,48 @@ describe('/partner/customers/[ref]: sending today and transfers (p2 B7, A10)', (
     );
     expect(page2).toContain('data-customer-transfer="tx_p_25"');
     expect(page2).not.toContain('data-customer-transfer="tx_a_1"');
+  });
+});
+
+// Lost-features p2 B6: the profile rows that come back, masked; never the rejected reason or a
+// screening flag; the PEP row only when the customer answered.
+describe('/partner/customers/[ref]: profile (p2 B6)', () => {
+  it('shows country, masked ID, declared PEP, source of funds, occupation and a masked reference; pii.view names them', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({
+        partnerId: PA,
+        senderPhone: SHARED,
+        fullName: A_NAME,
+        govIdType: 'passport',
+        govIdNumber: 'X9981234',
+        pepDeclared: false,
+        sourceOfFunds: 'savings',
+        occupation: 'retired',
+        kycProviderRef: 'inq_ABCDEFGH7777',
+        kycInquiryId: 'inq_ABCDEFGH7777',
+        kycRejectedReason: 'Matched list entry',
+        watchlistHit: true,
+        pepHit: true,
+      }),
+    );
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-prof' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-testid="partner-customer-profile"');
+    expect(html).toContain('Passport');
+    expect(html).toContain('••••1234');
+    expect(html).toContain('Declared politically exposed');
+    expect(html).toContain('Savings');
+    expect(html).toContain('Retired');
+    expect(html).toContain('****7777');
+    for (const v of ['X998', 'ABCDEFGH', 'Matched list']) expect(html).not.toContain(v);
+    expect(html).not.toMatch(/watchlist|pep hit/i);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta.fields).toEqual(['full_name', 'gov_id_last4', 'pep_declared', 'source_of_funds', 'occupation']);
+  });
+  it('no PEP answer → no PEP row', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).not.toContain('Declared politically exposed');
   });
 });

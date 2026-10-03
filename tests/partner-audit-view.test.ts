@@ -95,6 +95,10 @@ describe('projectAuditRow', () => {
     expect(d).toContain('nationality');
     for (const w of d.replace(/^fields=/, '').replace(/…$/, '').split(' ')) expect(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'occupation', 'source_of_funds']).toContain(w);
   });
+  it('lost-features p2 B6: the extra pii.view field names render as plain names', () => {
+    const d = projectAuditRow(row({ action: 'pii.view', meta: { fields: ['gov_id_last4', 'pep_declared'] } }), tenant).detail ?? '';
+    expect(d).toBe('fields=gov_id_last4 pep_declared');
+  });
   it('customer subjects and phone-shaped subjects are masked', () => {
     const c = projectAuditRow(row({ action: 'pii.view', subjectId: 'cust:' + 'a'.repeat(64) }), tenant).subject;
     expect(c).not.toContain('a'.repeat(20));

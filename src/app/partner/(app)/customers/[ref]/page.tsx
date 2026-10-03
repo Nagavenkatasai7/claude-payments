@@ -9,9 +9,9 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { auditIdentityView, openCustomerRef } from '@/lib/customer-ref';
-import { hasPermission } from '@/lib/permissions';
+import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
-import { customerDetailView, sendingTodayView } from '@/lib/partner-customer-view';
+import { customerDetailView, customerProfileView, sendingTodayView } from '@/lib/partner-customer-view';
 import { evaluateCap } from '@/lib/tier-rules';
 import { listPartnerCustomerTransfers } from '@/db/repos/partner-customer-reads';
 import { decodeTransferCursor, encodeTransferCursor } from '@/lib/partner-transfers';
@@ -87,13 +87,24 @@ export default async function PartnerCustomerDetailPage({
   if (!opened || opened.partnerId !== ctx.partnerId) notFound();
   const customer = await getCustomerStore(getStore()).getCustomer(ctx.partnerId, opened.phone);
   if (!customer || customer.partnerId !== ctx.partnerId) notFound();
-  await auditIdentityView(getDb(), { username: ctx.username }, customer, { actorScope: 'partner' });
+  // Lost-features p2 B6: the profile rows (masked ID, declared PEP, source of funds, occupation) are
+  // named in the same pii.view row, only those that render.
+  const profile = customerProfileView(customer);
+  const alsoShown = [
+    ...(profile.govId ? ['gov_id_last4'] : []),
+    ...(profile.pepDeclaredKey ? ['pep_declared'] : []),
+    ...(profile.sourceOfFundsKey ? ['source_of_funds'] : []),
+    ...(profile.occupationKey ? ['occupation'] : []),
+  ];
+  await auditIdentityView(getDb(), { username: ctx.username }, customer, { actorScope: 'partner', alsoShown });
 
   const partner = await getPartnerStore().getPartner(ctx.partnerId);
   const view = customerDetailView(customer, ref, new Date(), sendGateActive(partner));
-  // Mirrors the action's viewer checks (the action is the authority): no Show control that would
-  // always be refused. It depends only on the viewer, never on the customer (no oracle).
-  const canReveal = hasPermission(ctx.staff, 'canRevealPii') && (await getStaffMfaStore().isEnrolled(ctx.username));
+  // The one reveal rule (partner-reveal-policy; lost-features p2 B5): identity fields for admin and
+  // agent with two-step verification, no canRevealPii. Mirrors the action (the authority): no Show
+  // control that would always be refused. It depends only on the viewer, never on the customer.
+  const mfaEnrolled = await getStaffMfaStore().isEnrolled(ctx.username);
+  const canReveal = revealCapabilities(revealViewer(ctx, mfaEnrolled)).identity;
   // M3-12: the EFFECTIVE limits (the same resolver a mint uses, partner-set entries re-clamped at
   // read). The form is offered to admins only (the action re-gates PARTNER_ADMIN) and never over a
   // live SmartRemit override (the action refuses that too, under the row lock).
@@ -148,7 +159,16 @@ export default async function PartnerCustomerDetailPage({
               </Row>
             ))}
           </dl>
-          {canReveal ? <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.customers.revealNote')}</p> : null}
+          {canReveal ? (
+            <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.customers.revealNote')}</p>
+          ) : !mfaEnrolled ? (
+            <p className="mt-3 text-[13px] text-ds-ink-muted" data-reveal-hint="">
+              {t('partner.customers.revealEnrolHint')}{' '}
+              <Link href={PARTNER_ROUTES.security.href} className="font-semibold text-ds-primary underline-offset-4 hover:underline">
+                {t('partner.customers.revealEnrolLink')}
+              </Link>
+            </p>
+          ) : null}
         </Section>
         <Section title={t('partner.customers.verification')}>
           <dl className="divide-y divide-ds-border">
@@ -173,6 +193,31 @@ export default async function PartnerCustomerDetailPage({
               )}
             </div>
           ) : null}
+        </Section>
+        <Section title={t('partner.customers.profile')}>
+          <dl className="divide-y divide-ds-border" data-testid="partner-customer-profile">
+            <Row label={t('partner.customers.field.country')}>{profile.country ?? '—'}</Row>
+            {profile.govId ? (
+              <Row label={t('partner.customers.field.govId')}>
+                {t(profile.govId.typeKey)} <span className="font-mono tabular-nums">{profile.govId.last4}</span>
+              </Row>
+            ) : null}
+            {profile.pepDeclaredKey ? (
+              <Row label={t('partner.customers.field.pepDeclared')}>{t(profile.pepDeclaredKey)}</Row>
+            ) : null}
+            {profile.sourceOfFundsKey ? (
+              <Row label={t('partner.customers.field.sourceOfFunds')}>{t(profile.sourceOfFundsKey)}</Row>
+            ) : null}
+            {profile.occupationKey ? (
+              <Row label={t('partner.customers.field.occupation')}>{t(profile.occupationKey)}</Row>
+            ) : null}
+            {profile.verificationRefs.map((r) => (
+              <Row key={r} label={t('partner.customers.field.verificationRef')}>
+                <span className="font-mono tabular-nums">{r}</span>
+              </Row>
+            ))}
+          </dl>
+          <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.customers.profileNote')}</p>
         </Section>
       </div>
       <div className="mt-5">

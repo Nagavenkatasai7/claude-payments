@@ -1,8 +1,9 @@
 import { sealCustomerRef } from '@/lib/customer-ref';
-import { maskPhoneLast4 } from '@/lib/mask';
+import { maskLast4, maskPhoneLast4 } from '@/lib/mask';
+import { maskRef } from '@/lib/partner-transfers';
 import { deriveTier, observationDay, type CapSubject } from '@/lib/tier-rules';
 import type { MessageKey } from '@/lib/i18n';
-import type { CapEvaluation, CountryCode, Customer, KycStatus, Tier } from '@/lib/types';
+import type { CapEvaluation, CountryCode, Customer, GovIdType, KycStatus, Occupation, SourceOfFunds, Tier } from '@/lib/types';
 
 // partner-customer-view (UI redesign M3-11): the PURE shapes behind /partner/customers. The pages
 // render ONLY from these, so what can reach the HTML (or a client component's props) is decided
@@ -12,8 +13,11 @@ import type { CapEvaluation, CountryCode, Customer, KycStatus, Tier } from '@/li
 
 export const PARTNER_CUSTOMERS_PAGE_SIZE = 50;
 
-/** The fields a partner may reveal (one audited `pii.reveal` each). Nothing else is revealable. */
-export const REVEALABLE_FIELDS = Object.freeze(['full_name', 'date_of_birth', 'residential_address', 'phone'] as const);
+/**
+ * The fields a partner may reveal (one audited `pii.reveal` each). Nothing else is revealable. All are
+ * the `identity` class of partner-reveal-policy (lost-features p2 B5 adds nationality).
+ */
+export const REVEALABLE_FIELDS = Object.freeze(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'phone'] as const);
 export type RevealableField = (typeof REVEALABLE_FIELDS)[number];
 
 export function isRevealableField(f: unknown): f is RevealableField {
@@ -31,6 +35,8 @@ export function revealableValue(c: Customer, field: RevealableField): string | u
       return present(c.fullName);
     case 'date_of_birth':
       return present(c.dateOfBirth);
+    case 'nationality':
+      return present(c.nationality);
     case 'residential_address':
       return present(c.residentialAddress);
     default:
@@ -271,6 +277,7 @@ export function customerDetailView(c: Customer, ref: string, now: Date, kycGateA
       f('phone', 'partner.customers.field.phone', () => phone),
       f('full_name', 'partner.customers.field.full_name', (v) => maskInitials(v)),
       f('date_of_birth', 'partner.customers.field.date_of_birth', () => HIDDEN),
+      f('nationality', 'partner.customers.field.nationality', () => '••'),
       f('residential_address', 'partner.customers.field.residential_address', () => HIDDEN),
     ],
     kycStatusKey: kycStatusKey(c.kycStatus),
@@ -278,6 +285,77 @@ export function customerDetailView(c: Customer, ref: string, now: Date, kycGateA
     tierKey: tierView(c, now, kycGateActive).key,
     kycVerifiedAt: c.kycVerifiedAt ?? null,
     firstSeenAt: c.firstSeenAt,
+  };
+}
+
+// ── Lost-features p2 B6: the profile fields that came back ─────────────────────────────────────────
+// Closed label keys and masked strings only. It never reads watchlistHit, pepHit or kycRejectedReason
+// (the rejected reason can name a screening hit: the partner's own reasons show in the KYC history).
+// The ID and the verification reference show their last 4 only (the full reference opens the
+// provider case, which holds screening reports).
+
+const GOV_ID_KEYS: Readonly<Record<GovIdType, MessageKey>> = Object.freeze({
+  passport: 'partner.customers.govId.passport',
+  drivers_license: 'partner.customers.govId.drivers_license',
+  national_id: 'partner.customers.govId.national_id',
+  state_id: 'partner.customers.govId.state_id',
+});
+const SOURCE_OF_FUNDS_KEYS: Readonly<Record<SourceOfFunds, MessageKey>> = Object.freeze({
+  employment: 'partner.customers.sof.employment',
+  business: 'partner.customers.sof.business',
+  investment: 'partner.customers.sof.investment',
+  gift: 'partner.customers.sof.gift',
+  savings: 'partner.customers.sof.savings',
+  other: 'partner.customers.sof.other',
+});
+const OCCUPATION_KEYS: Readonly<Record<Occupation, MessageKey>> = Object.freeze({
+  salaried: 'partner.customers.occupation.salaried',
+  self_employed: 'partner.customers.occupation.self_employed',
+  business_owner: 'partner.customers.occupation.business_owner',
+  student: 'partner.customers.occupation.student',
+  homemaker: 'partner.customers.occupation.homemaker',
+  retired: 'partner.customers.occupation.retired',
+  unemployed: 'partner.customers.occupation.unemployed',
+  other: 'partner.customers.occupation.other',
+});
+
+function closedKey<K extends string>(map: Readonly<Record<K, MessageKey>>, v: unknown, unknown: MessageKey): MessageKey | null {
+  if (v === undefined || v === null || v === '') return null;
+  return typeof v === 'string' && Object.hasOwn(map, v) ? map[v as K] : unknown;
+}
+
+export interface CustomerProfileView {
+  country: CountryCode | null;
+  govId: { typeKey: MessageKey; last4: string } | null;
+  /** null when the customer never answered: the page renders no row (no "No" nobody collected). */
+  pepDeclaredKey: MessageKey | null;
+  sourceOfFundsKey: MessageKey | null;
+  occupationKey: MessageKey | null;
+  /** Masked (`****` + last 4); one entry when the provider ref and the inquiry id are the same. */
+  verificationRefs: string[];
+}
+
+export function customerProfileView(c: Customer): CustomerProfileView {
+  const govNumber = present(c.govIdNumber);
+  const idLast4 = present(c.idLast4);
+  const last4 = (v: string) => `${HIDDEN}${v.length > 4 ? maskLast4(v) : ''}`;
+  let govId: CustomerProfileView['govId'] = null;
+  if (c.govIdType || govNumber) {
+    govId = { typeKey: closedKey(GOV_ID_KEYS, c.govIdType, 'partner.customers.govId.unknown') ?? 'partner.customers.govId.unknown', last4: govNumber ? last4(govNumber) : HIDDEN };
+  } else if (c.idDocType || idLast4) {
+    govId = {
+      typeKey: closedKey(GOV_ID_KEYS, c.idDocType, 'partner.customers.govId.unknown') ?? 'partner.customers.govId.unknown',
+      last4: idLast4 && /^[A-Za-z0-9]{4}$/.test(idLast4) ? `${HIDDEN}${idLast4}` : HIDDEN,
+    };
+  }
+  const refs = [...new Set([present(c.kycProviderRef), present(c.kycInquiryId)].filter((r): r is string => r !== undefined))];
+  return {
+    country: typeof c.senderCountry === 'string' && /^[A-Z]{2}$/.test(c.senderCountry) ? c.senderCountry : null,
+    govId,
+    pepDeclaredKey: typeof c.pepDeclared === 'boolean' ? (c.pepDeclared ? 'partner.customers.pepDeclared.yes' : 'partner.customers.pepDeclared.no') : null,
+    sourceOfFundsKey: closedKey(SOURCE_OF_FUNDS_KEYS, c.sourceOfFunds, 'partner.customers.sof.unknown'),
+    occupationKey: closedKey(OCCUPATION_KEYS, c.occupation, 'partner.customers.occupation.unknown'),
+    verificationRefs: refs.map((r) => maskRef(r) ?? '****'),
   };
 }
 
