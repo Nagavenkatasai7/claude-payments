@@ -24,7 +24,7 @@ import { clampPage, parseTableParams, tableSorts } from '@/lib/ui/table-params';
 import { formatMoney } from '@/lib/ui/money';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, Button, EmptyState, Field, Input, PageHeader, Select, Table, buttonVariants, type TableColumn, type Tone } from '@/components/ds';
-import { PARTNER_ROUTES } from '../../routes';
+import { PARTNER_ROUTES, routeAllows } from '../../routes';
 import { FindCustomerForm } from './find-form';
 
 export const metadata: Metadata = {
@@ -113,7 +113,8 @@ type SearchParams = Record<string, string | string[] | undefined>;
  * grouped ledger read. Filters are closed values (KYC status, tier) plus `?last4=`: four digits the
  * list already prints, so no more of a phone reaches a URL than the page shows. The full-phone
  * search is the POST "find by phone" form. No identity is rendered, so no audit row is written here;
- * the detail page writes `pii.view`. Any tenant parameter is ignored.
+ * the detail page writes `pii.view`. Any tenant parameter is ignored. Admins also get a "New
+ * customer" link (p2 A5).
  */
 export default async function PartnerCustomersPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.customers.policy);
@@ -146,7 +147,22 @@ export default async function PartnerCustomersPage({ searchParams }: { searchPar
 
   return (
     <>
-      <PageHeader title={t('partner.customers.title')} sub={t('partner.customers.sub')} />
+      <PageHeader
+        title={t('partner.customers.title')}
+        sub={t('partner.customers.sub')}
+        actions={
+          routeAllows('customersNew', ctx.role) ? (
+            <Link
+              href={PARTNER_ROUTES.customersNew.href}
+              prefetch={false}
+              data-new-customer=""
+              className={buttonVariants({ variant: 'primary', size: 'md' })}
+            >
+              {t('partner.customers.new')}
+            </Link>
+          ) : undefined
+        }
+      />
       <div className="flex flex-col gap-4">
         <FindCustomerForm />
         <p className="text-[14px] text-ds-ink-muted" data-customers-summary="">

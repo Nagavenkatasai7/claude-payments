@@ -133,6 +133,32 @@ describe('customer store', () => {
   });
 });
 
+describe('customer-store: insertCustomerIfAbsent (lost-features p2 A5)', () => {
+  const fresh = (o: Partial<import('@/lib/types').Customer> = {}) => ({
+    senderPhone: PHONE,
+    firstSeenAt: '2026-09-01T00:00:00.000Z',
+    kycStatus: 'not_started' as const,
+    senderCountry: 'US' as const,
+    partnerId: 'default',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    ...o,
+  });
+  it('inserts once; a second call for the same (tenant, phone) changes nothing and returns false', async () => {
+    const { cs } = mkStores();
+    expect(await cs.insertCustomerIfAbsent(fresh({ fullName: 'First Name' }))).toBe(true);
+    expect(await cs.insertCustomerIfAbsent(fresh({ fullName: 'Other Name', kycStatus: 'verified' }))).toBe(false);
+    const c = await cs.getCustomer('default', PHONE);
+    expect(c).toMatchObject({ fullName: 'First Name', kycStatus: 'not_started' });
+  });
+  it('the key is (tenant, phone): the same phone at another tenant is a new row', async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    expect(await cs.insertCustomerIfAbsent(fresh())).toBe(true);
+    expect(await cs.insertCustomerIfAbsent(fresh({ partnerId: 'acme' }))).toBe(true);
+  });
+});
+
 describe('customer-store P1: senderCountry', () => {
   it('upsertOnFirstInbound writes senderCountry: US on a brand-new customer', async () => {
     const { cs } = mkStores();

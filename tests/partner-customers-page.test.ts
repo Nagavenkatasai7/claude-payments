@@ -76,6 +76,7 @@ import { auditSubjectId, openCustomerRef, sealCustomerRef } from '@/lib/customer
 import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import CustomersPage from '@/app/partner/(app)/customers/page';
 import CustomerDetailPage from '@/app/partner/(app)/customers/[ref]/page';
+import NewCustomerPage from '@/app/partner/(app)/customers/new/page';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -125,7 +126,7 @@ async function auditRows(action = 'pii.view') {
   return (res as unknown as { rows: Array<{ partner_id: string; actor: string; subject_id: string; meta: Record<string, unknown> }> }).rows;
 }
 const refsIn = (html: string) =>
-  [...html.matchAll(/href="\/partner\/customers\/([^"?]+)"/g)].map((m) => decodeURIComponent(m[1]));
+  [...html.matchAll(/href="\/partner\/customers\/(?!new")([^"?]+)"/g)].map((m) => decodeURIComponent(m[1]));
 
 const ALL_PII = [SHARED, ONLY_A, ONLY_B, A_NAME, B_NAME, 'Ashaqz', 'Ramanathan', 'Zubqx', 'Quellen', DOB, ADDR, 'Elmqz'];
 
@@ -538,5 +539,41 @@ describe('/partner/customers: find by phone (p2 A11)', () => {
     expect(html).toContain('data-testid="partner-customer-find"');
     expect(html).toMatch(/<input[^>]*name="phone"/);
     expect(html).not.toMatch(/href="[^"]*phone=/);
+  });
+});
+
+describe('/partner/customers/new (p2 A5)', () => {
+  const newPage = async () => renderToStaticMarkup(await NewCustomerPage());
+  it('admins get the New customer button on the list; agents get none', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(await list()).toMatch(/<a data-new-customer=""[^>]*href="\/partner\/customers\/new"/);
+    await signInAs({ username: 'agent1', partnerId: PA, role: 'agent' });
+    expect(await list()).not.toContain('data-new-customer');
+  });
+  it('agent, support and finance are refused the page', async () => {
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      await signInAs({ username: `u-${role}`, partnerId: PA, role });
+      await expect(newPage()).rejects.toThrow(/^REDIRECT:\/(partner|login)$/);
+    }
+  });
+  it('ours mode: the form offers the partner’s countries and no verified option; the copy says no message is sent', async () => {
+    await db.execute(sql.raw(`UPDATE partners SET countries = '["US","GB"]'::jsonb WHERE id = '${PA}'`));
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await newPage();
+    expect(html).toContain('data-testid="partner-customer-create"');
+    expect(html).toContain('<option value="US"');
+    expect(html).toContain('<option value="GB"');
+    expect(html).not.toContain('value="verified"');
+    expect(html).not.toContain('grandfathered');
+    expect(html).toContain('The customer gets no message.');
+    expect(await auditRows('customer.create')).toHaveLength(0);
+  });
+  it('delegated mode: verified is offered with a reason field', async () => {
+    await db.execute(sql.raw(`UPDATE partners SET kyc_mode = 'delegated' WHERE id = '${PA}'`));
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await newPage();
+    expect(html).toContain('value="verified"');
+    expect(html).toMatch(/<textarea[^>]*name="reason"/);
+    expect(html).not.toContain('grandfathered');
   });
 });
