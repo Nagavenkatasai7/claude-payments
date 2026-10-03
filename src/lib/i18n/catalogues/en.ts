@@ -1768,6 +1768,27 @@ export const en = {
   // ── end p2 ──
 
   // ── p3: support, staff, shell, insights, B2B invoices, password ──
+  'partner.home.kpi.flaggedToday': 'Flagged or blocked today',
+  'partner.home.kpi.flaggedLink': 'Open reviews',
+  'partner.home.allTimeTitle': 'All time',
+  'partner.home.kpi.countAll': 'Transfers',
+  'partner.home.kpi.volumeAll': 'Volume',
+  'partner.home.kpi.feesAll': 'Fees earned',
+  'partner.home.allTimeNote': 'Every live transfer since you started, in any status. Test-key transfers are not counted.',
+  'partner.settings.setup.title': 'Compliance setup',
+  'partner.settings.setup.intro': 'How identity checks and screening run for your customers.',
+  'partner.settings.setup.kycMode': 'Identity checks run by',
+  'partner.settings.setup.kycOurs': 'SmartRemit',
+  'partner.settings.setup.kycDelegated': 'Your team',
+  'partner.settings.setup.gate': 'Verify before send',
+  'partner.settings.setup.gateOn': 'On',
+  'partner.settings.setup.gateOff': 'Off',
+  'partner.settings.setup.liveRailWarning': 'Live rail with verification off',
+  'partner.settings.setup.countries': 'Countries',
+  'partner.settings.setup.noCountries': 'None',
+  'partner.settings.setup.sanctionsLabel': 'Sanctions screening',
+  'partner.settings.setup.sanctions': 'Always runs on every transfer',
+  'partner.settings.setup.changeNote': 'Ask SmartRemit to change these settings.',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──
