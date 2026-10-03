@@ -40,6 +40,8 @@ vi.mock('next/navigation', () => ({
     throw new Error('NOT_FOUND');
   },
   usePathname: () => pathname.current,
+  // Lost-features A15/A16: the live refresher and the palette navigate with the router.
+  useRouter: () => ({ push: () => {}, refresh: () => {} }),
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 // M3-3: the home page reads the ledger, channel health, integrations and API keys. Wire every
@@ -83,6 +85,7 @@ import Layout from '@/app/partner/(app)/layout';
 import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
 import { PartnerSidebar } from '@/app/partner/(app)/partner-sidebar';
+import { t } from '@/lib/i18n';
 
 // A distinctive tenant id, so "no tenant in any href" cannot false-match "/partner".
 const TENANT = 'ptn-zq9x';
@@ -208,6 +211,37 @@ describe('/partner layout: the chrome', () => {
     const html = await shell();
     expect(html).toMatch(/<form[^>]*>.*Sign out.*<\/form>/s);
     expect(hrefs(html).some((h) => /logout|sign-?out/i.test(h))).toBe(false);
+  });
+});
+
+describe('/partner layout: quick search and live updates (lost-features A16, A15)', () => {
+  it('every role gets the search trigger; its items are only the pages the role may open', async () => {
+    await signInAs({ username: 'ag', partnerId: TENANT, role: 'agent' });
+    let html = await shell();
+    expect(html).toContain('aria-keyshortcuts="Meta+K Control+K"');
+    expect(html).toContain(`>${t('partner.nav.customers')}<`);
+    for (const key of ['audit', 'invoices', 'customersNew', 'settings'] as const) {
+      expect(html, key).not.toContain(`>${t(PARTNER_ROUTES[key].labelKey)}<`);
+    }
+    await signInAs({ username: 'ad', partnerId: TENANT, role: 'admin' });
+    html = await shell();
+    expect(html).toContain(`>${t('partner.nav.invoices')}<`);
+    expect(html).toContain(`>${t('partner.customers.new')}<`);
+    await signInAs({ username: 'sp', partnerId: TENANT, role: 'support' });
+    html = await shell();
+    expect(html).toContain('aria-keyshortcuts="Meta+K Control+K"');
+    expect(html).not.toContain(`>${t('partner.nav.transfers')}</span></li>`);
+  });
+  it('the live indicator shows on list pages only', async () => {
+    await signInAs({ partnerId: TENANT, role: 'agent' });
+    for (const p of ['/partner', '/partner/transfers', '/partner/support', '/partner/reviews', '/partner/refunds']) {
+      pathname.current = p;
+      expect(await shell(), p).toContain('data-live="on"');
+    }
+    for (const p of ['/partner/transfers/abc', '/partner/support/contact', '/partner/security', '/partner/staff']) {
+      pathname.current = p;
+      expect(await shell(), p).not.toContain('data-live');
+    }
   });
 });
 

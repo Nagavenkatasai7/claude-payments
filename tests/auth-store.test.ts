@@ -775,3 +775,65 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     expect(await createStaffRepo(db).get('priya')).toBeNull();
   });
 });
+
+// Lost-features A15 (review 2.13): the /partner live poll reads the session WITHOUT refreshing it,
+// so polling never extends the 30-minute idle sign-out. peekSessionUser applies the same windows as
+// getSessionUser and writes nothing at all.
+describe('auth-store peekSessionUser (lost-features A15)', () => {
+  const MIN = 60 * 1000;
+  const T0 = new Date('2030-01-01T00:00:00Z').getTime();
+  const hashOf = (t: string) => createHash('sha256').update(t).digest('hex');
+  function setup() {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const r = fakeRedis();
+    return { r, s: createAuthStore(r) };
+  }
+  afterEach(() => vi.useRealTimers());
+
+  it('returns the user of a live session and never writes', async () => {
+    const { r, s } = setup();
+    const token = await s.createSession('priya');
+    const writes = [vi.spyOn(r, 'set'), vi.spyOn(r, 'expire'), vi.spyOn(r, 'del'), vi.spyOn(r, 'srem')];
+    vi.advanceTimersByTime(5 * MIN);
+    expect(await s.peekSessionUser(token)).toBe('priya');
+    for (const w of writes) expect(w).not.toHaveBeenCalled();
+  });
+
+  it('polling never extends the idle window: peeks every 30 s, then the session ends 30 min after the last real read', async () => {
+    const { s } = setup();
+    const token = await s.createSession('priya');
+    for (let i = 0; i < 59; i++) {
+      vi.advanceTimersByTime(30 * 1000);
+      expect(await s.peekSessionUser(token)).toBe('priya');
+    }
+    vi.advanceTimersByTime(61 * 1000); // 31 min after the last real read
+    expect(await s.peekSessionUser(token)).toBeNull();
+    expect(await s.getSessionUser(token)).toBeNull();
+  });
+
+  it('refuses an absolute-expired, unreadable, revoked or previous-build session (without adopting it)', async () => {
+    const { r, s } = setup();
+    const unread = await s.createSession('priya');
+    await r.set(`staff_sess_seen:${hashOf(unread)}`, 'garbage');
+    expect(await s.peekSessionUser(unread)).toBeNull();
+
+    const old = randomBytes(32).toString('hex');
+    await r.set(`staff_sess:${hashOf(old)}`, 'priya', { ex: 7 * 24 * 60 * 60 });
+    expect(await s.peekSessionUser(old)).toBeNull();
+    expect(r.dump.has(`staff_sess_seen:${hashOf(old)}`)).toBe(false); // not adopted
+
+    const gone = await s.createSession('priya');
+    await s.deleteSession(gone);
+    expect(await s.peekSessionUser(gone)).toBeNull();
+    expect(await s.peekSessionUser('not-a-token')).toBeNull();
+
+    const live = await s.createSession('priya');
+    for (let i = 0; i < 48; i++) {
+      vi.advanceTimersByTime(15 * MIN);
+      await s.getSessionUser(live);
+    }
+    vi.advanceTimersByTime(MIN);
+    expect(await s.peekSessionUser(live)).toBeNull();
+  });
+});

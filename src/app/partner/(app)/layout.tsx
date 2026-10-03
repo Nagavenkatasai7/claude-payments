@@ -9,6 +9,7 @@ import { parseHealthMarks, summarizeChannelHealth } from '@/lib/channel-health';
 import { readSignatureHealth } from '@/lib/webhook-signature-health';
 import { shellChannelBanner, type ShellChannelBanner } from '@/lib/partner-shell-health';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { buildPartnerCommands, openCommandScope } from '@/lib/partner-commands';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { buttonVariants } from '@/components/ds';
@@ -16,6 +17,8 @@ import { SiteBrand } from '@/components/ds/site-brand';
 import { logout } from '@/app/login/actions';
 import { PARTNER_ROUTES, partnerNav } from '../routes';
 import { PartnerSidebar } from './partner-sidebar';
+import { PartnerPalette } from './partner-palette';
+import { PartnerLiveRefresh } from './live-refresh';
 
 // The /partner shell (UI redesign M3-2), in the landing look (SPEC D11): the landing's ground,
 // ink, type and focus ring, its sticky translucent top bar, and ds primitives only. The partner's
@@ -119,7 +122,13 @@ export default async function PartnerAppLayout({ children }: { children: ReactNo
             ) : null}
             <span className="truncate text-[12.5px] text-ds-ink-subtle">{t('partner.shell.poweredBy')}</span>
           </div>
-          <form action={logout} className="ml-auto shrink-0">
+          {/* Lost-features A16 + A15: quick search (items filtered by the session role from the route
+              table; every page re-gates) and the live indicator (list pages only). */}
+          <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">
+            <PartnerPalette items={buildPartnerCommands(ctx.role)} scope={openCommandScope(ctx.role)} />
+            <PartnerLiveRefresh />
+          </div>
+          <form action={logout} className="shrink-0">
             <button type="submit" className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
               <LogOut aria-hidden="true" className="size-4" />
               {t('partner.shell.signOut')}
