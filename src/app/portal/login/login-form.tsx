@@ -66,7 +66,35 @@ export function LoginForm({ brand, next }: { brand: string; next: string }) {
         <Button type="submit" name="intent" value="mfa" disabled={busy}>
           {busy ? t('portal.login.verifying') : t('portal.login.verify')}
         </Button>
+        {/* lost-features p4 B4: ask support to turn two-step verification off (no code needed). */}
+        <div className="flex flex-col items-start gap-1">
+          <Button type="submit" name="intent" value="recover" variant="link" size="md" formNoValidate disabled={busy}>
+            {t('portal.login.lostAuthenticator')}
+          </Button>
+          <p className="text-[14px] text-ds-ink-muted">{t('portal.login.lostAuthenticatorHint')}</p>
+        </div>
       </form>
+    );
+  }
+
+  if (state.step === 'recovery') {
+    return (
+      <div className="flex flex-col gap-4">
+        <h2 className="text-[17px] font-semibold text-ds-ink">{t('portal.login.recoveryTitle')}</h2>
+        {state.notice ? (
+          <p role="status" className="text-[15px] text-ds-ink-muted">
+            {t(state.notice)}
+          </p>
+        ) : null}
+        {error ? (
+          <p role="alert" className="text-[15px] font-semibold text-ds-danger-ink">
+            {error}
+          </p>
+        ) : null}
+        <Link href={startOver} className="text-[14px] font-semibold text-ds-primary">
+          {t('portal.login.backToSignIn')}
+        </Link>
+      </div>
     );
   }
 
