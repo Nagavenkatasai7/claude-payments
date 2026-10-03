@@ -35,6 +35,7 @@ import type { Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
 import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
+import { isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
 
 // /partner/support/[ticketId] actions (UI redesign M3-19): reply, internal note, status. The
 // shared /partner action shape: the site-host guard, then the gate (outside any try); the target
@@ -62,6 +63,8 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) return { ok: false, error: t('partner.support.mfaRecovery.locked') };
   if (ticket.status === 'closed') return { ok: false, error: t('partner.support.closed') };
   const body = parseStaffText(formData.get('body'));
   if (!body) return { ok: false, error: t('partner.support.textInvalid') };
@@ -174,6 +177,8 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) return { ok: false, error: t('partner.support.mfaRecovery.locked') };
   // An escalation (waiting_admin) is SmartRemit's to handle: a partner cannot move it out.
   if (ticket.status === 'waiting_admin') return { ok: false, error: t('partner.support.statusRefused') };
   const status = parsePartnerTicketStatus(formData.get('status'));

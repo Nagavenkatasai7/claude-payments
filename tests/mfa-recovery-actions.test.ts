@@ -88,6 +88,16 @@ import {
   approveMfaRecoveryAction as platformApprove,
   declineMfaRecoveryAction as platformDecline,
 } from '@/app/admin-dashboard/tickets/recovery-actions';
+import {
+  replyAction as partnerReply,
+  setStatusAction as partnerSetStatus,
+} from '@/app/partner/(app)/support/[ticketId]/actions';
+import {
+  closeAction as platformClose,
+  replyAction as platformReply,
+  resolveAction as platformResolve,
+} from '@/app/admin-dashboard/tickets/actions';
+import { RECOVERY_LOCKED_MESSAGE } from '@/lib/customer-mfa-recovery-rules';
 
 const PHONE_A = '14155550101';
 const PHONE_B = '14155550202';
@@ -297,5 +307,48 @@ describe('/admin-dashboard approveMfaRecoveryAction', () => {
     expect(await platformDecline(fd)).toEqual({ ok: true, outcome: 'declined' });
     expect(await mfaOn('pa', PHONE_A)).toBe(true);
     expect(await status(A)).toBe('resolved');
+  });
+});
+
+describe('ordinary ticket actions refuse a recovery request', () => {
+  const messageCount = async (id: string) => (await createTicketRepo(db).listMessages(id, { includeInternal: true })).length;
+
+  it('/partner reply and status change return the locked copy and write nothing', async () => {
+    await partnerAdmin();
+    const before = { messages: await messageCount(A), outbox: await outboxCount() };
+    const locked = { ok: false, error: t('partner.support.mfaRecovery.locked') };
+    expect(await partnerReply(partnerForm(A, { checks: [], extra: { body: 'Done, all sorted.', requestKey: 'k'.repeat(32) } }))).toEqual(locked);
+    for (const next of ['resolved', 'closed', 'pending']) {
+      expect(await partnerSetStatus(partnerForm(A, { checks: [], extra: { status: next } }))).toEqual(locked);
+    }
+    expect(await status(A)).toBe('open');
+    expect(await messageCount(A)).toBe(before.messages);
+    expect(await outboxCount()).toBe(before.outbox);
+    expect(await mfaOn('pa', PHONE_A)).toBe(true);
+  });
+
+  it('/admin-dashboard reply, resolve and close throw the locked message and write nothing', async () => {
+    await platformAdmin();
+    const before = { messages: await messageCount(A), outbox: await outboxCount() };
+    const fd = platformForm(A, { checks: [] });
+    fd.set('body', 'Done, all sorted.');
+    await expect(platformReply(fd)).rejects.toThrow(RECOVERY_LOCKED_MESSAGE);
+    await expect(platformResolve(platformForm(A, { checks: [] }))).rejects.toThrow(RECOVERY_LOCKED_MESSAGE);
+    await expect(platformClose(platformForm(A, { checks: [] }))).rejects.toThrow(RECOVERY_LOCKED_MESSAGE);
+    expect(await status(A)).toBe('open');
+    expect(await messageCount(A)).toBe(before.messages);
+    expect(await outboxCount()).toBe(before.outbox);
+    expect(await count('ticket.resolve')).toBe(0);
+    expect(await count('ticket.close')).toBe(0);
+  });
+
+  it('an ordinary ticket of the same tenant still resolves on both dashboards', async () => {
+    const plain = await createTicketRepo(db).createTicket({ id: 'tk_plain', partnerId: 'pa', kind: 'customer', customerPhone: PHONE_A, subject: 'Help', body: 'b' });
+    await platformAdmin();
+    await platformResolve(platformForm(plain.id, { checks: [] }));
+    expect(await status(plain.id)).toBe('resolved');
+    await partnerAdmin();
+    expect(await partnerSetStatus(partnerForm(plain.id, { checks: [], extra: { status: 'open' } }))).toMatchObject({ ok: true });
+    expect(await status(plain.id)).toBe('open');
   });
 });

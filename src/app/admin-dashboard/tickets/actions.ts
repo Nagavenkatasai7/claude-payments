@@ -15,6 +15,7 @@ import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { ticketAssigneeRefusal, type AssigneeRefusal } from '@/lib/ticket-assignable';
 import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
+import { RECOVERY_LOCKED_MESSAGE, isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -102,6 +103,8 @@ export async function replyAction(formData: FormData): Promise<void> {
   const copilot = String(formData.get('copilot') ?? '');
   if (!body) throw new Error('Reply cannot be empty.');
   const ticket = await getScopedTicket(scope, ticketId);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   assertCanWork(staff, ticket);
   requireOpen(ticket);
 
@@ -225,6 +228,8 @@ export async function resolveAction(formData: FormData): Promise<void> {
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   assertCanWork(staff, ticket);
   const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
   const db = getDb();
@@ -256,6 +261,8 @@ export async function closeAction(formData: FormData): Promise<void> {
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   assertCanWork(staff, ticket);
   const updated = await createTicketRepo(getDb()).updateStatus(ticket.id, 'closed');
   if (!updated) throw new Error('Ticket cannot be closed.');

@@ -8,7 +8,7 @@ import type { Ticket } from '@/lib/types';
 import { RecoveryForms } from './recovery-forms';
 
 // The two-step recovery card on /partner/support/[ticketId] (lost-features p4 B4). The page mounts
-// it for every customer ticket; it renders only for a recovery request. Shown to every role that
+// it in place of the ordinary reply / status cards on a recovery request. Shown to every role that
 // can open the ticket: the request time, whether two-step verification is on now, and the time
 // the 24-hour wait ends. Decision forms only for an admin, on an open request that is not with
 // SmartRemit. The phone is never rendered here. That is UX: the actions re-gate everything.

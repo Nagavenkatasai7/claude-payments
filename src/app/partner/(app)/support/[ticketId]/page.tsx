@@ -44,6 +44,8 @@ import {
 } from './ticket-forms';
 import { tenantTicketAssignees } from '@/lib/ticket-assignable';
 import { logWarn } from '@/lib/log';
+import { isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
+import { RecoveryCard } from './recovery-card';
 
 export const metadata: Metadata = { title: t('partner.support.ticketTitle'), robots: { index: false, follow: false } };
 
@@ -350,16 +352,11 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
                 {isCustomer ? t('partner.support.closedNote') : t('partner.contact.closed')}
               </p>
             </Card>
+          ) : isCustomer && isRecoveryTicket(ticket) ? (
+            // Lost-features portal B4: a two-step recovery request moves only through its own
+            // approve / decline actions, so its card replaces the ordinary cards.
+            <RecoveryCard ticket={ticket} role={ctx.role} />
           ) : isCustomer ? (
-            /*
-             * ── Two-step recovery slot (lost-features portal B4) ──
-             * A customer's request to remove two-step verification is a customer ticket with
-             * category MFA_RECOVERY_CATEGORY (src/lib/ticket-category.ts). Only its dedicated
-             * approve / decline actions may move it, so its card renders HERE INSTEAD OF the
-             * ordinary cards, as one more branch:
-             *   ticket.category === MFA_RECOVERY_CATEGORY ? <RecoveryCard … /> : <CustomerTicketCards … />
-             * Everything the ordinary cards need stays inside CustomerTicketCards.
-             */
             <CustomerTicketCards
               ticket={ticket}
               requestKeys={requestKeys}
