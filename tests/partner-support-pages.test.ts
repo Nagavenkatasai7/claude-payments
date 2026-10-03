@@ -68,6 +68,7 @@ import SupportPage from '@/app/partner/(app)/support/page';
 import TicketPage from '@/app/partner/(app)/support/[ticketId]/page';
 import ContactPage from '@/app/partner/(app)/support/contact/page';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { seedPartnerTransfer } from './helpers-partner-app';
 
 const PA = 'ptn-alpha3';
@@ -422,5 +423,32 @@ describe('B10: the linked-transfer card and the customer link', () => {
     await db.execute(sql`DELETE FROM customers`);
     await signInAs({ role: 'admin', username: 'adm1' });
     expect(await ticket('tk_a3')).not.toContain('Open customer');
+  });
+});
+
+// Lost-features B9: an escalation the partner raised can be taken back by admin or support; one
+// SmartRemit raised shows only the "with SmartRemit" line.
+describe('B9: withdraw escalation on the page', () => {
+  const escalate = async (meta: Record<string, unknown>) => {
+    await createTicketRepo(db).updateStatus('tk_a1', 'waiting_admin');
+    await createAuditRepo(db).record({ partnerId: PA, actor: 'x', actorType: 'staff', action: 'ticket.escalate', subjectId: 'tk_a1', meta });
+  };
+  it('a partner escalation: admin and support get the withdraw form; an agent does not', async () => {
+    await escalate({ actorScope: 'partner', from: 'open' });
+    for (const [username, role] of [['adm1', 'admin'], ['sup1', 'support']] as const) {
+      await signInAs({ username, role });
+      const html = await ticket('tk_a1');
+      expect(html, role).toContain('data-testid="partner-support-withdraw"');
+      expect(html, role).toContain('This request is with SmartRemit.');
+    }
+    await signInAs({ username: 'ag1', role: 'agent' });
+    expect(await ticket('tk_a1')).not.toContain('data-testid="partner-support-withdraw"');
+  });
+  it('a SmartRemit escalation: no withdraw form', async () => {
+    await escalate({ reason: 'platform' });
+    await signInAs({ username: 'adm1', role: 'admin' });
+    const html = await ticket('tk_a1');
+    expect(html).not.toContain('data-testid="partner-support-withdraw"');
+    expect(html).toContain('This request is with SmartRemit.');
   });
 });

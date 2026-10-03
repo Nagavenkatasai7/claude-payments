@@ -8,6 +8,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { PARTNER_ROUTES, routeAllows } from '../../../routes';
 import { partnerCustomerHref } from '../../../customer-link';
 import { isHeld, maskRecipientName } from '@/lib/partner-transfers';
@@ -19,6 +20,7 @@ import {
   PARTNER_TICKET_STATUSES,
   errName,
   getVisibleTicket,
+  isPartnerEscalation,
   isTicketId,
   tenantStaffUsernames,
 } from '@/lib/partner-tickets';
@@ -26,7 +28,7 @@ import { Badge, Card, Money, PageHeader, StatusPill } from '@/components/ds';
 import type { PartnerCtx } from '@/lib/partner-access';
 import type { Ticket, TicketMessage, Transfer } from '@/lib/types';
 import { BackLink, TicketStatusBadge, formatWhen, priorityLabel, statusLabel } from '../support-bits';
-import { AssignForm, EscalateForm, FollowUpForm, NoteForm, ReplyForm, StatusForm } from './ticket-forms';
+import { AssignForm, EscalateForm, FollowUpForm, NoteForm, ReplyForm, StatusForm, WithdrawForm } from './ticket-forms';
 import { tenantTicketAssignees } from '@/lib/ticket-assignable';
 import { logWarn } from '@/lib/log';
 
@@ -75,6 +77,21 @@ function Thread({ messages, viewer, named }: { messages: TicketMessage[]; viewer
       })}
     </ol>
   );
+}
+
+/**
+ * Lost-features B9: may this viewer take the escalation back? Admin and support, a waiting_admin
+ * ticket, and the latest escalation was the partner's own (the action re-checks all of it). A failed
+ * read offers nothing.
+ */
+async function withdrawable(ctx: PartnerCtx, ticket: Ticket): Promise<boolean> {
+  if (ticket.status !== 'waiting_admin' || !PARTNER_TICKET_LEADS.roles.includes(ctx.role)) return false;
+  try {
+    return isPartnerEscalation(await createAuditRepo(getDb()).latestForSubject(ctx.partnerId, ticket.id, 'ticket.escalate'));
+  } catch (err) {
+    logWarn('partner.support.withdrawable', errName(err), { ticketId: ticket.id });
+    return false;
+  }
 }
 
 /**
@@ -170,9 +187,9 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
   // link for roles that may open transfers) and the ONE customer link (admin and agent; the helper
   // checks the role and that the customer exists here). prefetch={false}: the customer page writes
   // a pii.view row on render.
-  const [linked, customerHref] = isCustomer
-    ? await Promise.all([linkedTransfer(ctx, ticket), partnerCustomerHref(ctx, ticket.customerPhone)])
-    : [null, null];
+  const [linked, customerHref, canWithdraw] = isCustomer
+    ? await Promise.all([linkedTransfer(ctx, ticket), partnerCustomerHref(ctx, ticket.customerPhone), withdrawable(ctx, ticket)])
+    : [null, null, false];
   const transferHref = linked && linked !== 'failed' && routeAllows('transfers', ctx.role) ? `${PARTNER_ROUTES.transfers.href}/${linked.id}` : null;
   const requestKeys = { reply: newRequestKey(), note: newRequestKey(), followUp: newRequestKey() };
   const back = isCustomer
@@ -245,9 +262,18 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
               <Card as="section" className="p-4 sm:p-6">
                 <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.escalateTitle')}</h2>
                 {ticket.status === 'waiting_admin' ? (
-                  <p role="status" className="text-[15px] text-ds-ink-muted">
-                    {t('partner.support.escalatedNote')}
-                  </p>
+                  <>
+                    <p role="status" className="text-[15px] text-ds-ink-muted">
+                      {t('partner.support.escalatedNote')}
+                    </p>
+                    {canWithdraw ? (
+                      <div className="mt-4 border-t border-ds-border pt-4">
+                        <h3 className="mb-1 text-[15px] font-semibold text-ds-ink">{t('partner.support.withdrawTitle')}</h3>
+                        <p className="mb-3 text-[14px] text-ds-ink-muted">{t('partner.support.withdrawIntro')}</p>
+                        <WithdrawForm id={ticket.id} />
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <EscalateForm id={ticket.id} />
                 )}

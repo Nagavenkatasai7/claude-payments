@@ -49,7 +49,9 @@ vi.mock('@/lib/partner-store', async () => {
 import { createAuthStore } from '@/lib/auth-store';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { auditEvents, outbox, tickets, ticketMessages } from '@/db/schema';
-import { assignAction, escalateAction } from '@/app/partner/(app)/support/[ticketId]/actions';
+import { assignAction, escalateAction, withdrawEscalationAction } from '@/app/partner/(app)/support/[ticketId]/actions';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { t } from '@/lib/i18n';
 
 const PHONE = '15557654321';
 const NOT_FOUND = { ok: false, error: 'We could not find that ticket.' };
@@ -263,5 +265,99 @@ describe('escalateAction', () => {
     await createTicketRepo(db).updateStatus('tk_a1', 'closed');
     expect((await escalateAction(form({ id: 'tk_a1', reason: REASON }))).ok).toBe(false);
     expect(await audits()).toHaveLength(0);
+  });
+});
+
+// Lost-features B9: admin or support withdraws an escalation the PARTNER raised (waiting_admin →
+// open), with a required reason, one internal note and one audit row in one transaction. A ticket
+// SmartRemit escalated itself stays SmartRemit's.
+describe('withdrawEscalationAction', () => {
+  const WITHDRAW = 'We sorted it out with the customer directly';
+  /** A partner escalation, as the escalate action writes it. */
+  async function partnerEscalation(id: string, partnerId = 'pa') {
+    await createTicketRepo(db).updateStatus(id, 'waiting_admin');
+    await createAuditRepo(db).record({ partnerId, actor: `${partnerId}-sup`, actorType: 'staff', action: 'ticket.escalate', subjectId: id, meta: { actorScope: 'partner', from: 'open' } });
+  }
+  /** A platform escalation, as /admin-dashboard/tickets writes it (no actorScope). */
+  async function platformEscalation(id: string) {
+    await createTicketRepo(db).updateStatus(id, 'waiting_admin');
+    await createAuditRepo(db).record({ partnerId: 'pa', actor: 'plat-ops', actorType: 'staff', action: 'ticket.escalate', subjectId: id, meta: { reason: 'platform' } });
+  }
+
+  it('passes the shared /partner action contract (support allowed, agent bounced)', async () => {
+    await partnerEscalation('tk_a1');
+    await partnerEscalation('tk_b1', 'pb');
+    await expectPartnerActionContract({
+      db,
+      redis,
+      cookieJar,
+      action: withdrawEscalationAction,
+      form: (id) => form({ id, reason: WITHDRAW }),
+      ownId: 'tk_a1',
+      foreignId: 'tk_b1',
+      allowedRole: 'support',
+      disallowedRole: 'agent',
+      snapshot,
+    });
+    expect((await ticketRow('tk_a1')).status).toBe('open');
+    expect((await ticketRow('tk_b1')).status).toBe('waiting_admin');
+  });
+
+  it('withdraws: open again, one internal system note, one audit row, no customer nudge', async () => {
+    await partnerEscalation('tk_a1');
+    await signIn({ username: 'pa-admin', role: 'admin' });
+    const before = (await audits()).length;
+    expect(await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).toEqual({ ok: true });
+    expect((await ticketRow('tk_a1')).status).toBe('open');
+    const notes = await createTicketRepo(db).listMessages('tk_a1', { includeInternal: true });
+    expect(notes.filter((m) => m.actorType === 'system')).toEqual([
+      expect.objectContaining({ internal: true, body: `Escalation withdrawn by the partner team: ${WITHDRAW}` }),
+    ]);
+    const rows = await audits();
+    expect(rows).toHaveLength(before + 1);
+    expect(rows.at(-1)).toMatchObject({ partnerId: 'pa', actor: 'pa-admin', action: 'ticket.escalation.withdraw', subjectId: 'tk_a1', meta: { actorScope: 'partner' } });
+    expect(JSON.stringify(rows.at(-1)!.meta)).not.toContain('sorted');
+    expect(await db.select().from(outbox)).toHaveLength(0);
+  });
+
+  it("a ticket SmartRemit escalated itself is refused, nothing written", async () => {
+    await platformEscalation('tk_a1');
+    await signIn({ username: 'pa-admin', role: 'admin' });
+    const before = await snapshot();
+    expect(await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).toEqual({ ok: false, error: t('partner.support.withdrawNotYours') });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('the LATEST escalation decides: partner, then SmartRemit re-escalated → refused', async () => {
+    await partnerEscalation('tk_a1');
+    await createTicketRepo(db).updateStatus('tk_a1', 'open');
+    await platformEscalation('tk_a1');
+    await signIn({ username: 'pa-admin', role: 'admin' });
+    expect((await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).ok).toBe(false);
+  });
+
+  it('not escalated, a double submit, a closed ticket: refused, nothing more written', async () => {
+    await signIn({ username: 'pa-sup', role: 'support' });
+    expect(await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).toEqual({ ok: false, error: t('partner.support.withdrawRefused') });
+    await partnerEscalation('tk_a1');
+    expect(await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).toEqual({ ok: true });
+    const after = await snapshot();
+    expect((await withdrawEscalationAction(form({ id: 'tk_a1', reason: WITHDRAW }))).ok).toBe(false);
+    expect(await snapshot()).toEqual(after);
+  });
+
+  it('a short reason or one carrying a phone-length number is refused before any write', async () => {
+    await partnerEscalation('tk_a1');
+    await signIn({ username: 'pa-sup', role: 'support' });
+    const before = await snapshot();
+    expect((await withdrawEscalationAction(form({ id: 'tk_a1', reason: 'short' }))).ok).toBe(false);
+    expect((await withdrawEscalationAction(form({ id: 'tk_a1', reason: 'Call them on 415 555 0101 please' }))).ok).toBe(false);
+    expect((await withdrawEscalationAction(form({ id: 'tk_a1' }))).ok).toBe(false);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('a Contact SmartRemit thread is not found', async () => {
+    await signIn({ username: 'pa-admin', role: 'admin' });
+    expect(await withdrawEscalationAction(form({ id: 'tk_ai', reason: WITHDRAW }))).toEqual(NOT_FOUND);
   });
 });

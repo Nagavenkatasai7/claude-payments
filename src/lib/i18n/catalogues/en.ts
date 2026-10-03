@@ -2048,6 +2048,14 @@ export const en = {
   'partner.support.linkedCreated': 'Created',
   'partner.support.linkedRecipient': 'Recipient',
   'partner.support.openCustomer': 'Open customer',
+  'partner.support.withdrawTitle': 'Take it back from SmartRemit',
+  'partner.support.withdrawIntro': 'Your team escalated this request. If you can handle it yourselves, take it back and tell SmartRemit why.',
+  'partner.support.withdrawSubmit': 'Withdraw escalation',
+  'partner.support.withdrawNotYours': 'SmartRemit escalated this request itself, so only SmartRemit can move it.',
+  'partner.support.withdrawRefused': 'This request is no longer escalated. Reload the page.',
+  'partner.support.withdrawLabel': 'Reason',
+  'partner.support.withdrawHint': 'SmartRemit reads this in the ticket notes. Do not include phone or account numbers.',
+  'partner.support.withdrawSaved': 'Taken back. The request is open again.',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──

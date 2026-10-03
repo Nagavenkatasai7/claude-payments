@@ -246,6 +246,20 @@ export function escalationNote(reason: string): string {
   return `Escalated to SmartRemit: ${reason}`;
 }
 
+/**
+ * Lost-features B9: did the partner raise this escalation? The partner escalate writes
+ * meta.actorScope = 'partner' (P/support/[ticketId]/actions.ts); the platform escalate writes none.
+ * Only the partner's own escalation may be withdrawn by the partner.
+ */
+export function isPartnerEscalation(row: { meta: Record<string, unknown> } | null): boolean {
+  return row?.meta?.actorScope === 'partner';
+}
+
+/** The internal system note a withdrawal appends (SmartRemit's queue reads why it came back). */
+export function withdrawNote(reason: string): string {
+  return `Escalation withdrawn by the partner team: ${reason}`;
+}
+
 // ── Double-submit guard ──────────────────────────────────────────────────────────────────────
 
 const REQUEST_KEY_RE = /^[0-9a-f]{32}$/;

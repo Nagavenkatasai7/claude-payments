@@ -5,7 +5,7 @@ import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Checkbox, Field, Select } from '@/components/ds';
 import type { ActionResult } from '../../../action-result';
 import type { TicketStatus } from '@/lib/types';
-import { assignAction, escalateAction, internalNoteAction, replyAction, setStatusAction } from './actions';
+import { assignAction, escalateAction, internalNoteAction, replyAction, setStatusAction, withdrawEscalationAction } from './actions';
 import { contactFollowUpAction } from '../contact/actions';
 
 // The /partner/support/[ticketId] forms (UI redesign M3-19). Plain <form action>s carrying the
@@ -25,6 +25,7 @@ const statusSubmit = wrap(setStatusAction);
 const followUpSubmit = wrap(contactFollowUpAction);
 const assignSubmit = wrap(assignAction);
 const escalateSubmit = wrap(escalateAction);
+const withdrawSubmit = wrap(withdrawEscalationAction);
 
 function Result({ state, savedKey }: { state: ActionResult | null; savedKey: MessageKey }) {
   return (
@@ -179,15 +180,31 @@ export function AssignForm({
   );
 }
 
-/** Merge plan 2e: escalate to SmartRemit with a typed reason (validated again on the server). */
-export function EscalateForm({ id }: { id: string }) {
-  const [state, formAction, pending] = useActionState(escalateSubmit, null);
+/** A typed reason (validated again on the server) and one submit: escalate and withdraw. */
+function ReasonForm({
+  submit,
+  id,
+  label,
+  hint,
+  submitLabel,
+  savedKey,
+  testId,
+}: {
+  submit: (prev: ActionResult | null, fd: FormData) => Promise<ActionResult>;
+  id: string;
+  label: string;
+  hint: string;
+  submitLabel: string;
+  savedKey: MessageKey;
+  testId: string;
+}) {
+  const [state, formAction, pending] = useActionState(submit, null);
   const fieldId = useId();
   return (
-    <form action={formAction} className="flex flex-col gap-3" data-testid="partner-support-escalate">
+    <form action={formAction} className="flex flex-col gap-3" data-testid={testId}>
       <input type="hidden" name="id" value={id} />
       <label htmlFor={fieldId} className="text-[14px] font-semibold text-ds-ink">
-        {t('partner.support.escalateLabel')}
+        {label}
       </label>
       <textarea
         id={fieldId}
@@ -200,15 +217,45 @@ export function EscalateForm({ id }: { id: string }) {
         className={TEXTAREA}
       />
       <p id={`${fieldId}-hint`} className="text-[13px] text-ds-ink-muted">
-        {t('partner.support.escalateHint')}
+        {hint}
       </p>
       <div>
         <Button type="submit" size="md" variant="ghost" disabled={pending}>
-          {pending ? t('partner.support.saving') : t('partner.support.escalateSubmit')}
+          {pending ? t('partner.support.saving') : submitLabel}
         </Button>
       </div>
-      <Result state={state} savedKey="partner.support.escalateSaved" />
+      <Result state={state} savedKey={savedKey} />
     </form>
+  );
+}
+
+/** Merge plan 2e: escalate to SmartRemit with a typed reason. */
+export function EscalateForm({ id }: { id: string }) {
+  return (
+    <ReasonForm
+      submit={escalateSubmit}
+      id={id}
+      label={t('partner.support.escalateLabel')}
+      hint={t('partner.support.escalateHint')}
+      submitLabel={t('partner.support.escalateSubmit')}
+      savedKey="partner.support.escalateSaved"
+      testId="partner-support-escalate"
+    />
+  );
+}
+
+/** Lost-features B9: take back an escalation the partner raised (admin, support; the action re-checks). */
+export function WithdrawForm({ id }: { id: string }) {
+  return (
+    <ReasonForm
+      submit={withdrawSubmit}
+      id={id}
+      label={t('partner.support.withdrawLabel')}
+      hint={t('partner.support.withdrawHint')}
+      submitLabel={t('partner.support.withdrawSubmit')}
+      savedKey="partner.support.withdrawSaved"
+      testId="partner-support-withdraw"
+    />
   );
 }
 

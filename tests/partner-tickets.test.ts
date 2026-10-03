@@ -11,6 +11,8 @@ import {
   claimOnce,
   contactAvailable,
   escalationNote,
+  isPartnerEscalation,
+  withdrawNote,
   parseAssigneeField,
   parseEscalationReason,
   parseMineFilter,
@@ -328,5 +330,20 @@ describe('parseMineFilter + supportQueueHref', () => {
     expect((await listVisibleCustomerTickets(ctx('agent', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
     // Never another tenant's ticket assigned to the same username.
     expect((await listVisibleCustomerTickets(ctx('support', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
+  });
+});
+
+// Lost-features B9: a partner may withdraw only an escalation it raised itself. The partner escalate
+// writes meta.actorScope = 'partner'; the platform escalate writes none.
+describe('isPartnerEscalation + withdrawNote', () => {
+  it('only a partner-scoped escalate row counts', () => {
+    expect(isPartnerEscalation({ meta: { actorScope: 'partner', from: 'open' } })).toBe(true);
+    expect(isPartnerEscalation({ meta: { reason: 'x' } })).toBe(false);
+    expect(isPartnerEscalation({ meta: { actorScope: 'platform' } })).toBe(false);
+    expect(isPartnerEscalation({ meta: {} })).toBe(false);
+    expect(isPartnerEscalation(null)).toBe(false);
+  });
+  it('the withdraw note carries the reason', () => {
+    expect(withdrawNote('Solved it with the customer')).toBe('Escalation withdrawn by the partner team: Solved it with the customer');
   });
 });
