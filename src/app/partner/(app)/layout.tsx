@@ -1,14 +1,20 @@
 import type { ReactNode } from 'react';
-import { LogOut } from 'lucide-react';
+import Link from 'next/link';
+import { CircleAlert, LogOut, TriangleAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
-import { PARTNER_ANY } from '@/lib/partner-access';
+import { PARTNER_ANY, type PartnerRole } from '@/lib/partner-access';
 import { getPartnerStore } from '@/lib/partner-store';
+import { getStore } from '@/lib/store';
+import { parseHealthMarks, summarizeChannelHealth } from '@/lib/channel-health';
+import { readSignatureHealth } from '@/lib/webhook-signature-health';
+import { shellChannelBanner, type ShellChannelBanner } from '@/lib/partner-shell-health';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { buttonVariants } from '@/components/ds';
 import { SiteBrand } from '@/components/ds/site-brand';
 import { logout } from '@/app/login/actions';
-import { partnerNav } from '../routes';
+import { PARTNER_ROUTES, partnerNav } from '../routes';
 import { PartnerSidebar } from './partner-sidebar';
 
 // The /partner shell (UI redesign M3-2), in the landing look (SPEC D11): the landing's ground,
@@ -38,9 +44,61 @@ async function brandName(partnerId: string): Promise<string> {
   }
 }
 
+/**
+ * Lost-features p3 B12: the tenant's WhatsApp health on every page, as the legacy shell had it.
+ * Redis only (the health marks + the signature marks): no Neon, no decrypt. Best-effort: any error
+ * means no strip (a layout error is not caught by the segment's error.tsx). The default tenant IS
+ * the shared number, so its marks are the platform's, not a partner signal (as on Home). A layout
+ * does not re-render on client navigation, so the strip updates on a full load or a refresh.
+ */
+async function channelBanner(partnerId: string, role: PartnerRole): Promise<ShellChannelBanner | null> {
+  if (partnerId === DEFAULT_PARTNER_ID) return null;
+  try {
+    const [raw, signature] = await Promise.all([getStore().readChannelHealth(partnerId), readSignatureHealth(partnerId)]);
+    return shellChannelBanner(summarizeChannelHealth({ marks: parseHealthMarks(raw), now: new Date(), signature }), role);
+  } catch (err) {
+    logWarn('partner.shell', err instanceof Error ? err.name : 'error', { source: 'channel_health', partnerId });
+    return null;
+  }
+}
+
+function ChannelStrip({ banner }: { banner: ShellChannelBanner }) {
+  const error = banner.level === 'error';
+  const Icon = error ? CircleAlert : TriangleAlert;
+  return (
+    <div
+      role="status"
+      data-shell-banner={banner.level}
+      className={
+        'mx-auto mt-4 w-full max-w-[1180px] px-4 sm:px-5 ' + (error ? 'text-ds-danger-ink' : 'text-ds-warning-ink')
+      }
+    >
+      <div
+        className={
+          'flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-ds-inner border px-4 py-2 text-[14px] ' +
+          (error ? 'border-ds-danger-border bg-ds-danger-bg' : 'border-ds-warning-border bg-ds-warning-bg')
+        }
+      >
+        <Icon aria-hidden="true" className="size-4 shrink-0" />
+        <span className="font-semibold">{error ? t('partner.shell.waError') : t('partner.shell.waWarn')}</span>
+        {banner.link ? (
+          <Link
+            href={PARTNER_ROUTES.integrationsWhatsapp.href}
+            className="ml-auto inline-flex min-h-11 items-center font-semibold underline underline-offset-4"
+          >
+            {t('partner.shell.waFix')}
+          </Link>
+        ) : (
+          <span className="ml-auto">{t('partner.shell.waTellAdmin')}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default async function PartnerAppLayout({ children }: { children: ReactNode }) {
   const ctx = await requirePartnerStaff(PARTNER_ANY, { skipMfa: true });
-  const brand = await brandName(ctx.partnerId);
+  const [brand, banner] = await Promise.all([brandName(ctx.partnerId), channelBanner(ctx.partnerId, ctx.role)]);
   const items = partnerNav(ctx.role).map((r) => ({ href: r.href, label: t(r.labelKey) }));
 
   return (
@@ -69,6 +127,7 @@ export default async function PartnerAppLayout({ children }: { children: ReactNo
           </form>
         </div>
       </header>
+      {banner !== null ? <ChannelStrip banner={banner} /> : null}
       <div className="mx-auto grid w-full max-w-[1180px] gap-4 px-4 py-4 sm:px-5 lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-8 lg:py-8">
         <PartnerSidebar label={t('partner.nav.label')} menuLabel={t('partner.nav.menu')} items={items} />
         <main id="main" className="sh-main min-w-0 bg-transparent p-0">

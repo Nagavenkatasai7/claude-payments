@@ -1789,6 +1789,13 @@ export const en = {
   'partner.settings.setup.sanctionsLabel': 'Sanctions screening',
   'partner.settings.setup.sanctions': 'Always runs on every transfer',
   'partner.settings.setup.changeNote': 'Ask SmartRemit to change these settings.',
+  'partner.shell.waError': 'Your WhatsApp channel needs attention. Customers may not be getting messages.',
+  'partner.shell.waWarn': 'WhatsApp channel notice: something on your channel may need a look.',
+  'partner.shell.waFix': 'Fix it',
+  'partner.shell.waTellAdmin': 'Tell your admin.',
+  'partner.analytics.chart.recipients': 'Top recipients',
+  'partner.analytics.chart.recipientsSub': 'The 10 recipients who got the most transfers in this period.',
+  'partner.analytics.chart.recipientsNote': 'Names are shortened. Two people with the same short name are listed separately.',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──

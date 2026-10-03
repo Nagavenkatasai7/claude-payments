@@ -3,7 +3,7 @@ import { ANALYTICS_ROW_CAP, analyticsHref, buildPartnerAnalytics, parseAnalytics
 import type { Transfer } from '@/lib/types';
 
 // Merge plan 2d: the PURE view model behind /partner/analytics. It reuses the tested @/lib/analytics
-// functions and never carries a recipient name or phone (the legacy top-recipients chart is left out).
+// functions and never carries a phone or a full recipient name (top recipients are shortened, p3 B8).
 const DAY = 86_400_000;
 const NOW = Date.now();
 
@@ -67,9 +67,26 @@ describe('buildPartnerAnalytics', () => {
     expect(m.compliance).toEqual([{ status: 'cleared', count: 2 }, { status: 'flagged', count: 1 }]);
     expect(m.funding).toEqual([{ method: 'bank_transfer', count: 2 }, { method: 'debit_card', count: 1 }]);
   });
-  it('never carries a recipient name, phone or payout destination', () => {
+  it('never carries a full recipient name, phone or payout destination (p3 B8: names are shortened)', () => {
     const json = JSON.stringify(buildPartnerAnalytics(rows, NOW, 90, false));
-    for (const pii of ['Testname', 'Samplesurname', '14155550101', '919876543210', '2222']) expect(json).not.toContain(pii);
+    for (const pii of ['Samplesurname', '14155550101', '919876543210', '2222']) expect(json).not.toContain(pii);
+    expect(json).toContain('1. Testname S.');
+  });
+  it('top recipients: grouped on the FULL name server-side, ranked, at most 10, in-window only', () => {
+    const many = [
+      mk({ id: 'x1', recipientName: 'Testname Samplesurname' }),
+      mk({ id: 'x2', recipientName: 'Testname Samplesurname' }),
+      // Same mask ("Testname S."), different person: two rows, told apart by the rank.
+      mk({ id: 'x3', recipientName: 'Testname Secondsurname' }),
+      mk({ id: 'old', recipientName: 'Oldname Outside', createdAt: new Date(NOW - 10 * DAY).toISOString() }),
+      ...Array.from({ length: 12 }, (_, i) => mk({ id: `n${i}`, recipientName: `Zed${String.fromCharCode(97 + i)} Last${i}` })),
+    ];
+    const top = buildPartnerAnalytics(many, NOW, 7, false).topRecipients;
+    expect(top).toHaveLength(10);
+    expect(top[0]).toEqual({ label: '1. Testname S.', count: 2 });
+    expect(top[1]).toEqual({ label: '2. Testname S.', count: 1 });
+    const json = JSON.stringify(top);
+    for (const pii of ['Samplesurname', 'Secondsurname', 'Oldname', 'Last1']) expect(json).not.toContain(pii);
   });
   it('passes the truncation flag through; the cap is bounded', () => {
     expect(buildPartnerAnalytics([], NOW, 30, true).truncated).toBe(true);

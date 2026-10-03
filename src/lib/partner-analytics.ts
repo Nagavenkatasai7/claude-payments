@@ -6,15 +6,20 @@ import {
   dailyVolume,
   fundingMethodMix,
   statusDistribution,
+  topRecipientsByCount,
   transfersInWindow,
   type WindowDays,
 } from './analytics';
+import { maskRecipientName } from './partner-transfers';
 import type { ComplianceStatus, FundingMethod, Transfer, TransferStatus } from './types';
 
 // partner-analytics (merge plan 2d): the PURE view model behind /partner/analytics. It reuses the
 // tested @/lib/analytics functions over ONE tenant's live rows (the page reads them with the session
-// tenant only). Counts, USD amounts and enums only: no recipient name, phone or payout destination
-// ever enters it, so the legacy "top recipients" chart is not offered here.
+// tenant only). Counts, USD amounts and enums only: no phone or payout destination ever enters it.
+// Lost-features p3 B8: the top-recipients chart groups on the FULL name here, on the server, and
+// only the shortened name ("Testname S.", the transfer list's mask) leaves this function, with its
+// rank so two people with the same short name stay apart. The chart is a client component, so a
+// full name in the model would reach the browser.
 
 export const DEFAULT_ANALYTICS_WINDOW: WindowDays = 30;
 /** The most rows one page view reads; a busier window is shown as a partial view with a note. */
@@ -45,7 +50,11 @@ export interface PartnerAnalytics {
   status: { status: TransferStatus; count: number }[];
   compliance: { status: ComplianceStatus; count: number }[];
   funding: { method: FundingMethod; count: number }[];
+  topRecipients: { label: string; count: number }[];
 }
+
+/** How many recipients the chart ranks (as the legacy chart). */
+export const TOP_RECIPIENTS = 10;
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
@@ -68,5 +77,9 @@ export function buildPartnerAnalytics(rows: readonly Transfer[], now: number, da
     status: statusDistribution(inWindow),
     compliance: complianceDistribution(inWindow),
     funding: fundingMethodMix(inWindow),
+    topRecipients: topRecipientsByCount(inWindow, TOP_RECIPIENTS).map(({ name, count }, i) => ({
+      label: `${i + 1}. ${maskRecipientName(name)}`,
+      count,
+    })),
   };
 }

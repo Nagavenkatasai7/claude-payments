@@ -211,6 +211,64 @@ describe('/partner layout: the chrome', () => {
   });
 });
 
+describe('/partner layout: WhatsApp health strip (p3 B12)', () => {
+  const mark = (kind: string) => redis.set(`wahealth:${TENANT}`, JSON.stringify({ [kind]: { at: new Date().toISOString(), count: 3, code: 131047 } }));
+  it('no mark → no strip', async () => {
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('an error mark shows the strip; admins get "Fix it", other roles are told to ask their admin', async () => {
+    await mark('dead_send');
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    let html = await shell();
+    expect(html).toContain('data-shell-banner="error"');
+    expect(html).toContain('href="/partner/integrations/whatsapp"');
+    for (const [i, role] of (['agent', 'support', 'finance'] as const).entries()) {
+      await signInAs({ username: `s${i}`, partnerId: TENANT, role });
+      html = await shell();
+      expect(html, role).toContain('data-shell-banner="error"');
+      expect(html, role).not.toContain('/partner/integrations/whatsapp');
+    }
+    // Fixed copy only: no raw item message, count or code reaches the page.
+    expect(html).not.toContain('131047');
+    expect(html).not.toMatch(/×3|could not be delivered/);
+  });
+  it('a warn mark shows the warn strip', async () => {
+    await mark('no_phone');
+    await signInAs({ partnerId: TENANT, role: 'agent' });
+    expect(await shell()).toContain('data-shell-banner="warn"');
+  });
+  it('another tenant’s mark never shows on this tenant’s shell', async () => {
+    await redis.set(`wahealth:${OTHER}`, JSON.stringify({ dead_send: { at: new Date().toISOString(), count: 1 } }));
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('the default tenant (the shared number) never shows a strip', async () => {
+    await seedPartner(homeDb, 'default', 'SmartRemit');
+    await redis.set('wahealth:default', JSON.stringify({ dead_send: { at: new Date().toISOString(), count: 1 } }));
+    await signInAs({ partnerId: 'default', role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('a Redis error still renders the shell, with no strip', async () => {
+    await mark('dead_send');
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    const get = redis.get;
+    redis.get = (async (k: string) => {
+      if (k.startsWith('wahealth:')) throw new Error('redis down');
+      return get.call(redis, k);
+    }) as typeof redis.get;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const html = await shell();
+      expect(html).toContain('class="sh-sidebar');
+      expect(html).not.toContain('data-shell-banner');
+    } finally {
+      redis.get = get;
+      warn.mockRestore();
+    }
+  });
+});
+
 // A page's gate, checked from its source: the page's path maps (via href) to exactly one
 // PARTNER_ROUTES key, and every requirePartnerStaff call in it uses THAT key's policy.
 // Route groups are dropped from the URL; a dynamic segment ([id]) shares its static parent's key.
