@@ -2017,6 +2017,14 @@ export const en = {
   'partner.live.paused': 'Paused',
   'partner.live.resume': 'Resume live updates',
   'partner.live.pausedTitle': 'Live updates paused after 15 minutes without activity.',
+  'partner.staff.colPermissions': 'Extra permissions',
+  'partner.staff.perm.cancel': 'Cancel',
+  'partner.staff.perm.assign': 'Assign',
+  'partner.staff.perm.resend': 'Resend link',
+  'partner.staff.perm.reveal': 'Reveal payout account',
+  'partner.staff.perm.all': 'All (admin)',
+  'partner.staff.perm.none': 'None',
+  'partner.staff.permNote': 'SmartRemit sets extra permissions. Ask SmartRemit to change them.',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──

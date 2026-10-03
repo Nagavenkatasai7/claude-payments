@@ -5,7 +5,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { getStaffInviteStore, type StaffInvite } from '@/lib/staff-invite-store';
 import { listTenantStaff } from '@/lib/partner-staff-policy';
-import { lastLoginLabel, rosterRows, type RosterRow } from '@/lib/partner-staff-view';
+import { lastLoginLabel, permissionFlags, rosterRows, type RosterRow } from '@/lib/partner-staff-view';
 import { scopeOf } from '@/lib/staff-scope';
 import { t } from '@/lib/i18n';
 import type { Staff } from '@/lib/types';
@@ -101,6 +101,17 @@ export default async function PartnerStaffPage() {
       },
     },
     {
+      // Lost-features A13 (review 2.4): read only. SmartRemit sets the per-staff permissions.
+      key: 'permissions',
+      header: t('partner.staff.colPermissions'),
+      cell: (r) => {
+        const p = permissionFlags(r);
+        if (p.byRole) return t('partner.staff.perm.all');
+        if (p.keys.length === 0) return <span className="text-ds-ink-muted">{t('partner.staff.perm.none')}</span>;
+        return <span data-permissions="">{p.keys.map((k) => t(k)).join(', ')}</span>;
+      },
+    },
+    {
       key: 'actions',
       header: t('partner.staff.colActions'),
       cell: (r) => (r.self ? null : <RemoveMember username={r.username} name={r.name} />),
@@ -145,6 +156,7 @@ export default async function PartnerStaffPage() {
               rowKey={(r) => r.username}
             />
           )}
+          <p className="text-[13px] text-ds-ink-muted">{t('partner.staff.permNote')}</p>
         </section>
 
         <section aria-labelledby="staff-invites" className="flex flex-col gap-3">
