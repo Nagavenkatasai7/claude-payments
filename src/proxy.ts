@@ -4,6 +4,7 @@ import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import { parseSiteHost, stripSiteHeaders, SITE_HEADERS } from '@/lib/site-host';
 import { classifySitePath, type SitePathClass } from '@/lib/site-routes';
 import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-session-cookie';
+import { continuePath, legacyDeepLink } from '@/lib/legacy-deep-link';
 
 // Edge gate for the two signed-in surfaces (Stage 3 expanded to /account).
 // This is defense-in-depth ONLY — every page still runs its own require* and
@@ -16,8 +17,11 @@ import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-
 // runs the unchanged legacy gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
 // headers are stripped from every request this proxy sees; only siteProxy sets them.
 
-/** /account sub-paths that must stay PUBLIC (they ARE the auth entry points). */
-const PUBLIC_ACCOUNT_PATHS = ['/account/login', '/account/register', '/account/reset', '/account/verify'];
+/**
+ * /account sub-paths that must stay PUBLIC (they ARE the auth entry points). /account/continue is the
+ * hand-over for old receipt and ticket links (lost-features C2, src/lib/legacy-deep-link.ts).
+ */
+const PUBLIC_ACCOUNT_PATHS = ['/account/login', '/account/register', '/account/reset', '/account/verify', '/account/continue'];
 
 const isLegacyGatedPath = (p: string) =>
   p === '/admin-dashboard' || p.startsWith('/admin-dashboard/') || p === '/account' || p.startsWith('/account/');
@@ -51,7 +55,16 @@ function legacyProxy(req: NextRequest): NextResponse {
     if (isPublic) return NextResponse.next();
     if (!req.cookies.get(CUSTOMER_SESSION_COOKIE)?.value) {
       const url = req.nextUrl.clone();
-      url.pathname = '/account/login';
+      // C2: a signed-out GET for an old receipt or ticket link goes to the continue route, which
+      // finds the right partner's portal (deliberately different from the frozen oracle for exactly
+      // these two path shapes). Everything else keeps the legacy sign-in redirect.
+      const deep = isRead(req.method) ? legacyDeepLink(pathname) : null;
+      if (deep) {
+        url.pathname = continuePath(deep);
+        url.search = '';
+      } else {
+        url.pathname = '/account/login';
+      }
       return NextResponse.redirect(url);
     }
     return NextResponse.next();

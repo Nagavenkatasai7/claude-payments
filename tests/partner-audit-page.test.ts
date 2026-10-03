@@ -175,6 +175,25 @@ describe('/partner/audit: tenant isolation and the safe projection', () => {
     expect(html).toContain('fields=full_name');
   });
 
+  it("KYC decisions and AML reviews: only the tenant's own rows, without the reason; SmartRemit's never (BL-4, D6)", async () => {
+    await audit({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'owner-admin', subjectId: 'cust:' + 'cd'.repeat(32), meta: { reason: 'WATCHLIST-HIT' } });
+    await audit({ partnerId: 'pa', action: 'kyc.manual_override.create', actor: 'owner-admin', subjectId: 'cust:' + 'ce'.repeat(32), meta: { reason: 'PLATFORM-REASON', actorScope: 'platform' } });
+    await audit({ partnerId: 'pa', action: 'aml.reviewed', actor: 'owner-admin', subjectId: 'tx_platform_aml', meta: { alertId: 1, disposition: 'escalated', note: 'PLATFORM-NOTE' } });
+    await audit({ partnerId: 'pa', action: 'kyc.review.approve', actor: 'pa-ops', subjectId: 'cust:' + 'ef'.repeat(32), meta: { reason: 'OWN-REASON' } });
+    await audit({ partnerId: 'pa', action: 'aml.reviewed', actor: 'pa-admin', subjectId: 'tx_own_aml', meta: { alertId: 2, note: 'OWN-NOTE', actorScope: 'partner' } });
+    for (const sp of [{}, { action: 'kyc.review.reject' }, { action: 'aml.reviewed' }]) {
+      const html = await render(sp);
+      for (const s of ['WATCHLIST-HIT', 'PLATFORM-REASON', 'PLATFORM-NOTE', 'tx_platform_aml', 'Customer cdcdcd', 'Customer cecece', 'OWN-REASON', 'OWN-NOTE']) {
+        expect(html, `${JSON.stringify(sp)} ${s}`).not.toContain(s);
+      }
+    }
+    const html = await render();
+    expect(html).toContain('KYC review approved');
+    expect(html).toContain('Customer efefef');
+    expect(html).toContain('tx_own_aml');
+    expect(html).not.toContain('KYC review rejected</td>');
+  });
+
   it('a platform actor is shown as SmartRemit, never by username', async () => {
     await audit({ partnerId: 'pa', action: 'partner.whatsapp_config', actor: 'owner-admin', subjectId: 'pa' });
     const html = await render();

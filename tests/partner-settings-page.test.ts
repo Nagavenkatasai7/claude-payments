@@ -44,11 +44,24 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
+const failIntegrations = { on: false };
+vi.mock('@/lib/partner-integrations-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/partner-integrations-store')>('@/lib/partner-integrations-store');
+  return {
+    ...actual,
+    getPartnerIntegrationsStore: () => {
+      const s = actual.createPartnerIntegrationsStore(box.db!);
+      if (failIntegrations.on) s.getIntegrations = async () => Promise.reject(new Error('integrations down'));
+      return s;
+    },
+  };
+});
 
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { auditEvents, partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import SettingsPage from '@/app/partner/(app)/settings/page';
 import { t } from '@/lib/i18n';
 
@@ -67,6 +80,7 @@ const decode = (html: string) => html.replace(/&amp;/g, '&').replace(/&#x27;/g, 
 beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
+  failIntegrations.on = false;
   box.db = await freshDb();
   pgPartnerStore = createPartnerStore(box.db);
   await seedPartner(box.db, PA, 'Alpha');
@@ -141,5 +155,49 @@ describe('/partner/settings for a partner admin', () => {
   it('viewing writes no audit row', async () => {
     await render();
     expect(await box.db!.select().from(auditEvents)).toEqual([]);
+  });
+});
+
+describe('/partner/settings compliance setup card (p3 B13)', () => {
+  beforeEach(async () => {
+    await signInAs({});
+  });
+  it('a fresh partner: SmartRemit runs checks, the gate is off, countries listed, sanctions always run, no warning', async () => {
+    const html = decode(await render());
+    expect(html).toContain('data-testid="settings-setup"');
+    expect(html).toContain('data-setup="kycMode" data-value="ours"');
+    expect(html).toContain('data-setup="gate" data-value="off"');
+    expect(html).toMatch(/data-setup="countries"[^>]*>US</);
+    expect(html).toContain(t('partner.settings.setup.sanctions'));
+    expect(html).not.toContain('data-setup="liveRailWarning"');
+    expect(html).not.toContain('name="kycMode"');
+  });
+  it('ours + gate off + a live rail shows the warning; B’s settings never colour A’s card', async () => {
+    await createPartnerIntegrationsStore(box.db!).saveIntegrations(PA, {
+      kyc: {},
+      payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail-a.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+      whatsapp: {},
+    });
+    await box.db!.update(partners).set({ kycMode: 'delegated', requireKycBeforeSend: true }).where(eq(partners.id, PB));
+    const html = await render();
+    expect(html).toContain('data-setup="liveRailWarning"');
+    expect(html).toContain('data-setup="kycMode" data-value="ours"');
+    expect(html).not.toContain('rail-a.example');
+  });
+  it('a delegated partner with the gate on', async () => {
+    await box.db!.update(partners).set({ kycMode: 'delegated', requireKycBeforeSend: true }).where(eq(partners.id, PA));
+    const html = await render();
+    expect(html).toContain('data-setup="kycMode" data-value="delegated"');
+    expect(html).toContain('data-setup="gate" data-value="on"');
+  });
+  it('a failed integrations read hides only the warning; the rest of the page renders', async () => {
+    failIntegrations.on = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const html = await render();
+    warn.mockRestore();
+    expect(html).toContain('data-testid="settings-setup"');
+    expect(html).not.toContain('data-setup="liveRailWarning"');
+    expect(html).toContain('data-testid="settings-portal-form"');
+    expect(html).not.toContain('integrations down');
   });
 });

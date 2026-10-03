@@ -142,7 +142,9 @@ import {
   requestResetAction,
   resetAction,
   verifyMfaAction,
+  requestAccountMfaRecoveryAction,
 } from '@/app/account/actions';
+import { createPortalSessionStore } from '@/lib/portal-session-store';
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
 import { base32Decode, totpAt } from '@/lib/totp';
 import { sql } from 'drizzle-orm';
@@ -837,7 +839,7 @@ describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', (
     expect(cookieSet).not.toHaveBeenCalled();
   });
 
-  it('recovery: a WhatsApp-OTP password reset also turns MFA off, with an audit row (keyed subject, no phone)', async () => {
+  it('a password reset keeps two-step verification on and says so', async () => {
     await enrolledAccount();
     otpNowMs += 60_000; // past the per-phone resend cooldown
     const req = await requestResetAction(null, form({ phone: PHONE }));
@@ -845,14 +847,27 @@ describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', (
     const code = sentCodes[sentCodes.length - 1].code;
     const done = await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }));
     expect(done.step).toBe('login');
-    expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(false);
-    const rows = await auditRows('customer.mfa.reset');
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ actor_type: 'system', partner_id: 'default' });
-    expect(String(rows[0].subject_id)).toMatch(/^cust:[0-9a-f]{64}$/);
-    expect(JSON.stringify(rows[0])).not.toContain(NORM);
-    // Signing in afterwards is password-only again.
-    await expect(loginAction(null, form({ phone: PHONE, password: 'a brand new passphrase' }))).rejects.toThrow('REDIRECT:/account');
+    expect(done.notice).toContain('Two-step verification is still on');
+    expect(done.notice).toContain('Lost your authenticator app?');
+    expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(true);
+    expect(await auditRows('customer.mfa.reset')).toHaveLength(0);
+    // Signing in with the new password still stops at the authenticator step.
+    const s = await loginAction(null, form({ phone: PHONE, password: 'a brand new passphrase' }));
+    expect(s.step).toBe('mfa');
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('a password reset leaves the customer portal alone (factor and portal sessions intact)', async () => {
+    await enrolledAccount();
+    const portal = createPortalSessionStore(redis);
+    const { token } = await portal.create('default', NORM, 'test device');
+    otpNowMs += 60_000;
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    await runAfter();
+    const code = sentCodes[sentCodes.length - 1].code;
+    await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }));
+    expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(true);
+    expect(await portal.resolve(token, 'default')).not.toBeNull();
   });
 
   it('a reset for an account without MFA writes no MFA audit row', async () => {
@@ -866,6 +881,42 @@ describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', (
     const code = sentCodes[sentCodes.length - 1].code;
     expect((await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }))).step).toBe('login');
     expect(await auditRows('customer.mfa.reset')).toHaveLength(0);
+  });
+
+  // lost-features p4 B4: "Lost your authenticator app?" at the code step asks support instead.
+  async function recoveryTickets() {
+    const res = await testDb.execute(sql`SELECT partner_id, customer_phone, category FROM tickets WHERE category = 'mfa_recovery'`);
+    return (res as unknown as { rows: Record<string, unknown>[] }).rows;
+  }
+
+  it('a recovery request from the code step opens one request for the account, drops the token and signs nobody in', async () => {
+    await enrolledAccount();
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    const r = await requestAccountMfaRecoveryAction(null, form({ pendingToken: s.pendingToken! }));
+    expect(r.step).toBe('login');
+    expect(r.notice).toContain('support team');
+    expect(await recoveryTickets()).toEqual([{ partner_id: 'default', customer_phone: NORM, category: 'mfa_recovery' }]);
+    expect(await auditRows('customer.mfa.recovery.request')).toHaveLength(1);
+    expect(cookieSet).not.toHaveBeenCalled();
+    expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(true);
+    // The token is gone: a second request and the authenticator code are both refused.
+    expect((await requestAccountMfaRecoveryAction(null, form({ pendingToken: s.pendingToken! }))).error).toBeTruthy();
+    expect((await verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: '123456' }))).step).toBe('login');
+    expect(await recoveryTickets()).toHaveLength(1);
+  });
+
+  it('a recovery request needs a live mfa token bound to the current password', async () => {
+    await enrolledAccount();
+    const { getPendingAuthStore } = await import('@/lib/pending-auth-store');
+    for (const purpose of ['register', 'reset', 'login'] as const) {
+      const t = await getPendingAuthStore().create(NORM, purpose);
+      expect((await requestAccountMfaRecoveryAction(null, form({ pendingToken: t }))).step).toBe('login');
+    }
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    await authStore.setPassword(NORM, 'a brand new passphrase');
+    const r = await requestAccountMfaRecoveryAction(null, form({ pendingToken: s.pendingToken! }));
+    expect(r).toMatchObject({ step: 'login', error: expect.stringContaining('expired') });
+    expect(await recoveryTickets()).toHaveLength(0);
   });
 });
 

@@ -5,7 +5,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { getStaffInviteStore, type StaffInvite } from '@/lib/staff-invite-store';
 import { listTenantStaff } from '@/lib/partner-staff-policy';
-import { lastLoginLabel } from '@/lib/partner-staff-view';
+import { lastLoginLabel, permissionFlags, rosterRows, type RosterRow } from '@/lib/partner-staff-view';
 import { scopeOf } from '@/lib/staff-scope';
 import { t } from '@/lib/i18n';
 import type { Staff } from '@/lib/types';
@@ -22,6 +22,8 @@ export const metadata: Metadata = { title: t('partner.staff.title'), robots: { i
 // listTenantStaff (never another tenant's, never platform accounts) and invites from the tenant's
 // own index. An invite shows its username, role and expiry only: never the email, never the token.
 // There is no MFA-reset control (plan O3: MFA reset stays platform-only).
+// Lost-features A13: an agent gets a read-only roster (active members: name, username, role). Its
+// branch returns before the MFA and invite reads, so none of that is even loaded for an agent.
 
 const BASE = PARTNER_ROUTES.staff.href;
 const TABLE_PARAMS = { page: 1, sort: 'name', dir: 'asc' as const, offset: 0, limit: 500 };
@@ -37,6 +39,7 @@ export default async function PartnerStaffPage() {
   const members = listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, await getAuthStore().listStaff()).sort((a, b) =>
     a.username.localeCompare(b.username),
   );
+  if (ctx.role !== 'admin') return <AgentRoster rows={rosterRows(members, ctx.role)} self={ctx.username} />;
   const enrolled = await getStaffMfaStore().enrolledAmong(members.map((m) => m.username));
   const rows: MemberRow[] = members.map((m) => ({ ...m, mfaOn: enrolled.has(m.username), self: m.username === ctx.username }));
   const invites: InviteRow[] = await getStaffInviteStore().listForPartner(ctx.partnerId);
@@ -98,6 +101,17 @@ export default async function PartnerStaffPage() {
       },
     },
     {
+      // Lost-features A13 (review 2.4): read only. SmartRemit sets the per-staff permissions.
+      key: 'permissions',
+      header: t('partner.staff.colPermissions'),
+      cell: (r) => {
+        const p = permissionFlags(r);
+        if (p.byRole) return t('partner.staff.perm.all');
+        if (p.keys.length === 0) return <span className="text-ds-ink-muted">{t('partner.staff.perm.none')}</span>;
+        return <span data-permissions="">{p.keys.map((k) => t(k)).join(', ')}</span>;
+      },
+    },
+    {
       key: 'actions',
       header: t('partner.staff.colActions'),
       cell: (r) => (r.self ? null : <RemoveMember username={r.username} name={r.name} />),
@@ -142,6 +156,7 @@ export default async function PartnerStaffPage() {
               rowKey={(r) => r.username}
             />
           )}
+          <p className="text-[13px] text-ds-ink-muted">{t('partner.staff.permNote')}</p>
         </section>
 
         <section aria-labelledby="staff-invites" className="flex flex-col gap-3">
@@ -179,6 +194,50 @@ export default async function PartnerStaffPage() {
           </Card>
         </section>
       </div>
+    </>
+  );
+}
+
+function AgentRoster({ rows, self }: { rows: RosterRow[]; self: string }) {
+  const columns: TableColumn<RosterRow>[] = [
+    {
+      key: 'name',
+      header: t('partner.staff.colName'),
+      cell: (r) => (
+        <span className="flex flex-col">
+          <span className="font-semibold">
+            {r.name}
+            {r.username === self ? <span className="ml-2 text-[12.5px] font-normal text-ds-ink-muted">({t('partner.staff.you')})</span> : null}
+          </span>
+          <span className="break-all text-[13px] text-ds-ink-muted">{r.username}</span>
+        </span>
+      ),
+    },
+    { key: 'role', header: t('partner.staff.colRole'), cell: (r) => t(`partner.staff.role.${r.role}`) },
+  ];
+  return (
+    <>
+      <PageHeader title={t('partner.staff.title')} sub={t('partner.staff.subAgent')} />
+      <section aria-labelledby="staff-members" className="flex flex-col gap-3">
+        <h2 id="staff-members" className="text-[18px] font-bold text-ds-ink">
+          {t('partner.staff.membersTitle')}
+        </h2>
+        {rows.length === 0 ? (
+          <EmptyState icon={<Users className="size-5" />} title={t('partner.staff.emptyTitle')} />
+        ) : (
+          <Table
+            caption={t('partner.staff.membersCaption')}
+            columns={columns}
+            rows={rows}
+            total={0}
+            params={TABLE_PARAMS}
+            baseHref={BASE}
+            currentQuery={new URLSearchParams()}
+            empty={t('partner.staff.emptyTitle')}
+            rowKey={(r) => r.username}
+          />
+        )}
+      </section>
     </>
   );
 }

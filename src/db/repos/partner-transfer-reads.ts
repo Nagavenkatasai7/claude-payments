@@ -1,9 +1,9 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
-import { auditEvents, fundingEvents, outbox } from '@/db/schema';
+import { auditEvents, customers, fundingEvents, outbox } from '@/db/schema';
 import { createTransferRepo, type Page } from './transfer-repo';
 import { TIMELINE_AUDIT_ACTIONS, isTransferId, type FundingEventInput, type RailRow, type TimelineAuditRow, type TransferEnv } from '@/lib/partner-transfers';
-import type { PartnerId, Transfer, TransferStatus } from '@/lib/types';
+import type { KycStatus, PartnerId, Transfer, TransferStatus } from '@/lib/types';
 
 // partner-transfer-reads (UI redesign M3-5): the /partner Transfers pages' READS. Read-only; masked
 // ledger reads only (never a decrypting read). Every function takes the partner id FIRST and
@@ -20,15 +20,63 @@ function requireTenant(partnerId: PartnerId): void {
   if (typeof partnerId !== 'string' || partnerId.length === 0) throw new Error('partner-transfer-reads: a tenant is required');
 }
 
-/** One keyset page of THIS tenant's transfers in one environment (masked rows). */
-export async function listPartnerTransfers(
-  db: DbOrTx,
-  partnerId: PartnerId,
-  req: { limit: number; cursor?: string; status?: TransferStatus; environment: TransferEnv },
-): Promise<Page<Transfer>> {
+export interface PartnerTransferListReq {
+  limit: number;
+  cursor?: string;
+  status?: TransferStatus;
+  environment: TransferEnv;
+  /** A recipient-name fragment or an id prefix (an opened search, never raw request text). */
+  text?: string;
+  /** 4-15 digits: the account's last 4, or a sender-phone suffix. */
+  digits?: string;
+  from?: Date;
+  toExclusive?: Date;
+  assignedTo?: string;
+}
+
+/** One keyset page of THIS tenant's transfers in one environment (masked rows), optionally filtered. */
+export async function listPartnerTransfers(db: DbOrTx, partnerId: PartnerId, req: PartnerTransferListReq): Promise<Page<Transfer>> {
   requireTenant(partnerId);
   const limit = Math.min(Math.max(1, Math.trunc(req.limit) || 1), 50);
-  return createTransferRepo(db).adminList({ limit, cursor: req.cursor, status: req.status, environment: req.environment, partnerId });
+  return createTransferRepo(db).listForPartner(partnerId, {
+    limit,
+    cursor: req.cursor,
+    status: req.status,
+    environment: req.environment,
+    ...(req.text ? { text: req.text } : {}),
+    ...(req.digits ? { digits: req.digits } : {}),
+    ...(req.from ? { from: req.from } : {}),
+    ...(req.toExclusive ? { toExclusive: req.toExclusive } : {}),
+    ...(req.assignedTo ? { assignedTo: req.assignedTo } : {}),
+  });
+}
+
+export interface SenderBadge {
+  phone: string;
+  kycStatus: KycStatus;
+  firstSeenAt: string;
+}
+
+/**
+ * Lost-features restore p1 B2: the list's tier and KYC columns. One read for a page of sender
+ * phones, in THIS tenant: the phone (a key column), the KYC status and first-seen time only. No
+ * encrypted column, no screening column, nothing decrypted. Keyed by phone; absent = no customer.
+ */
+export async function readSenderBadges(db: DbOrTx, partnerId: PartnerId, phones: readonly string[]): Promise<Map<string, SenderBadge>> {
+  requireTenant(partnerId);
+  const wanted = [...new Set(phones.filter((p) => typeof p === 'string' && p.length > 0))];
+  const out = new Map<string, SenderBadge>();
+  if (wanted.length === 0) return out;
+  const rows = await db
+    .select({ phone: customers.phone, kycStatus: customers.kycStatus, firstSeenAt: customers.firstSeenAt })
+    .from(customers)
+    .where(and(eq(customers.partnerId, partnerId), inArray(customers.phone, wanted)));
+  for (const r of rows) {
+    const firstSeenAt = r.firstSeenAt instanceof Date ? r.firstSeenAt.toISOString() : String(r.firstSeenAt);
+    // The column is free text; tierView / kycStatusKey treat an unknown value as unknown.
+    out.set(r.phone, { phone: r.phone, kycStatus: r.kycStatus as KycStatus, firstSeenAt });
+  }
+  return out;
 }
 
 /** One of THIS tenant's transfers by id (masked), or null for a missing OR foreign id. */

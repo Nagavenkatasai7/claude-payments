@@ -11,6 +11,17 @@ const DATE = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', 
 const when = (iso: string) => (Number.isFinite(Date.parse(iso)) ? DATE.format(new Date(iso)) : '—');
 const FOCUS = 'rounded-ds-focus focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring';
 
+/** What the recipient gets, under the amount sent. The arrow is decorative; the sr-only label speaks. */
+function Received({ r }: { r: PortalTransferRow }) {
+  return (
+    <span className="block text-[12.5px] font-normal text-ds-ink-muted">
+      <span aria-hidden="true">→ </span>
+      <span className="sr-only">{t('portal.transfers.theyGetSr')}: </span>
+      <Money amount={r.amountDest} currency={r.destCurrency} />
+    </span>
+  );
+}
+
 export function TransferRows({ rows, caption }: { rows: PortalTransferRow[]; caption: string }) {
   return (
     <>
@@ -36,6 +47,7 @@ export function TransferRows({ rows, caption }: { rows: PortalTransferRow[]; cap
                 </td>
                 <td className="px-4 py-3">
                   <Money amount={r.amount} currency={r.currency} />
+                  <Received r={r} />
                 </td>
                 <td className="px-4 py-3">
                   <StatusPill status={r.status} refundStatus={r.refundStatus} />
@@ -58,8 +70,9 @@ export function TransferRows({ rows, caption }: { rows: PortalTransferRow[]; cap
                   <span className="block truncate font-semibold text-ds-ink">{r.recipientName}</span>
                   <span className="block font-mono text-[12.5px] text-ds-ink-muted">{r.maskedDestination}</span>
                 </span>
-                <span className="shrink-0 font-semibold text-ds-ink">
+                <span className="shrink-0 text-right font-semibold text-ds-ink">
                   <Money amount={r.amount} currency={r.currency} />
+                  <Received r={r} />
                 </span>
               </span>
               <span className="flex flex-wrap items-center justify-between gap-2">

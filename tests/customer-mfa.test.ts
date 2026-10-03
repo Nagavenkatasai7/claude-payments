@@ -7,7 +7,7 @@ import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
-import { createCustomerMfaStore, customerMfaKeys, stepUp, CUSTOMER_MFA_ENROLL_MAX_CODES } from '@/lib/customer-mfa';
+import { createCustomerMfaStore, customerMfaKeys, dropMfaRedisState, stepUp, CUSTOMER_MFA_ENROLL_MAX_CODES } from '@/lib/customer-mfa';
 import { base32Decode, totpAt } from '@/lib/totp';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -184,6 +184,21 @@ describe('customer-mfa store (Program-Fix 49D)', () => {
     expect(await store().isEnrolled(WHO)).toBe(false);
     expect(redis.dump.has(customerMfaKeys.last(WHO))).toBe(false);
     expect(await store().reset(WHO)).toBe(false);
+  });
+
+  it('dropMfaRedisState clears the enrolment and replay keys of ONE row only (the factor itself stays)', async () => {
+    await enrol();
+    await store().beginEnrolment(WHO).catch(() => undefined);
+    const OTHER = { partnerId: 'other', phone: WHO.phone };
+    await redis.set(customerMfaKeys.last(OTHER), '1');
+    await redis.set(customerMfaKeys.enroll(WHO), 'sealed');
+    await redis.set(customerMfaKeys.enrollCount(WHO), '1');
+    await dropMfaRedisState(redis, WHO);
+    expect(redis.dump.has(customerMfaKeys.enroll(WHO))).toBe(false);
+    expect(redis.dump.has(customerMfaKeys.enrollCount(WHO))).toBe(false);
+    expect(redis.dump.has(customerMfaKeys.last(WHO))).toBe(false);
+    expect(redis.dump.has(customerMfaKeys.last(OTHER))).toBe(true);
+    expect(await store().isEnrolled(WHO)).toBe(true);
   });
 
   it('a verify after 46B flips writes re-seals the secret as v2 (and it still verifies)', async () => {

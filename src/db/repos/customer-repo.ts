@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -202,6 +202,20 @@ export function createCustomerRepo(
     },
 
     /**
+     * Which of `phones` are customers of THIS tenant (partnerId in the WHERE), in one read that
+     * selects the key column only (nothing is decrypted). Backs the /partner "Open customer" links.
+     */
+    async existingPhones(partnerId: PartnerId, phones: readonly string[]): Promise<Set<string>> {
+      const wanted = [...new Set(phones.filter((p) => typeof p === 'string' && p.length > 0))];
+      if (!partnerId || wanted.length === 0) return new Set();
+      const rows = await db
+        .select({ phone: customers.phone })
+        .from(customers)
+        .where(and(eq(customers.partnerId, partnerId), inArray(customers.phone, wanted)));
+      return new Set(rows.map((r) => r.phone));
+    },
+
+    /**
      * Every tenant's row for a phone (oldest first). The ONLY phone-alone read;
      * callers must resolve exactly one row themselves and fail closed otherwise.
      */
@@ -267,6 +281,20 @@ export function createCustomerRepo(
         .update(customers)
         .set({ passwordHash: newHash, updatedAt: new Date() })
         .where(and(tenantKey(partnerId, senderPhone), eq(customers.passwordHash, oldHash)))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * Lost-features p2 A5: insert a customer only when (tenant, phone) is free. Returns whether a
+     * row was inserted; an existing row is never touched (unlike saveCustomer's upsert, so a
+     * manual create can never overwrite a customer, even in a race).
+     */
+    async insertCustomerIfAbsent(customer: Customer): Promise<boolean> {
+      const rows = await db
+        .insert(customers)
+        .values(customerToRow(customer))
+        .onConflictDoNothing({ target: [customers.partnerId, customers.phone] })
         .returning({ phone: customers.phone });
       return rows.length > 0;
     },

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
-import { auditEvents, customers, outbox } from '@/db/schema';
+import { auditEvents, customers, outbox, tickets } from '@/db/schema';
 import { freshDb, seedPartner } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
@@ -123,7 +123,7 @@ vi.mock('@/lib/customer-mfa', () => ({
   }),
 }));
 
-import { consentAction, requestCodeAction, resendCodeAction, verifyCodeAction, verifyMfaAction, type PortalLoginState } from '@/app/portal/login/actions';
+import { consentAction, portalLoginAction, requestCodeAction, requestMfaRecoveryAction, resendCodeAction, verifyCodeAction, verifyMfaAction, type PortalLoginState } from '@/app/portal/login/actions';
 import { createPortalOtpStore, PORTAL_OTP_IP_LIMIT } from '@/lib/portal-otp-store';
 import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-session-store';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
@@ -632,6 +632,109 @@ describe('8. TOTP-enrolled customers', () => {
     const s = await verify();
     h.site = SITE('pb', 'bravo');
     expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+  });
+});
+
+// lost-features p4 B4: "Lost your authenticator app?" at the authenticator step opens a support
+// request for the HOST partner and the phone in the pending record; it never signs anyone in.
+describe('B4: lost authenticator at the authenticator step', () => {
+  beforeEach(() => {
+    h.mfaEnrolled.add(`pa|${KNOWN}`);
+  });
+  const recoveryTickets = (partnerId: string) =>
+    db.select().from(tickets).where(and(eq(tickets.partnerId, partnerId), eq(tickets.category, 'mfa_recovery')));
+  async function mfaStep(): Promise<PortalLoginState> {
+    const s = await (await codeStep(KNOWN)).verify();
+    expect(s.step).toBe('mfa');
+    return s;
+  }
+
+  it('opens one request for the host partner and that phone, spends the token, and signs nobody in', async () => {
+    const s = await mfaStep();
+    const out = await portalLoginAction(null, fd({ intent: 'recover', pending: s.pending! }));
+    expect(out).toEqual({ step: 'recovery', notice: 'portal.login.recoverySent' });
+    const rows = await recoveryTickets('pa');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ customerPhone: KNOWN, kind: 'customer', priority: 'urgent' });
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+    await flushAfter();
+    expect(await auditCount('pa', 'portal.auth.mfa_recovery_requested')).toBe(1);
+    expect(await auditCount('pa', 'customer.mfa.recovery.request')).toBe(1);
+    // The token is spent: neither a second request nor the authenticator code works with it.
+    expect(await requestMfaRecoveryAction(null, fd({ pending: s.pending! }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+    expect(await verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+  });
+
+  it('a repeat sign-in and request reuses the open request with the same answer', async () => {
+    const first = await mfaStep();
+    expect((await requestMfaRecoveryAction(null, fd({ pending: first.pending! }))).step).toBe('recovery');
+    let t = Date.now() + 61_000; // past the send cooldown
+    vi.spyOn(Date, 'now').mockImplementation(() => t++);
+    try {
+      const second = await mfaStep();
+      expect(await requestMfaRecoveryAction(null, fd({ pending: second.pending! }))).toEqual({ step: 'recovery', notice: 'portal.login.recoverySent' });
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(await recoveryTickets('pa')).toHaveLength(1);
+  });
+
+  it('a login (code step) token is refused, and nothing is written', async () => {
+    const s = await requestCodeAction(null, fd({ phone: KNOWN }));
+    expect(await requestMfaRecoveryAction(null, fd({ pending: s.pending! }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+    expect(await recoveryTickets('pa')).toHaveLength(0);
+  });
+
+  it("an mfa token from A's host is refused on B's", async () => {
+    const s = await mfaStep();
+    h.site = SITE('pb', 'bravo');
+    expect(await requestMfaRecoveryAction(null, fd({ pending: s.pending! }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+    expect(await recoveryTickets('pa')).toHaveLength(0);
+    expect(await recoveryTickets('pb')).toHaveLength(0);
+  });
+
+  it('404s on the apex', async () => {
+    h.site = null;
+    await expect(requestMfaRecoveryAction(null, fd({ pending: 'x' }))).rejects.toThrow('404');
+  });
+});
+
+describe('C1: return to the requested page after sign-in', () => {
+  const TICKET = '/portal/help/tickets/tk_Abc-_1';
+  async function verifyWithNext(phone: string, next?: string) {
+    const s = await requestCodeAction(null, fd({ phone, ...(next !== undefined ? { next } : {}) }));
+    await flushAfter();
+    return verifyCodeAction(null, fd({ pending: s.pending!, code: lastCode(phone)!, ...(next !== undefined ? { next } : {}) }));
+  }
+  it('verify: a safe next is where the customer lands', async () => {
+    await expectRedirect(verifyWithNext(KNOWN, TICKET), TICKET);
+  });
+  it.each(['//evil.example', 'https://evil.example/portal', '/\\evil.example', '/portal/help/tickets/tk_x?y=1', '/portal/../admin-dashboard'])(
+    'verify: a hostile next (%s) lands on /portal',
+    async (next) => {
+      await expectRedirect(verifyWithNext(KNOWN, next), '/portal');
+    },
+  );
+  it('verify: no next → /portal (unchanged)', async () => {
+    await expectRedirect(verifyWithNext(KNOWN), '/portal');
+  });
+  it('mfa: the next carried through the authenticator step is re-checked and kept', async () => {
+    h.mfaEnrolled.add(`pa|${KNOWN}`);
+    const s = await verifyWithNext(KNOWN, TICKET);
+    expect(s.step).toBe('mfa');
+    await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid, next: TICKET })), TICKET);
+  });
+  it('mfa: a hostile next on the authenticator step → /portal', async () => {
+    h.mfaEnrolled.add(`pa|${KNOWN}`);
+    const s = await verifyWithNext(KNOWN, TICKET);
+    await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid, next: '//evil.example' })), '/portal');
+  });
+  it('consent: a safe next is kept; a hostile one → /portal', async () => {
+    const s = await verifyWithNext(UNKNOWN, '/portal/transfers');
+    expect(s.step).toBe('consent');
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes', next: '/portal/transfers' })), '/portal/transfers');
+    const t = await verifyWithNext('14155590101', 'https://evil.example');
+    await expectRedirect(consentAction(null, fd({ pending: t.pending!, consent: 'yes', next: 'https://evil.example' })), '/portal');
   });
 });
 

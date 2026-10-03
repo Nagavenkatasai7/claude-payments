@@ -36,7 +36,7 @@ const one = (v: string | string[] | undefined) => (typeof v === 'string' ? v : u
  */
 export default async function PortalRecipientsPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/recipients');
   const pid = site.partnerId;
   const phone = ctx.session.phone;
   const sp = await searchParams;

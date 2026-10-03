@@ -18,7 +18,7 @@ SmartRemit is white-label, non-custodial remittance **infrastructure**: a multi-
 
 | Sub-feature | Status | Reality (source) |
 |---|---|---|
-| Verified business WhatsApp profile | ⚠️ partial | The platform default is still Meta's **test number** (+1 555-629-8293). Partners can bring their own numbers (`partner_integrations`, routing by `phone_number_id` in `src/lib/whatsapp-inbound.ts`). Needs Meta Business Verification. |
+| Verified business WhatsApp profile | ⚠️ partial | The platform default is still Meta's **test number** (+1 555-630-8178, new Meta account since 2026-10-03). Partners can bring their own numbers (`partner_integrations`, routing by `phone_number_id` in `src/lib/whatsapp-inbound.ts`). Needs Meta Business Verification. |
 | AI suggests frequent recipients | ✅ built | Saved recipients per sender (`recipients` table), `list_saved_recipients`, `send_recipient_picker`, `repeat_transfer` and `get_customer_context` in `src/lib/tools.ts`. |
 | Select existing recipient / input new UPI or bank | ✅ built | The bot collects recipient name, phone and country; bank/UPI details are entered on the hosted pay page, never in chat (`src/lib/payout-format.ts`). |
 

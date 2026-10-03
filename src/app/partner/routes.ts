@@ -19,12 +19,24 @@ export const PARTNER_ROUTES = Object.freeze({
   onboarding: { href: '/partner/onboarding', labelKey: 'partner.nav.onboarding', policy: PARTNER_ADMIN, nav: true },
   transfers: { href: '/partner/transfers', labelKey: 'partner.nav.transfers', policy: PARTNER_MONEY_READ, nav: true },
   customers: { href: '/partner/customers', labelKey: 'partner.nav.customers', policy: PARTNER_OPS, nav: true },
+  // Lost-features A5: create a customer by hand (admin only; linked from Customers, not in the nav).
+  customersNew: { href: '/partner/customers/new', labelKey: 'partner.customers.new', policy: PARTNER_ADMIN, nav: false },
+  // Lost-features A8: one customer's conversation log at /partner/customers/conversation/<ref> (admin
+  // only; linked from the customer page, not in the nav). The bare path sends back to Customers.
+  customerConversation: {
+    href: '/partner/customers/conversation',
+    labelKey: 'partner.customers.conversation.title',
+    policy: PARTNER_ADMIN,
+    nav: false,
+  },
   // M3-16: the page is a money read; each report KIND is further gated by reportPolicy(kind).
   reports: { href: '/partner/reports', labelKey: 'partner.nav.reports', policy: PARTNER_MONEY_READ, nav: true },
   support: { href: '/partner/support', labelKey: 'partner.nav.support', policy: PARTNER_TICKETS, nav: true },
   supportContact: { href: '/partner/support/contact', labelKey: 'partner.nav.supportContact', policy: PARTNER_TICKETS, nav: false },
   security: { href: '/partner/security', labelKey: 'partner.nav.security', policy: PARTNER_ANY, nav: true },
-  staff: { href: '/partner/staff', labelKey: 'partner.nav.staff', policy: PARTNER_ADMIN, nav: true },
+  // Lost-features A13: agents get a read-only roster. Every staff ACTION stays PARTNER_ADMIN
+  // (staff/actions.ts pins it; it must never follow this route policy).
+  staff: { href: '/partner/staff', labelKey: 'partner.nav.staff', policy: PARTNER_OPS, nav: true },
   audit: { href: '/partner/audit', labelKey: 'partner.nav.audit', policy: PARTNER_ADMIN, nav: true },
   branding: { href: '/partner/branding', labelKey: 'partner.nav.branding', policy: PARTNER_ADMIN, nav: true },
   integrations: { href: '/partner/integrations', labelKey: 'partner.nav.integrations', policy: PARTNER_ADMIN, nav: true },
@@ -40,6 +52,8 @@ export const PARTNER_ROUTES = Object.freeze({
   refunds: { href: '/partner/refunds', labelKey: 'partner.nav.refunds', policy: PARTNER_MONEY_READ, nav: true },
   // 2c: held transfers + the KYC queue (ops); KYC decisions, reject & refund and AML alerts are admin only.
   reviews: { href: '/partner/reviews', labelKey: 'partner.nav.reviews', policy: PARTNER_OPS, nav: true },
+  // Lost-features A6: void or reissue a business invoice (admin only; linked from Transfers, not in the nav).
+  invoices: { href: '/partner/invoices', labelKey: 'partner.nav.invoices', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 

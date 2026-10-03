@@ -23,7 +23,7 @@ const FAQ: ReadonlyArray<{ q: MessageKey; a: MessageKey }> = [
  */
 export default async function PortalHelpPage() {
   const site = await requirePortalSite();
-  await requirePortalCustomer();
+  await requirePortalCustomer('/portal/help');
   const supportOn = await portalSupportEnabled(site.partnerId);
   return (
     <>

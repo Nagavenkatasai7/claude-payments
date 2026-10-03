@@ -118,12 +118,15 @@ export async function auditIdentityView(
   customer: Customer,
   // UI redesign M3-11: the partner app marks its rows (actorScope 'partner') so the tenant audit
   // viewer can attribute them. Opt-in: the legacy caller writes exactly what it wrote before.
-  opts: { actorScope?: 'partner' | 'platform' } = {},
+  // Lost-features p2 B6: `alsoShown` names further profile fields the caller renders (masked ID,
+  // declared PEP, source of funds, occupation); they are appended, names only.
+  opts: { actorScope?: 'partner' | 'platform'; alsoShown?: readonly string[] } = {},
 ): Promise<boolean> {
-  const fields = IDENTITY_FIELDS.filter(([, get]) => {
+  const identity: string[] = IDENTITY_FIELDS.filter(([, get]) => {
     const v = get(customer);
     return typeof v === 'string' && v.trim().length > 0;
   }).map(([name]) => name);
+  const fields = [...new Set([...identity, ...(opts.alsoShown ?? [])])];
   if (fields.length === 0) return false;
   await createAuditRepo(db).record({
     partnerId: customer.partnerId,

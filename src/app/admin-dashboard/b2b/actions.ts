@@ -13,6 +13,7 @@ import { canSee } from '@/lib/staff-scope';
 import { DEFAULT_PARTNER_ID, DEFAULT_SOURCE_CURRENCY } from '@/lib/defaults';
 import type { B2bInvoice, InvoiceLineItem, Staff } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { reissueTenantInvoice, voidTenantInvoice } from '@/lib/b2b-invoice-ops';
 
 /**
  * B2B admin actions. Server actions are public POST endpoints, so EVERY action
@@ -51,7 +52,7 @@ async function requirePlatformStaff(): Promise<Staff> {
  */
 async function requireInvoiceActor(
   formData: FormData,
-): Promise<{ staff: Staff; id: string; invoice: B2bInvoice }> {
+): Promise<{ staff: Staff; id: string; invoice: B2bInvoice; actorScope: 'platform' | 'partner' }> {
   const { staff, scope } = await requireScope();
   if (scope.kind === 'partner' && staff.role !== 'admin') {
     throw new Error('Forbidden: admin role required.');
@@ -60,7 +61,7 @@ async function requireInvoiceActor(
   if (!id) throw new Error('Missing invoice id.');
   const invoice = await getStore().getB2bInvoice(id);
   if (!invoice || !canSee(scope, invoice.partnerId)) throw new Error('Invoice not found.');
-  return { staff, id, invoice };
+  return { staff, id, invoice, actorScope: scope.kind };
 }
 
 /**
@@ -211,20 +212,12 @@ export async function reverseB2bTransferAction(formData: FormData): Promise<void
  */
 export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
-  const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
-  const partnerId = existing.partnerId;
-
-  const voided = await getStore().voidB2bInvoice(id, partnerId);
-  if (!voided) {
+  const { staff, id, invoice: existing, actorScope } = await requireInvoiceActor(formData);
+  // The shared core (lost-features A6): the guarded write and its audit row in ONE transaction.
+  const r = await voidTenantInvoice(getDb(), { partnerId: existing.partnerId, id, actor: staff.username, actorScope });
+  if (!r.ok) {
     throw new Error(`Cannot void a ${existing.status} invoice — only unpaid invoices are voidable.`);
   }
-  await createAuditRepo(getDb()).record({
-    partnerId,
-    actor: staff.username,
-    actorType: 'staff',
-    action: 'b2b.invoice.void',
-    subjectId: id,
-  });
   revalidatePath('/admin-dashboard/b2b');
 }
 
@@ -245,21 +238,12 @@ export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
  */
 export async function reissueB2bInvoiceAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
-  const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
-  const partnerId = existing.partnerId;
-
-  const newId = `reissue-${id}`;
-  const reissued = await getStore().reissueB2bInvoice(id, partnerId, newId);
-  if (!reissued) {
+  const { staff, id, invoice: existing, actorScope } = await requireInvoiceActor(formData);
+  // The shared core derives the clone id (reissueIdFor) and writes the clone and its audit row in
+  // ONE transaction.
+  const r = await reissueTenantInvoice(getDb(), { partnerId: existing.partnerId, id, actor: staff.username, actorScope });
+  if (!r.ok) {
     throw new Error(`Cannot reissue a ${existing.status} invoice — only voided or disputed invoices can be reissued.`);
   }
-  await createAuditRepo(getDb()).record({
-    partnerId,
-    actor: staff.username,
-    actorType: 'staff',
-    action: 'b2b.invoice.reissue',
-    subjectId: id,
-    meta: { reissuedAs: reissued.id },
-  });
   revalidatePath('/admin-dashboard/b2b');
 }

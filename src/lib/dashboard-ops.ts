@@ -3,6 +3,8 @@ import { env } from './env';
 import { isPartnerPulled } from './funding-method';
 import { CANCEL_REFUSAL, decideStaffCancel } from './dashboard-cancel-policy';
 import { pokeWorker } from './outbox';
+import { payUrlFor } from './pay-url';
+import { paylinkDedupeKey, resendEligibility } from './partner-transfer-ops';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -54,6 +56,41 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
 }
 
 /**
+ * The /partner Cancel (lost-features restore p1 A1): the SAME rule and the SAME guarded claim as
+ * cancelTransfer above (decideStaffCancel, then transfer-repo.cancelIfCancellable), read inside the
+ * caller's tenant, plus ONE `transfer.cancel` audit row (the staff reason in its meta) in the same
+ * transaction as the flip. No money moves, no effect is queued. A no-op (already cancelled or
+ * delivered) writes nothing; a refusal or a lost race throws the policy copy and writes nothing.
+ */
+export async function cancelOwnedTransfer(
+  db: Db,
+  id: string,
+  o: { partnerId: PartnerId; audit: StaffAuditCtx },
+): Promise<'cancelled' | 'noop'> {
+  return db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = await repo.getOwnedTransfer(o.partnerId, id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    const decision = decideStaffCancel(transfer);
+    if (decision.kind === 'noop') return 'noop';
+    if (decision.kind === 'refuse') throw new Error(decision.reason);
+    const cancelled = await repo.cancelIfCancellable(id, o.partnerId);
+    if (!cancelled) {
+      const fresh = await repo.getOwnedTransfer(o.partnerId, id);
+      const again = fresh ? decideStaffCancel(fresh) : null;
+      throw new Error(again?.kind === 'refuse' ? again.reason : CANCEL_REFUSAL.changed);
+    }
+    await recordStaffTransferAudit(tx, o.audit, 'transfer.cancel', cancelled, {
+      previousStatus: transfer.status,
+      newStatus: 'cancelled',
+    });
+    return 'cancelled';
+  });
+}
+
+/**
  * Reverse a PAID/DELIVERED B2B ach_pull transfer (staff-approved). NON-CUSTODIAL:
  * SmartRemit captured nothing — so unlike issueRefund this does NOT require a
  * fundingRef. It flips refundStatus none → pending and enqueues the durable
@@ -95,21 +132,41 @@ export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
   pokeWorker();
 }
 
+/**
+ * Assign (or, with null, unassign) a transfer: the ONE core for both dashboards (lost-features
+ * restore p1 A2). One transaction: the read (inside `scope`'s tenant when given, so a foreign id is
+ * not found), the compare-and-set on assigned_to from the value just read (assignIfUnchanged: it
+ * never writes adminNote, which also holds rail-failure notes, and never status), then ONE
+ * `transfer.assign` audit row (assignee, previous assignee, the optional note). The same assignee
+ * again is a no-op with no audit row. A lost race throws "changed concurrently" and writes nothing.
+ * The caller validates the assignee (transfer-assignable.ts) before calling.
+ */
 export async function assignTransfer(
-  store: Store,
+  db: Db,
   id: string,
-  assignee: string,
-  note: string,
-): Promise<void> {
-  const transfer = await store.getTransfer(id);
-  if (!transfer) {
-    throw new Error('Transfer not found');
-  }
-  // Status-guarded + column-targeted: never a stale full-row upsert.
-  const assigned = await store.updateTransferIfStatus(id, transfer.status, { assignedTo: assignee, adminNote: note });
-  if (!assigned) {
-    throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
-  }
+  assignee: string | null,
+  audit: StaffAuditCtx & { note?: string | null },
+  scope?: { partnerId: PartnerId },
+): Promise<'assigned' | 'unchanged'> {
+  return db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = scope ? await repo.getOwnedTransfer(scope.partnerId, id) : await repo.getTransfer(id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    const previous = transfer.assignedTo ?? null;
+    if (previous === assignee) return 'unchanged';
+    const assigned = await repo.assignIfUnchanged(id, { partnerId: transfer.partnerId, from: previous, to: assignee });
+    if (!assigned) {
+      throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
+    }
+    await recordStaffTransferAudit(tx, { actor: audit.actor, reason: audit.reason ?? null, actorScope: audit.actorScope }, 'transfer.assign', assigned, {
+      assignee,
+      previousAssignee: previous,
+      note: audit.note ?? null,
+    });
+    return 'assigned';
+  });
 }
 
 /**
@@ -140,6 +197,50 @@ export async function resendPaymentLink(
   const url = `${env.appBaseUrl}/pay/${id}`;
   await sendText(transfer.phone, `Here is your secure payment link again: ${url}`);
 }
+
+/**
+ * Lost-features restore p1 A3: resend the pay link through the OUTBOX (every external effect is an
+ * outbox row). One transaction: the tenant-scoped read, the eligibility (a live, unpaid transfer
+ * with no money in flight), ONE `whatsapp.text` row (the existing kind and shape: the worker sends
+ * it on the OWNING partner's number, re-checks the opt-out at send time and skips a sandbox row),
+ * deduped per transfer per 10 minutes, and ONE `transfer.paylink.resend` audit row (no phone, no
+ * URL). A dedupe hit throws and rolls back, so a second click inside the bucket writes nothing.
+ * The caller pre-checks the opt-out and the 24-hour window so staff get a clear reason.
+ */
+export async function queuePaymentLinkResend(
+  db: Db,
+  id: string,
+  o: { partnerId: PartnerId; audit: StaffAuditCtx; nowMs: number },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const transfer = await createTransferRepo(tx).getOwnedTransfer(o.partnerId, id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    if (resendEligibility(transfer) !== 'ok') {
+      throw new Error('Cannot resend: only an unpaid live transfer has a payment link to resend.');
+    }
+    const fresh = await createOutboxRepo(tx).enqueue(
+      'whatsapp.text',
+      {
+        to: transfer.phone,
+        body: `${PAYLINK_RESEND_TEXT} ${payUrlFor(transfer.id)}`,
+        partnerId: transfer.partnerId,
+        category: 'nonessential',
+      },
+      { dedupeKey: paylinkDedupeKey(transfer.id, o.nowMs) },
+    );
+    if (!fresh) {
+      throw new Error(PAYLINK_RECENT);
+    }
+    await recordStaffTransferAudit(tx, o.audit, 'transfer.paylink.resend', transfer, {});
+  });
+  pokeWorker();
+}
+
+/** The customer-facing resend copy (unchanged from the legacy inline send). */
+const PAYLINK_RESEND_TEXT = 'Here is your secure payment link again:';
+export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the last 10 minutes.';
 
 /**
  * WHO may release a compliance hold. OWNER DECISION (2026-09-16): releasing a
@@ -291,6 +392,19 @@ export async function rejectTransfer(
 }
 
 /**
+ * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
+ * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
+ * missing and nothing is written. Omitted = the existing unscoped reload (legacy callers).
+ */
+export interface RefundScope {
+  partnerId: PartnerId;
+}
+
+function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
+  return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
+}
+
+/**
  * PROACTIVELY issue a refund on a PAID or DELIVERED transfer that was actually
  * charged (fundingRef set) — admin-initiated, no prior customer request needed.
  * none → pending + the durable funding.refund effect, one transaction, with the
@@ -302,13 +416,28 @@ export async function rejectTransfer(
  * (enqueue returns false on dedupe-key conflict) and throws to roll back the
  * pending flip if not — so a stale `refund:<id>` row can never leave a transfer
  * flipped-to-pending with no effect to drain (a state no sweep would heal).
+ *
+ * With a `scope` (the /partner caller): the reload is tenant-scoped, a transfer whose
+ * settlementPartnerId names another partner is refused in every status, and a test transfer is
+ * refused. Without one: the platform path, unchanged.
  */
-export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, scope?: RefundScope): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    const transfer = await loadForRefund(repo, id, scope);
     if (!transfer) {
       throw new Error('Cannot refund: transfer not found.');
+    }
+    if (scope) {
+      // A tenant caller (the /partner Issue refund) may only refund what it also pays out: a
+      // transfer routed to another network partner is refused in EVERY status, re-checked here on
+      // the transaction's own read so a page rendered before the routing cannot slip through.
+      if (transfer.settlementPartnerId && transfer.settlementPartnerId !== scope.partnerId) {
+        throw new Error('Cannot refund: another partner pays this transfer out.');
+      }
+      if ((transfer.environment ?? 'live') === 'test') {
+        throw new Error('Cannot refund: a test transfer moves no money.');
+      }
     }
     if (transfer.status !== 'paid' && transfer.status !== 'delivered') {
       throw new Error(
@@ -318,10 +447,19 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Pr
     if (!transfer.fundingRef) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
     }
+    // An async debit that is still pending, failed, or was returned is not money we hold.
+    if (transfer.fundingState && transfer.fundingState !== 'succeeded') {
+      throw new Error(`Cannot refund: the sender debit is ${transfer.fundingState}.`);
+    }
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
-    await repo.updateRefund(id, { refundStatus: 'pending' });
+    // The guarded write is the claim, from exactly 'none': a concurrent decision that committed
+    // after the read above leaves nothing to claim, so this throws (rolls back) instead of
+    // flipping a row that moved.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
+      throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
+    }
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },
@@ -340,19 +478,6 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Pr
     }
   });
   pokeWorker();
-}
-
-/**
- * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
- * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
- * missing and nothing is written. Omitted = the existing unscoped reload (legacy callers).
- */
-export interface RefundScope {
-  partnerId: PartnerId;
-}
-
-function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
-  return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
 }
 
 /**

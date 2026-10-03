@@ -11,6 +11,8 @@ import {
   claimOnce,
   contactAvailable,
   escalationNote,
+  isPartnerEscalation,
+  withdrawNote,
   parseAssigneeField,
   parseEscalationReason,
   parseMineFilter,
@@ -26,7 +28,15 @@ import {
   parsePartnerTicketStatus,
   parseStaffText,
   staffClaimKey,
+  contactAudienceOf,
+  defaultContactAudience,
+  countWaitingTeamQuestions,
+  isTeamQuestion,
+  canAnswerTeamQuestion,
+  parseTeamQuestionStatus,
+  TEAM_QUESTION_STATUSES,
 } from '@/lib/partner-tickets';
+import { TEAM_QUESTION_CATEGORY } from '@/lib/ticket-category';
 
 // UI redesign M3-19: the tenant-scoped ticket reads for /partner/support. The repo's listTickets
 // treats a missing partnerId as "every tenant" (the platform queue), so /partner never calls it
@@ -328,5 +338,74 @@ describe('parseMineFilter + supportQueueHref', () => {
     expect((await listVisibleCustomerTickets(ctx('agent', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
     // Never another tenant's ticket assigned to the same username.
     expect((await listVisibleCustomerTickets(ctx('support', 'ag1'), { mine: true }, db)).map((t) => t.id)).toEqual(['tk_a1']);
+  });
+});
+
+// Lost-features B9: a partner may withdraw only an escalation it raised itself. The partner escalate
+// writes meta.actorScope = 'partner'; the platform escalate writes none.
+describe('isPartnerEscalation + withdrawNote', () => {
+  it('only a partner-scoped escalate row counts', () => {
+    expect(isPartnerEscalation({ meta: { actorScope: 'partner', from: 'open' } })).toBe(true);
+    expect(isPartnerEscalation({ meta: { reason: 'x' } })).toBe(false);
+    expect(isPartnerEscalation({ meta: { actorScope: 'platform' } })).toBe(false);
+    expect(isPartnerEscalation({ meta: {} })).toBe(false);
+    expect(isPartnerEscalation(null)).toBe(false);
+  });
+  it('the withdraw note carries the reason', () => {
+    expect(withdrawNote('Solved it with the customer')).toBe('Escalation withdrawn by the partner team: Solved it with the customer');
+  });
+});
+
+describe('A12 team questions: the addressee and who answers', () => {
+  const team = { kind: 'internal' as const, category: TEAM_QUESTION_CATEGORY, openedBy: 'ag1', status: 'open' as const };
+  const toSr = { kind: 'internal' as const, category: undefined, openedBy: 'ag1', status: 'open' as const };
+  it('contactAudienceOf: a missing field (an older form) means SmartRemit; a closed set otherwise', () => {
+    expect(contactAudienceOf(null)).toBe('smartremit');
+    expect(contactAudienceOf(undefined)).toBe('smartremit');
+    expect(contactAudienceOf('team')).toBe('team');
+    expect(contactAudienceOf('smartremit')).toBe('smartremit');
+    expect(contactAudienceOf('')).toBeNull();
+    expect(contactAudienceOf('admins')).toBeNull();
+    expect(contactAudienceOf(['team'])).toBeNull();
+  });
+  it('defaultContactAudience: agents and support ask their admins first; an admin asks SmartRemit', () => {
+    expect(defaultContactAudience('agent')).toBe('team');
+    expect(defaultContactAudience('support')).toBe('team');
+    expect(defaultContactAudience('admin')).toBe('smartremit');
+  });
+  it('isTeamQuestion: an internal thread with the team category only', () => {
+    expect(isTeamQuestion(team)).toBe(true);
+    expect(isTeamQuestion(toSr)).toBe(false);
+    expect(isTeamQuestion({ ...team, kind: 'customer' })).toBe(false);
+  });
+  it('canAnswerTeamQuestion: an admin of the tenant on an open team question they did not open', () => {
+    expect(canAnswerTeamQuestion({ role: 'admin', username: 'ad1' }, team)).toBe(true);
+    expect(canAnswerTeamQuestion({ role: 'admin', username: 'ad1' }, { ...team, status: 'resolved' })).toBe(true);
+    expect(canAnswerTeamQuestion({ role: 'admin', username: 'ad1' }, { ...team, status: 'closed' })).toBe(false);
+    expect(canAnswerTeamQuestion({ role: 'admin', username: 'ag1' }, team)).toBe(false); // the opener
+    expect(canAnswerTeamQuestion({ role: 'admin', username: 'ad1' }, toSr)).toBe(false); // SmartRemit's thread
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      expect(canAnswerTeamQuestion({ role, username: 'ad1' }, team)).toBe(false);
+    }
+  });
+  it('countWaitingTeamQuestions: open or pending team questions someone else opened', () => {
+    const rows = [
+      team,
+      { ...team, status: 'pending' as const },
+      { ...team, status: 'resolved' as const },
+      { ...team, status: 'closed' as const },
+      { ...team, openedBy: 'ad1' },
+      toSr,
+    ];
+    expect(countWaitingTeamQuestions(rows, 'ad1')).toBe(2);
+    expect(countWaitingTeamQuestions([], 'ad1')).toBe(0);
+  });
+  it('parseTeamQuestionStatus: resolved or closed only', () => {
+    expect(TEAM_QUESTION_STATUSES).toEqual(['resolved', 'closed']);
+    expect(parseTeamQuestionStatus('resolved')).toBe('resolved');
+    expect(parseTeamQuestionStatus('closed')).toBe('closed');
+    expect(parseTeamQuestionStatus('open')).toBeNull();
+    expect(parseTeamQuestionStatus('waiting_admin')).toBeNull();
+    expect(parseTeamQuestionStatus(null)).toBeNull();
   });
 });

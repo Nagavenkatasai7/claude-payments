@@ -150,8 +150,15 @@ describe('inviteStaffAction: the shared action contract', () => {
     expect(inv).toMatchObject({ partnerId: 'pa', username: 'pa-new' });
     expect(await invites().listForPartner('pb')).toEqual([]);
   });
-  it('the action policy is the staff route policy (admin only)', () => {
-    expect(PARTNER_ROUTES.staff.policy.roles).toEqual(['admin']);
+  it('the page is open to agents (read-only roster) but every staff action stays admin-only', async () => {
+    expect(PARTNER_ROUTES.staff.policy.roles).toEqual(['admin', 'agent']);
+    const { own } = await seedInvites();
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent' });
+    const before = { ...(await inviteSnapshot()), a: await exists('pa-agent2') };
+    await expect(inviteStaffAction(inviteForm('pa-new'))).rejects.toThrow(/^REDIRECT:\/partner$/);
+    await expect(revokeInviteAction(idForm(own))).rejects.toThrow(/^REDIRECT:\/partner$/);
+    await expect(removeStaffAction(userForm('pa-agent2'))).rejects.toThrow(/^REDIRECT:\/partner$/);
+    expect({ ...(await inviteSnapshot()), a: await exists('pa-agent2') }).toEqual(before);
   });
   it('support and finance are refused too (→ /partner), with no write', async () => {
     for (const role of ['support', 'finance', 'agent'] as const) {

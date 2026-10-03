@@ -3,6 +3,7 @@ import {
   TRANSFER_STATUSES,
   PARTNER_TRANSFERS_PAGE_SIZE,
   parseTransferFilters,
+  dayBounds,
   encodeTransferCursor,
   decodeTransferCursor,
   maskRecipientName,
@@ -113,6 +114,40 @@ describe('parseTransferFilters', () => {
   });
 });
 
+describe('parseTransferFilters: search token, dates, mine (lost-features p1 B1)', () => {
+  it('keeps a token-shaped s and drops anything else', () => {
+    const tok = 'v2.k0.' + ['aa', 'bb', 'cc', 'dd'].join('.');
+    expect(parseTransferFilters({ s: tok }).s).toBe(tok);
+    expect(parseTransferFilters({ s: 'Testname' }).s).toBeUndefined();
+    expect(parseTransferFilters({ s: '14155550101' }).s).toBeUndefined();
+    expect(parseTransferFilters({ s: 'v1.' + 'a'.repeat(2000) }).s).toBeUndefined();
+  });
+  it('accepts strict YYYY-MM-DD days only, and swaps a reversed range', () => {
+    expect(parseTransferFilters({ from: '2026-09-01', to: '2026-09-30' })).toMatchObject({ from: '2026-09-01', to: '2026-09-30' });
+    expect(parseTransferFilters({ from: '2026-09-30', to: '2026-09-01' })).toMatchObject({ from: '2026-09-01', to: '2026-09-30' });
+    expect(parseTransferFilters({ from: '2026-02-30' }).from).toBeUndefined();
+    expect(parseTransferFilters({ from: '2026-9-1' }).from).toBeUndefined();
+    expect(parseTransferFilters({ to: "2026-09-01' OR 1=1" }).to).toBeUndefined();
+    expect(parseTransferFilters({ from: '1999-12-31' }).from).toBeUndefined();
+  });
+  it('mine is exactly 1', () => {
+    expect(parseTransferFilters({ mine: '1' }).mine).toBe(true);
+    expect(parseTransferFilters({ mine: 'yes' }).mine).toBeUndefined();
+  });
+  it('dayBounds turns the days into a UTC [from, to + 1 day) range', () => {
+    expect(dayBounds({ from: '2026-09-01', to: '2026-09-02' })).toEqual({
+      from: new Date('2026-09-01T00:00:00.000Z'),
+      toExclusive: new Date('2026-09-03T00:00:00.000Z'),
+    });
+    expect(dayBounds({})).toEqual({});
+  });
+  it('transfersListHref carries the new keys so the pager keeps them', () => {
+    expect(transfersListHref({ environment: 'live', s: 'v1.a.b.c.d', from: '2026-09-01', to: '2026-09-02', mine: true, cursor: 'c|x' })).toBe(
+      `/partner/transfers?s=v1.a.b.c.d&from=2026-09-01&to=2026-09-02&mine=1&cursor=${encodeTransferCursor('c|x')}`,
+    );
+  });
+});
+
 describe('transfersListHref', () => {
   it('builds a static path with only the known filters (never a tenant)', () => {
     expect(transfersListHref({ environment: 'live' })).toBe('/partner/transfers');
@@ -213,6 +248,33 @@ describe('transferTimeline', () => {
     expect(rows[2].by).toBe(t('partner.transfers.actor.smartremit'));
     expect(JSON.stringify(rows)).not.toContain('WHY');
     expect(TIMELINE_AUDIT_ACTIONS).toContain('transfer.reject');
+  });
+});
+
+describe('transferTimeline: lost-features p1 actions (one row each, never a note, reason or assignee)', () => {
+  it('assign, cancel, pay-link resend and refund issue', () => {
+    const tenant = new Set(['pa-agent']);
+    const at = (m: number) => new Date(Date.UTC(2026, 8, 1, 10, m));
+    const rows = transferTimeline(
+      base({ status: 'cancelled' }),
+      [
+        { at: at(1), action: 'transfer.assign', actor: 'pa-agent', actorType: 'staff', meta: { assignee: 'platform-ops', note: 'ASSIGN NOTE', actorScope: 'partner' } },
+        { at: at(2), action: 'transfer.paylink.resend', actor: 'platform-ops', actorType: 'staff', meta: {} },
+        { at: at(3), action: 'transfer.cancel', actor: 'pa-agent', actorType: 'staff', meta: { reason: 'CANCEL WHY' } },
+        { at: at(4), action: 'refund.issue', actor: 'pa-agent', actorType: 'staff', meta: { reason: 'REFUND WHY' } },
+      ],
+      tenant,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['created', 'assign', 'resend', 'cancel', 'refundIssue']);
+    expect(rows.map((r) => r.label).slice(1)).toEqual([
+      'partner.transfers.timeline.assign',
+      'partner.transfers.timeline.resend',
+      'partner.transfers.timeline.cancel',
+      'partner.transfers.timeline.refundIssue',
+    ]);
+    expect(rows[2].by).toBe(t('partner.transfers.actor.smartremit'));
+    expect(JSON.stringify(rows)).not.toMatch(/NOTE|WHY|platform-ops/);
+    for (const a of ['transfer.assign', 'transfer.cancel', 'transfer.paylink.resend', 'refund.issue']) expect(TIMELINE_AUDIT_ACTIONS).toContain(a);
   });
 });
 

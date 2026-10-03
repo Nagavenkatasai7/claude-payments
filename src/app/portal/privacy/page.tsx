@@ -46,7 +46,7 @@ function Row({ label, value }: { label: string; value: string }) {
 export default async function PrivacyPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   await requirePortalSite();
   if (!env.customerDataRightsEnabled) notFound();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/privacy');
   const c = ctx.customer;
   const status = dataRequestStatusCopy((await searchParams).status);
 

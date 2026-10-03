@@ -26,11 +26,12 @@
 | Item | Value |
 |---|---|
 | Mode | **Developer / limited access**, unverified business |
-| Phone | Meta **test number** +1 555-629-8293 (Phone Number ID `1118376434692938`) — sandbox |
-| WABA | `1423798669516574` |
-| Business Portfolio | `1420039710147462` (was restricted ~2026-05-22, restored after appeal) |
+| App | SmartRemit Bot, App ID `1053120917721140` (moved to a new Meta account 2026-10-03) |
+| Phone | Meta **test number** +1 555-630-8178 (Phone Number ID `1355699904294040`) — sandbox |
+| WABA | `1970049657289438` |
+| Business Portfolio | SmartRemit (new portfolio, 2026-10-03; unverified). The previous portfolio `1420039710147462`, WABA `1423798669516574` and test number +1 555-629-8293 are retired. |
 | Token | Permanent System-User token in `WHATSAPP_TOKEN` |
-| Approved templates | `transfer_delivered` (en, UTILITY) — **stale**, India/UPI-era |
+| Approved templates | None yet on the new WABA. The old WABA had `transfer_delivered` (en, UTILITY, **stale**, India/UPI-era); every template in §3 must be created on the new WABA |
 | Unsubmitted | `scheduled_payment_ready` — referenced in code, never created; cron falls back to free-form text |
 | Recipient allow-list | Only verified test recipients can receive messages on the test number |
 

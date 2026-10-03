@@ -1,4 +1,6 @@
 import type { MessageKey } from './i18n';
+import { hasPermission } from './permissions';
+import type { Staff, StaffPermissions, StaffRole } from './types';
 
 // partner-staff-view — UI redesign M3-8. Pure display helpers for /partner/staff.
 
@@ -17,4 +19,35 @@ export function lastLoginLabel(iso: string | undefined, now: Date): Label {
   if (d < HOUR) return { key: 'partner.staff.minutesAgo', vars: { n: Math.floor(d / MIN) } };
   if (d < DAY) return { key: 'partner.staff.hoursAgo', vars: { n: Math.floor(d / HOUR) } };
   return { key: 'partner.staff.daysAgo', vars: { n: Math.floor(d / DAY) } };
+}
+
+export type RosterRow = Pick<Staff, 'name' | 'username' | 'role'>;
+
+/**
+ * Lost-features A13: the rows a role may see on /partner/staff. An admin manages the team and gets
+ * every member; an agent gets a read-only roster of ACTIVE members, projected to name, username and
+ * role (no MFA state, last sign-in or permissions). Any other role gets nothing (the page gate
+ * already refuses support and finance).
+ */
+export function rosterRows(members: readonly Staff[], role: StaffRole): RosterRow[] {
+  if (role === 'admin') return [...members];
+  if (role !== 'agent') return [];
+  return members.filter((m) => m.status !== 'suspended').map((m) => ({ name: m.name, username: m.username, role: m.role }));
+}
+
+const PERMISSION_KEYS: readonly (readonly [keyof StaffPermissions, MessageKey])[] = [
+  ['canCancel', 'partner.staff.perm.cancel'],
+  ['canAssign', 'partner.staff.perm.assign'],
+  ['canResend', 'partner.staff.perm.resend'],
+  ['canRevealPii', 'partner.staff.perm.reveal'],
+];
+
+/**
+ * Lost-features A13 (review 2.4): a member's per-staff permissions for the admin view, read only
+ * (SmartRemit sets them). An admin holds every one by role. Otherwise the flags hasPermission
+ * grants, in a fixed order (finance never holds legacy permissions, so it shows none).
+ */
+export function permissionFlags(member: Staff): { byRole: boolean; keys: MessageKey[] } {
+  if (member.role === 'admin') return { byRole: true, keys: [] };
+  return { byRole: false, keys: PERMISSION_KEYS.filter(([p]) => hasPermission(member, p)).map(([, k]) => k) };
 }

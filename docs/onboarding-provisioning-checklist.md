@@ -27,8 +27,8 @@ WhatsApp **forbids sending OTPs as free-form text** — they must go via an appr
 `AUTHENTICATION`-category template. This is the long pole; start it now.
 
 ### Prerequisites
-- **Meta Business Verification** of the Business Portfolio (`1420039710147462`) — auth templates are
-  restricted to verified businesses. (Our test number is `+1 555-629-8293`, WABA `1423798669516574`.)
+- **Meta Business Verification** of the SmartRemit Business Portfolio — auth templates are
+  restricted to verified businesses. (Our test number is `+1 555-630-8178`, WABA `1970049657289438`.)
 - A WhatsApp Business Account in good standing.
 
 ### Create it — WhatsApp Manager (easiest)

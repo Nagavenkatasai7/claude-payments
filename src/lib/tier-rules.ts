@@ -26,6 +26,12 @@ export function deriveTier(customer: CapSubject, now: Date, kycGateActive = true
   return kycGateActive ? 'Suspended' : 'T1';
 }
 
+/** Which day (1, 2 or 3) of the observation window `now` is. Meaningful only for a T0 subject. */
+export function observationDay(customer: Pick<CapSubject, 'firstSeenAt'>, now: Date): number {
+  const ageMs = now.getTime() - new Date(customer.firstSeenAt).getTime();
+  return Math.min(3, Math.floor(ageMs / (24 * 60 * 60 * 1000)) + 1);
+}
+
 /**
  * The two customer fields the tier ladder reads. createTransfer's in-lock cap
  * check evaluates a `store.capSubject(...)` (firstSeenAt from the customers row,
@@ -57,11 +63,7 @@ export function evaluateCap(
   const perTransferCapCents = Math.min(limits.perTransferCapCents, dailyCapCents);
   const todayRemainingCents = Math.max(0, dailyCapCents - todayUsedCents);
 
-  let dayOfWindow: number | undefined;
-  if (tier === 'T0') {
-    const ageMs = now.getTime() - new Date(customer.firstSeenAt).getTime();
-    dayOfWindow = Math.min(3, Math.floor(ageMs / (24 * 60 * 60 * 1000)) + 1);
-  }
+  const dayOfWindow = tier === 'T0' ? observationDay(customer, now) : undefined;
 
   const base = {
     tier,

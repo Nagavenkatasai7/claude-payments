@@ -1,7 +1,7 @@
 import { and, desc, eq, asc, sql, count, inArray, notInArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT, MFA_RECOVERY_CATEGORY } from '@/lib/ticket-category';
 import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
@@ -272,6 +272,30 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
+     * The customer's OPEN ticket of one code-set category under ONE tenant (partnerId in the
+     * WHERE), e.g. a two-step recovery request, so a repeat request reuses it instead of opening
+     * a second one. Open = open, pending or waiting_admin. An empty category matches nothing.
+     */
+    async findOpenCustomerTicketByCategory(partnerId: PartnerId, customerPhone: string, category: string): Promise<Ticket | null> {
+      if (!partnerId || !customerPhone || !category) return null;
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.kind, 'customer'),
+            eq(tickets.category, category),
+            inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+          ),
+        )
+        .orderBy(desc(tickets.createdAt))
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
      * Program-Fix 34B: the customer's OPEN help case under ONE tenant — the one
      * request_human_help reuses. Tenant-scoped in SQL (never a phone-only page
      * filtered in JS). A help case is category human_help OR the fixed help
@@ -329,9 +353,17 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
      * `notFrom` (optional) refuses the move when the CURRENT status is one of the listed states,
      * checked in the same UPDATE's WHERE (atomic: no read-then-write race). The partner surface
      * passes ['waiting_admin'] so an escalation landing mid-request is never overwritten.
+     * `onlyFrom` (optional) is the converse: the move applies only while the CURRENT status is one
+     * of the listed states (a withdrawn escalation moves only out of 'waiting_admin'). An empty
+     * list adds no condition.
      */
-    async updateStatus(id: string, status: TicketStatus, guard: { notFrom?: readonly TicketStatus[] } = {}): Promise<Ticket | null> {
+    async updateStatus(
+      id: string,
+      status: TicketStatus,
+      guard: { notFrom?: readonly TicketStatus[]; onlyFrom?: readonly TicketStatus[] } = {},
+    ): Promise<Ticket | null> {
       const notFrom = guard.notFrom ?? [];
+      const onlyFrom = guard.onlyFrom ?? [];
       const rows = await db
         .update(tickets)
         .set({
@@ -344,6 +376,7 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
           sql`${tickets.status} <> 'closed'`,
           sql`${tickets.status} <> ${status}`,
           notFrom.length > 0 ? notInArray(tickets.status, [...notFrom]) : undefined,
+          onlyFrom.length > 0 ? inArray(tickets.status, [...onlyFrom]) : undefined,
         ))
         .returning();
       return rows[0] ? rowToTicket(rows[0]) : null;
@@ -408,11 +441,17 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
       return m;
     },
 
+    /**
+     * Set the triage fields. A two-step recovery request keeps its category whatever the caller
+     * passes (checked in the same UPDATE): the recovery card and the action locks key on it.
+     */
     async setTriage(id: string, fields: { category?: string; priority?: TicketPriority }): Promise<void> {
       await db
         .update(tickets)
         .set({
-          ...(fields.category !== undefined ? { category: fields.category } : {}),
+          ...(fields.category !== undefined
+            ? { category: sql`CASE WHEN ${tickets.category} = ${MFA_RECOVERY_CATEGORY} THEN ${tickets.category} ELSE ${fields.category} END` }
+            : {}),
           ...(fields.priority !== undefined ? { priority: fields.priority } : {}),
           updatedAt: new Date(),
         })

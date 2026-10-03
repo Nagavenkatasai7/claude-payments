@@ -20,7 +20,7 @@ const when = (ms: number) => (Number.isFinite(ms) ? `${WHEN.format(new Date(ms))
  */
 export default async function DevicesPage() {
   await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/devices');
   const devices = await listPortalDevices(ctx);
   const others = devices.filter((d) => !d.current);
 

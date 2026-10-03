@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
-  cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
+  cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
@@ -300,19 +300,104 @@ describe('reverseB2bSettlement (non-custodial partner reverse via the refund sea
   });
 });
 
-describe('assignTransfer', () => {
-  it('sets assignedTo and adminNote on the transfer', async () => {
+describe('cancelOwnedTransfer (lost-features p1 A1: the /partner cancel, same rule, audited)', () => {
+  const AUD = { actor: 'pa-admin', reason: 'customer asked to stop', actorScope: 'partner' as const };
+  it('voids an unfunded draft of the scoped tenant with ONE transfer.cancel row in the same transaction', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'a1' }));
-    await assignTransfer(store, 'a1', 'alice@example.com', 'High priority');
-    const loaded = await store.getTransfer('a1');
-    expect(loaded?.assignedTo).toBe('alice@example.com');
-    expect(loaded?.adminNote).toBe('High priority');
+    await store.saveTransfer(makeTransfer({ id: 'pc1' }));
+    expect(await cancelOwnedTransfer(db, 'pc1', { partnerId: 'default', audit: AUD })).toBe('cancelled');
+    expect((await store.getTransfer('pc1'))?.status).toBe('cancelled');
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'pa-admin', actor_type: 'staff', action: 'transfer.cancel', subject_id: 'pc1', partner_id: 'default' });
+    expect(rows[0].meta).toEqual({ previousStatus: 'awaiting_payment', newStatus: 'cancelled', reason: 'customer asked to stop', actorScope: 'partner' });
+    expect(await outboxRows()).toHaveLength(0);
   });
-
-  it('throws for a missing transfer', async () => {
+  it('an already-cancelled or delivered transfer is a silent no-op with no audit row', async () => {
     const store = createStore(fakeRedis(), db);
-    await expect(assignTransfer(store, 'missing', 'alice', 'note')).rejects.toThrow('Transfer not found');
+    await store.saveTransfer(makeTransfer({ id: 'pc2', status: 'cancelled' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc3', status: 'delivered' }));
+    expect(await cancelOwnedTransfer(db, 'pc2', { partnerId: 'default', audit: AUD })).toBe('noop');
+    expect(await cancelOwnedTransfer(db, 'pc3', { partnerId: 'default', audit: AUD })).toBe('noop');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('refuses paid, held, charged and blocked rows with the shared policy copy; nothing written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc4', status: 'paid' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'in_review' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc6', fundingRef: 'ch_1' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'blocked' }));
+    await expect(cancelOwnedTransfer(db, 'pc4', { partnerId: 'default', audit: AUD })).rejects.toThrow(/use Refund/i);
+    await expect(cancelOwnedTransfer(db, 'pc5', { partnerId: 'default', audit: AUD })).rejects.toThrow(/use Reject/i);
+    await expect(cancelOwnedTransfer(db, 'pc6', { partnerId: 'default', audit: AUD })).rejects.toThrow(/already been charged/i);
+    await expect(cancelOwnedTransfer(db, 'pc7', { partnerId: 'default', audit: AUD })).rejects.toThrow(/blocked/i);
+    for (const id of ['pc4', 'pc5', 'pc6', 'pc7']) expect((await store.getTransfer(id))?.status).not.toBe('cancelled');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('another tenant\'s id is not found and nothing is written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc8' }));
+    await expect(cancelOwnedTransfer(db, 'pc8', { partnerId: 'other', audit: AUD })).rejects.toThrow('Transfer not found');
+    expect((await store.getTransfer('pc8'))?.status).toBe('awaiting_payment');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a failing audit insert rolls the cancel back', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc9' }));
+    failAudit = true;
+    await expect(cancelOwnedTransfer(db, 'pc9', { partnerId: 'default', audit: AUD })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('pc9'))?.status).toBe('awaiting_payment');
+  });
+});
+
+describe('assignTransfer (lost-features p1 A2: one core for both dashboards)', () => {
+  const NOTE = 'rail failure: the bank refused the account';
+  it('sets assigned_to, NEVER touches adminNote, and writes one transfer.assign row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a1', adminNote: NOTE }));
+    expect(await assignTransfer(db, 'a1', 'alice', { actor: 'plat', note: 'High priority', actorScope: 'platform' })).toBe('assigned');
+    const loaded = await store.getTransfer('a1');
+    expect(loaded?.assignedTo).toBe('alice');
+    expect(loaded?.adminNote).toBe(NOTE);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'plat', action: 'transfer.assign', subject_id: 'a1', partner_id: 'default' });
+    expect(rows[0].meta).toEqual({ assignee: 'alice', previousAssignee: null, note: 'High priority', reason: null, actorScope: 'platform' });
+  });
+  it('the same assignee again is a no-op (no write, no audit row); null unassigns', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a2', assignedTo: 'alice' }));
+    expect(await assignTransfer(db, 'a2', 'alice', { actor: 'plat' })).toBe('unchanged');
+    expect(await auditRows()).toHaveLength(0);
+    expect(await assignTransfer(db, 'a2', null, { actor: 'plat' })).toBe('assigned');
+    expect((await store.getTransfer('a2'))?.assignedTo).toBeUndefined();
+    expect((await auditRows())[0].meta).toMatchObject({ assignee: null, previousAssignee: 'alice' });
+  });
+  it('a scope reads the row inside that tenant: a foreign id is not found and nothing is written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a3' }));
+    await expect(assignTransfer(db, 'a3', 'alice', { actor: 'u' }, { partnerId: 'other' })).rejects.toThrow('Transfer not found');
+    expect((await store.getTransfer('a3'))?.assignedTo).toBeUndefined();
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a failing audit insert rolls the assignment back', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a4' }));
+    failAudit = true;
+    await expect(assignTransfer(db, 'a4', 'alice', { actor: 'u' })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a4'))?.assignedTo).toBeUndefined();
+  });
+  it('throws for a missing transfer', async () => {
+    await expect(assignTransfer(db, 'missing', 'alice', { actor: 'u' })).rejects.toThrow('Transfer not found');
+  });
+  it('the repo claim is a compare-and-set on assigned_to (a lost race returns null, nothing written)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a5', assignedTo: 'bob' }));
+    const repo = createTransferRepo(db);
+    expect(await repo.assignIfUnchanged('a5', { partnerId: 'default', from: null, to: 'alice' })).toBeNull();
+    expect(await repo.assignIfUnchanged('a5', { partnerId: 'other', from: 'bob', to: 'alice' })).toBeNull();
+    expect((await store.getTransfer('a5'))?.assignedTo).toBe('bob');
+    expect((await repo.assignIfUnchanged('a5', { partnerId: 'default', from: 'bob', to: 'alice' }))?.assignedTo).toBe('alice');
   });
 });
 
@@ -520,8 +605,78 @@ describe('issueRefund (admin-proactive, no prior request)', () => {
     expect(await outboxRows()).toHaveLength(1);
   });
 
+  it('refuses a debit that was returned, is still pending, or failed (the money is not with us)', async () => {
+    const store = createStore(fakeRedis(), db);
+    for (const state of ['returned', 'pending', 'failed'] as const) {
+      const id = `iss7${state}`;
+      await store.saveTransfer(makeTransfer({ id, status: 'paid', fundingRef: `mockfund-${id}` }));
+      await db.execute(sql`UPDATE transfers SET funding_state = ${state} WHERE id = ${id}`);
+      await expect(issueRefund(db, id)).rejects.toThrow(/sender debit/i);
+      expect((await store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+    }
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
   it('throws for a missing transfer', async () => {
     await expect(issueRefund(db, 'missing')).rejects.toThrow(/not found/i);
+  });
+});
+
+describe('issueRefund with a tenant scope (lost-features p1 A7: the /partner Issue refund, BL-2)', () => {
+  const AUD = { actor: 'pa-admin', reason: 'customer disputed the charge', actorScope: 'partner' as const };
+  const seedPa = () => db.execute(sql`INSERT INTO partners (id, name) VALUES ('pa', 'Partner A') ON CONFLICT DO NOTHING`);
+  it('the owner refunds its own charged transfer: one funding.refund row and one refund.issue row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr1', status: 'delivered', fundingRef: 'f1' }));
+    await issueRefund(db, 'sr1', AUD, { partnerId: 'default' });
+    expect((await store.getTransfer('sr1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:sr1' }]);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'refund.issue', actor: 'pa-admin', subject_id: 'sr1', partner_id: 'default' });
+    expect(rows[0].meta).toMatchObject({ reason: 'customer disputed the charge', actorScope: 'partner', refundStatus: 'pending' });
+  });
+  it('a transfer another partner pays out is refused INSIDE the transaction, in every status; nothing written', async () => {
+    await seedPa();
+    const store = createStore(fakeRedis(), db);
+    for (const [id, status] of [['sr2', 'paid'], ['sr3', 'delivered'], ['sr4', 'awaiting_payment'], ['sr5', 'cancelled']] as const) {
+      await store.saveTransfer(makeTransfer({ id, status, fundingRef: 'f' }));
+      await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'pa' WHERE id = ${id}`);
+      await expect(issueRefund(db, id, AUD, { partnerId: 'default' }), id).rejects.toThrow(/another partner pays this transfer out/i);
+    }
+    expect(await outboxRows()).toHaveLength(0);
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a settlement partner equal to the owner is fine', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr6', status: 'paid', fundingRef: 'f' }));
+    await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'default' WHERE id = 'sr6'`);
+    await issueRefund(db, 'sr6', AUD, { partnerId: 'default' });
+    expect(await outboxRows()).toHaveLength(1);
+  });
+  it('another tenant\'s id reads as missing; a sandbox transfer is refused', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr7', status: 'paid', fundingRef: 'f' }));
+    await store.saveTransfer(makeTransfer({ id: 'sr8', status: 'paid', fundingRef: 'f', environment: 'test' }));
+    await expect(issueRefund(db, 'sr7', AUD, { partnerId: 'pa' })).rejects.toThrow(/not found/i);
+    await expect(issueRefund(db, 'sr8', AUD, { partnerId: 'default' })).rejects.toThrow(/test transfer/i);
+    expect(await outboxRows()).toHaveLength(0);
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('two submits at once: exactly one refund effect and one audit row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr9', status: 'paid', fundingRef: 'f' }));
+    const r = await Promise.allSettled([issueRefund(db, 'sr9', AUD, { partnerId: 'default' }), issueRefund(db, 'sr9', AUD, { partnerId: 'default' })]);
+    expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    expect(await outboxRows()).toHaveLength(1);
+    expect(await auditRows()).toHaveLength(1);
+  });
+  it('the refund flip is a claim from none: a row that moved after the read is not flipped', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr10', status: 'paid', fundingRef: 'f', refundStatus: 'failed' }));
+    // The claim the core makes refuses a non-none row even though 'failed' -> 'pending' is otherwise legal.
+    expect(await createTransferRepo(db).updateRefund('sr10', { refundStatus: 'pending' }, { from: 'none' })).toBeNull();
+    expect((await store.getTransfer('sr10'))?.refundStatus).toBe('failed');
   });
 });
 
@@ -834,16 +989,15 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     expect((await store.getTransfer('race_can'))?.status).toBe('paid');
   });
 
-  it('assign racing a release: throws and never overwrites the paid row', async () => {
+  it('assign racing a release: the assignment writes only assigned_to, so the paid row stays paid', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'race_asg', status: 'in_review', complianceStatus: 'flagged' }));
-    const stale = (await store.getTransfer('race_asg'))!;
     await releaseTransfer(store, db, 'race_asg', REL);
 
-    await expect(assignTransfer(staleView(store, stale), 'race_asg', 'agent1', 'look')).rejects.toThrow(/changed/i);
+    await assignTransfer(db, 'race_asg', 'agent1', { actor: 'plat', note: 'look' });
     const loaded = await store.getTransfer('race_asg');
     expect(loaded?.status).toBe('paid');
-    expect(loaded?.assignedTo).toBeUndefined();
+    expect(loaded?.assignedTo).toBe('agent1');
   });
 });
 

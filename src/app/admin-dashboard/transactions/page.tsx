@@ -2,8 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
 import { getAuthStore } from '@/lib/auth-store';
-import { toStaffOptions } from '@/lib/staff-options';
-import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
+import { platformAssigneeOptions } from '@/lib/transfer-assignable';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
@@ -105,7 +104,7 @@ export default async function TransactionsPage({
         <Card className="overflow-hidden py-0">
           <TransactionsExplorer
             transfers={transfers}
-            staff={toStaffOptions(allStaff.filter((s) => isLegacyDashboardStaff(s)))}
+            assignees={platformAssigneeOptions(allStaff)}
             staffByUsername={Object.fromEntries(
               allStaff.map((s) => [s.username, s.name]),
             )}

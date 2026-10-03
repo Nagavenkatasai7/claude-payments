@@ -14,6 +14,8 @@ import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { ticketAssigneeRefusal, type AssigneeRefusal } from '@/lib/ticket-assignable';
+import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
+import { RECOVERY_LOCKED_MESSAGE, isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -102,6 +104,8 @@ export async function replyAction(formData: FormData): Promise<void> {
   if (!body) throw new Error('Reply cannot be empty.');
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   requireOpen(ticket);
 
   const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
@@ -125,7 +129,7 @@ export async function replyAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+          body: ticketReplyNudge(nudgeUrl),
           partnerId: ticket.partnerId,
           // Program-Fix 49A: nonessential — suppressed after STOP (B5).
           category: 'nonessential',
@@ -210,8 +214,17 @@ export async function escalateAction(formData: FormData): Promise<void> {
       body: `Escalated to admins: ${reason}`,
       internal: true,
     });
+    // In the same transaction, so a partner withdraw that reads the latest escalation sees it.
+    // A recovery request may be escalated: only platform admins decide it.
+    await createAuditRepo(tx).record({
+      partnerId: ticket.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'ticket.escalate',
+      subjectId: ticket.id,
+      meta: { reason },
+    });
   });
-  await audit(staff, ticket, 'ticket.escalate', { reason });
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -225,6 +238,8 @@ export async function resolveAction(formData: FormData): Promise<void> {
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
   const db = getDb();
   // Owner tenant only (fix 11 / F58); creds resolve at drain.
@@ -236,7 +251,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+          body: ticketResolvedNudge(nudgeUrl),
           partnerId: ticket.partnerId,
           category: 'nonessential', // Program-Fix 49A (B5)
         },
@@ -256,6 +271,8 @@ export async function closeAction(formData: FormData): Promise<void> {
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   const updated = await createTicketRepo(getDb()).updateStatus(ticket.id, 'closed');
   if (!updated) throw new Error('Ticket cannot be closed.');
   await audit(staff, ticket, 'ticket.close');

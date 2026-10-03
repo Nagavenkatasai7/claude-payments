@@ -186,8 +186,8 @@ export default async function AccountSettingsPage({
                   On since {new Date(customer.mfaEnrolledAt).toLocaleDateString('en-US', { dateStyle: 'medium' })}.
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Lost your phone? Reset your password from the sign-in page with a code sent to your WhatsApp. That
-                  also turns two-step verification off, so you can set it up again.
+                  Lost your phone? At the authenticator step of sign-in, choose &ldquo;Lost your authenticator
+                  app?&rdquo;. Our support team checks it is you before turning two-step verification off.
                 </p>
               </>
             ) : (

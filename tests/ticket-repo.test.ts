@@ -126,6 +126,20 @@ describe('ticket-repo — lifecycle', () => {
     expect((await repo.updateStatus(t2.id, 'resolved', { notFrom: [] }))?.status).toBe('resolved');
   });
 
+  it('an optional onlyFrom guard moves the ticket only out of the listed states, in the same UPDATE', async () => {
+    const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
+    // Not escalated: a withdraw (waiting_admin → open) is refused and nothing changes.
+    expect(await repo.updateStatus(t.id, 'pending', { onlyFrom: ['waiting_admin'] })).toBeNull();
+    expect((await repo.getTicket(t.id))?.status).toBe('open');
+    await repo.updateStatus(t.id, 'waiting_admin');
+    expect((await repo.updateStatus(t.id, 'open', { onlyFrom: ['waiting_admin'] }))?.status).toBe('open');
+    // A second (double-submitted) withdraw finds it no longer escalated.
+    expect(await repo.updateStatus(t.id, 'pending', { onlyFrom: ['waiting_admin'] })).toBeNull();
+    // Combined with notFrom both apply; an empty onlyFrom changes nothing.
+    expect(await repo.updateStatus(t.id, 'resolved', { onlyFrom: ['open'], notFrom: ['open'] })).toBeNull();
+    expect((await repo.updateStatus(t.id, 'pending', { onlyFrom: [] }))?.status).toBe('pending');
+  });
+
   it('assign with guard.from is a compare-and-set on the current assignee (null = unassigned)', async () => {
     const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b' });
     expect(await repo.assign(t.id, 'sup1', { from: 'someone' })).toBeNull();
@@ -158,6 +172,41 @@ describe('ticket-repo — lifecycle', () => {
     const read = await repo.getTicket(t.id);
     expect(read?.category).toBe('refund');
     expect(read?.priority).toBe('urgent');
+  });
+
+  it('setTriage never replaces the category of a two-step recovery request (priority still applies)', async () => {
+    const t = await repo.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'b', category: 'mfa_recovery' });
+    await repo.setTriage(t.id, { category: 'refund', priority: 'low' });
+    const read = await repo.getTicket(t.id);
+    expect(read?.category).toBe('mfa_recovery');
+    expect(read?.priority).toBe('low');
+  });
+});
+
+describe('ticket-repo — findOpenCustomerTicketByCategory', () => {
+  const open = (o: { id?: string; partnerId?: string; kind?: 'customer' | 'internal'; phone?: string; category?: string }) =>
+    repo.createTicket({
+      id: o.id ?? tid(), partnerId: o.partnerId ?? 'p1', kind: o.kind ?? 'customer',
+      ...(o.kind === 'internal' ? { openedBy: 's1' } : { customerPhone: o.phone ?? '15551230000' }),
+      subject: 's', body: 'b', ...(o.category !== undefined ? { category: o.category } : {}),
+    });
+  it("finds the customer's open ticket of that category under ONE tenant", async () => {
+    const t = await open({ category: 'mfa_recovery' });
+    expect((await repo.findOpenCustomerTicketByCategory('p1', '15551230000', 'mfa_recovery'))?.id).toBe(t.id);
+    // pending and waiting_admin are still open
+    await repo.updateStatus(t.id, 'waiting_admin');
+    expect((await repo.findOpenCustomerTicketByCategory('p1', '15551230000', 'mfa_recovery'))?.id).toBe(t.id);
+  });
+  it('another tenant, another phone, another category, an internal ticket or a resolved one is never found', async () => {
+    await open({ partnerId: 'p2', category: 'mfa_recovery' });
+    await open({ phone: '15559990000', category: 'mfa_recovery' });
+    await open({ category: 'human_help' });
+    await open({});
+    await open({ kind: 'internal', category: 'mfa_recovery' });
+    const done = await open({ category: 'mfa_recovery' });
+    await repo.updateStatus(done.id, 'resolved');
+    expect(await repo.findOpenCustomerTicketByCategory('p1', '15551230000', 'mfa_recovery')).toBeNull();
+    expect(await repo.findOpenCustomerTicketByCategory('p1', '15551230000', '')).toBeNull();
   });
 });
 

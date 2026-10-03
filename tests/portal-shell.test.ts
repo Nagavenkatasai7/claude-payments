@@ -16,10 +16,11 @@ vi.mock('@/lib/portal-site', () => ({
     return h.site;
   },
 }));
-vi.mock('@/lib/portal-auth', () => ({
+vi.mock('@/lib/portal-auth', async (orig) => ({
   getPortalCustomer: async () => h.customer,
   requirePortalCustomer: async () => h.customer,
-  safePortalNext: (v: unknown) => (v === '/portal/send' ? v : '/portal'),
+  // The REAL allow-list: the sign-in page's ?next= handling is pinned against it (C1).
+  safePortalNext: (await orig<typeof import('@/lib/portal-auth')>()).safePortalNext,
 }));
 vi.mock('next/navigation', async (orig) => ({
   ...(await orig<typeof import('next/navigation')>()),
@@ -122,5 +123,18 @@ describe('portal sign-in page', () => {
   it('apex → 404', async () => {
     h.site = null;
     await expect(PortalLoginPage(noQuery())).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+  });
+  it('C1: a signed-in customer with a safe ?next= goes there; a hostile one goes to /portal', async () => {
+    h.customer = { customer: {}, session: {}, site: SITE, token: 'x' };
+    await expect(PortalLoginPage({ searchParams: Promise.resolve({ next: '/portal/transfers' }) })).rejects.toThrow('REDIRECT:/portal/transfers');
+    await expect(PortalLoginPage({ searchParams: Promise.resolve({ next: '//evil.example' }) })).rejects.toThrow(/^REDIRECT:\/portal$/);
+    await expect(PortalLoginPage({ searchParams: Promise.resolve({ next: ['/portal/help', '/portal/chat'] }) })).rejects.toThrow(/^REDIRECT:\/portal$/);
+  });
+  it('C1: the form carries the safe next as a hidden field, never a hostile one', async () => {
+    const html = renderToStaticMarkup(await PortalLoginPage({ searchParams: Promise.resolve({ next: '/portal/help/tickets/tk_Abc-_1' }) }));
+    expect(html).toContain('name="next" value="/portal/help/tickets/tk_Abc-_1"');
+    const bad = renderToStaticMarkup(await PortalLoginPage({ searchParams: Promise.resolve({ next: 'https://evil.example/"><script>' }) }));
+    expect(bad).toContain('name="next" value="/portal"');
+    expect(bad).not.toContain('evil.example');
   });
 });

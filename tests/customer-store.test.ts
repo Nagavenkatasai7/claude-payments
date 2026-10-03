@@ -119,6 +119,44 @@ describe('customer store', () => {
     const all = await cs.listCustomers();
     expect(all.map((c) => c.senderPhone).sort()).toEqual(['15551111111', '15552222222']);
   });
+
+  it("existingPhones answers which of the phones are THIS tenant's customers, in one read, without decrypting", async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    await cs.upsertOnFirstInbound('default', '15551111111');
+    await cs.upsertOnFirstInbound('acme', '15552222222');
+    const found = await cs.existingPhones('default', ['15551111111', '15552222222', '15553333333', '15551111111']);
+    expect([...found]).toEqual(['15551111111']);
+    expect([...(await cs.existingPhones('acme', ['15551111111', '15552222222']))]).toEqual(['15552222222']);
+    expect((await cs.existingPhones('default', [])).size).toBe(0);
+    expect((await cs.existingPhones('', ['15551111111'])).size).toBe(0);
+  });
+});
+
+describe('customer-store: insertCustomerIfAbsent (lost-features p2 A5)', () => {
+  const fresh = (o: Partial<import('@/lib/types').Customer> = {}) => ({
+    senderPhone: PHONE,
+    firstSeenAt: '2026-09-01T00:00:00.000Z',
+    kycStatus: 'not_started' as const,
+    senderCountry: 'US' as const,
+    partnerId: 'default',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    ...o,
+  });
+  it('inserts once; a second call for the same (tenant, phone) changes nothing and returns false', async () => {
+    const { cs } = mkStores();
+    expect(await cs.insertCustomerIfAbsent(fresh({ fullName: 'First Name' }))).toBe(true);
+    expect(await cs.insertCustomerIfAbsent(fresh({ fullName: 'Other Name', kycStatus: 'verified' }))).toBe(false);
+    const c = await cs.getCustomer('default', PHONE);
+    expect(c).toMatchObject({ fullName: 'First Name', kycStatus: 'not_started' });
+  });
+  it('the key is (tenant, phone): the same phone at another tenant is a new row', async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    expect(await cs.insertCustomerIfAbsent(fresh())).toBe(true);
+    expect(await cs.insertCustomerIfAbsent(fresh({ partnerId: 'acme' }))).toBe(true);
+  });
 });
 
 describe('customer-store P1: senderCountry', () => {

@@ -28,7 +28,7 @@ import { boundStaffNote } from '@/lib/send-limits';
 import type { StaffAuditCtx } from '@/lib/dashboard-ops';
 import type { Staff, StaffPermissions } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
-import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
+import { transferAssigneeRefusal } from '@/lib/transfer-assignable';
 
 async function requirePermission(
   permission: keyof StaffPermissions,
@@ -82,31 +82,27 @@ export async function cancelTransferAction(formData: FormData): Promise<void> {
   revalidatePath('/admin-dashboard', 'layout');
 }
 
+// Lost-features restore p1 A2: the copy for each transferAssigneeRefusal (unchanged wording).
+const ASSIGN_REFUSAL = {
+  unknown: 'Cannot assign: unknown staff member.',
+  scope: 'Cannot assign: staff member is outside this transfer’s scope.',
+  inactive: 'Cannot assign: staff member is inactive.',
+  role: 'Cannot assign: staff member cannot work transfers.',
+} as const;
+
 export async function assignTransferAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const staff = await requirePermission('canAssign');
   const id = String(formData.get('id') ?? '');
   const assignee = String(formData.get('assignee') ?? '');
-  const note = String(formData.get('note') ?? '').slice(0, 500); // L3: bound stored string
-  const { store, transfer } = await getScopedTransfer(staff, id);
-  // Only allow assigning to a real staff account…
-  const assigneeStaff = await getAuthStore().getStaff(assignee);
-  if (!assigneeStaff) {
-    throw new Error('Cannot assign: unknown staff member.');
-  }
-  // …who can actually see this transfer's tenant (M2: no cross-partner assignment)…
-  if (!canSee(scopeOf(assigneeStaff), transfer.partnerId)) {
-    throw new Error('Cannot assign: staff member is outside this transfer’s scope.');
-  }
-  // …and who is still active (don't orphan work on a suspended account).
-  if (assigneeStaff.status === 'suspended') {
-    throw new Error('Cannot assign: staff member is inactive.');
-  }
-  // …and whose role can open the legacy transfer surfaces (UI redesign M3-6: finance cannot).
-  if (!isLegacyDashboardStaff(assigneeStaff)) {
-    throw new Error('Cannot assign: staff member cannot work transfers.');
-  }
-  await assignTransfer(store, id, assignee, note);
+  const { transfer } = await getScopedTransfer(staff, id);
+  // The ONE transfer assignee rule (transfer-assignable.ts): a real, active account that can see
+  // this transfer's tenant and whose role works transfers (admin or agent: support cannot open a
+  // transfer, finance is /partner-only), so an assignment is never a dead end.
+  const refusal = transferAssigneeRefusal(await getAuthStore().getStaff(assignee), transfer.partnerId);
+  if (refusal) throw new Error(ASSIGN_REFUSAL[refusal]);
+  // The note lives only in the transfer.assign audit row (bounded); adminNote is never written.
+  await assignTransfer(getDb(), id, assignee, { actor: staff.username, note: boundStaffNote(formData.get('note')), actorScope: 'platform' });
   revalidatePath('/admin-dashboard', 'layout');
 }
 

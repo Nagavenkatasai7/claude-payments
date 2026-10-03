@@ -3,11 +3,14 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { getPartnerStore } from '@/lib/partner-store';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import type { PartnerIntegrations } from '@/lib/partner-integrations';
+import { setupView, type SetupView } from '@/lib/partner-setup-view';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import type { PartnerDisclosureConfig } from '@/lib/types';
-import { Card, EmptyState, ErrorState, PageHeader } from '@/components/ds';
+import { Badge, Card, EmptyState, ErrorState, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
 import { AlertEmailForm, DisclosureForm, SupportPortalForm, type DisclosureValues } from './settings-forms';
 
@@ -19,6 +22,9 @@ export const metadata: Metadata = { title: t('partner.settings.title'), robots: 
 // the page gates itself (the layout's gate is chrome only) and reads the SESSION tenant only.
 // Platform-only settings (settlement provider, countries, internal name, admin note) are not here
 // (D8). Every value is rendered as escaped text. Viewing writes nothing.
+// Lost-features p3 B13: a read-only "Compliance setup" card first (KYC mode, verify-before-send, the
+// live-rail warning, countries, and the fixed sanctions line). Admin only, like the page (owner
+// line: agents no longer see these facts).
 
 const H2 = 'text-[18px] font-extrabold text-ds-ink';
 const INTRO = 'mt-1 mb-4 text-[14px] text-ds-ink-muted';
@@ -46,9 +52,62 @@ async function marginRows(partnerId: string): Promise<Array<{ corridor: string; 
   }
 }
 
+async function paymentConfig(partnerId: string): Promise<Pick<PartnerIntegrations, 'payment'> | null> {
+  try {
+    return await getPartnerIntegrationsStore().getIntegrations(partnerId);
+  } catch (err) {
+    logWarn('partner.settings.page', err instanceof Error ? err.name : 'error', { source: 'integrations', partnerId });
+    return null;
+  }
+}
+
+function SetupCard({ view }: { view: SetupView }) {
+  const row = 'flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0';
+  return (
+    <Card as="section" className="p-5 sm:p-6">
+      <h2 className={H2}>{t('partner.settings.setup.title')}</h2>
+      <p className={INTRO}>{t('partner.settings.setup.intro')}</p>
+      <dl data-testid="settings-setup" className="divide-y divide-ds-border text-[14px]">
+        <div className={row}>
+          <dt className="font-semibold text-ds-ink-muted">{t('partner.settings.setup.kycMode')}</dt>
+          <dd className="text-ds-ink" data-setup="kycMode" data-value={view.kycMode}>
+            {view.kycMode === 'delegated' ? t('partner.settings.setup.kycDelegated') : t('partner.settings.setup.kycOurs')}
+          </dd>
+        </div>
+        <div className={row}>
+          <dt className="font-semibold text-ds-ink-muted">{t('partner.settings.setup.gate')}</dt>
+          <dd className="flex flex-wrap items-center gap-2 text-ds-ink" data-setup="gate" data-value={view.verifyBeforeSend ? 'on' : 'off'}>
+            {view.verifyBeforeSend ? t('partner.settings.setup.gateOn') : t('partner.settings.setup.gateOff')}
+            {view.liveRailWarning === true ? (
+              <Badge tone="warning">
+                <span data-setup="liveRailWarning">{t('partner.settings.setup.liveRailWarning')}</span>
+              </Badge>
+            ) : null}
+          </dd>
+        </div>
+        <div className={row}>
+          <dt className="font-semibold text-ds-ink-muted">{t('partner.settings.setup.countries')}</dt>
+          <dd className="text-ds-ink" data-setup="countries">
+            {view.countries.length > 0 ? view.countries.join(', ') : t('partner.settings.setup.noCountries')}
+          </dd>
+        </div>
+        <div className={row}>
+          <dt className="font-semibold text-ds-ink-muted">{t('partner.settings.setup.sanctionsLabel')}</dt>
+          <dd className="text-ds-ink">{t('partner.settings.setup.sanctions')}</dd>
+        </div>
+      </dl>
+      <p className="mt-4 text-[13px] text-ds-ink-subtle">{t('partner.settings.setup.changeNote')}</p>
+    </Card>
+  );
+}
+
 export default async function PartnerSettingsPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.settings.policy);
-  const [partner, margins] = await Promise.all([getPartnerStore().getPartner(ctx.partnerId), marginRows(ctx.partnerId)]);
+  const [partner, margins, payment] = await Promise.all([
+    getPartnerStore().getPartner(ctx.partnerId),
+    marginRows(ctx.partnerId),
+    paymentConfig(ctx.partnerId),
+  ]);
   const header = <PageHeader title={t('partner.settings.title')} sub={t('partner.settings.sub')} />;
   if (!partner) {
     return (
@@ -64,6 +123,7 @@ export default async function PartnerSettingsPage() {
     <>
       {header}
       <div className="flex min-w-0 flex-col gap-4 lg:gap-6">
+        <SetupCard view={setupView(partner, payment)} />
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.settings.portal.title')}</h2>
           <p className={INTRO}>{t('partner.settings.portal.intro')}</p>

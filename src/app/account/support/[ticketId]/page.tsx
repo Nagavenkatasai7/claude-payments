@@ -57,7 +57,10 @@ export default async function SupportThreadPage({
   searchParams: Promise<{ error?: string }>;
 }) {
   const { ticketId } = await params;
-  const customer = await requireCustomer({ portalPath: `/portal/help/tickets/${encodeURIComponent(ticketId)}` });
+  const customer = await requireCustomer({
+    portalPath: `/portal/help/tickets/${encodeURIComponent(ticketId)}`,
+    signedOutTo: `/account/continue/support/${encodeURIComponent(ticketId)}`,
+  });
 
   // Admin kill switch — same gate as the support landing; the action re-checks.
   const partner =

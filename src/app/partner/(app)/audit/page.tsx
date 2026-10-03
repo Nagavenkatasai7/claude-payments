@@ -11,6 +11,7 @@ import { isValidNewStaffUsername } from '@/lib/staff-username';
 import {
   AUDIT_MAX_WINDOW_DAYS,
   TENANT_AUDIT_ACTIONS,
+  TENANT_OWN_ONLY_ACTIONS,
   actionLabelKey,
   auditCursorOf,
   parseAuditCursor,
@@ -64,7 +65,9 @@ export default async function PartnerAuditPage({ searchParams }: { searchParams:
 
   const f = parseAuditFilters(sp, selectable, now);
   const before = parseAuditCursor(sp.before);
-  const rows = await listTenantAudit(getDb(), ctx.partnerId, { ...f, before, limit: PAGE_SIZE + 1 });
+  // KYC decisions and AML reviews: this tenant's own rows only (never SmartRemit's: D6).
+  const ownOnly = { actions: TENANT_OWN_ONLY_ACTIONS, tenantActors: [...tenantUsernames] };
+  const rows = await listTenantAudit(getDb(), ctx.partnerId, { ...f, before, limit: PAGE_SIZE + 1, ownOnly });
   const page = rows.slice(0, PAGE_SIZE);
   const older = rows.length > PAGE_SIZE ? page[page.length - 1] : undefined;
   const shown: Row[] = page.map((r) => ({ ...projectAuditRow(r, tenantUsernames, platformUsernames), key: String(r.id) }));

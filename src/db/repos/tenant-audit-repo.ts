@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
 import { auditEvents } from '@/db/schema';
 import type { PartnerId } from '@/lib/types';
@@ -31,6 +31,13 @@ export interface TenantAuditQuery {
   to: Date;
   before?: { at: Date; id: number };
   limit: number;
+  /**
+   * Actions shown only when the TENANT wrote them (partner-audit-view TENANT_OWN_ONLY_ACTIONS: KYC
+   * decisions, AML reviews). For those actions a row is kept when it is marked
+   * meta.actorScope = 'partner', or when its actor is a current member of the tenant and it is not
+   * marked 'platform' (decisions made before the marker existed). Other actions are unaffected.
+   */
+  ownOnly?: { actions: readonly string[]; tenantActors: readonly string[] };
 }
 
 const MAX_LIMIT = 100;
@@ -52,6 +59,16 @@ function tenantScope(partnerId: PartnerId, actions: readonly string[]): SQL | un
   return and(eq(auditEvents.partnerId, partnerId), inArray(auditEvents.action, [...actions]));
 }
 
+function ownOnlyScope(o: TenantAuditQuery['ownOnly']): SQL | undefined {
+  if (!o || o.actions.length === 0) return undefined;
+  const marked = sql`${auditEvents.meta}->>'actorScope' = 'partner'`;
+  const byMember =
+    o.tenantActors.length > 0
+      ? and(inArray(auditEvents.actor, [...o.tenantActors]), sql`coalesce(${auditEvents.meta}->>'actorScope', '') <> 'platform'`)
+      : undefined;
+  return or(notInArray(auditEvents.action, [...o.actions]), marked, byMember);
+}
+
 export async function listTenantAudit(db: DbOrTx, partnerId: PartnerId, q: TenantAuditQuery): Promise<TenantAuditDbRow[]> {
   if (!partnerId || q.actions.length === 0) return [];
   const before = q.before
@@ -66,6 +83,7 @@ export async function listTenantAudit(db: DbOrTx, partnerId: PartnerId, q: Tenan
         gte(auditEvents.at, q.from),
         lt(auditEvents.at, q.to), // exclusive: [from, to)
         q.actor ? eq(auditEvents.actor, q.actor) : undefined,
+        ownOnlyScope(q.ownOnly),
         before,
       ),
     )

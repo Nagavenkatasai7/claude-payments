@@ -93,8 +93,8 @@ describe('/partner/staff: the gate', () => {
     await signInAs({ username: 'root', role: 'admin', partnerId: undefined });
     await expect(StaffPage()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
-  it('agent, support and finance → /partner (admin only)', async () => {
-    for (const role of ['agent', 'support', 'finance'] as const) {
+  it('support and finance → /partner (admin and agent only)', async () => {
+    for (const role of ['support', 'finance'] as const) {
       await signInAs({ username: `pa-${role}`, role, partnerId: 'pa' });
       await expect(StaffPage()).rejects.toThrow('REDIRECT:/partner');
     }
@@ -158,9 +158,51 @@ describe('/partner/staff: content', () => {
     for (const role of ['admin', 'agent', 'support', 'finance']) expect(html).toContain(`value="${role}"`);
   });
 
+  it('a read-only permissions column: "All (admin)" for admins, the flags that are on for others, no control', async () => {
+    await save({ username: 'pa-agent2', name: 'Ann Agent', role: 'agent', partnerId: 'pa', permissions: { canCancel: true, canResend: false, canAssign: false, canRevealPii: true } });
+    const html = await render();
+    const row = (u: string) => html.slice(html.indexOf(`>${u}<`), html.indexOf('</tr>', html.indexOf(`>${u}<`)));
+    expect(html).toContain(t('partner.staff.colPermissions'));
+    expect(html).toContain(t('partner.staff.permNote'));
+    expect(row('pa-admin')).toContain(t('partner.staff.perm.all'));
+    expect(row('pa-agent')).toContain(t('partner.staff.perm.none'));
+    expect(row('pa-agent2')).toContain(`${t('partner.staff.perm.cancel')}, ${t('partner.staff.perm.reveal')}`);
+    expect(html).not.toMatch(/name="(canCancel|canResend|canAssign|canRevealPii|permissions)"/);
+  });
+
   it('no Remove control on your own row', async () => {
     const html = await render();
     expect(html).not.toContain(t('partner.staff.removeName', { name: 'Alice Admin' }));
     expect(html).toContain(t('partner.staff.removeName', { name: 'Andy Agent' }));
+  });
+});
+
+// Lost-features A13: the agent view is a read-only roster. Nothing an admin manages is read or shown.
+describe('/partner/staff: the agent view', () => {
+  beforeEach(async () => {
+    await save({ username: 'pa-admin', name: 'Alice Admin', role: 'admin', partnerId: 'pa', lastLoginAt: new Date().toISOString() });
+    await signInAs({ username: 'pa-agent', name: 'Andy Agent', role: 'agent', partnerId: 'pa' });
+    await save({ username: 'pa-fin', name: 'Fiona Finance', role: 'finance', partnerId: 'pa', status: 'suspended' });
+    await save({ username: 'pb-agent', name: 'Bob Otherco', role: 'agent', partnerId: 'pb' });
+    await redis.set('staff_mfa:pa-admin', JSON.stringify({ secretEnc: 'sealed', enrolledAt: new Date().toISOString() }));
+    const inv = await createStaffInviteStore(redis).issue({ partnerId: 'pa', username: 'pa-invitee', name: 'Ivy', role: 'support', invitedBy: 'pa-admin' });
+    if ('error' in inv) throw new Error();
+  });
+  it("names and roles of the tenant's ACTIVE members; no other tenant, no suspended member", async () => {
+    const html = await render();
+    for (const s of ['Alice Admin', 'pa-admin', 'Andy Agent', t('partner.staff.role.admin')]) expect(html).toContain(s);
+    for (const s of ['Fiona Finance', 'pa-fin', 'Bob Otherco', 'pb-agent']) expect(html).not.toContain(s);
+    expect(html).toContain(t('partner.staff.subAgent'));
+  });
+  it('no MFA state, last sign-in, invites, invite form or Remove control', async () => {
+    const html = await render();
+    for (const s of [t('partner.staff.mfaOn'), t('partner.staff.mfaOff'), t('partner.staff.colLastLogin'), t('partner.staff.justNow'), t('partner.staff.invitesTitle'), 'pa-invitee', t('partner.staff.inviteTitle'), t('partner.staff.colActions')]) {
+      expect(html, s).not.toContain(s);
+    }
+    expect(html).not.toContain('data-testid="partner-staff-invite-form"');
+    expect(html).not.toContain(t('partner.staff.removeName', { name: 'Alice Admin' }));
+    expect(html).not.toContain(t('partner.staff.statusActive'));
+    expect(html).not.toContain(t('partner.staff.colPermissions'));
+    expect(html).not.toContain(t('partner.staff.perm.all'));
   });
 });

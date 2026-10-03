@@ -12,20 +12,45 @@ const daysAgo = (d: number) => new Date(now.getTime() - d * 86_400_000).toISOStr
 const base: PartnerHomeInput = {
   role: 'admin',
   now,
-  summary: { countToday: 3, volumeToday: 450, commissionToday: 9, needsAttention: 1, byStatus: { in_review: 2 } },
+  summary: {
+    countToday: 3,
+    volumeToday: 450,
+    commissionToday: 9,
+    flaggedToday: 2,
+    total: 40,
+    volumeAllTime: 12_000,
+    commissionAllTime: 310,
+    needsAttention: 1,
+    byStatus: { in_review: 2 },
+  },
   whatsapp: 'ok',
   settlement: 'ok',
   apiKeys: [{ keyId: 'pk_live_k1', lastUsedAt: daysAgo(1) }],
 };
 const api = (i: PartnerHomeInput) => buildPartnerHome(i).health.find((h) => h.key === 'api')!.state;
 
+const kpis = {
+  countToday: 3,
+  volumeTodayUsd: 450,
+  feesTodayUsd: 9,
+  flaggedToday: 2,
+  allTime: { count: 40, volumeUsd: 12_000, feesUsd: 310 },
+};
+
 describe('buildPartnerHome', () => {
   it('KPIs for money roles (admin, agent); none for support', () => {
-    expect(buildPartnerHome(base).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
-    expect(buildPartnerHome({ ...base, role: 'agent' }).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
+    expect(buildPartnerHome(base).kpis).toEqual(kpis);
+    expect(buildPartnerHome({ ...base, role: 'agent' }).kpis).toEqual(kpis);
     expect(buildPartnerHome({ ...base, role: 'support' }).kpis).toBeNull();
     // M3-6: finance is in PARTNER_MONEY_READ, so it sees the money KPIs.
-    expect(buildPartnerHome({ ...base, role: 'finance' }).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
+    expect(buildPartnerHome({ ...base, role: 'finance' }).kpis).toEqual(kpis);
+  });
+
+  it('flagged today is a bare count (no transfer, no name) and all-time totals come from the same aggregate', () => {
+    const k = buildPartnerHome({ ...base, summary: { ...base.summary!, flaggedToday: 0 } }).kpis;
+    expect(k).toMatchObject({ flaggedToday: 0, allTime: { count: 40, volumeUsd: 12_000, feesUsd: 310 } });
+    expect(Object.keys(k as object).sort()).toEqual(['allTime', 'countToday', 'feesTodayUsd', 'flaggedToday', 'volumeTodayUsd']);
+    expect(buildPartnerHome({ ...base, role: 'support' }).kpis).toBeNull();
   });
 
   it('actions: holds from byStatus.in_review, attention, and unhealthy channels; zero counts omitted', () => {
@@ -98,5 +123,22 @@ describe('settlementHealth', () => {
   });
   it('an unknown rail type → attention', () => {
     expect(settlementHealth({ providerType: 'other', credentials: { settlementUrl: 'https://rail.example/s' } }, opts)).toBe('attention');
+  });
+});
+
+describe('A12: team questions waiting on Home (admins only)', () => {
+  it('an admin sees the count of team questions waiting for an answer; zero is omitted', () => {
+    expect(buildPartnerHome({ ...base, teamQuestions: 3 }).actions).toContainEqual({ key: 'team_questions', count: 3 });
+    expect(buildPartnerHome({ ...base, teamQuestions: 0 }).actions.some((a) => a.key === 'team_questions')).toBe(false);
+  });
+  it('other roles never get the item, even when a count is passed', () => {
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      expect(buildPartnerHome({ ...base, role, teamQuestions: 3 }).actions.some((a) => a.key === 'team_questions')).toBe(false);
+    }
+  });
+  it('a failed read marks the list incomplete for an admin; not read at all changes nothing', () => {
+    expect(buildPartnerHome({ ...base, teamQuestions: null }).actionsIncomplete).toBe(true);
+    expect(buildPartnerHome({ ...base, role: 'agent', teamQuestions: null }).actionsIncomplete).toBe(false);
+    expect(buildPartnerHome(base).actionsIncomplete).toBe(false);
   });
 });

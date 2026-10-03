@@ -432,6 +432,23 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
       }
       return username;
     },
+    /**
+     * Lost-features A15 (review 2.13): the username behind a live session, read WITHOUT refreshing
+     * lastSeen, for the /partner live poll (so polling never extends the 30-minute idle window).
+     * The same idle and absolute windows as getSessionUser, and no write at all: an expired session
+     * is left for the next real read to revoke, and a previous-build record (no seen record) is not
+     * adopted here (the poll then answers 401 until a real request adopts it).
+     */
+    async peekSessionUser(token: string): Promise<string | null> {
+      const h = sha256hex(token);
+      const username = await redis.get(sessionKey(h));
+      if (!username) return null;
+      const raw = await redis.get(seenKey(h));
+      const seen = raw === null ? null : parseSeen(raw);
+      const now = Date.now();
+      if (!seen || now - seen.createdAtMs > ABSOLUTE_MS || now - seen.lastSeenMs > IDLE_MS) return null;
+      return username;
+    },
     async deleteSession(token: string): Promise<void> {
       const h = sha256hex(token);
       const username = await redis.get(sessionKey(h));

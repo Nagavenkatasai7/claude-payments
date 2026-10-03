@@ -54,6 +54,14 @@ describe('viewConversation', () => {
     for (const v of ['acme private', 'acme reply', PHONE]) expect(s).not.toContain(v);
   });
 
+  it('lost-features p2 A8: actorScope is added to the meta only when passed', async () => {
+    await viewConversation(db, acmeAdmin, customer('acme'));
+    await viewConversation(db, acmeAdmin, customer('acme'), { actorScope: 'partner' });
+    const rows = await auditRows();
+    expect(rows[0].meta).toEqual({ count: 3, channel: 'wa+web', unreadable: 0 });
+    expect(rows[1].meta).toEqual({ count: 3, channel: 'wa+web', unreadable: 0, actorScope: 'partner' });
+  });
+
   it("a partner admin reads their own tenant's thread", async () => {
     expect((await viewConversation(db, acmeAdmin, customer('acme')))?.length).toBe(3);
     expect(await auditRows()).toHaveLength(1);

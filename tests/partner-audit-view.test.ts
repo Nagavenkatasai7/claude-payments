@@ -6,6 +6,7 @@ import {
   auditCursorOf,
   actionLabelKey,
   TENANT_AUDIT_ACTIONS,
+  TENANT_OWN_ONLY_ACTIONS,
 } from '@/lib/partner-audit-view';
 import { t } from '@/lib/i18n';
 
@@ -94,6 +95,10 @@ describe('projectAuditRow', () => {
     expect(d).toContain('nationality');
     for (const w of d.replace(/^fields=/, '').replace(/…$/, '').split(' ')) expect(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'occupation', 'source_of_funds']).toContain(w);
   });
+  it('lost-features p2 B6: the extra pii.view field names render as plain names', () => {
+    const d = projectAuditRow(row({ action: 'pii.view', meta: { fields: ['gov_id_last4', 'pep_declared'] } }), tenant).detail ?? '';
+    expect(d).toBe('fields=gov_id_last4 pep_declared');
+  });
   it('customer subjects and phone-shaped subjects are masked', () => {
     const c = projectAuditRow(row({ action: 'pii.view', subjectId: 'cust:' + 'a'.repeat(64) }), tenant).subject;
     expect(c).not.toContain('a'.repeat(20));
@@ -112,8 +117,8 @@ describe('projectAuditRow', () => {
 });
 
 describe('TENANT_AUDIT_ACTIONS', () => {
-  it('the allowlist excludes screening, KYC decision, login and ops rows', () => {
-    for (const a of ['sanctions.screen', 'kyc.manual_override.create', 'auth.login.failed', 'auth.login.success', 'ops.outbox.retry', 'auth.mfa.reset', 'auth.mfa.failed']) {
+  it('the allowlist excludes screening, login and ops rows', () => {
+    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
       expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
     }
   });
@@ -126,6 +131,87 @@ describe('TENANT_AUDIT_ACTIONS', () => {
     expect(t(actionLabelKey('partner.display_name.update'))).toBe('Display name changed');
     expect(Object.isFrozen(TENANT_AUDIT_ACTIONS)).toBe(true);
     for (const a of TENANT_AUDIT_ACTIONS) expect(t(actionLabelKey(a)), a).not.toBe(actionLabelKey(a));
+  });
+});
+
+// Lost-features restore (review BL-4): every action the four slices write or restore is labelled
+// in ONE place, with the exact names their writers use.
+const SLICE_ACTIONS: Record<string, string> = {
+  // p1: transfers and refunds
+  'transfer.cancel': 'Transfer cancelled',
+  'transfer.assign': 'Transfer assigned',
+  'transfer.paylink.resend': 'Payment link resent',
+  'transfer.reject': 'Held transfer rejected',
+  'refund.issue': 'Refund issued',
+  'refund.approve': 'Refund approved',
+  'refund.dismiss': 'Refund dismissed',
+  'refund.retry': 'Refund retried',
+  // p2: customers (KYC decisions own-only)
+  'conversation.view': 'Conversation log viewed',
+  'customer.create': 'Customer created',
+  'kyc.manual_override.create': 'Customer created as verified',
+  'kyc.manual_override.approve': 'KYC approved',
+  'kyc.manual_override.reject': 'KYC rejected',
+  'kyc.review.approve': 'KYC review approved',
+  'kyc.review.reject': 'KYC review rejected',
+  // BL-4: schedules and AML reviews (own-only)
+  'schedule.create': 'Scheduled transfer created',
+  'schedule.pause': 'Scheduled transfer paused',
+  'schedule.resume': 'Scheduled transfer resumed',
+  'schedule.cancel': 'Scheduled transfer cancelled',
+  'aml.reviewed': 'AML alert reviewed',
+  // p3: support, staff questions, invoices, password
+  'ticket.assign': 'Ticket assigned',
+  'ticket.escalate': 'Ticket escalated to SmartRemit',
+  'ticket.escalation.withdraw': 'Escalation withdrawn',
+  'ticket.status': 'Ticket status changed',
+  'ticket.resolve': 'Ticket resolved',
+  'ticket.close': 'Ticket closed',
+  'ticket.reply': 'Ticket reply sent',
+  'ticket.contact.open': 'Question sent',
+  'ticket.contact.reply': 'Question follow-up sent',
+  'employee_question.answer': 'Team question answered',
+  'employee_question.status': 'Team question status changed',
+  'b2b.invoice.void': 'Business invoice voided',
+  'b2b.invoice.reissue': 'Business invoice reissued',
+  'auth.password.change': 'Password changed',
+  // p4: two-step recovery
+  'customer.mfa.recovery.request': 'Two-step recovery requested',
+  'customer.mfa.recovery.approve': 'Two-step recovery approved',
+  'customer.mfa.recovery.decline': 'Two-step recovery declined',
+};
+
+describe('lost-features audit labels (BL-4)', () => {
+  it('every slice action is allowlisted with its own label', () => {
+    for (const [a, label] of Object.entries(SLICE_ACTIONS)) {
+      expect(TENANT_AUDIT_ACTIONS, a).toContain(a);
+      expect(t(actionLabelKey(a)), a).toBe(label);
+    }
+  });
+  it('KYC decisions and AML reviews are own-only, and own-only actions are all allowlisted', () => {
+    expect([...TENANT_OWN_ONLY_ACTIONS].sort()).toEqual(
+      ['aml.reviewed', 'kyc.manual_override.approve', 'kyc.manual_override.create', 'kyc.manual_override.reject', 'kyc.review.approve', 'kyc.review.reject'].sort(),
+    );
+    expect(Object.isFrozen(TENANT_OWN_ONLY_ACTIONS)).toBe(true);
+    for (const a of TENANT_OWN_ONLY_ACTIONS) expect(TENANT_AUDIT_ACTIONS).toContain(a);
+  });
+  it('reasons, notes, assignees and dispositions never render: these actions show no detail', () => {
+    const meta = {
+      reason: 'watchlist hit for +15550001111', note: 'called Jane', assignee: 'owner-admin', disposition: 'escalated',
+      previousStatus: 'paid', from: 'open', to: 'paused', status: 'resolved', alertId: 7, reissuedAs: 'reissue-x', scheduleId: 'sch_1', ticketId: 'tk_1', via: 'portal',
+    };
+    const silent = Object.keys(SLICE_ACTIONS).filter((a) => !['conversation.view', 'customer.create', 'customer.mfa.recovery.approve', 'customer.mfa.recovery.decline'].includes(a));
+    for (const action of silent) {
+      const p = projectAuditRow(row({ action, meta }), tenant);
+      expect(p.detail, action).toBeNull();
+      for (const v of ['watchlist', '5550001111', 'Jane', 'owner-admin', 'escalated']) expect(JSON.stringify(p), action).not.toContain(v);
+    }
+  });
+  it('the few safe details: conversation count and channel, the created KYC status, the recovery checks and decline reason', () => {
+    expect(projectAuditRow(row({ action: 'conversation.view', meta: { count: 12, channel: 'wa', unreadable: 1, actorScope: 'partner' } }), tenant).detail).toBe('count=12, channel=wa');
+    expect(projectAuditRow(row({ action: 'customer.create', meta: { kycStatus: 'not_started', senderCountry: 'US', source: 'manual' } }), tenant).detail).toBe('kycStatus=not_started');
+    expect(projectAuditRow(row({ action: 'customer.mfa.recovery.approve', meta: { checks: ['id_document', 'recent_transfer'], ticketId: 'tk_1' } }), tenant).detail).toBe('checks=id_document recent_transfer');
+    expect(projectAuditRow(row({ action: 'customer.mfa.recovery.decline', meta: { reason: 'not_verified', ticketId: 'tk_1' } }), tenant).detail).toBe('reason=not_verified');
   });
 });
 

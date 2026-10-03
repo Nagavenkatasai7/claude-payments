@@ -3,9 +3,10 @@ import { maskPhoneLast4 } from '@/lib/mask';
 
 // partner-audit-view (UI redesign M3-4): the PURE half of the partner audit log viewer. A tenant sees
 // its own trail through three allowlists, never the raw row:
-//   1. ACTIONS: only the action types below are ever queried (platform-internal, screening, KYC
-//      decision, sign-in and ops rows are left out on purpose: they carry evidence names, free-text
-//      reasons or IP metadata);
+//   1. ACTIONS: only the action types below are ever queried (platform-internal, screening,
+//      sign-in and ops rows are left out on purpose: they carry evidence names, free-text reasons or
+//      IP metadata). KYC decisions and AML reviews are listed but OWN-ONLY (TENANT_OWN_ONLY_ACTIONS):
+//      the page shows the tenant's own rows, never SmartRemit's, and never their reasons;
 //   2. ACTORS: a tenant username is shown; any other staff actor reads as "SmartRemit", and system /
 //      API-key actors as a fixed label, so no other tenant's or platform's identifiers are rendered;
 //   3. META: a per-action list of keys; every other meta key (reasons, old/new config, IPs, slugs,
@@ -52,6 +53,50 @@ const ACTION_LABELS = Object.freeze({
   'webhook.test': 'partner.audit.action.webhookTest',
   'webhook.replay': 'partner.audit.action.webhookReplay',
   'auth.mfa.enroll': 'partner.audit.action.mfaEnroll',
+  // Lost-features restore (review BL-4): every action the four slices write or restore, labelled in
+  // one place. None shows detail unless DETAIL_KEYS says so (reasons and notes never render).
+  // p1: transfers and refunds (subject = transfer id).
+  'transfer.cancel': 'partner.audit.action.transferCancel',
+  'transfer.assign': 'partner.audit.action.transferAssign',
+  'transfer.paylink.resend': 'partner.audit.action.paylinkResend',
+  'transfer.reject': 'partner.audit.action.reject',
+  'refund.issue': 'partner.audit.action.refundIssue',
+  'refund.approve': 'partner.audit.action.refundApprove',
+  'refund.dismiss': 'partner.audit.action.refundDismiss',
+  'refund.retry': 'partner.audit.action.refundRetry',
+  // p2: customers (subject = keyed cust: id). The KYC decisions are own-only.
+  'conversation.view': 'partner.audit.action.conversationView',
+  'customer.create': 'partner.audit.action.customerCreate',
+  'kyc.manual_override.create': 'partner.audit.action.kycCreateVerified',
+  'kyc.manual_override.approve': 'partner.audit.action.kycApprove',
+  'kyc.manual_override.reject': 'partner.audit.action.kycReject',
+  'kyc.review.approve': 'partner.audit.action.kycReviewApprove',
+  'kyc.review.reject': 'partner.audit.action.kycReviewReject',
+  // Schedules (staff: subject = schedule id; portal: keyed cust: id) and AML reviews (own-only).
+  'schedule.create': 'partner.audit.action.scheduleCreate',
+  'schedule.pause': 'partner.audit.action.schedulePause',
+  'schedule.resume': 'partner.audit.action.scheduleResume',
+  'schedule.cancel': 'partner.audit.action.scheduleCancel',
+  'aml.reviewed': 'partner.audit.action.amlReviewed',
+  // p3: support (subject = ticket id), staff questions, B2B invoices (subject = invoice id), password.
+  'ticket.assign': 'partner.audit.action.ticketAssign',
+  'ticket.escalate': 'partner.audit.action.ticketEscalate',
+  'ticket.escalation.withdraw': 'partner.audit.action.ticketEscalationWithdraw',
+  'ticket.status': 'partner.audit.action.ticketStatus',
+  'ticket.resolve': 'partner.audit.action.ticketResolve',
+  'ticket.close': 'partner.audit.action.ticketClose',
+  'ticket.reply': 'partner.audit.action.ticketReply',
+  'ticket.contact.open': 'partner.audit.action.contactOpen',
+  'ticket.contact.reply': 'partner.audit.action.contactReply',
+  'employee_question.answer': 'partner.audit.action.teamQuestionAnswer',
+  'employee_question.status': 'partner.audit.action.teamQuestionStatus',
+  'b2b.invoice.void': 'partner.audit.action.invoiceVoid',
+  'b2b.invoice.reissue': 'partner.audit.action.invoiceReissue',
+  'auth.password.change': 'partner.audit.action.passwordChange', // meta holds a hashed IP: never shown
+  // p4: two-step recovery (subject = keyed cust: id or ticket id).
+  'customer.mfa.recovery.request': 'partner.audit.action.mfaRecoveryRequest',
+  'customer.mfa.recovery.approve': 'partner.audit.action.mfaRecoveryApprove',
+  'customer.mfa.recovery.decline': 'partner.audit.action.mfaRecoveryDecline',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -62,6 +107,20 @@ export const TENANT_AUDIT_ACTIONS: readonly TenantAuditAction[] = Object.freeze(
 );
 
 const isTenantAction = (a: string): a is TenantAuditAction => Object.hasOwn(ACTION_LABELS, a);
+
+/**
+ * Actions a tenant sees only when it wrote them itself (tenant-audit-repo `ownOnly`). A feed of
+ * SmartRemit's KYC decisions or AML reviews across all customers would be a screening list under
+ * another name (D6), so those rows never reach the page.
+ */
+export const TENANT_OWN_ONLY_ACTIONS: readonly TenantAuditAction[] = Object.freeze([
+  'kyc.review.approve',
+  'kyc.review.reject',
+  'kyc.manual_override.approve',
+  'kyc.manual_override.reject',
+  'kyc.manual_override.create',
+  'aml.reviewed',
+] as const);
 
 export function actionLabelKey(action: string): MessageKey {
   return isTenantAction(action) ? ACTION_LABELS[action] : 'partner.audit.action.other';
@@ -75,6 +134,11 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'pii.view': ['fields'],
   'report.request': ['kind'],
   'webhook.replay': ['outboxId'],
+  'conversation.view': ['count', 'channel'],
+  'customer.create': ['kycStatus'],
+  // Closed enums only (the recovery module's RECOVERY_CHECKS and decline reasons).
+  'customer.mfa.recovery.approve': ['checks'],
+  'customer.mfa.recovery.decline': ['reason'],
 });
 
 const MASK = '••••'; // ••••
@@ -84,7 +148,7 @@ const CUSTOMER_SUBJECT = /^cust:([0-9a-f]{6})[0-9a-f]*$/i;
 const MAX_DETAIL = 80;
 
 /** A value that could be a phone or an email never reaches the page. */
-function safeText(v: string): string {
+export function safeText(v: string): string {
   if (v.includes('@')) return MASK;
   if (PHONE_SHAPE.test(v) || DIGIT_RUN.test(v)) return maskPhoneLast4(v);
   return v;

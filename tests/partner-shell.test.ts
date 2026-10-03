@@ -40,6 +40,8 @@ vi.mock('next/navigation', () => ({
     throw new Error('NOT_FOUND');
   },
   usePathname: () => pathname.current,
+  // Lost-features A15/A16: the live refresher and the palette navigate with the router.
+  useRouter: () => ({ push: () => {}, refresh: () => {} }),
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
 // M3-3: the home page reads the ledger, channel health, integrations and API keys. Wire every
@@ -83,6 +85,7 @@ import Layout from '@/app/partner/(app)/layout';
 import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
 import { PartnerSidebar } from '@/app/partner/(app)/partner-sidebar';
+import { t } from '@/lib/i18n';
 
 // A distinctive tenant id, so "no tenant in any href" cannot false-match "/partner".
 const TENANT = 'ptn-zq9x';
@@ -208,6 +211,95 @@ describe('/partner layout: the chrome', () => {
     const html = await shell();
     expect(html).toMatch(/<form[^>]*>.*Sign out.*<\/form>/s);
     expect(hrefs(html).some((h) => /logout|sign-?out/i.test(h))).toBe(false);
+  });
+});
+
+describe('/partner layout: quick search and live updates (lost-features A16, A15)', () => {
+  it('every role gets the search trigger; its items are only the pages the role may open', async () => {
+    await signInAs({ username: 'ag', partnerId: TENANT, role: 'agent' });
+    let html = await shell();
+    expect(html).toContain('aria-keyshortcuts="Meta+K Control+K"');
+    expect(html).toContain(`>${t('partner.nav.customers')}<`);
+    for (const key of ['audit', 'invoices', 'customersNew', 'settings'] as const) {
+      expect(html, key).not.toContain(`>${t(PARTNER_ROUTES[key].labelKey)}<`);
+    }
+    await signInAs({ username: 'ad', partnerId: TENANT, role: 'admin' });
+    html = await shell();
+    expect(html).toContain(`>${t('partner.nav.invoices')}<`);
+    expect(html).toContain(`>${t('partner.customers.new')}<`);
+    await signInAs({ username: 'sp', partnerId: TENANT, role: 'support' });
+    html = await shell();
+    expect(html).toContain('aria-keyshortcuts="Meta+K Control+K"');
+    expect(html).not.toContain(`>${t('partner.nav.transfers')}</span></li>`);
+  });
+  it('the live indicator shows on list pages only', async () => {
+    await signInAs({ partnerId: TENANT, role: 'agent' });
+    for (const p of ['/partner', '/partner/transfers', '/partner/support', '/partner/reviews', '/partner/refunds']) {
+      pathname.current = p;
+      expect(await shell(), p).toContain('data-live="on"');
+    }
+    for (const p of ['/partner/transfers/abc', '/partner/support/contact', '/partner/security', '/partner/staff']) {
+      pathname.current = p;
+      expect(await shell(), p).not.toContain('data-live');
+    }
+  });
+});
+
+describe('/partner layout: WhatsApp health strip (p3 B12)', () => {
+  const mark = (kind: string) => redis.set(`wahealth:${TENANT}`, JSON.stringify({ [kind]: { at: new Date().toISOString(), count: 3, code: 131047 } }));
+  it('no mark → no strip', async () => {
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('an error mark shows the strip; admins get "Fix it", other roles are told to ask their admin', async () => {
+    await mark('dead_send');
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    let html = await shell();
+    expect(html).toContain('data-shell-banner="error"');
+    expect(html).toContain('href="/partner/integrations/whatsapp"');
+    for (const [i, role] of (['agent', 'support', 'finance'] as const).entries()) {
+      await signInAs({ username: `s${i}`, partnerId: TENANT, role });
+      html = await shell();
+      expect(html, role).toContain('data-shell-banner="error"');
+      expect(html, role).not.toContain('/partner/integrations/whatsapp');
+    }
+    // Fixed copy only: no raw item message, count or code reaches the page.
+    expect(html).not.toContain('131047');
+    expect(html).not.toMatch(/×3|could not be delivered/);
+  });
+  it('a warn mark shows the warn strip', async () => {
+    await mark('no_phone');
+    await signInAs({ partnerId: TENANT, role: 'agent' });
+    expect(await shell()).toContain('data-shell-banner="warn"');
+  });
+  it('another tenant’s mark never shows on this tenant’s shell', async () => {
+    await redis.set(`wahealth:${OTHER}`, JSON.stringify({ dead_send: { at: new Date().toISOString(), count: 1 } }));
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('the default tenant (the shared number) never shows a strip', async () => {
+    await seedPartner(homeDb, 'default', 'SmartRemit');
+    await redis.set('wahealth:default', JSON.stringify({ dead_send: { at: new Date().toISOString(), count: 1 } }));
+    await signInAs({ partnerId: 'default', role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('a Redis error still renders the shell, with no strip', async () => {
+    await mark('dead_send');
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    const get = redis.get;
+    redis.get = (async (k: string) => {
+      if (k.startsWith('wahealth:')) throw new Error('redis down');
+      return get.call(redis, k);
+    }) as typeof redis.get;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const html = await shell();
+      expect(html).toContain('class="sh-sidebar');
+      expect(html).not.toContain('data-shell-banner');
+    } finally {
+      redis.get = get;
+      warn.mockRestore();
+    }
   });
 });
 

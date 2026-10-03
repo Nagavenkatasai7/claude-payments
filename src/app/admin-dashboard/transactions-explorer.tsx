@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import type { Partner, Tier, Transfer } from '@/lib/types';
-import type { StaffOption } from '@/lib/staff-options';
+import type { PlatformAssigneeOptions } from '@/lib/transfer-assignable';
 import { accountLast4 } from '@/lib/payout-format';
 import { Input } from '@/components/ui/input';
 import { TransactionsTabs } from './transactions-tabs';
@@ -20,7 +20,7 @@ const SELECT_CLASS =
 export interface TransactionsExplorerProps {
   transfers: Transfer[];
   /** Fix 20: the {username, name} projection only — never a full Staff (it carries passwordHash). */
-  staff: StaffOption[];
+  assignees: PlatformAssigneeOptions;
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
   kycByPhone: Record<string, KycInfo>;
@@ -117,7 +117,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
       </div>
       <TransactionsTabs
         transfers={filtered}
-        staff={props.staff}
+        assignees={props.assignees}
         staffByUsername={props.staffByUsername}
         tierByPhone={props.tierByPhone}
         kycByPhone={props.kycByPhone}

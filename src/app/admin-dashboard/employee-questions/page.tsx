@@ -11,12 +11,16 @@ import { Input } from '@/components/ui/input';
 import { askQuestionAction } from './actions';
 import { listEmployeeQuestions } from './queries';
 import { QuestionStatusBadge, STATUS_LABEL, TEXTAREA_CLASS } from './status-badge';
+import { TEAM_QUESTION_CATEGORY } from '@/lib/ticket-category';
+import { t as tr } from '@/lib/i18n';
 
 // Employee questions — ONE page, two modes (gate: requireSupportOrAdmin):
 //   • support staff: an "Ask the admins" form + a list of THEIR OWN questions;
 //   • admins: the full internal queue (platform admins all partners; partner
 //     admins pinned to theirs) with a status filter.
 // All scoping decisions live in ./queries — this page only renders.
+// Lost-features A12: a partner's TEAM question (addressed to its own admins) is badged so SmartRemit
+// can skip it; it stays listed and answerable here as before.
 
 // Derived from the exhaustive label map so the filter row tracks TicketStatus.
 const STATUSES = Object.keys(STATUS_LABEL) as TicketStatus[];
@@ -141,7 +145,16 @@ export default async function EmployeeQuestionsPage({
                 label: t.subject,
                 cells: isAdmin
                   ? [
-                      subjectLink(t),
+                      t.category === TEAM_QUESTION_CATEGORY ? (
+                        <span key="subject" className="inline-flex flex-wrap items-center gap-2">
+                          {subjectLink(t)}
+                          <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                            {tr('support.employeeQuestions.toPartnerAdmins')}
+                          </span>
+                        </span>
+                      ) : (
+                        subjectLink(t)
+                      ),
                       t.openedBy ?? '—',
                       t.partnerId,
                       <QuestionStatusBadge key="status" status={t.status} />,

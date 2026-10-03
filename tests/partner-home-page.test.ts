@@ -197,6 +197,40 @@ describe('/partner home: tenant isolation', { retry: 0 }, () => {
   });
 });
 
+describe('/partner home: flagged today and all-time totals (p3 B11, B13)', () => {
+  it('flagged today is a bare count; admin and agent get a Reviews link, finance gets the count only', async () => {
+    await createStore(redis, db).saveTransfer(
+      transfer({ id: 'a4', partnerId: PA, amountUsd: 50, feeUsd: 1, complianceStatus: 'flagged', complianceReasons: ['watchlist'] }),
+    );
+    await signInAs({ partnerId: PA, role: 'admin' });
+    let html = await render();
+    expect(html).toContain('data-kpi="flaggedToday">1<');
+    expect(html).toContain('href="/partner/reviews"');
+    expect(html).not.toContain('watchlist');
+    await signInAs({ username: 'u4', partnerId: PA, role: 'agent' });
+    expect(await render()).toContain('href="/partner/reviews"');
+    await signInAs({ username: 'u5', partnerId: PA, role: 'finance' });
+    html = await render();
+    expect(html).toContain('data-kpi="flaggedToday">1<');
+    expect(html).not.toContain('href="/partner/reviews"');
+  });
+
+  it('no flagged transfer → 0 and no link', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await render();
+    expect(html).toContain('data-kpi="flaggedToday">0<');
+    expect(html).not.toContain('href="/partner/reviews"');
+  });
+
+  it('all-time totals are the session tenant’s live rows only', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await render();
+    expect(html).toContain('data-kpi="countAll">2<'); // sandbox a3 and PB's five excluded
+    expect(html).toMatch(/data-kpi="volumeAll">(<[^>]+>)*\$350\.00</);
+    expect(html).toMatch(/data-kpi="feesAll">(<[^>]+>)*\$5\.00</);
+  });
+});
+
 describe('/partner home: roles', () => {
   it('agent sees the money KPIs; support sees health and actions, no money KPIs', async () => {
     await signInAs({ partnerId: PA, role: 'agent' });
@@ -253,5 +287,32 @@ describe('/partner home: fail-soft per card', () => {
     const html = await render();
     expect(html).toContain('data-health="api" data-state="attention"');
     expect(html).not.toContain('data-action="no_live_key"');
+  });
+});
+
+describe('/partner home: A12 team questions waiting (admins only)', () => {
+  beforeEach(async () => {
+    const { createTicketRepo } = await import('@/db/repos/ticket-repo');
+    const repo = createTicketRepo(db);
+    const q = (id: string, partnerId: string, openedBy: string, category?: string) =>
+      repo.createTicket({ id, partnerId, kind: 'internal', openedBy, subject: `s ${id}`, body: `b ${id}`, ...(category ? { category } : {}) });
+    await q('tk_q1', PA, 'sup1', 'team_question');
+    await q('tk_q2', PA, 'sup2', 'team_question');
+    await q('tk_q3', PA, 'u1', 'team_question'); // the admin's own question
+    await q('tk_q4', PA, 'sup1'); // addressed to SmartRemit
+    await q('tk_q5', PB, 'pbsup', 'team_question'); // another tenant
+    await repo.updateStatus('tk_q2', 'resolved');
+  });
+  it("an admin sees their tenant's waiting team questions, not their own, SmartRemit's or another tenant's", async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await render();
+    expect(html).toContain('data-action="team_questions"');
+    expect(html).toContain('Team questions waiting for an answer: 1');
+  });
+  it('agent and support never get the item', async () => {
+    for (const role of ['agent', 'support'] as const) {
+      await signInAs({ partnerId: PA, role, username: `x-${role}` });
+      expect(await render(), role).not.toContain('data-action="team_questions"');
+    }
   });
 });

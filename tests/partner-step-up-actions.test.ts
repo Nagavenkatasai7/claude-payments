@@ -71,6 +71,7 @@ import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
 import { t } from '@/lib/i18n';
 import { createKeyAction, revokeKeyAction, rotateKeyAction } from '@/app/partner/(app)/integrations/api-keys/actions';
 import { replayDeliveryAction, rotateSecretAction, saveEndpointAction, sendTestAction } from '@/app/partner/(app)/integrations/webhooks/actions';
+import { issueRefundAction } from '@/app/partner/(app)/transfers/[id]/refund-actions';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 const PASSWORD = 'correct horse battery staple';
@@ -166,6 +167,13 @@ const RUNNERS: Runner[] = [
     run: (extra) => replayDeliveryAction(null, form({ id: String(paDead), ...extra })),
     done: (r) => expect(r).toEqual({ ok: true }),
   },
+  {
+    // Lost-features restore p1 A7: Issue refund on /partner (a money action) is gated too.
+    name: 'issueRefundAction',
+    target: 'refund.issue',
+    run: (extra) => issueRefundAction(form({ id: 't_ref', reason: 'customer disputed the charge', ...extra })),
+    done: (r) => expect(r).toEqual({ ok: true }),
+  },
 ];
 
 beforeEach(async () => {
@@ -183,6 +191,7 @@ beforeEach(async () => {
   await createPartnerIntegrationsStore(db).saveIntegrations('pa', rail());
   paKey = (await createApiKeyRepo(db).issue('pa', 'test')).keyId;
   await createStore(fakeRedis(), db).saveTransfer(transfer('t_pa', 'pa'));
+  await createStore(fakeRedis(), db).saveTransfer({ ...transfer('t_ref', 'pa'), fundingRef: 'ch_ref' });
   paDead = await deadRow('instruct:t_pa', 't_pa');
 });
 

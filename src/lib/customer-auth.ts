@@ -24,10 +24,16 @@ export async function getCurrentCustomer(): Promise<Customer | null> {
  * When the customer's OWN partner (from the session, never the URL) runs a live portal
  * (customerPortalOrigin), the customer is sent there instead; partners without a portal keep the
  * legacy page. The portal re-checks the session and ownership itself.
+ *
+ * `signedOutTo` (lost-features C2): where a signed-out visitor goes instead of /account/login. The
+ * receipt and ticket pages pass their /account/continue route, so an expired legacy cookie (which the
+ * proxy lets through) still reaches the right partner's portal sign-in.
  */
-export async function requireCustomer(opts: { portalPath?: `/portal${string}` } = {}): Promise<Customer> {
+export async function requireCustomer(
+  opts: { portalPath?: `/portal${string}`; signedOutTo?: `/account/continue/${string}` } = {},
+): Promise<Customer> {
   const customer = await getCurrentCustomer();
-  if (!customer) redirect('/account/login');
+  if (!customer) redirect(opts.signedOutTo ?? '/account/login');
   if (opts.portalPath) {
     const origin = await customerPortalOrigin(customer.partnerId);
     if (origin) redirect(portalUrl(origin, opts.portalPath));

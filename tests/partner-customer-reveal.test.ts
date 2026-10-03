@@ -171,19 +171,16 @@ describe('revealCustomerFieldAction: refusals (same shape as missing, no audit)'
   it('a field outside the allowlist (email, __proto__, a non-string)', async () => {
     await signInAs({ partnerId: PA });
     const ref = sealCustomerRef(PA, SHARED);
-    for (const f of ['email', '__proto__', 'constructor', 'govIdNumber', 'nationality', '']) {
+    for (const f of ['email', '__proto__', 'constructor', 'govIdNumber', 'payout_destination', 'recipient_name', '']) {
       expect(await reveal(ref, f), f).toEqual(NOT_FOUND);
     }
     expect(await revealCustomerFieldAction(ref, { toString: () => 'full_name' } as never)).toEqual(NOT_FOUND);
     expect(await reveals()).toHaveLength(0);
   });
-  it('an agent without canRevealPii', async () => {
-    await signInAs({ partnerId: PA, role: 'agent' });
-    expect(await reveal(sealCustomerRef(PA, SHARED), 'full_name')).toEqual(NOT_FOUND);
-    expect(await reveals()).toHaveLength(0);
-  });
-  it('staff who have not set up two-step verification', async () => {
+  it('staff who have not set up two-step verification (admin or agent, with or without canRevealPii)', async () => {
     await signInAs({ partnerId: PA, role: 'admin' }, { mfa: false });
+    expect(await reveal(sealCustomerRef(PA, SHARED), 'full_name')).toEqual(NOT_FOUND);
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-nomfa', permissions: { ...noPerms, canRevealPii: true } }, { mfa: false });
     expect(await reveal(sealCustomerRef(PA, SHARED), 'full_name')).toEqual(NOT_FOUND);
     expect(await reveals()).toHaveLength(0);
   });
@@ -205,6 +202,22 @@ describe('revealCustomerFieldAction: refusals (same shape as missing, no audit)'
 });
 
 describe('revealCustomerFieldAction: success', () => {
+  // Lost-features p2 B5 (review BL-1, the one reveal rule): identity fields need admin or agent with
+  // two-step verification, never canRevealPii (the old dashboard showed them to agents in clear).
+  it('an enrolled agent WITHOUT canRevealPii may reveal identity: value and one pii.reveal', async () => {
+    await signInAs({ partnerId: PA, role: 'agent', username: 'agent-noflag' });
+    expect(await reveal(sealCustomerRef(PA, SHARED), 'full_name')).toEqual({ value: A_NAME });
+    const rows = await reveals();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'agent-noflag', meta: { field: 'full_name', actorScope: 'partner' } });
+  });
+  it('nationality is revealable: the ISO code, field=nationality', async () => {
+    const cs = createCustomerStore(db, createStore(redis, db));
+    await cs.saveCustomer(customer({ partnerId: PA, fullName: A_NAME, nationality: 'IN' }));
+    await signInAs({ partnerId: PA, role: 'agent', username: 'agent-nat' });
+    expect(await reveal(sealCustomerRef(PA, SHARED), 'nationality')).toEqual({ value: 'IN' });
+    expect((await reveals()).map((r) => r.meta.field)).toEqual(['nationality']);
+  });
   it('returns the value and writes exactly ONE pii.reveal row (field name, partner-marked, keyed subject)', async () => {
     await signInAs({ partnerId: PA, role: 'agent', username: 'agent-a', permissions: { ...noPerms, canRevealPii: true } });
     const ref = sealCustomerRef(PA, SHARED);

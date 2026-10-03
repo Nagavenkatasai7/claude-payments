@@ -11,15 +11,15 @@ import { WINDOW_DAYS } from '@/lib/analytics';
 import { ANALYTICS_ROW_CAP, analyticsHref, buildPartnerAnalytics, parseAnalyticsWindow, type PartnerAnalytics } from '@/lib/partner-analytics';
 import { Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { dsCn } from '@/lib/ui/ds-cn';
-import { ComplianceDonut, DailyCommission, DailyTransfers, DailyVolume, FundingMix, StatusDonut } from '@/components/charts/transfer-charts';
+import { ComplianceDonut, DailyCommission, DailyTransfers, DailyVolume, FundingMix, StatusDonut, TopRecipients } from '@/components/charts/transfer-charts';
 
 export const metadata: Metadata = { title: t('partner.analytics.title'), robots: { index: false, follow: false } };
 
 // /partner/analytics (merge plan 2d): charts over the SESSION tenant's live transfers for a 7/30/90
 // day window (?window=, allowlisted). The read takes the tenant from requirePartnerStaff only, and
-// the view model (lib/partner-analytics) holds counts, amounts and enums: no recipient name or
-// phone reaches the page (the legacy top-recipients chart is not offered). The charts are the shared
-// components the legacy analytics page uses too.
+// the view model (lib/partner-analytics) holds counts, amounts and enums: no phone and no full
+// recipient name reaches the page (the top-recipients chart gets shortened names only, ranked, p3 B8).
+// The charts are the shared components the legacy analytics page uses too.
 
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 const FOCUS = 'focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring';
@@ -134,6 +134,12 @@ export default async function PartnerAnalyticsPage({ searchParams }: { searchPar
               </div>
               <ChartCard title={t('partner.analytics.chart.funding')} sub={t('partner.analytics.chart.fundingSub')}>
                 <FundingMix data={model.funding} />
+              </ChartCard>
+              <ChartCard title={t('partner.analytics.chart.recipients')} sub={t('partner.analytics.chart.recipientsSub')}>
+                <TopRecipients data={model.topRecipients.map((r) => ({ name: r.label, count: r.count }))} />
+                <p className="mt-2 text-[13px] text-ds-ink-subtle" data-recipients-note="">
+                  {t('partner.analytics.chart.recipientsNote')}
+                </p>
               </ChartCard>
             </>
           )}

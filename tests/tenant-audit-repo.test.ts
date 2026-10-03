@@ -133,6 +133,40 @@ describe('listTenantAudit', () => {
   });
 });
 
+describe('listTenantAudit ownOnly (KYC decisions and AML reviews: the tenant\'s own rows only)', () => {
+  const OWN = ['kyc.review.reject', 'aml.reviewed'];
+  const q = (tenantActors: string[]) => ({
+    actions: ['kyc.review.reject', 'aml.reviewed', 'created'],
+    from: daysAgo(30),
+    to: new Date(),
+    limit: 100,
+    ownOnly: { actions: OWN, tenantActors },
+  });
+  beforeEach(async () => {
+    await insert({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'pa-admin', subjectId: 'own-marked', meta: { actorScope: 'partner' } });
+    await insert({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'pa-gone', subjectId: 'own-marked-former', meta: { actorScope: 'partner' } });
+    await insert({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'pa-admin', subjectId: 'own-unmarked' });
+    await insert({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'owner-admin', subjectId: 'platform-unmarked', meta: { reason: 'watchlist hit' } });
+    await insert({ partnerId: 'pa', action: 'kyc.review.reject', actor: 'pa-admin', subjectId: 'platform-marked', meta: { actorScope: 'platform' } });
+    await insert({ partnerId: 'pa', action: 'aml.reviewed', actor: 'owner-admin', subjectId: 'aml-platform', meta: { alertId: 1 } });
+    await insert({ partnerId: 'pa', action: 'aml.reviewed', actor: 'pa-admin', subjectId: 'aml-own', meta: { alertId: 2, actorScope: 'partner' } });
+    await insert({ partnerId: 'pa', action: 'created', actor: 'owner-admin', subjectId: 'not-own-only' });
+    await insert({ partnerId: 'pb', action: 'kyc.review.reject', actor: 'pa-admin', subjectId: 'other-tenant', meta: { actorScope: 'partner' } });
+  });
+  it('keeps partner-marked rows and unmarked rows by a current member; drops platform rows; other actions unaffected', async () => {
+    const rows = await listTenantAudit(db, 'pa', q(['pa-admin']));
+    expect(rows.map((r) => r.subjectId).sort()).toEqual(['aml-own', 'not-own-only', 'own-marked', 'own-marked-former', 'own-unmarked']);
+  });
+  it('with no tenant actors only the partner-marked rows remain', async () => {
+    const rows = await listTenantAudit(db, 'pa', q([]));
+    expect(rows.map((r) => r.subjectId).sort()).toEqual(['aml-own', 'not-own-only', 'own-marked', 'own-marked-former']);
+  });
+  it('without ownOnly the read is unchanged (the page always passes it)', async () => {
+    const { ownOnly: _ignored, ...plain } = q(['pa-admin']);
+    expect(await listTenantAudit(db, 'pa', plain)).toHaveLength(8);
+  });
+});
+
 describe('listTenantAuditForSubject', () => {
   it('returns only this tenant rows for the subject, allowlisted actions only, newest first', async () => {
     await insert({ partnerId: 'pa', action: 'transfer.release', subjectId: 'tx1', at: daysAgo(2) });

@@ -283,3 +283,23 @@ describe('setQuestionStatusAction (admin, audited)', () => {
     expect((await createTicketRepo(db).getTicket(q.id))?.status).toBe('open');
   });
 });
+
+describe("A12: a partner's team question stays visible and answerable on SmartRemit's queue", () => {
+  it('lists it with its category (the page badges it) and a platform admin can still answer it', async () => {
+    const q = await createTicketRepo(db).createTicket({
+      id: tid(),
+      partnerId: 'p1',
+      kind: 'internal',
+      openedBy: 'p1sup',
+      subject: 'team q',
+      body: 'team q body',
+      category: 'team_question',
+    });
+    currentStaff = mkStaff('root', 'admin');
+    const queue = await listEmployeeQuestions(currentStaff);
+    expect(queue.find((x) => x.id === q.id)?.category).toBe('team_question');
+    await answerQuestionAction(ticketForm(q.id, { body: 'Platform answer.' }));
+    const msgs = await createTicketRepo(db).listMessages(q.id, { includeInternal: true });
+    expect(msgs.map((m) => m.body)).toEqual(['team q body', 'Platform answer.']);
+  });
+});

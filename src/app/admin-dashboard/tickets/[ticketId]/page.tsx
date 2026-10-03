@@ -31,6 +31,8 @@ import {
 } from '../actions';
 import type { TicketMessage, Transfer } from '@/lib/types';
 import { ticketCategoryLabel } from '@/lib/ticket-category';
+import { isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
+import { PlatformRecoveryCard } from './recovery-card';
 
 // Ticket detail (B3). Scope is enforced at the READ: partner staff resolve the
 // ticket via getOwnedTicket (404-never-403), platform staff via getTicket.
@@ -107,6 +109,9 @@ export default async function TicketDetailPage({
     ? []
     : allStaff.filter((s) => isTicketAssignable(s, ticket.partnerId) && !isTestStaff(s));
   const closed = ticket.status === 'closed';
+  // A two-step recovery request moves only through its own approve / decline card: no reply
+  // composer, no Resolve or Close (the actions refuse it too).
+  const recovery = isRecoveryTicket(ticket);
 
   return (
     <>
@@ -140,13 +145,15 @@ export default async function TicketDetailPage({
               </CardContent>
             </Card>
 
-            <CopilotPanel
-              ticketId={ticket.id}
-              closed={closed}
-              replyAction={replyAction}
-              applyTriageAction={applyTriageAction}
-              copilotRejectAction={copilotRejectAction}
-            />
+            {!recovery && (
+              <CopilotPanel
+                ticketId={ticket.id}
+                closed={closed}
+                replyAction={replyAction}
+                applyTriageAction={applyTriageAction}
+                copilotRejectAction={copilotRejectAction}
+              />
+            )}
 
             {!closed && (
               <Card>
@@ -172,6 +179,7 @@ export default async function TicketDetailPage({
           </div>
 
           <div className="space-y-4">
+            <PlatformRecoveryCard ticket={ticket} staff={staff} />
             <Card>
               <CardHeader>
                 <CardTitle>Details</CardTitle>
@@ -265,20 +273,22 @@ export default async function TicketDetailPage({
                     </div>
                   </form>
 
-                  <div className="flex flex-wrap gap-2 border-t border-border pt-3">
-                    {ticket.status !== 'resolved' && (
-                      <form action={resolveAction}>
+                  {!recovery && (
+                    <div className="flex flex-wrap gap-2 border-t border-border pt-3">
+                      {ticket.status !== 'resolved' && (
+                        <form action={resolveAction}>
+                          <input type="hidden" name="ticketId" value={ticket.id} />
+                          <Button type="submit" size="sm">Resolve</Button>
+                        </form>
+                      )}
+                      <form action={closeAction}>
                         <input type="hidden" name="ticketId" value={ticket.id} />
-                        <Button type="submit" size="sm">Resolve</Button>
+                        <Button type="submit" size="sm" variant="outline" className="text-destructive">
+                          Close ticket
+                        </Button>
                       </form>
-                    )}
-                    <form action={closeAction}>
-                      <input type="hidden" name="ticketId" value={ticket.id} />
-                      <Button type="submit" size="sm" variant="outline" className="text-destructive">
-                        Close ticket
-                      </Button>
-                    </form>
-                  </div>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             )}
