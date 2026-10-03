@@ -2041,6 +2041,13 @@ export const en = {
   'partner.security.password.error.same': 'Choose a new password that differs from the current one.',
   'partner.security.password.error.concurrent': 'Your password was changed somewhere else. Reload the page and try again.',
   'partner.security.password.error.policy': 'Choose a different password.',
+  'partner.support.linkedTitle': 'Linked transfer',
+  'partner.support.linkedOpen': 'Open transfer',
+  'partner.support.linkedStatus': 'Status',
+  'partner.support.linkedAmount': 'Amount',
+  'partner.support.linkedCreated': 'Created',
+  'partner.support.linkedRecipient': 'Recipient',
+  'partner.support.openCustomer': 'Open customer',
   // ── end p3 ──
 
   // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──

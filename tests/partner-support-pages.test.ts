@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
@@ -42,6 +43,11 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
+// Lost-features B10: the customer link reads the tenant's customer rows (customer-link.ts).
+vi.mock('@/lib/customer-store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/customer-store')>();
+  return { ...actual, getCustomerStore: (store: Parameters<typeof actual.createCustomerStore>[1]) => actual.createCustomerStore(db, store) };
+});
 vi.mock('@/lib/partner-tickets', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-tickets')>('@/lib/partner-tickets');
   return {
@@ -61,6 +67,8 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import SupportPage from '@/app/partner/(app)/support/page';
 import TicketPage from '@/app/partner/(app)/support/[ticketId]/page';
 import ContactPage from '@/app/partner/(app)/support/contact/page';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { seedPartnerTransfer } from './helpers-partner-app';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -348,5 +356,71 @@ describe('LOW-4: an escalated (waiting_admin) ticket offers no partner status ch
     // The reply form stays, without the "waiting on customer" box (that would move the status).
     expect(html).toContain('name="body"');
     expect(html).not.toContain('name="waiting"');
+  });
+});
+
+// Lost-features B10: a customer ticket shows its linked transfer as a masked card, and the
+// "Open customer" link (admin and agent, never prefetched). Tenant-keyed: a transfer id pointing
+// at another tenant's transfer shows no card.
+describe('B10: the linked-transfer card and the customer link', () => {
+  beforeEach(async () => {
+    const repo = createTicketRepo(db);
+    await seedPartnerTransfer(db, { id: 'trA1', partnerId: PA, phone: PHONE_A, status: 'delivered', amountSource: 250, sourceCurrency: 'USD' });
+    await seedPartnerTransfer(db, { id: 'trB1', partnerId: PB, phone: PHONE_B, recipientName: 'Bravoname Bravosurname' });
+    await repo.createTicket({ id: 'tk_a3', partnerId: PA, kind: 'customer', customerPhone: PHONE_A, transferId: 'trA1', subject: 'Linked one', body: 'About my transfer' });
+    await repo.createTicket({ id: 'tk_a4', partnerId: PA, kind: 'customer', customerPhone: PHONE_A, transferId: 'trB1', subject: 'Crafted link', body: 'Points elsewhere' });
+    await createCustomerRepo(db, async () => null).ensureCustomer(PA, PHONE_A);
+  });
+  const noPii = (html: string) => {
+    expect(html).not.toContain('Samplesurname');
+    expect(html).not.toContain('000011112222');
+    expect(html).not.toContain('HDFC0001111');
+    expect(html).not.toContain(PHONE_A);
+    expect(html).not.toContain('919876543210');
+  };
+
+  it('admin: the card (status, amount, shortened recipient), the transfer link and the customer link, never prefetched', async () => {
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_a3');
+    expect(html).toContain('data-linked-transfer="trA1"');
+    expect(html).toContain('href="/partner/transfers/trA1"');
+    expect(html).toContain('Testname S.');
+    expect(html).toContain('250.00');
+    expect(html).toContain('Delivered');
+    const m = /<a[^>]*href="(\/partner\/customers\/[^"]+)"[^>]*>Open customer<\/a>/.exec(html);
+    expect(m).not.toBeNull();
+    expect(m![1]).not.toContain(PHONE_A);
+    noPii(html);
+  });
+
+  it('support: the card without the transfer link and without the customer link', async () => {
+    await signInAs({ role: 'support', username: 'sup1' });
+    const html = await ticket('tk_a3');
+    expect(html).toContain('data-linked-transfer="trA1"');
+    expect(html).not.toContain('href="/partner/transfers/trA1"');
+    expect(html).not.toContain('Open customer');
+    noPii(html);
+  });
+
+  it('agent (assigned): the card, the transfer link and the customer link', async () => {
+    await createTicketRepo(db).assign('tk_a3', 'ag1');
+    await signInAs({ role: 'agent', username: 'ag1' });
+    const html = await ticket('tk_a3');
+    expect(html).toContain('href="/partner/transfers/trA1"');
+    expect(html).toContain('Open customer');
+  });
+
+  it("a transfer id that points at another tenant's transfer shows no card and nothing of it", async () => {
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_a4');
+    expect(html).not.toContain('data-linked-transfer');
+    expect(html).not.toContain('href="/partner/transfers/trB1"');
+    expect(html).not.toContain('Bravoname');
+  });
+
+  it('no customer row in this tenant: no customer link', async () => {
+    await db.execute(sql`DELETE FROM customers`);
+    await signInAs({ role: 'admin', username: 'adm1' });
+    expect(await ticket('tk_a3')).not.toContain('Open customer');
   });
 });
