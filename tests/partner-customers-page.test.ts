@@ -530,3 +530,13 @@ describe('/partner/customers/[ref]: conversation link (p2 A8)', () => {
     expect(await detail(ref)).not.toContain('data-conversation-link');
   });
 });
+
+describe('/partner/customers: find by phone (p2 A11)', () => {
+  it('the list offers a POST find form with no phone field in any link', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await list();
+    expect(html).toContain('data-testid="partner-customer-find"');
+    expect(html).toMatch(/<input[^>]*name="phone"/);
+    expect(html).not.toMatch(/href="[^"]*phone=/);
+  });
+});

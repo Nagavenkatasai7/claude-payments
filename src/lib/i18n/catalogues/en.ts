@@ -1848,6 +1848,12 @@ export const en = {
   'partner.customers.conversation.unreadable': 'This message could not be opened.',
   'partner.customers.conversation.busy': 'Too many details were opened in a short time. Try again in a few minutes.',
   'partner.customers.conversation.back': 'Back to customer',
+  'partner.customers.find.label': 'Find by phone',
+  'partner.customers.find.hint': 'The full number with country code. It is not saved in the address bar.',
+  'partner.customers.find.placeholder': '+1 555 123 4567',
+  'partner.customers.find.submit': 'Find customer',
+  'partner.customers.find.none': 'No customer with that phone number.',
+  'partner.customers.find.invalid': 'Enter a full phone number with country code.',
   // ── end p2 ──
 
   // ── p3: support, staff, shell, insights, B2B invoices, password ──

@@ -25,6 +25,7 @@ import { formatMoney } from '@/lib/ui/money';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, Button, EmptyState, Field, Input, PageHeader, Select, Table, buttonVariants, type TableColumn, type Tone } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
+import { FindCustomerForm } from './find-form';
 
 export const metadata: Metadata = {
   title: t('partner.customers.title'),
@@ -147,6 +148,7 @@ export default async function PartnerCustomersPage({ searchParams }: { searchPar
     <>
       <PageHeader title={t('partner.customers.title')} sub={t('partner.customers.sub')} />
       <div className="flex flex-col gap-4">
+        <FindCustomerForm />
         <p className="text-[14px] text-ds-ink-muted" data-customers-summary="">
           {t('partner.customers.subCount', { total: summary.total, t0: summary.t0 })}
         </p>
