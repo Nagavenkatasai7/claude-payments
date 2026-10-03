@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
-  cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
+  cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
@@ -297,6 +297,56 @@ describe('reverseB2bSettlement (non-custodial partner reverse via the refund sea
     await store.saveTransfer(makeTransfer({ id: 'rv4', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
     await reverseB2bSettlement(db, 'rv4');
     await expect(reverseB2bSettlement(db, 'rv4')).rejects.toThrow(/already in progress/i);
+  });
+});
+
+describe('cancelOwnedTransfer (lost-features p1 A1: the /partner cancel, same rule, audited)', () => {
+  const AUD = { actor: 'pa-admin', reason: 'customer asked to stop', actorScope: 'partner' as const };
+  it('voids an unfunded draft of the scoped tenant with ONE transfer.cancel row in the same transaction', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc1' }));
+    expect(await cancelOwnedTransfer(db, 'pc1', { partnerId: 'default', audit: AUD })).toBe('cancelled');
+    expect((await store.getTransfer('pc1'))?.status).toBe('cancelled');
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'pa-admin', actor_type: 'staff', action: 'transfer.cancel', subject_id: 'pc1', partner_id: 'default' });
+    expect(rows[0].meta).toEqual({ previousStatus: 'awaiting_payment', newStatus: 'cancelled', reason: 'customer asked to stop', actorScope: 'partner' });
+    expect(await outboxRows()).toHaveLength(0);
+  });
+  it('an already-cancelled or delivered transfer is a silent no-op with no audit row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc2', status: 'cancelled' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc3', status: 'delivered' }));
+    expect(await cancelOwnedTransfer(db, 'pc2', { partnerId: 'default', audit: AUD })).toBe('noop');
+    expect(await cancelOwnedTransfer(db, 'pc3', { partnerId: 'default', audit: AUD })).toBe('noop');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('refuses paid, held, charged and blocked rows with the shared policy copy; nothing written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc4', status: 'paid' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'in_review' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc6', fundingRef: 'ch_1' }));
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'blocked' }));
+    await expect(cancelOwnedTransfer(db, 'pc4', { partnerId: 'default', audit: AUD })).rejects.toThrow(/use Refund/i);
+    await expect(cancelOwnedTransfer(db, 'pc5', { partnerId: 'default', audit: AUD })).rejects.toThrow(/use Reject/i);
+    await expect(cancelOwnedTransfer(db, 'pc6', { partnerId: 'default', audit: AUD })).rejects.toThrow(/already been charged/i);
+    await expect(cancelOwnedTransfer(db, 'pc7', { partnerId: 'default', audit: AUD })).rejects.toThrow(/blocked/i);
+    for (const id of ['pc4', 'pc5', 'pc6', 'pc7']) expect((await store.getTransfer(id))?.status).not.toBe('cancelled');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('another tenant\'s id is not found and nothing is written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc8' }));
+    await expect(cancelOwnedTransfer(db, 'pc8', { partnerId: 'other', audit: AUD })).rejects.toThrow('Transfer not found');
+    expect((await store.getTransfer('pc8'))?.status).toBe('awaiting_payment');
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a failing audit insert rolls the cancel back', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'pc9' }));
+    failAudit = true;
+    await expect(cancelOwnedTransfer(db, 'pc9', { partnerId: 'default', audit: AUD })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('pc9'))?.status).toBe('awaiting_payment');
   });
 });
 

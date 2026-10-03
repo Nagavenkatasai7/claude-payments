@@ -1,11 +1,12 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 import { t } from '@/lib/i18n';
-import { Button, Field, Input, Select } from '@/components/ds';
+import { Button, ConfirmDialog, Field, Input, Select } from '@/components/ds';
+import { STAFF_REASON_MIN } from '@/lib/send-limits';
 import type { StaffOption } from '@/lib/staff-options';
 import type { ActionResult } from '../../../action-result';
-import { assignTransferAction, resendPayLinkAction } from './ops-actions';
+import { assignTransferAction, cancelTransferAction, resendPayLinkAction } from './ops-actions';
 
 // The transfer page's non-money actions (lost-features restore p1). The page renders each control
 // only for viewers transferOpsFor allows; that is UX. Every server action re-gates, re-checks the
@@ -82,5 +83,37 @@ export function ResendForm({ id }: { id: string }) {
       </div>
       <Result state={state} done={t('partner.transferOps.resend.queued')} />
     </form>
+  );
+}
+
+/**
+ * Cancel an unpaid transfer, behind a dialog with a typed reason (the same minimum the server
+ * checks). The result renders outside the dialog, which closes after the action.
+ */
+export function CancelControl({ id }: { id: string }) {
+  const [state, setState] = useState<ActionResult | null>(null);
+  const run = async (formData: FormData) => {
+    formData.set('id', id);
+    setState(await cancelTransferAction(formData));
+  };
+  return (
+    <div className="flex flex-col gap-2" data-testid="partner-cancel-control">
+      <div>
+        <ConfirmDialog
+          trigger={
+            <Button type="button" variant="danger" size="md">
+              {t('partner.transferOps.cancel.button')}
+            </Button>
+          }
+          title={t('partner.transferOps.cancel.title')}
+          body={t('partner.transferOps.cancel.body')}
+          confirmLabel={t('partner.transferOps.cancel.confirm')}
+          reasonMin={STAFF_REASON_MIN}
+          destructive
+          action={run}
+        />
+      </div>
+      <Result state={state} done={t('partner.transferOps.cancel.done')} />
+    </div>
   );
 }

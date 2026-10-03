@@ -38,7 +38,7 @@ import type { PartnerId } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import { partnerCustomerHref } from '../../../customer-link';
 import { revealTransferFieldAction } from './reveal-actions';
-import { AssignForm, ResendForm } from './transfer-ops';
+import { AssignForm, CancelControl, ResendForm } from './transfer-ops';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
@@ -148,7 +148,7 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   // Lost-features restore p1: the controls this viewer may use (UX only; each action re-checks).
   const opsFor = transferOpsFor(transfer, ctx);
   const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
-  const anyOp = opsFor.assign || opsFor.resend;
+  const anyOp = opsFor.assign || opsFor.resend || opsFor.cancel;
   // An agent missing a per-staff flag is told why a control is absent (SmartRemit sets the flags).
   const missingFlag = ctx.role === 'agent' && !(['canCancel', 'canAssign', 'canResend'] as const).every((p) => hasPermission(ctx.staff, p));
   const reveal = (field: RevealableTransferField) => revealTransferFieldAction.bind(null, transfer.id, field);
@@ -276,6 +276,7 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
               <div className="flex flex-col gap-6">
                 {opsFor.assign ? <AssignForm id={transfer.id} options={assignOptions} current={assignee.kind === 'tenant' ? assignee.username : null} /> : null}
                 {opsFor.resend ? <ResendForm id={transfer.id} /> : null}
+                {opsFor.cancel ? <CancelControl id={transfer.id} /> : null}
               </div>
             ) : null}
             {missingFlag ? <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.transferOps.askPermission')}</p> : null}

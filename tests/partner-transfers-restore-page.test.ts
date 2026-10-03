@@ -324,3 +324,19 @@ describe('/partner/transfers/[id]: A3 resend control', () => {
     expect(await detail('tr_A_asha')).not.toContain('partner-resend-form');
   });
 });
+
+describe('/partner/transfers/[id]: A1 cancel control', () => {
+  it('admin: an unpaid uncharged transfer offers Cancel; a held one does not', async () => {
+    await asAdmin();
+    expect(await detail('tr_A_asha')).toContain('data-testid="partner-cancel-control"');
+    expect(await detail('tr_A_meera')).not.toContain('partner-cancel-control');
+  });
+  it('an agent needs canCancel; finance never', async () => {
+    await asAgent();
+    expect(await detail('tr_A_asha')).not.toContain('partner-cancel-control');
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent', permissions: { canCancel: true, canAssign: false, canResend: false, canRevealPii: false } });
+    expect(await detail('tr_A_asha')).toContain('partner-cancel-control');
+    await asFinance();
+    expect(await detail('tr_A_asha')).not.toContain('partner-cancel-control');
+  });
+});

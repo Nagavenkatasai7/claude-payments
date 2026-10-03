@@ -56,6 +56,41 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
 }
 
 /**
+ * The /partner Cancel (lost-features restore p1 A1): the SAME rule and the SAME guarded claim as
+ * cancelTransfer above (decideStaffCancel, then transfer-repo.cancelIfCancellable), read inside the
+ * caller's tenant, plus ONE `transfer.cancel` audit row (the staff reason in its meta) in the same
+ * transaction as the flip. No money moves, no effect is queued. A no-op (already cancelled or
+ * delivered) writes nothing; a refusal or a lost race throws the policy copy and writes nothing.
+ */
+export async function cancelOwnedTransfer(
+  db: Db,
+  id: string,
+  o: { partnerId: PartnerId; audit: StaffAuditCtx },
+): Promise<'cancelled' | 'noop'> {
+  return db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = await repo.getOwnedTransfer(o.partnerId, id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    const decision = decideStaffCancel(transfer);
+    if (decision.kind === 'noop') return 'noop';
+    if (decision.kind === 'refuse') throw new Error(decision.reason);
+    const cancelled = await repo.cancelIfCancellable(id, o.partnerId);
+    if (!cancelled) {
+      const fresh = await repo.getOwnedTransfer(o.partnerId, id);
+      const again = fresh ? decideStaffCancel(fresh) : null;
+      throw new Error(again?.kind === 'refuse' ? again.reason : CANCEL_REFUSAL.changed);
+    }
+    await recordStaffTransferAudit(tx, o.audit, 'transfer.cancel', cancelled, {
+      previousStatus: transfer.status,
+      newStatus: 'cancelled',
+    });
+    return 'cancelled';
+  });
+}
+
+/**
  * Reverse a PAID/DELIVERED B2B ach_pull transfer (staff-approved). NON-CUSTODIAL:
  * SmartRemit captured nothing — so unlike issueRefund this does NOT require a
  * fundingRef. It flips refundStatus none → pending and enqueues the durable

@@ -8,15 +8,16 @@ import { hasPermission } from '@/lib/permissions';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { getAuthStore } from '@/lib/auth-store';
-import { PAYLINK_RECENT, assignTransfer, queuePaymentLinkResend } from '@/lib/dashboard-ops';
-import { resendEligibility } from '@/lib/partner-transfer-ops';
+import { PAYLINK_RECENT, assignTransfer, cancelOwnedTransfer, queuePaymentLinkResend } from '@/lib/dashboard-ops';
+import { cancelRefusalKey, resendEligibility } from '@/lib/partner-transfer-ops';
 import { suppressForOptOut } from '@/lib/consent-gate';
 import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { isTenantTransferAssignee } from '@/lib/transfer-assignable';
 import { parseAssigneeField } from '@/lib/partner-tickets';
-import { boundStaffNote } from '@/lib/send-limits';
+import { boundStaffNote, requireStaffReason, STAFF_REASON_MIN } from '@/lib/send-limits';
+import { isReasonValid } from '@/lib/ui/confirm-reason';
 import { isPartnerNoteShaped, isTransferId } from '@/lib/partner-transfers';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
@@ -115,6 +116,46 @@ export async function resendPayLinkAction(formData: FormData): Promise<ActionRes
     if (err instanceof Error && err.message.startsWith('Cannot resend')) return notAllowed;
     if (err instanceof Error && err.message === 'Transfer not found') return notFound();
     logWarn('partner.transfers.resend', errName(err), { transferId: transfer.id });
+    return { ok: false, error: t('partner.common.failed') };
+  }
+  revalidate(transfer.id);
+  return { ok: true };
+}
+
+/**
+ * Cancel (void) one of THIS tenant's unpaid, uncharged transfers. A typed reason is required (the
+ * ConfirmDialog minimum and the server rule, with no phone- or account-length number: it lands in
+ * append-only audit meta). The rule is the shared decideStaffCancel and the guarded claim
+ * (cancelOwnedTransfer): paid, held, charged and blocked rows are refused with translated copy, an
+ * already-cancelled row is a quiet success, and no money moves.
+ */
+export async function cancelTransferAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_OPS);
+  if (!hasPermission(ctx.staff, 'canCancel')) return noPermission();
+
+  const transfer = await ownedTransfer(ctx.partnerId, formData);
+  if (!transfer) return notFound();
+
+  const rawReason = formData.get('reason');
+  let reason: string;
+  try {
+    if (!isReasonValid(rawReason, STAFF_REASON_MIN)) throw new Error('short');
+    reason = requireStaffReason(rawReason);
+  } catch {
+    return { ok: false, error: t('partner.transferOps.cancel.reasonTooShort') };
+  }
+  if (!isPartnerNoteShaped(reason)) return { ok: false, error: t('partner.transferOps.cancel.reasonHasNumber') };
+
+  try {
+    await cancelOwnedTransfer(getDb(), transfer.id, {
+      partnerId: ctx.partnerId,
+      audit: { actor: ctx.username, reason, actorScope: 'partner' },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'Transfer not found') return notFound();
+    if (err instanceof Error && err.message.startsWith('Cannot ')) return { ok: false, error: t(cancelRefusalKey(err.message)) };
+    logWarn('partner.transfers.cancel', errName(err), { transferId: transfer.id });
     return { ok: false, error: t('partner.common.failed') };
   }
   revalidate(transfer.id);
