@@ -457,6 +457,38 @@ describe('contactSmartRemitAction (Contact SmartRemit: a tenant → platform thr
   });
 });
 
+describe('A12: the contact form names who should answer', () => {
+  const SEEDED = ['tk_a1', 'tk_a2', 'tk_b1', 'tk_ai', 'tk_bi'];
+  const created = async () => (await db.select().from(tickets)).filter((x) => !SEEDED.includes(x.id));
+  it('a form without the field (the previous build) keeps its meaning: addressed to SmartRemit', async () => {
+    await signInAs({ username: 'ag9', role: 'agent' });
+    await expect(contactSmartRemitAction(contactForm())).rejects.toThrow(/^REDIRECT:\/partner\/support\/tk_/);
+    const rows = await created();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].category ?? null).toBeNull();
+    expect((await audits())[0].meta).toMatchObject({ actorScope: 'partner', audience: 'smartremit' });
+  });
+  it("'team' files a team question for the tenant's admins, audited with the audience", async () => {
+    await signInAs({ username: 'ag9', role: 'agent' });
+    await expect(contactSmartRemitAction(contactForm({ audience: 'team' }))).rejects.toThrow(/^REDIRECT:\/partner\/support\/tk_/);
+    const rows = await created();
+    expect(rows[0]).toMatchObject({ partnerId: PA, kind: 'internal', category: 'team_question', openedBy: 'ag9' });
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ action: 'ticket.contact.open', subjectId: rows[0].id });
+    expect(a[0].meta).toMatchObject({ actorScope: 'partner', audience: 'team' });
+  });
+  it('an unknown addressee is refused before any write', async () => {
+    await signInAs({ role: 'admin' });
+    for (const audience of ['', 'admins', 'platform']) {
+      const r = await contactSmartRemitAction(contactForm({ audience }));
+      expect(r).toEqual({ ok: false, error: 'Choose who should answer.' });
+    }
+    expect(await created()).toHaveLength(0);
+    expect(await audits()).toHaveLength(0);
+  });
+});
+
 describe('contactFollowUpAction (the opener follows up on their own thread)', () => {
   it('1/2. anonymous → /login; platform → /admin-dashboard; finance bounced', async () => {
     await expect(contactFollowUpAction(followForm('tk_ai'))).rejects.toThrow('REDIRECT:/login');

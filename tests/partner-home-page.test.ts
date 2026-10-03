@@ -289,3 +289,30 @@ describe('/partner home: fail-soft per card', () => {
     expect(html).not.toContain('data-action="no_live_key"');
   });
 });
+
+describe('/partner home: A12 team questions waiting (admins only)', () => {
+  beforeEach(async () => {
+    const { createTicketRepo } = await import('@/db/repos/ticket-repo');
+    const repo = createTicketRepo(db);
+    const q = (id: string, partnerId: string, openedBy: string, category?: string) =>
+      repo.createTicket({ id, partnerId, kind: 'internal', openedBy, subject: `s ${id}`, body: `b ${id}`, ...(category ? { category } : {}) });
+    await q('tk_q1', PA, 'sup1', 'team_question');
+    await q('tk_q2', PA, 'sup2', 'team_question');
+    await q('tk_q3', PA, 'u1', 'team_question'); // the admin's own question
+    await q('tk_q4', PA, 'sup1'); // addressed to SmartRemit
+    await q('tk_q5', PB, 'pbsup', 'team_question'); // another tenant
+    await repo.updateStatus('tk_q2', 'resolved');
+  });
+  it("an admin sees their tenant's waiting team questions, not their own, SmartRemit's or another tenant's", async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await render();
+    expect(html).toContain('data-action="team_questions"');
+    expect(html).toContain('Team questions waiting for an answer: 1');
+  });
+  it('agent and support never get the item', async () => {
+    for (const role of ['agent', 'support'] as const) {
+      await signInAs({ partnerId: PA, role, username: `x-${role}` });
+      expect(await render(), role).not.toContain('data-action="team_questions"');
+    }
+  });
+});

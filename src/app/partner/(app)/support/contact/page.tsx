@@ -5,7 +5,14 @@ import { PARTNER_ROUTES } from '../../../routes';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { newRequestKey } from '@/lib/portal-request-key';
-import { contactAvailable, errName, listContactThreads, tenantStaffUsernames } from '@/lib/partner-tickets';
+import {
+  contactAvailable,
+  defaultContactAudience,
+  errName,
+  isTeamQuestion,
+  listContactThreads,
+  tenantStaffUsernames,
+} from '@/lib/partner-tickets';
 import { Card, EmptyState, PageHeader } from '@/components/ds';
 import type { Ticket } from '@/lib/types';
 import { BackLink, LoadError, TicketRows, formatWhen } from '../support-bits';
@@ -16,6 +23,8 @@ export const metadata: Metadata = { title: t('partner.contact.title'), robots: {
 // /partner/support/contact (UI redesign M3-19): the SESSION tenant's threads with the SmartRemit
 // team (internal tickets, answered from the platform employee-questions queue). A partner admin
 // sees the tenant's threads; everyone else sees only the ones they started. Never another tenant's.
+// Lost-features A12: a thread is addressed to SmartRemit or, as a team question, to the tenant's own
+// admins (who answer it on the thread page); each row names its addressee.
 
 export default async function PartnerContactPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.supportContact.policy);
@@ -43,7 +52,7 @@ export default async function PartnerContactPage() {
   return (
     <>
       <BackLink href={PARTNER_ROUTES.support.href} label={t('partner.support.back')} />
-      <PageHeader title={t('partner.contact.title')} sub={t('partner.contact.sub')} />
+      <PageHeader title={t('partner.contact.title')} sub={t('partner.contact.subAudience')} />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-6">
         <section aria-labelledby="contact-list-title" className="order-2 lg:order-1">
           <h2 id="contact-list-title" className="mb-3 text-[17px] font-semibold text-ds-ink">
@@ -57,6 +66,7 @@ export default async function PartnerContactPage() {
             <TicketRows
               rows={rows}
               meta={(r) => [
+                isTeamQuestion(r) ? t('partner.contact.toTeam') : t('partner.contact.toSmartRemit'),
                 t('partner.contact.openedBy', { name: opener(r) }),
                 t('partner.support.updated', { when: formatWhen(r.updatedAt) }),
               ]}
@@ -66,7 +76,7 @@ export default async function PartnerContactPage() {
         <Card as="section" className="order-1 p-4 sm:p-6 lg:order-2">
           <h2 className="mb-4 text-[17px] font-semibold text-ds-ink">{t('partner.contact.newTitle')}</h2>
           {contactAvailable(ctx.partnerId) ? (
-            <ContactForm requestKey={newRequestKey()} />
+            <ContactForm requestKey={newRequestKey()} defaultAudience={defaultContactAudience(ctx.role)} />
           ) : (
             <p className="text-[15px] text-ds-ink-muted">{t('partner.contact.unavailable')}</p>
           )}

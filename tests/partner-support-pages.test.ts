@@ -452,3 +452,59 @@ describe('B9: withdraw escalation on the page', () => {
     expect(html).toContain('This request is with SmartRemit.');
   });
 });
+
+describe('A12: team questions on the pages', () => {
+  beforeEach(async () => {
+    await createTicketRepo(db).createTicket({
+      id: 'tk_tq',
+      partnerId: PA,
+      kind: 'internal',
+      openedBy: 'sup1',
+      subject: 'Alpha team question',
+      body: 'Who approves refunds?',
+      category: 'team_question',
+    });
+  });
+  it('an admin gets the answer and status forms on a team question, with the addressee badge', async () => {
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_tq');
+    expect(html).toContain('To your admins');
+    expect(html).toContain('data-testid="partner-team-answer"');
+    expect(html).toContain('data-testid="partner-team-status"');
+    expect(html).toContain('value="resolved"');
+    expect(html).toContain('value="closed"');
+    expect(html).not.toContain('Only the person who started this conversation can add to it');
+  });
+  it('a thread to SmartRemit stays read-only for the admin, badged as such', async () => {
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_ai');
+    expect(html).toContain('To SmartRemit');
+    expect(html).not.toContain('data-testid="partner-team-answer"');
+    expect(html).not.toContain('data-testid="partner-team-status"');
+  });
+  it('the opener follows up on their own team question; no answer form', async () => {
+    await signInAs({ role: 'support', username: 'sup1' });
+    const html = await ticket('tk_tq');
+    expect(html).toContain('data-testid="partner-contact-follow-up"');
+    expect(html).not.toContain('data-testid="partner-team-answer"');
+  });
+  it('a closed team question is read-only for the admin', async () => {
+    await createTicketRepo(db).updateStatus('tk_tq', 'closed');
+    await signInAs({ role: 'admin', username: 'adm1' });
+    const html = await ticket('tk_tq');
+    expect(html).not.toContain('data-testid="partner-team-answer"');
+    expect(html).toContain('This conversation is closed.');
+  });
+  it('the contact list names each addressee; the form preselects by role', async () => {
+    const checked = (html: string) =>
+      (html.match(/<input[^>]*name="audience"[^>]*>/g) ?? []).filter((tag) => tag.includes('checked')).map((tag) => tag.match(/value="(\w+)"/)?.[1]);
+    await signInAs({ role: 'admin', username: 'adm1' });
+    let html = await contact();
+    expect(html).toContain('To your admins');
+    expect(html).toContain('To SmartRemit');
+    expect(checked(html)).toEqual(['smartremit']);
+    await signInAs({ role: 'support', username: 'sup1' });
+    html = await contact();
+    expect(checked(html)).toEqual(['team']);
+  });
+});

@@ -9,6 +9,7 @@ import type { RedisLike } from './store';
 import type { PartnerRole } from './partner-access';
 import type { PartnerId, Ticket, TicketKind, TicketStatus } from './types';
 import { customerTicketUrl } from './customer-portal-url';
+import { TEAM_QUESTION_CATEGORY } from './ticket-category';
 
 /**
  * partner-tickets: the tenant-scoped STAFF reads and input rules behind /partner/support
@@ -183,6 +184,63 @@ export type PartnerTicketStatus = (typeof PARTNER_TICKET_STATUSES)[number];
 export function parsePartnerTicketStatus(v: unknown): PartnerTicketStatus | null {
   return typeof v === 'string' && (PARTNER_TICKET_STATUSES as readonly string[]).includes(v)
     ? (v as PartnerTicketStatus)
+    : null;
+}
+
+// ── Lost-features A12: team questions (an internal thread addressed to the tenant's own admins) ──
+
+export type ContactAudience = 'team' | 'smartremit';
+
+/**
+ * The "Who should answer?" field of the contact form. A MISSING field means SmartRemit: a form
+ * rendered by the previous build (rolling release) has no such field and keeps its old meaning.
+ * Any other value outside the closed set is refused (null).
+ */
+export function contactAudienceOf(v: unknown): ContactAudience | null {
+  if (v === null || v === undefined) return 'smartremit';
+  return v === 'team' || v === 'smartremit' ? v : null;
+}
+
+/** The form's preselected addressee: staff ask their own admins first; an admin asks SmartRemit. */
+export function defaultContactAudience(role: PartnerRole): ContactAudience {
+  return role === 'admin' ? 'smartremit' : 'team';
+}
+
+/** An internal thread addressed to the tenant's own admins (category null keeps "to SmartRemit"). */
+export function isTeamQuestion(ticket: Pick<Ticket, 'kind' | 'category'>): boolean {
+  return ticket.kind === 'internal' && ticket.category === TEAM_QUESTION_CATEGORY;
+}
+
+/**
+ * Pure: may this viewer answer, resolve or close this thread? A tenant admin, on a team question,
+ * not one they opened themselves, and not closed. Threads addressed to SmartRemit stay read-only.
+ * The tenant is pinned by the caller (getVisibleTicket).
+ */
+export function canAnswerTeamQuestion(
+  viewer: TicketViewer,
+  ticket: Pick<Ticket, 'kind' | 'category' | 'openedBy' | 'status'>,
+): boolean {
+  return (
+    viewer.role === 'admin' && isTeamQuestion(ticket) && ticket.openedBy !== viewer.username && ticket.status !== 'closed'
+  );
+}
+
+/** Home (admins): team questions still waiting for an answer (open or pending) that someone else opened. */
+export function countWaitingTeamQuestions(
+  rows: ReadonlyArray<Pick<Ticket, 'kind' | 'category' | 'openedBy' | 'status'>>,
+  viewer: string,
+): number {
+  return rows.filter(
+    (r) => isTeamQuestion(r) && r.openedBy !== viewer && (r.status === 'open' || r.status === 'pending'),
+  ).length;
+}
+
+export const TEAM_QUESTION_STATUSES = ['resolved', 'closed'] as const;
+export type TeamQuestionStatus = (typeof TEAM_QUESTION_STATUSES)[number];
+
+export function parseTeamQuestionStatus(v: unknown): TeamQuestionStatus | null {
+  return typeof v === 'string' && (TEAM_QUESTION_STATUSES as readonly string[]).includes(v)
+    ? (v as TeamQuestionStatus)
     : null;
 }
 

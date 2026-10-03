@@ -31,6 +31,11 @@ export interface PartnerHomeInput {
   whatsapp: HealthState | null;
   settlement: HealthState | null;
   apiKeys: ReadonlyArray<{ keyId: string; revokedAt?: string; lastUsedAt?: string }> | null;
+  /**
+   * Lost-features A12, admins only: team questions waiting for an answer. Omitted when not read
+   * (other roles); null when the read failed.
+   */
+  teamQuestions?: number | null;
   now: Date;
 }
 
@@ -43,7 +48,7 @@ export interface PartnerKpis {
   allTime: { count: number; volumeUsd: number; feesUsd: number };
 }
 
-export type PartnerActionKey = 'holds' | 'attention' | 'whatsapp' | 'webhooks' | 'no_live_key';
+export type PartnerActionKey = 'holds' | 'attention' | 'whatsapp' | 'webhooks' | 'no_live_key' | 'team_questions';
 
 export interface PartnerHomeModel {
   health: Array<{ key: 'whatsapp' | 'webhooks' | 'api'; state: HealthView }>;
@@ -110,6 +115,7 @@ export function buildPartnerHome(i: PartnerHomeInput): PartnerHomeModel {
           flaggedToday: i.summary.flaggedToday,
           allTime: { count: i.summary.total, volumeUsd: i.summary.volumeAllTime, feesUsd: i.summary.commissionAllTime },
         };
+  const isAdmin = i.role === 'admin';
   const unhealthy = (s: HealthState | null) => (s !== null && s !== 'ok' ? 1 : 0);
   const candidates: PartnerHomeModel['actions'] = [
     { key: 'holds', count: i.summary?.byStatus.in_review ?? 0 },
@@ -117,11 +123,17 @@ export function buildPartnerHome(i: PartnerHomeInput): PartnerHomeModel {
     { key: 'whatsapp', count: unhealthy(i.whatsapp) },
     { key: 'webhooks', count: unhealthy(i.settlement) },
     { key: 'no_live_key', count: api === 'off' ? 1 : 0 },
+    { key: 'team_questions', count: isAdmin ? (i.teamQuestions ?? 0) : 0 },
   ];
   return {
     health,
     kpis,
     actions: candidates.filter((a) => a.count > 0),
-    actionsIncomplete: i.summary === null || i.whatsapp === null || i.settlement === null || i.apiKeys === null,
+    actionsIncomplete:
+      i.summary === null ||
+      i.whatsapp === null ||
+      i.settlement === null ||
+      i.apiKeys === null ||
+      (isAdmin && i.teamQuestions === null),
   };
 }
