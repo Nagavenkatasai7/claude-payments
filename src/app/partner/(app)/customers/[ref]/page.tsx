@@ -11,7 +11,10 @@ import { sendGateActive } from '@/lib/kyc-gate';
 import { auditIdentityView, openCustomerRef } from '@/lib/customer-ref';
 import { hasPermission } from '@/lib/permissions';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
-import { customerDetailView } from '@/lib/partner-customer-view';
+import { customerDetailView, sendingTodayView } from '@/lib/partner-customer-view';
+import { evaluateCap } from '@/lib/tier-rules';
+import { listPartnerCustomerTransfers } from '@/db/repos/partner-customer-reads';
+import { decodeTransferCursor, encodeTransferCursor } from '@/lib/partner-transfers';
 import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits, type SendLimitSource } from '@/lib/send-limits';
 import { partnerMayWriteOverride } from '@/lib/partner-send-limits';
@@ -23,6 +26,7 @@ import { PARTNER_ROUTES } from '../../../routes';
 import { revealCustomerFieldAction } from './actions';
 import { LimitForm } from './limit-form';
 import { KycDecisionDialog } from './kyc-decision-dialog';
+import { CustomerTransfers, toCustomerTransferRow } from './customer-transfers';
 
 export const metadata: Metadata = {
   title: t('partner.customers.detailTitle'),
@@ -48,6 +52,8 @@ const SOURCE_KEY: Record<SendLimitSource, MessageKey> = {
   platform: 'partner.limits.source.platform',
 };
 const usd = (cents: number) => formatMoney(cents / 100);
+/** Lost-features p2 A10: transfers shown per page on the customer page (keyset "Older" link). */
+const CUSTOMER_TRANSFERS_PAGE = 25;
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -67,9 +73,16 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * and closed labels only. No screening detail, rejection reason or ID number is shown. A value is
  * revealed only through the audited action; the client receives the masked string, never the value.
  */
-export default async function PartnerCustomerDetailPage({ params }: { params: Promise<{ ref: string }> }) {
+export default async function PartnerCustomerDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ ref: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.customers.policy);
   const { ref } = await params;
+  const sp = (await searchParams) ?? {};
   const opened = openCustomerRef(ref);
   if (!opened || opened.partnerId !== ctx.partnerId) notFound();
   const customer = await getCustomerStore(getStore()).getCustomer(ctx.partnerId, opened.phone);
@@ -86,6 +99,16 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
   // live SmartRemit override (the action refuses that too, under the row lock).
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
+  // Lost-features p2 B7 and A10: today's spend against the cap (the same ledger read and evaluation
+  // a mint uses, figures only) and this customer's live transfers at THIS tenant (masked rows).
+  const txCursor = decodeTransferCursor(Array.isArray(sp.tx) ? sp.tx[0] : sp.tx);
+  // senderTotals is the daily-volume store's ledger read (ET day; blocked and cancelled excluded).
+  const [totals, txPage] = await Promise.all([
+    getStore().senderTotals(ctx.partnerId, customer.senderPhone),
+    listPartnerCustomerTransfers(getDb(), ctx.partnerId, customer.senderPhone, { limit: CUSTOMER_TRANSFERS_PAGE, cursor: txCursor }),
+  ]);
+  const today = sendingTodayView(evaluateCap(customer, now, totals.todayUsdCents, 0, sendGateActive(partner), limits));
+  const olderHref = txPage.nextCursor ? `${PARTNER_ROUTES.customers.href}/${ref}?tx=${encodeTransferCursor(txPage.nextCursor)}` : null;
   const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
   const canEditLimits = PARTNER_ADMIN.roles.includes(ctx.role);
   // Merge plan 2c (D3): the KYC decision is offered to admins only, by KYC mode and the no-op rules
@@ -155,7 +178,21 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
       <div className="mt-5">
         <Section title={t('partner.limits.title')}>
           <p className="text-[13px] text-ds-ink-muted">{t('partner.limits.sub')}</p>
-          <dl className="mt-2 divide-y divide-ds-border">
+          <dl className="mt-2 divide-y divide-ds-border" data-testid="partner-sending-today">
+            <Row label={t('partner.limits.usedToday')}>
+              <span className="tabular-nums" data-today="used">{usd(today.usedCents)}</span>
+            </Row>
+            <Row label={t('partner.limits.leftToday')}>
+              <span className="tabular-nums" data-today="left">{usd(today.remainingCents)}</span>
+              <span className="ml-2 text-[13px] text-ds-ink-muted">{t('partner.limits.ofCap', { cap: usd(today.dailyCapCents) })}</span>
+            </Row>
+            {today.dayOfWindow !== null ? (
+              <Row label={t('partner.limits.window')}>
+                <span data-today="day">{t('partner.limits.dayOfWindow', { day: today.dayOfWindow })}</span>
+              </Row>
+            ) : null}
+          </dl>
+          <dl className="mt-2 divide-y divide-ds-border border-t border-ds-border">
             <Row label={t('partner.limits.perTransfer')}>
               <span className="tabular-nums">{usd(limits.perTransferCapCents)}</span>
               <span className="ml-2 text-[13px] text-ds-ink-muted">{t(SOURCE_KEY[limits.source.perTransferCapCents])}</span>
@@ -184,6 +221,12 @@ export default async function PartnerCustomerDetailPage({ params }: { params: Pr
               </div>
             )
           ) : null}
+        </Section>
+      </div>
+      <div className="mt-5">
+        <Section title={t('partner.customers.transfers.title')}>
+          <p className="mb-2 text-[13px] text-ds-ink-muted">{t('partner.customers.transfers.sub')}</p>
+          <CustomerTransfers rows={txPage.items.map(toCustomerTransferRow)} olderHref={olderHref} />
         </Section>
       </div>
     </>

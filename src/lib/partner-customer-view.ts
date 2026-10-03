@@ -2,7 +2,7 @@ import { sealCustomerRef } from '@/lib/customer-ref';
 import { maskPhoneLast4 } from '@/lib/mask';
 import { deriveTier, observationDay, type CapSubject } from '@/lib/tier-rules';
 import type { MessageKey } from '@/lib/i18n';
-import type { Customer, KycStatus, Tier } from '@/lib/types';
+import type { CapEvaluation, CountryCode, Customer, KycStatus, Tier } from '@/lib/types';
 
 // partner-customer-view (UI redesign M3-11): the PURE shapes behind /partner/customers. The pages
 // render ONLY from these, so what can reach the HTML (or a client component's props) is decided
@@ -129,6 +129,113 @@ export function customerListRow(c: Customer): CustomerListRow {
     phone: maskPhoneLast4(c.senderPhone),
     kycStatus: closedKyc(c.kycStatus),
     createdAt: c.createdAt,
+  };
+}
+
+// ── Lost-features p2 B4: the customer list (directory) ──────────────────────────────────────────
+// Country, tier (with the day of the observation window), ledger totals and last activity, plus
+// closed filters. Phones stay masked (owner line); there is still no name column. The full-phone
+// search is a POST (find by phone), never a URL parameter; `?last4=` carries the four digits the
+// list already prints.
+
+/** Ledger totals for one phone (partner-customer-reads partnerCustomerTotals). */
+export interface DirectoryTotals {
+  count: number;
+  sentCents: number;
+  lastAt: string;
+}
+
+export interface CustomerDirectoryRow extends CustomerListRow {
+  country: CountryCode | null;
+  tier: Tier;
+  tierKey: MessageKey;
+  dayOfWindow: number | null;
+  transfers: number;
+  sentCents: number;
+  /** The newest live transfer, else first seen. */
+  lastActivityAt: string;
+}
+
+export function customerDirectoryRow(c: Customer, totals: DirectoryTotals | undefined, now: Date, kycGateActive: boolean): CustomerDirectoryRow {
+  const tv = tierView(c, now, kycGateActive);
+  return {
+    ...customerListRow(c),
+    country: typeof c.senderCountry === 'string' && /^[A-Z]{2}$/.test(c.senderCountry) ? c.senderCountry : null,
+    tier: tv.tier,
+    tierKey: tv.key,
+    dayOfWindow: tv.dayOfWindow,
+    transfers: totals?.count ?? 0,
+    sentCents: totals?.sentCents ?? 0,
+    lastActivityAt: totals?.lastAt ?? c.firstSeenAt,
+  };
+}
+
+export const DIRECTORY_TIERS = Object.freeze(['T0', 'T1', 'Suspended'] as const satisfies readonly Tier[]);
+
+export interface CustomerFilters {
+  kyc?: KycStatus;
+  tier?: Tier;
+  last4?: string;
+}
+
+const firstParam = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+/** The list's filters from search params: closed values only; anything else is dropped. */
+export function parseCustomerFilters(sp: Record<string, string | string[] | undefined>): CustomerFilters {
+  const out: CustomerFilters = {};
+  const kyc = firstParam(sp.kyc);
+  if (typeof kyc === 'string' && (KYC_STATUS_VALUES as readonly string[]).includes(kyc)) out.kyc = kyc as KycStatus;
+  const tier = firstParam(sp.tier);
+  if (typeof tier === 'string' && (DIRECTORY_TIERS as readonly string[]).includes(tier)) out.tier = tier as Tier;
+  const last4 = firstParam(sp.last4);
+  if (typeof last4 === 'string' && /^\d{4}$/.test(last4)) out.last4 = last4;
+  return out;
+}
+
+export function filterDirectory(rows: readonly CustomerDirectoryRow[], f: CustomerFilters): CustomerDirectoryRow[] {
+  return rows.filter(
+    (r) =>
+      (f.kyc === undefined || r.kycStatus === f.kyc) &&
+      (f.tier === undefined || r.tier === f.tier) &&
+      (f.last4 === undefined || r.phone.endsWith(f.last4)),
+  );
+}
+
+export type DirectorySort = 'created' | 'lastActivity';
+
+/** One page of directory rows sorted by created time or last activity (ties by ref order kept stable). */
+export function pageDirectory(
+  rows: readonly CustomerDirectoryRow[],
+  p: { sort: string; dir: 'asc' | 'desc'; offset: number; limit: number },
+): { rows: CustomerDirectoryRow[]; total: number } {
+  const key = (r: CustomerDirectoryRow) => (p.sort === 'lastActivity' ? r.lastActivityAt : r.createdAt);
+  const sorted = [...rows].sort((a, b) => {
+    const d = key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.phone < b.phone ? -1 : a.phone > b.phone ? 1 : 0;
+    return p.dir === 'asc' ? d : -d;
+  });
+  return { rows: sorted.slice(p.offset, p.offset + p.limit), total: rows.length };
+}
+
+export function directorySummary(rows: readonly CustomerDirectoryRow[]): { total: number; t0: number } {
+  return { total: rows.length, t0: rows.filter((r) => r.tier === 'T0').length };
+}
+
+// ── Lost-features p2 B7: "Sending today" ───────────────────────────────────────────────────────────
+export interface SendingTodayView {
+  dailyCapCents: number;
+  usedCents: number;
+  remainingCents: number;
+  /** 1-3 in the observation window, else null. */
+  dayOfWindow: number | null;
+}
+
+/** The figures only: the cap evaluation's reason and withinCap never leave (nothing hints at a cause). */
+export function sendingTodayView(cap: CapEvaluation): SendingTodayView {
+  return {
+    dailyCapCents: cap.dailyCapCents,
+    usedCents: cap.todayUsedCents,
+    remainingCents: cap.todayRemainingCents,
+    dayOfWindow: cap.tier === 'T0' && typeof cap.dayOfWindow === 'number' ? cap.dayOfWindow : null,
   };
 }
 

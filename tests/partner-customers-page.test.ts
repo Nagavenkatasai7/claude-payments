@@ -321,3 +321,109 @@ describe('/partner/customers/[ref]: send limits (M3-12)', () => {
     expect(html).toContain(FORM);
   });
 });
+
+// Lost-features p2 B4: country, tier, totals, last activity and closed filters; phones stay masked.
+describe('/partner/customers: list columns and filters (p2 B4)', () => {
+  beforeEach(async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    await seedPartnerTransfer(db, { id: 'ta1', partnerId: PA, phone: SHARED, amountUsd: 120, status: 'delivered' });
+    await seedPartnerTransfer(db, { id: 'ta2', partnerId: PA, phone: SHARED, amountUsd: 30, status: 'cancelled' });
+    await seedPartnerTransfer(db, { id: 'tat', partnerId: PA, phone: SHARED, amountUsd: 900, status: 'delivered', environment: 'test' });
+    await seedPartnerTransfer(db, { id: 'tb1', partnerId: PB, phone: SHARED, amountUsd: 7777, status: 'delivered' });
+  });
+  const rowOf = (html: string, last4: string) => {
+    const m = html.match(new RegExp(`<tr[^>]*>(?:(?!</tr>).)*••••${last4}(?:(?!</tr>).)*</tr>`, 's'));
+    return m?.[0] ?? '';
+  };
+  it('totals are this tenant’s live rows only (cancelled not counted; test rows and B’s never)', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await list();
+    const row = rowOf(html, '0000');
+    expect(row).toContain('data-col="transfers">1<');
+    expect(row).toContain('data-col="sent">$120.00<');
+    expect(row).toContain('>US<');
+    expect(html).not.toContain('7,777');
+    expect(html).not.toContain('$900.00');
+    expect(rowOf(html, '1111')).toContain('data-col="transfers">0<');
+    for (const v of ALL_PII) expect(html).not.toContain(v);
+  });
+  it('the summary counts the tenant’s customers and those in their first days', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: '15553334444', kycStatus: 'pending', firstSeenAt: daysAgo(1), createdAt: daysAgo(1) }),
+    );
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await list();
+    expect(html).toMatch(/data-customers-summary="">3 customers · 1 in their first days/);
+    expect(rowOf(html, '4444')).toContain('data-tier="T0"');
+    expect(rowOf(html, '4444')).toContain('Day 2 of 3');
+  });
+  it('filters by KYC status, tier and last 4; junk filters are ignored', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(refsIn(await list({ kyc: 'pending' })).map((r) => openCustomerRef(r)?.phone)).toEqual([ONLY_A]);
+    expect(refsIn(await list({ last4: '0000' })).map((r) => openCustomerRef(r)?.phone)).toEqual([SHARED]);
+    expect(refsIn(await list({ tier: 'Suspended' }))).toEqual([]);
+    expect(await list({ tier: 'Suspended' })).toContain('No customers match these filters.');
+    expect(refsIn(await list({ kyc: 'nope', last4: '12' }))).toHaveLength(2);
+    // A filter on B's phone at A finds nothing of B.
+    expect(refsIn(await list({ last4: '2222' }))).toEqual([]);
+  });
+  it('sorts by last activity', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const phones = refsIn(await list({ sort: 'lastActivity', dir: 'desc' })).map((r) => openCustomerRef(r)?.phone);
+    expect(phones).toEqual([SHARED, ONLY_A]);
+  });
+});
+
+// Lost-features p2 B7 (sending today) and A10 (the customer's transfers).
+describe('/partner/customers/[ref]: sending today and transfers (p2 B7, A10)', () => {
+  beforeEach(async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    await seedPartnerTransfer(db, { id: 'tx_a_1', partnerId: PA, phone: SHARED, amountUsd: 120, status: 'paid' });
+    await seedPartnerTransfer(db, { id: 'tx_a_test', partnerId: PA, phone: SHARED, amountUsd: 900, status: 'paid', environment: 'test' });
+    await seedPartnerTransfer(db, { id: 'tx_b_1', partnerId: PB, phone: SHARED, amountUsd: 777, status: 'paid' });
+  });
+  it('shows today’s spend against the cap from this tenant’s live rows only', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-today="used">$120.00<');
+    expect(html).toContain('data-today="left">$2,879.00<');
+    expect(html).not.toContain('data-today="day"');
+  });
+  it('a customer in the first days shows the day of the window', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: ONLY_A, kycStatus: 'pending', firstSeenAt: daysAgo(0.5) }),
+    );
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, ONLY_A));
+    expect(html).toContain('data-today="day">Day 1 of 3<');
+    expect(html).toContain('No live transfers yet.');
+  });
+  it('lists this tenant’s live transfers for the customer, masked; never B’s or test rows', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-customer-transfer="tx_a_1"');
+    expect(html).toContain('href="/partner/transfers/tx_a_1"');
+    expect(html).not.toContain('tx_b_1');
+    expect(html).not.toContain('tx_a_test');
+    expect(html).toContain('Testname S.');
+    for (const v of ['Samplesurname', '000011112222', '919876543210']) expect(html).not.toContain(v);
+  });
+  it('pages older transfers by an opaque cursor (no phone in the link)', async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    for (let i = 0; i < 26; i++) {
+      await seedPartnerTransfer(db, { id: `tx_p_${i}`, partnerId: PA, phone: SHARED, status: 'delivered', createdAt: daysAgo(2 + i / 100) });
+    }
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const ref = sealCustomerRef(PA, SHARED);
+    const html = await detail(ref);
+    const older = html.match(/href="([^"]*\?tx=[^"]*)"/)?.[1];
+    expect(older).toBeTruthy();
+    expect(older).not.toContain(SHARED.slice(-6));
+    const tx = new URL(older!.replace(/&amp;/g, '&'), 'https://x').searchParams.get('tx')!;
+    const page2 = renderToStaticMarkup(
+      await CustomerDetailPage({ params: Promise.resolve({ ref }), searchParams: Promise.resolve({ tx }) }),
+    );
+    expect(page2).toContain('data-customer-transfer="tx_p_25"');
+    expect(page2).not.toContain('data-customer-transfer="tx_a_1"');
+  });
+});

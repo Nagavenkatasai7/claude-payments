@@ -1765,6 +1765,33 @@ export const en = {
   // ── end p1 ──
 
   // ── p2: customers (create, conversation log, KYC trail, transfers, find, list and detail) ──
+  'partner.customers.subCount': '{total} customers · {t0} in their first days',
+  'partner.customers.col.country': 'Country',
+  'partner.customers.col.tier': 'Tier',
+  'partner.customers.col.transfers': 'Transfers',
+  'partner.customers.col.sent': 'Sent (USD)',
+  'partner.customers.col.lastActivity': 'Last activity',
+  'partner.customers.tier.day': 'Day {day} of 3',
+  'partner.customers.filter.label': 'Filter customers',
+  'partner.customers.filter.kyc': 'Verification',
+  'partner.customers.filter.tier': 'Tier',
+  'partner.customers.filter.last4': 'Phone ends in',
+  'partner.customers.filter.last4Hint': 'The last 4 digits. To find one customer by full number, use Find by phone.',
+  'partner.customers.filter.any': 'Any',
+  'partner.customers.filter.apply': 'Apply',
+  'partner.customers.filter.clear': 'Clear filters',
+  'partner.customers.filter.none': 'No customers match these filters.',
+  'partner.customers.totalsNote': 'Transfers count live transfers except cancelled and blocked ones. Sent counts paid and delivered transfers.',
+  'partner.limits.usedToday': 'Sent today',
+  'partner.limits.leftToday': 'Left today',
+  'partner.limits.ofCap': 'of {cap} a day',
+  'partner.limits.window': 'First days',
+  'partner.limits.dayOfWindow': 'Day {day} of 3',
+  'partner.customers.transfers.title': 'Transfers',
+  'partner.customers.transfers.sub': 'Live transfers by this customer, newest first. Recipients and accounts are masked.',
+  'partner.customers.transfers.caption': 'This customer’s transfers',
+  'partner.customers.transfers.empty': 'No live transfers yet.',
+  'partner.customers.transfers.older': 'Older transfers',
   // ── end p2 ──
 
   // ── p3: support, staff, shell, insights, B2B invoices, password ──
