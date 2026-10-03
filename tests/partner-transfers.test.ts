@@ -251,6 +251,33 @@ describe('transferTimeline', () => {
   });
 });
 
+describe('transferTimeline: lost-features p1 actions (one row each, never a note, reason or assignee)', () => {
+  it('assign, cancel, pay-link resend and refund issue', () => {
+    const tenant = new Set(['pa-agent']);
+    const at = (m: number) => new Date(Date.UTC(2026, 8, 1, 10, m));
+    const rows = transferTimeline(
+      base({ status: 'cancelled' }),
+      [
+        { at: at(1), action: 'transfer.assign', actor: 'pa-agent', actorType: 'staff', meta: { assignee: 'platform-ops', note: 'ASSIGN NOTE', actorScope: 'partner' } },
+        { at: at(2), action: 'transfer.paylink.resend', actor: 'platform-ops', actorType: 'staff', meta: {} },
+        { at: at(3), action: 'transfer.cancel', actor: 'pa-agent', actorType: 'staff', meta: { reason: 'CANCEL WHY' } },
+        { at: at(4), action: 'refund.issue', actor: 'pa-agent', actorType: 'staff', meta: { reason: 'REFUND WHY' } },
+      ],
+      tenant,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['created', 'assign', 'resend', 'cancel', 'refundIssue']);
+    expect(rows.map((r) => r.label).slice(1)).toEqual([
+      'partner.transfers.timeline.assign',
+      'partner.transfers.timeline.resend',
+      'partner.transfers.timeline.cancel',
+      'partner.transfers.timeline.refundIssue',
+    ]);
+    expect(rows[2].by).toBe(t('partner.transfers.actor.smartremit'));
+    expect(JSON.stringify(rows)).not.toMatch(/NOTE|WHY|platform-ops/);
+    for (const a of ['transfer.assign', 'transfer.cancel', 'transfer.paylink.resend', 'refund.issue']) expect(TIMELINE_AUDIT_ACTIONS).toContain(a);
+  });
+});
+
 describe('holds', () => {
   it('isHeld: a flagged transfer stops being held once released or finished', () => {
     // markPaidIfInReview never clears complianceStatus, so 'flagged' outlives the hold.

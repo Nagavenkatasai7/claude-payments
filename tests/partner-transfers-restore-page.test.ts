@@ -276,3 +276,33 @@ describe('/partner/transfers/[id]: B3 detail fields and reveals', () => {
     expect(await detail('tr_A_asha')).toContain('pa-agent');
   });
 });
+
+describe('/partner/transfers/[id]: A2 assign control', () => {
+  it('admin: the picker lists this tenant\'s admins and agents only', async () => {
+    await signInAs(redis, cookieJar, { username: 'pb-agent', partnerId: 'pb', role: 'agent' });
+    await signInAs(redis, cookieJar, { username: 'plat-admin', role: 'admin' });
+    await signInAs(redis, cookieJar, { username: 'pa-sup', partnerId: 'pa', role: 'support' });
+    await asAdmin();
+    const html = await detail('tr_A_asha');
+    expect(html).toContain('data-testid="partner-assign-form"');
+    const opts = [...html.matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]);
+    expect(opts).toEqual(expect.arrayContaining(['', 'pa-admin', 'pa-agent']));
+    expect(opts).not.toContain('pb-agent');
+    expect(opts).not.toContain('plat-admin');
+    expect(opts).not.toContain('pa-sup');
+  });
+  it('an agent without canAssign: no form, and the permission hint; with it: the form', async () => {
+    await asAgent();
+    const html = await detail('tr_A_asha');
+    expect(html).not.toContain('partner-assign-form');
+    expect(html).toContain('Ask your admin or SmartRemit');
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent', permissions: { canCancel: true, canAssign: true, canResend: true, canRevealPii: false } });
+    const ok = await detail('tr_A_asha');
+    expect(ok).toContain('partner-assign-form');
+    expect(ok).not.toContain('Ask your admin or SmartRemit');
+  });
+  it('finance: no actions section', async () => {
+    await asFinance();
+    expect(await detail('tr_A_asha')).not.toContain('partner-assign-form');
+  });
+});

@@ -861,6 +861,23 @@ export function createTransferRepo(
     },
 
     /**
+     * Lost-features restore p1 A2: the assignment claim. ONE compare-and-set on assigned_to alone:
+     *   UPDATE transfers SET assigned_to = $to
+     *   WHERE id = $id AND partner_id = $p AND assigned_to IS NOT DISTINCT FROM $from RETURNING *
+     * Nothing else is written (never admin_note, never status), so an assignment can never undo a
+     * concurrent money move. Null ⇒ the row is missing, in another tenant, or someone else changed
+     * the assignee since the caller read it.
+     */
+    async assignIfUnchanged(id: string, o: { partnerId: PartnerId; from: string | null; to: string | null }): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ assignedTo: o.to })
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, o.partnerId), sql`${transfers.assignedTo} IS NOT DISTINCT FROM ${o.from}`))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Atomically VOID an UNFUNDED draft: the ONLY cancel write, used by staff
      * Cancel (dashboard-ops.cancelTransfer) and the customer chat cancel_bill
      * (tools.ts), both via store.cancelTransferIfUnfunded (Phase 1 Task 5 /

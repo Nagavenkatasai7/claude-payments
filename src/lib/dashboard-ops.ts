@@ -95,21 +95,41 @@ export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
   pokeWorker();
 }
 
+/**
+ * Assign (or, with null, unassign) a transfer: the ONE core for both dashboards (lost-features
+ * restore p1 A2). One transaction: the read (inside `scope`'s tenant when given, so a foreign id is
+ * not found), the compare-and-set on assigned_to from the value just read (assignIfUnchanged: it
+ * never writes adminNote, which also holds rail-failure notes, and never status), then ONE
+ * `transfer.assign` audit row (assignee, previous assignee, the optional note). The same assignee
+ * again is a no-op with no audit row. A lost race throws "changed concurrently" and writes nothing.
+ * The caller validates the assignee (transfer-assignable.ts) before calling.
+ */
 export async function assignTransfer(
-  store: Store,
+  db: Db,
   id: string,
-  assignee: string,
-  note: string,
-): Promise<void> {
-  const transfer = await store.getTransfer(id);
-  if (!transfer) {
-    throw new Error('Transfer not found');
-  }
-  // Status-guarded + column-targeted: never a stale full-row upsert.
-  const assigned = await store.updateTransferIfStatus(id, transfer.status, { assignedTo: assignee, adminNote: note });
-  if (!assigned) {
-    throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
-  }
+  assignee: string | null,
+  audit: StaffAuditCtx & { note?: string | null },
+  scope?: { partnerId: PartnerId },
+): Promise<'assigned' | 'unchanged'> {
+  return db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = scope ? await repo.getOwnedTransfer(scope.partnerId, id) : await repo.getTransfer(id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    const previous = transfer.assignedTo ?? null;
+    if (previous === assignee) return 'unchanged';
+    const assigned = await repo.assignIfUnchanged(id, { partnerId: transfer.partnerId, from: previous, to: assignee });
+    if (!assigned) {
+      throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
+    }
+    await recordStaffTransferAudit(tx, { actor: audit.actor, reason: audit.reason ?? null, actorScope: audit.actorScope }, 'transfer.assign', assigned, {
+      assignee,
+      previousAssignee: previous,
+      note: audit.note ?? null,
+    });
+    return 'assigned';
+  });
 }
 
 /**

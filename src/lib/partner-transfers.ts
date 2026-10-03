@@ -192,7 +192,26 @@ export function holdReasonKeys(reasons: readonly string[]): MessageKey[] {
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 // Merge plan 2c: 'transfer.reject' (a partner's or SmartRemit's reject) shows as one row, never its reason.
-export const TIMELINE_AUDIT_ACTIONS = Object.freeze(['transfer.hold.note', 'transfer.release', 'transfer.reject'] as const);
+// Lost-features restore p1: assign, cancel, pay-link resend and refund issue show the same way: one
+// row with who, never the note, the reason or the assignee (a platform row can name SmartRemit staff).
+export const TIMELINE_AUDIT_ACTIONS = Object.freeze([
+  'transfer.hold.note',
+  'transfer.release',
+  'transfer.reject',
+  'transfer.assign',
+  'transfer.cancel',
+  'transfer.paylink.resend',
+  'refund.issue',
+] as const);
+
+const PLAIN_ROWS: Readonly<Record<string, { kind: TimelineKind; label: MessageKey }>> = Object.freeze({
+  'transfer.release': { kind: 'release', label: 'partner.transfers.timeline.release' },
+  'transfer.reject': { kind: 'reject', label: 'partner.transfers.timeline.reject' },
+  'transfer.assign': { kind: 'assign', label: 'partner.transfers.timeline.assign' },
+  'transfer.cancel': { kind: 'cancel', label: 'partner.transfers.timeline.cancel' },
+  'transfer.paylink.resend': { kind: 'resend', label: 'partner.transfers.timeline.resend' },
+  'refund.issue': { kind: 'refundIssue', label: 'partner.transfers.timeline.refundIssue' },
+});
 
 export interface TimelineAuditRow {
   at: Date;
@@ -201,7 +220,7 @@ export interface TimelineAuditRow {
   actorType?: string;
   meta: unknown;
 }
-export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'delivered' | 'refunded';
+export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'assign' | 'cancel' | 'resend' | 'refundIssue' | 'delivered' | 'refunded';
 export interface TimelineRow {
   at: string;
   kind: TimelineKind;
@@ -239,10 +258,8 @@ export function transferTimeline(tr: Transfer, audit: readonly TimelineAuditRow[
       const own = m?.actorScope === 'partner' && a.actorType === 'staff' && tenant.has(a.actor);
       const raw = own ? m?.note : undefined;
       rows.push({ at: at.toISOString(), kind: 'note', label: 'partner.transfers.timeline.note', by, ...(typeof raw === 'string' ? { note: raw } : {}) });
-    } else if (a.action === 'transfer.release') {
-      rows.push({ at: at.toISOString(), kind: 'release', label: 'partner.transfers.timeline.release', by });
-    } else if (a.action === 'transfer.reject') {
-      rows.push({ at: at.toISOString(), kind: 'reject', label: 'partner.transfers.timeline.reject', by });
+    } else if (Object.hasOwn(PLAIN_ROWS, a.action)) {
+      rows.push({ at: at.toISOString(), ...PLAIN_ROWS[a.action], by });
     }
   }
   return rows.sort((x, y) => Date.parse(x.at) - Date.parse(y.at));

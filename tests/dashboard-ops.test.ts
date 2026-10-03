@@ -300,19 +300,54 @@ describe('reverseB2bSettlement (non-custodial partner reverse via the refund sea
   });
 });
 
-describe('assignTransfer', () => {
-  it('sets assignedTo and adminNote on the transfer', async () => {
+describe('assignTransfer (lost-features p1 A2: one core for both dashboards)', () => {
+  const NOTE = 'rail failure: the bank refused the account';
+  it('sets assigned_to, NEVER touches adminNote, and writes one transfer.assign row', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'a1' }));
-    await assignTransfer(store, 'a1', 'alice@example.com', 'High priority');
+    await store.saveTransfer(makeTransfer({ id: 'a1', adminNote: NOTE }));
+    expect(await assignTransfer(db, 'a1', 'alice', { actor: 'plat', note: 'High priority', actorScope: 'platform' })).toBe('assigned');
     const loaded = await store.getTransfer('a1');
-    expect(loaded?.assignedTo).toBe('alice@example.com');
-    expect(loaded?.adminNote).toBe('High priority');
+    expect(loaded?.assignedTo).toBe('alice');
+    expect(loaded?.adminNote).toBe(NOTE);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'plat', action: 'transfer.assign', subject_id: 'a1', partner_id: 'default' });
+    expect(rows[0].meta).toEqual({ assignee: 'alice', previousAssignee: null, note: 'High priority', reason: null, actorScope: 'platform' });
   });
-
-  it('throws for a missing transfer', async () => {
+  it('the same assignee again is a no-op (no write, no audit row); null unassigns', async () => {
     const store = createStore(fakeRedis(), db);
-    await expect(assignTransfer(store, 'missing', 'alice', 'note')).rejects.toThrow('Transfer not found');
+    await store.saveTransfer(makeTransfer({ id: 'a2', assignedTo: 'alice' }));
+    expect(await assignTransfer(db, 'a2', 'alice', { actor: 'plat' })).toBe('unchanged');
+    expect(await auditRows()).toHaveLength(0);
+    expect(await assignTransfer(db, 'a2', null, { actor: 'plat' })).toBe('assigned');
+    expect((await store.getTransfer('a2'))?.assignedTo).toBeUndefined();
+    expect((await auditRows())[0].meta).toMatchObject({ assignee: null, previousAssignee: 'alice' });
+  });
+  it('a scope reads the row inside that tenant: a foreign id is not found and nothing is written', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a3' }));
+    await expect(assignTransfer(db, 'a3', 'alice', { actor: 'u' }, { partnerId: 'other' })).rejects.toThrow('Transfer not found');
+    expect((await store.getTransfer('a3'))?.assignedTo).toBeUndefined();
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a failing audit insert rolls the assignment back', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a4' }));
+    failAudit = true;
+    await expect(assignTransfer(db, 'a4', 'alice', { actor: 'u' })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a4'))?.assignedTo).toBeUndefined();
+  });
+  it('throws for a missing transfer', async () => {
+    await expect(assignTransfer(db, 'missing', 'alice', { actor: 'u' })).rejects.toThrow('Transfer not found');
+  });
+  it('the repo claim is a compare-and-set on assigned_to (a lost race returns null, nothing written)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a5', assignedTo: 'bob' }));
+    const repo = createTransferRepo(db);
+    expect(await repo.assignIfUnchanged('a5', { partnerId: 'default', from: null, to: 'alice' })).toBeNull();
+    expect(await repo.assignIfUnchanged('a5', { partnerId: 'other', from: 'bob', to: 'alice' })).toBeNull();
+    expect((await store.getTransfer('a5'))?.assignedTo).toBe('bob');
+    expect((await repo.assignIfUnchanged('a5', { partnerId: 'default', from: 'bob', to: 'alice' }))?.assignedTo).toBe('alice');
   });
 });
 
@@ -834,16 +869,15 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     expect((await store.getTransfer('race_can'))?.status).toBe('paid');
   });
 
-  it('assign racing a release: throws and never overwrites the paid row', async () => {
+  it('assign racing a release: the assignment writes only assigned_to, so the paid row stays paid', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'race_asg', status: 'in_review', complianceStatus: 'flagged' }));
-    const stale = (await store.getTransfer('race_asg'))!;
     await releaseTransfer(store, db, 'race_asg', REL);
 
-    await expect(assignTransfer(staleView(store, stale), 'race_asg', 'agent1', 'look')).rejects.toThrow(/changed/i);
+    await assignTransfer(db, 'race_asg', 'agent1', { actor: 'plat', note: 'look' });
     const loaded = await store.getTransfer('race_asg');
     expect(loaded?.status).toBe('paid');
-    expect(loaded?.assignedTo).toBeUndefined();
+    expect(loaded?.assignedTo).toBe('agent1');
   });
 });
 

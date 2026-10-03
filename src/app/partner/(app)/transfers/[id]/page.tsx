@@ -29,12 +29,16 @@ import { t } from '@/lib/i18n';
 import { Badge, Card, MaskedValue, Money, PageHeader, StatusPill, buttonVariants } from '@/components/ds';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
-import { assigneeView, settlementRouteKey, type RevealableTransferField } from '@/lib/partner-transfer-ops';
+import { assigneeView, settlementRouteKey, transferOpsFor, type RevealableTransferField } from '@/lib/partner-transfer-ops';
+import { tenantTransferAssignees } from '@/lib/transfer-assignable';
+import { hasPermission } from '@/lib/permissions';
+import { toStaffOptions } from '@/lib/staff-options';
 import { tenantStaffUsernames } from '@/lib/partner-tickets';
 import type { PartnerId } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import { partnerCustomerHref } from '../../../customer-link';
 import { revealTransferFieldAction } from './reveal-actions';
+import { AssignForm } from './transfer-ops';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
@@ -141,6 +145,12 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
     transfer.assignedTo,
     transfer.assignedTo ? await tenantStaffUsernames(ctx.partnerId, [transfer.assignedTo], (u) => getAuthStore().getStaff(u)) : new Set<string>(),
   );
+  // Lost-features restore p1: the controls this viewer may use (UX only; each action re-checks).
+  const opsFor = transferOpsFor(transfer, ctx);
+  const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
+  const anyOp = opsFor.assign;
+  // An agent missing a per-staff flag is told why a control is absent (SmartRemit sets the flags).
+  const missingFlag = ctx.role === 'agent' && !(['canCancel', 'canAssign', 'canResend'] as const).every((p) => hasPermission(ctx.staff, p));
   const reveal = (field: RevealableTransferField) => revealTransferFieldAction.bind(null, transfer.id, field);
   const shown = (masked: string, field: RevealableTransferField, label: string, allowed: boolean) =>
     allowed ? <MaskedValue masked={masked} label={label} reveal={reveal(field)} /> : <span className="font-mono">{masked}</span>;
@@ -257,6 +267,17 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
         {canNote ? (
           <Section title={t('partner.transfers.noteTitle')}>
             <NoteForm id={transfer.id} requestKey={newRequestKey()} />
+          </Section>
+        ) : null}
+
+        {ops && (anyOp || missingFlag) ? (
+          <Section title={t('partner.transferOps.title')}>
+            {anyOp ? (
+              <div className="flex flex-col gap-6">
+                {opsFor.assign ? <AssignForm id={transfer.id} options={assignOptions} current={assignee.kind === 'tenant' ? assignee.username : null} /> : null}
+              </div>
+            ) : null}
+            {missingFlag ? <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.transferOps.askPermission')}</p> : null}
           </Section>
         ) : null}
 
