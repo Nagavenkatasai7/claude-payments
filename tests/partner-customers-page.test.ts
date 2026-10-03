@@ -515,3 +515,18 @@ describe('/partner/customers/[ref]: decision history (p2 A9)', () => {
     expect(await detail(sealCustomerRef(PA, SHARED))).toContain('No verification decisions yet.');
   });
 });
+
+describe('/partner/customers/[ref]: conversation link (p2 A8)', () => {
+  it('admins get a link to the log by ref (no phone); agents get none; viewing the page reads no log', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const ref = sealCustomerRef(PA, SHARED);
+    const html = await detail(ref);
+    const href = html.match(/data-conversation-link=""[^>]*href="([^"]*)"|href="([^"]*)"[^>]*data-conversation-link=""/);
+    const link = href?.[1] ?? href?.[2];
+    expect(link?.startsWith('/partner/customers/conversation/')).toBe(true);
+    expect(link).not.toContain('1230000');
+    expect(await auditRows('conversation.view')).toHaveLength(0);
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-conv' });
+    expect(await detail(ref)).not.toContain('data-conversation-link');
+  });
+});

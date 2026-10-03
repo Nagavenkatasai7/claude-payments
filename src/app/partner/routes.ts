@@ -21,6 +21,14 @@ export const PARTNER_ROUTES = Object.freeze({
   customers: { href: '/partner/customers', labelKey: 'partner.nav.customers', policy: PARTNER_OPS, nav: true },
   // Lost-features A5: create a customer by hand (admin only; linked from Customers, not in the nav).
   customersNew: { href: '/partner/customers/new', labelKey: 'partner.customers.new', policy: PARTNER_ADMIN, nav: false },
+  // Lost-features A8: one customer's conversation log at /partner/customers/conversation/<ref> (admin
+  // only; linked from the customer page, not in the nav). The bare path sends back to Customers.
+  customerConversation: {
+    href: '/partner/customers/conversation',
+    labelKey: 'partner.customers.conversation.title',
+    policy: PARTNER_ADMIN,
+    nav: false,
+  },
   // M3-16: the page is a money read; each report KIND is further gated by reportPolicy(kind).
   reports: { href: '/partner/reports', labelKey: 'partner.nav.reports', policy: PARTNER_MONEY_READ, nav: true },
   support: { href: '/partner/support', labelKey: 'partner.nav.support', policy: PARTNER_TICKETS, nav: true },

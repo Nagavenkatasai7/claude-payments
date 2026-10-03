@@ -1835,6 +1835,19 @@ export const en = {
   'partner.customers.trail.createdVerified': 'Created as verified',
   'partner.customers.trail.created': 'Created with a set status',
   'partner.customers.trail.reason': 'Reason: {reason}',
+  'partner.customers.conversation.title': 'Conversation log',
+  'partner.customers.conversation.sub': 'The latest {limit} WhatsApp and web chat messages with customer {phone}.',
+  'partner.customers.conversation.open': 'Open conversation log',
+  'partner.customers.conversation.openNote': 'Opening the log is recorded in your audit log.',
+  'partner.customers.conversation.recorded': 'This view is recorded in your audit log.',
+  'partner.customers.conversation.empty': 'No logged messages yet.',
+  'partner.customers.conversation.customer': 'Customer',
+  'partner.customers.conversation.bot': 'Your assistant',
+  'partner.customers.conversation.channel.wa': 'WhatsApp',
+  'partner.customers.conversation.channel.web': 'Web chat',
+  'partner.customers.conversation.unreadable': 'This message could not be opened.',
+  'partner.customers.conversation.busy': 'Too many details were opened in a short time. Try again in a few minutes.',
+  'partner.customers.conversation.back': 'Back to customer',
   // ── end p2 ──
 
   // ── p3: support, staff, shell, insights, B2B invoices, password ──

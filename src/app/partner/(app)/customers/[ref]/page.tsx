@@ -301,6 +301,22 @@ export default async function PartnerCustomerDetailPage({
           ) : null}
         </Section>
       </div>
+      {canEditLimits ? (
+        <div className="mt-5">
+          {/* Lost-features p2 A8: admin only; a deliberate, recorded read on its own page. */}
+          <Section title={t('partner.customers.conversation.title')}>
+            <p className="text-[13px] text-ds-ink-muted">{t('partner.customers.conversation.openNote')}</p>
+            <Link
+              href={`${PARTNER_ROUTES.customerConversation.href}/${view.ref}`}
+              prefetch={false}
+              data-conversation-link=""
+              className="mt-2 inline-flex min-h-11 items-center text-[14px] font-semibold text-ds-primary underline-offset-4 hover:underline"
+            >
+              {t('partner.customers.conversation.open')}
+            </Link>
+          </Section>
+        </div>
+      ) : null}
       <div className="mt-5">
         <Section title={t('partner.customers.transfers.title')}>
           <p className="mb-2 text-[13px] text-ds-ink-muted">{t('partner.customers.transfers.sub')}</p>
