@@ -17,13 +17,16 @@ import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
-import { sendTemplateWithButton, sendTemplateOrText, sendText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
+import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
   TEMPLATE_SCHEDULED_PAYMENT_READY,
   TEMPLATE_LANG,
   scheduledPaymentReadyParams,
+  scheduledPaymentReadyText,
   scheduleNameNeededText,
+  scheduleNameNeededTemplate,
 } from '@/lib/whatsapp-templates';
+import { sendTextThenTemplate } from '@/lib/whatsapp-business-initiated';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
@@ -78,12 +81,18 @@ export async function GET(req: NextRequest) {
         waCreds,
       );
     },
-    // Scheduled-send name nudge (2026-10-02): free-form text, so it reaches the
-    // customer only inside their 24-hour window (a rejection is thrown, and
-    // cron-run logs and swallows it). From the partner's own number and brand.
+    // Scheduled-send name nudge (2026-10-02): free-form text; outside the
+    // 24-hour window the schedule_name_needed template (2026-10-03, plain text
+    // if that fails). A failure is thrown, and cron-run logs and swallows it.
+    // From the partner's own number and brand.
     sendScheduledNameNeeded: async (schedule, timing) => {
       const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
-      await sendText(schedule.phone, scheduleNameNeededText(brand, schedule, timing), waCreds);
+      await sendTextThenTemplate(
+        schedule.phone,
+        { text: scheduleNameNeededText(brand, schedule, timing), template: scheduleNameNeededTemplate(brand, schedule, timing.dueAt) },
+        waCreds,
+        { partnerId: schedule.partnerId, store },
+      );
     },
     sendScheduledLink: async (schedule, transfer, url) => {
       // The scheduled_payment_ready template (docs §3.3) path is now wired, but
@@ -95,9 +104,10 @@ export async function GET(req: NextRequest) {
       // it with a re-engagement error, which the helper logs and swallows.
       const senderName = (await customerStore.getCustomer(schedule.partnerId, schedule.phone))?.fullName ?? 'there';
       const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
-      const fallbackText =
-        `Your scheduled ${brand} transfer of $${schedule.amountUsd.toFixed(2)} ` +
-        `to ${schedule.recipientName} is ready. Tap to pay: ${url}`;
+      // 2026-10-03: names the customer's own schedule (frequency + the day it
+      // was set up) and how to stop it, so a forgotten schedule's reminder can
+      // never read as another customer's message.
+      const fallbackText = scheduledPaymentReadyText(brand, schedule, url);
       const { bodyParams, buttonToken } = scheduledPaymentReadyParams(
         schedule,
         transfer.id,

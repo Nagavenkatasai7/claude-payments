@@ -44,6 +44,7 @@ import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { botScheduleAuditEvent, type BotScheduleAuditAction } from './bot-schedule-audit';
 import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './sender-identity';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
@@ -3630,6 +3631,7 @@ async function createScheduleTool(
     createdAt: new Date().toISOString(),
   };
   await ctx.scheduleStore.saveSchedule(schedule);
+  await auditBotSchedule(ctx, 'schedule.create', schedule.id);
   return {
     schedule_id: schedule.id,
     frequency: schedule.frequency,
@@ -3674,8 +3676,11 @@ async function listSchedulesTool(
   _args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const all = await ctx.scheduleStore.listActiveSchedules();
-  const mine = all.filter((s) => s.phone === ctx.phone && s.partnerId === ctx.partnerId);
+  // Tenant AND phone in the WHERE (schedule-repo listForCustomer): another
+  // customer's schedules are never loaded into this turn, not just filtered out.
+  const mine = (await ctx.scheduleStore.listForCustomer(ctx.partnerId, ctx.phone)).filter(
+    (s) => s.status === 'active',
+  );
   return {
     schedules: mine.map((s) => ({
       schedule_id: s.id,
@@ -3702,7 +3707,24 @@ async function cancelScheduleTool(
   }
   schedule.status = 'cancelled';
   await ctx.scheduleStore.saveSchedule(schedule);
+  await auditBotSchedule(ctx, 'schedule.cancel', schedule.id);
   return { schedule_id: schedule.id, status: schedule.status };
+}
+
+/**
+ * One audit row per schedule made or cancelled in chat (bot-schedule-audit.ts).
+ * Best-effort AFTER the save: the customer's schedule change has already
+ * happened, so a failed audit write is logged (ids only), never surfaced as a
+ * failed tool call that would make the agent retry and double-create.
+ */
+async function auditBotSchedule(ctx: ToolContext, action: BotScheduleAuditAction, scheduleId: string): Promise<void> {
+  try {
+    await ctx.store.recordAudit(
+      botScheduleAuditEvent({ partnerId: ctx.partnerId, phone: ctx.phone, action, scheduleId, channel: ctx.channel ?? 'whatsapp' }),
+    );
+  } catch (err) {
+    logWarn('schedule.audit', err instanceof Error ? err.message : 'audit write failed', { scheduleId, action });
+  }
 }
 
 async function listSavedRecipientsTool(

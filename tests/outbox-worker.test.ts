@@ -10,7 +10,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
-import { drainOnce, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
+import { drainOnce, OPS_ALERT_TEXT_PREFIX, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -2319,7 +2319,8 @@ describe('drainOnce — ops-alert mirror (Program-Fix 26)', () => {
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText.mock.calls[0]).toEqual(['15550000001', 'hello ops']);
+    // 2026-10-03: free-form ops alerts carry the staff-only label.
+    expect(sendText.mock.calls[0]).toEqual(['15550000001', `${OPS_ALERT_TEXT_PREFIX}hello ops`]);
     expect(await rows('email.send')).toEqual([]);
     expect(await rows('ops.webhook')).toEqual([]);
   });
@@ -2592,6 +2593,7 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 
   it('a 131030 thrown inside mock.settle still retries normally (never dead at attempt 1)', async () => {
     await store.saveTransfer(transferFixture());
+    await store.recordInboundNow('acme', '15551230000'); // inside the window: the plain text path
     sendText.mockRejectedValueOnce(graphErr(131030));
     await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' });
     const r = await drainOnce(deps(), 'w1');
@@ -2604,19 +2606,87 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 // Program-Fix 25 PR A (§3.10): ops alerts on a production number. UNCHANGED
 // unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
 // skipping the free-form call would silence alerts.
+describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', { retry: 0 }, () => {
+  const TPL = { name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
+  const windowClosed = () =>
+    WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131047 } }));
+  const notApproved = () =>
+    WhatsAppSendError.fromResponse('WhatsApp template send failed', 404, JSON.stringify({ error: { code: 132001 } }));
+  const chattedRecently = () => store.recordInboundNow('acme', '15551230000');
+
+  it('inside the window: the text goes out exactly as before and no template is tried', async () => {
+    await chattedRecently();
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText.mock.calls).toEqual([['15551230000', 'held text', undefined]]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it("the window is the ROW's tenant: a marker under another tenant does not count", async () => {
+    await store.recordInboundNow('default', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('outside the window: only the approved template, and the row is done', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_in_review', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('outside the window, template not approved yet (132001) ⇒ the plain text as today; the row is done, never dead', async () => {
+    sendTemplate.mockRejectedValueOnce(notApproved());
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText.mock.calls).toEqual([['15551230000', 'held text', undefined]]);
+  });
+
+  it('inside, Graph refuses the text (131047) and the template is not approved ⇒ RETRIES (the window error), never dead at attempt 1', async () => {
+    await chattedRecently();
+    sendText.mockRejectedValueOnce(windowClosed());
+    sendTemplate.mockRejectedValueOnce(notApproved());
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+  });
+
+  it('inside, a non-window text failure never tries the template', async () => {
+    await chattedRecently();
+    sendText.mockRejectedValueOnce(new Error('graph down'));
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('a malformed template is ignored: the plain text, even outside the window', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', template: { name: 'Bad Name', lang: 'en', params: [] } });
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 }, () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText exactly as today', async () => {
+  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText, labelled staff-only', async () => {
     vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
     vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
     vi.stubEnv('WHATSAPP_WINDOW_AWARE', 'true'); // the flag alone changes nothing here
     await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
-    expect(sendText.mock.calls).toEqual([['15550000001', 'hello ops']]);
+    expect(sendText.mock.calls).toEqual([['15550000001', `${OPS_ALERT_TEXT_PREFIX}hello ops`]]);
+    expect(OPS_ALERT_TEXT_PREFIX).toBe('SmartRemit staff alert (not a customer message): ');
     expect(sendTemplate).not.toHaveBeenCalled();
   });
 
@@ -2748,10 +2818,20 @@ describe('drainOnce — sandbox transfers never reach a rail or a real phone (Pr
 
   it('mock.settle for a LIVE transfer still messages sender and recipient (unchanged)', async () => {
     await store.saveTransfer(transferFixture());
+    await store.recordInboundNow('acme', '15551230000'); // the sender chatted in the last 24 hours
     await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' }, { dedupeKey: 'mocksettle:wk_t1' });
     await drainOnce(deps(), 'w1');
     expect(sendText).toHaveBeenCalled();
     expect(sendTemplate).toHaveBeenCalled();
+  });
+
+  it('2026-10-03: mock.settle for a sender outside the window ⇒ the transfer_delivered_sender template', async () => {
+    await store.saveTransfer(transferFixture());
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' }, { dedupeKey: 'mocksettle:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const names = sendTemplate.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(names).toContain('transfer_delivered_sender');
+    expect(sendText.mock.calls.map((c) => (c as unknown[])[0])).not.toContain('15551230000');
   });
 
   it('a sandbox-marked whatsapp.text / whatsapp.template completes WITHOUT sending', async () => {

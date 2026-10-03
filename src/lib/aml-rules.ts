@@ -47,6 +47,22 @@ export interface SenderAmlStats {
 
 export type AmlRule = 'structuring' | 'first_transfer' | 'new_beneficiary' | 'cluster';
 
+const AML_RULE_REASON: Record<AmlRule, string> = {
+  structuring: 'several smaller sends that add up to a large amount',
+  first_transfer: "a large first send from a new customer",
+  new_beneficiary: 'a large send to a new recipient',
+  cluster: 'many different senders paying one recipient',
+};
+
+/**
+ * The staff alert text for one hit (2026-10-03). Ids only, never a name, phone
+ * or amount: the alert goes to the ops phone and the email/webhook mirrors.
+ * Keeps the rule code for searching; says what it means for whoever reads it.
+ */
+export function amlAlertMessage(rule: AmlRule, transferId: string): string {
+  return `AML review needed: ${AML_RULE_REASON[rule]} on transfer ${transferId} (rule ${rule}). Review it in the admin dashboard.`;
+}
+
 export interface AmlHit {
   rule: AmlRule;
   window: '7d' | '30d' | 'first' | 'destination';

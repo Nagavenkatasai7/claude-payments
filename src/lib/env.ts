@@ -8,6 +8,23 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * 2026-10-03 (Batch 1 A1): a value pasted into Vercel with a stray space or
+ * newline (the Oct 2 403 was a trailing newline on a WhatsApp setting) is read
+ * without it. Whitespace-only counts as missing, the same rule boot-assert uses.
+ */
+function trimmedEnv(name: string): string {
+  return (process.env[name] ?? '').trim();
+}
+
+function requiredTrimmed(name: string): string {
+  const value = trimmedEnv(name);
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 export const env = {
   // Neon Postgres pooled connection string (auto-injected by the Vercel
   // Marketplace integration). The LEDGER lives here from Stage 2 on.
@@ -17,7 +34,7 @@ export const env = {
   // Ops alert destination — WhatsApp number that receives stuck-money /
   // dead-letter alerts from the reconciliation sweep (Stage 2). '' ⇒ no alerts.
   get opsAlertPhone(): string {
-    return process.env.OPS_ALERT_PHONE ?? '';
+    return trimmedEnv('OPS_ALERT_PHONE');
   },
   // Program-Fix 26 — the ops-alert MIRROR. Both OPTIONAL (never boot-asserted):
   // unset ⇒ ops alerts go to OPS_ALERT_PHONE only, exactly as before.
@@ -52,16 +69,16 @@ export const env = {
   // Partner-requests page. SMTP_USER is the FULL mailbox address; SMTP_PASS is
   // that mailbox's password (Hostinger has no separate SMTP key).
   get smtpHost(): string {
-    return process.env.SMTP_HOST ?? '';
+    return trimmedEnv('SMTP_HOST');
   },
   get smtpPort(): number {
     return Number(process.env.SMTP_PORT ?? '465');
   },
   get smtpUser(): string {
-    return process.env.SMTP_USER ?? '';
+    return trimmedEnv('SMTP_USER');
   },
   get smtpPass(): string {
-    return process.env.SMTP_PASS ?? '';
+    return trimmedEnv('SMTP_PASS');
   },
   /** Recipients of partner-lead emails — comma-separated; extendable any time. */
   get partnerLeadEmails(): string[] {
@@ -119,19 +136,19 @@ export const env = {
     return required('OLLAMA_MODEL');
   },
   get whatsappToken() {
-    return required('WHATSAPP_TOKEN');
+    return requiredTrimmed('WHATSAPP_TOKEN');
   },
   get whatsappPhoneNumberId() {
-    return required('WHATSAPP_PHONE_NUMBER_ID');
+    return requiredTrimmed('WHATSAPP_PHONE_NUMBER_ID');
   },
   get whatsappVerifyToken() {
-    return required('WHATSAPP_VERIFY_TOKEN');
+    return requiredTrimmed('WHATSAPP_VERIFY_TOKEN');
   },
   get metaAppSecret() {
     // Meta App Secret for X-Hub-Signature-256 verification on inbound webhooks.
     // '' ⇒ unconfigured ⇒ the /api/whatsapp POST handler skips the signature
     // check (warns; preserves dev/test + current prod). Set ⇒ fail-closed 401.
-    return process.env.META_APP_SECRET ?? '';
+    return trimmedEnv('META_APP_SECRET');
   },
   /**
    * True only under NODE_ENV=production. Fix 22: the settlement-URL rule's
@@ -313,7 +330,7 @@ export const env = {
     // entirely and delivers the code as regular free-form text — the right mode
     // for the testing business until templates are approved in WhatsApp
     // Manager. Set this to the approved template name to switch over.
-    return process.env.WHATSAPP_AUTH_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_AUTH_TEMPLATE');
   },
   // ── Customer onboarding Phase 2 — Persona KYC ──
   // All optional (`?? ''`): an unprovisioned env keeps MockKycProvider selected and
@@ -342,28 +359,28 @@ export const env = {
   // sendVerificationStatus sends the free-form fallback text directly, no
   // template attempt. Set to the approved names to switch over.
   get whatsappVerificationNeededTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_NEEDED_TEMPLATE');
   },
   get whatsappVerificationInProgressTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE');
   },
   get whatsappVerificationVerifiedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE');
   },
   get whatsappVerificationFailedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_FAILED_TEMPLATE');
   },
   // Program-Fix 25 — both OPTIONAL, unset ⇒ today's behaviour byte-for-byte.
   // The approved UTILITY template (one body variable) for ops alerts. '' ⇒ the
   // ops.alert row sends free-form text exactly as before.
   get whatsappOpsAlertTemplate(): string {
-    return process.env.WHATSAPP_OPS_ALERT_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_OPS_ALERT_TEMPLATE');
   },
   // 'true' ⇒ sendBusinessInitiated checks the 24h customer-service window
   // (lastmsg:) and skips a doomed free-form send outside it. Turn on only after
   // the production number is live and the templates are approved.
   get whatsappWindowAware(): boolean {
-    return process.env.WHATSAPP_WINDOW_AWARE === 'true';
+    return trimmedEnv('WHATSAPP_WINDOW_AWARE') === 'true';
   },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.

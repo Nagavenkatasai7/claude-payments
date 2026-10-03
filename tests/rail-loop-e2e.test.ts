@@ -128,6 +128,7 @@ beforeEach(async () => {
     whatsapp: {},
   });
   await createStore(redis, db).saveTransfer(transferFixture());
+  await createStore(redis, db).recordInboundNow('acme', '15551230000'); // the sender chatted in the last 24 hours
   await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'e2e_t1' }, { dedupeKey: 'instruct:e2e_t1' });
 });
 

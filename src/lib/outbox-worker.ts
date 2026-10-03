@@ -43,7 +43,8 @@ import { WhatsAppSendError, isAuthErrorCode } from '@/lib/whatsapp-errors';
 import { resolveWaChannel, WaChannelIncompleteError, type WaChannel } from '@/lib/whatsapp-creds';
 import { recordChannelHealth } from '@/lib/channel-health';
 import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-worker';
-import { sendBusinessInitiated, toTemplateParam } from '@/lib/whatsapp-business-initiated';
+import { rowTemplate, sendBusinessInitiated, sendTextThenTemplate, toTemplateParam } from '@/lib/whatsapp-business-initiated';
+import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
@@ -186,6 +187,8 @@ const TERMINAL_ON_DEADLINE: ReadonlySet<string> = new Set(['agent.turn']);
  */
 const PERMANENT_DEAD_KINDS: ReadonlySet<string> = new Set(['whatsapp.text', 'whatsapp.template', 'ops.alert']);
 const OPS_ALERT_TEMPLATE_LANG = 'en';
+/** Free-form ops alerts start with this, so staff alerts never read as customer messages. */
+export const OPS_ALERT_TEXT_PREFIX = 'SmartRemit staff alert (not a customer message): ';
 
 /**
  * Program-Fix 34A: how long a turn waits (uncharged) before it is re-tried when
@@ -445,7 +448,15 @@ async function handle(
     case 'whatsapp.text': {
       if (sandboxSkip(row, p)) return;
       if (await optedOutSkip(deps, row, p)) return;
-      await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
+      // 2026-10-03: a row may carry an approved template, sent only when the
+      // customer is outside the 24-hour window. No (or a malformed) template,
+      // or a customer inside the window ⇒ the plain send, byte-for-byte as before.
+      await sendTextThenTemplate(
+        str(p.to),
+        { text: str(p.body), template: rowTemplate(p.template) },
+        await resolveSendCreds(p, partner),
+        { partnerId: str(p.partnerId) || DEFAULT_PARTNER_ID, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+      );
       return;
     }
     case 'whatsapp.template': {
@@ -475,8 +486,15 @@ async function handle(
         }
         return;
       }
+      // 2026-10-03: outside the 24-hour window the sender's "delivered"
+      // notice goes as the approved transfer_delivered_sender template.
       for (const msg of stage2.senderMessages) {
-        await deps.sendText(stage2.transfer.phone, msg, waCreds);
+        await sendTextThenTemplate(
+          stage2.transfer.phone,
+          { text: msg, template: deliveredSenderTemplate(stage2.transfer) },
+          waCreds,
+          { partnerId: stage2.transfer.partnerId, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+        );
       }
       if (stage2.senderMessages.length > 0 && stage2.transfer.recipientPhone) {
         const recipientPhone = stage2.transfer.recipientPhone;
@@ -821,15 +839,19 @@ async function handle(
       // Program-Fix 25: unset ⇒ free-form exactly as before. alertDead skips
       // ops.alert, so a skipped call would be a SILENT alert — never skip here.
       const opsTemplate = env.whatsappOpsAlertTemplate;
+      // 2026-10-03: the ops alert comes from the same bot number customers chat
+      // with, so a free-form alert is labelled as staff-only. A tester's phone
+      // that is also the ops phone can never mistake it for a customer message.
+      const staffText = `${OPS_ALERT_TEXT_PREFIX}${str(p.message)}`;
       if (!opsTemplate) {
-        await deps.sendText(to, str(p.message));
+        await deps.sendText(to, staffText);
         return;
       }
       const out = await sendBusinessInitiated(
         to,
         {
           template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(str(p.message))] },
-          fallbackText: str(p.message),
+          fallbackText: staffText,
         },
         undefined, // the platform number, as the free-form path
         { partnerId: DEFAULT_PARTNER_ID, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },

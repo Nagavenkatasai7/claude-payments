@@ -54,6 +54,9 @@ function workerDeps(): WorkerDeps {
 beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
+  // The sender chatted in the last 24 hours, so the "delivered" notice is the
+  // plain text (2026-10-03: outside the window it would be the template).
+  for (const tenant of ['default', 'acme']) await store.recordInboundNow(tenant, '15551230000');
   outbox = createOutboxRepo(db);
   sendText.mockClear();
   sendTemplate.mockClear();

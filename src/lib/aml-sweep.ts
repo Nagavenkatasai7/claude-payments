@@ -8,7 +8,7 @@ import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { env } from '@/lib/env';
 import { logWarn } from '@/lib/log';
 import { resolveCorridorRules } from '@/lib/compliance-config';
-import { cluster, firstTransfer, structuring, type AmlHit, type AmlRuleConfig } from '@/lib/aml-rules';
+import { amlAlertMessage, cluster, firstTransfer, structuring, type AmlHit, type AmlRuleConfig } from '@/lib/aml-rules';
 import { destinationBidx, senderBidx } from '@/lib/aml-bidx';
 import type { Partner, PartnerId, Transfer } from '@/lib/types';
 
@@ -308,7 +308,7 @@ async function evaluateRow(
       const enqueued = await createOutboxRepo(tx).enqueue(
         'ops.alert',
         // The handler sends p.message only (outbox-worker.ts ops.alert). Ids only: no PII.
-        { message: `AML ${hit.rule} on ${t.id}` },
+        { message: amlAlertMessage(hit.rule, t.id) },
         { dedupeKey },
       );
       if (enqueued) {

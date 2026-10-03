@@ -8,10 +8,21 @@
 
 import type { CurrencyCode, Schedule, Transfer } from './types';
 import { DEFAULT_BRAND } from './partner-config';
+import { NAME_MAX, safeDisplayText } from './untrusted-text';
 
 /** Program-Fix 49A: a blank/absent brand falls back to the SmartRemit default. */
 function brandOr(brand: string | undefined): string {
   return brand?.trim() || DEFAULT_BRAND;
+}
+
+/**
+ * A recipient name as it may appear in a template param or a business message:
+ * the same cleaning as recipientDisplayName (payment.ts) — web-address tokens
+ * stripped so an outsider-written name never becomes a link inside a
+ * business-verified message — and never empty (Meta rejects an empty param).
+ */
+function recipientOr(name: string | undefined): string {
+  return safeDisplayText(name, NAME_MAX) || 'your recipient';
 }
 
 // All new UTILITY templates use language code 'en' — matches the live
@@ -26,6 +37,8 @@ export const TEMPLATE_TRANSFER_IN_REVIEW = 'transfer_in_review';               /
 export const TEMPLATE_TRANSFER_RELEASED = 'transfer_released';                 // §3.6
 export const TEMPLATE_TRANSFER_CANCELLED = 'transfer_cancelled';              // §3.7
 export const TEMPLATE_VERIFICATION_REMINDER = 'verification_reminder';        // §3.8
+// 2026-10-03: the scheduled-send legal-name nudge (owner-steps guide B5 body).
+export const TEMPLATE_SCHEDULE_NAME_NEEDED = 'schedule_name_needed';
 
 /**
  * Ordered body params plus the single dynamic URL-button suffix token, for the
@@ -107,8 +120,9 @@ export function formatSourceAmount(amount: number, currency: CurrencyCode | stri
 const DUE_DAY = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
 
 /**
- * Scheduled-send name nudge (2026-10-02): free-form text (no approved template
- * yet, so it only lands inside the customer's 24-hour window). Fixed copy with
+ * Scheduled-send name nudge (2026-10-02): free-form text. Outside the customer's
+ * 24-hour window the cron sends the schedule_name_needed template instead
+ * (2026-10-03; until Meta approves it, this text goes either way). Fixed copy with
  * the partner's brand and the source amount only, never the recipient's
  * outsider-written name. `dueAt` is any instant on the Eastern due day.
  */
@@ -126,6 +140,47 @@ export function scheduleNameNeededText(
 }
 
 /**
+ * schedule_name_needed — the scheduled-send legal-name nudge as a template.
+ * Body: "Your scheduled {{1}} transfer of {{2}}, due {{3}}, needs your full
+ * legal name before it can go out. Please reply to this message with your full
+ * name exactly as it appears on your ID."
+ * Params: [brand, source amount, due day]. Never the recipient's name.
+ */
+export function scheduleNameNeededParams(
+  brand: string,
+  schedule: Pick<Schedule, 'amountUsd' | 'amountSource' | 'sourceCurrency'>,
+  dueAt: number,
+): string[] {
+  return [
+    brandOr(brand),
+    formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD'),
+    DUE_DAY.format(dueAt),
+  ];
+}
+
+/** The ready-to-send template for the scheduled-send legal-name nudge. */
+export function scheduleNameNeededTemplate(
+  brand: string,
+  schedule: Pick<Schedule, 'amountUsd' | 'amountSource' | 'sourceCurrency'>,
+  dueAt: number,
+): { name: string; lang: string; params: string[] } {
+  return { name: TEMPLATE_SCHEDULE_NAME_NEEDED, lang: TEMPLATE_LANG, params: scheduleNameNeededParams(brand, schedule, dueAt) };
+}
+
+/** The ready-to-send template for the sender's "delivered" notice (§3.2). */
+export function deliveredSenderTemplate(transfer: Transfer): { name: string; lang: string; params: string[] } {
+  return { name: TEMPLATE_TRANSFER_DELIVERED_SENDER, lang: TEMPLATE_LANG, params: transferDeliveredSenderParams(transfer) };
+}
+
+/**
+ * The ready-to-send template for the held ("in review") notice (§3.5). The
+ * ledger row carries no sender name, so {{1}} is "there" ("Hi there, …").
+ */
+export function inReviewTemplate(transfer: Transfer): { name: string; lang: string; params: string[] } {
+  return { name: TEMPLATE_TRANSFER_IN_REVIEW, lang: TEMPLATE_LANG, params: transferInReviewParams(transfer, 'there') };
+}
+
+/**
  * §3.2 transfer_delivered_sender — sender delivery confirmation.
  * Body: "Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}."
  * Params: [source amount, recipient name, transfer id]. No button.
@@ -136,16 +191,31 @@ export function transferDeliveredSenderParams(transfer: Transfer): string[] {
       transfer.totalChargeSource ?? transfer.totalChargeUsd,
       transfer.sourceCurrency ?? 'USD',
     ),
-    transfer.recipientName,
+    recipientOr(transfer.recipientName),
     transfer.id,
   ];
 }
 
+const SET_UP_DAY = new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
+
+/**
+ * The day a schedule was set up, e.g. "September 3, 2026" (Eastern), so a
+ * reminder names the customer's own schedule. 2026-10-03: a tester who had
+ * forgotten an old schedule read its reminder as another customer's message.
+ * An unparseable createdAt degrades to "an earlier date", never "Invalid Date".
+ */
+export function scheduleSetUpDay(createdAt: string): string {
+  const ms = Date.parse(createdAt);
+  return Number.isFinite(ms) ? SET_UP_DAY.format(ms) : 'an earlier date';
+}
+
 /**
  * §3.3 scheduled_payment_ready — recurring-transfer approval with pay link.
- * Body: "Hi {{1}}, your scheduled transfer of {{2}} to {{3}} is ready for approval..."
+ * Body: "Hi {{1}}, your {{2}} scheduled transfer of {{3}} to {{4}} is ready.
+ * You set up this schedule on {{5}}. Tap the button below to review and pay,
+ * or reply "cancel schedule" to stop it."
  * Button URL suffix {{1}} = the pay token (the freshly created transfer's id).
- * Params: body [sender name, amount, recipient], button token = transferId.
+ * Params: body [sender name, frequency, amount, recipient, set-up day], button token = transferId.
  */
 export function scheduledPaymentReadyParams(
   schedule: Schedule,
@@ -155,11 +225,27 @@ export function scheduledPaymentReadyParams(
   return {
     bodyParams: [
       senderName,
+      schedule.frequency,
       formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD'),
-      schedule.recipientName,
+      recipientOr(schedule.recipientName),
+      scheduleSetUpDay(schedule.createdAt),
     ],
     buttonToken: transferId,
   };
+}
+
+/**
+ * The free-form twin of scheduled_payment_ready, sent until the template is
+ * approved (and in-window only). Says which of the customer's schedules this
+ * is, when they set it up, and how to stop it (the bot's cancel_schedule).
+ */
+export function scheduledPaymentReadyText(brand: string, schedule: Schedule, url: string): string {
+  const amount = formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD');
+  return (
+    `Your ${schedule.frequency} scheduled ${brandOr(brand)} transfer of ${amount} to ${recipientOr(schedule.recipientName)} is ready. ` +
+    `You set up this schedule on ${scheduleSetUpDay(schedule.createdAt)}. Tap to pay: ${url}\n\n` +
+    `To stop this schedule, reply "cancel schedule".`
+  );
 }
 
 /**
@@ -176,7 +262,7 @@ export function paymentReminderParams(transfer: Transfer, senderName: string): T
         transfer.totalChargeSource ?? transfer.totalChargeUsd,
         transfer.sourceCurrency ?? 'USD',
       ),
-      transfer.recipientName,
+      recipientOr(transfer.recipientName),
     ],
     buttonToken: transfer.id,
   };
@@ -190,7 +276,7 @@ function senderAmountRecipientParams(transfer: Transfer, senderName: string): st
       transfer.totalChargeSource ?? transfer.totalChargeUsd,
       transfer.sourceCurrency ?? 'USD',
     ),
-    transfer.recipientName,
+    recipientOr(transfer.recipientName),
   ];
 }
 

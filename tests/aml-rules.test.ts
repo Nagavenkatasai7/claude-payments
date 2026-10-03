@@ -4,6 +4,7 @@ import {
   firstTransfer,
   cluster,
   AML_DEFAULTS,
+  amlAlertMessage,
   type SenderAmlStats,
 } from '@/lib/aml-rules';
 
@@ -93,5 +94,22 @@ describe('cluster (R3)', () => {
     expect(cluster(2, cfg)).toBeNull();
     expect(cluster(3, cfg)).toMatchObject({ rule: 'cluster', window: '30d', count: 3 });
     expect(cluster(5, cfg)).toMatchObject({ count: 5 });
+  });
+});
+
+describe('amlAlertMessage (2026-10-03: readable staff alert, ids only)', () => {
+  it('says what the rule means, keeps the rule code and the transfer id, and points at the dashboard', () => {
+    expect(amlAlertMessage('new_beneficiary', 'tx_1')).toBe(
+      'AML review needed: a large send to a new recipient on transfer tx_1 (rule new_beneficiary). Review it in the admin dashboard.',
+    );
+  });
+
+  it('has a plain-English reason for every rule', () => {
+    for (const rule of ['structuring', 'first_transfer', 'new_beneficiary', 'cluster'] as const) {
+      const m = amlAlertMessage(rule, 'tx_9');
+      expect(m).toContain(`(rule ${rule})`);
+      expect(m).toContain('tx_9');
+      expect(m).not.toContain('undefined');
+    }
   });
 });

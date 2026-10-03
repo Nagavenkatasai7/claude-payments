@@ -15,7 +15,7 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
         ...r,
         enqueue: async (...args: Parameters<typeof r.enqueue>) => {
           const payload = args[1] as { message?: string };
-          if (failBox.failFor && String(payload.message ?? '').endsWith(failBox.failFor)) throw new Error('db down');
+          if (failBox.failFor && String(payload.message ?? '').includes(`transfer ${failBox.failFor} `)) throw new Error('db down');
           return r.enqueue(...args);
         },
       };
@@ -43,6 +43,7 @@ vi.mock('@/db/repos/partner-repo', async (orig) => {
 });
 
 import { amlSweep, AML_CURSOR_KEY, AML_LOCK_KEY } from '@/lib/aml-sweep';
+import { amlAlertMessage } from '@/lib/aml-rules';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { settleOrHold } from '@/lib/settlement';
 import { newTransferId } from '@/lib/id';
@@ -128,7 +129,7 @@ describe('amlSweep — structuring', () => {
     expect(s).toHaveLength(1);
     expect(s[0]).toMatchObject({ kind: 'ops.alert', dedupe_key: `aml:structuring:${ids[2]}` });
     // The payload is the message only: ids, no phone / name / destination.
-    expect(s[0].payload).toEqual({ message: `AML structuring on ${ids[2]}` });
+    expect(s[0].payload).toEqual({ message: amlAlertMessage('structuring', ids[2]) });
     const a = await amlAudits('structuring');
     expect(a).toHaveLength(1);
     expect(a[0]).toMatchObject({ partner_id: 'default', actor_type: 'system', subject_id: ids[2] });
@@ -200,7 +201,7 @@ describe('amlSweep — beneficiary clustering', () => {
     const c = await alerts('aml:cluster:');
     expect(c).toHaveLength(1);
     expect(c[0].dedupe_key).toMatch(/^aml:cluster:default:[0-9a-f]{64}:\d{4}-\d{2}$/);
-    expect(c[0].payload).toEqual({ message: `AML cluster on ${ids[2]}` });
+    expect(c[0].payload).toEqual({ message: amlAlertMessage('cluster', ids[2]) });
     expect(await amlAudits('cluster')).toHaveLength(1);
   });
 

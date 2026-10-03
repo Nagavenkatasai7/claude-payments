@@ -8,9 +8,14 @@ import {
   TEMPLATE_TRANSFER_RELEASED,
   TEMPLATE_TRANSFER_CANCELLED,
   TEMPLATE_VERIFICATION_REMINDER,
+  TEMPLATE_SCHEDULE_NAME_NEEDED,
+  scheduleNameNeededParams,
+  scheduleNameNeededTemplate,
   formatSourceAmount,
   transferDeliveredSenderParams,
   scheduledPaymentReadyParams,
+  scheduledPaymentReadyText,
+  scheduleSetUpDay,
   paymentReminderParams,
   transferInReviewParams,
   transferReleasedParams,
@@ -124,10 +129,17 @@ describe('transferDeliveredSenderParams (§3.2 — [amount, recipient, id])', ()
   });
 });
 
-describe('scheduledPaymentReadyParams (§3.3 — body [name, amount, recipient] + URL button token)', () => {
-  it('returns bodyParams [senderName, amount, recipient] in order', () => {
+describe('scheduledPaymentReadyParams (§3.3 — body [name, frequency, amount, recipient, set-up day] + URL button token)', () => {
+  it('returns bodyParams [senderName, frequency, amount, recipient, set-up day] in order', () => {
     const result = scheduledPaymentReadyParams(makeSchedule(), 'tx_a1b2c3', 'Anand');
-    expect(result.bodyParams).toEqual(['Anand', '$100.00', 'Priya']);
+    // createdAt 2026-05-30T00:00Z is May 29 in New York.
+    expect(result.bodyParams).toEqual(['Anand', 'monthly', '$100.00', 'Priya', 'May 29, 2026']);
+  });
+
+  it('names a weekly schedule as weekly', () => {
+    const result = scheduledPaymentReadyParams(makeSchedule({ frequency: 'weekly', createdAt: '2026-09-03T15:00:00.000Z' }), 'tx_1', 'Anand');
+    expect(result.bodyParams[1]).toBe('weekly');
+    expect(result.bodyParams[4]).toBe('September 3, 2026');
   });
 
   it('uses the passed-in transferId as the URL button token (NOT schedule.id)', () => {
@@ -147,14 +159,32 @@ describe('scheduledPaymentReadyParams (§3.3 — body [name, amount, recipient] 
       'tx_1',
       'Anand',
     );
-    expect(result.bodyParams[1]).toBe('£250.00');
+    expect(result.bodyParams[2]).toBe('£250.00');
   });
 
   it('falls back to amountUsd/USD when amountSource is undefined', () => {
     const s = makeSchedule({ amountUsd: 99 });
     delete (s as Partial<Schedule>).amountSource;
     const result = scheduledPaymentReadyParams(s, 'tx_1', 'Anand');
-    expect(result.bodyParams[1]).toBe('$99.00');
+    expect(result.bodyParams[2]).toBe('$99.00');
+  });
+});
+
+describe('scheduledPaymentReadyText (free-form twin, 2026-10-03)', () => {
+  it('names the schedule, the day it was set up, the link and how to stop it', () => {
+    const text = scheduledPaymentReadyText('SmartRemit', makeSchedule({ amountSource: 500, recipientName: 'Mom', createdAt: '2026-09-03T15:00:00.000Z' }), 'https://smartremit.ai/pay/tx_1');
+    expect(text).toBe(
+      'Your monthly scheduled SmartRemit transfer of $500.00 to Mom is ready. ' +
+        'You set up this schedule on September 3, 2026. Tap to pay: https://smartremit.ai/pay/tx_1\n\n' +
+        'To stop this schedule, reply "cancel schedule".',
+    );
+  });
+
+  it('a blank brand falls back to the default; an unparseable createdAt never prints Invalid Date', () => {
+    const text = scheduledPaymentReadyText('  ', makeSchedule({ createdAt: 'nope' }), 'u');
+    expect(text).toContain('SmartRemit transfer');
+    expect(text).toContain('set up this schedule on an earlier date');
+    expect(scheduleSetUpDay('nope')).toBe('an earlier date');
   });
 });
 
@@ -283,5 +313,25 @@ describe('scheduleNameNeededText', () => {
   it('never carries the recipient name', () => {
     const text = scheduleNameNeededText('Acme Remit', s, { dueToday: true, dueAt: Date.now() });
     expect(text).not.toContain('Mom');
+  });
+});
+
+describe('schedule_name_needed template (2026-10-03)', () => {
+  const s = { amountUsd: 200, amountSource: 200, sourceCurrency: 'USD' } as const;
+  const dueAt = Date.parse('2026-05-23T16:00:00Z');
+
+  it('params are [brand, source amount, Eastern due day], never a recipient name', () => {
+    expect(scheduleNameNeededParams('Acme Remit', s, dueAt)).toEqual(['Acme Remit', '$200.00', 'Saturday, May 23']);
+  });
+
+  it('a blank brand falls back so Meta never gets an empty param', () => {
+    expect(scheduleNameNeededParams('', s, dueAt)[0]).not.toBe('');
+  });
+
+  it('the ready-to-send template carries the fixed name and language', () => {
+    expect(scheduleNameNeededTemplate('Acme Remit', s, dueAt)).toEqual({
+      name: TEMPLATE_SCHEDULE_NAME_NEEDED, lang: TEMPLATE_LANG, params: ['Acme Remit', '$200.00', 'Saturday, May 23'],
+    });
+    expect(TEMPLATE_SCHEDULE_NAME_NEEDED).toBe('schedule_name_needed');
   });
 });

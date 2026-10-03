@@ -19,6 +19,7 @@ export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
 export const RECIPIENT_TEMPLATE_LANG = 'en';
 
 import type { IncomingMessage, UnsupportedMediaType } from './types';
+import { isMetaAccountField } from './meta-account-events';
 import { isOptOutKeyword, isResumeKeyword } from './consent';
 export type { IncomingMessage }; // re-export for any caller using @/lib/whatsapp
 
@@ -334,6 +335,9 @@ export function parseWebhook(body: unknown): WebhookChange[] {
       for (const change of changes) {
         const value = change && typeof change === 'object' ? change.value : undefined;
         if (!value || typeof value !== 'object') continue;
+        // Account events (template status, number quality) are not message
+        // changes: meta-account-events.ts reads them (2026-10-03).
+        if (isMetaAccountField((change as { field?: unknown }).field)) continue;
         out.push(parseChange(value));
       }
     }
