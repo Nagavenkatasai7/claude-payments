@@ -1259,6 +1259,51 @@ export function createTransferRepo(
       return page(conds.length ? and(...conds) : and(sql`true`), req);
     },
 
+    /**
+     * Lost-features restore p1 B1: the /partner transfer list. adminList's tenant + status +
+     * environment page plus the optional search filters, all ANDed with `partner_id = $p` (REQUIRED):
+     *  - text: recipient_name ILIKE %text% (plaintext by design, CLAUDE.md crypto-06) OR an id prefix;
+     *  - digits: payout_destination_last4 = digits (exactly 4 digits) OR a sender-phone suffix;
+     *  - from / toExclusive: created_at >= from AND created_at < toExclusive;
+     *  - assignedTo: assigned_to = $u.
+     * Every pattern goes through escapeLike, so a term is always a literal. Masked rows; keyset paging
+     * as every list. The contains / suffix matches cannot use an index: fine for one tenant at
+     * 25 rows a page today; a trigram index would be a later migration.
+     */
+    listForPartner(
+      partnerId: PartnerId,
+      req: PageReq & {
+        status?: TransferStatus;
+        environment: TransferEnvironment;
+        text?: string;
+        digits?: string;
+        from?: Date;
+        toExclusive?: Date;
+        assignedTo?: string;
+      },
+    ): Promise<Page<Transfer>> {
+      if (typeof partnerId !== 'string' || partnerId.length === 0) throw new Error('listForPartner: a tenant is required');
+      const conds = [eq(transfers.partnerId, partnerId), eq(transfers.environment, req.environment)];
+      if (req.status) conds.push(eq(transfers.status, req.status));
+      if (req.text) {
+        const lit = escapeLike(req.text);
+        conds.push(
+          or(
+            sql`${transfers.recipientName} ILIKE ${`%${lit}%`} ESCAPE '\\'`,
+            sql`${transfers.id} LIKE ${`${lit}%`} ESCAPE '\\'`,
+          )!,
+        );
+      }
+      if (req.digits) {
+        const suffix = sql`${transfers.phone} LIKE ${`%${escapeLike(req.digits)}`} ESCAPE '\\'`;
+        conds.push(req.digits.length === 4 ? or(eq(transfers.payoutDestinationLast4, req.digits), suffix)! : suffix);
+      }
+      if (req.from) conds.push(gte(transfers.createdAt, req.from));
+      if (req.toExclusive) conds.push(lt(transfers.createdAt, req.toExclusive));
+      if (req.assignedTo) conds.push(eq(transfers.assignedTo, req.assignedTo));
+      return page(and(...conds), req);
+    },
+
     /** Replaces the full-ledger scan in upsertOnFirstInbound (grandfathering, per tenant). */
     async firstTransferAt(partnerId: PartnerId, phone: string): Promise<string | null> {
       const rows = await db

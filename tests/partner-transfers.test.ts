@@ -3,6 +3,7 @@ import {
   TRANSFER_STATUSES,
   PARTNER_TRANSFERS_PAGE_SIZE,
   parseTransferFilters,
+  dayBounds,
   encodeTransferCursor,
   decodeTransferCursor,
   maskRecipientName,
@@ -110,6 +111,40 @@ describe('parseTransferFilters', () => {
   it('the page size is bounded', () => {
     expect(PARTNER_TRANSFERS_PAGE_SIZE).toBeGreaterThan(0);
     expect(PARTNER_TRANSFERS_PAGE_SIZE).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('parseTransferFilters: search token, dates, mine (lost-features p1 B1)', () => {
+  it('keeps a token-shaped s and drops anything else', () => {
+    const tok = 'v2.k0.' + ['aa', 'bb', 'cc', 'dd'].join('.');
+    expect(parseTransferFilters({ s: tok }).s).toBe(tok);
+    expect(parseTransferFilters({ s: 'Testname' }).s).toBeUndefined();
+    expect(parseTransferFilters({ s: '14155550101' }).s).toBeUndefined();
+    expect(parseTransferFilters({ s: 'v1.' + 'a'.repeat(2000) }).s).toBeUndefined();
+  });
+  it('accepts strict YYYY-MM-DD days only, and swaps a reversed range', () => {
+    expect(parseTransferFilters({ from: '2026-09-01', to: '2026-09-30' })).toMatchObject({ from: '2026-09-01', to: '2026-09-30' });
+    expect(parseTransferFilters({ from: '2026-09-30', to: '2026-09-01' })).toMatchObject({ from: '2026-09-01', to: '2026-09-30' });
+    expect(parseTransferFilters({ from: '2026-02-30' }).from).toBeUndefined();
+    expect(parseTransferFilters({ from: '2026-9-1' }).from).toBeUndefined();
+    expect(parseTransferFilters({ to: "2026-09-01' OR 1=1" }).to).toBeUndefined();
+    expect(parseTransferFilters({ from: '1999-12-31' }).from).toBeUndefined();
+  });
+  it('mine is exactly 1', () => {
+    expect(parseTransferFilters({ mine: '1' }).mine).toBe(true);
+    expect(parseTransferFilters({ mine: 'yes' }).mine).toBeUndefined();
+  });
+  it('dayBounds turns the days into a UTC [from, to + 1 day) range', () => {
+    expect(dayBounds({ from: '2026-09-01', to: '2026-09-02' })).toEqual({
+      from: new Date('2026-09-01T00:00:00.000Z'),
+      toExclusive: new Date('2026-09-03T00:00:00.000Z'),
+    });
+    expect(dayBounds({})).toEqual({});
+  });
+  it('transfersListHref carries the new keys so the pager keeps them', () => {
+    expect(transfersListHref({ environment: 'live', s: 'v1.a.b.c.d', from: '2026-09-01', to: '2026-09-02', mine: true, cursor: 'c|x' })).toBe(
+      `/partner/transfers?s=v1.a.b.c.d&from=2026-09-01&to=2026-09-02&mine=1&cursor=${encodeTransferCursor('c|x')}`,
+    );
   });
 });
 
