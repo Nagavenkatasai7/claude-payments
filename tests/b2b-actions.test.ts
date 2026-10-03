@@ -166,3 +166,21 @@ describe('reissueB2bInvoiceAction: tenant resolved from the invoice (Program-Fix
     expect(await store.getB2bInvoice('reissue-inv_a')).toBeNull();
   });
 });
+
+describe('lost-features A6: the legacy actions run through the shared core', { retry: 0 }, () => {
+  it('the audit row carries the actor scope (and reissuedAs), written with the change', async () => {
+    await store.saveB2bInvoice(invoice({ id: 'inv_a', partnerId: 'tenant_a' }));
+    await voidB2bInvoiceAction(form({ id: 'inv_a' }));
+    expect((await auditRows('b2b.invoice.void', 'inv_a'))[0].meta).toEqual({ actorScope: 'platform' });
+    currentStaff = staff({ username: 'a_admin', partnerId: 'tenant_a' });
+    await reissueB2bInvoiceAction(form({ id: 'inv_a' }));
+    expect((await auditRows('b2b.invoice.reissue', 'inv_a'))[0].meta).toEqual({ actorScope: 'partner', reissuedAs: 'reissue-inv_a' });
+  });
+  it('a repeated reissue lands on the same clone and is audited once', async () => {
+    await store.saveB2bInvoice(invoice({ id: 'inv_a', partnerId: 'tenant_a', status: 'voided' }));
+    await reissueB2bInvoiceAction(form({ id: 'inv_a' }));
+    await reissueB2bInvoiceAction(form({ id: 'inv_a' }));
+    expect(await auditRows('b2b.invoice.reissue', 'inv_a')).toHaveLength(1);
+    expect((await store.getB2bInvoice('reissue-inv_a'))?.status).toBe('unpaid');
+  });
+});

@@ -125,3 +125,20 @@ describe('settlementHealth', () => {
     expect(settlementHealth({ providerType: 'other', credentials: { settlementUrl: 'https://rail.example/s' } }, opts)).toBe('attention');
   });
 });
+
+describe('A12: team questions waiting on Home (admins only)', () => {
+  it('an admin sees the count of team questions waiting for an answer; zero is omitted', () => {
+    expect(buildPartnerHome({ ...base, teamQuestions: 3 }).actions).toContainEqual({ key: 'team_questions', count: 3 });
+    expect(buildPartnerHome({ ...base, teamQuestions: 0 }).actions.some((a) => a.key === 'team_questions')).toBe(false);
+  });
+  it('other roles never get the item, even when a count is passed', () => {
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      expect(buildPartnerHome({ ...base, role, teamQuestions: 3 }).actions.some((a) => a.key === 'team_questions')).toBe(false);
+    }
+  });
+  it('a failed read marks the list incomplete for an admin; not read at all changes nothing', () => {
+    expect(buildPartnerHome({ ...base, teamQuestions: null }).actionsIncomplete).toBe(true);
+    expect(buildPartnerHome({ ...base, role: 'agent', teamQuestions: null }).actionsIncomplete).toBe(false);
+    expect(buildPartnerHome(base).actionsIncomplete).toBe(false);
+  });
+});

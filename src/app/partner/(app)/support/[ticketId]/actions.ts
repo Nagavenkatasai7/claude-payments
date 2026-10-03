@@ -5,7 +5,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createAuditRepo, type SubjectAuditRow } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getRedis } from '@/lib/redis';
 import { pokeWorker } from '@/lib/outbox';
@@ -17,6 +17,7 @@ import {
   errName,
   escalationNote,
   getVisibleTicket,
+  isPartnerEscalation,
   isRequestKey,
   parseAssigneeField,
   parseEscalationReason,
@@ -24,6 +25,7 @@ import {
   parseStaffText,
   staffClaimKey,
   ticketNudgeUrl,
+  withdrawNote,
 } from '@/lib/partner-tickets';
 import { getAuthStore } from '@/lib/auth-store';
 import { PARTNER_TICKET_LEADS } from '@/lib/partner-access';
@@ -32,6 +34,7 @@ import { isTenantTicketAssignee } from '@/lib/ticket-assignable';
 import type { Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
+import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 
 // /partner/support/[ticketId] actions (UI redesign M3-19): reply, internal note, status. The
 // shared /partner action shape: the site-host guard, then the gate (outside any try); the target
@@ -39,8 +42,8 @@ import type { ActionResult } from '../../../action-result';
 // with the legacy worker rules (an agent works only tickets assigned to them; a Contact SmartRemit
 // thread is not a customer ticket), and every miss is the same not-found; input validated before
 // any write; the write, its outbox nudge and its audit row in ONE transaction. The nudges are the
-// ones the platform ticket actions enqueue (same text, same dedupe keys), so a ticket worked on
-// both surfaces never double-sends.
+// ones the platform ticket actions enqueue (same text from ticket-nudge.ts, same dedupe keys), so a
+// ticket worked on both surfaces never double-sends.
 
 /** Statuses a partner may not move a ticket out of (the platform escalation is SmartRemit's). */
 const PARTNER_LOCKED_STATUSES = ['waiting_admin'] as const;
@@ -88,7 +91,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
             'whatsapp.text',
             {
               to: ticket.customerPhone,
-              body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+              body: ticketReplyNudge(nudgeUrl),
               // The ticket's own tenant (a repo value, never a form field); creds resolve at drain.
               partnerId: ticket.partnerId,
               category: 'nonessential',
@@ -187,7 +190,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
           'whatsapp.text',
           {
             to: ticket.customerPhone,
-            body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+            body: ticketResolvedNudge(nudgeUrl),
             partnerId: ticket.partnerId,
             category: 'nonessential',
           },
@@ -322,6 +325,64 @@ export async function escalateAction(formData: FormData): Promise<ActionResult> 
   } catch (err) {
     if (err instanceof StatusRefusedError) return alreadyEscalated;
     logWarn('partner.support.escalate', errName(err), { ticketId: ticket.id });
+    return failed();
+  }
+  refresh(ticket.id);
+  return { ok: true };
+}
+
+/**
+ * Lost-features B9: withdraw an escalation the PARTNER raised (waiting_admin → open). Admin and
+ * support only (PARTNER_TICKET_LEADS: an agent escalates but does not take a ticket back, as for
+ * assign). Only when the ticket's latest escalation was the partner's own (isPartnerEscalation): a
+ * ticket SmartRemit escalated itself stays SmartRemit's. The reason is required (the escalate rule)
+ * and lands only in the sealed internal note; the guarded status move (onlyFrom waiting_admin), the
+ * note and ONE audit row commit together, so a double submit or a ticket SmartRemit already moved
+ * writes nothing. No customer nudge.
+ */
+export async function withdrawEscalationAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_TICKET_LEADS);
+  const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
+  if (!ticket) return notFound();
+  const refused: ActionResult = { ok: false, error: t('partner.support.withdrawRefused') };
+  if (ticket.status !== 'waiting_admin') return refused;
+  const parsed = parseEscalationReason(formData.get('reason'));
+  if (!parsed.ok) {
+    return { ok: false, error: t(parsed.error === 'number' ? 'partner.support.reasonHasNumber' : 'partner.support.reasonTooShort') };
+  }
+  let latest: SubjectAuditRow | null;
+  try {
+    latest = await createAuditRepo(getDb()).latestForSubject(ctx.partnerId, ticket.id, 'ticket.escalate');
+  } catch (err) {
+    logWarn('partner.support.withdraw', errName(err), { ticketId: ticket.id });
+    return failed();
+  }
+  if (!isPartnerEscalation(latest)) return { ok: false, error: t('partner.support.withdrawNotYours') };
+
+  try {
+    await getDb().transaction(async (tx) => {
+      const repo = createTicketRepo(tx);
+      if (!(await repo.updateStatus(ticket.id, 'open', { onlyFrom: ['waiting_admin'] }))) throw new StatusRefusedError();
+      await repo.appendMessage({
+        ticketId: ticket.id,
+        actorType: 'system',
+        actorId: 'system',
+        body: withdrawNote(parsed.reason),
+        internal: true,
+      });
+      await createAuditRepo(tx).record({
+        partnerId: ctx.partnerId,
+        actor: ctx.username,
+        actorType: 'staff',
+        action: 'ticket.escalation.withdraw',
+        subjectId: ticket.id,
+        meta: { actorScope: 'partner' },
+      });
+    });
+  } catch (err) {
+    if (err instanceof StatusRefusedError) return refused;
+    logWarn('partner.support.withdraw', errName(err), { ticketId: ticket.id });
     return failed();
   }
   refresh(ticket.id);

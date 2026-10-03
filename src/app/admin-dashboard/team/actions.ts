@@ -24,6 +24,7 @@ import {
   type StaffPasswordFormState,
 } from '@/lib/staff-password';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { changeOwnPassword, type PasswordChangeCode } from '@/lib/staff-password-change';
 
 /**
  * Team management — platform-admin only. Every action is a public POST endpoint,
@@ -293,94 +294,34 @@ function policyRefusal(err: unknown): StaffPasswordFormState {
 
 /**
  * Change your OWN password (any signed-in staff member, from
- * /admin-dashboard/account). Reserves an attempt on the SAME buckets as the
- * login (same seed-admin predicate), verifies the current password, applies
- * the policy (breach check fail-OPEN: an HIBP outage must never stop someone
- * rotating a leaked password), compare-and-sets the hash, revokes EVERY
- * session and mints a fresh one for this browser.
+ * /admin-dashboard/account). The work is the shared core (staff-password-change.ts,
+ * lost-features A14: the same core serves /partner/security); this wrapper keeps
+ * its exact messages.
  */
+const OWN_PASSWORD_MESSAGES: Record<Exclude<PasswordChangeCode, 'policy' | 'gone'>, string> = {
+  missing: 'Enter your current password and a new one.',
+  mismatch: 'The new passwords do not match.',
+  throttled: 'Too many attempts. Try again later.',
+  wrong_current: 'Your current password is incorrect.',
+  same: 'Choose a new password that differs from the current one.',
+  concurrent: PASSWORD_CHANGED_CONCURRENTLY,
+};
+
 export async function changeOwnPasswordAction(
   _prev: StaffPasswordFormState,
   formData: FormData,
 ): Promise<StaffPasswordFormState> {
   await refuseOnSiteHost();
   const me = await requireStaffSelf();
-  const current = String(formData.get('currentPassword') ?? '');
-  const next = String(formData.get('newPassword') ?? '');
-  const confirm = String(formData.get('confirmPassword') ?? '');
-  if (!current || !next) return { ok: false, message: 'Enter your current password and a new one.' };
-  if (next !== confirm) return { ok: false, message: 'The new passwords do not match.' };
-
-  const store = getAuthStore();
-  const fresh = await store.getStaff(me.username);
-  if (!fresh) redirect('/login');
-  const ip = clientIpFrom(await headers());
-  const audit = getStaffAuthAudit();
-  const guard = getStaffLoginGuard();
-  const reservation = await guard.reserve(me.username, ip, { seedExempt: isSeedAdminRecord(fresh) });
-  if (!reservation.allowed) {
-    if (reservation.justTripped) {
-      await audit.record({
-        action: 'auth.login.throttled',
-        actorType: 'staff',
-        actor: me.username,
-        subjectId: me.username,
-        partnerId: fresh.partnerId,
-        ip,
-        meta: { bucket: reservation.justTripped, context: 'password.change' },
-      });
-    }
-    return { ok: false, message: 'Too many attempts. Try again later.' };
-  }
-  if (!(await verifyPassword(current, fresh.passwordHash))) {
-    await audit.record({
-      action: 'auth.login.failed',
-      actorType: 'staff',
-      actor: me.username,
-      subjectId: me.username,
-      partnerId: fresh.partnerId,
-      ip,
-      meta: { reason: 'invalid', context: 'password.change' },
-    });
-    return { ok: false, message: 'Your current password is incorrect.' };
-  }
-  // The current password is proven: this attempt never counts against the budget.
-  await guard.refund(reservation.keys);
-  await guard.clear(me.username, ip);
-  if (next === current) return { ok: false, message: 'Choose a new password that differs from the current one.' };
-  try {
-    await assertStaffPasswordPolicy(next, { failClosed: false });
-  } catch (err) {
-    return policyRefusal(err);
-  }
-
-  const newHash = await hashPassword(next);
-  let wrote = await store.setPasswordHash(me.username, fresh.passwordHash, newHash);
-  if (!wrote) {
-    // Retry ONCE, only when the fresh hash still proves the current password
-    // (a concurrent lazy rehash of the same password). A reset by an admin no
-    // longer verifies, so it is reported, never overwritten.
-    const again = await store.getStaff(me.username);
-    if (again && (await verifyPassword(current, again.passwordHash))) {
-      wrote = await store.setPasswordHash(me.username, again.passwordHash, newHash);
-    }
-  }
-  // Re-read after the write: the compare-and-set is not atomic (auth-store).
-  if (!wrote || (await store.getStaff(me.username))?.passwordHash !== newHash) {
-    return { ok: false, message: PASSWORD_CHANGED_CONCURRENTLY };
-  }
-  await store.deleteAllSessionsFor(me.username);
-  const token = await store.createSession(me.username);
-  setStaffSessionCookie(await cookies(), token); // Program-Fix 45 P1: the __Host- cookie
-  await audit.record({
-    action: 'auth.password.change',
-    actorType: 'staff',
-    actor: me.username,
-    subjectId: me.username,
-    partnerId: fresh.partnerId,
-    ip,
+  const r = await changeOwnPassword(me, {
+    current: String(formData.get('currentPassword') ?? ''),
+    next: String(formData.get('newPassword') ?? ''),
+    confirm: String(formData.get('confirmPassword') ?? ''),
   });
-  return { ok: true, message: 'Password changed. Every other session was signed out.' };
+  if (r.ok) return { ok: true, message: 'Password changed. Every other session was signed out.' };
+  if (r.code === 'gone') redirect('/login');
+  if (r.code === 'policy') return { ok: false, message: r.policyMessage ?? '' };
+  return { ok: false, message: OWN_PASSWORD_MESSAGES[r.code] };
 }
 
 /**

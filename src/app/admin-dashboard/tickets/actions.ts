@@ -14,6 +14,7 @@ import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { ticketAssigneeRefusal, type AssigneeRefusal } from '@/lib/ticket-assignable';
+import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -125,7 +126,7 @@ export async function replyAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `You have a new reply from support — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+          body: ticketReplyNudge(nudgeUrl),
           partnerId: ticket.partnerId,
           // Program-Fix 49A: nonessential — suppressed after STOP (B5).
           category: 'nonessential',
@@ -236,7 +237,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
         'whatsapp.text',
         {
           to: ticket.customerPhone,
-          body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${nudgeUrl}`,
+          body: ticketResolvedNudge(nudgeUrl),
           partnerId: ticket.partnerId,
           category: 'nonessential', // Program-Fix 49A (B5)
         },

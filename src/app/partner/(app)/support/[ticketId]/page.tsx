@@ -1,25 +1,47 @@
+import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { ShieldAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
-import { PARTNER_ROUTES } from '../../../routes';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { PARTNER_ROUTES, routeAllows } from '../../../routes';
+import { partnerCustomerHref } from '../../../customer-link';
+import { isHeld, maskRecipientName } from '@/lib/partner-transfers';
 import { PARTNER_TICKET_LEADS } from '@/lib/partner-access';
 import { t } from '@/lib/i18n';
 import { maskPhoneLast4 } from '@/lib/mask';
 import { newRequestKey } from '@/lib/portal-request-key';
 import {
   PARTNER_TICKET_STATUSES,
+  TEAM_QUESTION_STATUSES,
+  canAnswerTeamQuestion,
   errName,
   getVisibleTicket,
+  isPartnerEscalation,
+  isTeamQuestion,
   isTicketId,
   tenantStaffUsernames,
 } from '@/lib/partner-tickets';
-import { Badge, Card, PageHeader } from '@/components/ds';
-import type { Ticket, TicketMessage } from '@/lib/types';
+import { Badge, Card, Money, PageHeader, StatusPill } from '@/components/ds';
+import type { PartnerCtx } from '@/lib/partner-access';
+import type { Ticket, TicketMessage, Transfer } from '@/lib/types';
 import { BackLink, TicketStatusBadge, formatWhen, priorityLabel, statusLabel } from '../support-bits';
-import { AssignForm, EscalateForm, FollowUpForm, NoteForm, ReplyForm, StatusForm } from './ticket-forms';
+import {
+  AssignForm,
+  EscalateForm,
+  FollowUpForm,
+  NoteForm,
+  ReplyForm,
+  StatusForm,
+  TeamAnswerForm,
+  TeamStatusForm,
+  WithdrawForm,
+} from './ticket-forms';
 import { tenantTicketAssignees } from '@/lib/ticket-assignable';
 import { logWarn } from '@/lib/log';
 
@@ -31,6 +53,9 @@ export const metadata: Metadata = { title: t('partner.support.ticketTitle'), rob
 // thread (admin: the tenant's; others: their own). Every miss is notFound(). The customer is
 // ••••last4 only: a customer message's author id IS the phone, so it is never rendered. Staff who
 // are not this tenant's members (SmartRemit staff) are labelled "SmartRemit", never by username.
+// Lost-features A12: an internal thread is addressed to SmartRemit or (a team question) to the
+// tenant's admins; a partner admin answers, resolves or closes a team question here. A thread
+// addressed to SmartRemit stays read-only for everyone but its opener's follow-ups.
 
 type Author = { label: string; mine: boolean };
 
@@ -70,6 +95,165 @@ function Thread({ messages, viewer, named }: { messages: TicketMessage[]; viewer
   );
 }
 
+/**
+ * Lost-features B9: may this viewer take the escalation back? Admin and support, a waiting_admin
+ * ticket, and the latest escalation was the partner's own (the action re-checks all of it). A failed
+ * read offers nothing.
+ */
+async function withdrawable(ctx: PartnerCtx, ticket: Ticket): Promise<boolean> {
+  if (ticket.status !== 'waiting_admin' || !PARTNER_TICKET_LEADS.roles.includes(ctx.role)) return false;
+  try {
+    return isPartnerEscalation(await createAuditRepo(getDb()).latestForSubject(ctx.partnerId, ticket.id, 'ticket.escalate'));
+  } catch (err) {
+    logWarn('partner.support.withdrawable', errName(err), { ticketId: ticket.id });
+    return false;
+  }
+}
+
+/**
+ * Lost-features B10: the ticket's linked transfer, read inside the SESSION tenant (getOwnedTransfer
+ * keeps the tenant in the WHERE, masked by default). A missing or another tenant's transfer is null
+ * (no card); a failed read is 'failed' (the old one-line reference).
+ */
+async function linkedTransfer(ctx: PartnerCtx, ticket: Ticket): Promise<Transfer | null | 'failed'> {
+  if (ticket.kind !== 'customer' || !ticket.transferId) return null;
+  try {
+    return await createTransferRepo(getDb()).getOwnedTransfer(ctx.partnerId, ticket.transferId);
+  } catch (err) {
+    logWarn('partner.support.linked_transfer', errName(err), { ticketId: ticket.id });
+    return 'failed';
+  }
+}
+
+/** Masked only: status, amount, created, the shortened recipient. Never the payout destination. */
+function LinkedTransferCard({ transfer, href }: { transfer: Transfer; href: string | null }) {
+  const rows: [string, ReactNode][] = [
+    [t('partner.support.linkedStatus'), <StatusPill key="s" status={transfer.status} refundStatus={transfer.refundStatus} />],
+    [t('partner.support.linkedAmount'), <Money key="a" amount={transfer.amountSource ?? transfer.amountUsd} currency={transfer.sourceCurrency ?? 'USD'} />],
+    [t('partner.support.linkedRecipient'), maskRecipientName(transfer.recipientName)],
+    [t('partner.support.linkedCreated'), formatWhen(transfer.createdAt)],
+  ];
+  return (
+    <section data-linked-transfer={transfer.id} className="mb-4 rounded-ds-inner border border-ds-border bg-ds-tint p-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-[15px] font-semibold text-ds-ink">{t('partner.support.linkedTitle')}</h3>
+        {isHeld(transfer) ? (
+          <Badge tone="warning">
+            <ShieldAlert aria-hidden="true" className="size-3.5" />
+            {t('partner.transfers.heldBadge')}
+          </Badge>
+        ) : null}
+      </div>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[14px]">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-ds-ink-muted">{label}</dt>
+            <dd className="text-right text-ds-ink">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {href ? (
+        <Link href={href} className="mt-3 inline-flex min-h-11 items-center text-[14px] font-semibold text-ds-primary underline-offset-4 hover:underline">
+          {t('partner.support.linkedOpen')}
+        </Link>
+      ) : (
+        <p className="mt-2 break-all font-mono text-[12.5px] text-ds-ink-muted">#{transfer.id}</p>
+      )}
+    </section>
+  );
+}
+
+type StatusOption = { value: Ticket['status']; label: string };
+
+/**
+ * The ordinary working cards of a customer ticket: reply, internal note, assign, escalate or
+ * withdraw, status. Every action re-gates and re-checks on the server.
+ */
+function CustomerTicketCards({
+  ticket,
+  requestKeys,
+  assignees,
+  assigneeLabel,
+  currentAssignee,
+  canWithdraw,
+  statusOptions,
+}: {
+  ticket: Ticket;
+  requestKeys: { reply: string; note: string };
+  assignees: { value: string; label: string }[] | null;
+  assigneeLabel: string;
+  currentAssignee: string;
+  canWithdraw: boolean;
+  statusOptions: StatusOption[];
+}) {
+  return (
+    <>
+      <Card as="section" className="p-4 sm:p-6">
+        <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.replyTitle')}</h2>
+        <ReplyForm id={ticket.id} requestKey={requestKeys.reply} withWaiting={ticket.status !== 'waiting_admin'} />
+      </Card>
+      <Card as="section" className="p-4 sm:p-6">
+        <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.noteTitle')}</h2>
+        <NoteForm id={ticket.id} requestKey={requestKeys.note} />
+      </Card>
+      {assignees ? (
+        <Card as="section" className="p-4 sm:p-6">
+          <h2 className="mb-1 text-[17px] font-semibold text-ds-ink">{t('partner.support.assignTitle')}</h2>
+          <p className="mb-3 text-[14px] text-ds-ink-muted">{assigneeLabel}</p>
+          <AssignForm
+            id={ticket.id}
+            current={assignees.some((a) => a.value === currentAssignee) ? currentAssignee : ''}
+            options={assignees}
+          />
+        </Card>
+      ) : null}
+      <Card as="section" className="p-4 sm:p-6">
+        <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.escalateTitle')}</h2>
+        {ticket.status === 'waiting_admin' ? (
+          <>
+            <p role="status" className="text-[15px] text-ds-ink-muted">
+              {t('partner.support.escalatedNote')}
+            </p>
+            {canWithdraw ? (
+              <div className="mt-4 border-t border-ds-border pt-4">
+                <h3 className="mb-1 text-[15px] font-semibold text-ds-ink">{t('partner.support.withdrawTitle')}</h3>
+                <p className="mb-3 text-[14px] text-ds-ink-muted">{t('partner.support.withdrawIntro')}</p>
+                <WithdrawForm id={ticket.id} />
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <EscalateForm id={ticket.id} />
+        )}
+      </Card>
+      {/* An escalated (waiting_admin) ticket is SmartRemit's to move: no partner status change. */}
+      {ticket.status === 'waiting_admin' ? null : (
+        <Card as="section" className="p-4 sm:p-6">
+          <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.statusTitle')}</h2>
+          <StatusForm id={ticket.id} options={statusOptions} />
+        </Card>
+      )}
+    </>
+  );
+}
+
+/** Lost-features A12: a partner admin answers, resolves or closes a team question. */
+function TeamQuestionCards({ ticket, requestKey }: { ticket: Ticket; requestKey: string }) {
+  const options = TEAM_QUESTION_STATUSES.filter((s) => s !== ticket.status).map((s) => ({ value: s, label: statusLabel(s) }));
+  return (
+    <>
+      <Card as="section" className="p-4 sm:p-6">
+        <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.contact.answerTitle')}</h2>
+        <TeamAnswerForm id={ticket.id} requestKey={requestKey} />
+      </Card>
+      <Card as="section" className="p-4 sm:p-6">
+        <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.contact.teamStatusTitle')}</h2>
+        <TeamStatusForm id={ticket.id} options={options} />
+      </Card>
+    </>
+  );
+}
+
 export default async function PartnerTicketPage({ params }: { params: Promise<{ ticketId: string }> }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const { ticketId } = await params;
@@ -106,7 +290,15 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
     ? t('partner.support.unassigned')
     : t('partner.support.assignedTo', { name: named.has(ticket.assignedTo) ? ticket.assignedTo : t('partner.support.from.platform') });
   const closed = ticket.status === 'closed';
-  const requestKeys = { reply: newRequestKey(), note: newRequestKey(), followUp: newRequestKey() };
+  // Lost-features B10: the masked linked-transfer card (everyone who sees the ticket; the transfer
+  // link for roles that may open transfers) and the ONE customer link (admin and agent; the helper
+  // checks the role and that the customer exists here). prefetch={false}: the customer page writes
+  // a pii.view row on render.
+  const [linked, customerHref, canWithdraw] = isCustomer
+    ? await Promise.all([linkedTransfer(ctx, ticket), partnerCustomerHref(ctx, ticket.customerPhone), withdrawable(ctx, ticket)])
+    : [null, null, false];
+  const transferHref = linked && linked !== 'failed' && routeAllows('transfers', ctx.role) ? `${PARTNER_ROUTES.transfers.href}/${linked.id}` : null;
+  const requestKeys = { reply: newRequestKey(), note: newRequestKey(), followUp: newRequestKey(), answer: newRequestKey() };
   const back = isCustomer
     ? { href: PARTNER_ROUTES.support.href, label: t('partner.support.back') }
     : { href: PARTNER_ROUTES.supportContact.href, label: t('partner.support.backContact') };
@@ -123,6 +315,16 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
         sub={
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {isCustomer ? <span>{t('partner.support.customer', { masked: maskPhoneLast4(ticket.customerPhone) })}</span> : null}
+            {isCustomer ? null : (
+              <Badge tone={isTeamQuestion(ticket) ? 'info' : 'neutral'}>
+                {isTeamQuestion(ticket) ? t('partner.contact.toTeam') : t('partner.contact.toSmartRemit')}
+              </Badge>
+            )}
+            {customerHref ? (
+              <Link href={customerHref} prefetch={false} className="font-semibold text-ds-primary underline-offset-4 hover:underline">
+                {t('partner.support.openCustomer')}
+              </Link>
+            ) : null}
             {isCustomer ? <span>{priorityLabel(ticket.priority)}</span> : null}
             <span>{t('partner.support.updated', { when: formatWhen(ticket.updatedAt) })}</span>
           </span>
@@ -132,7 +334,9 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:gap-6">
         <Card as="section" className="p-4 sm:p-6">
           <h2 className="mb-4 text-[17px] font-semibold text-ds-ink">{t('partner.support.threadTitle')}</h2>
-          {isCustomer && ticket.transferId ? (
+          {linked && linked !== 'failed' ? (
+            <LinkedTransferCard transfer={linked} href={transferHref} />
+          ) : linked === 'failed' && ticket.transferId ? (
             <p className="mb-4 break-all text-[13.5px] text-ds-ink-muted">
               {t('partner.support.transferRef', { id: ticket.transferId })}
             </p>
@@ -147,44 +351,26 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
               </p>
             </Card>
           ) : isCustomer ? (
-            <>
-              <Card as="section" className="p-4 sm:p-6">
-                <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.replyTitle')}</h2>
-                <ReplyForm id={ticket.id} requestKey={requestKeys.reply} withWaiting={ticket.status !== 'waiting_admin'} />
-              </Card>
-              <Card as="section" className="p-4 sm:p-6">
-                <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.noteTitle')}</h2>
-                <NoteForm id={ticket.id} requestKey={requestKeys.note} />
-              </Card>
-              {assignees ? (
-                <Card as="section" className="p-4 sm:p-6">
-                  <h2 className="mb-1 text-[17px] font-semibold text-ds-ink">{t('partner.support.assignTitle')}</h2>
-                  <p className="mb-3 text-[14px] text-ds-ink-muted">{assigneeLabel}</p>
-                  <AssignForm
-                    id={ticket.id}
-                    current={assignees.some((a) => a.value === currentAssignee) ? currentAssignee : ''}
-                    options={assignees}
-                  />
-                </Card>
-              ) : null}
-              <Card as="section" className="p-4 sm:p-6">
-                <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.escalateTitle')}</h2>
-                {ticket.status === 'waiting_admin' ? (
-                  <p role="status" className="text-[15px] text-ds-ink-muted">
-                    {t('partner.support.escalatedNote')}
-                  </p>
-                ) : (
-                  <EscalateForm id={ticket.id} />
-                )}
-              </Card>
-              {/* An escalated (waiting_admin) ticket is SmartRemit's to move: no partner status change. */}
-              {ticket.status === 'waiting_admin' ? null : (
-                <Card as="section" className="p-4 sm:p-6">
-                  <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.support.statusTitle')}</h2>
-                  <StatusForm id={ticket.id} options={statusOptions} />
-                </Card>
-              )}
-            </>
+            /*
+             * ── Two-step recovery slot (lost-features portal B4) ──
+             * A customer's request to remove two-step verification is a customer ticket with
+             * category MFA_RECOVERY_CATEGORY (src/lib/ticket-category.ts). Only its dedicated
+             * approve / decline actions may move it, so its card renders HERE INSTEAD OF the
+             * ordinary cards, as one more branch:
+             *   ticket.category === MFA_RECOVERY_CATEGORY ? <RecoveryCard … /> : <CustomerTicketCards … />
+             * Everything the ordinary cards need stays inside CustomerTicketCards.
+             */
+            <CustomerTicketCards
+              ticket={ticket}
+              requestKeys={requestKeys}
+              assignees={assignees}
+              assigneeLabel={assigneeLabel}
+              currentAssignee={currentAssignee}
+              canWithdraw={canWithdraw}
+              statusOptions={statusOptions}
+            />
+          ) : canAnswerTeamQuestion(ctx, ticket) ? (
+            <TeamQuestionCards ticket={ticket} requestKey={requestKeys.answer} />
           ) : ticket.openedBy === ctx.username ? (
             <Card as="section" className="p-4 sm:p-6">
               <h2 className="mb-3 text-[17px] font-semibold text-ds-ink">{t('partner.contact.followUpTitle')}</h2>

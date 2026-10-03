@@ -625,9 +625,33 @@ export function createAuditRepo(db: DbOrTx) {
         at: r.at.toISOString(),
       };
     },
+
+    /**
+     * Lost-features B9: the newest row of ONE action for ONE subject, tenant-keyed (partner_id is
+     * always in the WHERE; an empty tenant matches nothing). The partner "withdraw escalation" reads
+     * who raised a ticket's escalation through it (the (subject_id, action) index).
+     */
+    async latestForSubject(partnerId: PartnerId, subjectId: string, action: string): Promise<SubjectAuditRow | null> {
+      if (!partnerId) return null;
+      const rows = await db
+        .select({ actor: auditEvents.actor, meta: auditEvents.meta, at: auditEvents.at })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.partnerId, partnerId), eq(auditEvents.subjectId, subjectId), eq(auditEvents.action, action)))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(1);
+      const r = rows[0];
+      return r ? { actor: r.actor, meta: (r.meta ?? {}) as Record<string, unknown>, at: r.at.toISOString() } : null;
+    },
   };
 }
 export type AuditRepo = ReturnType<typeof createAuditRepo>;
+
+/** One audit row of a subject's history (lost-features B9). */
+export interface SubjectAuditRow {
+  actor: string;
+  meta: Record<string, unknown>;
+  at: string;
+}
 
 /** One durable KYC decision row, as the customer page renders it (Program-Fix 28). */
 export interface KycAuditRow {
@@ -868,6 +892,16 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
       const rows = await db
         .select()
         .from(b2bInvoices)
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(limit);
+      return rows.map(toDomain);
+    },
+    /** One tenant's newest invoices, bounded (lost-features A6: /partner/invoices). */
+    async listRecentInvoices(partnerId: PartnerId, limit: number): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(eq(b2bInvoices.partnerId, partnerId))
         .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
         .limit(limit);
       return rows.map(toDomain);

@@ -333,3 +333,14 @@ describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is 
     expect(await detail('tr_A_edd')).not.toContain(RELEASE);
   });
 });
+
+describe('lost-features A6: the Business invoices link', () => {
+  it('admins get it in the header; agents and finance do not', async () => {
+    await asAdmin();
+    expect(await list()).toContain('href="/partner/invoices"');
+    await asAgent();
+    expect(await list()).not.toContain('href="/partner/invoices"');
+    await signInAs(redis, cookieJar, { username: 'pa-fin', partnerId: 'pa', role: 'finance' as 'admin' });
+    expect(await list()).not.toContain('href="/partner/invoices"');
+  });
+});

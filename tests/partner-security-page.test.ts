@@ -74,6 +74,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
 import SecurityPage from '@/app/partner/(app)/security/page';
+import { t } from '@/lib/i18n';
 import HomePage from '@/app/partner/(app)/page';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
@@ -134,10 +135,27 @@ describe('/partner/security', () => {
     enrolled.add('u1');
     const html = await render(SecurityPage());
     expect(html).toContain('On');
-    expect(html).not.toContain('name="currentPassword"');
+    expect(html).not.toContain(t('partner.security.start'));
     expect(html).not.toContain('data-testid="partner-mfa-required"');
     expect(html).toContain('href="/partner"');
     expect(await redis.get(`${MFA_PENDING_PREFIX}u1`)).toBeNull();
+  });
+  // Lost-features A14: the password card, for every role, once two-step setup is not pending.
+  it('the password card shows when nothing is pending (any role, finance too) and is absent while enrolment is pending', async () => {
+    for (const [i, role] of (['admin', 'agent', 'support', 'finance'] as const).entries()) {
+      await signInAs({ username: `pw${i}`, partnerId: 'pa', role });
+      enrolled.add(`pw${i}`);
+      const html = await render(SecurityPage());
+      expect(html, role).toContain('data-testid="partner-password-form"');
+      expect(html, role).toContain(`>${t('partner.security.password.title')}</h2>`);
+      expect(html, role).toContain('name="newPassword"');
+      expect(html, role).not.toMatch(/name="(username|partnerId)"/);
+    }
+    await signInAs({ username: 'pending1', partnerId: 'pa', role: 'agent' });
+    await redis.set(`${MFA_PENDING_PREFIX}pending1`, '1');
+    const html = await render(SecurityPage());
+    expect(html).not.toContain('data-testid="partner-password-form"');
+    expect(html).not.toContain(`>${t('partner.security.password.title')}</h2>`);
   });
   it('renders no session or tenant detail beyond the page (no username, no partner id)', async () => {
     await signInAs({ username: 'pa-secret-user', partnerId: 'pa', role: 'admin' });

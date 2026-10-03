@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { lastLoginLabel, rosterRows } from '@/lib/partner-staff-view';
+import { lastLoginLabel, permissionFlags, rosterRows } from '@/lib/partner-staff-view';
 import type { Staff } from '@/lib/types';
 
 // UI redesign M3-8: the Staff page's relative "last sign-in" (pure, injected clock).
@@ -51,5 +51,29 @@ describe('rosterRows', () => {
   });
   it('any other role gets nothing', () => {
     for (const role of ['support', 'finance', 'root'] as const) expect(rosterRows(members, role as never)).toEqual([]);
+  });
+});
+
+// Lost-features A13 (review 2.4): the admin view shows each member's per-staff permissions, read
+// only (SmartRemit sets them). Admins hold every permission by role; other roles show what is on.
+describe('permissionFlags', () => {
+  const base = { username: 'u', name: 'U', passwordHash: 'x', createdAt: '2026-01-01T00:00:00.000Z', partnerId: 'pa' };
+  const none = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
+  it('an admin: every permission, by role', () => {
+    expect(permissionFlags({ ...base, role: 'admin', permissions: none })).toEqual({ byRole: true, keys: [] });
+  });
+  it('an agent: the flags that are on, in a fixed order', () => {
+    expect(permissionFlags({ ...base, role: 'agent', permissions: { canCancel: true, canResend: false, canAssign: true, canRevealPii: true } })).toEqual({
+      byRole: false,
+      keys: ['partner.staff.perm.cancel', 'partner.staff.perm.assign', 'partner.staff.perm.reveal'],
+    });
+    expect(permissionFlags({ ...base, role: 'agent', permissions: { canCancel: false, canResend: true, canAssign: false } })).toEqual({
+      byRole: false,
+      keys: ['partner.staff.perm.resend'],
+    });
+  });
+  it('none on, and finance (which never holds legacy permissions), show none', () => {
+    expect(permissionFlags({ ...base, role: 'agent', permissions: none })).toEqual({ byRole: false, keys: [] });
+    expect(permissionFlags({ ...base, role: 'finance', permissions: { ...none, canCancel: true } })).toEqual({ byRole: false, keys: [] });
   });
 });

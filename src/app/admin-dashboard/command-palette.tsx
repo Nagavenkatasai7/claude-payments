@@ -10,6 +10,7 @@ import {
 import { useRouter } from 'next/navigation';
 import { Icon } from './icons';
 import type { CommandItem } from './command-items';
+import { matchesCommand } from '@/lib/command-match';
 
 /**
  * Cmd-K command palette for the admin dashboard.
@@ -33,17 +34,6 @@ import type { CommandItem } from './command-items';
 const KBD =
   'flex-none items-center gap-px rounded-sm border border-border bg-card px-[5px] py-px text-[11px] leading-normal font-semibold text-muted-foreground [&_svg]:block [&_svg]:h-3 [&_svg]:w-3';
 
-function matches(item: CommandItem, q: string): boolean {
-  if (!q) return true;
-  const hay = `${item.label} ${item.group} ${item.keywords ?? ''}`.toLowerCase();
-  // every whitespace-separated term must appear (AND match)
-  return q
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .every((term) => hay.includes(term));
-}
-
 export function CommandPalette({ items }: { items: CommandItem[] }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -55,7 +45,7 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
   const [liveMsg, setLiveMsg] = useState('');
 
   const filtered = useMemo(
-    () => items.filter((it) => matches(it, query)),
+    () => items.filter((it) => matchesCommand(it, query)),
     [items, query],
   );
   // Derive (don't store) the clamped active index so a shrinking result set can

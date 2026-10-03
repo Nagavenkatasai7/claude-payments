@@ -15,6 +15,7 @@ import {
   CONTACT_OPEN_CAP,
   CapReachedError,
   claimOnce,
+  contactAudienceOf,
   contactAvailable,
   errName,
   getVisibleTicket,
@@ -27,6 +28,7 @@ import {
   staffClaimKey,
   withUserLock,
 } from '@/lib/partner-tickets';
+import { TEAM_QUESTION_CATEGORY } from '@/lib/ticket-category';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
 
@@ -35,6 +37,9 @@ import type { ActionResult } from '../../../action-result';
 // employee-questions flow), so it appears in the platform employee-questions queue and never on a
 // customer surface. The tenant and the opener come from the SESSION only (a partnerId/partner field
 // in the form is never read). Only the opener adds follow-ups (the legacy opener-only rule).
+// Lost-features A12: the form names who should answer. 'team' files the thread as a team question
+// (category TEAM_QUESTION_CATEGORY) that the tenant's admins answer (team-actions.ts); a missing
+// field keeps the old meaning, addressed to SmartRemit (category null).
 
 const OPEN_STATUSES = new Set(['open', 'pending', 'waiting_admin']);
 const failed = (): ActionResult => ({ ok: false, error: t('partner.support.failed') });
@@ -48,10 +53,12 @@ export async function contactSmartRemitAction(formData: FormData): Promise<Actio
   if (!subject) return { ok: false, error: t('partner.contact.subjectInvalid') };
   const message = parseContactBody(formData.get('message'));
   if (!message) return { ok: false, error: t('partner.contact.messageInvalid') };
+  const audience = contactAudienceOf(formData.get('audience'));
+  if (!audience) return { ok: false, error: t('partner.contact.audienceInvalid') };
   const requestKey = formData.get('requestKey');
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
-  const claim = staffClaimKey('contact', ctx.partnerId, ctx.username, requestKey, JSON.stringify([subject, message]));
+  const claim = staffClaimKey('contact', ctx.partnerId, ctx.username, requestKey, JSON.stringify([subject, message, audience]));
   let ticketId: string;
   try {
     const redis = getRedis();
@@ -79,6 +86,7 @@ export async function contactSmartRemitAction(formData: FormData): Promise<Actio
           openedBy: ctx.username,
           subject,
           body: message,
+          ...(audience === 'team' ? { category: TEAM_QUESTION_CATEGORY } : {}),
         });
         await createAuditRepo(tx).record({
           partnerId: ctx.partnerId,
@@ -86,7 +94,7 @@ export async function contactSmartRemitAction(formData: FormData): Promise<Actio
           actorType: 'staff',
           action: 'ticket.contact.open',
           subjectId: id,
-          meta: { actorScope: 'partner' },
+          meta: { actorScope: 'partner', audience },
         });
         return id;
       });

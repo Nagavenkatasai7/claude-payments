@@ -158,6 +158,18 @@ describe('/partner/staff: content', () => {
     for (const role of ['admin', 'agent', 'support', 'finance']) expect(html).toContain(`value="${role}"`);
   });
 
+  it('a read-only permissions column: "All (admin)" for admins, the flags that are on for others, no control', async () => {
+    await save({ username: 'pa-agent2', name: 'Ann Agent', role: 'agent', partnerId: 'pa', permissions: { canCancel: true, canResend: false, canAssign: false, canRevealPii: true } });
+    const html = await render();
+    const row = (u: string) => html.slice(html.indexOf(`>${u}<`), html.indexOf('</tr>', html.indexOf(`>${u}<`)));
+    expect(html).toContain(t('partner.staff.colPermissions'));
+    expect(html).toContain(t('partner.staff.permNote'));
+    expect(row('pa-admin')).toContain(t('partner.staff.perm.all'));
+    expect(row('pa-agent')).toContain(t('partner.staff.perm.none'));
+    expect(row('pa-agent2')).toContain(`${t('partner.staff.perm.cancel')}, ${t('partner.staff.perm.reveal')}`);
+    expect(html).not.toMatch(/name="(canCancel|canResend|canAssign|canRevealPii|permissions)"/);
+  });
+
   it('no Remove control on your own row', async () => {
     const html = await render();
     expect(html).not.toContain(t('partner.staff.removeName', { name: 'Alice Admin' }));
@@ -190,5 +202,7 @@ describe('/partner/staff: the agent view', () => {
     expect(html).not.toContain('data-testid="partner-staff-invite-form"');
     expect(html).not.toContain(t('partner.staff.removeName', { name: 'Alice Admin' }));
     expect(html).not.toContain(t('partner.staff.statusActive'));
+    expect(html).not.toContain(t('partner.staff.colPermissions'));
+    expect(html).not.toContain(t('partner.staff.perm.all'));
   });
 });

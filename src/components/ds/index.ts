@@ -17,3 +17,4 @@ export { Table, type TableColumn } from './table';
 export { ConfirmDialog } from './confirm-dialog';
 export { Toaster, useToast } from './toast';
 export { MaskedValue, type RevealAction, type RevealResult } from './masked-value';
+export { CommandPalette, type CommandPaletteItem, type CommandPaletteLabels } from './command-palette';

@@ -13,6 +13,7 @@ import { getChannelHealth, summarizeChannelHealth } from '@/lib/channel-health';
 import { readSignatureHealth, type SignatureHealth } from '@/lib/webhook-signature-health';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { buildPartnerHome, settlementHealth, whatsappHealth, type HealthState } from '@/lib/partner-home';
+import { contactAvailable, countWaitingTeamQuestions, listTenantTickets, QUEUE_LIMIT } from '@/lib/partner-tickets';
 import { PageHeader, buttonVariants } from '@/components/ds';
 import { ActionList, HealthCard, KpiRow } from './home-sections';
 
@@ -56,14 +57,21 @@ async function readSettlement(partnerId: string): Promise<HealthState> {
 export default async function PartnerHomePage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.home.policy);
   const pid = ctx.partnerId;
-  const [summary, whatsapp, settlement, apiKeys] = await Promise.all([
+  // Lost-features A12: admins see how many team questions wait for them (a bounded tenant read).
+  const readsTeamQuestions = ctx.role === 'admin' && contactAvailable(pid);
+  const [summary, whatsapp, settlement, apiKeys, teamQuestions] = await Promise.all([
     // Live rows only; "today" is the ledger's America/New_York day (transfer-repo.ts summary()).
     safe('summary', pid, () => getStore().transfersSummary(pid)),
     safe('whatsapp', pid, () => readWhatsapp(pid)),
     safe('settlement', pid, () => readSettlement(pid)),
     safe('api_keys', pid, () => getPartnerApiKeyStore().list(pid)),
+    readsTeamQuestions
+      ? safe('team_questions', pid, async () =>
+          countWaitingTeamQuestions(await listTenantTickets(pid, { kind: 'internal', limit: QUEUE_LIMIT }), ctx.username),
+        )
+      : Promise.resolve(undefined),
   ]);
-  const model = buildPartnerHome({ role: ctx.role, summary, whatsapp, settlement, apiKeys, now: new Date() });
+  const model = buildPartnerHome({ role: ctx.role, summary, whatsapp, settlement, apiKeys, teamQuestions, now: new Date() });
 
   return (
     <>
