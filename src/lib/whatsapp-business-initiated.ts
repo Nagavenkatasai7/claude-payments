@@ -48,6 +48,54 @@ export function toTemplateParam(text: string): string {
   return flat.length > TEMPLATE_PARAM_MAX ? `${flat.slice(0, TEMPLATE_PARAM_MAX - 1)}…` : flat;
 }
 
+/**
+ * Text first, template only when Meta says the 24-hour window is closed
+ * (2026-10-03). A drop-in for a plain `sendText` on an existing send path:
+ * when the text goes through (the customer chatted in the last 24 hours) the
+ * behaviour is byte-for-byte today's, with no extra Graph call and no billed
+ * template. Only a window rejection (131047 / HTTP 470) retries as the
+ * approved template. Throws like sendText: the text error when there is no
+ * template or the failure is not a window error, else the template's error.
+ */
+export async function sendTextThenTemplate(
+  to: string,
+  msg: { text: string; template?: BusinessTemplate },
+  creds: WaCreds | undefined,
+  opts: { sendText?: SendTextFn; sendTemplate?: SendTemplateFn } = {},
+): Promise<void> {
+  const sendText = opts.sendText ?? realSendText;
+  const sendTemplate = opts.sendTemplate ?? realSendTemplate;
+  try {
+    await sendText(to, msg.text, creds);
+  } catch (err) {
+    const t = msg.template;
+    if (!t || !isWindowError(err)) throw err;
+    logWarn('whatsapp.window-template', 'outside the 24-hour window; sending the approved template instead', { template: t.name });
+    await sendTemplate(to, t.name, t.lang, t.params.map(toTemplateParam), creds);
+  }
+}
+
+const ROW_TEMPLATE_NAME_RE = /^[a-z0-9_]{1,512}$/;
+const ROW_TEMPLATE_LANG_RE = /^[a-z]{2,3}(?:_[A-Z]{2})?$/;
+
+/**
+ * The optional `template` on a `whatsapp.text` outbox row (2026-10-03): the
+ * approved template to try for a customer who may be outside the 24-hour
+ * window, with the row's `body` as the free-form fallback. Anything malformed
+ * (or an empty param, which Meta rejects) reads as no template, so the row
+ * sends its plain text exactly as before. Params are flattened for Meta.
+ */
+export function rowTemplate(raw: unknown): BusinessTemplate | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const { name, lang, params } = raw as Record<string, unknown>;
+  if (typeof name !== 'string' || !ROW_TEMPLATE_NAME_RE.test(name)) return undefined;
+  if (typeof lang !== 'string' || !ROW_TEMPLATE_LANG_RE.test(lang)) return undefined;
+  if (!Array.isArray(params) || !params.every((x) => typeof x === 'string')) return undefined;
+  const flat = (params as string[]).map(toTemplateParam);
+  if (flat.some((x) => x === '')) return undefined;
+  return { name, lang, params: flat };
+}
+
 async function attempt(fn: () => Promise<void>, via: 'text' | 'template'): Promise<SendOutcome> {
   try {
     await fn();

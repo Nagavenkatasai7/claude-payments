@@ -10,7 +10,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
-import { drainOnce, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
+import { drainOnce, OPS_ALERT_TEXT_PREFIX, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -2319,7 +2319,8 @@ describe('drainOnce — ops-alert mirror (Program-Fix 26)', () => {
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText.mock.calls[0]).toEqual(['15550000001', 'hello ops']);
+    // 2026-10-03: free-form ops alerts carry the staff-only label.
+    expect(sendText.mock.calls[0]).toEqual(['15550000001', `${OPS_ALERT_TEXT_PREFIX}hello ops`]);
     expect(await rows('email.send')).toEqual([]);
     expect(await rows('ops.webhook')).toEqual([]);
   });
@@ -2604,19 +2605,67 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 // Program-Fix 25 PR A (§3.10): ops alerts on a production number. UNCHANGED
 // unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
 // skipping the free-form call would silence alerts.
+describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', { retry: 0 }, () => {
+  const TPL = { name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
+  const windowClosed = () =>
+    WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131047 } }));
+
+  it('inside the window: the text goes out exactly as before and no template is tried', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText.mock.calls).toEqual([['15551230000', 'held text', undefined]]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('window closed (131047): retries as the approved template and the row is done', async () => {
+    sendText.mockRejectedValueOnce(windowClosed());
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_in_review', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
+  });
+
+  it('window closed and the template is not approved yet (132001) ⇒ dead at attempt 1 (permanent), never retried for a day', async () => {
+    sendText.mockRejectedValueOnce(windowClosed());
+    sendTemplate.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp template send failed', 404, JSON.stringify({ error: { code: 132001 } })),
+    );
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(1);
+  });
+
+  it('a non-window text failure never tries the template', async () => {
+    sendText.mockRejectedValueOnce(new Error('graph down'));
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', template: TPL });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('a malformed template is ignored, even on a window error', async () => {
+    sendText.mockRejectedValueOnce(windowClosed());
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', template: { name: 'Bad Name', lang: 'en', params: [] } });
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
 describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 }, () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText exactly as today', async () => {
+  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText, labelled staff-only', async () => {
     vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
     vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
     vi.stubEnv('WHATSAPP_WINDOW_AWARE', 'true'); // the flag alone changes nothing here
     await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
-    expect(sendText.mock.calls).toEqual([['15550000001', 'hello ops']]);
+    expect(sendText.mock.calls).toEqual([['15550000001', `${OPS_ALERT_TEXT_PREFIX}hello ops`]]);
+    expect(OPS_ALERT_TEXT_PREFIX).toBe('SmartRemit staff alert (not a customer message): ');
     expect(sendTemplate).not.toHaveBeenCalled();
   });
 

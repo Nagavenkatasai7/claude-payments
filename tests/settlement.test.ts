@@ -298,8 +298,11 @@ describe('beginHold — the transactional compliance hold', { retry: 0 }, () => 
     const payload = await stage1Payload('st_t1');
     expect(payload.partnerId).toBe('acme');
     expect(payload.to).toBe('15551230000');
-    expect(Object.keys(payload).sort()).toEqual(['body', 'category', 'partnerId', 'to']);
+    expect(Object.keys(payload).sort()).toEqual(['body', 'category', 'partnerId', 'template', 'to']);
     expect(payload.category).toBe('essential'); // Program-Fix 49A: survives STOP
+    // 2026-10-03: the approved transfer_in_review template rides along, used only
+    // when Meta refuses the plain text because the 24-hour window has closed.
+    expect((payload.template as { name: string }).name).toBe('transfer_in_review');
   });
 
   it("is idempotent: a second call returns { kind: 'already' } and enqueues nothing", async () => {

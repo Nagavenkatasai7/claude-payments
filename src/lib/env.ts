@@ -8,6 +8,23 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * 2026-10-03 (Batch 1 A1): a value pasted into Vercel with a stray space or
+ * newline (the Oct 2 403 was a trailing newline on a WhatsApp setting) is read
+ * without it. Whitespace-only counts as missing, the same rule boot-assert uses.
+ */
+function trimmedEnv(name: string): string {
+  return (process.env[name] ?? '').trim();
+}
+
+function requiredTrimmed(name: string): string {
+  const value = trimmedEnv(name);
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 export const env = {
   // Neon Postgres pooled connection string (auto-injected by the Vercel
   // Marketplace integration). The LEDGER lives here from Stage 2 on.
@@ -52,16 +69,16 @@ export const env = {
   // Partner-requests page. SMTP_USER is the FULL mailbox address; SMTP_PASS is
   // that mailbox's password (Hostinger has no separate SMTP key).
   get smtpHost(): string {
-    return process.env.SMTP_HOST ?? '';
+    return trimmedEnv('SMTP_HOST');
   },
   get smtpPort(): number {
     return Number(process.env.SMTP_PORT ?? '465');
   },
   get smtpUser(): string {
-    return process.env.SMTP_USER ?? '';
+    return trimmedEnv('SMTP_USER');
   },
   get smtpPass(): string {
-    return process.env.SMTP_PASS ?? '';
+    return trimmedEnv('SMTP_PASS');
   },
   /** Recipients of partner-lead emails — comma-separated; extendable any time. */
   get partnerLeadEmails(): string[] {
@@ -119,19 +136,19 @@ export const env = {
     return required('OLLAMA_MODEL');
   },
   get whatsappToken() {
-    return required('WHATSAPP_TOKEN');
+    return requiredTrimmed('WHATSAPP_TOKEN');
   },
   get whatsappPhoneNumberId() {
-    return required('WHATSAPP_PHONE_NUMBER_ID');
+    return requiredTrimmed('WHATSAPP_PHONE_NUMBER_ID');
   },
   get whatsappVerifyToken() {
-    return required('WHATSAPP_VERIFY_TOKEN');
+    return requiredTrimmed('WHATSAPP_VERIFY_TOKEN');
   },
   get metaAppSecret() {
     // Meta App Secret for X-Hub-Signature-256 verification on inbound webhooks.
     // '' ⇒ unconfigured ⇒ the /api/whatsapp POST handler skips the signature
     // check (warns; preserves dev/test + current prod). Set ⇒ fail-closed 401.
-    return process.env.META_APP_SECRET ?? '';
+    return trimmedEnv('META_APP_SECRET');
   },
   /**
    * True only under NODE_ENV=production. Fix 22: the settlement-URL rule's

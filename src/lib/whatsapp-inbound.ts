@@ -26,6 +26,7 @@ import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding, DEFAULT_BRAND } from '@/lib/partner-config';
+import { parseMetaAccountEvents, metaAccountEventAlert } from '@/lib/meta-account-events';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
@@ -540,6 +541,16 @@ export async function processInboundWebhook(
   };
 
   try {
+    // Meta account events (template approved/rejected/re-labelled, number
+    // quality) carry no receiving number and no customer: the route's
+    // signature already proved whose Meta app sent them. Each becomes one
+    // deduped ops alert (2026-10-03, Batch 1 A5). Infra errors propagate so
+    // Meta redelivers; the dedupe key keeps the redelivery from alerting twice.
+    for (const ev of parseMetaAccountEvents(body)) {
+      const { message, dedupeKey } = metaAccountEventAlert(ev, tenantId);
+      await deps.outbox.enqueue('ops.alert', { message }, { dedupeKey });
+    }
+
     for (const change of changes) {
       // R1 per-change tenant rule: a change for another tenant's number never
       // runs under this route's tenant (its signature proved THIS tenant only).

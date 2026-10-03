@@ -15,7 +15,7 @@ function allSources(dir: string): string[] {
 }
 
 describe('WhatsApp template catalog is code-true', () => {
-  it('fixed names equal the code constants (all 8), with no duplicates', async () => {
+  it('fixed names equal the code constants (all 9), with no duplicates', async () => {
     const { TEMPLATES } = await import('@/content/docs/whatsapp-template-catalog');
     const t = await import('@/lib/whatsapp-templates');
     const w = await import('@/lib/whatsapp');
@@ -23,7 +23,7 @@ describe('WhatsApp template catalog is code-true', () => {
     expect(fixed).toEqual([
       w.RECIPIENT_TEMPLATE_NAME, t.TEMPLATE_TRANSFER_DELIVERED_SENDER, t.TEMPLATE_SCHEDULED_PAYMENT_READY,
       t.TEMPLATE_PAYMENT_REMINDER, t.TEMPLATE_TRANSFER_IN_REVIEW, t.TEMPLATE_TRANSFER_RELEASED,
-      t.TEMPLATE_TRANSFER_CANCELLED, t.TEMPLATE_VERIFICATION_REMINDER,
+      t.TEMPLATE_TRANSFER_CANCELLED, t.TEMPLATE_VERIFICATION_REMINDER, t.TEMPLATE_SCHEDULE_NAME_NEEDED,
     ].sort());
     expect(new Set(TEMPLATES.map((x) => x.name)).size).toBe(TEMPLATES.length);
     for (const e of TEMPLATES) expect(e.language).toBe(t.TEMPLATE_LANG);
@@ -46,6 +46,7 @@ describe('WhatsApp template catalog is code-true', () => {
       transfer_released: t.transferReleasedParams(tr, 'Anand').length,
       transfer_cancelled: t.transferCancelledParams(tr, 'Anand').length,
       verification_reminder: t.verificationReminderParams('Anand', 'sess_1').bodyParams.length,
+      schedule_name_needed: t.scheduleNameNeededParams('Acme', { amountUsd: 200 } as never, Date.now()).length,
     };
     for (const e of TEMPLATES) {
       expect({ name: e.name, n: placeholders(e.body) }).toEqual({ name: e.name, n: e.paramCount });
@@ -81,12 +82,13 @@ describe('WhatsApp template catalog is code-true', () => {
       scheduled_payment_ready: /TEMPLATE_SCHEDULED_PAYMENT_READY|SCHEDULED_TEMPLATE_NAME/.test(
         text.replace(/export const (TEMPLATE_SCHEDULED_PAYMENT_READY|SCHEDULED_TEMPLATE_NAME)[^\n]*/g, ''),
       ),
-      transfer_delivered_sender: /transferDeliveredSenderParams\(|TEMPLATE_TRANSFER_DELIVERED_SENDER/.test(text),
+      transfer_delivered_sender: /transferDeliveredSenderParams\(|deliveredSenderTemplate\(|TEMPLATE_TRANSFER_DELIVERED_SENDER/.test(text),
       payment_reminder: /paymentReminderParams\(|TEMPLATE_PAYMENT_REMINDER/.test(text),
-      transfer_in_review: /transferInReviewParams\(|TEMPLATE_TRANSFER_IN_REVIEW/.test(text),
+      transfer_in_review: /transferInReviewParams\(|inReviewTemplate\(|TEMPLATE_TRANSFER_IN_REVIEW/.test(text),
       transfer_released: /transferReleasedParams\(|TEMPLATE_TRANSFER_RELEASED/.test(text),
       transfer_cancelled: /transferCancelledParams\(|TEMPLATE_TRANSFER_CANCELLED/.test(text),
       verification_reminder: /verificationReminderParams\(|TEMPLATE_VERIFICATION_REMINDER/.test(text),
+      schedule_name_needed: /scheduleNameNeeded(Params|Template)\(|TEMPLATE_SCHEDULE_NAME_NEEDED/.test(text),
     };
     for (const e of TEMPLATES.filter((x) => x.nameSource === 'fixed')) {
       expect({ name: e.name, sentToday: e.sentToday }).toEqual({ name: e.name, sentToday: referenced[e.name] });

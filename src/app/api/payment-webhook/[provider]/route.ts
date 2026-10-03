@@ -23,6 +23,8 @@ import {
   sendText, sendTemplate, sendTemplateOrText, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { sendTextThenTemplate } from '@/lib/whatsapp-business-initiated';
+import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
 
 // WL3: the settlement status callback. A partner's rail (or our hosted reference
 // rail) POSTs lifecycle events here; we verify the HMAC with THAT partner's
@@ -207,10 +209,17 @@ async function handleVerified(
             ? await getPartnerIntegrationsStore().getIntegrations(updated.partnerId)
             : railIntegrations;
         const waCreds = waCredsFrom(brandIntegrations);
-        await sendText(
+        // 2026-10-03: a closed 24-hour window retries the sender's notice as
+        // the approved transfer_delivered_sender template; a failure still
+        // throws into the catch below, as the plain send did.
+        await sendTextThenTemplate(
           updated.phone,
-          `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${recipientDisplayName(updated)}. Thanks for using ${brand}!`,
+          {
+            text: `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${recipientDisplayName(updated)}. Thanks for using ${brand}!`,
+            template: deliveredSenderTemplate(updated),
+          },
           waCreds,
+          { sendText, sendTemplate },
         );
         if (updated.recipientPhone) {
           // Template-first (reaches a recipient outside the 24h window), but

@@ -619,17 +619,19 @@ describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25
     expect(msg).not.toContain('Mom');
   });
 
-  // Review r1: on a production number the notice often hits 131047 (window
-  // closed). Coalesce per code per hour so a real outage still alerts ONCE.
+  // Review r1: coalesce per code per hour so a real outage still alerts ONCE.
+  // (Since 2026-10-03 a 131047 window-closed refusal no longer fails the notice:
+  // it is retried as the approved template, pinned below. 131026 stands in for a
+  // code that still fails it.)
   it('two transfers failing with the same code in one hour → ONE alert; another code → its own', async () => {
     const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(hour + 30 * 60_000); // mid-hour: never straddles a bucket boundary
     try {
-      sendText.mockRejectedValueOnce(graphErr(131047));
+      sendText.mockRejectedValueOnce(graphErr(131026));
       await post('uniteller', body, sig(body));
       await flushAfter();
-      sendText.mockRejectedValueOnce(graphErr(131047));
+      sendText.mockRejectedValueOnce(graphErr(131026));
       updateTransferFromWebhook.mockResolvedValueOnce({ ...deliveredTransfer, id: 'wh_9' });
       await post('uniteller', body, sig(body));
       await flushAfter();
@@ -639,12 +641,31 @@ describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25
       await post('uniteller', body, sig(body));
       await flushAfter();
       expect(notifyAlerts().map((x) => x.dedupeKey!.replace(/:\d+$/, '')).sort()).toEqual([
-        'notifyfail:131047',
+        'notifyfail:131026',
         'notifyfail:none',
       ]);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('2026-10-03: a closed window (131047) retries the SENDER notice as transfer_delivered_sender, no alert', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131047));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    const names = sendTemplate.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(names).toContain('transfer_delivered_sender');
+    expect(notifyAlerts()).toEqual([]);
+  });
+
+  it('2026-10-03: a closed window AND an unapproved template (132001) → one notifyfail:132001 alert', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131047));
+    sendTemplate.mockRejectedValueOnce(graphErr(132001));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    const a = notifyAlerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupeKey).toMatch(/^notifyfail:132001:\d+$/);
   });
 
   it('the SENDER notice throwing (non-131030) → one alert; a 131030 throw → none', async () => {
