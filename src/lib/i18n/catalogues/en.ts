@@ -34,6 +34,7 @@ export const en = {
   'status.refund.completed': 'Refunded',
   'partner.nav.customers': 'Customers',
   'partner.customers.title': 'Customers',
+  'partner.customers.new': 'New customer',
   'partner.customers.sub': 'People who have sent money through your workspace. Details are masked.',
   'partner.customers.caption': 'Customers, newest first',
   'partner.customers.col.phone': 'Phone',
@@ -362,6 +363,7 @@ export const en = {
   'partner.security.keyLabel': 'Setup key',
   'partner.security.uriSummary': 'Setup link (otpauth://) for apps that accept one',
   'partner.nav.transfers': 'Transfers',
+  'partner.nav.invoices': 'Business invoices',
   'partner.common.notFound': 'That transfer was not found.',
   'partner.common.failed': 'Something went wrong. Nothing was changed. Try again.',
   'partner.transfers.title': 'Transfers',
@@ -719,6 +721,7 @@ export const en = {
   'partner.nav.staff': 'Staff',
   'partner.staff.title': 'Staff & roles',
   'partner.staff.sub': 'Who can sign in to your workspace, their role and whether two-step sign-in is on.',
+  'partner.staff.subAgent': 'Your team. Ask an admin to make changes.',
   'partner.staff.membersTitle': 'Members',
   'partner.staff.membersCaption': 'Workspace members',
   'partner.staff.colName': 'Name',
@@ -1755,4 +1758,18 @@ export const en = {
   'partner.reject.reasonHasNumber': 'Remove phone or account numbers from the reason.',
   'partner.reject.notAllowed': 'This hold cannot be rejected here. SmartRemit compliance reviews it.',
   'partner.transfers.timeline.reject': 'Hold rejected',
+
+  // ── Lost-features restore: one block per slice. Each lane appends ONLY inside its own block, so
+  // parallel builds never edit the same lines. Shared keys (routes, audit labels) are above.
+  // ── p1: transfers (cancel, assign, resend, reveal, issue refund, search, list and detail) ──
+  // ── end p1 ──
+
+  // ── p2: customers (create, conversation log, KYC trail, transfers, find, list and detail) ──
+  // ── end p2 ──
+
+  // ── p3: support, staff, shell, insights, B2B invoices, password ──
+  // ── end p3 ──
+
+  // ── p4: customer portal (receipts, times, two-step recovery, sign-in hand-over) ──
+  // ── end p4 ──
 } as const;

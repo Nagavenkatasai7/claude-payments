@@ -35,7 +35,19 @@ describe('PARTNER_ROUTES', () => {
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/branding');
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
     expect(partnerNav('support').map((r) => r.href)).not.toContain('/partner/customers');
-    for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/staff');
+    for (const role of ['support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/staff');
+  });
+  it('lost-features A13: agents open Staff (a read-only roster); support and finance never', () => {
+    for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('staff', role)).toBe(role === 'admin' || role === 'agent');
+    expect(partnerNav('agent').map((r) => r.href)).toContain('/partner/staff');
+  });
+  it('lost-features A5 and A6: New customer and Business invoices are admin-only and out of the nav', () => {
+    expect(PARTNER_ROUTES.customersNew).toMatchObject({ href: '/partner/customers/new', labelKey: 'partner.customers.new', nav: false });
+    expect(PARTNER_ROUTES.invoices).toMatchObject({ href: '/partner/invoices', labelKey: 'partner.nav.invoices', nav: false });
+    for (const key of ['customersNew', 'invoices'] as const) {
+      for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows(key, role), `${key}/${role}`).toBe(role === 'admin');
+      for (const role of KNOWN_PARTNER_ROLES) expect(partnerNav(role).map((r) => r.href)).not.toContain(PARTNER_ROUTES[key].href);
+    }
   });
   it('M3-20: onboarding is admin-only, in the nav right after home', () => {
     for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('onboarding', role)).toBe(role === 'admin');

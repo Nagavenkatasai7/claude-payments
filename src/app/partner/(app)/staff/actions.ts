@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { requirePartnerStaff } from '@/lib/auth';
+import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getAuthStore } from '@/lib/auth-store';
 import { getDb } from '@/db/client';
@@ -31,7 +32,9 @@ import { PARTNER_ROUTES } from '../../routes';
 // (any partnerId / partner / tenant form field is never read), the target resolved inside that
 // tenant (missing and foreign are the same "not found"), the input validated before any write.
 
-const POLICY = PARTNER_ROUTES.staff.policy;
+// Pinned to PARTNER_ADMIN, NOT the page's route policy: agents may open the page (a read-only
+// roster, lost-features A13) but never invite, revoke or remove.
+const POLICY = PARTNER_ADMIN;
 const PAGE = PARTNER_ROUTES.staff.href;
 /** Invite EMAILS per tenant per hour. The pending cap alone does not bound sends (revoke + re-issue). */
 const INVITE_SEND_LIMIT = 20;
