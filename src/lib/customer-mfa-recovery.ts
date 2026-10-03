@@ -76,7 +76,7 @@ function resolveDeps(d: Partial<RecoveryDeps>): RecoveryDeps {
     redis: d.redis ?? getRedis(),
     now: d.now ?? (() => Date.now()),
     isEnrolled: d.isEnrolled ?? ((k) => getCustomerMfaStore().isEnrolled(k)),
-    poke: d.poke ?? pokeWorker,
+    poke: d.poke ?? (() => pokeWorker()),
     revokePortalSessions: d.revokePortalSessions ?? ((p, phone) => getPortalSessionStore().revokeAll(p, phone)),
     revokeLegacySessions: d.revokeLegacySessions ?? ((phone) => getCustomerAuthStore().deleteAllSessions(phone)),
   };
