@@ -103,6 +103,16 @@ export function recoveryApprovableAt(requestedAt: string, checks: readonly Recov
   return checks.includes('id_document') ? at : at + RECOVERY_COOL_OFF_MS;
 }
 
+/** A fixed UTC label for the end of the wait (the action's refusal and the staff card agree). */
+export function recoveryTimeLabel(ms: number): string {
+  const when = new Date(ms).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
+  // Some ICU versions put a narrow no-break space before AM/PM: one plain space everywhere.
+  return `${when.replace(/\s+/g, ' ')} UTC`;
+}
+
+/** What the approve / decline actions on both dashboards return (`error` is fixed copy). */
+export type RecoveryActionResult = { ok: true; outcome: 'approved' | 'already_off' | 'declined' } | { ok: false; error: string };
+
 // ── Dependencies (one seam for tests) ────────────────────────────────────────
 
 export interface RecoveryDeps {

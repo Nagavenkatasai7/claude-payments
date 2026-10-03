@@ -12,6 +12,7 @@ import { t } from './i18n';
 import { createStaffStepUp, type StaffStepUp, type StepUpTarget } from './staff-step-up';
 import { STEP_UP_FIELD, type StepUpFactor, type StepUpRequired } from './staff-step-up-result';
 import type { PartnerCtx } from './partner-access';
+import type { Staff } from './types';
 
 /**
  * The /partner credential and money-config actions' 15-minute step-up (M3-14 follow-up). Called
@@ -49,25 +50,34 @@ const required = (factor: StepUpFactor, error: string): StepUpRequired => ({ ok:
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 
 export async function gatePartnerStepUp(ctx: PartnerCtx, formData: FormData, target: StepUpTarget): Promise<StepUpGateResult> {
+  return gateStaffStepUp(ctx.staff, formData, target);
+}
+
+/**
+ * The same gate for any signed-in staff member, partner-scoped or platform (lost-features p4 B4:
+ * the platform approval of a two-step recovery). Same contract as gatePartnerStepUp; the audit
+ * row's actorScope is derived from the staff record, never from input.
+ */
+export async function gateStaffStepUp(staff: Staff, formData: FormData, target: StepUpTarget): Promise<StepUpGateResult> {
   try {
     const s = stepUp();
-    const token = await sessionTokenFor(ctx.username);
+    const token = await sessionTokenFor(staff.username);
     if (!token) return { ok: false, error: t('partner.stepUp.unavailable') };
-    if (await s.isFresh(token, ctx.username)) return null;
+    if (await s.isFresh(token, staff.username)) return null;
     const raw = formData.get(STEP_UP_FIELD);
     const secret = typeof raw === 'string' ? raw : '';
     if (!secret.trim()) {
-      const factor = await s.factorFor(ctx.username);
+      const factor = await s.factorFor(staff.username);
       return required(factor, t(factor === 'totp' ? 'partner.stepUp.required.totp' : 'partner.stepUp.required.password'));
     }
     const ip = clientIpFrom(await headers());
-    const r = await s.verify({ token, staff: ctx.staff, secret, ip, target, actorScope: scopeOf(ctx.staff).kind });
+    const r = await s.verify({ token, staff, secret, ip, target, actorScope: scopeOf(staff).kind });
     if (r.outcome === 'ok') return null;
     if (r.outcome === 'throttled') return required(r.factor, t('partner.stepUp.throttled'));
     return required(r.factor, t(r.factor === 'totp' ? 'partner.stepUp.invalid.totp' : 'partner.stepUp.invalid.password'));
   } catch (err) {
     // The error NAME only: never the message (it could echo input) and never the secret.
-    logWarn('partner.stepup', errName(err), { partnerId: ctx.partnerId, target });
+    logWarn('partner.stepup', errName(err), { partnerId: staff.partnerId ?? 'platform', target });
     return { ok: false, error: t('partner.stepUp.unavailable') };
   }
 }

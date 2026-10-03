@@ -38,6 +38,7 @@ import {
   parseDeclineReason,
   parseRecoveryChecks,
   recoveryApprovableAt,
+  recoveryTimeLabel,
   type RecoveryDeps,
 } from '@/lib/customer-mfa-recovery';
 
@@ -130,6 +131,10 @@ describe('pure rules', () => {
     expect(recoveryApprovableAt(at, ['id_document'])).toBe(Date.parse(at));
     expect(recoveryApprovableAt(at, ['recent_transfer', 'kyc_name'])).toBe(Date.parse(at) + RECOVERY_COOL_OFF_MS);
     expect(RECOVERY_COOL_OFF_MS).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('recoveryTimeLabel is a fixed UTC label (the server and every viewer agree)', () => {
+    expect(recoveryTimeLabel(Date.parse('2026-10-03T14:05:00.000Z'))).toBe('Oct 3, 2026, 2:05 PM UTC');
   });
 
   it('parseDeclineReason accepts the closed list only', () => {
