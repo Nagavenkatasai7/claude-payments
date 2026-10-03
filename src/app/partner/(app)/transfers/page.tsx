@@ -17,7 +17,7 @@ import { logWarn } from '@/lib/log';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Checkbox, EmptyState, Field, Input, PageHeader, Select, buttonVariants } from '@/components/ds';
 import type { Transfer } from '@/lib/types';
-import { PARTNER_ROUTES } from '../../routes';
+import { PARTNER_ROUTES, routeAllows } from '../../routes';
 import { partnerCustomerHrefs } from '../../customer-link';
 import { TransferRows, toPartnerListRow } from './transfer-rows';
 import { TransfersExportForm } from '../reports/request-form';
@@ -106,7 +106,18 @@ export default async function PartnerTransfersPage({ searchParams }: { searchPar
 
   return (
     <>
-      <PageHeader title={t('partner.transfers.title')} sub={t('partner.transfers.sub')} />
+      <PageHeader
+        title={t('partner.transfers.title')}
+        sub={t('partner.transfers.sub')}
+        actions={
+          // Lost-features A6: admins reach the business invoices from here (the page re-gates).
+          routeAllows('invoices', ctx.role) ? (
+            <Link href={PARTNER_ROUTES.invoices.href} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              {t('partner.invoices.link')}
+            </Link>
+          ) : undefined
+        }
+      />
       <div className="flex flex-col gap-5">
         <form
           action={searchTransfersAction}

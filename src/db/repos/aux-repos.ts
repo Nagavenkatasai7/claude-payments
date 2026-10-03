@@ -896,6 +896,16 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
         .limit(limit);
       return rows.map(toDomain);
     },
+    /** One tenant's newest invoices, bounded (lost-features A6: /partner/invoices). */
+    async listRecentInvoices(partnerId: PartnerId, limit: number): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(eq(b2bInvoices.partnerId, partnerId))
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(limit);
+      return rows.map(toDomain);
+    },
     async listInvoices(partnerId: PartnerId): Promise<B2bInvoice[]> {
       const rows = await db
         .select()
