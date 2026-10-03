@@ -1874,5 +1874,6 @@ export const en = {
   'portal.b2b.funding': 'Funding',
   'portal.b2b.fundingBusinessAccount': 'Debited from business account',
   'portal.b2b.fundingCardOrBank': 'Card / bank',
+  'portal.transfers.theyGetSr': 'Recipient gets',
   // ── end p4 ──
 } as const;
