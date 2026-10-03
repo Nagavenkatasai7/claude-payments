@@ -46,12 +46,18 @@ vi.mock('@/lib/store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/store')>('@/lib/store');
   return { ...actual, getStore: () => actual.createStore(redis, db) };
 });
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
+});
 vi.mock('@/lib/customer-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/customer-store')>('@/lib/customer-store');
   return { ...actual, getCustomerStore: (store: Parameters<typeof actual.createCustomerStore>[1]) => actual.createCustomerStore(db, store) };
 });
 
 import ListPage from '@/app/partner/(app)/transfers/page';
+import DetailPage from '@/app/partner/(app)/transfers/[id]/page';
+import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import { searchTransfersAction } from '@/app/partner/(app)/transfers/search-actions';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { sealTransferSearch } from '@/lib/partner-transfer-search';
@@ -60,6 +66,8 @@ const PHONE = '14155550101';
 const list = async (sp: Record<string, string> = {}) => renderToStaticMarkup(await ListPage({ searchParams: Promise.resolve(sp) }));
 const asAdmin = () => signInAs(redis, cookieJar, { username: 'pa-admin', partnerId: 'pa', role: 'admin' });
 const asAgent = () => signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent' });
+const detail = async (id: string) => renderToStaticMarkup(await DetailPage({ params: Promise.resolve({ id }) }));
+const enroll = (u: string) => redis.set(staffMfaKeys.secret(u), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
 const asFinance = () => signInAs(redis, cookieJar, { username: 'pa-fin', partnerId: 'pa', role: 'finance' });
 const tok = (q: Parameters<typeof sealTransferSearch>[2], user = 'pa-admin', partner = 'pa') => sealTransferSearch(partner, user, q, Date.now());
 const form = (o: Record<string, string>) => {
@@ -210,5 +218,61 @@ describe('/partner/transfers: columns', () => {
     const before = await n();
     await list({ s: tok({ kind: 'text', value: 'Asha' }) });
     expect(await n()).toBe(before);
+  });
+});
+
+describe('/partner/transfers/[id]: B3 detail fields and reveals', () => {
+  const SHOW = /aria-label="Show ([^"]+)"/g;
+  const shows = (html: string) => [...html.matchAll(SHOW)].map((m) => m[1]).sort();
+  it('an enrolled admin gets every Show control; the page stays masked and writes no audit row', async () => {
+    await asAdmin();
+    await enroll('pa-admin');
+    const html = await detail('tr_A_asha');
+    expect(shows(html)).toEqual(['Paid to', 'Recipient name', 'Recipient phone', 'Sender name', 'Sender phone']);
+    expect(html).not.toContain(PHONE);
+    expect(html).not.toContain('Asha Rao');
+    expect(html).toContain('Asha R.');
+    expect(html).toContain('Revealing a value is recorded in your audit log');
+    const n = ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events`)) as unknown as { rows: Array<{ n: number }> }).rows[0].n;
+    expect(n).toBe(0);
+  });
+  it('an enrolled agent without canRevealPii: identity only, with the permission hint', async () => {
+    await asAgent();
+    await enroll('pa-agent');
+    const html = await detail('tr_A_asha');
+    expect(shows(html)).toEqual(['Recipient name', 'Recipient phone', 'Sender name', 'Sender phone']);
+    expect(html).toContain('Ask SmartRemit for the reveal permission');
+  });
+  it('not enrolled: no Show control, with the two-step hint; finance: none and no hint', async () => {
+    await asAgent();
+    const html = await detail('tr_A_asha');
+    expect(shows(html)).toEqual([]);
+    expect(html).toContain('Turn on two-step verification');
+    await asFinance();
+    await enroll('pa-fin');
+    const fin = await detail('tr_A_asha');
+    expect(shows(fin)).toEqual([]);
+    expect(fin).not.toContain('Turn on two-step verification');
+    expect(fin).not.toContain('Open customer');
+  });
+  it('no customer row (another sender): no sender-name row and no customer link', async () => {
+    await asAdmin();
+    await enroll('pa-admin');
+    const html = await detail('tr_A_meera');
+    expect(html).not.toContain('Sender name');
+    expect(html).not.toContain('Open customer');
+  });
+  it('the route by class only, and the assignee (own staff by name, anyone else as SmartRemit)', async () => {
+    await asAdmin();
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent' });
+    await asAdmin();
+    await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'pb' WHERE id = 'tr_A_meera'`);
+    const routed = await detail('tr_A_meera');
+    expect(routed).toContain('A SmartRemit network partner (best rate)');
+    expect(routed).not.toContain('Partner B');
+    expect(routed).not.toMatch(/>pb</);
+    expect(routed).not.toContain('platform-ops');
+    expect(await detail('tr_A_asha')).toContain('Your settlement rail');
+    expect(await detail('tr_A_asha')).toContain('pa-agent');
   });
 });
