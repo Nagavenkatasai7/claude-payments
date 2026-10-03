@@ -13,6 +13,7 @@ import {
   requestResetAction,
   resetAction,
   verifyMfaAction,
+  requestAccountMfaRecoveryAction,
   type AccountState,
 } from './actions';
 
@@ -197,12 +198,20 @@ export function LoginForm() {
 // ── Authenticator-code step (Program-Fix 49D; only when two-step is on) ─────
 function MfaCodeForm({ phone, pendingToken }: { phone?: string; pendingToken: string }) {
   const [state, action, pending] = useActionState<AccountState | null, FormData>(verifyMfaAction, null);
-  // A refusal that ends the sign-in (expired / too many codes) goes back to the
-  // password form with its message.
+  // lost-features p4 B4: "Lost your authenticator app?" asks support (it posts the same token).
+  const [recovery, recoveryAction, recoveryPending] = useActionState<AccountState | null, FormData>(
+    requestAccountMfaRecoveryAction,
+    null,
+  );
+  // A refusal that ends the sign-in (expired / too many codes), or a sent
+  // recovery request, goes back to the password form with its message.
+  if (recovery?.step === 'login') {
+    return <LoginRestart error={recovery.error} notice={recovery.notice} />;
+  }
   if (state?.step === 'login') {
     return <LoginRestart error={state.error} />;
   }
-  const err = state?.error;
+  const err = state?.error ?? recovery?.error;
   // The server derives WHO from the token; the phone is display-only.
   const currentToken = state?.pendingToken ?? pendingToken;
   return (
@@ -238,22 +247,25 @@ function MfaCodeForm({ phone, pendingToken }: { phone?: string; pendingToken: st
           {pending ? 'Verifying…' : 'Verify'}
         </Button>
       </form>
-      <p className="mt-4 text-xs leading-normal text-muted-foreground">
-        Lost access to your authenticator app?{' '}
-        <a href="/account/reset" className={altLinkCls}>
-          Reset your password
-        </a>{' '}
-        with a code sent to your WhatsApp. That also turns two-step verification off, so you can set it up again.
-      </p>
+      <form action={recoveryAction} className="mt-4">
+        <input type="hidden" name="pendingToken" value={currentToken} />
+        <Button type="submit" variant="link" disabled={recoveryPending || pending} className="h-auto p-0 text-sm">
+          {recoveryPending ? 'Sending…' : 'Lost your authenticator app?'}
+        </Button>
+        <p className="mt-1 text-xs leading-normal text-muted-foreground">
+          Ask our support team to turn two-step verification off. They check it is you first.
+        </p>
+      </form>
     </div>
   );
 }
 
 /** The password form again, after the code step ended (keeps its message). */
-function LoginRestart({ error }: { error?: string }) {
+function LoginRestart({ error, notice }: { error?: string; notice?: string }) {
   return (
     <div>
       <FormError error={error} />
+      <FormNotice notice={notice} />
       <a href="/account/login" className={altLinkCls}>
         Sign in again
       </a>
