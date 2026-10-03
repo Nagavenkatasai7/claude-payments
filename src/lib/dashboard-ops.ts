@@ -447,6 +447,10 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!transfer.fundingRef) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
     }
+    // An async debit that is still pending, failed, or was returned is not money we hold.
+    if (transfer.fundingState && transfer.fundingState !== 'succeeded') {
+      throw new Error(`Cannot refund: the sender debit is ${transfer.fundingState}.`);
+    }
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }

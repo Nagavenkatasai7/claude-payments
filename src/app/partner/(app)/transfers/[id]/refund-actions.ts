@@ -25,6 +25,7 @@ const ELIGIBILITY_COPY: Record<Exclude<IssueRefundEligibility, 'ok'>, MessageKey
   sandbox: 'partner.transferOps.refund.sandbox',
   wrongStatus: 'partner.transferOps.refund.wrongStatus',
   notCharged: 'partner.transferOps.refund.notCharged',
+  debitNotSettled: 'partner.transferOps.refund.debitNotSettled',
   already: 'partner.transferOps.refund.already',
 };
 

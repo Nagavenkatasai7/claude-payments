@@ -65,7 +65,7 @@ export async function approveMfaRecoveryAction(formData: FormData): Promise<Reco
   }
   if (!enrolled) return refused('Turn on two-step verification for your own staff account first.');
 
-  const stepUp = await gateStaffStepUp(staff, formData, 'customer.mfa.recovery.approve');
+  const stepUp = await gateStaffStepUp(staff, formData, 'customer.mfa.recovery.approve', { always: true });
   if (stepUp) return stepUp;
 
   let outcome: Awaited<ReturnType<typeof approveMfaRecovery>>;

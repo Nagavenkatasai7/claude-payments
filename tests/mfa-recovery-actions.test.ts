@@ -224,6 +224,14 @@ describe('/partner approveMfaRecoveryAction', () => {
     expect((await db.select().from(auditEvents).where(eq(auditEvents.action, 'customer.mfa.recovery.approve')))[0].meta).toEqual({ checks: ['recent_transfer'], actorScope: 'partner' });
   });
 
+  it('every approval asks for a fresh code, even right after another step-up', async () => {
+    await partnerAdmin();
+    const second = await recoveryTicket('pa', '14155550303');
+    expect(await partnerApprove(partnerForm(A, { secret: staffMfa.code }))).toEqual({ ok: true, outcome: 'approved' });
+    expect(isStepUpRequired(await partnerApprove(partnerForm(second)))).toBe(true);
+    expect(await mfaOn('pa', '14155550303')).toBe(true);
+  });
+
   it('a request escalated to SmartRemit is refused, and nothing is written', async () => {
     await partnerAdmin();
     gate.bypass = true;
@@ -295,6 +303,13 @@ describe('/admin-dashboard approveMfaRecoveryAction', () => {
     const [row] = await db.select().from(auditEvents).where(eq(auditEvents.action, 'customer.mfa.recovery.approve'));
     expect(row).toMatchObject({ partnerId: 'pb', actor: 'ops-admin', subjectId: B });
     expect(row.meta).toEqual({ checks: ['id_document'], actorScope: 'platform' });
+  });
+
+  it('every approval asks for a fresh code, even right after another step-up', async () => {
+    await platformAdmin();
+    expect(await platformApprove(platformForm(B, { secret: staffMfa.code }))).toEqual({ ok: true, outcome: 'approved' });
+    expect(isStepUpRequired(await platformApprove(platformForm(A)))).toBe(true);
+    expect(await mfaOn('pa', PHONE_A)).toBe(true);
   });
 
   it('a non-recovery ticket is not found; decline works with a listed reason', async () => {

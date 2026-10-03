@@ -129,6 +129,10 @@ describe('issueRefundEligibility (BL-2: a transfer another partner pays out is r
     expect(issueRefundEligibility(tr({ fundingRef: 'ch_1', refundStatus: 'requested' }), 'pa')).toBe('already');
     expect(issueRefundEligibility(tr({ fundingRef: 'ch_1', refundStatus: 'failed' }), 'pa')).toBe('already');
     expect(issueRefundEligibility(tr({ fundingRef: 'ch_1', environment: 'test' }), 'pa')).toBe('sandbox');
+    for (const fundingState of ['returned', 'pending', 'failed'] as const) {
+      expect(issueRefundEligibility(tr({ fundingRef: 'ch_1', fundingState }), 'pa')).toBe('debitNotSettled');
+    }
+    expect(issueRefundEligibility(tr({ fundingRef: 'ch_1', fundingState: 'succeeded' }), 'pa')).toBe('ok');
   });
 });
 

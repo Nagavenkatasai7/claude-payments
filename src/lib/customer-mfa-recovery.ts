@@ -192,6 +192,11 @@ class StaleRecoveryError extends Error {
 }
 
 /** The statuses the decision may not move the request out of (closed is terminal in the repo). */
+/** The partner's ticket page shows internal notes, so a SmartRemit approver is named as SmartRemit. */
+function noteActor(approver: RecoveryApprover): string {
+  return approver.scope === 'platform' ? 'SmartRemit' : approver.username;
+}
+
 function lockedFrom(approver: RecoveryApprover): TicketStatus[] {
   // A partner never decides a request escalated to SmartRemit; checked in the same UPDATE.
   return approver.scope === 'partner' ? ['resolved', 'closed', 'waiting_admin'] : ['resolved', 'closed'];
@@ -225,7 +230,7 @@ export async function approveMfaRecovery(
         ticketId: ticket.id,
         actorType: 'system',
         actorId: 'system',
-        body: t('mfaRecovery.note.approved', { actor: approver.username, checks: checks.join(', ') }),
+        body: t('mfaRecovery.note.approved', { actor: noteActor(approver), checks: checks.join(', ') }),
         internal: true,
       });
       await tickets.appendMessage({
@@ -301,7 +306,7 @@ export async function declineMfaRecovery(
         ticketId: ticket.id,
         actorType: 'system',
         actorId: 'system',
-        body: t('mfaRecovery.note.declined', { actor: approver.username, reason }),
+        body: t('mfaRecovery.note.declined', { actor: noteActor(approver), reason }),
         internal: true,
       });
       await tickets.appendMessage({

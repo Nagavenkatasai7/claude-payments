@@ -70,7 +70,7 @@ export async function approveMfaRecoveryAction(formData: FormData): Promise<Reco
   }
   if (!enrolled) return refused('partner.support.mfaRecovery.needStaffMfa');
 
-  const stepUp = await gatePartnerStepUp(ctx, formData, 'customer.mfa.recovery.approve');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'customer.mfa.recovery.approve', { always: true });
   if (stepUp) return stepUp;
 
   let outcome: Awaited<ReturnType<typeof approveMfaRecovery>>;

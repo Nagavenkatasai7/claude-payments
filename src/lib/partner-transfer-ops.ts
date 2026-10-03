@@ -101,7 +101,7 @@ export function resendEligibility(t: Pick<Transfer, 'status' | 'environment' | '
 
 // ── Issue refund ────────────────────────────────────────────────────────────
 
-export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus' | 'notCharged' | 'already';
+export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus' | 'notCharged' | 'debitNotSettled' | 'already';
 
 /**
  * May the OWNER partner issue a refund on this transfer? The core (dashboard-ops.issueRefund)
@@ -109,15 +109,17 @@ export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus'
  *  - routed: another partner's rail pays it out (settlementPartnerId set and not the owner). A refund
  *    there is a cross-tenant money effect, so SmartRemit handles it. Refused in EVERY status (BL-2);
  *  - sandbox: a test transfer moved no money.
+ * The core's money rules are mirrored here so the page hides the button too.
  */
 export function issueRefundEligibility(
-  t: Pick<Transfer, 'status' | 'environment' | 'fundingRef' | 'refundStatus' | 'settlementPartnerId'>,
+  t: Pick<Transfer, 'status' | 'environment' | 'fundingRef' | 'fundingState' | 'refundStatus' | 'settlementPartnerId'>,
   ownerId: PartnerId,
 ): IssueRefundEligibility {
   if (t.settlementPartnerId && t.settlementPartnerId !== ownerId) return 'routed';
   if ((t.environment ?? 'live') === 'test') return 'sandbox';
   if (t.status !== 'paid' && t.status !== 'delivered') return 'wrongStatus';
   if (!t.fundingRef) return 'notCharged';
+  if (t.fundingState && t.fundingState !== 'succeeded') return 'debitNotSettled';
   if ((t.refundStatus ?? 'none') !== 'none') return 'already';
   return 'ok';
 }

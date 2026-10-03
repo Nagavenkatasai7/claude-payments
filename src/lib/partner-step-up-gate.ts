@@ -49,8 +49,18 @@ async function sessionTokenFor(username: string): Promise<string | null> {
 const required = (factor: StepUpFactor, error: string): StepUpRequired => ({ ok: false, error, code: 'step_up_required', factor });
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 
-export async function gatePartnerStepUp(ctx: PartnerCtx, formData: FormData, target: StepUpTarget): Promise<StepUpGateResult> {
-  return gateStaffStepUp(ctx.staff, formData, target);
+/** `always`: ask for the code even on a fresh session (the approval of a two-step recovery). */
+export interface StepUpGateOptions {
+  always?: boolean;
+}
+
+export async function gatePartnerStepUp(
+  ctx: PartnerCtx,
+  formData: FormData,
+  target: StepUpTarget,
+  opts: StepUpGateOptions = {},
+): Promise<StepUpGateResult> {
+  return gateStaffStepUp(ctx.staff, formData, target, opts);
 }
 
 /**
@@ -58,12 +68,17 @@ export async function gatePartnerStepUp(ctx: PartnerCtx, formData: FormData, tar
  * the platform approval of a two-step recovery). Same contract as gatePartnerStepUp; the audit
  * row's actorScope is derived from the staff record, never from input.
  */
-export async function gateStaffStepUp(staff: Staff, formData: FormData, target: StepUpTarget): Promise<StepUpGateResult> {
+export async function gateStaffStepUp(
+  staff: Staff,
+  formData: FormData,
+  target: StepUpTarget,
+  opts: StepUpGateOptions = {},
+): Promise<StepUpGateResult> {
   try {
     const s = stepUp();
     const token = await sessionTokenFor(staff.username);
     if (!token) return { ok: false, error: t('partner.stepUp.unavailable') };
-    if (await s.isFresh(token, staff.username)) return null;
+    if (!opts.always && (await s.isFresh(token, staff.username))) return null;
     const raw = formData.get(STEP_UP_FIELD);
     const secret = typeof raw === 'string' ? raw : '';
     if (!secret.trim()) {

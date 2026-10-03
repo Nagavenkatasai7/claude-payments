@@ -605,6 +605,18 @@ describe('issueRefund (admin-proactive, no prior request)', () => {
     expect(await outboxRows()).toHaveLength(1);
   });
 
+  it('refuses a debit that was returned, is still pending, or failed (the money is not with us)', async () => {
+    const store = createStore(fakeRedis(), db);
+    for (const state of ['returned', 'pending', 'failed'] as const) {
+      const id = `iss7${state}`;
+      await store.saveTransfer(makeTransfer({ id, status: 'paid', fundingRef: `mockfund-${id}` }));
+      await db.execute(sql`UPDATE transfers SET funding_state = ${state} WHERE id = ${id}`);
+      await expect(issueRefund(db, id)).rejects.toThrow(/sender debit/i);
+      expect((await store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+    }
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
   it('throws for a missing transfer', async () => {
     await expect(issueRefund(db, 'missing')).rejects.toThrow(/not found/i);
   });

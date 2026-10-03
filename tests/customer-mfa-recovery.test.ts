@@ -258,7 +258,9 @@ describe('approveMfaRecovery', () => {
     expect((await createTicketRepo(db).getTicket(t.id))!.status).toBe('resolved');
     const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
     expect(msgs.filter((m) => m.internal).map((m) => m.actorType)).toEqual(['system']);
-    expect(msgs.filter((m) => m.internal)[0].body).toContain('ops.admin');
+    // The partner's ticket page shows internal notes: a SmartRemit approver is named as SmartRemit.
+    expect(msgs.filter((m) => m.internal)[0].body).toContain('SmartRemit');
+    expect(msgs.filter((m) => m.internal)[0].body).not.toContain('ops.admin');
     expect(msgs.filter((m) => !m.internal && m.actorType === 'staff')).toHaveLength(1);
 
     const reset = await auditRows('customer.mfa.reset');
@@ -375,6 +377,8 @@ describe('declineMfaRecovery', () => {
     expect(rowsDecline[0].meta).toEqual({ reason: 'no_response', actorScope: 'partner' });
     expect((await outboxRows()).filter((o) => o.dedupeKey === `mfarecno:${t.id}`)).toHaveLength(1);
     expect(revokedPortal).toEqual([]);
+    const notes = (await createTicketRepo(db).listMessages(t.id, { includeInternal: true })).filter((m) => m.internal);
+    expect(notes.map((m) => m.body).join(' ')).toContain('pa.admin');
     // A second decline (or an approve) of the same ticket is refused.
     expect(await declineMfaRecovery(t, PARTNER, 'no_response', deps)).toBe('stale');
     expect(await approveMfaRecovery(t, PARTNER, ['id_document'], deps)).toBe('stale');

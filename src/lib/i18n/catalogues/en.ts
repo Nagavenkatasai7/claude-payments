@@ -1852,6 +1852,7 @@ export const en = {
   'partner.transferOps.refund.routed': 'Another network partner pays this transfer out. Ask SmartRemit to refund it.',
   'partner.transferOps.refund.already': 'A refund is already requested, pending or done. See Refunds.',
   'partner.transferOps.refund.notCharged': 'The customer was never charged, so there is nothing to refund.',
+  'partner.transferOps.refund.debitNotSettled': 'The customer\'s payment has not settled, or it was returned, so there is nothing to refund.',
   'partner.transferOps.refund.wrongStatus': 'Only paid or delivered transfers can be refunded.',
   'partner.transferOps.refund.sandbox': 'Test transfers move no money and cannot be refunded.',
   'partner.transferOps.refund.done': 'Refund started. The customer is told when it completes.',
