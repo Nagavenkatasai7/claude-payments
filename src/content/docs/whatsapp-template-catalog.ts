@@ -90,7 +90,7 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     sentToday: true,
     nameSource: 'fixed',
     purpose:
-      "Asks a sender with a scheduled transfer for their legal name before it can go out. {{1}} is your brand name. Sent only when the plain message is refused because the sender has not written in the last 24 hours.",
+      "Asks a sender with a scheduled transfer for their legal name before it can go out. {{1}} is your brand name. Sent instead of the plain message only when the sender has not written in the last 24 hours.",
   },
   {
     name: 'transfer_delivered_sender',
@@ -102,7 +102,7 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     samples: ['$50.00', 'Priya', 'tx_a1b2c3'],
     sentToday: true,
     nameSource: 'fixed',
-    purpose: 'Delivery confirmation to the sender. Sent only when the plain message is refused because the sender has not written in the last 24 hours.',
+    purpose: 'Delivery confirmation to the sender. Sent instead of the plain message only when the sender has not written in the last 24 hours.',
   },
   {
     name: 'transfer_in_review',
@@ -114,7 +114,7 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     sentToday: true,
     nameSource: 'fixed',
     purpose:
-      'Tells the sender a transfer is held for compliance review. {{1}} is "there" today (the transfer record carries no sender name). Sent only when the plain message is refused because the sender has not written in the last 24 hours.',
+      'Tells the sender a transfer is held for compliance review. {{1}} is "there" today (the transfer record carries no sender name). Sent instead of the plain message only when the sender has not written in the last 24 hours.',
   },
   verificationStatus('verification_needed', 'needed', 'Please verify your identity to start sending money.'),
   verificationStatus('verification_in_progress', 'in progress or received', 'Your identity verification is in progress.'),

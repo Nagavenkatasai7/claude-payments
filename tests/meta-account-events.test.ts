@@ -131,3 +131,28 @@ describe('processInboundWebhook — Meta account events', () => {
     expect(rows[0].payload.message).not.toContain('15550001234');
   });
 });
+
+describe('account events: caps and parsing boundaries', () => {
+  it('reads at most MAX_ACCOUNT_EVENTS_PER_POST events from one POST', async () => {
+    const { MAX_ACCOUNT_EVENTS_PER_POST } = await import('@/lib/meta-account-events');
+    const many = {
+      entry: Array.from({ length: 30 }, (_, i) => ({
+        time: 1_759_500_000 + i * 7200,
+        changes: [{ field: 'message_template_status_update', value: { event: 'APPROVED', message_template_name: 'ops_alert', message_template_language: 'en' } }],
+      })),
+    };
+    expect(parseMetaAccountEvents(many)).toHaveLength(MAX_ACCOUNT_EVENTS_PER_POST);
+  });
+
+  it('a sender varying `time` within one hour gets ONE dedupe key', () => {
+    const at = (t: number) => metaAccountEventAlert(parseMetaAccountEvents(body('message_template_status_update', { event: 'APPROVED', message_template_name: 'ops_alert', message_template_language: 'en' }, t))[0], 'acme').dedupeKey;
+    const hour = 1_759_500_000 - (1_759_500_000 % 3600);
+    expect(at(hour + 1)).toBe(at(hour + 3599));
+    expect(at(hour + 3600)).not.toBe(at(hour + 1));
+  });
+
+  it('parseWebhook leaves account-event changes out of the message changes', async () => {
+    const { parseWebhook } = await import('@/lib/whatsapp');
+    expect(parseWebhook(body('phone_number_quality_update', { event: 'FLAGGED' }))).toEqual([]);
+  });
+});

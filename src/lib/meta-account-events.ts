@@ -21,6 +21,10 @@ export const META_ACCOUNT_FIELDS = [
 ] as const;
 export type MetaAccountField = (typeof META_ACCOUNT_FIELDS)[number];
 
+export function isMetaAccountField(field: unknown): field is MetaAccountField {
+  return (META_ACCOUNT_FIELDS as readonly unknown[]).includes(field);
+}
+
 export interface MetaAccountEvent {
   field: MetaAccountField;
   /** entry[].time (Unix seconds) when Meta sent it; null when absent. */
@@ -62,7 +66,14 @@ function defined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 }
 
-/** Every account event in a webhook POST. Pure; garbage ⇒ []. */
+/**
+ * At most this many account events are read from one POST. Meta sends one
+ * event per change; the cap bounds what a signed-but-misbehaving partner app
+ * can turn into ops alerts in a single request.
+ */
+export const MAX_ACCOUNT_EVENTS_PER_POST = 10;
+
+/** Every account event in a webhook POST (capped). Pure; garbage ⇒ []. */
 export function parseMetaAccountEvents(body: unknown): MetaAccountEvent[] {
   try {
     const entries = (body as { entry?: unknown })?.entry;
@@ -76,9 +87,10 @@ export function parseMetaAccountEvents(body: unknown): MetaAccountEvent[] {
       for (const change of changes) {
         if (!change || typeof change !== 'object') continue;
         const { field, value } = change as { field?: unknown; value?: unknown };
-        if (!(META_ACCOUNT_FIELDS as readonly unknown[]).includes(field)) continue;
+        if (!isMetaAccountField(field)) continue;
+        if (out.length >= MAX_ACCOUNT_EVENTS_PER_POST) return out;
         const v = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-        const f = field as MetaAccountField;
+        const f = field;
         if (f === 'phone_number_quality_update') {
           out.push(defined({
             field: f, time,
@@ -141,9 +153,10 @@ export function metaAccountEventAlert(ev: MetaAccountEvent, tenantId: PartnerId)
     ? `${ev.templateName}:${ev.templateLanguage ?? ''}`
     : ev.phoneLast4 ?? '';
   const detail = ev.correctCategory ?? ev.newCategory ?? ev.event ?? '';
-  // One alert per (tenant, field, template or number, outcome, Meta send time):
-  // Meta redelivers a webhook until it gets a 200, and a redelivery must not
-  // alert twice. An event with no time falls back to the hour.
-  const when = ev.time ?? Math.floor(Date.now() / 3_600_000);
+  // One alert per (tenant, field, template or number, outcome, hour of Meta's
+  // send time): a redelivery (Meta retries until it gets a 200) never alerts
+  // twice, and a signed sender varying `time` gets at most one per hour per
+  // outcome. An event with no time uses the current hour.
+  const when = Math.floor((ev.time !== null ? ev.time * 1000 : Date.now()) / 3_600_000);
   return { message, dedupeKey: `metaacct:${tenantId}:${ev.field}:${subject}:${detail}:${when}` };
 }

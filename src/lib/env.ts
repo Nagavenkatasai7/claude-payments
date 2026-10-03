@@ -34,7 +34,7 @@ export const env = {
   // Ops alert destination — WhatsApp number that receives stuck-money /
   // dead-letter alerts from the reconciliation sweep (Stage 2). '' ⇒ no alerts.
   get opsAlertPhone(): string {
-    return process.env.OPS_ALERT_PHONE ?? '';
+    return trimmedEnv('OPS_ALERT_PHONE');
   },
   // Program-Fix 26 — the ops-alert MIRROR. Both OPTIONAL (never boot-asserted):
   // unset ⇒ ops alerts go to OPS_ALERT_PHONE only, exactly as before.
@@ -330,7 +330,7 @@ export const env = {
     // entirely and delivers the code as regular free-form text — the right mode
     // for the testing business until templates are approved in WhatsApp
     // Manager. Set this to the approved template name to switch over.
-    return process.env.WHATSAPP_AUTH_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_AUTH_TEMPLATE');
   },
   // ── Customer onboarding Phase 2 — Persona KYC ──
   // All optional (`?? ''`): an unprovisioned env keeps MockKycProvider selected and
@@ -359,28 +359,28 @@ export const env = {
   // sendVerificationStatus sends the free-form fallback text directly, no
   // template attempt. Set to the approved names to switch over.
   get whatsappVerificationNeededTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_NEEDED_TEMPLATE');
   },
   get whatsappVerificationInProgressTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE');
   },
   get whatsappVerificationVerifiedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE');
   },
   get whatsappVerificationFailedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_VERIFICATION_FAILED_TEMPLATE');
   },
   // Program-Fix 25 — both OPTIONAL, unset ⇒ today's behaviour byte-for-byte.
   // The approved UTILITY template (one body variable) for ops alerts. '' ⇒ the
   // ops.alert row sends free-form text exactly as before.
   get whatsappOpsAlertTemplate(): string {
-    return process.env.WHATSAPP_OPS_ALERT_TEMPLATE ?? '';
+    return trimmedEnv('WHATSAPP_OPS_ALERT_TEMPLATE');
   },
   // 'true' ⇒ sendBusinessInitiated checks the 24h customer-service window
   // (lastmsg:) and skips a doomed free-form send outside it. Turn on only after
   // the production number is live and the templates are approved.
   get whatsappWindowAware(): boolean {
-    return process.env.WHATSAPP_WINDOW_AWARE === 'true';
+    return trimmedEnv('WHATSAPP_WINDOW_AWARE') === 'true';
   },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.

@@ -448,14 +448,14 @@ async function handle(
     case 'whatsapp.text': {
       if (sandboxSkip(row, p)) return;
       if (await optedOutSkip(deps, row, p)) return;
-      // 2026-10-03: a row may carry an approved template. The text still goes
-      // first; only a closed 24-hour window retries as the template. No (or a
-      // malformed) template ⇒ the plain send, byte-for-byte as before.
+      // 2026-10-03: a row may carry an approved template, sent only when the
+      // customer is outside the 24-hour window. No (or a malformed) template,
+      // or a customer inside the window ⇒ the plain send, byte-for-byte as before.
       await sendTextThenTemplate(
         str(p.to),
         { text: str(p.body), template: rowTemplate(p.template) },
         await resolveSendCreds(p, partner),
-        { sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+        { partnerId: str(p.partnerId) || DEFAULT_PARTNER_ID, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
       );
       return;
     }
@@ -486,14 +486,14 @@ async function handle(
         }
         return;
       }
-      // 2026-10-03: a closed 24-hour window retries the sender's "delivered"
-      // notice as the approved transfer_delivered_sender template.
+      // 2026-10-03: outside the 24-hour window the sender's "delivered"
+      // notice goes as the approved transfer_delivered_sender template.
       for (const msg of stage2.senderMessages) {
         await sendTextThenTemplate(
           stage2.transfer.phone,
           { text: msg, template: deliveredSenderTemplate(stage2.transfer) },
           waCreds,
-          { sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+          { partnerId: stage2.transfer.partnerId, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
         );
       }
       if (stage2.senderMessages.length > 0 && stage2.transfer.recipientPhone) {

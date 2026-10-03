@@ -103,4 +103,15 @@ describe('bot schedule tools write an audit row', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ subject_id: auditSubjectId('default', PHONE), meta: { scheduleId: created.schedule_id, via: 'whatsapp' } });
   });
+
+  it('a failing audit write never fails the customer: the schedule is still created and cancelled', async () => {
+    const c = await ctxFor(PHONE);
+    c.store.recordAudit = async () => { throw new Error('audit down'); };
+    const created = await executeTool('create_schedule', SCHEDULE_ARGS, c);
+    expect(created.schedule_id).toBeTruthy();
+    expect((await c.scheduleStore.getSchedule(created.schedule_id as string))?.status).toBe('active');
+    const cancelled = await executeTool('cancel_schedule', { schedule_id: created.schedule_id }, c);
+    expect(cancelled.error).toBeUndefined();
+    expect((await c.scheduleStore.getSchedule(created.schedule_id as string))?.status).toBe('cancelled');
+  });
 });

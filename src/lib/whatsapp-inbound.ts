@@ -504,7 +504,8 @@ export async function processInboundWebhook(
   // The shared number (routedPartnerId null) is the default tenant's channel.
   const tenantId: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
   const changes: WebhookChange[] = parseWebhook(body);
-  if (changes.length === 0) return { ok: true };
+  const accountEvents = parseMetaAccountEvents(body);
+  if (changes.length === 0 && accountEvents.length === 0) return { ok: true };
 
   // partner-demo R4 (+ follow-up): a poke forces a FULL /api/worker run, i.e.
   // a Neon wake, so it follows exactly the inserts that can leave work behind.
@@ -546,7 +547,7 @@ export async function processInboundWebhook(
     // signature already proved whose Meta app sent them. Each becomes one
     // deduped ops alert (2026-10-03, Batch 1 A5). Infra errors propagate so
     // Meta redelivers; the dedupe key keeps the redelivery from alerting twice.
-    for (const ev of parseMetaAccountEvents(body)) {
+    for (const ev of accountEvents) {
       const { message, dedupeKey } = metaAccountEventAlert(ev, tenantId);
       await deps.outbox.enqueue('ops.alert', { message }, { dedupeKey });
     }

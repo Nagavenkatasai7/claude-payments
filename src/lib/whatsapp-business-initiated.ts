@@ -9,7 +9,7 @@
 import { env } from './env';
 import { logWarn } from './log';
 import { sendTemplate as realSendTemplate, sendText as realSendText, type WaCreds } from './whatsapp';
-import { isInServiceWindow, isWindowError, sendOutcomeFromError, type SendOutcome } from './whatsapp-errors';
+import { isInServiceWindow, isWindowError, sendOutcomeFromError, WhatsAppSendError, type SendOutcome } from './whatsapp-errors';
 import type { PartnerId } from './types';
 
 // Program-Fix 25 PR B: the type moved to the pure whatsapp-errors.ts (whatsapp.ts
@@ -49,30 +49,69 @@ export function toTemplateParam(text: string): string {
 }
 
 /**
- * Text first, template only when Meta says the 24-hour window is closed
- * (2026-10-03). A drop-in for a plain `sendText` on an existing send path:
- * when the text goes through (the customer chatted in the last 24 hours) the
- * behaviour is byte-for-byte today's, with no extra Graph call and no billed
- * template. Only a window rejection (131047 / HTTP 470) retries as the
- * approved template. Throws like sendText: the text error when there is no
- * template or the failure is not a window error, else the template's error.
+ * The 24-hour window decides (2026-10-03). A drop-in for a plain `sendText`
+ * on an existing send path:
+ *  - no template, or the customer wrote in the last 24 hours (the `lastmsg:`
+ *    marker, 24-h TTL) ⇒ the plain text, byte-for-byte today's single call,
+ *    nothing billed. If Graph ever refuses that text with a window error
+ *    (131047 / 470) the template is tried once; should that fail too, the
+ *    ORIGINAL window error is rethrown (retryable, as today).
+ *  - no marker (outside the window) ⇒ the approved template. On the Cloud API
+ *    an out-of-window text is accepted and then dropped (131047 arrives later
+ *    on the status webhook, see whatsapp.ts sendTransactionOtp), so deciding
+ *    up front is the only way the template is ever used. If the template
+ *    fails (not approved yet: 132001), the plain text goes as today, and its
+ *    error, if any, is what throws.
+ * A marker that cannot be read counts as inside the window: today's text.
  */
 export async function sendTextThenTemplate(
   to: string,
   msg: { text: string; template?: BusinessTemplate },
   creds: WaCreds | undefined,
-  opts: { sendText?: SendTextFn; sendTemplate?: SendTemplateFn } = {},
+  opts: { partnerId: PartnerId; store?: WindowReader; sendText?: SendTextFn; sendTemplate?: SendTemplateFn },
 ): Promise<void> {
   const sendText = opts.sendText ?? realSendText;
   const sendTemplate = opts.sendTemplate ?? realSendTemplate;
+  const t = msg.template;
+  if (!t) return sendText(to, msg.text, creds);
+  const params = t.params.map(toTemplateParam);
+
+  let inWindow = true;
   try {
-    await sendText(to, msg.text, creds);
-  } catch (err) {
-    const t = msg.template;
-    if (!t || !isWindowError(err)) throw err;
-    logWarn('whatsapp.window-template', 'outside the 24-hour window; sending the approved template instead', { template: t.name });
-    await sendTemplate(to, t.name, t.lang, t.params.map(toTemplateParam), creds);
+    const store = opts.store ?? (await import('./store')).getStore();
+    inWindow = Boolean(await store.getLastInboundAt(opts.partnerId, to));
+  } catch {
+    inWindow = true;
   }
+
+  if (inWindow) {
+    try {
+      await sendText(to, msg.text, creds);
+    } catch (err) {
+      if (!isWindowError(err)) throw err;
+      logWarn('whatsapp.window-template', 'text refused: 24-hour window closed; sending the approved template instead', { template: t.name });
+      try {
+        await sendTemplate(to, t.name, t.lang, params, creds);
+      } catch (templateErr) {
+        logWarn('whatsapp.window-template', 'template send failed too', { template: t.name, code: graphCode(templateErr) });
+        throw err;
+      }
+    }
+    return;
+  }
+
+  try {
+    await sendTemplate(to, t.name, t.lang, params, creds);
+  } catch (templateErr) {
+    logWarn('whatsapp.window-template', 'outside the 24-hour window and the template failed; sending the plain text', {
+      template: t.name, code: graphCode(templateErr),
+    });
+    await sendText(to, msg.text, creds);
+  }
+}
+
+function graphCode(err: unknown): number | null {
+  return err instanceof WhatsAppSendError ? err.code ?? null : null;
 }
 
 const ROW_TEMPLATE_NAME_RE = /^[a-z0-9_]{1,512}$/;

@@ -8,10 +8,21 @@
 
 import type { CurrencyCode, Schedule, Transfer } from './types';
 import { DEFAULT_BRAND } from './partner-config';
+import { NAME_MAX, safeDisplayText } from './untrusted-text';
 
 /** Program-Fix 49A: a blank/absent brand falls back to the SmartRemit default. */
 function brandOr(brand: string | undefined): string {
   return brand?.trim() || DEFAULT_BRAND;
+}
+
+/**
+ * A recipient name as it may appear in a template param or a business message:
+ * the same cleaning as recipientDisplayName (payment.ts) — web-address tokens
+ * stripped so an outsider-written name never becomes a link inside a
+ * business-verified message — and never empty (Meta rejects an empty param).
+ */
+function recipientOr(name: string | undefined): string {
+  return safeDisplayText(name, NAME_MAX) || 'your recipient';
 }
 
 // All new UTILITY templates use language code 'en' — matches the live
@@ -110,8 +121,8 @@ const DUE_DAY = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long
 
 /**
  * Scheduled-send name nudge (2026-10-02): free-form text. Outside the customer's
- * 24-hour window the cron retries it as the schedule_name_needed template
- * (2026-10-03; until Meta approves it that retry fails too). Fixed copy with
+ * 24-hour window the cron sends the schedule_name_needed template instead
+ * (2026-10-03; until Meta approves it, this text goes either way). Fixed copy with
  * the partner's brand and the source amount only, never the recipient's
  * outsider-written name. `dueAt` is any instant on the Eastern due day.
  */
@@ -180,7 +191,7 @@ export function transferDeliveredSenderParams(transfer: Transfer): string[] {
       transfer.totalChargeSource ?? transfer.totalChargeUsd,
       transfer.sourceCurrency ?? 'USD',
     ),
-    transfer.recipientName,
+    recipientOr(transfer.recipientName),
     transfer.id,
   ];
 }
@@ -216,7 +227,7 @@ export function scheduledPaymentReadyParams(
       senderName,
       schedule.frequency,
       formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD'),
-      schedule.recipientName,
+      recipientOr(schedule.recipientName),
       scheduleSetUpDay(schedule.createdAt),
     ],
     buttonToken: transferId,
@@ -231,7 +242,7 @@ export function scheduledPaymentReadyParams(
 export function scheduledPaymentReadyText(brand: string, schedule: Schedule, url: string): string {
   const amount = formatSourceAmount(schedule.amountSource ?? schedule.amountUsd, schedule.sourceCurrency ?? 'USD');
   return (
-    `Your ${schedule.frequency} scheduled ${brandOr(brand)} transfer of ${amount} to ${schedule.recipientName} is ready. ` +
+    `Your ${schedule.frequency} scheduled ${brandOr(brand)} transfer of ${amount} to ${recipientOr(schedule.recipientName)} is ready. ` +
     `You set up this schedule on ${scheduleSetUpDay(schedule.createdAt)}. Tap to pay: ${url}\n\n` +
     `To stop this schedule, reply "cancel schedule".`
   );
@@ -251,7 +262,7 @@ export function paymentReminderParams(transfer: Transfer, senderName: string): T
         transfer.totalChargeSource ?? transfer.totalChargeUsd,
         transfer.sourceCurrency ?? 'USD',
       ),
-      transfer.recipientName,
+      recipientOr(transfer.recipientName),
     ],
     buttonToken: transfer.id,
   };
@@ -265,7 +276,7 @@ function senderAmountRecipientParams(transfer: Transfer, senderName: string): st
       transfer.totalChargeSource ?? transfer.totalChargeUsd,
       transfer.sourceCurrency ?? 'USD',
     ),
-    transfer.recipientName,
+    recipientOr(transfer.recipientName),
   ];
 }
 

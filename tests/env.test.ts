@@ -96,7 +96,7 @@ describe('env', () => {
 
 
   describe('stray whitespace in pasted settings is ignored (2026-10-03, Batch 1 A1)', () => {
-    const NAMES = ['WHATSAPP_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_VERIFY_TOKEN', 'META_APP_SECRET', 'SMTP_HOST', 'SMTP_USER', 'SMTP_PASS'] as const;
+    const NAMES = ['WHATSAPP_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'WHATSAPP_VERIFY_TOKEN', 'META_APP_SECRET', 'SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'OPS_ALERT_PHONE', 'WHATSAPP_OPS_ALERT_TEMPLATE', 'WHATSAPP_AUTH_TEMPLATE', 'WHATSAPP_WINDOW_AWARE'] as const;
     const saved: Record<string, string | undefined> = {};
     afterEach(() => {
       for (const n of NAMES) {
@@ -128,6 +128,17 @@ describe('env', () => {
       expect(env.smtpUser).toBe('ops@example.com');
       expect(env.smtpPass).toBe('p@ss word'); // inner spaces kept
       expect(env.emailFrom === process.env.EMAIL_FROM || env.emailFrom === 'SmartRemit <ops@example.com>').toBe(true);
+    });
+
+    it('trims the ops-alert phone, template names and the window flag', () => {
+      for (const [k, v] of [['OPS_ALERT_PHONE', '15550001111\n'], ['WHATSAPP_OPS_ALERT_TEMPLATE', 'ops_alert \n'], ['WHATSAPP_AUTH_TEMPLATE', ' verification_code'], ['WHATSAPP_WINDOW_AWARE', 'true\n']] as const) {
+        if (!(k in saved)) saved[k] = process.env[k];
+        process.env[k] = v;
+      }
+      expect(env.opsAlertPhone).toBe('15550001111');
+      expect(env.whatsappOpsAlertTemplate).toBe('ops_alert');
+      expect(env.whatsappAuthTemplate).toBe('verification_code');
+      expect(env.whatsappWindowAware).toBe(true);
     });
 
     it('a whitespace-only required WhatsApp setting is missing, as boot-assert treats it', () => {

@@ -209,9 +209,9 @@ async function handleVerified(
             ? await getPartnerIntegrationsStore().getIntegrations(updated.partnerId)
             : railIntegrations;
         const waCreds = waCredsFrom(brandIntegrations);
-        // 2026-10-03: a closed 24-hour window retries the sender's notice as
-        // the approved transfer_delivered_sender template; a failure still
-        // throws into the catch below, as the plain send did.
+        // 2026-10-03: outside the 24-hour window the sender's notice goes as
+        // the approved transfer_delivered_sender template (plain text if that
+        // fails); a failure still throws into the catch below, as before.
         await sendTextThenTemplate(
           updated.phone,
           {
@@ -219,7 +219,7 @@ async function handleVerified(
             template: deliveredSenderTemplate(updated),
           },
           waCreds,
-          { sendText, sendTemplate },
+          { partnerId: updated.partnerId, sendText, sendTemplate },
         );
         if (updated.recipientPhone) {
           // Template-first (reaches a recipient outside the 24h window), but

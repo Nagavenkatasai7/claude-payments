@@ -81,9 +81,9 @@ export async function GET(req: NextRequest) {
         waCreds,
       );
     },
-    // Scheduled-send name nudge (2026-10-02): free-form text first; a closed
-    // 24-hour window retries it as the schedule_name_needed template
-    // (2026-10-03). A failure is thrown, and cron-run logs and swallows it.
+    // Scheduled-send name nudge (2026-10-02): free-form text; outside the
+    // 24-hour window the schedule_name_needed template (2026-10-03, plain text
+    // if that fails). A failure is thrown, and cron-run logs and swallows it.
     // From the partner's own number and brand.
     sendScheduledNameNeeded: async (schedule, timing) => {
       const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
@@ -91,6 +91,7 @@ export async function GET(req: NextRequest) {
         schedule.phone,
         { text: scheduleNameNeededText(brand, schedule, timing), template: scheduleNameNeededTemplate(brand, schedule, timing.dueAt) },
         waCreds,
+        { partnerId: schedule.partnerId, store },
       );
     },
     sendScheduledLink: async (schedule, transfer, url) => {

@@ -81,7 +81,7 @@ Create each in **WhatsApp Manager → Account tools → Message templates → Cr
   `Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}.`
 - **Footer:** `SmartRemit · smartremit.ai`
 - **Samples:** {{1}}=`$50.00`, {{2}}=`Priya`, {{3}}=`tx_a1b2c3`
-- **Wired 2026-10-03:** sent only when the plain "delivered" message is refused because the 24-hour window is closed.
+- **Wired 2026-10-03:** sent instead of the plain "delivered" message only when the sender has not written in the last 24 hours (the `lastmsg:` marker); inside the window the plain text goes as before. Until the template is approved the plain text goes either way.
 
 ### 3.3 `scheduled_payment_ready` — recurring-transfer approval (with pay link)
 - **Category:** Utility · **Language:** en
@@ -90,14 +90,15 @@ Create each in **WhatsApp Manager → Account tools → Message templates → Cr
 - **Buttons:** **Call-to-action → Visit website**, type **Dynamic**, label `Review & Pay`, URL `https://smartremit.ai/pay/{{1}}` (one dynamic suffix variable).
 - **Samples:** body {{1}}=`Anand`, {{2}}=`monthly`, {{3}}=`$100.00`, {{4}}=`Priya`, {{5}}=`September 3, 2026`; button {{1}}=`draft_abc123`
 - Replaces the current free-form cron text (which only lands if the user happens to be in-window). Names the customer's own schedule and how to stop it, so a forgotten schedule's reminder is not mistaken for someone else's message.
-- **Partners on their own number:** a version submitted with the old 3-param body no longer matches; resubmit it with this body (until then the free-form text is sent in-window, as before).
+- **Partners on their own number:** a version submitted with the old 3-param body no longer matches; resubmit it with this body (until then the free-form text is sent, as before).
+- **Rollout order:** deploy the 5-param code first, then create (or edit) the template. An edited template with the old 3-param code still running would fail and fall back to the text.
 
 ### 3.3a `schedule_name_needed` — scheduled transfer needs the sender's legal name
 - **Category:** Utility · **Language:** en
 - **Body:**
   `Your scheduled {{1}} transfer of {{2}}, due {{3}}, needs your full legal name before it can go out. Please reply to this message with your full name exactly as it appears on your ID.`
 - **Samples:** {{1}}=`SmartRemit` (your brand), {{2}}=`$200.00`, {{3}}=`Monday, October 5`
-- Sent only when the plain-text nudge is refused because the 24-hour window is closed.
+- Sent instead of the plain-text nudge only when the sender has not written in the last 24 hours.
 
 ### 3.4 `payment_reminder` — abandoned/unpaid transfer nudge
 - **Category:** Utility · **Language:** en
@@ -111,7 +112,7 @@ Create each in **WhatsApp Manager → Account tools → Message templates → Cr
 - **Body:**
   `Hi {{1}}, your transfer of {{2}} to {{3}} is being reviewed by our team for security. We'll update you shortly — no action is needed right now.`
 - **Samples:** {{1}}=`Anand`, {{2}}=`$1,000.00`, {{3}}=`Priya`
-- **Wired 2026-10-03:** sent only when the plain "in review" message is refused because the 24-hour window is closed. {{1}} is `there` today (the transfer record has no sender name).
+- **Wired 2026-10-03:** sent instead of the plain "in review" message only when the sender has not written in the last 24 hours. {{1}} is `there` today (the transfer record has no sender name).
 
 ### 3.6 `transfer_released` — cleared after review
 - **Category:** Utility · **Language:** en
