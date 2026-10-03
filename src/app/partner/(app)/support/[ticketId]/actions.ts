@@ -5,7 +5,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
-import { createAuditRepo, type SubjectAuditRow } from '@/db/repos/aux-repos';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getRedis } from '@/lib/redis';
 import { pokeWorker } from '@/lib/outbox';
@@ -36,6 +36,9 @@ import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
 import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 import { isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
+
+/** The latest escalation was SmartRemit's own: rolls the withdraw back. */
+class NotYourEscalationError extends Error {}
 
 // /partner/support/[ticketId] actions (UI redesign M3-19): reply, internal note, status. The
 // shared /partner action shape: the site-host guard, then the gate (outside any try); the target
@@ -298,6 +301,8 @@ export async function escalateAction(formData: FormData): Promise<ActionResult> 
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.support.policy);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) return { ok: false, error: t('partner.support.mfaRecovery.locked') };
   if (ticket.status === 'closed') return { ok: false, error: t('partner.support.closed') };
   const alreadyEscalated: ActionResult = { ok: false, error: t('partner.support.alreadyEscalated') };
   if (ticket.status === 'waiting_admin') return alreadyEscalated;
@@ -350,25 +355,22 @@ export async function withdrawEscalationAction(formData: FormData): Promise<Acti
   const ctx = await requirePartnerStaff(PARTNER_TICKET_LEADS);
   const ticket = await getVisibleTicket(ctx, String(formData.get('id') ?? '').trim(), 'customer');
   if (!ticket) return notFound();
+  // A two-step recovery request moves only through its own approve / decline actions.
+  if (isRecoveryTicket(ticket)) return { ok: false, error: t('partner.support.mfaRecovery.locked') };
   const refused: ActionResult = { ok: false, error: t('partner.support.withdrawRefused') };
   if (ticket.status !== 'waiting_admin') return refused;
   const parsed = parseEscalationReason(formData.get('reason'));
   if (!parsed.ok) {
     return { ok: false, error: t(parsed.error === 'number' ? 'partner.support.reasonHasNumber' : 'partner.support.reasonTooShort') };
   }
-  let latest: SubjectAuditRow | null;
-  try {
-    latest = await createAuditRepo(getDb()).latestForSubject(ctx.partnerId, ticket.id, 'ticket.escalate');
-  } catch (err) {
-    logWarn('partner.support.withdraw', errName(err), { ticketId: ticket.id });
-    return failed();
-  }
-  if (!isPartnerEscalation(latest)) return { ok: false, error: t('partner.support.withdrawNotYours') };
-
   try {
     await getDb().transaction(async (tx) => {
       const repo = createTicketRepo(tx);
       if (!(await repo.updateStatus(ticket.id, 'open', { onlyFrom: ['waiting_admin'] }))) throw new StatusRefusedError();
+      // Read the latest escalation AFTER the guarded update holds the ticket row, so an escalation
+      // SmartRemit commits meanwhile is seen here and rolls the withdraw back.
+      const latest = await createAuditRepo(tx).latestForSubject(ctx.partnerId, ticket.id, 'ticket.escalate');
+      if (!isPartnerEscalation(latest)) throw new NotYourEscalationError();
       await repo.appendMessage({
         ticketId: ticket.id,
         actorType: 'system',
@@ -387,6 +389,7 @@ export async function withdrawEscalationAction(formData: FormData): Promise<Acti
     });
   } catch (err) {
     if (err instanceof StatusRefusedError) return refused;
+    if (err instanceof NotYourEscalationError) return { ok: false, error: t('partner.support.withdrawNotYours') };
     logWarn('partner.support.withdraw', errName(err), { ticketId: ticket.id });
     return failed();
   }

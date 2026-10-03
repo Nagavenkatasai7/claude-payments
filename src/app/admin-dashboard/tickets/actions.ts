@@ -103,9 +103,9 @@ export async function replyAction(formData: FormData): Promise<void> {
   const copilot = String(formData.get('copilot') ?? '');
   if (!body) throw new Error('Reply cannot be empty.');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   // A two-step recovery request moves only through its own approve / decline actions.
   if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
-  assertCanWork(staff, ticket);
   requireOpen(ticket);
 
   const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
@@ -214,8 +214,17 @@ export async function escalateAction(formData: FormData): Promise<void> {
       body: `Escalated to admins: ${reason}`,
       internal: true,
     });
+    // In the same transaction, so a partner withdraw that reads the latest escalation sees it.
+    // A recovery request may be escalated: only platform admins decide it.
+    await createAuditRepo(tx).record({
+      partnerId: ticket.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'ticket.escalate',
+      subjectId: ticket.id,
+      meta: { reason },
+    });
   });
-  await audit(staff, ticket, 'ticket.escalate', { reason });
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -228,9 +237,9 @@ export async function resolveAction(formData: FormData): Promise<void> {
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   // A two-step recovery request moves only through its own approve / decline actions.
   if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
-  assertCanWork(staff, ticket);
   const nudgeUrl = ticket.customerPhone ? await supportUrl(ticket.partnerId, ticket.id) : '';
   const db = getDb();
   // Owner tenant only (fix 11 / F58); creds resolve at drain.
@@ -261,9 +270,9 @@ export async function closeAction(formData: FormData): Promise<void> {
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   // A two-step recovery request moves only through its own approve / decline actions.
   if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
-  assertCanWork(staff, ticket);
   const updated = await createTicketRepo(getDb()).updateStatus(ticket.id, 'closed');
   if (!updated) throw new Error('Ticket cannot be closed.');
   await audit(staff, ticket, 'ticket.close');

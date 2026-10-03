@@ -89,8 +89,10 @@ import {
   declineMfaRecoveryAction as platformDecline,
 } from '@/app/admin-dashboard/tickets/recovery-actions';
 import {
+  escalateAction as partnerEscalate,
   replyAction as partnerReply,
   setStatusAction as partnerSetStatus,
+  withdrawEscalationAction as partnerWithdraw,
 } from '@/app/partner/(app)/support/[ticketId]/actions';
 import {
   closeAction as platformClose,
@@ -340,6 +342,19 @@ describe('ordinary ticket actions refuse a recovery request', () => {
     expect(await messageCount(A)).toBe(before.messages);
     expect(await outboxCount()).toBe(before.outbox);
     expect(await mfaOn('pa', PHONE_A)).toBe(true);
+  });
+
+  it('/partner escalate and withdraw return the locked copy and move nothing', async () => {
+    await partnerAdmin();
+    const locked = { ok: false, error: t('partner.support.mfaRecovery.locked') };
+    const reason = { reason: 'The customer needs SmartRemit to look at this' };
+    expect(await partnerEscalate(partnerForm(A, { checks: [], extra: reason }))).toEqual(locked);
+    expect(await status(A)).toBe('open');
+    await createTicketRepo(db).updateStatus(A, 'waiting_admin');
+    expect(await partnerWithdraw(partnerForm(A, { checks: [], extra: reason }))).toEqual(locked);
+    expect(await status(A)).toBe('waiting_admin');
+    expect(await count('ticket.escalate')).toBe(0);
+    expect(await count('ticket.escalation.withdraw')).toBe(0);
   });
 
   it('/admin-dashboard reply, resolve and close throw the locked message and write nothing', async () => {

@@ -50,11 +50,14 @@ export interface OpenCommand {
 
 // The same shapes as isTransferId (partner-transfers.ts) and isTicketId (partner-tickets.ts); those
 // modules are server-side, so the shapes are restated here and test-pinned against them. Ticket ids
-// are `tk_` + an id. A transfer id must look like one (a digit, or the 22-character id length), so
-// typing a page name never offers "Open transfer refunds".
+// are `tk_` + an id. A transfer id must have a minted shape (src/lib/id.ts): the 22-character id,
+// or a pre-fix 8-character base36 id with a letter and a digit. So typing a page name never offers
+// "Open transfer refunds", and a typed phone number never becomes a URL.
 const TICKET_RE = /^tk_[A-Za-z0-9_-]{1,77}$/;
-const TRANSFER_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const looksLikeTransferId = (q: string) => TRANSFER_RE.test(q) && (/\d/.test(q) || q.length >= 16);
+const MINTED_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{21}$/;
+const LEGACY_ID_RE = /^[a-z0-9]{8}$/;
+const looksLikeTransferId = (q: string) =>
+  !/^\d+$/.test(q) && (MINTED_ID_RE.test(q) || (LEGACY_ID_RE.test(q) && /\d/.test(q) && /[a-z]/.test(q)));
 
 /** The "Open" items for what the user typed (none, or one). */
 export function openCommands(query: string, scope: OpenCommandScope): OpenCommand[] {

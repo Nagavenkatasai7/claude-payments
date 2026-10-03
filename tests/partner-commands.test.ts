@@ -93,6 +93,12 @@ describe('openCommandScope + openCommands', () => {
     expect(openCommands('ab12cd34', { transfers: true, tickets: false })[0]?.id).toBe('ab12cd34');
   });
 
+  it('a typed phone number is never offered (it would land in the URL)', () => {
+    for (const q of ['15551234567', '+15551234567', '5551234', '12345678', '4155550101', '1'.repeat(22), 'abc123', 'abcdefgh']) {
+      expect(openCommands(q, { transfers: true, tickets: true }), q).toEqual([]);
+    }
+  });
+
   it('never offers an id the detail pages would refuse', () => {
     for (const q of [TRANSFER, 'ab12cd34', 'x'.repeat(64) + '1', TICKET, 'tk_' + 'y'.repeat(78)]) {
       for (const c of openCommands(q, { transfers: true, tickets: true })) {
