@@ -635,6 +635,45 @@ describe('8. TOTP-enrolled customers', () => {
   });
 });
 
+describe('C1: return to the requested page after sign-in', () => {
+  const TICKET = '/portal/help/tickets/tk_Abc-_1';
+  async function verifyWithNext(phone: string, next?: string) {
+    const s = await requestCodeAction(null, fd({ phone, ...(next !== undefined ? { next } : {}) }));
+    await flushAfter();
+    return verifyCodeAction(null, fd({ pending: s.pending!, code: lastCode(phone)!, ...(next !== undefined ? { next } : {}) }));
+  }
+  it('verify: a safe next is where the customer lands', async () => {
+    await expectRedirect(verifyWithNext(KNOWN, TICKET), TICKET);
+  });
+  it.each(['//evil.example', 'https://evil.example/portal', '/\\evil.example', '/portal/help/tickets/tk_x?y=1', '/portal/../admin-dashboard'])(
+    'verify: a hostile next (%s) lands on /portal',
+    async (next) => {
+      await expectRedirect(verifyWithNext(KNOWN, next), '/portal');
+    },
+  );
+  it('verify: no next → /portal (unchanged)', async () => {
+    await expectRedirect(verifyWithNext(KNOWN), '/portal');
+  });
+  it('mfa: the next carried through the authenticator step is re-checked and kept', async () => {
+    h.mfaEnrolled.add(`pa|${KNOWN}`);
+    const s = await verifyWithNext(KNOWN, TICKET);
+    expect(s.step).toBe('mfa');
+    await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid, next: TICKET })), TICKET);
+  });
+  it('mfa: a hostile next on the authenticator step → /portal', async () => {
+    h.mfaEnrolled.add(`pa|${KNOWN}`);
+    const s = await verifyWithNext(KNOWN, TICKET);
+    await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid, next: '//evil.example' })), '/portal');
+  });
+  it('consent: a safe next is kept; a hostile one → /portal', async () => {
+    const s = await verifyWithNext(UNKNOWN, '/portal/transfers');
+    expect(s.step).toBe('consent');
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes', next: '/portal/transfers' })), '/portal/transfers');
+    const t = await verifyWithNext('14155590101', 'https://evil.example');
+    await expectRedirect(consentAction(null, fd({ pending: t.pending!, consent: 'yes', next: 'https://evil.example' })), '/portal');
+  });
+});
+
 describe('resendCodeAction', () => {
   it('re-sends to the pending phone after the cooldown, with the same answer shape', async () => {
     let t = Date.now();

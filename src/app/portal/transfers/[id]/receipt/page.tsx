@@ -36,8 +36,8 @@ function Row({ label, children, strong }: { label: string; children: ReactNode; 
  */
 export default async function ReceiptPage({ params }: { params: Promise<{ id: string }> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
   const { id } = await params;
+  const ctx = await requirePortalCustomer(`/portal/transfers/${id}/receipt`);
   const owner = portalOwner(ctx);
   const transfer = await getPortalTransfer(owner, id);
   if (!transfer) notFound();

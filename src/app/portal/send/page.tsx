@@ -48,7 +48,7 @@ const regionName = (code: string) => {
  */
 export default async function PortalSendPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/send');
   const owner = { partnerId: site.partnerId, phone: ctx.session.phone };
   const [partner, customer] = await Promise.all([
     getPartnerStore().getPartner(site.partnerId),

@@ -29,6 +29,7 @@ const h = vi.hoisted(() => ({
   redis: null as unknown,
   store: null as unknown,
   ps: null as unknown,
+  returnTo: undefined as string | undefined,
 }));
 vi.mock('@/lib/portal-site', () => ({
   getPortalSite: async () => h.site,
@@ -39,7 +40,8 @@ vi.mock('@/lib/portal-site', () => ({
 }));
 vi.mock('@/lib/portal-auth', () => ({
   getPortalCustomer: async () => h.ctx,
-  requirePortalCustomer: async () => {
+  requirePortalCustomer: async (returnTo?: string) => {
+    h.returnTo = returnTo;
     if (!h.ctx) throw new Error('REDIRECT:/portal/login');
     return h.ctx;
   },
@@ -300,6 +302,19 @@ describe('Business (b2b) transfers: names, badges and the Payment card', () => {
     const html = await detail(A.transferIds[0]);
     expect(html).not.toContain('data-b2b-payment');
     expect(html).not.toContain('Business name');
+  });
+});
+
+describe('C1: signed out, each page asks to come back to itself', () => {
+  it('the list, the detail and the receipt pass their own path', async () => {
+    h.ctx = null;
+    const id = A.transferIds[0];
+    await expect(list()).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe('/portal/transfers');
+    await expect(detail(id)).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe(`/portal/transfers/${id}`);
+    await expect(receipt(id)).rejects.toThrow('REDIRECT:/portal/login');
+    expect(h.returnTo).toBe(`/portal/transfers/${id}/receipt`);
   });
 });
 

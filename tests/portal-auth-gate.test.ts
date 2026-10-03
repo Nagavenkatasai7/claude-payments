@@ -204,6 +204,19 @@ describe('requirePortalCustomer', () => {
     h.jar.set(PORTAL_SESSION_COOKIE, token);
     expect(await getPortalCustomer()).toBeNull();
   });
+  it('C1: signed out with a safe returnTo → the sign-in page carries it as an encoded next', async () => {
+    await expectRedirect(requirePortalCustomer('/portal/help/tickets/tk_Abc-_1'), '/portal/login?next=%2Fportal%2Fhelp%2Ftickets%2Ftk_Abc-_1');
+    await expectRedirect(requirePortalCustomer('/portal/transfers'), '/portal/login?next=%2Fportal%2Ftransfers');
+  });
+  it('C1: an unsafe returnTo, or /portal itself, → the plain sign-in page', async () => {
+    await expectRedirect(requirePortalCustomer('//evil.example'), '/portal/login');
+    await expectRedirect(requirePortalCustomer('https://evil.example/portal'), '/portal/login');
+    await expectRedirect(requirePortalCustomer('/portal'), '/portal/login');
+  });
+  it('C1: signed in, the returnTo changes nothing', async () => {
+    await signedIn('pa');
+    expect((await requirePortalCustomer('/portal/transfers')).site.partnerId).toBe('pa');
+  });
   it('apex → 404 before any cookie or store read', async () => {
     h.site = null;
     await expect(requirePortalCustomer()).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
@@ -277,6 +290,30 @@ describe('5. safePortalNext', () => {
   it('M2-14: only the two privacy steps are allowed under /portal/privacy', () => {
     expect(safePortalNext('/portal/privacy/other')).toBe('/portal');
   });
+  it.each(['/portal/transfers', '/portal/transfers/AbCdEf12/receipt', '/portal/help', '/portal/help/tickets', '/portal/help/tickets/new',
+    '/portal/help/tickets/tk_Abc-_1', '/portal/chat'])('C1: %s is kept', (v) => expect(safePortalNext(v)).toBe(v));
+  it.each([
+    '/portal/help/tickets/abc', // not a tk_ id
+    '/portal/help/tickets/tk_x/../x',
+    '/portal/help/tickets/tk_x?y=1',
+    '/portal/help/tickets/tk_',
+    `/portal/help/tickets/tk_${'a'.repeat(65)}`,
+    '/portal/transfers/x/receipt',
+    '/portal/transfers/AbCdEf12/receipt/extra',
+    '/portal/transfers?f=abc',
+    '/portal/help/',
+    '/portal/chat/x',
+    '/portal/chat#x',
+    '//evil.example',
+    '/\\evil.example',
+    '/portal/\\evil.example',
+    '/%2F%2Fevil.example',
+    '/portal/%2E%2E/admin-dashboard',
+    '%2Fportal%2Fhelp',
+    '/portal/help\n',
+    'https://evil.example/portal',
+    ' /portal/help',
+  ])('C1: %s → /portal', (v) => expect(safePortalNext(v)).toBe('/portal'));
 });
 
 describe('step-up', () => {

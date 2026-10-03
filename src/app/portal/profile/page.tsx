@@ -32,7 +32,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  */
 export default async function ProfilePage() {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/profile');
   const [partner, mfaOn] = await Promise.all([
     getPartnerStore().getPartner(site.partnerId),
     getCustomerMfaStore()

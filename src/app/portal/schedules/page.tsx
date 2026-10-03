@@ -49,7 +49,7 @@ const one = (v: string | string[] | undefined) => (typeof v === 'string' ? v : u
  */
 export default async function PortalSchedulesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/schedules');
   const sp = await searchParams;
   const rows = visibleSchedules(await createScheduleRepo(getDb()).listForCustomer(site.partnerId, ctx.session.phone)).map((s) => {
     const cadence = describeSchedule(s);

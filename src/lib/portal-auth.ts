@@ -53,19 +53,27 @@ async function loadPortalCustomer(): Promise<PortalCustomerContext | null> {
 /** The signed-in customer on THIS partner's host, or null. A cookie from another partner's host is null. */
 export const getPortalCustomer: () => Promise<PortalCustomerContext | null> = cache(loadPortalCustomer);
 
-/** getPortalCustomer() or a redirect to the sign-in page. */
-export async function requirePortalCustomer(): Promise<PortalCustomerContext> {
+/**
+ * getPortalCustomer() or a redirect to the sign-in page. A page passes its own path as `returnTo`
+ * (C1): when it is on the safePortalNext allow-list, the sign-in page gets it as `?next=` and lands
+ * the customer back there. Server actions keep the no-argument form (a POST never returns).
+ */
+export async function requirePortalCustomer(returnTo?: string): Promise<PortalCustomerContext> {
   const ctx = await getPortalCustomer();
-  if (!ctx) redirect('/portal/login');
+  if (!ctx) {
+    const next = safePortalNext(returnTo);
+    redirect(next === '/portal' ? '/portal/login' : `/portal/login?next=${encodeURIComponent(next)}`);
+  }
   return ctx;
 }
 
 /**
- * The step-up `next` allow-list: /portal or one of the sensitive pages, with opaque-id character sets
- * only (no `//`, no `..`, no query). Anything else → /portal.
+ * The `next` allow-list (step-up and sign-in): /portal or one of its pages, with opaque-id character
+ * sets only (no `//`, no `..`, no query, no backslash). Anything else → /portal. Re-checked on the
+ * server at every use: a `next` from a query string or a hidden field is never trusted as is.
  */
 const NEXT_RE =
-  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers\/[A-Za-z0-9_-]{6,64}|profile|notifications|devices|privacy|privacy\/(?:export|delete)))?$/;
+  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers|transfers\/[A-Za-z0-9_-]{6,64}|transfers\/[A-Za-z0-9_-]{6,64}\/receipt|help|help\/tickets|help\/tickets\/new|help\/tickets\/tk_[A-Za-z0-9_-]{1,64}|chat|profile|notifications|devices|privacy|privacy\/(?:export|delete)))?$/;
 
 export function safePortalNext(next: unknown): string {
   return typeof next === 'string' && NEXT_RE.test(next) ? next : '/portal';
@@ -93,10 +101,10 @@ export async function isPortalSessionFresh(ctx: PortalCustomerContext): Promise<
 
 /**
  * The 15-minute step-up (owner O1). A session that is not fresh (isPortalSessionFresh) is sent
- * through /portal/verify first.
+ * through /portal/verify first; a signed-out visitor goes to sign-in and comes back to `returnTo`.
  */
 export async function requireFreshPortalAuth(returnTo: string): Promise<PortalCustomerContext> {
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer(returnTo);
   if (!(await isPortalSessionFresh(ctx))) {
     redirect(`/portal/verify?next=${safePortalNext(returnTo)}`);
   }

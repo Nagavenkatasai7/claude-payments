@@ -19,7 +19,7 @@ export const generateMetadata = () => portalMetadata('portal.notify.title', { re
  */
 export default async function NotificationsPage() {
   const site = await requirePortalSite();
-  const ctx = await requirePortalCustomer();
+  const ctx = await requirePortalCustomer('/portal/notifications');
   const db = getDb();
   const owner = { partnerId: site.partnerId, senderPhone: ctx.session.phone, email: ctx.customer.email };
   const [prefs, verified] = await Promise.all([getPortalPrefs(db, site.partnerId, ctx.session.phone), verifiedReceiptEmail(db, owner)]);

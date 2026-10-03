@@ -13,14 +13,19 @@ import { Button, Checkbox, Field, Input } from '@/components/ds';
 const APEX = 'https://smartremit.ai';
 const INITIAL: PortalLoginState = { step: 'phone' };
 
-export function LoginForm({ brand }: { brand: string }) {
+// `next` is the page to land on after sign-in (already allow-listed by the page; the actions check it
+// again). Every step's form carries it, so it survives the code, authenticator and consent steps.
+export function LoginForm({ brand, next }: { brand: string; next: string }) {
   const [state, action, busy] = useActionState(portalLoginAction, INITIAL);
   const error = state.error ? t(state.error) : undefined;
+  const nextField = <input type="hidden" name="next" value={next} />;
+  const startOver = next === '/portal' ? '/portal/login' : `/portal/login?next=${encodeURIComponent(next)}`;
 
   if (state.step === 'code') {
     return (
       <form action={action} className="flex flex-col gap-5">
         <input type="hidden" name="pending" value={state.pending ?? ''} />
+        {nextField}
         {state.notice ? (
           <p role="status" className="text-[15px] text-ds-ink-muted">
             {t(state.notice, { last4: state.last4 ?? '' })}
@@ -39,7 +44,7 @@ export function LoginForm({ brand }: { brand: string }) {
           <Button type="submit" name="intent" value="resend" variant="link" size="md" formNoValidate disabled={busy}>
             {t('portal.login.resend')}
           </Button>
-          <Link href="/portal/login" className="text-[14px] font-semibold text-ds-primary">
+          <Link href={startOver} className="text-[14px] font-semibold text-ds-primary">
             {t('portal.login.startOver')}
           </Link>
         </div>
@@ -51,6 +56,7 @@ export function LoginForm({ brand }: { brand: string }) {
     return (
       <form action={action} className="flex flex-col gap-5">
         <input type="hidden" name="pending" value={state.pending ?? ''} />
+        {nextField}
         <Field name="code" label={t('portal.login.mfaLabel')} error={error} required>
           {({ id, describedBy, invalid }) => (
             <Input id={id} name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6}
@@ -68,6 +74,7 @@ export function LoginForm({ brand }: { brand: string }) {
     return (
       <form action={action} className="flex flex-col gap-5">
         <input type="hidden" name="pending" value={state.pending ?? ''} />
+        {nextField}
         <h2 className="text-[17px] font-semibold text-ds-ink">{t('portal.login.consentTitle')}</h2>
         <p className="text-[15px] text-ds-ink-muted">{t('portal.login.consentIntro')}</p>
         <Checkbox name="consent" value="yes" required label={t('portal.login.consentLabel', { brand })} error={error} />
@@ -88,6 +95,7 @@ export function LoginForm({ brand }: { brand: string }) {
 
   return (
     <form action={action} className="flex flex-col gap-5">
+      {nextField}
       <Field name="phone" label={t('portal.login.phoneLabel')} hint={t('portal.login.phoneHint')} error={error} required>
         {({ id, describedBy, invalid }) => (
           <Input id={id} name="phone" type="tel" inputMode="tel" autoComplete="tel" required aria-describedby={describedBy} invalid={invalid} />
