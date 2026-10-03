@@ -49,6 +49,10 @@ describe('PARTNER_ROUTES', () => {
       for (const role of KNOWN_PARTNER_ROLES) expect(partnerNav(role).map((r) => r.href)).not.toContain(PARTNER_ROUTES[key].href);
     }
   });
+  it('lost-features A8: the conversation log is admin-only and out of the nav', () => {
+    expect(PARTNER_ROUTES.customerConversation).toMatchObject({ href: '/partner/customers/conversation', nav: false });
+    for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('customerConversation', role)).toBe(role === 'admin');
+  });
   it('M3-20: onboarding is admin-only, in the nav right after home', () => {
     for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('onboarding', role)).toBe(role === 'admin');
     expect(partnerNav('admin')[1].href).toBe('/partner/onboarding');

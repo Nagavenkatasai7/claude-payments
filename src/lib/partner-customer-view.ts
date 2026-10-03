@@ -1,8 +1,9 @@
 import { sealCustomerRef } from '@/lib/customer-ref';
-import { maskPhoneLast4 } from '@/lib/mask';
+import { maskLast4, maskPhoneLast4 } from '@/lib/mask';
+import { maskRef } from '@/lib/partner-transfers';
 import { deriveTier, observationDay, type CapSubject } from '@/lib/tier-rules';
 import type { MessageKey } from '@/lib/i18n';
-import type { Customer, KycStatus, Tier } from '@/lib/types';
+import type { CapEvaluation, CountryCode, Customer, GovIdType, KycStatus, Occupation, SourceOfFunds, Tier } from '@/lib/types';
 
 // partner-customer-view (UI redesign M3-11): the PURE shapes behind /partner/customers. The pages
 // render ONLY from these, so what can reach the HTML (or a client component's props) is decided
@@ -12,8 +13,11 @@ import type { Customer, KycStatus, Tier } from '@/lib/types';
 
 export const PARTNER_CUSTOMERS_PAGE_SIZE = 50;
 
-/** The fields a partner may reveal (one audited `pii.reveal` each). Nothing else is revealable. */
-export const REVEALABLE_FIELDS = Object.freeze(['full_name', 'date_of_birth', 'residential_address', 'phone'] as const);
+/**
+ * The fields a partner may reveal (one audited `pii.reveal` each). Nothing else is revealable. All are
+ * the `identity` class of partner-reveal-policy (lost-features p2 B5 adds nationality).
+ */
+export const REVEALABLE_FIELDS = Object.freeze(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'phone'] as const);
 export type RevealableField = (typeof REVEALABLE_FIELDS)[number];
 
 export function isRevealableField(f: unknown): f is RevealableField {
@@ -31,6 +35,8 @@ export function revealableValue(c: Customer, field: RevealableField): string | u
       return present(c.fullName);
     case 'date_of_birth':
       return present(c.dateOfBirth);
+    case 'nationality':
+      return present(c.nationality);
     case 'residential_address':
       return present(c.residentialAddress);
     default:
@@ -132,6 +138,113 @@ export function customerListRow(c: Customer): CustomerListRow {
   };
 }
 
+// ── Lost-features p2 B4: the customer list (directory) ──────────────────────────────────────────
+// Country, tier (with the day of the observation window), ledger totals and last activity, plus
+// closed filters. Phones stay masked (owner line); there is still no name column. The full-phone
+// search is a POST (find by phone), never a URL parameter; `?last4=` carries the four digits the
+// list already prints.
+
+/** Ledger totals for one phone (partner-customer-reads partnerCustomerTotals). */
+export interface DirectoryTotals {
+  count: number;
+  sentCents: number;
+  lastAt: string;
+}
+
+export interface CustomerDirectoryRow extends CustomerListRow {
+  country: CountryCode | null;
+  tier: Tier;
+  tierKey: MessageKey;
+  dayOfWindow: number | null;
+  transfers: number;
+  sentCents: number;
+  /** The newest live transfer, else first seen. */
+  lastActivityAt: string;
+}
+
+export function customerDirectoryRow(c: Customer, totals: DirectoryTotals | undefined, now: Date, kycGateActive: boolean): CustomerDirectoryRow {
+  const tv = tierView(c, now, kycGateActive);
+  return {
+    ...customerListRow(c),
+    country: typeof c.senderCountry === 'string' && /^[A-Z]{2}$/.test(c.senderCountry) ? c.senderCountry : null,
+    tier: tv.tier,
+    tierKey: tv.key,
+    dayOfWindow: tv.dayOfWindow,
+    transfers: totals?.count ?? 0,
+    sentCents: totals?.sentCents ?? 0,
+    lastActivityAt: totals?.lastAt ?? c.firstSeenAt,
+  };
+}
+
+export const DIRECTORY_TIERS = Object.freeze(['T0', 'T1', 'Suspended'] as const satisfies readonly Tier[]);
+
+export interface CustomerFilters {
+  kyc?: KycStatus;
+  tier?: Tier;
+  last4?: string;
+}
+
+const firstParam = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+/** The list's filters from search params: closed values only; anything else is dropped. */
+export function parseCustomerFilters(sp: Record<string, string | string[] | undefined>): CustomerFilters {
+  const out: CustomerFilters = {};
+  const kyc = firstParam(sp.kyc);
+  if (typeof kyc === 'string' && (KYC_STATUS_VALUES as readonly string[]).includes(kyc)) out.kyc = kyc as KycStatus;
+  const tier = firstParam(sp.tier);
+  if (typeof tier === 'string' && (DIRECTORY_TIERS as readonly string[]).includes(tier)) out.tier = tier as Tier;
+  const last4 = firstParam(sp.last4);
+  if (typeof last4 === 'string' && /^\d{4}$/.test(last4)) out.last4 = last4;
+  return out;
+}
+
+export function filterDirectory(rows: readonly CustomerDirectoryRow[], f: CustomerFilters): CustomerDirectoryRow[] {
+  return rows.filter(
+    (r) =>
+      (f.kyc === undefined || r.kycStatus === f.kyc) &&
+      (f.tier === undefined || r.tier === f.tier) &&
+      (f.last4 === undefined || r.phone.endsWith(f.last4)),
+  );
+}
+
+export type DirectorySort = 'created' | 'lastActivity';
+
+/** One page of directory rows sorted by created time or last activity (ties by ref order kept stable). */
+export function pageDirectory(
+  rows: readonly CustomerDirectoryRow[],
+  p: { sort: string; dir: 'asc' | 'desc'; offset: number; limit: number },
+): { rows: CustomerDirectoryRow[]; total: number } {
+  const key = (r: CustomerDirectoryRow) => (p.sort === 'lastActivity' ? r.lastActivityAt : r.createdAt);
+  const sorted = [...rows].sort((a, b) => {
+    const d = key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.phone < b.phone ? -1 : a.phone > b.phone ? 1 : 0;
+    return p.dir === 'asc' ? d : -d;
+  });
+  return { rows: sorted.slice(p.offset, p.offset + p.limit), total: rows.length };
+}
+
+export function directorySummary(rows: readonly CustomerDirectoryRow[]): { total: number; t0: number } {
+  return { total: rows.length, t0: rows.filter((r) => r.tier === 'T0').length };
+}
+
+// ── Lost-features p2 B7: "Sending today" ───────────────────────────────────────────────────────────
+export interface SendingTodayView {
+  dailyCapCents: number;
+  usedCents: number;
+  remainingCents: number;
+  /** 1-3 in the observation window, else null. */
+  dayOfWindow: number | null;
+}
+
+/** The figures only: the cap evaluation's reason and withinCap never leave (nothing hints at a cause). */
+export function sendingTodayView(cap: CapEvaluation): SendingTodayView {
+  return {
+    dailyCapCents: cap.dailyCapCents,
+    usedCents: cap.todayUsedCents,
+    remainingCents: cap.todayRemainingCents,
+    dayOfWindow: cap.tier === 'T0' && typeof cap.dayOfWindow === 'number' ? cap.dayOfWindow : null,
+  };
+}
+
 export interface DetailField {
   field: RevealableField;
   labelKey: MessageKey;
@@ -164,6 +277,7 @@ export function customerDetailView(c: Customer, ref: string, now: Date, kycGateA
       f('phone', 'partner.customers.field.phone', () => phone),
       f('full_name', 'partner.customers.field.full_name', (v) => maskInitials(v)),
       f('date_of_birth', 'partner.customers.field.date_of_birth', () => HIDDEN),
+      f('nationality', 'partner.customers.field.nationality', () => '••'),
       f('residential_address', 'partner.customers.field.residential_address', () => HIDDEN),
     ],
     kycStatusKey: kycStatusKey(c.kycStatus),
@@ -171,6 +285,77 @@ export function customerDetailView(c: Customer, ref: string, now: Date, kycGateA
     tierKey: tierView(c, now, kycGateActive).key,
     kycVerifiedAt: c.kycVerifiedAt ?? null,
     firstSeenAt: c.firstSeenAt,
+  };
+}
+
+// ── Lost-features p2 B6: the profile fields that came back ─────────────────────────────────────────
+// Closed label keys and masked strings only. It never reads watchlistHit, pepHit or kycRejectedReason
+// (the rejected reason can name a screening hit: the partner's own reasons show in the KYC history).
+// The ID and the verification reference show their last 4 only (the full reference opens the
+// provider case, which holds screening reports).
+
+const GOV_ID_KEYS: Readonly<Record<GovIdType, MessageKey>> = Object.freeze({
+  passport: 'partner.customers.govId.passport',
+  drivers_license: 'partner.customers.govId.drivers_license',
+  national_id: 'partner.customers.govId.national_id',
+  state_id: 'partner.customers.govId.state_id',
+});
+const SOURCE_OF_FUNDS_KEYS: Readonly<Record<SourceOfFunds, MessageKey>> = Object.freeze({
+  employment: 'partner.customers.sof.employment',
+  business: 'partner.customers.sof.business',
+  investment: 'partner.customers.sof.investment',
+  gift: 'partner.customers.sof.gift',
+  savings: 'partner.customers.sof.savings',
+  other: 'partner.customers.sof.other',
+});
+const OCCUPATION_KEYS: Readonly<Record<Occupation, MessageKey>> = Object.freeze({
+  salaried: 'partner.customers.occupation.salaried',
+  self_employed: 'partner.customers.occupation.self_employed',
+  business_owner: 'partner.customers.occupation.business_owner',
+  student: 'partner.customers.occupation.student',
+  homemaker: 'partner.customers.occupation.homemaker',
+  retired: 'partner.customers.occupation.retired',
+  unemployed: 'partner.customers.occupation.unemployed',
+  other: 'partner.customers.occupation.other',
+});
+
+function closedKey<K extends string>(map: Readonly<Record<K, MessageKey>>, v: unknown, unknown: MessageKey): MessageKey | null {
+  if (v === undefined || v === null || v === '') return null;
+  return typeof v === 'string' && Object.hasOwn(map, v) ? map[v as K] : unknown;
+}
+
+export interface CustomerProfileView {
+  country: CountryCode | null;
+  govId: { typeKey: MessageKey; last4: string } | null;
+  /** null when the customer never answered: the page renders no row (no "No" nobody collected). */
+  pepDeclaredKey: MessageKey | null;
+  sourceOfFundsKey: MessageKey | null;
+  occupationKey: MessageKey | null;
+  /** Masked (`****` + last 4); one entry when the provider ref and the inquiry id are the same. */
+  verificationRefs: string[];
+}
+
+export function customerProfileView(c: Customer): CustomerProfileView {
+  const govNumber = present(c.govIdNumber);
+  const idLast4 = present(c.idLast4);
+  const last4 = (v: string) => `${HIDDEN}${v.length > 4 ? maskLast4(v) : ''}`;
+  let govId: CustomerProfileView['govId'] = null;
+  if (c.govIdType || govNumber) {
+    govId = { typeKey: closedKey(GOV_ID_KEYS, c.govIdType, 'partner.customers.govId.unknown') ?? 'partner.customers.govId.unknown', last4: govNumber ? last4(govNumber) : HIDDEN };
+  } else if (c.idDocType || idLast4) {
+    govId = {
+      typeKey: closedKey(GOV_ID_KEYS, c.idDocType, 'partner.customers.govId.unknown') ?? 'partner.customers.govId.unknown',
+      last4: idLast4 && /^[A-Za-z0-9]{4}$/.test(idLast4) ? `${HIDDEN}${idLast4}` : HIDDEN,
+    };
+  }
+  const refs = [...new Set([present(c.kycProviderRef), present(c.kycInquiryId)].filter((r): r is string => r !== undefined))];
+  return {
+    country: typeof c.senderCountry === 'string' && /^[A-Z]{2}$/.test(c.senderCountry) ? c.senderCountry : null,
+    govId,
+    pepDeclaredKey: typeof c.pepDeclared === 'boolean' ? (c.pepDeclared ? 'partner.customers.pepDeclared.yes' : 'partner.customers.pepDeclared.no') : null,
+    sourceOfFundsKey: closedKey(SOURCE_OF_FUNDS_KEYS, c.sourceOfFunds, 'partner.customers.sof.unknown'),
+    occupationKey: closedKey(OCCUPATION_KEYS, c.occupation, 'partner.customers.occupation.unknown'),
+    verificationRefs: refs.map((r) => maskRef(r) ?? '****'),
   };
 }
 

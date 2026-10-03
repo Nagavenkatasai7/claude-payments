@@ -25,7 +25,9 @@ export async function viewConversation(
   db: DbOrTx,
   staff: Pick<Staff, 'username' | 'role' | 'partnerId'>,
   customer: Pick<Customer, 'partnerId' | 'senderPhone'>,
-  opts: { limit?: number } = {},
+  // Lost-features p2 A8: the partner page marks its rows (actorScope 'partner'). Opt-in, so the
+  // legacy caller writes exactly what it wrote before.
+  opts: { limit?: number; actorScope?: 'partner' | 'platform' } = {},
 ): Promise<ConversationEntry[] | null> {
   if (staff.role !== 'admin') return null;
   if (staff.partnerId !== undefined && staff.partnerId !== customer.partnerId) return null;
@@ -41,7 +43,12 @@ export async function viewConversation(
     actorType: 'staff',
     action: 'conversation.view',
     subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
-    meta: { count: entries.length, channel, unreadable: entries.filter((e) => e.unreadable).length },
+    meta: {
+      count: entries.length,
+      channel,
+      unreadable: entries.filter((e) => e.unreadable).length,
+      ...(opts.actorScope ? { actorScope: opts.actorScope } : {}),
+    },
   });
   return entries;
 }

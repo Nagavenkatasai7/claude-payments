@@ -76,6 +76,7 @@ import { auditSubjectId, openCustomerRef, sealCustomerRef } from '@/lib/customer
 import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import CustomersPage from '@/app/partner/(app)/customers/page';
 import CustomerDetailPage from '@/app/partner/(app)/customers/[ref]/page';
+import NewCustomerPage from '@/app/partner/(app)/customers/new/page';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -125,7 +126,7 @@ async function auditRows(action = 'pii.view') {
   return (res as unknown as { rows: Array<{ partner_id: string; actor: string; subject_id: string; meta: Record<string, unknown> }> }).rows;
 }
 const refsIn = (html: string) =>
-  [...html.matchAll(/href="\/partner\/customers\/([^"?]+)"/g)].map((m) => decodeURIComponent(m[1]));
+  [...html.matchAll(/href="\/partner\/customers\/(?!new")([^"?]+)"/g)].map((m) => decodeURIComponent(m[1]));
 
 const ALL_PII = [SHARED, ONLY_A, ONLY_B, A_NAME, B_NAME, 'Ashaqz', 'Ramanathan', 'Zubqx', 'Quellen', DOB, ADDR, 'Elmqz'];
 
@@ -252,13 +253,33 @@ describe('/partner/customers/[ref]: detail', () => {
     expect(html).not.toMatch(/watchlist|sanction|pep hit|Matched list/i);
     expect(html).toContain('Verified');
   });
-  it('an agent without canRevealPii sees masked values and no Show control; admin gets one per present field', async () => {
-    await signInAs({ partnerId: PA, role: 'agent' });
-    expect(await detail(sealCustomerRef(PA, SHARED))).not.toContain('>Show<');
+  it('p2 B5: an enrolled agent WITHOUT canRevealPii gets one Show control per present field, as does an admin', async () => {
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag' });
+    await redis.set(staffMfaKeys.secret('ag'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
+    expect((await detail(sealCustomerRef(PA, SHARED))).match(/>Show</g)).toHaveLength(4);
     await signInAs({ partnerId: PA, role: 'admin', username: 'adm' });
     await redis.set(staffMfaKeys.secret('adm'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
     const html = await detail(sealCustomerRef(PA, SHARED));
     expect(html.match(/>Show</g)).toHaveLength(4);
+    expect(html).not.toContain('data-reveal-hint');
+  });
+  it('a non-enrolled agent sees masked values, no Show control, and the hint to turn on two-step verification', async () => {
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-nomfa', permissions: { ...perms, canRevealPii: true } });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).not.toContain('>Show<');
+    expect(html).toContain('data-reveal-hint');
+    expect(html).toContain('href="/partner/security"');
+  });
+  it('nationality is masked and revealable when present', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: SHARED, fullName: A_NAME, dateOfBirth: DOB, residentialAddress: ADDR, nationality: 'IN' }),
+    );
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag2' });
+    await redis.set(staffMfaKeys.secret('ag2'), JSON.stringify({ secretEnc: 'x', enrolledAt: 'y' }));
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('Nationality');
+    expect(html.match(/>Show</g)).toHaveLength(5);
+    expect(html).not.toMatch(/>IN</);
   });
   it('an admin without two-step verification sees no Show control (the reveal would be refused)', async () => {
     await signInAs({ partnerId: PA, role: 'admin', username: 'adm-nomfa' });
@@ -319,5 +340,240 @@ describe('/partner/customers/[ref]: send limits (M3-12)', () => {
     const html = await detail(sealCustomerRef(PA, SHARED));
     expect(html).not.toContain('$5,000.00');
     expect(html).toContain(FORM);
+  });
+});
+
+// Lost-features p2 B4: country, tier, totals, last activity and closed filters; phones stay masked.
+describe('/partner/customers: list columns and filters (p2 B4)', () => {
+  beforeEach(async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    await seedPartnerTransfer(db, { id: 'ta1', partnerId: PA, phone: SHARED, amountUsd: 120, status: 'delivered' });
+    await seedPartnerTransfer(db, { id: 'ta2', partnerId: PA, phone: SHARED, amountUsd: 30, status: 'cancelled' });
+    await seedPartnerTransfer(db, { id: 'tat', partnerId: PA, phone: SHARED, amountUsd: 900, status: 'delivered', environment: 'test' });
+    await seedPartnerTransfer(db, { id: 'tb1', partnerId: PB, phone: SHARED, amountUsd: 7777, status: 'delivered' });
+  });
+  const rowOf = (html: string, last4: string) => {
+    const m = html.match(new RegExp(`<tr[^>]*>(?:(?!</tr>).)*••••${last4}(?:(?!</tr>).)*</tr>`, 's'));
+    return m?.[0] ?? '';
+  };
+  it('totals are this tenant’s live rows only (cancelled not counted; test rows and B’s never)', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await list();
+    const row = rowOf(html, '0000');
+    expect(row).toContain('data-col="transfers">1<');
+    expect(row).toContain('data-col="sent">$120.00<');
+    expect(row).toContain('>US<');
+    expect(html).not.toContain('7,777');
+    expect(html).not.toContain('$900.00');
+    expect(rowOf(html, '1111')).toContain('data-col="transfers">0<');
+    for (const v of ALL_PII) expect(html).not.toContain(v);
+  });
+  it('the summary counts the tenant’s customers and those in their first days', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: '15553334444', kycStatus: 'pending', firstSeenAt: daysAgo(1), createdAt: daysAgo(1) }),
+    );
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await list();
+    expect(html).toMatch(/data-customers-summary="">3 customers · 1 in their first days/);
+    expect(rowOf(html, '4444')).toContain('data-tier="T0"');
+    expect(rowOf(html, '4444')).toContain('Day 2 of 3');
+  });
+  it('filters by KYC status, tier and last 4; junk filters are ignored', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(refsIn(await list({ kyc: 'pending' })).map((r) => openCustomerRef(r)?.phone)).toEqual([ONLY_A]);
+    expect(refsIn(await list({ last4: '0000' })).map((r) => openCustomerRef(r)?.phone)).toEqual([SHARED]);
+    expect(refsIn(await list({ tier: 'Suspended' }))).toEqual([]);
+    expect(await list({ tier: 'Suspended' })).toContain('No customers match these filters.');
+    expect(refsIn(await list({ kyc: 'nope', last4: '12' }))).toHaveLength(2);
+    // A filter on B's phone at A finds nothing of B.
+    expect(refsIn(await list({ last4: '2222' }))).toEqual([]);
+  });
+  it('sorts by last activity', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const phones = refsIn(await list({ sort: 'lastActivity', dir: 'desc' })).map((r) => openCustomerRef(r)?.phone);
+    expect(phones).toEqual([SHARED, ONLY_A]);
+  });
+});
+
+// Lost-features p2 B7 (sending today) and A10 (the customer's transfers).
+describe('/partner/customers/[ref]: sending today and transfers (p2 B7, A10)', () => {
+  beforeEach(async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    await seedPartnerTransfer(db, { id: 'tx_a_1', partnerId: PA, phone: SHARED, amountUsd: 120, status: 'paid' });
+    await seedPartnerTransfer(db, { id: 'tx_a_test', partnerId: PA, phone: SHARED, amountUsd: 900, status: 'paid', environment: 'test' });
+    await seedPartnerTransfer(db, { id: 'tx_b_1', partnerId: PB, phone: SHARED, amountUsd: 777, status: 'paid' });
+  });
+  it('shows today’s spend against the cap from this tenant’s live rows only', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-today="used">$120.00<');
+    expect(html).toContain('data-today="left">$2,879.00<');
+    expect(html).not.toContain('data-today="day"');
+  });
+  it('a customer in the first days shows the day of the window', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({ partnerId: PA, senderPhone: ONLY_A, kycStatus: 'pending', firstSeenAt: daysAgo(0.5) }),
+    );
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, ONLY_A));
+    expect(html).toContain('data-today="day">Day 1 of 3<');
+    expect(html).toContain('No live transfers yet.');
+  });
+  it('lists this tenant’s live transfers for the customer, masked; never B’s or test rows', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-customer-transfer="tx_a_1"');
+    expect(html).toContain('href="/partner/transfers/tx_a_1"');
+    expect(html).not.toContain('tx_b_1');
+    expect(html).not.toContain('tx_a_test');
+    expect(html).toContain('Testname S.');
+    for (const v of ['Samplesurname', '000011112222', '919876543210']) expect(html).not.toContain(v);
+  });
+  it('pages older transfers by an opaque cursor (no phone in the link)', async () => {
+    const { seedPartnerTransfer } = await import('./helpers-partner-app');
+    for (let i = 0; i < 26; i++) {
+      await seedPartnerTransfer(db, { id: `tx_p_${i}`, partnerId: PA, phone: SHARED, status: 'delivered', createdAt: daysAgo(2 + i / 100) });
+    }
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const ref = sealCustomerRef(PA, SHARED);
+    const html = await detail(ref);
+    const older = html.match(/href="([^"]*\?tx=[^"]*)"/)?.[1];
+    expect(older).toBeTruthy();
+    expect(older).not.toContain(SHARED.slice(-6));
+    const tx = new URL(older!.replace(/&amp;/g, '&'), 'https://x').searchParams.get('tx')!;
+    const page2 = renderToStaticMarkup(
+      await CustomerDetailPage({ params: Promise.resolve({ ref }), searchParams: Promise.resolve({ tx }) }),
+    );
+    expect(page2).toContain('data-customer-transfer="tx_p_25"');
+    expect(page2).not.toContain('data-customer-transfer="tx_a_1"');
+  });
+});
+
+// Lost-features p2 B6: the profile rows that come back, masked; never the rejected reason or a
+// screening flag; the PEP row only when the customer answered.
+describe('/partner/customers/[ref]: profile (p2 B6)', () => {
+  it('shows country, masked ID, declared PEP, source of funds, occupation and a masked reference; pii.view names them', async () => {
+    await createCustomerStore(db, createStore(redis, db)).saveCustomer(
+      customer({
+        partnerId: PA,
+        senderPhone: SHARED,
+        fullName: A_NAME,
+        govIdType: 'passport',
+        govIdNumber: 'X9981234',
+        pepDeclared: false,
+        sourceOfFunds: 'savings',
+        occupation: 'retired',
+        kycProviderRef: 'inq_ABCDEFGH7777',
+        kycInquiryId: 'inq_ABCDEFGH7777',
+        kycRejectedReason: 'Matched list entry',
+        watchlistHit: true,
+        pepHit: true,
+      }),
+    );
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-prof' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-testid="partner-customer-profile"');
+    expect(html).toContain('Passport');
+    expect(html).toContain('••••1234');
+    expect(html).toContain('Declared politically exposed');
+    expect(html).toContain('Savings');
+    expect(html).toContain('Retired');
+    expect(html).toContain('****7777');
+    for (const v of ['X998', 'ABCDEFGH', 'Matched list']) expect(html).not.toContain(v);
+    expect(html).not.toMatch(/watchlist|pep hit/i);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta.fields).toEqual(['full_name', 'gov_id_last4', 'pep_declared', 'source_of_funds', 'occupation']);
+  });
+  it('no PEP answer → no PEP row', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).not.toContain('Declared politically exposed');
+  });
+});
+
+// Lost-features p2 A9: the KYC decision history (durable audit rows only).
+describe('/partner/customers/[ref]: decision history (p2 A9)', () => {
+  async function decision(partnerId: string, actor: string, action: string, meta: Record<string, unknown>) {
+    const { createAuditRepo } = await import('@/db/repos/aux-repos');
+    await createAuditRepo(db).record({ partnerId, actor, actorType: 'staff', action, subjectId: auditSubjectId(partnerId, SHARED), meta });
+  }
+  it('own decisions show who and why; SmartRemit’s show the outcome only; B’s rows for the same phone never show', async () => {
+    await decision(PA, 'pa-adm', 'kyc.review.approve', { reason: 'Documents look right', actorScope: 'partner', newStatus: 'verified' });
+    await decision(PA, 'owner-root', 'kyc.manual_override.reject', { reason: 'Watchlist entry match', actorScope: 'platform', newStatus: 'rejected' });
+    await decision(PB, 'pb-adm', 'kyc.review.reject', { reason: 'Bravo private reason', actorScope: 'partner' });
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-trail' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-testid="partner-kyc-trail"');
+    expect(html).toContain('Documents look right');
+    expect(html).toContain('pa-adm');
+    expect(html).toContain('data-trail="rejected"');
+    expect(html).toContain('SmartRemit');
+    for (const v of ['Watchlist entry', 'owner-root', 'Bravo private', 'pb-adm']) expect(html).not.toContain(v);
+  });
+  it('no decisions → the empty line', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(await detail(sealCustomerRef(PA, SHARED))).toContain('No verification decisions yet.');
+  });
+});
+
+describe('/partner/customers/[ref]: conversation link (p2 A8)', () => {
+  it('admins get a link to the log by ref (no phone); agents get none; viewing the page reads no log', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const ref = sealCustomerRef(PA, SHARED);
+    const html = await detail(ref);
+    const href = html.match(/data-conversation-link=""[^>]*href="([^"]*)"|href="([^"]*)"[^>]*data-conversation-link=""/);
+    const link = href?.[1] ?? href?.[2];
+    expect(link?.startsWith('/partner/customers/conversation/')).toBe(true);
+    expect(link).not.toContain('1230000');
+    expect(await auditRows('conversation.view')).toHaveLength(0);
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-conv' });
+    expect(await detail(ref)).not.toContain('data-conversation-link');
+  });
+});
+
+describe('/partner/customers: find by phone (p2 A11)', () => {
+  it('the list offers a POST find form with no phone field in any link', async () => {
+    await signInAs({ partnerId: PA, role: 'agent' });
+    const html = await list();
+    expect(html).toContain('data-testid="partner-customer-find"');
+    expect(html).toMatch(/<input[^>]*name="phone"/);
+    expect(html).not.toMatch(/href="[^"]*phone=/);
+  });
+});
+
+describe('/partner/customers/new (p2 A5)', () => {
+  const newPage = async () => renderToStaticMarkup(await NewCustomerPage());
+  it('admins get the New customer button on the list; agents get none', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(await list()).toMatch(/<a data-new-customer=""[^>]*href="\/partner\/customers\/new"/);
+    await signInAs({ username: 'agent1', partnerId: PA, role: 'agent' });
+    expect(await list()).not.toContain('data-new-customer');
+  });
+  it('agent, support and finance are refused the page', async () => {
+    for (const role of ['agent', 'support', 'finance'] as const) {
+      await signInAs({ username: `u-${role}`, partnerId: PA, role });
+      await expect(newPage()).rejects.toThrow(/^REDIRECT:\/(partner|login)$/);
+    }
+  });
+  it('ours mode: the form offers the partner’s countries and no verified option; the copy says no message is sent', async () => {
+    await db.execute(sql.raw(`UPDATE partners SET countries = '["US","GB"]'::jsonb WHERE id = '${PA}'`));
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await newPage();
+    expect(html).toContain('data-testid="partner-customer-create"');
+    expect(html).toContain('<option value="US"');
+    expect(html).toContain('<option value="GB"');
+    expect(html).not.toContain('value="verified"');
+    expect(html).not.toContain('grandfathered');
+    expect(html).toContain('The customer gets no message.');
+    expect(await auditRows('customer.create')).toHaveLength(0);
+  });
+  it('delegated mode: verified is offered with a reason field', async () => {
+    await db.execute(sql.raw(`UPDATE partners SET kyc_mode = 'delegated' WHERE id = '${PA}'`));
+    await signInAs({ partnerId: PA, role: 'admin' });
+    const html = await newPage();
+    expect(html).toContain('value="verified"');
+    expect(html).toMatch(/<textarea[^>]*name="reason"/);
+    expect(html).not.toContain('grandfathered');
   });
 });

@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { requirePartnerStaff } from '@/lib/auth';
-import { PARTNER_ROUTES } from '../routes';
+import { PARTNER_ROUTES, routeAllows } from '../routes';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { env } from '@/lib/env';
@@ -77,7 +77,9 @@ export default async function PartnerHomePage() {
         }
       />
       <div className="grid gap-4 lg:gap-6">
-        {model.kpis !== null ? <KpiRow kpis={model.kpis} /> : null}
+        {model.kpis !== null ? (
+          <KpiRow kpis={model.kpis} reviewsHref={routeAllows('reviews', ctx.role) ? PARTNER_ROUTES.reviews.href : null} />
+        ) : null}
         <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
           <ActionList actions={model.actions} incomplete={model.actionsIncomplete} />
           <HealthCard health={model.health} />

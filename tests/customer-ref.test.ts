@@ -162,6 +162,20 @@ describe('auditIdentityView', () => {
     expect(r[1].meta).toEqual({ fields: ['full_name'], actorScope: 'partner' });
   });
 
+  it('lost-features p2 B6: opt-in alsoShown names are appended (deduped, names only); without it the meta is unchanged', async () => {
+    await auditIdentityView(db, { username: 'pat' }, customer({ fullName: 'A' }), {
+      actorScope: 'partner',
+      alsoShown: ['gov_id_last4', 'pep_declared', 'full_name'],
+    });
+    // A customer with no identity value but shown profile fields is still recorded.
+    await auditIdentityView(db, { username: 'pat' }, customer(), { actorScope: 'partner', alsoShown: ['occupation'] });
+    expect(await auditIdentityView(db, { username: 'pat' }, customer(), { alsoShown: [] })).toBe(false);
+    const r = await rows();
+    expect(r).toHaveLength(2);
+    expect(r[0].meta).toEqual({ fields: ['full_name', 'gov_id_last4', 'pep_declared'], actorScope: 'partner' });
+    expect(r[1].meta).toEqual({ fields: ['occupation'], actorScope: 'partner' });
+  });
+
   it('writes nothing when every identity field is empty', async () => {
     expect(await auditIdentityView(db, { username: 'alice' }, customer())).toBe(false);
     expect(await rows()).toHaveLength(0);

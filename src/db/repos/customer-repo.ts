@@ -286,6 +286,20 @@ export function createCustomerRepo(
     },
 
     /**
+     * Lost-features p2 A5: insert a customer only when (tenant, phone) is free. Returns whether a
+     * row was inserted; an existing row is never touched (unlike saveCustomer's upsert, so a
+     * manual create can never overwrite a customer, even in a race).
+     */
+    async insertCustomerIfAbsent(customer: Customer): Promise<boolean> {
+      const rows = await db
+        .insert(customers)
+        .values(customerToRow(customer))
+        .onConflictDoNothing({ target: [customers.partnerId, customers.phone] })
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
      * Resolve-or-create WITHOUT implying WhatsApp consent (no optInAt). The
      * partner API mints for senders who never messaged anyone; opt-in is a
      * channel fact recorded only by the inbound webhook (upsertOnFirstInbound).

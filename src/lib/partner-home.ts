@@ -19,6 +19,12 @@ export interface PartnerHomeInput {
     countToday: number;
     volumeToday: number;
     commissionToday: number;
+    /** Today's live rows whose compliance status is flagged or blocked: a count, never a list. */
+    flaggedToday: number;
+    /** All-time live rows (any status), their volume, and fees on paid/delivered rows. */
+    total: number;
+    volumeAllTime: number;
+    commissionAllTime: number;
     needsAttention: number;
     byStatus: Record<string, number>;
   } | null;
@@ -32,6 +38,9 @@ export interface PartnerKpis {
   countToday: number;
   volumeTodayUsd: number;
   feesTodayUsd: number;
+  /** A bare count (p3 B11): it names nobody and matches the analytics compliance donut. */
+  flaggedToday: number;
+  allTime: { count: number; volumeUsd: number; feesUsd: number };
 }
 
 export type PartnerActionKey = 'holds' | 'attention' | 'whatsapp' | 'webhooks' | 'no_live_key';
@@ -94,7 +103,13 @@ export function buildPartnerHome(i: PartnerHomeInput): PartnerHomeModel {
     ? null
     : i.summary === null
       ? 'error'
-      : { countToday: i.summary.countToday, volumeTodayUsd: i.summary.volumeToday, feesTodayUsd: i.summary.commissionToday };
+      : {
+          countToday: i.summary.countToday,
+          volumeTodayUsd: i.summary.volumeToday,
+          feesTodayUsd: i.summary.commissionToday,
+          flaggedToday: i.summary.flaggedToday,
+          allTime: { count: i.summary.total, volumeUsd: i.summary.volumeAllTime, feesUsd: i.summary.commissionAllTime },
+        };
   const unhealthy = (s: HealthState | null) => (s !== null && s !== 'ok' ? 1 : 0);
   const candidates: PartnerHomeModel['actions'] = [
     { key: 'holds', count: i.summary?.byStatus.in_review ?? 0 },

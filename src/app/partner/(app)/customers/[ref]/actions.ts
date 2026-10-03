@@ -3,7 +3,7 @@
 import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { PARTNER_OPS } from '@/lib/partner-access';
-import { hasPermission } from '@/lib/permissions';
+import { revealClassOf, revealDecision, revealViewer } from '@/lib/partner-reveal-policy';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { getRedis } from '@/lib/redis';
 import { getDb } from '@/db/client';
@@ -24,7 +24,9 @@ const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
  * from /partner to a decrypted customer value. Both arguments arrive from the client (MaskedValue
  * binds them) and are UNTRUSTED: the ref is re-opened and re-scoped to the SESSION tenant, the field
  * is checked against the allowlist. The order: site host, gate (outside any try), field allowlist,
- * permission, enrolled two-step verification, rate limit (fails closed), tenant lookup, then ONE
+ * the one reveal rule (partner-reveal-policy: every field here is `identity`, so admin and agent
+ * with enrolled two-step verification, no canRevealPii; lost-features p2 B5), rate limit (fails
+ * closed), tenant lookup, then ONE
  * `pii.reveal` audit row BEFORE the value is returned. Every refusal returns the same shape as a
  * missing customer and writes nothing; any failure returns no value. Never throws past the gate
  * (mirrors revealDestinationAction), and never logs a value or a phone (the error name only).
@@ -35,9 +37,11 @@ export async function revealCustomerFieldAction(ref: string, field: RevealableFi
   const refused: RevealResult = { error: t('partner.customers.notFound') };
 
   if (!isRevealableField(field) || typeof ref !== 'string') return refused;
-  if (!hasPermission(ctx.staff, 'canRevealPii')) return refused;
+  const cls = revealClassOf(field);
+  if (cls === null) return refused;
   try {
-    if (!(await getStaffMfaStore().isEnrolled(ctx.username))) return refused;
+    const viewer = revealViewer(ctx, await getStaffMfaStore().isEnrolled(ctx.username));
+    if (!revealDecision(viewer, cls).ok) return refused;
     if (!(await takeRevealBudget(getRedis(), ctx.partnerId, ctx.username))) return refused;
 
     const opened = openCustomerRef(ref);

@@ -56,7 +56,8 @@ import { listPartnerLiveTransfersSince } from '@/db/repos/partner-analytics-read
 const DAY = 86_400_000;
 const page = async (sp: Record<string, string> = {}) => renderToStaticMarkup(await AnalyticsPage({ searchParams: Promise.resolve(sp) }));
 const kpi = (html: string, name: string) => html.match(new RegExp(`data-kpi="${name}"[^>]*>(?:<span[^>]*>)?([^<]*)<`))?.[1];
-const PII = ['14155550101', '5550101', '919876543210', '000011112222', 'HDFC0001111', 'Testname', 'Samplesurname'];
+// p3 B8: the shortened recipient name ('Testname S.') may show; the full surname never does.
+const PII = ['14155550101', '5550101', '919876543210', '000011112222', 'HDFC0001111', 'Samplesurname'];
 const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
 
 beforeEach(async () => {
@@ -121,6 +122,13 @@ describe('/partner/analytics: data', () => {
     await signInAs(redis, cookieJar, { username: 'pb-admin', partnerId: 'pb', role: 'admin' });
     await db.delete((await import('@/db/schema')).transfers);
     expect(await page()).toContain('No transfers in this period');
+  });
+  it('top recipients: the card renders with its note; no full recipient name anywhere on the page', async () => {
+    await signInAs(redis, cookieJar, { username: 'pa-finance', partnerId: 'pa', role: 'finance' });
+    const html = await page();
+    expect(html).toContain('Top recipients');
+    expect(html).toContain('data-recipients-note');
+    expect(html).not.toContain('Samplesurname');
   });
   it('a failed read shows fixed copy (no raw error text)', async () => {
     await signInAs(redis, cookieJar, { username: 'pa-admin', partnerId: 'pa', role: 'admin' });
