@@ -3,6 +3,8 @@ import { env } from './env';
 import { isPartnerPulled } from './funding-method';
 import { CANCEL_REFUSAL, decideStaffCancel } from './dashboard-cancel-policy';
 import { pokeWorker } from './outbox';
+import { payUrlFor } from './pay-url';
+import { paylinkDedupeKey, resendEligibility } from './partner-transfer-ops';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -160,6 +162,50 @@ export async function resendPaymentLink(
   const url = `${env.appBaseUrl}/pay/${id}`;
   await sendText(transfer.phone, `Here is your secure payment link again: ${url}`);
 }
+
+/**
+ * Lost-features restore p1 A3: resend the pay link through the OUTBOX (every external effect is an
+ * outbox row). One transaction: the tenant-scoped read, the eligibility (a live, unpaid transfer
+ * with no money in flight), ONE `whatsapp.text` row (the existing kind and shape: the worker sends
+ * it on the OWNING partner's number, re-checks the opt-out at send time and skips a sandbox row),
+ * deduped per transfer per 10 minutes, and ONE `transfer.paylink.resend` audit row (no phone, no
+ * URL). A dedupe hit throws and rolls back, so a second click inside the bucket writes nothing.
+ * The caller pre-checks the opt-out and the 24-hour window so staff get a clear reason.
+ */
+export async function queuePaymentLinkResend(
+  db: Db,
+  id: string,
+  o: { partnerId: PartnerId; audit: StaffAuditCtx; nowMs: number },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const transfer = await createTransferRepo(tx).getOwnedTransfer(o.partnerId, id);
+    if (!transfer) {
+      throw new Error('Transfer not found');
+    }
+    if (resendEligibility(transfer) !== 'ok') {
+      throw new Error('Cannot resend: only an unpaid live transfer has a payment link to resend.');
+    }
+    const fresh = await createOutboxRepo(tx).enqueue(
+      'whatsapp.text',
+      {
+        to: transfer.phone,
+        body: `${PAYLINK_RESEND_TEXT} ${payUrlFor(transfer.id)}`,
+        partnerId: transfer.partnerId,
+        category: 'nonessential',
+      },
+      { dedupeKey: paylinkDedupeKey(transfer.id, o.nowMs) },
+    );
+    if (!fresh) {
+      throw new Error(PAYLINK_RECENT);
+    }
+    await recordStaffTransferAudit(tx, o.audit, 'transfer.paylink.resend', transfer, {});
+  });
+  pokeWorker();
+}
+
+/** The customer-facing resend copy (unchanged from the legacy inline send). */
+const PAYLINK_RESEND_TEXT = 'Here is your secure payment link again:';
+export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the last 10 minutes.';
 
 /**
  * WHO may release a compliance hold. OWNER DECISION (2026-09-16): releasing a

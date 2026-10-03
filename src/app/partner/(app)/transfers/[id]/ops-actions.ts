@@ -8,7 +8,12 @@ import { hasPermission } from '@/lib/permissions';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { getAuthStore } from '@/lib/auth-store';
-import { assignTransfer } from '@/lib/dashboard-ops';
+import { PAYLINK_RECENT, assignTransfer, queuePaymentLinkResend } from '@/lib/dashboard-ops';
+import { resendEligibility } from '@/lib/partner-transfer-ops';
+import { suppressForOptOut } from '@/lib/consent-gate';
+import { isInServiceWindow } from '@/lib/whatsapp-errors';
+import { getStore } from '@/lib/store';
+import { getCustomerStore } from '@/lib/customer-store';
 import { isTenantTransferAssignee } from '@/lib/transfer-assignable';
 import { parseAssigneeField } from '@/lib/partner-tickets';
 import { boundStaffNote } from '@/lib/send-limits';
@@ -67,6 +72,49 @@ export async function assignTransferAction(formData: FormData): Promise<ActionRe
     if (err instanceof Error && err.message.startsWith('Cannot assign')) return { ok: false, error: t('partner.transferOps.assign.stale') };
     if (err instanceof Error && err.message === 'Transfer not found') return notFound();
     logWarn('partner.transfers.assign', errName(err), { transferId: transfer.id });
+    return { ok: false, error: t('partner.common.failed') };
+  }
+  revalidate(transfer.id);
+  return { ok: true };
+}
+
+/**
+ * Resend the payment link of one of THIS tenant's live, unpaid transfers on WhatsApp, through the
+ * outbox (queuePaymentLinkResend: sent from the partner's own number by the worker). Before
+ * queuing, staff get a clear reason instead of a message that cannot arrive:
+ *  - the customer opted out (the worker would skip the row anyway);
+ *  - the customer has not messaged in the last 24 hours (WhatsApp delivers free text only inside
+ *    that window and no pay-link template exists, so the row would fail, retry and alert).
+ * One resend per transfer per 10 minutes. A lookup failure refuses (fails closed).
+ */
+export async function resendPayLinkAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_OPS);
+  if (!hasPermission(ctx.staff, 'canResend')) return noPermission();
+
+  const transfer = await ownedTransfer(ctx.partnerId, formData);
+  if (!transfer) return notFound();
+  const notAllowed: ActionResult = { ok: false, error: t('partner.transferOps.resend.notAllowed') };
+  if (resendEligibility(transfer) !== 'ok') return notAllowed;
+
+  try {
+    const store = getStore();
+    if (await suppressForOptOut(getCustomerStore(store), ctx.partnerId, transfer.phone, 'nonessential')) {
+      return { ok: false, error: t('partner.transferOps.resend.optedOut') };
+    }
+    if (!(await isInServiceWindow(store, ctx.partnerId, transfer.phone))) {
+      return { ok: false, error: t('partner.transferOps.resend.outsideWindow') };
+    }
+    await queuePaymentLinkResend(getDb(), transfer.id, {
+      partnerId: ctx.partnerId,
+      audit: { actor: ctx.username, actorScope: 'partner' },
+      nowMs: Date.now(),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === PAYLINK_RECENT) return { ok: false, error: t('partner.transferOps.resend.recent') };
+    if (err instanceof Error && err.message.startsWith('Cannot resend')) return notAllowed;
+    if (err instanceof Error && err.message === 'Transfer not found') return notFound();
+    logWarn('partner.transfers.resend', errName(err), { transferId: transfer.id });
     return { ok: false, error: t('partner.common.failed') };
   }
   revalidate(transfer.id);

@@ -306,3 +306,21 @@ describe('/partner/transfers/[id]: A2 assign control', () => {
     expect(await detail('tr_A_asha')).not.toContain('partner-assign-form');
   });
 });
+
+describe('/partner/transfers/[id]: A3 resend control', () => {
+  it('admin: an unpaid live transfer offers the resend with the 24-hour hint; a held one does not', async () => {
+    await asAdmin();
+    const html = await detail('tr_A_asha');
+    expect(html).toContain('data-testid="partner-resend-form"');
+    expect(html).toContain('last 24 hours');
+    expect(await detail('tr_A_meera')).not.toContain('partner-resend-form');
+  });
+  it('an agent needs canResend; finance never', async () => {
+    await asAgent();
+    expect(await detail('tr_A_asha')).not.toContain('partner-resend-form');
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent', permissions: { canCancel: false, canAssign: false, canResend: true, canRevealPii: false } });
+    expect(await detail('tr_A_asha')).toContain('partner-resend-form');
+    await asFinance();
+    expect(await detail('tr_A_asha')).not.toContain('partner-resend-form');
+  });
+});
