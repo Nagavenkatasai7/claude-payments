@@ -29,7 +29,7 @@ import { t } from '@/lib/i18n';
 import { Badge, Card, MaskedValue, Money, PageHeader, StatusPill, buttonVariants } from '@/components/ds';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
-import { assigneeView, settlementRouteKey, transferOpsFor, type RevealableTransferField } from '@/lib/partner-transfer-ops';
+import { assigneeView, issueRefundEligibility, settlementRouteKey, transferOpsFor, type RevealableTransferField } from '@/lib/partner-transfer-ops';
 import { tenantTransferAssignees } from '@/lib/transfer-assignable';
 import { hasPermission } from '@/lib/permissions';
 import { toStaffOptions } from '@/lib/staff-options';
@@ -39,6 +39,7 @@ import { PARTNER_ROUTES } from '../../../routes';
 import { partnerCustomerHref } from '../../../customer-link';
 import { revealTransferFieldAction } from './reveal-actions';
 import { AssignForm, CancelControl, ResendForm } from './transfer-ops';
+import { IssueRefundDialog } from './issue-refund-dialog';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
@@ -149,6 +150,10 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const opsFor = transferOpsFor(transfer, ctx);
   const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
   const anyOp = opsFor.assign || opsFor.resend || opsFor.cancel;
+  // Issue refund (admin only): offered when eligible; a paid or delivered transfer another network
+  // partner pays out says why there is no button (by route class only, never the partner's name).
+  const refundRouted =
+    ctx.role === 'admin' && (transfer.status === 'paid' || transfer.status === 'delivered') && issueRefundEligibility(transfer, ctx.partnerId) === 'routed';
   // An agent missing a per-staff flag is told why a control is absent (SmartRemit sets the flags).
   const missingFlag = ctx.role === 'agent' && !(['canCancel', 'canAssign', 'canResend'] as const).every((p) => hasPermission(ctx.staff, p));
   const reveal = (field: RevealableTransferField) => revealTransferFieldAction.bind(null, transfer.id, field);
@@ -280,6 +285,16 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
               </div>
             ) : null}
             {missingFlag ? <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.transferOps.askPermission')}</p> : null}
+          </Section>
+        ) : null}
+
+        {opsFor.refund || refundRouted ? (
+          <Section title={t('partner.transferOps.refund.title')}>
+            {opsFor.refund ? (
+              <IssueRefundDialog id={transfer.id} delivered={transfer.status === 'delivered'} />
+            ) : (
+              <p className="text-[13px] text-ds-ink-muted">{t('partner.transferOps.refund.routed')}</p>
+            )}
           </Section>
         ) : null}
 

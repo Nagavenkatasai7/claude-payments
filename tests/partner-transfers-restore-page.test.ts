@@ -340,3 +340,22 @@ describe('/partner/transfers/[id]: A1 cancel control', () => {
     expect(await detail('tr_A_asha')).not.toContain('partner-cancel-control');
   });
 });
+
+describe('/partner/transfers/[id]: A7 issue refund control', () => {
+  it('admin only, on a paid charged transfer; the routed note instead when another partner pays it out', async () => {
+    await seedPartnerTransfer(db, { id: 'tr_A_paid', partnerId: 'pa', phone: PHONE, status: 'paid', fundingRef: 'ch_1' });
+    await seedPartnerTransfer(db, { id: 'tr_A_route', partnerId: 'pa', phone: PHONE, status: 'paid', fundingRef: 'ch_2' });
+    await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'pb' WHERE id = 'tr_A_route'`);
+    await asAdmin();
+    expect(await detail('tr_A_paid')).toContain('data-testid="partner-issue-refund"');
+    const routed = await detail('tr_A_route');
+    expect(routed).not.toContain('partner-issue-refund');
+    expect(routed).toContain('Ask SmartRemit to refund it');
+    expect(routed).not.toContain('Partner B');
+    expect(await detail('tr_A_asha')).not.toContain('partner-issue-refund');
+    await signInAs(redis, cookieJar, { username: 'pa-agent', partnerId: 'pa', role: 'agent', permissions: { canCancel: true, canAssign: true, canResend: true, canRevealPii: true } });
+    expect(await detail('tr_A_paid')).not.toContain('partner-issue-refund');
+    await asFinance();
+    expect(await detail('tr_A_paid')).not.toContain('partner-issue-refund');
+  });
+});

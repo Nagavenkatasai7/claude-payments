@@ -610,6 +610,64 @@ describe('issueRefund (admin-proactive, no prior request)', () => {
   });
 });
 
+describe('issueRefund with a tenant scope (lost-features p1 A7: the /partner Issue refund, BL-2)', () => {
+  const AUD = { actor: 'pa-admin', reason: 'customer disputed the charge', actorScope: 'partner' as const };
+  const seedPa = () => db.execute(sql`INSERT INTO partners (id, name) VALUES ('pa', 'Partner A') ON CONFLICT DO NOTHING`);
+  it('the owner refunds its own charged transfer: one funding.refund row and one refund.issue row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr1', status: 'delivered', fundingRef: 'f1' }));
+    await issueRefund(db, 'sr1', AUD, { partnerId: 'default' });
+    expect((await store.getTransfer('sr1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:sr1' }]);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'refund.issue', actor: 'pa-admin', subject_id: 'sr1', partner_id: 'default' });
+    expect(rows[0].meta).toMatchObject({ reason: 'customer disputed the charge', actorScope: 'partner', refundStatus: 'pending' });
+  });
+  it('a transfer another partner pays out is refused INSIDE the transaction, in every status; nothing written', async () => {
+    await seedPa();
+    const store = createStore(fakeRedis(), db);
+    for (const [id, status] of [['sr2', 'paid'], ['sr3', 'delivered'], ['sr4', 'awaiting_payment'], ['sr5', 'cancelled']] as const) {
+      await store.saveTransfer(makeTransfer({ id, status, fundingRef: 'f' }));
+      await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'pa' WHERE id = ${id}`);
+      await expect(issueRefund(db, id, AUD, { partnerId: 'default' }), id).rejects.toThrow(/another partner pays this transfer out/i);
+    }
+    expect(await outboxRows()).toHaveLength(0);
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('a settlement partner equal to the owner is fine', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr6', status: 'paid', fundingRef: 'f' }));
+    await db.execute(sql`UPDATE transfers SET settlement_partner_id = 'default' WHERE id = 'sr6'`);
+    await issueRefund(db, 'sr6', AUD, { partnerId: 'default' });
+    expect(await outboxRows()).toHaveLength(1);
+  });
+  it('another tenant\'s id reads as missing; a sandbox transfer is refused', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr7', status: 'paid', fundingRef: 'f' }));
+    await store.saveTransfer(makeTransfer({ id: 'sr8', status: 'paid', fundingRef: 'f', environment: 'test' }));
+    await expect(issueRefund(db, 'sr7', AUD, { partnerId: 'pa' })).rejects.toThrow(/not found/i);
+    await expect(issueRefund(db, 'sr8', AUD, { partnerId: 'default' })).rejects.toThrow(/test transfer/i);
+    expect(await outboxRows()).toHaveLength(0);
+    expect(await auditRows()).toHaveLength(0);
+  });
+  it('two submits at once: exactly one refund effect and one audit row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr9', status: 'paid', fundingRef: 'f' }));
+    const r = await Promise.allSettled([issueRefund(db, 'sr9', AUD, { partnerId: 'default' }), issueRefund(db, 'sr9', AUD, { partnerId: 'default' })]);
+    expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    expect(await outboxRows()).toHaveLength(1);
+    expect(await auditRows()).toHaveLength(1);
+  });
+  it('the refund flip is a claim from none: a row that moved after the read is not flipped', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'sr10', status: 'paid', fundingRef: 'f', refundStatus: 'failed' }));
+    // The claim the core makes refuses a non-none row even though 'failed' -> 'pending' is otherwise legal.
+    expect(await createTransferRepo(db).updateRefund('sr10', { refundStatus: 'pending' }, { from: 'none' })).toBeNull();
+    expect((await store.getTransfer('sr10'))?.refundStatus).toBe('failed');
+  });
+});
+
 describe('approveRefund (customer-requested → in flight)', () => {
   it('moves requested → pending and enqueues exactly one funding.refund', async () => {
     const store = createStore(fakeRedis(), db);

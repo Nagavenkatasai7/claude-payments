@@ -392,6 +392,19 @@ export async function rejectTransfer(
 }
 
 /**
+ * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
+ * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
+ * missing and nothing is written. Omitted = the existing unscoped reload (legacy callers).
+ */
+export interface RefundScope {
+  partnerId: PartnerId;
+}
+
+function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
+  return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
+}
+
+/**
  * PROACTIVELY issue a refund on a PAID or DELIVERED transfer that was actually
  * charged (fundingRef set) — admin-initiated, no prior customer request needed.
  * none → pending + the durable funding.refund effect, one transaction, with the
@@ -403,13 +416,28 @@ export async function rejectTransfer(
  * (enqueue returns false on dedupe-key conflict) and throws to roll back the
  * pending flip if not — so a stale `refund:<id>` row can never leave a transfer
  * flipped-to-pending with no effect to drain (a state no sweep would heal).
+ *
+ * With a `scope` (the /partner caller): the reload is tenant-scoped, a transfer whose
+ * settlementPartnerId names another partner is refused in every status, and a test transfer is
+ * refused. Without one: the platform path, unchanged.
  */
-export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, scope?: RefundScope): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    const transfer = await loadForRefund(repo, id, scope);
     if (!transfer) {
       throw new Error('Cannot refund: transfer not found.');
+    }
+    if (scope) {
+      // A tenant caller (the /partner Issue refund) may only refund what it also pays out: a
+      // transfer routed to another network partner is refused in EVERY status, re-checked here on
+      // the transaction's own read so a page rendered before the routing cannot slip through.
+      if (transfer.settlementPartnerId && transfer.settlementPartnerId !== scope.partnerId) {
+        throw new Error('Cannot refund: another partner pays this transfer out.');
+      }
+      if ((transfer.environment ?? 'live') === 'test') {
+        throw new Error('Cannot refund: a test transfer moves no money.');
+      }
     }
     if (transfer.status !== 'paid' && transfer.status !== 'delivered') {
       throw new Error(
@@ -422,7 +450,12 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Pr
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
-    await repo.updateRefund(id, { refundStatus: 'pending' });
+    // The guarded write is the claim, from exactly 'none': a concurrent decision that committed
+    // after the read above leaves nothing to claim, so this throws (rolls back) instead of
+    // flipping a row that moved.
+    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
+      throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
+    }
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },
@@ -441,19 +474,6 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Pr
     }
   });
   pokeWorker();
-}
-
-/**
- * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
- * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
- * missing and nothing is written. Omitted = the existing unscoped reload (legacy callers).
- */
-export interface RefundScope {
-  partnerId: PartnerId;
-}
-
-function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
-  return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
 }
 
 /**
