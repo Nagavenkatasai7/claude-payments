@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { eq } from 'drizzle-orm';
+import { auditEvents } from '@/db/schema';
 import { createStore } from '@/lib/store';
 import type { Staff, Transfer } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 /**
  * Partner-scope enforcement on the mutating transfer actions (audit H1/H2/M2).
@@ -15,6 +18,7 @@ let currentStaff: Staff;
 // Transfers live in Postgres now — the store is rebuilt per test in beforeEach
 // (vi.mock factories are hoisted/sync, so they close over this let-variable).
 let store: ReturnType<typeof createStore>;
+let db: Db;
 
 vi.mock('@/lib/auth', () => ({
   requireStaff: async () => currentStaff,
@@ -31,6 +35,7 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
 vi.mock('@/lib/whatsapp', () => ({ sendText: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
@@ -99,7 +104,7 @@ function form(values: Record<string, string>): FormData {
 
 beforeEach(async () => {
   redis.dump.clear();
-  const db = await freshDb();
+  db = await freshDb();
   // Transfers carry a REAL FK to partners — seed the two tenants used below.
   await seedPartner(db, 'A');
   await seedPartner(db, 'B');
@@ -206,11 +211,28 @@ describe('assignTransferAction assignee scope (M2)', () => {
     expect((await store.getTransfer('a4'))?.assignedTo).toBeUndefined();
   });
 
-  it('caps the stored note at 500 chars (L3)', async () => {
-    await store.saveTransfer(makeTransfer({ id: 'a3', partnerId: 'A', status: 'paid' }));
+  it('lost-features p1 A2: the note is bounded in the transfer.assign audit row; adminNote is untouched', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'a3', partnerId: 'A', status: 'paid', adminNote: 'rail failure note' }));
     await authStore.saveStaff(staff({ username: 'agentA', partnerId: 'A' }));
     currentStaff = staff({ username: 'plat' });
     await assignTransferAction(form({ id: 'a3', assignee: 'agentA', note: 'x'.repeat(900) }));
-    expect((await store.getTransfer('a3'))?.adminNote?.length).toBe(500);
+    const t = await store.getTransfer('a3');
+    expect(t?.assignedTo).toBe('agentA');
+    expect(t?.adminNote).toBe('rail failure note');
+    const [row] = await db.select().from(auditEvents).where(eq(auditEvents.action, 'transfer.assign'));
+    expect(row).toMatchObject({ actor: 'plat', subjectId: 'a3', partnerId: 'A' });
+    expect((row.meta as { note: string }).note.length).toBe(500);
+    expect(row.meta).toMatchObject({ assignee: 'agentA', previousAssignee: null, actorScope: 'platform' });
+  });
+
+  it('lost-features p1 dead-end fix: a support assignee is refused (support cannot open a transfer)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'a5', partnerId: 'A', status: 'paid' }));
+    await authStore.saveStaff(staff({ username: 'supA', role: 'support', partnerId: 'A' }));
+    await authStore.saveStaff(staff({ username: 'platSup', role: 'support' }));
+    currentStaff = staff({ username: 'plat' });
+    await expect(assignTransferAction(form({ id: 'a5', assignee: 'supA', note: 'x' }))).rejects.toThrow(/cannot work/i);
+    await expect(assignTransferAction(form({ id: 'a5', assignee: 'platSup', note: 'x' }))).rejects.toThrow(/cannot work/i);
+    await expect(assignTransferAction(form({ id: 'a5', assignee: 'nobody', note: 'x' }))).rejects.toThrow(/unknown/i);
+    expect((await store.getTransfer('a5'))?.assignedTo).toBeUndefined();
   });
 });

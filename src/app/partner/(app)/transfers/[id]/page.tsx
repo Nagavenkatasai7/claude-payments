@@ -26,9 +26,20 @@ import { payoutMethodLabel } from '@/lib/payout-format';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { logWarn } from '@/lib/log';
 import { t } from '@/lib/i18n';
-import { Badge, Card, Money, PageHeader, StatusPill, buttonVariants } from '@/components/ds';
+import { Badge, Card, MaskedValue, Money, PageHeader, StatusPill, buttonVariants } from '@/components/ds';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
+import { assigneeView, issueRefundEligibility, settlementRouteKey, transferOpsFor, type RevealableTransferField } from '@/lib/partner-transfer-ops';
+import { tenantTransferAssignees } from '@/lib/transfer-assignable';
+import { hasPermission } from '@/lib/permissions';
+import { toStaffOptions } from '@/lib/staff-options';
+import { tenantStaffUsernames } from '@/lib/partner-tickets';
 import type { PartnerId } from '@/lib/types';
 import { PARTNER_ROUTES } from '../../../routes';
+import { partnerCustomerHref } from '../../../customer-link';
+import { revealTransferFieldAction } from './reveal-actions';
+import { AssignForm, CancelControl, ResendForm } from './transfer-ops';
+import { IssueRefundDialog } from './issue-refund-dialog';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
@@ -42,6 +53,8 @@ export const metadata: Metadata = {
 const WHEN = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
 const when = (iso?: string) => (iso && Number.isFinite(Date.parse(iso)) ? `${WHEN.format(new Date(iso))} UTC` : '—');
 const MAX_ACTOR_LOOKUPS = 20;
+const NAME_MASK = '••••••';
+const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 
 function Row({ label, children, strong }: { label: string; children: ReactNode; strong?: boolean }) {
   return (
@@ -71,9 +84,19 @@ async function tenantActors(partnerId: PartnerId, audit: TimelineAuditRow[]): Pr
     for (const s of staff) if (s && s.partnerId === partnerId) out.add(s.username);
   } catch (err) {
     // Fail closed: an unknown actor is shown as SmartRemit, never by name.
-    logWarn('partner.transfers.actors', err instanceof Error ? err.name : 'error'); // the error name only (no bound values)
+    logWarn('partner.transfers.actors', errName(err)); // the error name only (no bound values)
   }
   return out;
+}
+
+/** Enrolled two-step verification; a lookup failure hides every Show control (fail closed). */
+async function mfaEnrolled(username: string): Promise<boolean> {
+  try {
+    return await getStaffMfaStore().isEnrolled(username);
+  } catch (err) {
+    logWarn('partner.transfers.mfa', errName(err));
+    return false;
+  }
 }
 
 /**
@@ -81,6 +104,11 @@ async function tenantActors(partnerId: PartnerId, audit: TimelineAuditRow[]): Pr
  * tenant: a foreign or missing id is notFound(). Masked reads only (never a decrypting read): the
  * destination is `****last4`, phones are `••••last4`, the recipient name is first word + initial,
  * provider and rail references are `****last4`. Hold reasons render only from known labels.
+ * Lost-features restore p1 B3: the sender name and phone, the recipient name and phone and the
+ * payout account each have a click-to-reveal for the viewers the ONE reveal rule allows
+ * (partner-reveal-policy; the Show control depends on the viewer only, never on the transfer).
+ * Nothing is decrypted on render, so the page writes no audit row; each reveal writes `pii.reveal`.
+ * The settling partner is shown by class only, never named.
  */
 export default async function PartnerTransferDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.transfers.policy);
@@ -109,6 +137,28 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const test = (transfer.environment ?? 'live') === 'test';
   const currency = transfer.sourceCurrency ?? 'USD';
   const destination = transfer.payoutDestination.startsWith('****') ? transfer.payoutDestination : '****';
+  const ops = PARTNER_OPS.roles.includes(ctx.role);
+  const caps = ops ? revealCapabilities(revealViewer(ctx, await mfaEnrolled(ctx.username))) : { identity: false, destination: false };
+  // An existing customer row in THIS tenant (admin and agent only): the sender-name reveal and the
+  // customer link. A sandbox sender has no row, so neither shows.
+  const customerHref = await partnerCustomerHref(ctx, transfer.phone);
+  const assignee = assigneeView(
+    transfer.assignedTo,
+    transfer.assignedTo ? await tenantStaffUsernames(ctx.partnerId, [transfer.assignedTo], (u) => getAuthStore().getStaff(u)) : new Set<string>(),
+  );
+  // Lost-features restore p1: the controls this viewer may use (UX only; each action re-checks).
+  const opsFor = transferOpsFor(transfer, ctx);
+  const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
+  const anyOp = opsFor.assign || opsFor.resend || opsFor.cancel;
+  // Issue refund (admin only): offered when eligible; a paid or delivered transfer another network
+  // partner pays out says why there is no button (by route class only, never the partner's name).
+  const refundRouted =
+    ctx.role === 'admin' && (transfer.status === 'paid' || transfer.status === 'delivered') && issueRefundEligibility(transfer, ctx.partnerId) === 'routed';
+  // An agent missing a per-staff flag is told why a control is absent (SmartRemit sets the flags).
+  const missingFlag = ctx.role === 'agent' && !(['canCancel', 'canAssign', 'canResend'] as const).every((p) => hasPermission(ctx.staff, p));
+  const reveal = (field: RevealableTransferField) => revealTransferFieldAction.bind(null, transfer.id, field);
+  const shown = (masked: string, field: RevealableTransferField, label: string, allowed: boolean) =>
+    allowed ? <MaskedValue masked={masked} label={label} reveal={reveal(field)} /> : <span className="font-mono">{masked}</span>;
 
   return (
     <>
@@ -143,17 +193,39 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
             <span className="text-[13.5px] text-ds-ink-muted">{when(transfer.createdAt)}</span>
           </div>
           <dl className="divide-y divide-ds-border">
-            <Row label={t('partner.transfers.sender')}>
-              <span className="font-mono">{maskPhoneLast4(transfer.phone)}</span>
+            {customerHref ? (
+              <Row label={t('partner.transfers.senderName')}>
+                {shown(NAME_MASK, 'full_name', t('partner.transfers.senderName'), caps.identity)}
+              </Row>
+            ) : null}
+            <Row label={t('partner.transfers.senderPhone')}>
+              <span className="inline-flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                {shown(maskPhoneLast4(transfer.phone), 'phone', t('partner.transfers.senderPhone'), caps.identity)}
+                {customerHref ? (
+                  // prefetch={false}: the customer page writes a pii.view row on render.
+                  <Link href={customerHref} prefetch={false} className="text-[13px] font-semibold text-ds-primary hover:underline">
+                    {t('partner.transfers.openCustomer')}
+                  </Link>
+                ) : null}
+              </span>
             </Row>
-            <Row label={t('partner.transfers.recipient')}>{maskRecipientName(transfer.recipientName)}</Row>
+            <Row label={t('partner.transfers.recipientName')}>
+              {shown(maskRecipientName(transfer.recipientName), 'recipient_name', t('partner.transfers.recipientName'), caps.identity)}
+            </Row>
             <Row label={t('partner.transfers.recipientPhone')}>
-              <span className="font-mono">{maskPhoneLast4(transfer.recipientPhone)}</span>
+              {shown(maskPhoneLast4(transfer.recipientPhone), 'recipient_phone', t('partner.transfers.recipientPhone'), caps.identity && Boolean(transfer.recipientPhone))}
             </Row>
             <Row label={t('partner.transfers.destination')}>
-              <span className="font-mono">
-                {payoutMethodLabel(transfer.payoutMethod)} {destination}
+              <span className="inline-flex flex-wrap items-center justify-end gap-2">
+                <span>{payoutMethodLabel(transfer.payoutMethod)}</span>
+                {shown(destination, 'payout_destination', t('partner.transfers.destination'), caps.destination && destination !== '****')}
               </span>
+            </Row>
+            <Row label={t('partner.transfers.settledVia')}>{t(settlementRouteKey(transfer, ctx.partnerId))}</Row>
+            <Row label={t('partner.transfers.assignedTo')}>
+              {assignee.kind === 'tenant'
+                ? assignee.username
+                : t(assignee.kind === 'smartremit' ? 'partner.transfers.assigneeSmartRemit' : 'partner.transfers.unassigned')}
             </Row>
             <Row label={t('partner.transfers.youSend')}>
               <Money amount={transfer.amountSource ?? transfer.amountUsd} currency={currency} />
@@ -169,6 +241,9 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
             </Row>
             <Row label={t('partner.transfers.mode')}>{t(test ? 'partner.transfers.env.test' : 'partner.transfers.env.live')}</Row>
           </dl>
+          {caps.identity ? <p className="text-[13px] text-ds-ink-muted">{t('partner.transfers.revealNote')}</p> : null}
+          {ops && !caps.identity ? <p className="text-[13px] text-ds-ink-muted">{t('partner.transfers.revealMfa')}</p> : null}
+          {caps.identity && !caps.destination ? <p className="text-[13px] text-ds-ink-muted">{t('partner.transfers.revealPermission')}</p> : null}
         </Card>
 
         {held ? (
@@ -197,6 +272,29 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
         {canNote ? (
           <Section title={t('partner.transfers.noteTitle')}>
             <NoteForm id={transfer.id} requestKey={newRequestKey()} />
+          </Section>
+        ) : null}
+
+        {ops && (anyOp || missingFlag) ? (
+          <Section title={t('partner.transferOps.title')}>
+            {anyOp ? (
+              <div className="flex flex-col gap-6">
+                {opsFor.assign ? <AssignForm id={transfer.id} options={assignOptions} current={assignee.kind === 'tenant' ? assignee.username : null} /> : null}
+                {opsFor.resend ? <ResendForm id={transfer.id} /> : null}
+                {opsFor.cancel ? <CancelControl id={transfer.id} /> : null}
+              </div>
+            ) : null}
+            {missingFlag ? <p className="mt-3 text-[13px] text-ds-ink-muted">{t('partner.transferOps.askPermission')}</p> : null}
+          </Section>
+        ) : null}
+
+        {opsFor.refund || refundRouted ? (
+          <Section title={t('partner.transferOps.refund.title')}>
+            {opsFor.refund ? (
+              <IssueRefundDialog id={transfer.id} delivered={transfer.status === 'delivered'} />
+            ) : (
+              <p className="text-[13px] text-ds-ink-muted">{t('partner.transferOps.refund.routed')}</p>
+            )}
           </Section>
         ) : null}
 

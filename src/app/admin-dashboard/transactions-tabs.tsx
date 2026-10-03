@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import type { Partner, Tier, Transfer } from '@/lib/types';
-import type { StaffOption } from '@/lib/staff-options';
+import type { PlatformAssigneeOptions } from '@/lib/transfer-assignable';
 import { showsStaffCancel } from '@/lib/dashboard-cancel-policy';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
@@ -126,7 +126,8 @@ function Stage({ at, fallback }: { at?: string; fallback: string }) {
 export interface TransactionsTabsProps {
   transfers: Transfer[];
   /** Fix 20: the {username, name} projection only — never a full Staff (it carries passwordHash). */
-  staff: StaffOption[];
+  /** Lost-features p1 dead-end fix: SmartRemit staff plus each tenant's own; a row offers its tenant's group only. */
+  assignees: PlatformAssigneeOptions;
   staffByUsername: Record<string, string>;
   /** Keyed `${partnerId}:${phone}` (fix 1). */
   tierByPhone: Record<string, Tier>;
@@ -151,7 +152,7 @@ function tierBadgeClass(tier: Tier): string {
 
 export function TransactionsTabs({
   transfers,
-  staff,
+  assignees,
   staffByUsername,
   tierByPhone,
   kycByPhone,
@@ -284,7 +285,7 @@ export function TransactionsTabs({
                   <input type="hidden" name="id" value={t.id} />
                   <select name="assignee" className={`cursor-pointer ${INLINE_CONTROL}`} required>
                     <option value="">Assign…</option>
-                    {staff.map((s) => (
+                    {[...assignees.platform, ...(assignees.byTenant[t.partnerId] ?? [])].map((s) => (
                       <option key={s.username} value={s.username}>{s.name}</option>
                     ))}
                   </select>

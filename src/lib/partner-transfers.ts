@@ -37,6 +37,14 @@ export interface TransferFilters {
   environment: TransferEnv;
   q?: string;
   cursor?: string;
+  /** A sealed name / phone / last-4 search (partner-transfer-search.ts), opened by the page. */
+  s?: string;
+  /** Created on or after this UTC day (YYYY-MM-DD). */
+  from?: string;
+  /** Created on or before this UTC day (YYYY-MM-DD). */
+  to?: string;
+  /** Only transfers assigned to the viewer. */
+  mine?: true;
 }
 
 type SearchParams = Record<string, string | string[] | undefined>;
@@ -50,7 +58,48 @@ export function parseTransferFilters(sp: SearchParams): TransferFilters {
   const qRaw = (one(sp.q) ?? '').trim().slice(0, PARTNER_TRANSFER_QUERY_MAX);
   const q = qRaw && ID_RE.test(qRaw) && HAS_LETTER.test(qRaw) ? qRaw : undefined;
   const cursor = decodeTransferCursor(one(sp.cursor));
-  return { ...(status ? { status } : {}), environment, ...(q ? { q } : {}), ...(cursor ? { cursor } : {}) };
+  const sRaw = one(sp.s);
+  const s = sRaw && sRaw.length <= SEARCH_TOKEN_MAX && SEARCH_TOKEN_SHAPE.test(sRaw) ? sRaw : undefined;
+  let from = parseDay(one(sp.from));
+  let to = parseDay(one(sp.to));
+  if (from && to && from > to) [from, to] = [to, from];
+  const mine = one(sp.mine) === '1';
+  return {
+    ...(status ? { status } : {}),
+    environment,
+    ...(q ? { q } : {}),
+    ...(cursor ? { cursor } : {}),
+    ...(s ? { s } : {}),
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+    ...(mine ? { mine: true as const } : {}),
+  };
+}
+
+// The sealed search token's shape (field-crypto v1 / v2, as customer refs). Opening it is the
+// page's job (server-only); here it is only kept or dropped.
+const SEARCH_TOKEN_SHAPE = /^(?:v1|v2\.[a-z0-9]+)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const SEARCH_TOKEN_MAX = 1024;
+const DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const DAY_MIN = '2000-01-01';
+const DAY_MAX = '2199-12-31';
+
+/** A strict YYYY-MM-DD calendar day (it must round-trip, so 2026-02-30 is refused). */
+function parseDay(v: string | undefined): string | undefined {
+  if (!v) return undefined;
+  const m = DAY_RE.exec(v);
+  if (!m) return undefined;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (d.toISOString().slice(0, 10) !== v) return undefined;
+  return v >= DAY_MIN && v <= DAY_MAX ? v : undefined;
+}
+
+/** The filters' days as a UTC range: created_at >= from AND created_at < to + 1 day. */
+export function dayBounds(f: { from?: string; to?: string }): { from?: Date; toExclusive?: Date } {
+  const out: { from?: Date; toExclusive?: Date } = {};
+  if (f.from) out.from = new Date(`${f.from}T00:00:00.000Z`);
+  if (f.to) out.toExclusive = new Date(Date.parse(`${f.to}T00:00:00.000Z`) + 86_400_000);
+  return out;
 }
 
 const CURSOR_MIN_MS = Date.UTC(2000, 0, 1);
@@ -71,11 +120,18 @@ export function decodeTransferCursor(token: unknown): string | undefined {
   return Number.isFinite(at) && at >= CURSOR_MIN_MS && at <= CURSOR_MAX_MS ? c : undefined;
 }
 
-/** A list URL carrying only the known filters (a static path; the tenant is never in it). */
-export function transfersListHref(f: { status?: TransferStatus; environment: TransferEnv; cursor?: string }): string {
+/**
+ * A list URL carrying only the known filters (a static path; the tenant is never in it). A search
+ * travels only as its sealed token, never as the typed text.
+ */
+export function transfersListHref(f: Omit<TransferFilters, 'q'>): string {
   const qs = new URLSearchParams();
   if (f.status) qs.set('status', f.status);
   if (f.environment === 'test') qs.set('environment', 'test');
+  if (f.s) qs.set('s', f.s);
+  if (f.from) qs.set('from', f.from);
+  if (f.to) qs.set('to', f.to);
+  if (f.mine) qs.set('mine', '1');
   if (f.cursor) qs.set('cursor', encodeTransferCursor(f.cursor));
   const s = qs.toString();
   return s ? `/partner/transfers?${s}` : '/partner/transfers';
@@ -136,7 +192,26 @@ export function holdReasonKeys(reasons: readonly string[]): MessageKey[] {
 
 // ── Timeline ────────────────────────────────────────────────────────────────
 // Merge plan 2c: 'transfer.reject' (a partner's or SmartRemit's reject) shows as one row, never its reason.
-export const TIMELINE_AUDIT_ACTIONS = Object.freeze(['transfer.hold.note', 'transfer.release', 'transfer.reject'] as const);
+// Lost-features restore p1: assign, cancel, pay-link resend and refund issue show the same way: one
+// row with who, never the note, the reason or the assignee (a platform row can name SmartRemit staff).
+export const TIMELINE_AUDIT_ACTIONS = Object.freeze([
+  'transfer.hold.note',
+  'transfer.release',
+  'transfer.reject',
+  'transfer.assign',
+  'transfer.cancel',
+  'transfer.paylink.resend',
+  'refund.issue',
+] as const);
+
+const PLAIN_ROWS: Readonly<Record<string, { kind: TimelineKind; label: MessageKey }>> = Object.freeze({
+  'transfer.release': { kind: 'release', label: 'partner.transfers.timeline.release' },
+  'transfer.reject': { kind: 'reject', label: 'partner.transfers.timeline.reject' },
+  'transfer.assign': { kind: 'assign', label: 'partner.transfers.timeline.assign' },
+  'transfer.cancel': { kind: 'cancel', label: 'partner.transfers.timeline.cancel' },
+  'transfer.paylink.resend': { kind: 'resend', label: 'partner.transfers.timeline.resend' },
+  'refund.issue': { kind: 'refundIssue', label: 'partner.transfers.timeline.refundIssue' },
+});
 
 export interface TimelineAuditRow {
   at: Date;
@@ -145,7 +220,7 @@ export interface TimelineAuditRow {
   actorType?: string;
   meta: unknown;
 }
-export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'delivered' | 'refunded';
+export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'assign' | 'cancel' | 'resend' | 'refundIssue' | 'delivered' | 'refunded';
 export interface TimelineRow {
   at: string;
   kind: TimelineKind;
@@ -183,10 +258,8 @@ export function transferTimeline(tr: Transfer, audit: readonly TimelineAuditRow[
       const own = m?.actorScope === 'partner' && a.actorType === 'staff' && tenant.has(a.actor);
       const raw = own ? m?.note : undefined;
       rows.push({ at: at.toISOString(), kind: 'note', label: 'partner.transfers.timeline.note', by, ...(typeof raw === 'string' ? { note: raw } : {}) });
-    } else if (a.action === 'transfer.release') {
-      rows.push({ at: at.toISOString(), kind: 'release', label: 'partner.transfers.timeline.release', by });
-    } else if (a.action === 'transfer.reject') {
-      rows.push({ at: at.toISOString(), kind: 'reject', label: 'partner.transfers.timeline.reject', by });
+    } else if (Object.hasOwn(PLAIN_ROWS, a.action)) {
+      rows.push({ at: at.toISOString(), ...PLAIN_ROWS[a.action], by });
     }
   }
   return rows.sort((x, y) => Date.parse(x.at) - Date.parse(y.at));

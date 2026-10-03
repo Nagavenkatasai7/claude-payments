@@ -861,6 +861,23 @@ export function createTransferRepo(
     },
 
     /**
+     * Lost-features restore p1 A2: the assignment claim. ONE compare-and-set on assigned_to alone:
+     *   UPDATE transfers SET assigned_to = $to
+     *   WHERE id = $id AND partner_id = $p AND assigned_to IS NOT DISTINCT FROM $from RETURNING *
+     * Nothing else is written (never admin_note, never status), so an assignment can never undo a
+     * concurrent money move. Null ⇒ the row is missing, in another tenant, or someone else changed
+     * the assignee since the caller read it.
+     */
+    async assignIfUnchanged(id: string, o: { partnerId: PartnerId; from: string | null; to: string | null }): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ assignedTo: o.to })
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, o.partnerId), sql`${transfers.assignedTo} IS NOT DISTINCT FROM ${o.from}`))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Atomically VOID an UNFUNDED draft: the ONLY cancel write, used by staff
      * Cancel (dashboard-ops.cancelTransfer) and the customer chat cancel_bill
      * (tools.ts), both via store.cancelTransferIfUnfunded (Phase 1 Task 5 /
@@ -1257,6 +1274,51 @@ export function createTransferRepo(
         req.environment ? eq(transfers.environment, req.environment) : undefined,
       ].filter((c): c is NonNullable<typeof c> => Boolean(c));
       return page(conds.length ? and(...conds) : and(sql`true`), req);
+    },
+
+    /**
+     * Lost-features restore p1 B1: the /partner transfer list. adminList's tenant + status +
+     * environment page plus the optional search filters, all ANDed with `partner_id = $p` (REQUIRED):
+     *  - text: recipient_name ILIKE %text% (plaintext by design, CLAUDE.md crypto-06) OR an id prefix;
+     *  - digits: payout_destination_last4 = digits (exactly 4 digits) OR a sender-phone suffix;
+     *  - from / toExclusive: created_at >= from AND created_at < toExclusive;
+     *  - assignedTo: assigned_to = $u.
+     * Every pattern goes through escapeLike, so a term is always a literal. Masked rows; keyset paging
+     * as every list. The contains / suffix matches cannot use an index: fine for one tenant at
+     * 25 rows a page today; a trigram index would be a later migration.
+     */
+    listForPartner(
+      partnerId: PartnerId,
+      req: PageReq & {
+        status?: TransferStatus;
+        environment: TransferEnvironment;
+        text?: string;
+        digits?: string;
+        from?: Date;
+        toExclusive?: Date;
+        assignedTo?: string;
+      },
+    ): Promise<Page<Transfer>> {
+      if (typeof partnerId !== 'string' || partnerId.length === 0) throw new Error('listForPartner: a tenant is required');
+      const conds = [eq(transfers.partnerId, partnerId), eq(transfers.environment, req.environment)];
+      if (req.status) conds.push(eq(transfers.status, req.status));
+      if (req.text) {
+        const lit = escapeLike(req.text);
+        conds.push(
+          or(
+            sql`${transfers.recipientName} ILIKE ${`%${lit}%`} ESCAPE '\\'`,
+            sql`${transfers.id} LIKE ${`${lit}%`} ESCAPE '\\'`,
+          )!,
+        );
+      }
+      if (req.digits) {
+        const suffix = sql`${transfers.phone} LIKE ${`%${escapeLike(req.digits)}`} ESCAPE '\\'`;
+        conds.push(req.digits.length === 4 ? or(eq(transfers.payoutDestinationLast4, req.digits), suffix)! : suffix);
+      }
+      if (req.from) conds.push(gte(transfers.createdAt, req.from));
+      if (req.toExclusive) conds.push(lt(transfers.createdAt, req.toExclusive));
+      if (req.assignedTo) conds.push(eq(transfers.assignedTo, req.assignedTo));
+      return page(and(...conds), req);
     },
 
     /** Replaces the full-ledger scan in upsertOnFirstInbound (grandfathering, per tenant). */
