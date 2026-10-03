@@ -1826,6 +1826,15 @@ export const en = {
   'partner.customers.occupation.unknown': 'Not recognised',
   'partner.customers.pepDeclared.yes': 'Yes',
   'partner.customers.pepDeclared.no': 'No',
+  'partner.customers.trail.title': 'Decision history',
+  'partner.customers.trail.empty': 'No verification decisions yet.',
+  'partner.customers.trail.note': 'Your team’s decisions show who made them and why. SmartRemit decisions show the outcome only.',
+  'partner.customers.trail.started': 'Verification started',
+  'partner.customers.trail.approved': 'Approved',
+  'partner.customers.trail.rejected': 'Rejected',
+  'partner.customers.trail.createdVerified': 'Created as verified',
+  'partner.customers.trail.created': 'Created with a set status',
+  'partner.customers.trail.reason': 'Reason: {reason}',
   // ── end p2 ──
 
   // ── p3: support, staff, shell, insights, B2B invoices, password ──

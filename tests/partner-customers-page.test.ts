@@ -490,3 +490,28 @@ describe('/partner/customers/[ref]: profile (p2 B6)', () => {
     expect(html).not.toContain('Declared politically exposed');
   });
 });
+
+// Lost-features p2 A9: the KYC decision history (durable audit rows only).
+describe('/partner/customers/[ref]: decision history (p2 A9)', () => {
+  async function decision(partnerId: string, actor: string, action: string, meta: Record<string, unknown>) {
+    const { createAuditRepo } = await import('@/db/repos/aux-repos');
+    await createAuditRepo(db).record({ partnerId, actor, actorType: 'staff', action, subjectId: auditSubjectId(partnerId, SHARED), meta });
+  }
+  it('own decisions show who and why; SmartRemit’s show the outcome only; B’s rows for the same phone never show', async () => {
+    await decision(PA, 'pa-adm', 'kyc.review.approve', { reason: 'Documents look right', actorScope: 'partner', newStatus: 'verified' });
+    await decision(PA, 'owner-root', 'kyc.manual_override.reject', { reason: 'Watchlist entry match', actorScope: 'platform', newStatus: 'rejected' });
+    await decision(PB, 'pb-adm', 'kyc.review.reject', { reason: 'Bravo private reason', actorScope: 'partner' });
+    await signInAs({ partnerId: PA, role: 'agent', username: 'ag-trail' });
+    const html = await detail(sealCustomerRef(PA, SHARED));
+    expect(html).toContain('data-testid="partner-kyc-trail"');
+    expect(html).toContain('Documents look right');
+    expect(html).toContain('pa-adm');
+    expect(html).toContain('data-trail="rejected"');
+    expect(html).toContain('SmartRemit');
+    for (const v of ['Watchlist entry', 'owner-root', 'Bravo private', 'pb-adm']) expect(html).not.toContain(v);
+  });
+  it('no decisions → the empty line', async () => {
+    await signInAs({ partnerId: PA, role: 'admin' });
+    expect(await detail(sealCustomerRef(PA, SHARED))).toContain('No verification decisions yet.');
+  });
+});

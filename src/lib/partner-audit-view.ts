@@ -148,7 +148,7 @@ const CUSTOMER_SUBJECT = /^cust:([0-9a-f]{6})[0-9a-f]*$/i;
 const MAX_DETAIL = 80;
 
 /** A value that could be a phone or an email never reaches the page. */
-function safeText(v: string): string {
+export function safeText(v: string): string {
   if (v.includes('@')) return MASK;
   if (PHONE_SHAPE.test(v) || DIGIT_RUN.test(v)) return maskPhoneLast4(v);
   return v;

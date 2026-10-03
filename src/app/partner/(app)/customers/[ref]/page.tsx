@@ -8,7 +8,12 @@ import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { sendGateActive } from '@/lib/kyc-gate';
-import { auditIdentityView, openCustomerRef } from '@/lib/customer-ref';
+import { auditIdentityView, auditSubjectId, openCustomerRef } from '@/lib/customer-ref';
+import { getAuthStore } from '@/lib/auth-store';
+import { listTenantAuditForSubject } from '@/db/repos/tenant-audit-repo';
+import { listTenantStaff } from '@/lib/partner-staff-policy';
+import { scopeOf } from '@/lib/staff-scope';
+import { KYC_TRAIL_ACTIONS, partnerKycTrail } from '@/lib/partner-kyc-trail';
 import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { customerDetailView, customerProfileView, sendingTodayView } from '@/lib/partner-customer-view';
@@ -52,6 +57,8 @@ const SOURCE_KEY: Record<SendLimitSource, MessageKey> = {
   platform: 'partner.limits.source.platform',
 };
 const usd = (cents: number) => formatMoney(cents / 100);
+/** Lost-features p2 A9: the most decision rows the history reads. */
+const KYC_TRAIL_LIMIT = 50;
 /** Lost-features p2 A10: transfers shown per page on the customer page (keyset "Older" link). */
 const CUSTOMER_TRANSFERS_PAGE = 25;
 
@@ -114,10 +121,16 @@ export default async function PartnerCustomerDetailPage({
   // a mint uses, figures only) and this customer's live transfers at THIS tenant (masked rows).
   const txCursor = decodeTransferCursor(Array.isArray(sp.tx) ? sp.tx[0] : sp.tx);
   // senderTotals is the daily-volume store's ledger read (ET day; blocked and cancelled excluded).
-  const [totals, txPage] = await Promise.all([
+  // Lost-features p2 A9: the KYC decision history from this tenant's durable audit rows only
+  // (partner-kyc-trail decides whose reason may show; SmartRemit's decisions show the outcome only).
+  const [totals, txPage, trailRows, allStaff] = await Promise.all([
     getStore().senderTotals(ctx.partnerId, customer.senderPhone),
     listPartnerCustomerTransfers(getDb(), ctx.partnerId, customer.senderPhone, { limit: CUSTOMER_TRANSFERS_PAGE, cursor: txCursor }),
+    listTenantAuditForSubject(getDb(), ctx.partnerId, auditSubjectId(ctx.partnerId, customer.senderPhone), KYC_TRAIL_ACTIONS, KYC_TRAIL_LIMIT),
+    getAuthStore().listStaff(),
   ]);
+  const tenantUsernames = new Set(listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, allStaff).map((m) => m.username));
+  const trail = partnerKycTrail(trailRows, tenantUsernames, customer.kycSubmittedAt);
   const today = sendingTodayView(evaluateCap(customer, now, totals.todayUsdCents, 0, sendGateActive(partner), limits));
   const olderHref = txPage.nextCursor ? `${PARTNER_ROUTES.customers.href}/${ref}?tx=${encodeTransferCursor(txPage.nextCursor)}` : null;
   const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
@@ -178,6 +191,26 @@ export default async function PartnerCustomerDetailPage({
             <Row label={t('partner.customers.verifiedAt')}>{when(view.kycVerifiedAt)}</Row>
             <Row label={t('partner.customers.firstSeen')}>{when(view.firstSeenAt)}</Row>
           </dl>
+          <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-trail">
+            <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.customers.trail.title')}</h3>
+            {trail.length === 0 ? (
+              <p className="text-[14px] text-ds-ink-muted">{t('partner.customers.trail.empty')}</p>
+            ) : (
+              <ol className="flex flex-col gap-2">
+                {trail.map((e, i) => (
+                  <li key={i} className="text-[14px] text-ds-ink" data-trail={e.labelKey.slice('partner.customers.trail.'.length)}>
+                    <span className="font-semibold">{t(e.labelKey)}</span>
+                    {e.actor ? <span className="text-ds-ink-muted"> · {e.actor}</span> : null}
+                    <span className="text-ds-ink-muted"> · {when(e.at)}</span>
+                    {e.reason ? (
+                      <span className="block break-words text-[13px] text-ds-ink-muted">{t('partner.customers.trail.reason', { reason: e.reason })}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+            )}
+            <p className="mt-2 text-[12.5px] text-ds-ink-subtle">{t('partner.customers.trail.note')}</p>
+          </div>
           {canEditLimits ? (
             <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-decision">
               <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.kyc.decisionTitle')}</h3>
