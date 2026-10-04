@@ -153,3 +153,51 @@ describe('gradient utilities (Tailwind v4 @utility)', () => {
     expect(landing).toContain('bg-[linear-gradient(95deg,#0e7490,#0d9488_45%,#059669)]');
   });
 });
+
+// 2026-10-04: the admin dashboard wears the landing palette through a box-less token scope (the
+// .account-brand technique), so every shadcn page under /admin-dashboard repaints without edits.
+describe('.admin-brand (the admin dashboard scope)', () => {
+  const ds = () => block(':root', css.indexOf('/* ── DS tokens (UI redesign M1)'));
+  /** Resolve `var(--ds-x)` through the DS :root block; literals pass through. */
+  const resolve = (v: string): string => {
+    const m = /^var\((--ds-[\w-]+)\)$/.exec(v);
+    return m ? resolve(ds().get(m[1]) ?? '') : v;
+  };
+  const lum = (hex: string) => {
+    const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a: string, b: string) => {
+    const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+
+  it('is a box-less scope declared before the M1 marker', () => {
+    expect(css).toMatch(/\.admin-brand\s*\{\s*display:\s*contents;/);
+    expect(css.indexOf('.admin-brand {')).toBeLessThan(css.indexOf('/* ── DS tokens (UI redesign M1)'));
+  });
+  it('maps the shadcn tokens onto the landing palette', () => {
+    const a = block('.admin-brand');
+    expect(resolve(a.get('--background')!)).toBe('#f5f9ff');
+    expect(resolve(a.get('--foreground')!)).toBe('#0b1b3f');
+    expect(resolve(a.get('--primary')!)).toBe('#0c5bd2');
+    expect(resolve(a.get('--ring')!)).toBe('#0c5bd2');
+    expect(resolve(a.get('--border')!)).toBe('#dbe4f0');
+    expect(a.get('--radius')).toBe('0.75rem');
+  });
+  it('every text pairing passes WCAG AA (4.5:1)', () => {
+    const a = block('.admin-brand');
+    const r = (k: string) => resolve(a.get(k)!);
+    const pairs: Array<[string, string]> = [
+      ['--foreground', '--background'], ['--card-foreground', '--card'], ['--primary-foreground', '--primary'],
+      ['--muted-foreground', '--background'], ['--muted-foreground', '--muted'], ['--accent-foreground', '--accent'],
+      ['--secondary-foreground', '--secondary'], ['--destructive-foreground', '--destructive'],
+      ['--sidebar-foreground', '--sidebar'], ['--sidebar-accent-foreground', '--sidebar-accent'],
+      ['--primary', '--card'], ['--success', '--card'], ['--warning', '--card'], ['--destructive', '--card'],
+    ];
+    for (const [fg, bg] of pairs) expect(ratio(r(fg), r(bg)), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+  });
+  it('the admin page title is restyled only inside the scope', () => {
+    expect(css).toMatch(/\.admin-brand \.sh-page-title\s*\{/);
+  });
+});

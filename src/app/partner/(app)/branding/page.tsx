@@ -1,41 +1,37 @@
 import type { Metadata } from 'next';
 import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { getPartnerSite, loadSiteTheme } from '@/db/repos/partner-site-repo';
+import { getPartnerSite } from '@/db/repos/partner-site-repo';
 import { partnerMayClaimSlug } from '@/lib/partner-slug-policy';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding } from '@/lib/partner-config';
-import { MAX_LOGO_FILE_KB } from '@/lib/partner-branding';
 import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
-import { ContactForm, DisplayNameForm, LogoForm, PersonaForm, ThemeForm } from './branding-forms';
-import { BrandPreview } from './preview';
+import { ContactForm, PersonaForm } from './branding-forms';
 import { SlugClaimForm } from './slug-form';
 
 export const metadata: Metadata = { title: t('partner.branding.title'), robots: { index: false, follow: false } };
 
-// /partner/branding (UI redesign M3-17): the tenant's logo, colours and support contact (2f adds
-// the display name and the assistant voice, both rendered as escaped text in form fields). The page
-// gates itself (admin only, MFA enforced; the layout's gate is chrome only). Everything is read
-// for the SESSION's partner only. Colours come from loadSiteTheme (always re-validated), the logo
-// reaches the page only through SiteBrand as an <img src> (never CSS, never an app route), and the
-// support contact is rendered as escaped text. The writes are the server actions in ./actions and
-// (M3-18) the one-time web-address claim in ./slug-actions; once claimed, the slug is read-only here.
+// /partner/branding (UI redesign M3-17), shown as "Portal settings": the tenant's web address,
+// support contact and assistant tone. Customer pages carry the SmartRemit brand only (owner decision,
+// 2026-10-04), so the page no longer offers or shows a partner logo, colours, display name or preview
+// (the stored values are kept, unused). The page gates itself (admin only, MFA enforced; the layout's
+// gate is chrome only). Everything is read for the SESSION's partner only, and the support contact and
+// tone are rendered as escaped text. The writes are the server actions in ./actions and (M3-18) the
+// one-time web-address claim in ./slug-actions; once claimed, the slug is read-only here.
 export default async function PartnerBrandingPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.branding.policy);
-  const [partner, theme, site] = await Promise.all([
+  const [partner, site] = await Promise.all([
     getPartnerStore().getPartner(ctx.partnerId),
-    loadSiteTheme(getDb(), ctx.partnerId),
     getPartnerSite(getDb(), ctx.partnerId),
   ]);
   const branding = resolvePartnerBranding(partner);
-  const logo = partner?.logoUrl ?? null;
 
   return (
     <>
       <PageHeader title={t('partner.branding.title')} sub={t('partner.branding.sub')} />
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] lg:items-start lg:gap-6">
+      <div className="grid max-w-3xl gap-4">
         <div className="flex min-w-0 flex-col gap-4">
           <Card as="section" className="p-5 sm:p-6">
             <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.slug.title')}</h2>
@@ -51,24 +47,9 @@ export default async function PartnerBrandingPage() {
             )}
           </Card>
           <Card as="section" className="p-5 sm:p-6">
-            <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.colorsTitle')}</h2>
-            <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.colorsIntro')}</p>
-            <ThemeForm primary={theme.primary} accent={theme.accent} />
-          </Card>
-          <Card as="section" className="p-5 sm:p-6">
-            <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.logoTitle')}</h2>
-            <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.logoIntro', { max: MAX_LOGO_FILE_KB })}</p>
-            <LogoForm />
-          </Card>
-          <Card as="section" className="p-5 sm:p-6">
             <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.contactTitle')}</h2>
             <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.contactIntro')}</p>
             <ContactForm current={branding.supportContact} />
-          </Card>
-          <Card as="section" className="p-5 sm:p-6">
-            <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.displayNameTitle')}</h2>
-            <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.displayNameIntro')}</p>
-            <DisplayNameForm current={partner?.displayName ?? ''} />
           </Card>
           <Card as="section" className="p-5 sm:p-6">
             <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.personaTitle')}</h2>
@@ -76,11 +57,6 @@ export default async function PartnerBrandingPage() {
             <PersonaForm current={partner?.botPersona ?? ''} />
           </Card>
         </div>
-        <Card as="aside" className="min-w-0 p-5 sm:p-6 lg:sticky lg:top-24">
-          <h2 className="text-[18px] font-extrabold text-ds-ink">{t('partner.branding.previewTitle')}</h2>
-          <p className="mt-1 mb-4 text-[14px] text-ds-ink-muted">{t('partner.branding.previewIntro')}</p>
-          <BrandPreview theme={theme} brand={branding.brand} logo={logo} supportContact={branding.supportContact} />
-        </Card>
       </div>
     </>
   );

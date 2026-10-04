@@ -103,7 +103,7 @@ beforeEach(async () => {
   logWarnSpy.mockClear();
   await seedPartner(db, 'pa', 'Partner A');
   await seedPartner(db, 'pb', 'Partner B');
-  // The end-customer brand is displayName → brandName → SmartRemit (resolvePartnerBranding).
+  // The end-customer brand is always SmartRemit (resolvePartnerBranding, 2026-10-04), whatever the display name.
   await db.execute(sql`UPDATE partners SET display_name = 'Partner A' WHERE id = 'pa'`);
   await db.execute(sql`UPDATE partners SET display_name = 'Partner B' WHERE id = 'pb'`);
   // M2-14 (#417 L2): receipts need the portal ON (platform switch + this partner enabled).
@@ -124,7 +124,7 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     expect(rows).toHaveLength(1);
     expect(rows[0].dedupe_key).toBe('rcpt-auto:rc_t1');
     expect(rows[0].payload.to).toEqual([EMAIL]);
-    expect(rows[0].payload.subject).toBe('Your Partner A transfer receipt');
+    expect(rows[0].payload.subject).toBe('Your SmartRemit transfer receipt');
     expect(rows[0].payload.text).toBe('{{receipt_body}}');
   });
 
@@ -213,7 +213,7 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     expect(await emailRows()).toHaveLength(0);
   });
 
-  it("the tenant comes from the transfer: opted in on BOTH, A's transfer mails A's address with A's brand", async () => {
+  it("the tenant comes from the transfer: opted in on BOTH, A's transfer mails A's address, branded SmartRemit", async () => {
     await optIn('pa', { email: 'a@example.com' });
     await optIn('pb', { email: 'b@example.com' });
     await store().saveTransfer(transfer({ partnerId: 'pa' }));
@@ -221,7 +221,7 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     const rows = await emailRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].payload.to).toEqual(['a@example.com']);
-    expect(rows[0].payload.subject).toBe('Your Partner A transfer receipt');
+    expect(rows[0].payload.subject).toBe('Your SmartRemit transfer receipt');
   });
 
   it('a prefs read failure NEVER blocks delivery: delivered commits, no email, a warning without PII', async () => {

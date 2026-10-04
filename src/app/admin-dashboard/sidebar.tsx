@@ -15,21 +15,21 @@ export type { SidebarActive, NavItem } from './nav';
 // Shared nav-item recipe (duplicated in mobile-nav.tsx, which is a client
 // component and cannot import this server module).
 const navItemBase =
-  'relative mb-px flex items-center gap-2.5 rounded-md px-[11px] py-2 text-[13px] font-medium transition-colors';
+  'relative mb-0.5 flex items-center gap-2.5 rounded-[10px] px-3 py-2 text-[13.5px] font-medium transition-colors';
 const navItemIdle = 'text-muted-foreground hover:bg-secondary hover:text-foreground';
 const navItemActive =
-  "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-3 before:top-1/2 before:h-[18px] before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
+  "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-3 before:top-1/2 before:h-5 before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
 
 export async function Sidebar({ active }: { active?: SidebarActive }) {
   const staff = await requireStaff();
   const groups = visibleNavGroups(staff);
 
   return (
-    <aside className="sh-sidebar sticky top-14 hidden h-[calc(100vh-56px)] overflow-y-auto border-r border-sidebar-border bg-sidebar px-3 py-3.5 text-sidebar-foreground min-[1025px]:block">
+    <aside className="sh-sidebar sticky top-[60px] hidden h-[calc(100vh-60px)] overflow-y-auto border-r border-sidebar-border bg-sidebar px-3 py-4 text-sidebar-foreground min-[1025px]:block">
       {groups.map((group, i) => (
         <Fragment key={group.label ?? `g${i}`}>
           {group.label && (
-            <div className="mt-3.5 mb-1 px-2.5 py-1 text-[11px] font-semibold tracking-[0.6px] text-muted-foreground uppercase">
+            <div className="mt-4 mb-1 px-3 py-1 text-[11px] font-bold tracking-[0.08em] text-ds-ink-subtle uppercase">
               {group.label}
             </div>
           )}

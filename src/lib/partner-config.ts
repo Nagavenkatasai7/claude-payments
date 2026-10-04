@@ -11,6 +11,7 @@ import type { PartnerIntegrationsStore } from './partner-integrations-store';
 //   brand 'SmartRemit', KYC 'ours' (gate ON), mock payment, env-driven KYC,
 //   shared WhatsApp number, no color/logo override, no persona.
 //
+// resolvePartnerBranding always resolves to SmartRemit (2026-10-04, see below).
 // resolvePartnerBranding + resolveKycMode are PURE and SYNC (no I/O) — they read
 // only the Partner record, which the agent already has in scope (agent.ts:104),
 // so the per-turn hot path costs zero extra fetches. Only the provider seams
@@ -26,16 +27,23 @@ export interface ResolvedBranding {
   logoUrl: string | null; // null = no logo override
 }
 
-/** Resolve the end-customer-facing brand from a Partner record. null ⇒ 'SmartRemit'. */
+/**
+ * Resolve the end-customer-facing brand. Always 'SmartRemit' (owner decision, 2026-10-04): SmartRemit
+ * is the only brand customers see on the bot, the portal, the pay page, receipts and emails; partners
+ * stay behind the scenes. The partner's displayName / brandName / primaryColor / logoUrl stay stored
+ * (internal records) but never become the brand. supportContact and botPersona (a tone hint) are not
+ * brand and still pass through. The licensed provider is still named where the law requires it, via
+ * resolvePartnerDisclosure below, which this does not touch.
+ */
 export function resolvePartnerBranding(
   partner: Partner | null | undefined,
 ): ResolvedBranding {
   return {
-    brand: partner?.displayName?.trim() || partner?.brandName?.trim() || DEFAULT_BRAND,
+    brand: DEFAULT_BRAND,
     supportContact: partner?.supportContact?.trim() ?? '',
     botPersona: partner?.botPersona?.trim() ?? '',
-    primaryColor: partner?.primaryColor?.trim() || null,
-    logoUrl: partner?.logoUrl?.trim() || null,
+    primaryColor: null,
+    logoUrl: null,
   };
 }
 
@@ -107,7 +115,9 @@ export function resolvePartnerDisclosure(partner: Partner | null | undefined): R
   const raw: unknown = partner.supportConfig?.disclosure;
   const c = (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
   const entity = text(c.licensedEntity);
-  const brand = resolvePartnerBranding(partner).brand;
+  // The provider of record is a legal notice, not branding: an unconfigured real partner falls back to
+  // its OWN name (never the SmartRemit brand), exactly as before the 2026-10-04 branding change.
+  const brand = partner.displayName?.trim() || partner.brandName?.trim() || DEFAULT_BRAND;
   const reg = c.stateRegulator && typeof c.stateRegulator === 'object' ? (c.stateRegulator as Record<string, unknown>) : null;
   const regName = reg ? text(reg.name) : null;
   const est = c.deliveryEstimate && typeof c.deliveryEstimate === 'object'

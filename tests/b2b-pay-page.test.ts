@@ -111,12 +111,13 @@ function expectGenericDead(html: string) {
 }
 
 describe('/pay/b2b/[invoiceId] — payable bill (sanity for the mocks)', () => {
-  it('renders "Pay your bill" with the PARTNER brand and the seller name', async () => {
+  it('renders "Pay your bill" with the SmartRemit brand (never the partner brand) and the seller name', async () => {
     const html = await render(LIVE, FRESH_IP);
     expect(html).toContain('Pay your bill');
-    expect(html).toContain('Acme Money Co');
+    expect(html).toContain('SmartRemit');
+    expect(html).not.toContain('Acme Money Co');
     expect(html).toContain('Seller Ltd');
-    expect(getPartner).toHaveBeenCalledWith('p_acme');
+    expect(getPartner).not.toHaveBeenCalled(); // the brand is SmartRemit: no partner read for it
     // Program-Fix 15 PR B: a B2B bill is not a consumer remittance (§1005.30) — no Reg E card or acknowledgement.
     expect(html).not.toContain('Before you pay');
     expect(html).not.toContain('I have read this disclosure.');
@@ -198,12 +199,13 @@ describe('/pay/b2b/[invoiceId] — one message for every dead bill (Program-Fix 
   });
 });
 
-describe('/pay/b2b/[invoiceId] — FX down keeps the partner brand (a live, payable bill)', () => {
-  it('renders the distinct retry message WITH partner branding', async () => {
+describe('/pay/b2b/[invoiceId] — FX down keeps the SmartRemit brand (a live, payable bill)', () => {
+  it('renders the distinct retry message WITH SmartRemit branding', async () => {
     getFxRates.mockRejectedValue(new Error('provider down'));
     const html = await render(LIVE, FRESH_IP);
     expect(html).toContain('please try again shortly');
-    expect(html).toContain('Acme Money Co');
+    expect(html).toContain('SmartRemit');
+    expect(html).not.toContain('Acme Money Co');
     expect(html).not.toContain(INACTIVE);
     expect(html).not.toContain('Pay your bill');
   });
@@ -223,7 +225,8 @@ describe('/pay/b2b/[invoiceId] — per-IP guard before the invoice read', () => 
   it('limiter down (Redis throws): the payable bill still renders — fail open', async () => {
     const html = await render(LIVE, DOWN_IP);
     expect(html).toContain('Pay your bill');
-    expect(html).toContain('Acme Money Co');
+    expect(html).toContain('SmartRemit');
+    expect(html).not.toContain('Acme Money Co');
   });
 
   it('no forwarded header (IP unknown): renders normally', async () => {

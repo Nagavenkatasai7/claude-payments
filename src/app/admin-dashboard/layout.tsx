@@ -16,9 +16,12 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   const staff = await requireStaff();
   const navItems = resolveNavItems(staff);
 
+  // .admin-brand (tailwind.css) re-points the shadcn tokens to the SmartRemit landing palette for the
+  // whole subtree, drawer included; it is box-less (display: contents), so the layout is unchanged.
   return (
+    <div className="admin-brand">
     <DrawerProvider>
-      <div className="grid min-h-svh grid-rows-[56px_1fr] bg-background text-foreground">
+      <div className="grid min-h-svh grid-rows-[60px_1fr] bg-background font-sans text-foreground antialiased">
         <TopBar />
         {/* Sidebar + page column. Pages render `<Sidebar …/><main className="sh-main">…`
             as the two grid children; ≤1024px collapses to a single column and the
@@ -29,5 +32,6 @@ export default async function DashboardLayout({ children }: { children: ReactNod
       </div>
       <MobileNavDrawer items={navItems} />
     </DrawerProvider>
+    </div>
   );
 }

@@ -62,7 +62,8 @@ export function computeOnboardingChecklist(f: OnboardingFacts): OnboardingStep[]
     sandboxKey: f.sandboxKeyActive,
     sandboxTransfer: f.sandboxTransferDelivered,
     webhook: f.partnerRail && f.endpointUrlValid && f.recentPingOk,
-    branding: f.slugClaimed && (f.logoSet || f.primaryColorSet),
+    // Pages are SmartRemit-branded (2026-10-04): the step is the web-address claim only.
+    branding: f.slugClaimed,
     goLive: f.goLiveRequested || f.goLiveApproved,
   };
   return ONBOARDING_STEP_KEYS.map((key, i) => ({ step: (i + 1) as OnboardingStepNumber, key, done: done[key] }));

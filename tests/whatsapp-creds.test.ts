@@ -24,13 +24,13 @@ describe('waCredsFrom (WL2 outbound credential resolution)', () => {
 // number and the SmartRemit brand. (The outbox worker keeps its own
 // fail-closed, memoized resolver.)
 describe('partnerWaContext (Program-Fix 49A)', () => {
-  it('a BYO partner ⇒ its brand + its creds', async () => {
+  it('a BYO partner ⇒ the SmartRemit brand + its own creds', async () => {
     const { partnerWaContext } = await import('@/lib/whatsapp-creds');
     const ctx = await partnerWaContext('acme', {
       getPartner: async () => ({ id: 'acme', displayName: 'Acme Remit' }) as never,
       getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn', token: 't' } }) as never,
     });
-    expect(ctx).toEqual({ brand: 'Acme Remit', waCreds: { phoneNumberId: 'pn', token: 't' } });
+    expect(ctx).toEqual({ brand: 'SmartRemit', waCreds: { phoneNumberId: 'pn', token: 't' } });
   });
 
   it('no partner row / no integrations ⇒ SmartRemit + the shared number', async () => {

@@ -10,6 +10,7 @@ import { inviteRedeemable } from '@/lib/staff-invite-accept';
 import { getStaffInviteStore } from '@/lib/staff-invite-store';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { Card } from '@/components/ds';
+import BrandLogo from '@/app/landing/BrandLogo';
 import { AcceptForm } from './accept-form';
 import { INVITE_PAGE_IP_LIMIT, INVITE_PAGE_SCOPE } from './accept-result';
 import { DeadInvite } from './dead-invite';
@@ -35,7 +36,10 @@ const ROOT =
 function Shell({ children }: { children: ReactNode }) {
   return (
     <main id="main" className={ROOT}>
-      <Card className="w-full max-w-md">{children}</Card>
+      <div className="flex w-full max-w-md flex-col items-center gap-6">
+        <BrandLogo height={40} eager className="h-9 sm:h-10" />
+        <Card className="w-full">{children}</Card>
+      </div>
     </main>
   );
 }

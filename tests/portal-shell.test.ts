@@ -55,18 +55,19 @@ describe('portal layout', () => {
     h.site = null;
     await expect(PortalLayout({ children: null })).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
   });
-  it('partner theme + brand logo (img alt = brand), lang, main landmark and skip link', async () => {
+  // 2026-10-04: SmartRemit is the only brand. Even a site object carrying a partner theme, logo and
+  // brand (portal-site no longer produces one) renders the SmartRemit.ai logo and no theme override.
+  it('the SmartRemit.ai logo (never the partner logo, name or theme), lang, main landmark and skip link', async () => {
     const html = await renderLayout();
-    expect(html).toContain('<style>.ds-site{--ds-primary:#0f766e');
-    expect(html).toMatch(/<img[^>]*alt="Acme Remit"/);
+    expect(html).not.toContain('<style>');
+    expect(html).toMatch(/<img[^>]*alt="SmartRemit.ai"/);
+    expect(html).toContain('smartremit-lockup.png');
+    expect(html).not.toContain('Acme Remit');
+    expect(html).not.toContain(LOGO);
     expect(html).toContain('class="ds-site" lang="en"');
     expect(html).toContain('id="main"');
     expect(html).toContain('href="#main"');
     expect(html).toContain('<p>child</p>');
-  });
-  it('no logo → the brand as text', async () => {
-    h.site = { ...SITE, logo: null };
-    expect(await renderLayout()).toContain('>Acme Remit</span>');
   });
   it('signed out: no nav, no sign-out (the sign-in page lives under the layout)', async () => {
     const html = await renderLayout();

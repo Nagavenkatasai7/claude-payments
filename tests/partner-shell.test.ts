@@ -178,10 +178,13 @@ describe('/partner layout: the chrome', () => {
       }
     }
   });
-  it('shows the SESSION tenant brand only (never another partner)', async () => {
+  // 2026-10-04: the header is the SmartRemit.ai logo; no partner name (own or another's) is shown.
+  it('shows the SmartRemit.ai logo and no partner brand (own or another)', async () => {
     await signInAs({ partnerId: TENANT, role: 'agent' });
     const html = await shell();
-    expect(html).toContain('Acme Remit Test');
+    expect(html).toMatch(/<img[^>]*alt="SmartRemit.ai"/);
+    expect(html).toContain('Partner workspace');
+    expect(html).not.toContain('Acme Remit Test');
     expect(html).not.toContain('Other Brand Co');
     expect(html).not.toContain(TENANT);
   });

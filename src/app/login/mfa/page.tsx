@@ -3,14 +3,14 @@ import Link from 'next/link';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { MfaForm } from './mfa-form';
+import { StaffAuthShell } from '../staff-auth-shell';
 import { SMARTREMIT_ICONS } from '../../brand-icons';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { SkipLink } from '@/components/skip-link';
 import { readMfaPendingToken } from '@/lib/staff-mfa-cookie';
 
 export const dynamic = 'force-dynamic';
 
-export const metadata: Metadata = { icons: SMARTREMIT_ICONS };
+export const metadata: Metadata = { title: 'Two-step verification · SmartRemit', icons: SMARTREMIT_ICONS };
 
 // Program-Fix 17b: public (like /login; the middleware matcher does not cover
 // it). Without the pending cookie there is nothing to verify: back to /login.
@@ -21,33 +21,17 @@ export default async function MfaPage() {
   return (
     <>
       <SkipLink />
-      <main
-        id="main"
-        className="flex min-h-screen items-center justify-center bg-background px-4 font-sans text-foreground antialiased"
+      <StaffAuthShell
+        title="Two-step verification"
+        sub="Enter the code from your authenticator app to finish signing in."
+        footer={
+          <Link href="/login" className="font-semibold text-ds-primary underline-offset-4 hover:underline">
+            Start over
+          </Link>
+        }
       >
-        <Card className="w-full max-w-sm">
-          <CardHeader className="space-y-1">
-            <div className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
-                SR
-              </span>
-              SmartRemit
-            </div>
-            <p className="text-xs text-muted-foreground">smartremit.ai</p>
-            <CardTitle className="pt-2 text-xl">
-              <h1>Two-step verification</h1>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <MfaForm />
-            <p className="text-center text-xs text-muted-foreground">
-              <Link href="/login" className="underline underline-offset-2">
-                Start over
-              </Link>
-            </p>
-          </CardContent>
-        </Card>
-      </main>
+        <MfaForm />
+      </StaffAuthShell>
     </>
   );
 }

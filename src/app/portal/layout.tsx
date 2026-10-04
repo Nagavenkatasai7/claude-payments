@@ -6,8 +6,8 @@ import { env } from '@/lib/env';
 import { t } from '@/lib/i18n';
 import { portalNavItems } from '@/lib/portal-nav';
 import { Sidebar, Button } from '@/components/ds';
-import { SiteBrand } from '@/components/ds/site-brand';
-import { SiteThemeStyle } from '@/components/ds/site-theme-style';
+import Link from 'next/link';
+import BrandLogo from '@/app/landing/BrandLogo';
 import { signOutAction } from './signout/actions';
 
 // Site-only (L8): on the apex the whole tree is the root 404, whose head must match any unmatched URL.
@@ -16,8 +16,9 @@ export const generateMetadata = () => portalMetadata(null, { robots: { index: fa
 export const dynamic = 'force-dynamic';
 
 /**
- * The customer portal shell (UI redesign M2-5, Task 5.7): the partner's theme and brand in the
- * landing look (D11). The gate runs FIRST, so on the apex (or with the portal off) the whole tree
+ * The customer portal shell (UI redesign M2-5, Task 5.7) in the landing look (D11). SmartRemit is the
+ * only brand (owner decision, 2026-10-04): the header is the SmartRemit.ai logo and the colours are
+ * SmartRemit's, never the partner's. The gate runs FIRST, so on the apex (or with the portal off) the whole tree
  * falls through to the brand-neutral root 404. It does not require a customer (sign-in lives
  * under it); the nav and sign-out show only for a signed-in customer.
  */
@@ -26,7 +27,6 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   const customer = await getPortalCustomer();
   return (
     <>
-      <SiteThemeStyle theme={site.theme} />
       <div className="ds-site" lang="en">
         <div className="min-h-dvh bg-ds-ground text-ds-ink">
           <a
@@ -36,7 +36,9 @@ export default async function PortalLayout({ children }: { children: ReactNode }
             {t('portal.skip')}
           </a>
           <header className="flex items-center justify-between gap-4 border-b border-ds-border bg-ds-surface px-4 py-3 sm:px-6 print:hidden">
-            <SiteBrand brand={site.brand} logo={site.logo} />
+            <Link href="/portal" className="inline-flex rounded-ds-focus">
+              <BrandLogo height={36} eager className="h-8 sm:h-9" />
+            </Link>
             {customer ? (
               <form action={signOutAction}>
                 <Button type="submit" variant="ghost" size="sm">
