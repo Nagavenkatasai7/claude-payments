@@ -4,11 +4,10 @@
 // constants in src/lib/whatsapp.ts / src/lib/whatsapp-templates.ts, the
 // builders' output length, and the send paths that reference them.
 //
-// White-label (owner answer Q4, 2026-09-28): a template that would name the
-// platform shows BRAND_PLACEHOLDER instead; the partner submits it with its own
-// brand name.
+// Branding (owner decision, 2026-10-04): SmartRemit is the only brand customers
+// see, so a template that names the brand names SmartRemit, on every number.
 
-export const BRAND_PLACEHOLDER = '[Your brand]';
+export const TEMPLATE_BRAND = 'SmartRemit';
 
 export interface TemplateEntry {
   /** Exact Meta template name. For 'configured' entries the name is platform-wide: submit it exactly as given. */
@@ -36,13 +35,13 @@ export interface TemplateEntry {
   purpose: string;
 }
 
-const FOOTER = BRAND_PLACEHOLDER;
+const FOOTER = TEMPLATE_BRAND;
 
 const verificationStatus = (name: string, state: string, sample: string): TemplateEntry => ({
   name,
   category: 'UTILITY',
   language: 'en',
-  body: `Hi {{1}}, an update on your ${BRAND_PLACEHOLDER} account: {{2}} Reply here if you have any questions.`,
+  body: `Hi {{1}}, an update on your ${TEMPLATE_BRAND} account: {{2}} Reply here if you have any questions.`,
   footer: FOOTER,
   paramCount: 2,
   samples: ['Anand', sample],
@@ -90,13 +89,13 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     sentToday: true,
     nameSource: 'fixed',
     purpose:
-      "Asks a sender with a scheduled transfer for their legal name before it can go out. {{1}} is your brand name. Sent instead of the plain message only when the sender has not written in the last 24 hours.",
+      "Asks a sender with a scheduled transfer for their legal name before it can go out. {{1}} is the brand name, SmartRemit. Sent instead of the plain message only when the sender has not written in the last 24 hours.",
   },
   {
     name: 'transfer_delivered_sender',
     category: 'UTILITY',
     language: 'en',
-    body: `Your ${BRAND_PLACEHOLDER} transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}.`,
+    body: `Your ${TEMPLATE_BRAND} transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}.`,
     footer: FOOTER,
     paramCount: 3,
     samples: ['$50.00', 'Priya', 'tx_a1b2c3'],
@@ -172,7 +171,7 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     name: 'verification_reminder',
     category: 'UTILITY',
     language: 'en',
-    body: `Hi {{1}}, identity verification is still pending on your ${BRAND_PLACEHOLDER} account. Until it's complete, some transfers may be limited. You can finish it using the button below.`,
+    body: `Hi {{1}}, identity verification is still pending on your ${TEMPLATE_BRAND} account. Until it's complete, some transfers may be limited. You can finish it using the button below.`,
     button: { kind: 'url', label: 'Verify Now', urlPattern: null },
     paramCount: 1,
     samples: ['Anand'],

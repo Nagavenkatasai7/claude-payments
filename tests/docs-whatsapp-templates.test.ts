@@ -114,13 +114,13 @@ describe('WhatsApp template catalog is code-true', () => {
     expect(vr?.button).toMatchObject({ kind: 'url', urlPattern: null });
   });
 
-  it('white-label: no body or footer hard-codes the SmartRemit brand (partners submit their own)', async () => {
-    const { TEMPLATES, BRAND_PLACEHOLDER } = await import('@/content/docs/whatsapp-template-catalog');
+  it('SmartRemit branding (owner decision 2026-10-04): templates name SmartRemit, never a partner-brand placeholder', async () => {
+    const { TEMPLATES, TEMPLATE_BRAND } = await import('@/content/docs/whatsapp-template-catalog');
+    expect(TEMPLATE_BRAND).toBe('SmartRemit');
     for (const e of TEMPLATES) {
-      expect({ name: e.name, hit: /smartremit/i.test(`${e.body} ${e.footer ?? ''}`) }).toEqual({ name: e.name, hit: false });
+      const text = `${e.body} ${e.footer ?? ''} ${e.purpose}`;
+      expect({ name: e.name, hit: /your brand/i.test(text) }).toEqual({ name: e.name, hit: false });
     }
-    // The placeholder is neither a Meta {{n}} variable nor MDX/JSX markup.
-    expect(BRAND_PLACEHOLDER).not.toMatch(/[{}<>]/);
-    expect(TEMPLATES.some((e) => e.body.includes(BRAND_PLACEHOLDER))).toBe(true);
+    expect(TEMPLATES.some((e) => e.body.includes(TEMPLATE_BRAND))).toBe(true);
   });
 });

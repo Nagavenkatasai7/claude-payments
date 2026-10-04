@@ -9,7 +9,7 @@ export default function DocsIndexPage() {
     <div>
       <PageHeader
         title="Partner documentation"
-        sub="Everything you need to run SmartRemit under your own brand: API keys, the sandbox, webhooks, your WhatsApp number and go-live."
+        sub="Everything you need to run SmartRemit with your licence: API keys, the sandbox, webhooks, your WhatsApp number and go-live."
       />
       <Card className="mt-8 p-5 transition-colors hover:border-ds-border-strong sm:p-6">
         <h2 className="text-[17px] font-semibold text-ds-ink">
