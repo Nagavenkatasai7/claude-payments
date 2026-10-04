@@ -620,8 +620,9 @@ export default async function LandingPage({
                 Partner with us.
               </h2>
               <p className="mt-4 max-w-[46ch] text-[17px] leading-relaxed text-[#475569]">
-                Licensed money transmitters: get a branded WhatsApp bot, a hosted pay page,
-                signed settlement webhooks, a REST API, and a self-service dashboard. You keep
+                Licensed money transmitters: reach customers through the SmartRemit WhatsApp
+                assistant and pay page, with signed settlement webhooks, a REST API, and a
+                self-service dashboard. You keep
                 the licence and the funds — we orchestrate the rest. Tell us your corridors and
                 we&rsquo;ll be in touch.
               </p>

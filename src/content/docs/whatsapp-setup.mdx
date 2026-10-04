@@ -1,10 +1,10 @@
 ## Bring your own number
 
-Your customers can chat with the assistant on your own WhatsApp Business number, under your brand.
+Your customers can chat with the SmartRemit assistant on your own WhatsApp Business number.
 
 1. In your dashboard, enter your number's phone-number ID, access token, verify token and app secret.
 2. Point your Meta app's webhook at the callback URL shown on your dashboard's partner page, using the verify token you entered.
-3. Send your number a message. Inbound messages on your number are routed to your account, and replies, sign-in codes and delivery notices leave from your number under your brand.
+3. Send your number a message. Inbound messages on your number are routed to your account, and replies, sign-in codes and delivery notices leave from your number as SmartRemit.
 
 Meta's own setup steps are in the [WhatsApp Business Platform documentation](https://developers.facebook.com/docs/whatsapp/).
 
@@ -12,7 +12,7 @@ Meta's own setup steps are in the [WhatsApp Business Platform documentation](htt
 
 WhatsApp only lets a business start a conversation, or write to someone who has not messaged it in the last 24 hours, with a **message template** that Meta has approved. Create each template in [WhatsApp Manager](https://business.facebook.com/) for your own WhatsApp Business account, **exactly** as listed below: the same name, the same category and the language **English** (code `en`, not `en_US`). A template approved under a different name or language fails, and the message falls back to plain text, which only reaches someone who messaged your number in the last 24 hours.
 
-Where a template below shows `[Your brand]`, submit it with your own brand name. Every `{{n}}` variable needs a sample value when you submit; the samples below are safe to use.
+Templates that name the brand say SmartRemit: submit them exactly as written. Every `{{n}}` variable needs a sample value when you submit; the samples below are safe to use.
 
 <TemplateCatalog />
 

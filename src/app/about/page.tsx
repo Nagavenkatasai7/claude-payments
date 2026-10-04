@@ -129,7 +129,7 @@ export default function AboutPage() {
                 {`The agent fetches a live mid-market exchange rate and adds a clear, flat fee — your first transfer is free, then it's a low flat fee. The rate you approve is the rate that's used; there's no hidden markup baked into it.`}
               </Step>
               <Step n={3} title="Approve & pay securely">
-                {`You tap one button to open a secure, branded pay page, enter the recipient's payout details, clear a one-time passcode, and pay the licensed partner. SmartRemit never receives or holds your money — the partner's rail processes the payment.`}
+                {`You tap one button to open a secure SmartRemit pay page, enter the recipient's payout details, clear a one-time passcode, and pay the licensed partner. SmartRemit never receives or holds your money — the partner's rail processes the payment.`}
               </Step>
               <Step n={4} title="Compliance runs every time">
                 {`A sanctions screen runs on every transfer and cannot be switched off. A match stops the transfer before it's ever created; a flag routes it to a human reviewer; cleared transfers move on.`}
@@ -149,14 +149,14 @@ export default function AboutPage() {
           <div className={SECTION}>
             <span className={KICKER}>For partners</span>
             <h2 className="mt-3 text-[clamp(26px,3.6vw,40px)] font-semibold tracking-[-0.02em]">
-              White-label rails for the licensed transmitter.
+              Remittance rails for the licensed transmitter.
             </h2>
             <p className="mt-5 max-w-[760px] text-[17px] text-[#475569]">
-              {`SmartRemit is multi-tenant infrastructure: one platform serves many partners, each with its own brand, WhatsApp number, settlement rail, rates and isolated dashboard. The licensed partner keeps the license and the funds flow — SmartRemit orchestrates everything around the money.`}
+              {`SmartRemit is multi-tenant infrastructure: one platform serves many partners, each with its own WhatsApp number, settlement rail, rates and isolated dashboard, while customers always see SmartRemit. The licensed partner keeps the license and the funds flow — SmartRemit orchestrates everything around the money.`}
             </p>
             <div className="mt-8 grid gap-5 sm:grid-cols-2">
-              <Pillar title="A branded WhatsApp agent + pay page">
-                {`Your customers chat with your brand and pay on a hosted, secure page — you bring your own WhatsApp number.`}
+              <Pillar title="The SmartRemit WhatsApp agent + pay page">
+                {`Your customers chat with the SmartRemit assistant and pay on a hosted, secure page. You can bring your own WhatsApp number.`}
               </Pillar>
               <Pillar title="Signed settlement webhooks">
                 {`Instructions out and callbacks in are HMAC-signed and verified fail-closed — an invalid signature is rejected.`}

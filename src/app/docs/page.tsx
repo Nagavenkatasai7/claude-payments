@@ -15,7 +15,7 @@ import { destinationListText } from '@/lib/destination-country';
 export const metadata = {
   title: 'SmartRemit — Partner API documentation',
   description:
-    'Integrate the SmartRemit white-label remittance infrastructure: REST API, settlement webhooks, WhatsApp channel.',
+    'Integrate the SmartRemit remittance infrastructure: REST API, settlement webhooks, WhatsApp channel.',
   // /docs is SmartRemit-owned, so its link preview may carry the share image.
   openGraph: { images: [SHARE_IMAGE] },
   icons: SMARTREMIT_ICONS,
@@ -695,7 +695,7 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
               <ul className="space-y-1.5">
                 <li><code>created</code> → awaiting payment (no-op transition)</li>
                 <li><code>funded</code> → paid (customer charged on your side)</li>
-                <li><code>paid_out</code> → delivered — triggers the branded WhatsApp delivery notifications</li>
+                <li><code>paid_out</code> → delivered — triggers the SmartRemit WhatsApp delivery notifications</li>
                 <li>
                   <code>failed</code> / <code>returned</code> → cancelled. If SmartRemit captured the
                   charge it is refunded; a partner-pulled debit gets a signed <code>reverse</code> instruction;
