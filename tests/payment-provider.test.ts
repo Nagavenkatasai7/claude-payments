@@ -119,7 +119,7 @@ describe('MockPaymentProvider.initiateTransfer (stage 1 + durable stage 2)', () 
     expect((await store.getTransfer('pay_seam_1'))!.status).toBe('delivered');
   });
 
-  it('WL1: the delivery message uses the PARTNER brand resolved at drain time', async () => {
+  it('WL1: the delivery message says SmartRemit (never the partner brand) at drain time, 2026-10-04', async () => {
     await seedPartner(db, 'acme');
     await db.execute(sql`UPDATE partners SET display_name = 'Acme Pay' WHERE id = 'acme'`);
     const t = { ...fixture(), partnerId: 'acme' };
@@ -129,8 +129,8 @@ describe('MockPaymentProvider.initiateTransfer (stage 1 + durable stage 2)', () 
     await db.execute(sql`UPDATE outbox SET next_attempt_at = now()`);
     await drainOnce(workerDeps(), 'w1');
     const msg = (sendText.mock.calls[0] as unknown[])[1] as string;
-    expect(msg).toContain('Thanks for using Acme Pay!');
-    expect(msg).not.toContain('SmartRemit');
+    expect(msg).toContain('Thanks for using SmartRemit!');
+    expect(msg).not.toContain('Acme Pay');
   });
 });
 

@@ -4,8 +4,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 // Frozen @ 96c8933, computed with `git show 96c8933:<file> | shasum -a 256` (tailwind: `| head -n 246`).
-// The post-demo re-skin updates these DELIBERATELY, in the same PR.
-const TAILWIND_PREFIX_SHA = '5d8cb08e16470f11d86d187c57e1927263bfa46251bd19d24945460c3980a656';
+// The post-demo re-skin updates these DELIBERATELY, in the same PR. 2026-10-04 (the demo freeze was
+// cancelled on 2026-09-28): the admin re-skin added the .admin-brand scope inside the first 246 lines,
+// so the tailwind prefix hash moved on purpose; :root, .account-brand and the .sh-* rules are unchanged
+// (tests/ds-tokens.test.ts still pins every frozen value).
+const TAILWIND_PREFIX_SHA = 'c4767ffebd92e3ae2601217637f301260fa77aca11ac36096361d1d3a3327234';
 const SHADCN_SHA: Record<string, string> = {
   'src/components/ui/alert.tsx': '2cc59b5f7bda91c1670884b1bf46bfc8a2a6f226cef184f5762acc037188885b',
   'src/components/ui/badge.tsx': '46a0de5224f6a5d5d63d45246534288518dce888f031064bff925bbc7fe6ad97',

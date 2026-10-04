@@ -170,7 +170,7 @@ describe('writer 1 — the rail callback route (/api/payment-webhook/[provider])
     expect(sendEmail).toHaveBeenCalledTimes(1);
     const msg = sendEmail.mock.calls[0][0];
     expect(msg.to).toEqual([EMAIL]);
-    expect(msg.subject).toBe('Your Acme Remit transfer receipt');
+    expect(msg.subject).toBe('Your SmartRemit transfer receipt');
     expect(msg.text).toContain('****9012');
     expect(msg.text).not.toContain(FULL_ACCOUNT);
   });
