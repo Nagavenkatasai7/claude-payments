@@ -1,6 +1,4 @@
 import { getStore } from '@/lib/store';
-import { getPartnerStore } from '@/lib/partner-store';
-import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
 import { getB2bQuoteStore, resolveCheckoutBillQuote } from '@/lib/b2b-quote-store';
 import { billDenomination, quoteCrossBorderBill, quoteBuyerDenominatedBill } from '@/lib/b2b-quote';
 import { getFxRates } from '@/lib/rate';
@@ -10,6 +8,7 @@ import { BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { BillPayForm } from './bill-pay-form';
 import { headers } from 'next/headers';
 import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
+import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
 
 // Cross-border B2B bill checkout page (Plan 4). The buyer opens /pay/b2b/<invoiceId>:
 // the obligation is FIXED in the seller's currency (Case S — we quote the buyer's
@@ -23,24 +22,8 @@ const pageClasses =
   "flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif] text-[#e9edef]";
 const sheetClasses = 'w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7';
 const headingClasses = 'mb-5 text-lg leading-normal font-semibold';
-const brandClasses = 'mb-1 text-xl leading-normal font-extrabold text-[#25d366]';
 const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
 
-function Brand({ branding }: { branding: ResolvedBranding }) {
-  if (branding.logoUrl) {
-    return (
-      <div className={brandClasses}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={branding.logoUrl} alt={branding.brand} style={{ maxHeight: 28, verticalAlign: 'middle' }} />
-      </div>
-    );
-  }
-  return (
-    <div className={brandClasses} style={branding.primaryColor ? { color: branding.primaryColor } : undefined}>
-      {branding.brand}
-    </div>
-  );
-}
 
 function formatMoney(amount: number, currency: string): string {
   try {
@@ -60,13 +43,11 @@ function formatMoney(amount: number, currency: string): string {
 // DEFAULT branding — a dead link reveals neither the partner nor the bill state.
 const INACTIVE_MESSAGE = 'This bill is no longer active';
 
-/** `branding` is passed ONLY for a live, payable bill (the FX-down catch); every dead sheet is default-branded. */
-function Inactive({ message, branding }: { message: string; branding?: ResolvedBranding }) {
-  const brand = branding ?? resolvePartnerBranding(null);
+function Inactive({ message }: { message: string }) {
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={brand} />
+        <DarkSheetBrand />
         <h1 className={headingClasses}>{message}</h1>
       </div>
     </main>
@@ -129,7 +110,6 @@ export default async function CrossBorderBillPayPage({
 
   // The partner is read only for a PAYABLE bill (Program-Fix 23): its brand
   // dresses the checkout and the FX-down retry sheet, never a dead link.
-  const branding = resolvePartnerBranding(await getPartnerStore().getPartner(invoice.partnerId));
 
   // Live-locked checkout quote — reused on reload, re-quoted on expiry. Wrapped:
   // a QuoteError (bad FX input) or a RateUnavailableError (Task 9: provider
@@ -165,13 +145,13 @@ export default async function CrossBorderBillPayPage({
           : Math.round(q.sellerAmount * 100) === Math.round(invoicedAmount * 100)),
     );
   } catch {
-    return <Inactive branding={branding} message="This bill can't be paid right now — please try again shortly" />;
+    return <Inactive message="This bill can't be paid right now — please try again shortly" />;
   }
 
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={branding} />
+        <DarkSheetBrand />
         <h1 className={headingClasses}>Pay your bill</h1>
         <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
           <div className={lineClasses}>

@@ -30,7 +30,7 @@ vi.mock('@/lib/partner-store', () => ({
   }),
 }));
 vi.mock('@/db/repos/partner-site-repo', () => ({
-  loadSiteTheme: async () => ({ primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false }),
+  loadSiteTheme: async () => ({ primary: '#123456', accent: '#654321', primaryFromPartner: true, accentFromPartner: true }),
 }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 
@@ -50,8 +50,14 @@ afterEach(() => vi.unstubAllEnvs());
 describe('getPortalSite', () => {
   it('all four hold → the site (tenant from the host, brand, theme)', async () => {
     const s = await getPortalSite();
-    expect(s).toMatchObject({ partnerId: 'pa', slug: 'acme', brand: 'Acme Remit', logo: null });
+    expect(s).toMatchObject({ partnerId: 'pa', slug: 'acme', brand: 'SmartRemit', logo: null });
     expect(s?.theme.primary).toBe('#0c5bd2');
+  });
+  it('a partner logo and colours never reach the portal (SmartRemit branding, 2026-10-04)', async () => {
+    h.partner = { id: 'pa', status: 'active', displayName: 'Acme Remit', logoUrl: 'data:image/png;base64,AAAA', primaryColor: '#123456' };
+    const s = await getPortalSite();
+    expect(s).toMatchObject({ brand: 'SmartRemit', logo: null });
+    expect(s?.theme).toEqual({ primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false });
   });
   it('apex host → null', async () => {
     h.tenant = null;

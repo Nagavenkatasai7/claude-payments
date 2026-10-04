@@ -208,6 +208,68 @@
   --muted: #f5f9ff;
 }
 
+/* Admin dashboard brand scope (2026-10-04, owner: "the SmartRemit logo and the new UI look").
+ * The same technique as .account-brand: the shadcn tokens resolve through `@theme inline`, so
+ * re-pointing them on a box-less wrapper (app/admin-dashboard/layout.tsx) repaints every
+ * /admin-dashboard page in the landing palette with no per-page edits. Values reference the DS
+ * tokens declared below (custom properties resolve at use, so order does not matter). Every text
+ * pairing passes WCAG AA (pinned in tests/ds-tokens.test.ts). The indigo :root stays for the rest. */
+.admin-brand {
+  display: contents;
+  --background: var(--ds-ground);
+  --foreground: var(--ds-ink);
+  --card: var(--ds-surface);
+  --card-foreground: var(--ds-ink);
+  --popover: var(--ds-surface);
+  --popover-foreground: var(--ds-ink);
+  --primary: var(--ds-brand-blue);
+  --primary-foreground: var(--ds-on-primary);
+  --secondary: var(--ds-tint);
+  --secondary-foreground: var(--ds-ink);
+  --muted: var(--ds-tint);
+  --muted-foreground: var(--ds-ink-muted);
+  --accent: var(--ds-tint);
+  --accent-foreground: var(--ds-ink);
+  --destructive: #b91c1c;
+  --destructive-foreground: #ffffff;
+  --success: var(--ds-icon-ink);
+  --warning: var(--ds-warning-ink);
+  --border: var(--ds-border);
+  --input: var(--ds-border-strong);
+  --ring: var(--ds-brand-blue);
+  --radius: 0.75rem;
+  --sidebar: var(--ds-surface);
+  --sidebar-foreground: var(--ds-ink);
+  --sidebar-primary: var(--ds-brand-blue);
+  --sidebar-primary-foreground: var(--ds-on-primary);
+  --sidebar-accent: var(--ds-tint);
+  --sidebar-accent-foreground: var(--ds-brand-blue);
+  --sidebar-border: var(--ds-border);
+  --sidebar-ring: var(--ds-brand-blue);
+}
+/* shadcn's border convention (`* { border-color: var(--border) }`) inside the scope only: a bare
+ * `border` utility otherwise falls back to currentColor (Tailwind v4), which drew dark navy card
+ * outlines. In @layer base, so every border-* colour utility still wins. */
+@layer base {
+  .admin-brand *,
+  .admin-brand ::before,
+  .admin-brand ::after {
+    border-color: var(--border);
+  }
+}
+/* The admin page heading in the landing's heavy navy (like ds PageHeader). @layer components, so a
+ * page's own utilities still win; only pages inside the scope change. */
+@layer components {
+  .admin-brand .sh-page-title {
+    font-size: clamp(24px, 2.6vw, 30px);
+    font-weight: 800;
+    letter-spacing: -0.025em;
+  }
+  .admin-brand .sh-page-sub {
+    font-size: 14px;
+  }
+}
+
 @theme inline {
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --color-background: var(--background);

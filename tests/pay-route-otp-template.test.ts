@@ -132,7 +132,7 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, sent: true });
     expect(sendTransactionOtp).toHaveBeenCalledOnce();
-    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', CREDS_A, 'Acme A', { name: 'a_login_code', lang: 'en_US' }, expect.any(Object));
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', CREDS_A, 'SmartRemit', { name: 'a_login_code', lang: 'en_US' }, expect.any(Object));
     expect(getPortalSettingsSpy.calls).toEqual(['pa']);
   });
 
@@ -197,7 +197,7 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
     draftsById.set('d_pa', { senderPhone: PHONE, partnerId: 'pa' });
     const res = await requestOtp('d_pa');
     expect(res.status).toBe(200);
-    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', CREDS_A, 'Acme A', { name: 'a_login_code', lang: 'en_US' }, expect.any(Object));
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', CREDS_A, 'SmartRemit', { name: 'a_login_code', lang: 'en_US' }, expect.any(Object));
     expect(getPortalSettingsSpy.calls).toEqual(['pa']);
   });
 });

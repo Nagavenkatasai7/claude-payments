@@ -91,7 +91,7 @@ beforeEach(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
-  it('brands the prompt, skips the KYC gate for an UNVERIFIED sender, and delivers', async () => {
+  it('brands the prompt SmartRemit, skips the KYC gate for an UNVERIFIED sender, and delivers', async () => {
     const redis = fakeRedis();
     const h = buildHarness(redis, 'acme');
     // A fully-provisioned delegated partner + an UNVERIFIED customer under it.
@@ -112,9 +112,9 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     ]);
     await h.agent.runAgentTurn(PHONE, 'send $200 to Anita, bank 1234567890, 919876543210');
 
-    // (1) the system prompt carries the PARTNER brand, never SmartRemit
-    expect(h.systemSnapshots[0]).toContain('Acme Pay');
-    expect(h.systemSnapshots[0]).not.toContain('SmartRemit');
+    // (1) the system prompt carries the SmartRemit brand, never the partner's (2026-10-04)
+    expect(h.systemSnapshots[0]).toContain('SmartRemit');
+    expect(h.systemSnapshots[0]).not.toContain('Acme Pay');
     // (2) the verify-leading note is NOT injected for a delegated partner
     expect(h.systemSnapshots[0]).not.toContain('[UNVERIFIED SENDER]');
 

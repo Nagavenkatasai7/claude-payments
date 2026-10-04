@@ -76,7 +76,8 @@ describe('step 6: branding + slug', () => {
   it('done with a slug and a validated primary colour', () => expect(done(facts(), 6)).toBe(true));
   it('done with a slug and a logo (no colour)', () => expect(done(facts({ primaryColorSet: false, logoSet: true }), 6)).toBe(true));
   it('not done without a slug', () => expect(done(facts({ slugClaimed: false, logoSet: true }), 6)).toBe(false));
-  it('not done with a slug but neither logo nor colour', () => expect(done(facts({ primaryColorSet: false, logoSet: false }), 6)).toBe(false));
+  // 2026-10-04: pages are SmartRemit-branded, so a partner logo or colour is no longer needed to go live.
+  it('done with a slug alone (no logo, no colour)', () => expect(done(facts({ primaryColorSet: false, logoSet: false }), 6)).toBe(true));
 });
 
 describe('step 7: request go-live', () => {

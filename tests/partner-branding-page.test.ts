@@ -111,53 +111,30 @@ describe('/partner/branding gates by itself', () => {
   });
 });
 
-describe('/partner/branding for a partner admin', () => {
+// 2026-10-04: customer pages carry the SmartRemit brand only, so this page (now "Portal settings")
+// keeps the web address, the support contact and the assistant tone, and no longer offers or shows a
+// partner logo, colours, display name or preview.
+describe('/partner/branding (Portal settings) for a partner admin', () => {
   beforeEach(async () => {
     await signInAs({});
   });
-  it('renders one h1, the three forms and the preview, with the default theme for a fresh partner', async () => {
+  it('renders one h1 and the contact + tone forms; no colour, logo, display-name form or preview', async () => {
     const html = await render();
     expect(html.match(/<h1\b/g)).toHaveLength(1);
-    for (const id of ['branding-theme-form', 'branding-logo-form', 'branding-contact-form', 'branding-preview']) expect(html).toContain(`data-testid="${id}"`);
-    expect(html).toContain('name="primaryColor"');
-    expect(html).toContain('name="accentColor"');
-    expect(html).toContain('name="logo"');
-    expect(html).toContain('accept="image/png,image/jpeg,image/webp"');
+    expect(html).toContain('Portal settings');
+    for (const id of ['branding-contact-form', 'branding-persona-form']) expect(html).toContain(`data-testid="${id}"`);
     expect(html).toContain('name="supportContact"');
-    // No saved colours → the preview shows the landing defaults (loadSiteTheme's fallback).
-    expect(styles(html)).toEqual([
-      `<style>.ds-site{--ds-primary:${DEFAULT_THEME.primary};--ds-primary-hover:color-mix(in srgb,${DEFAULT_THEME.primary} 88%,black);--ds-accent:${DEFAULT_THEME.accent};--ds-gradient-text:linear-gradient(95deg,${DEFAULT_THEME.primary},${DEFAULT_THEME.accent})}</style>`,
-    ]);
-  });
-  it('the preview <style> contains ONLY validated tokens (the M1 character-class assertion)', async () => {
-    await box.db!.update(partners).set({ primaryColor: '#7A1FA2' }).where(eq(partners.id, PA));
-    await box.db!.insert(partnerSites).values({ partnerId: PA, accentColor: '#0e7490' });
-    const found = styles(await render());
-    expect(found).toHaveLength(1);
-    expect(found[0]).toMatch(/^<style>[a-z0-9#\-,(.%) ;:{}]+<\/style>$/);
-    expect(found[0]).toContain('.ds-site{--ds-primary:#7a1fa2;');
-  });
-  it.each(['red;}body{display:none}', '</style><script>alert(1)</script>', 'url(javascript:alert(1))', '#25d366', '#7a1fa2;}*{x:y'])(
-    'a hostile legacy primary %j (written outside the writer) never reaches the page',
-    async (bad) => {
-      await box.db!.update(partners).set({ primaryColor: bad }).where(eq(partners.id, PA));
-      const html = await render();
-      const found = styles(html);
-      expect(found).toHaveLength(1);
-      expect(found[0]).toMatch(/^<style>[a-z0-9#\-,(.%) ;:{}]+<\/style>$/);
-      expect(found[0]).toContain(`--ds-primary:${DEFAULT_THEME.primary};`); // the invalid value fell back
-      for (const needle of ['display:none', 'alert(1)', 'url(javascript', '*{x:y', '#25d366']) expect(html).not.toContain(needle);
-    },
-  );
-  it('a stored logo (incl. a PNG+HTML polyglot or a legacy SVG) appears only as an <img src>, never in CSS', async () => {
-    for (const logo of [PNG_POLYGLOT, SVG_LEGACY]) {
-      await box.db!.update(partners).set({ logoUrl: logo }).where(eq(partners.id, PA));
-      const html = await render();
-      expect(html).toContain(`<img src="${logo}"`);
-      expect(html.split(logo)).toHaveLength(2); // exactly once, as that img src
-      for (const s of styles(html)) expect(s).not.toContain('base64');
-      expect(html).not.toContain('url(');
+    expect(html).toContain('name="botPersona"');
+    for (const id of ['branding-theme-form', 'branding-logo-form', 'branding-preview', 'branding-display-name-form']) {
+      expect(html).not.toContain(`data-testid="${id}"`);
     }
+    for (const name of ['primaryColor', 'accentColor', 'logo', 'displayName']) expect(html).not.toContain(`name="${name}"`);
+    expect(styles(html)).toEqual([]);
+  });
+  it('a stored logo, colour or display name never reaches the page', async () => {
+    await box.db!.update(partners).set({ logoUrl: PNG_POLYGLOT, primaryColor: '#7A1FA2', displayName: 'Alpha Remit' }).where(eq(partners.id, PA));
+    const html = await render();
+    for (const leak of [PNG_POLYGLOT, '#7a1fa2', '#7A1FA2', 'Alpha Remit']) expect(html).not.toContain(leak);
   });
   it('a legacy support contact is rendered as escaped text', async () => {
     await box.db!.update(partners).set({ supportContact: '<script>alert(1)</script>' }).where(eq(partners.id, PA));
@@ -165,35 +142,17 @@ describe('/partner/branding for a partner admin', () => {
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
   });
-  it('shows ONLY the session tenant’s brand: nothing of partner B reaches A’s page', async () => {
-    await box.db!.update(partners).set({ displayName: 'Alpha Remit', supportContact: 'help@alpha.example' }).where(eq(partners.id, PA));
-    const html = await render();
-    expect(html).toContain('Alpha Remit');
-    expect(html).toContain('help@alpha.example');
-    for (const leak of ['Bravo', 'bravo-help@bravo.example', b64('BRAVOLOGO'), '#1f2937']) expect(html).not.toContain(leak);
-  });
-});
-
-describe('/partner/branding display name and assistant voice (2f)', () => {
-  beforeEach(async () => {
-    await signInAs({});
-  });
-  it('renders both forms with A’s stored values as escaped text, and nothing of B’s', async () => {
-    await box.db!.update(partners).set({ displayName: 'Alpha Remit', botPersona: 'warm <i>and</i> brief' }).where(eq(partners.id, PA));
+  it('shows ONLY the session tenant’s settings: nothing of partner B reaches A’s page', async () => {
+    await box.db!.update(partners).set({ supportContact: 'help@alpha.example', botPersona: 'warm <i>and</i> brief' }).where(eq(partners.id, PA));
     await box.db!.update(partners).set({ botPersona: 'BRAVO-VOICE' }).where(eq(partners.id, PB));
     const html = await render();
-    for (const id of ['branding-display-name-form', 'branding-persona-form']) expect(html).toContain(`data-testid="${id}"`);
-    expect(html).toContain('name="displayName"');
-    expect(html).toContain('value="Alpha Remit"');
-    expect(html).toContain('name="botPersona"');
+    expect(html).toContain('help@alpha.example');
     expect(html).toContain('warm &lt;i&gt;and&lt;/i&gt; brief');
     expect(html).not.toContain('<i>and</i>');
-    for (const leak of ['Bravo Remit', 'BRAVO-VOICE']) expect(html).not.toContain(leak);
+    for (const leak of ['Bravo', 'bravo-help@bravo.example', b64('BRAVOLOGO'), '#1f2937', 'BRAVO-VOICE']) expect(html).not.toContain(leak);
   });
 });
 
-// Carry-forward from the PR #381 review: a stored logo is safe only as an <img> data URI (a PNG+HTML
-// polyglot passes the signature check). No app route may serve it.
 describe('/partner/branding web address (M3-18)', () => {
   beforeEach(async () => {
     await signInAs({});

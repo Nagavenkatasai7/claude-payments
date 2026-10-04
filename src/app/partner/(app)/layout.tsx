@@ -3,7 +3,6 @@ import Link from 'next/link';
 import { CircleAlert, LogOut, TriangleAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
 import { PARTNER_ANY, type PartnerRole } from '@/lib/partner-access';
-import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import { parseHealthMarks, summarizeChannelHealth } from '@/lib/channel-health';
 import { readSignatureHealth } from '@/lib/webhook-signature-health';
@@ -13,7 +12,7 @@ import { buildPartnerCommands, openCommandScope } from '@/lib/partner-commands';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { buttonVariants } from '@/components/ds';
-import { SiteBrand } from '@/components/ds/site-brand';
+import BrandLogo from '@/app/landing/BrandLogo';
 import { logout } from '@/app/login/actions';
 import { PARTNER_ROUTES, partnerNav } from '../routes';
 import { PartnerSidebar } from './partner-sidebar';
@@ -21,8 +20,9 @@ import { PartnerPalette } from './partner-palette';
 import { PartnerLiveRefresh } from './live-refresh';
 
 // The /partner shell (UI redesign M3-2), in the landing look (SPEC D11): the landing's ground,
-// ink, type and focus ring, its sticky translucent top bar, and ds primitives only. The partner's
-// logo and colours arrive with Branding (M3-17); until then the brand is the partner's name as text.
+// ink, type and focus ring, its sticky translucent top bar, and ds primitives only. The header is the
+// SmartRemit.ai logo: SmartRemit is the only brand on every page, partners stay behind the scenes
+// (owner decision, 2026-10-04).
 //
 // The gate here is for the CHROME only. A layout does not re-render on navigation and does not
 // stop child segments rendering (next/dist/docs/01-app/02-guides/authentication.md "Layouts and
@@ -33,19 +33,6 @@ import { PartnerLiveRefresh } from './live-refresh';
 const ROOT =
   'min-h-dvh overflow-x-clip bg-ds-ground font-sans leading-[1.6] text-ds-ink antialiased ' +
   '[&_:focus-visible]:rounded-ds-focus [&_:focus-visible]:outline-2 [&_:focus-visible]:outline-offset-[3px] [&_:focus-visible]:outline-ds-focus-ring';
-
-async function brandName(partnerId: string): Promise<string> {
-  // Only the lookup is guarded: a layout error is not caught by this segment's error.tsx, and a
-  // missing brand must never take the whole workspace down. The gate is never inside a try/catch
-  // (redirect() works by throwing).
-  try {
-    const p = await getPartnerStore().getPartner(partnerId);
-    return p?.displayName ?? p?.name ?? '';
-  } catch (err) {
-    logWarn('partner.shell', 'brand lookup failed', { err });
-    return '';
-  }
-}
 
 /**
  * Lost-features p3 B12: the tenant's WhatsApp health on every page, as the legacy shell had it.
@@ -101,7 +88,7 @@ function ChannelStrip({ banner }: { banner: ShellChannelBanner }) {
 
 export default async function PartnerAppLayout({ children }: { children: ReactNode }) {
   const ctx = await requirePartnerStaff(PARTNER_ANY, { skipMfa: true });
-  const [brand, banner] = await Promise.all([brandName(ctx.partnerId), channelBanner(ctx.partnerId, ctx.role)]);
+  const banner = await channelBanner(ctx.partnerId, ctx.role);
   const items = partnerNav(ctx.role).map((r) => ({ href: r.href, label: t(r.labelKey) }));
 
   return (
@@ -114,14 +101,12 @@ export default async function PartnerAppLayout({ children }: { children: ReactNo
       </a>
       <header className="sticky top-0 z-50 border-b border-ds-border bg-ds-nav-bg backdrop-blur-[12px]">
         <div className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-4 py-3 sm:px-5">
-          <div className="flex min-w-0 flex-col leading-tight">
-            {brand ? (
-              <span className="truncate text-[17px]">
-                <SiteBrand brand={brand} logo={null} />
-              </span>
-            ) : null}
-            <span className="truncate text-[12.5px] text-ds-ink-subtle">{t('partner.shell.poweredBy')}</span>
-          </div>
+          <Link href={PARTNER_ROUTES.home.href} className="flex min-w-0 items-center gap-3 rounded-ds-focus">
+            <BrandLogo height={36} eager className="h-8 sm:h-9" />
+            <span className="hidden truncate rounded-full border border-ds-border bg-ds-tint px-2.5 py-0.5 text-[12.5px] font-semibold text-ds-ink-muted sm:inline">
+              {t('partner.shell.poweredBy')}
+            </span>
+          </Link>
           {/* Lost-features A16 + A15: quick search (items filtered by the session role from the route
               table; every page re-gates) and the live indicator (list pages only). */}
           <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2">

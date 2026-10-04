@@ -39,10 +39,10 @@ const Ctx = createContext<DrawerCtx | null>(null);
 // Shared nav-item recipe — duplicated from sidebar.tsx (a server module this
 // client component cannot import).
 const navItemBase =
-  'relative mb-px flex min-h-11 items-center gap-2.5 rounded-md px-[11px] py-2 text-[13px] font-medium transition-colors';
+  'relative mb-0.5 flex min-h-11 items-center gap-2.5 rounded-[10px] px-3 py-2 text-[14px] font-medium transition-colors';
 const navItemIdle = 'text-muted-foreground hover:bg-secondary hover:text-foreground';
 const navItemActive =
-  "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-3 before:top-1/2 before:h-[18px] before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
+  "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-2.5 before:top-1/2 before:h-5 before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -62,7 +62,7 @@ export function MobileMenuButton() {
   return (
     <button
       type="button"
-      className="mr-1.5 inline-flex h-10 w-10 flex-none cursor-pointer items-center justify-center rounded-md border border-border bg-transparent text-foreground min-[1025px]:hidden"
+      className="inline-flex h-10 w-10 flex-none cursor-pointer items-center justify-center rounded-[10px] border border-border bg-transparent text-foreground min-[1025px]:hidden"
       aria-label="Open navigation menu"
       aria-expanded={open}
       aria-controls="sh-mobile-drawer"
@@ -155,7 +155,12 @@ export function MobileNavDrawer({ items }: { items: ResolvedNavItem[] }) {
         aria-label="Navigation"
       >
         <div className="flex items-center justify-between border-b border-border pr-4 pb-3.5 pt-[max(14px,env(safe-area-inset-top))] pl-[max(16px,env(safe-area-inset-left))]">
-          <span className="text-sm font-bold text-foreground">Menu</span>
+          {/* The SmartRemit.ai mark + name; the dialog keeps its "Navigation" label. */}
+          <span className="flex items-center gap-2 text-[15px] font-extrabold tracking-[-0.01em] text-foreground">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/brand/smartremit-mark.png" alt="" width={26} height={26} className="h-[26px] w-[26px]" />
+            SmartRemit
+          </span>
           <button
             type="button"
             className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md border border-border bg-transparent text-[15px] text-muted-foreground [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"

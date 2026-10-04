@@ -661,7 +661,7 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     expect(agentTurnRows()).toHaveLength(0);
   });
 
-  it('the reminder names the routed tenant\'s brand', async () => {
+  it('the reminder names SmartRemit (never the tenant brand) and leaves from the tenant number', async () => {
     process.env.META_APP_SECRET = SECRET;
     partnerForPhoneNumberId.mockResolvedValue('acme');
     getIntegrations.mockResolvedValue({ kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } });
@@ -672,7 +672,7 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     expect(getPartner).toHaveBeenCalledWith('acme');
     // The row names the routed tenant; the worker resolves ITS creds at drain
     // time, so the reminder leaves from acme's own number.
-    expectReply('15551230000', "You're unsubscribed from Acme Remit. Reply START to resume.", 'wamid.BRAND1', 'acme');
+    expectReply('15551230000', "You're unsubscribed from SmartRemit. Reply START to resume.", 'wamid.BRAND1', 'acme');
   });
 
   it('STOP from unknown phone → row created without opt-in, then optedOutAt set', async () => {

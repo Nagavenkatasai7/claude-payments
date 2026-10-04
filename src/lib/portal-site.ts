@@ -1,13 +1,12 @@
 import { cache } from 'react';
 import { notFound } from 'next/navigation';
 import { getDb } from '@/db/client';
-import { loadSiteTheme } from '@/db/repos/partner-site-repo';
 import { getSiteTenant } from './site-tenant';
 import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { getPartnerStore } from './partner-store';
 import { resolvePartnerBranding } from './partner-config';
 import { env } from './env';
-import type { SiteTheme } from './ui/theme';
+import { resolveSiteTheme, type SiteTheme } from './ui/theme';
 import type { PartnerId } from './types';
 
 /**
@@ -31,10 +30,11 @@ import type { PartnerId } from './types';
 export interface PortalSite {
   partnerId: PartnerId;
   slug: string;
-  /** The end-customer brand (displayName → brandName → SmartRemit). */
+  /** The end-customer brand: always SmartRemit (resolvePartnerBranding, 2026-10-04). */
   brand: string;
-  /** The stored logo value; SiteBrand re-checks it before it becomes an <img src>. */
+  /** Always null: the portal header shows the SmartRemit logo, never a partner's (2026-10-04). */
   logo: unknown;
+  /** Always the SmartRemit default colours: a partner's colours are not applied (2026-10-04). */
   theme: SiteTheme;
 }
 
@@ -49,13 +49,12 @@ async function loadPortalSite(): Promise<PortalSite | null> {
     if (!settings.portalEnabledAt) return null;
     const partner = await getPartnerStore().getPartner(tenant.partnerId);
     if (!partner || partner.status !== 'active') return null;
-    const theme = await loadSiteTheme(db, tenant.partnerId);
     return {
       partnerId: tenant.partnerId,
       slug: tenant.slug,
       brand: resolvePartnerBranding(partner).brand,
-      logo: partner.logoUrl ?? null,
-      theme,
+      logo: null,
+      theme: resolveSiteTheme({}),
     };
   } catch {
     return null;

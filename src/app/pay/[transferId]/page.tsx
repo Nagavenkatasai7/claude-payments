@@ -2,7 +2,7 @@ import { getStore } from '@/lib/store';
 import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
-import { resolvePartnerBranding, resolvePartnerDisclosure, type ResolvedBranding } from '@/lib/partner-config';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
@@ -18,6 +18,7 @@ import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rat
 import { isInfraError } from '@/lib/infra-error';
 import { retryOnceOnInfra } from '@/lib/infra-retry';
 import { logWarn } from '@/lib/log';
+import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -29,25 +30,8 @@ const pageClasses =
   "flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif] text-[#e9edef]";
 const sheetClasses = 'w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7';
 const headingClasses = 'mb-5 text-lg leading-normal font-semibold';
-const brandClasses = 'mb-1 text-xl leading-normal font-extrabold text-[#25d366]';
 
-function Brand({ branding }: { branding: ResolvedBranding }) {
-  if (branding.logoUrl) {
-    return (
-      <div className={brandClasses}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={branding.logoUrl} alt={branding.brand} style={{ maxHeight: 28, verticalAlign: 'middle' }} />
-      </div>
-    );
-  }
-  return (
-    <div className={brandClasses} style={branding.primaryColor ? { color: branding.primaryColor } : undefined}>
-      {branding.brand}
-    </div>
-  );
-}
-
-// ONE partner read feeds both the branding and the Reg E disclosure.
+// ONE partner read feeds the Reg E disclosure (the brand is always SmartRemit).
 async function loadPartner(partnerId: string | null): Promise<Partner | null> {
   if (!partnerId) return null;
   return getPartnerStore().getPartner(partnerId);
@@ -58,11 +42,11 @@ async function loadPartner(partnerId: string | null): Promise<Partner | null> {
  * identical markup with default branding, so the page is never an oracle for
  * whether an id exists.
  */
-function InactiveSheet({ branding }: { branding: ResolvedBranding }) {
+function InactiveSheet() {
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={branding} />
+        <DarkSheetBrand />
         <h1 className={headingClasses}>This link is no longer active</h1>
       </div>
     </main>
@@ -78,7 +62,7 @@ function TemporaryProblemSheet({ transferId }: { transferId: string }) {
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={resolvePartnerBranding(null)} />
+        <DarkSheetBrand />
         <h1 className={headingClasses}>We&apos;re having a temporary problem</h1>
         <p className="mb-5 text-sm leading-normal text-[#8696a0]">Please try again in a moment.</p>
         <a href={`/pay/${encodeURIComponent(transferId)}`} className="text-sm leading-normal font-semibold text-[#25d366]">
@@ -157,7 +141,7 @@ async function renderPayPage(transferId: string) {
   // budget ⇒ the same sheet as not-found (default brand), never a 429, no log.
   // `headers()` is `Promise<ReadonlyHeaders>` (next/dist/server/request/headers.d.ts:11).
   if (await isIpRateLimited(await headers(), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT)) {
-    return <InactiveSheet branding={resolvePartnerBranding(null)} />;
+    return <InactiveSheet />;
   }
   const transfer = await getStore().getTransfer(transferId);
 
@@ -189,7 +173,7 @@ async function renderPayPage(transferId: string) {
   };
 
   let view: View | null = null;
-  // WL1: the partner that owns this payment — drives the page branding below.
+  // WL1: the partner that owns this payment — drives the Reg E disclosure below.
   let brandPartnerId: string | null = null;
 
   if (transfer) {
@@ -199,7 +183,7 @@ async function renderPayPage(transferId: string) {
     // Returned before the decrypted payout read. (The POST still refuses it:
     // refuseUnlessAwaiting in api/pay/[transferId]/route.ts.)
     if (transfer.status === 'cancelled') {
-      return <InactiveSheet branding={resolvePartnerBranding(null)} />;
+      return <InactiveSheet />;
     }
     brandPartnerId = transfer.partnerId;
     // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
@@ -273,10 +257,9 @@ async function renderPayPage(transferId: string) {
   }
 
   const partner = await loadPartner(brandPartnerId);
-  const branding = resolvePartnerBranding(partner);
 
   if (!view) {
-    return <InactiveSheet branding={branding} />;
+    return <InactiveSheet />;
   }
 
   // Program-Fix 15 PR B: the Reg E pre-payment disclosure (null for B2B). The
@@ -293,7 +276,7 @@ async function renderPayPage(transferId: string) {
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={branding} />
+        <DarkSheetBrand />
         <h1 className={headingClasses}>Secure payment</h1>
         <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
           <Row label="Recipient" value={view.recipientName} />

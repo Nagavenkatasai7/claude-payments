@@ -40,17 +40,19 @@ describe('resolvePartnerBranding', () => {
     expect(resolvePartnerBranding(partner({ id: 'default', name: 'SmartRemit Default' })).brand).toBe('SmartRemit');
   });
 
-  it('prefers displayName, then brandName, then SmartRemit', () => {
-    expect(resolvePartnerBranding(partner({ displayName: 'Acme Pay', brandName: 'Acme' })).brand).toBe('Acme Pay');
-    expect(resolvePartnerBranding(partner({ brandName: 'Acme' })).brand).toBe('Acme');
+  // Oct 4 owner decision: SmartRemit is the only customer-facing brand. Partners stay behind the
+  // scenes, so a partner's display name, brand name, colour and logo never become the brand.
+  it('always SmartRemit, whatever displayName / brandName the partner has', () => {
+    expect(resolvePartnerBranding(partner({ displayName: 'Acme Pay', brandName: 'Acme' })).brand).toBe('SmartRemit');
+    expect(resolvePartnerBranding(partner({ brandName: 'Acme' })).brand).toBe('SmartRemit');
     expect(resolvePartnerBranding(partner({})).brand).toBe('SmartRemit');
   });
 
-  it('passes through color/logo/support/persona; absent ⇒ null/empty', () => {
+  it('drops partner colour and logo; keeps support contact and persona (not brand)', () => {
     const r = resolvePartnerBranding(
       partner({ primaryColor: '#1a73e8', logoUrl: 'https://cdn/x.png', supportContact: 'help@acme.com', botPersona: 'warm and concise' }),
     );
-    expect(r).toEqual({ brand: 'SmartRemit', supportContact: 'help@acme.com', botPersona: 'warm and concise', primaryColor: '#1a73e8', logoUrl: 'https://cdn/x.png' });
+    expect(r).toEqual({ brand: 'SmartRemit', supportContact: 'help@acme.com', botPersona: 'warm and concise', primaryColor: null, logoUrl: null });
   });
 });
 

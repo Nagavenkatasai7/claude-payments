@@ -72,7 +72,7 @@ describe('resolveFeaturedSendPartner', () => {
 
   it('valid partner ⇒ { displayName, slug, mode } (test by default), no legal name when none is configured', async () => {
     expect(await resolveFeaturedSendPartner({ env: ENV(), db })).toEqual({
-      displayName: 'Acme Pay',
+      displayName: 'SmartRemit',
       slug: 'acme-pay',
       mode: 'test',
     });
@@ -80,7 +80,7 @@ describe('resolveFeaturedSendPartner', () => {
 
   it('live mode is never granted without a configured licensed entity (downgrades to test)', async () => {
     expect(await resolveFeaturedSendPartner({ env: ENV(LIVE), db })).toEqual({
-      displayName: 'Acme Pay',
+      displayName: 'SmartRemit',
       slug: 'acme-pay',
       mode: 'test',
     });
@@ -89,7 +89,7 @@ describe('resolveFeaturedSendPartner', () => {
   it('live + confirmed + a configured licensed entity ⇒ live with the legal name', async () => {
     await db.update(partners).set({ supportConfig: { disclosure: { licensedEntity: 'Acme Money Services LLC' } } });
     expect(await resolveFeaturedSendPartner({ env: ENV(LIVE), db })).toEqual({
-      displayName: 'Acme Pay',
+      displayName: 'SmartRemit',
       legalName: 'Acme Money Services LLC',
       slug: 'acme-pay',
       mode: 'live',
@@ -101,7 +101,7 @@ describe('resolveFeaturedSendPartner', () => {
   it('carries the configured licensed entity as the legal name, and never the partner id', async () => {
     await db.update(partners).set({ supportConfig: { disclosure: { licensedEntity: 'Acme Money Services LLC' } } });
     const got = await resolveFeaturedSendPartner({ env: ENV(), db });
-    expect(got).toEqual({ displayName: 'Acme Pay', legalName: 'Acme Money Services LLC', slug: 'acme-pay', mode: 'test' });
+    expect(got).toEqual({ displayName: 'SmartRemit', legalName: 'Acme Money Services LLC', slug: 'acme-pay', mode: 'test' });
     expect(JSON.stringify(got)).not.toContain('"acme"');
   });
 

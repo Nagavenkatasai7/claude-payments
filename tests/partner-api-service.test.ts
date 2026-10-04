@@ -106,7 +106,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('partner-api-service: read endpoints', () => {
   it('listCorridors maps the partner countries → IN corridors + brand', () => {
     const r = listCorridors(DELEGATED);
-    expect(r.brand).toBe('Acme Pay');
+    expect(r.brand).toBe('SmartRemit');
     expect(r.corridors[0]).toMatchObject({ source_currency: 'USD', destination_country: 'IN', destination_currency: 'INR' });
   });
 

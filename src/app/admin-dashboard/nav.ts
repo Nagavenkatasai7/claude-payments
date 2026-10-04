@@ -1,4 +1,4 @@
-import type { Staff } from '@/lib/types';
+import type { Staff, StaffRole } from '@/lib/types';
 import type { IconName } from './icons';
 
 /**
@@ -137,4 +137,10 @@ export function resolveNavItems(staff: Staff): ResolvedNavItem[] {
     icon: NAV_META[key].icon,
     href: NAV_META[key].hrefFor(staff),
   }));
+}
+
+/** The role shown beside the staff member's name in the top bar. */
+export function staffRoleLabel(role: StaffRole): string {
+  const labels: Record<StaffRole, string> = { admin: 'Admin', agent: 'Agent', support: 'Support', finance: 'Finance' };
+  return labels[role];
 }

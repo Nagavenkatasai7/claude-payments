@@ -1905,7 +1905,9 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
     expect(reply).not.toContain('Acme.co');
   });
 
-  it('R6b: a tenant whose brand is a host keeps that brand in the reply', async () => {
+  // 2026-10-04: SmartRemit is the only brand, so a partner display name that looks like a host is no
+  // longer allow-listed as the brand: it is stripped like any other host.
+  it('R6b: a tenant display name that looks like a host is not the brand, so it is stripped', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
@@ -1920,7 +1922,7 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
       chat: async () => ({ role: 'assistant', content: 'Thanks from Acme.co! Not pay-now.example though.' }),
     });
     const reply = await agent.runAgentTurn(PHONE, 'hi');
-    expect(reply).toContain('Acme.co!');
+    expect(reply).not.toContain('Acme.co');
     expect(reply).not.toContain('pay-now.example');
   });
 

@@ -12,11 +12,13 @@ import { Sidebar } from './sidebar';
 import { Icon } from './icons';
 import { SenderCell } from './sender-cell';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { greetingFor } from '@/lib/staff-greeting';
+import type { IconName } from './icons';
 import { Button } from '@/components/ui/button';
 
 function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 function humanizeFunding(method: Transfer['fundingMethod']): string {
   if (method === 'credit_card') return 'Credit card';
@@ -57,6 +59,35 @@ function statusPillClass(status: Transfer['status']): string {
   return 'border-destructive/50 text-destructive';
 }
 
+// The four "today" numbers as tiles: an icon chip, the label and the figure.
+function StatTile({ label, value, icon, tone = 'brand' }: { label: string; value: string; icon: IconName; tone?: 'brand' | 'alert' }) {
+  const chip =
+    tone === 'alert'
+      ? 'border-ds-danger-border bg-ds-danger-bg text-ds-danger-ink'
+      : 'border-ds-border bg-ds-tint text-primary';
+  return (
+    <Card className={`gap-0 py-5 ${tone === 'alert' ? 'border-ds-danger-border' : ''}`}>
+      <div className="flex items-start justify-between gap-3 px-5">
+        <div>
+          <CardDescription className="text-[13px] font-medium">{label}</CardDescription>
+          <div className="mt-1.5 text-[28px] leading-none font-extrabold tracking-[-0.02em] tabular-nums">{value}</div>
+        </div>
+        <span aria-hidden="true" className={`flex size-10 shrink-0 items-center justify-center rounded-ds-inner border [&_svg]:size-[18px] ${chip}`}>
+          <Icon name={icon} />
+        </span>
+      </div>
+    </Card>
+  );
+}
+
+// Shortcuts for platform admins (the same pages the sidebar links; every page re-gates itself).
+const QUICK_LINKS: Array<{ href: string; label: string; sub: string; icon: IconName }> = [
+  { href: '/admin-dashboard/compliance', label: 'Compliance', sub: 'Holds and reviews', icon: 'compliance' },
+  { href: '/admin-dashboard/transactions', label: 'Transactions', sub: 'Every transfer', icon: 'transactions' },
+  { href: '/admin-dashboard/customers', label: 'Customers', sub: 'Senders and KYC', icon: 'customers' },
+  { href: '/admin-dashboard/partners', label: 'Partners', sub: 'Licensed partners', icon: 'partners' },
+];
+
 export default async function DashboardPage() {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
@@ -75,6 +106,7 @@ export default async function DashboardPage() {
     now,
     365,
   ).slice(0, 3);
+  const greeting = `${greetingFor(new Date(now), 'America/New_York')}, ${staff.name.split(' ')[0]}`;
   const todayLabel = new Date(now).toLocaleDateString('en-US', {
     timeZone: 'America/New_York',
     weekday: 'long',
@@ -87,53 +119,64 @@ export default async function DashboardPage() {
     <>
       <Sidebar active="overview" />
       <main className="sh-main">
+        {/* The smoke reads .sh-page-title for "Overview": the title stays, the greeting is the sub-line. */}
         <div className="sh-page-head">
           <div>
             <div className="sh-page-title">Overview</div>
-            <div className="sh-page-sub">{todayLabel}</div>
+            <div className="sh-page-sub">
+              <span className="font-semibold text-foreground">{greeting}.</span> {todayLabel}
+            </div>
           </div>
         </div>
 
-        <section className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <Card className="border-primary/30 bg-accent/40">
-            <CardHeader className="pb-2">
-              <CardDescription>Commission today</CardDescription>
-              <CardTitle className="text-3xl tabular-nums">{usd(summary.commissionToday)}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardDescription>Volume today</CardDescription>
-              <CardTitle className="text-3xl tabular-nums">{usd(summary.volumeToday)}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardDescription>Transactions today</CardDescription>
-              <CardTitle className="text-3xl tabular-nums">{summary.countToday}</CardTitle>
-            </CardHeader>
-          </Card>
-          <Card className={summary.flaggedToday > 0 ? 'border-destructive/50' : ''}>
-            <CardHeader className="pb-2">
-              <CardDescription>Flagged today</CardDescription>
-              <CardTitle className="text-3xl tabular-nums">{summary.flaggedToday}</CardTitle>
-            </CardHeader>
-          </Card>
+        <section aria-label="Today" className="mb-6 grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 lg:grid-cols-4">
+          <StatTile label="Commission today" value={usd(summary.commissionToday)} icon="rates" />
+          <StatTile label="Volume today" value={usd(summary.volumeToday)} icon="analytics" />
+          <StatTile label="Transactions today" value={String(summary.countToday)} icon="transactions" />
+          <StatTile
+            label="Flagged today"
+            value={String(summary.flaggedToday)}
+            icon="shield"
+            tone={summary.flaggedToday > 0 ? 'alert' : 'brand'}
+          />
         </section>
 
         {attentionCount > 0 && (
-          <Card className="mb-6 border-warning/50">
-            <CardContent className="flex items-center gap-2 py-4 text-sm">
-              <Icon name="warning" /> <strong>{attentionCount}</strong>{' '}
-              {attentionCount === 1 ? 'transfer needs' : 'transfers need'} attention
+          <div
+            role="status"
+            className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-ds-inner border border-ds-warning-border bg-ds-warning-bg px-4 py-3 text-[14px] text-ds-warning-ink"
+          >
+            <Icon name="warning" />
+            <span>
+              <strong>{attentionCount}</strong> {attentionCount === 1 ? 'transfer needs' : 'transfers need'} attention
+            </span>
+            <Link
+              href="/admin-dashboard/compliance"
+              className="ml-auto font-semibold underline underline-offset-4"
+            >
+              View on Compliance →
+            </Link>
+          </div>
+        )}
+
+        {staff.role === 'admin' && (
+          <nav aria-label="Quick links" className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:grid-cols-4">
+            {QUICK_LINKS.map((q) => (
               <Link
-                href="/admin-dashboard/compliance"
-                className="ml-auto text-primary underline-offset-2 hover:underline"
+                key={q.href}
+                href={q.href}
+                className="group flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:border-primary/40 hover:bg-accent"
               >
-                View on Compliance →
+                <span aria-hidden="true" className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-accent text-primary group-hover:bg-card [&_svg]:size-[17px]">
+                  <Icon name={q.icon} />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[14px] font-semibold text-foreground">{q.label}</span>
+                  <span className="block truncate text-[12.5px] text-muted-foreground">{q.sub}</span>
+                </span>
               </Link>
-            </CardContent>
-          </Card>
+            ))}
+          </nav>
         )}
 
         <Card className="mb-6">
