@@ -145,3 +145,33 @@ describe('nightly.yml', () => {
     expect(read('.github/workflows/smoke.yml')).toMatch(/run: npm run e2e/);
   });
 });
+
+describe('PR template (release safety plan, PR 1)', () => {
+  // SOC 2 CC8.1 and PCI DSS 6.5.2 ask each change to record its risk, its
+  // approval evidence and its rollback; GitHub prefills new PR bodies from
+  // this file.
+  const tpl = () => read('.github/pull_request_template.md');
+
+  it('has every section the change record needs, in order', () => {
+    const headings = [...tpl().matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+    expect(headings).toEqual([
+      'Before',
+      'After',
+      'Touches money, auth, webhooks, crypto or compliance?',
+      'Migration?',
+      'Risk',
+      'Rollback',
+      'Tests run',
+    ]);
+  });
+
+  it('asks for /security-review and /migrate-prod where they apply', () => {
+    expect(tpl()).toContain('/security-review');
+    expect(tpl()).toContain('/migrate-prod');
+    expect(tpl()).toContain('after-deploy');
+  });
+
+  it('keeps the Program-Fix line on its own line for the tracker', () => {
+    expect(tpl()).toMatch(/^Program-Fix: <n>/m);
+  });
+});
