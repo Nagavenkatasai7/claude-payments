@@ -774,6 +774,11 @@ export interface SettlementRoute {
   fxRate: number;                    // destination units per 1 source unit
   source: 'platform' | 'partner';
   settlementPartnerId?: PartnerId;   // set only when source==='partner'
+  // Step 0 FX-5: which partner offer won (source==='partner' only). A pushed
+  // rate carries its own expiry (ISO-8601); a standing margin rides the
+  // platform mid and has none.
+  kind?: 'partner_push' | 'partner_margin';
+  expiresAt?: string;
 }
 
 // ── Per-corridor compliance (P5) ──────────────────────────────────────
