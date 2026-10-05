@@ -182,7 +182,7 @@ export function inReviewTemplate(transfer: Transfer): { name: string; lang: stri
 
 /**
  * §3.2 transfer_delivered_sender — sender delivery confirmation.
- * Body: "Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}."
+ * Body: "Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}. Reply here if you have any questions."
  * Params: [source amount, recipient name, transfer id]. No button.
  */
 export function transferDeliveredSenderParams(transfer: Transfer): string[] {

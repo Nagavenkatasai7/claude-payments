@@ -141,6 +141,32 @@ describe('rankCorridorDemand — USD normalization across mixed currencies', () 
     expect(out[0].total.pricedLeads).toBe(1);
     expect(out[0].total.usdDemand).toBeCloseTo(100, 5);
   });
+
+  it('looks up every currency at once, not one after another', async () => {
+    // A slow (uncached) rate for one currency must not delay the others: every
+    // lookup has started before any of them answers.
+    const started: string[] = [];
+    const release: Array<() => void> = [];
+    const fx: FxRatesFn = vi.fn(
+      (cur) =>
+        new Promise<FxRates>((resolve) => {
+          started.push(cur);
+          release.push(() => resolve(RATES[cur] ?? { toInr: 1, toUsd: 1 }));
+        }),
+    );
+    const reqs = [
+      lead({ destinationCountry: 'Nepal', approxAmount: 100, approxCurrency: 'USD' }),
+      lead({ destinationCountry: 'Nepal', approxAmount: 100, approxCurrency: 'GBP' }),
+      lead({ destinationCountry: 'Nepal', approxAmount: 100, approxCurrency: 'AED' }),
+    ];
+    const pending = rankCorridorDemand(reqs, SUPPORTED, fx, { now: NOW });
+    await Promise.resolve();
+    expect(started.sort()).toEqual(['AED', 'GBP', 'USD']);
+    release.forEach((r) => r());
+    const out = await pending;
+    expect(out[0].total.pricedLeads).toBe(3);
+    expect(out[0].total.usdDemand).toBeCloseTo(100 + 127 + 27, 5);
+  });
 });
 
 describe('rankCorridorDemand — supported gap flag', () => {

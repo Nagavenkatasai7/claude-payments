@@ -13,7 +13,7 @@ import type { CorridorDemand } from '@/lib/corridor-demand';
 vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
 
 import { chat } from '@/lib/ollama';
-import { narrateCorridorBrief } from '@/lib/corridor-brief-ai';
+import { narrateCorridorBrief, getCorridorBrief, type BriefCache } from '@/lib/corridor-brief-ai';
 
 const chatMock = vi.mocked(chat);
 
@@ -130,5 +130,92 @@ describe('narrateCorridorBrief — behavior with chat() stubbed', () => {
   it('throws without calling the model when there is nothing to narrate', async () => {
     await expect(narrateCorridorBrief([])).rejects.toThrow(/no corridor demand/i);
     expect(chatMock).not.toHaveBeenCalled();
+  });
+});
+
+// getCorridorBrief — the admin Corridors page's entry point. The model call is
+// slow (up to OLLAMA_TIMEOUT_MS), so a brief for the same top-N numbers is
+// reused from the shared cache for an hour, and concurrent page loads share one
+// in-flight call. The cache is best-effort: a cache outage still narrates.
+describe('getCorridorBrief — cached narration', () => {
+  function mapCache(): BriefCache & { store: Map<string, string>; sets: Array<{ key: string; ex?: number }> } {
+    const store = new Map<string, string>();
+    const sets: Array<{ key: string; ex?: number }> = [];
+    return {
+      store,
+      sets,
+      async get(key) {
+        return store.get(key) ?? null;
+      },
+      async set(key, value, opts) {
+        store.set(key, value);
+        sets.push({ key, ex: opts?.ex });
+        return 'OK';
+      },
+    };
+  }
+  const rows = [
+    demand({ key: 'pakistan', destination: 'Pakistan', total: { leads: 12, distinctSenders: 9, usdDemand: 5000, pricedLeads: 4 }, growthLeads: 3, growthPct: 50 }),
+  ];
+
+  it('calls the model once, stores the brief for an hour, then serves it from the cache', async () => {
+    const cache = mapCache();
+    chatMock.mockResolvedValue(reply('Pakistan looks worth prioritising.'));
+    expect(await getCorridorBrief(rows, 5, cache)).toBe('Pakistan looks worth prioritising.');
+    expect(await getCorridorBrief(rows, 5, cache)).toBe('Pakistan looks worth prioritising.');
+    expect(chatMock).toHaveBeenCalledTimes(1);
+    expect(cache.sets).toHaveLength(1);
+    expect(cache.sets[0].ex).toBe(3600);
+    expect(cache.sets[0].key).toMatch(/^corridor-brief:v1:[0-9a-f]{32}$/);
+  });
+
+  it('the cache key follows the numbers: changed demand gets a fresh brief', async () => {
+    const cache = mapCache();
+    chatMock.mockResolvedValueOnce(reply('first')).mockResolvedValueOnce(reply('second'));
+    expect(await getCorridorBrief(rows, 5, cache)).toBe('first');
+    const more = [{ ...rows[0], total: { ...rows[0].total, leads: 13 } }];
+    expect(await getCorridorBrief(more, 5, cache)).toBe('second');
+    expect(chatMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('the cache key is an opaque hash: no destination, count or phone in it', async () => {
+    const cache = mapCache();
+    chatMock.mockResolvedValue(reply('brief'));
+    await getCorridorBrief(rows, 5, cache);
+    expect(JSON.stringify([...cache.store.keys()])).not.toMatch(/Pakistan|pakistan|1555/);
+  });
+
+  it('concurrent page loads share ONE model call', async () => {
+    const cache = mapCache();
+    let resolve!: (m: ChatMessage) => void;
+    chatMock.mockReturnValue(new Promise<ChatMessage>((r) => { resolve = r; }));
+    const a = getCorridorBrief(rows, 5, cache);
+    const b = getCorridorBrief(rows, 5, cache);
+    await new Promise((r) => setTimeout(r, 0));
+    resolve(reply('shared'));
+    expect(await Promise.all([a, b])).toEqual(['shared', 'shared']);
+    expect(chatMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cache outage still narrates (fail-open on read and write)', async () => {
+    const broken: BriefCache = {
+      get: async () => { throw new Error('redis down'); },
+      set: async () => { throw new Error('redis down'); },
+    };
+    chatMock.mockResolvedValue(reply('still here'));
+    expect(await getCorridorBrief(rows, 5, broken)).toBe('still here');
+  });
+
+  it('a failed model call is not cached and the next load retries', async () => {
+    const cache = mapCache();
+    chatMock.mockResolvedValueOnce(reply('  ')).mockResolvedValueOnce(reply('recovered'));
+    await expect(getCorridorBrief(rows, 5, cache)).rejects.toThrow(/empty/i);
+    expect(cache.store.size).toBe(0);
+    expect(await getCorridorBrief(rows, 5, cache)).toBe('recovered');
+  });
+
+  it('works with no cache at all', async () => {
+    chatMock.mockResolvedValue(reply('uncached'));
+    expect(await getCorridorBrief(rows, 5, null)).toBe('uncached');
   });
 });
