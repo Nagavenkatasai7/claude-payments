@@ -70,15 +70,16 @@ function configured(s: VoiceSettings): boolean {
 }
 
 /**
- * Everything but the switch (no database read): the shared number, the Azure
- * settings and a beta sender. Callers read the switch only when this is true,
- * so a photo from a non-beta sender never costs a flag read. Pure.
+ * The sender side (no database read): the shared number and a beta sender.
+ * Callers read the switch (voiceNotesOn, which also checks the Azure settings)
+ * only when this is true, so a photo from a non-beta sender never costs a flag
+ * read. Pure.
  */
 export function voiceSenderEligible(
   msg: { routedPartnerId: PartnerId | null; from: string },
   s: VoiceSettings,
 ): boolean {
-  return msg.routedPartnerId === null && configured(s) && onBetaList(msg.from, s.betaPhones);
+  return msg.routedPartnerId === null && onBetaList(msg.from, s.betaPhones);
 }
 
 let warnedUnconfigured = false;

@@ -52,12 +52,10 @@ describe('onBetaList', () => {
 });
 
 describe('voiceSenderEligible (no database read)', () => {
-  it('needs the shared number, the key, the region and a beta sender', () => {
+  it('needs the shared number and a beta sender (the Azure settings are voiceNotesOn, which logs them)', () => {
     expect(voiceSenderEligible({ routedPartnerId: null, from: '15550000001' }, SETTINGS)).toBe(true);
     expect(voiceSenderEligible({ routedPartnerId: 'acme', from: '15550000001' }, SETTINGS)).toBe(false);
     expect(voiceSenderEligible({ routedPartnerId: null, from: '15550000002' }, SETTINGS)).toBe(false);
-    expect(voiceSenderEligible({ routedPartnerId: null, from: '15550000001' }, { ...SETTINGS, key: '' })).toBe(false);
-    expect(voiceSenderEligible({ routedPartnerId: null, from: '15550000001' }, { ...SETTINGS, region: '' })).toBe(false);
   });
 
   it('voiceSettingsFromEnv reads the getters at call time', () => {

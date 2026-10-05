@@ -10,6 +10,7 @@ import {
   VOICE_FAIL_REPLY,
   VOICE_PLACEHOLDER,
   VOICE_UNSUPPORTED_REPLY,
+  __resetVoiceWarnings,
 } from '@/lib/voice-notes';
 
 // Step 1 voice notes, inbound side: a voice note from a beta sender on the
@@ -129,14 +130,19 @@ describe('everyone else gets MEDIA_REPLY byte for byte', () => {
     expect(await outboxRows()).toEqual([mediaReplyRow('wamid.N1', MEDIA_REPLY, OTHER), mediaReplyRow('wamid.N2', MEDIA_REPLY)]);
   });
 
-  it('no Azure key or region', async () => {
+  it('no Azure key or region (logged once, names only)', async () => {
     await voiceSwitch(true);
+    __resetVoiceWarnings();
     vi.stubEnv('AZURE_SPEECH_KEY', '');
     await processInboundWebhook(webhook([voice('wamid.K1')]), { routedPartnerId: null });
     vi.stubEnv('AZURE_SPEECH_KEY', 'fake-speech-key');
     vi.stubEnv('AZURE_SPEECH_REGION', '');
     await processInboundWebhook(webhook([voice('wamid.K2')]), { routedPartnerId: null });
     expect(await outboxRows()).toEqual([mediaReplyRow('wamid.K1', MEDIA_REPLY), mediaReplyRow('wamid.K2', MEDIA_REPLY)]);
+    const warn = vi.mocked(console.warn);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('voice.config'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('fake-speech-key');
   });
 
   it("a partner's own number (voice is on the shared number only)", async () => {
