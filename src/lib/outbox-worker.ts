@@ -1489,7 +1489,8 @@ export async function drainOnce(
       await withRowDeadline(handle(deps, row, signal, partner, { hardStopAt: opts.hardStopAt, reportSlot }), rowDeadlineMs, signal);
       // Partner-Demo R3b: a finished agent.turn drops its plaintext messageText
       // in the SAME compare-and-set (the text now lives sealed in the log).
-      // Failed / dead rows keep it (retry, ops Retry).
+      // Step 1: a voice turn's Meta media id goes with it. Failed / dead rows
+      // keep both (retry, ops Retry).
       if (await outbox.markDone(row.id, workerId, row.kind === 'agent.turn' ? { dropPayloadKey: ['messageText', 'media'] } : {})) {
         result.processed++;
         // Review S2: a finished turn's reply row is sent NEXT, not after every
