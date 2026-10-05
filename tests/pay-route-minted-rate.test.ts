@@ -61,7 +61,20 @@ vi.mock('@/lib/providers/funding-provider', async (orig) => {
   return { ...real, getFundingProvider: () => ({ capture, refund: vi.fn(), handleWebhook: vi.fn() }) };
 });
 
+// Review finding 3: a test can make the rate check throw an arbitrary error
+// (null ⇒ the real checkMintedRate).
+const mintedThrows = vi.hoisted(() => ({ err: null as Error | null }));
+vi.mock('@/lib/minted-rate', async (orig) => {
+  const real = await orig<typeof import('@/lib/minted-rate')>();
+  return {
+    ...real,
+    checkMintedRate: (...a: Parameters<typeof real.checkMintedRate>) =>
+      mintedThrows.err ? Promise.reject(mintedThrows.err) : real.checkMintedRate(...a),
+  };
+});
+
 import { POST } from '@/app/api/pay/[transferId]/route';
+import { QuoteError } from '@/lib/fx';
 
 const PHONE = '15551234567';
 const TID = 'tr_minted_1';
@@ -112,6 +125,7 @@ beforeEach(async () => {
   resetRateCacheForTests();
   sendTransactionOtp.mockClear();
   capture.mockReset().mockResolvedValue({ fundingRef: 'mockfund-x' });
+  mintedThrows.err = null;
   vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
 });
 afterEach(() => {
@@ -252,6 +266,81 @@ describe('flag ON: special refusals', () => {
     expect((await res.json()).reason).toBe('rate_expired');
     expect(global.fetch).not.toHaveBeenCalled();
     expect((await auditRows())[0].meta).toMatchObject({ reason: 'routed_stale' });
+  });
+});
+
+describe('flag ON: a partner PUSH rate ends at its expiry (review finding 1)', () => {
+  const MIN = 60_000;
+  // Minted `ago` ms ago on a push that expires 5 min after the mint.
+  const pushed = (ago: number) => row({
+    settlementPartnerId: 'p_rail', fxSource: 'partner_push', fxProvider: 'partner',
+    createdAt: new Date(Date.now() - ago).toISOString(), fxFetchedAt: new Date(Date.now() - ago - MIN).toISOString(),
+    fxExpiresAt: new Date(Date.now() - ago + 5 * MIN).toISOString(),
+  });
+  beforeEach(async () => {
+    const { seedPartner } = await import('./helpers-db');
+    await seedPartner(db, 'p_rail');
+    stubFx(MINTED_RATE);
+  });
+
+  it('+4 min after the mint: still payable (a code is sent), no FX fetch', async () => {
+    await store.saveTransfer(pushed(4 * MIN));
+    expect((await (await POST(req({ action: 'request_otp' }), ctx)).json()).sent).toBe(true);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect((await current())?.status).toBe('awaiting_payment');
+  });
+
+  it('+6 min after the mint (inside the 60-min lock): 409 rate_expired (routed_stale), cancelled, no code', async () => {
+    await store.saveTransfer(pushed(6 * MIN));
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, reason: 'rate_expired', status: 'cancelled' });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect((await current())?.status).toBe('cancelled');
+    expect((await auditRows())[0].meta).toMatchObject({ reason: 'routed_stale' });
+  });
+
+  it('a routed row with NO stored expiry (pre-fix row) behaves as today inside the lock', async () => {
+    await store.saveTransfer({ ...pushed(6 * MIN), fxExpiresAt: undefined });
+    expect((await (await POST(req({ action: 'request_otp' }), ctx)).json()).sent).toBe(true);
+    expect((await current())?.status).toBe('awaiting_payment');
+  });
+
+  it('flag OFF: the expired push row proceeds exactly as today', async () => {
+    vi.unstubAllEnvs();
+    await store.saveTransfer(pushed(6 * MIN));
+    expect((await (await POST(req({ action: 'request_otp' }), ctx)).json()).sent).toBe(true);
+    expect((await current())?.status).toBe('awaiting_payment');
+    expect(await auditRows()).toHaveLength(0);
+  });
+});
+
+describe('flag ON: a QuoteError from the rate check (review finding 3)', () => {
+  it('answers 503 fx_unavailable like RateUnavailableError: no code, no cancel, no audit', async () => {
+    await store.saveTransfer(row());
+    stubFx(MINTED_RATE);
+    mintedThrows.err = new QuoteError('Invalid exchange rate; please try again.');
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ ok: false, reason: 'fx_unavailable' });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect((await current())?.status).toBe('awaiting_payment');
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('the same on a pay POST: the OTP is never verified and nothing is captured', async () => {
+    await store.saveTransfer(row());
+    stubFx(MINTED_RATE);
+    await txOtp.issue(TID, PHONE);
+    mintedThrows.err = new QuoteError('Invalid exchange rate; please try again.');
+    const verify = vi.spyOn(txOtp, 'verify');
+    const res = await POST(req({ otp: '654321' }), ctx);
+    expect(res.status).toBe(503);
+    expect((await res.json()).reason).toBe('fx_unavailable');
+    expect(verify).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    expect((await current())?.status).toBe('awaiting_payment');
   });
 });
 

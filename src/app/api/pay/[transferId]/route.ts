@@ -43,6 +43,7 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
+import { QuoteError } from '@/lib/fx';
 import { transferMintedFromDraft } from '@/lib/pay-link';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
@@ -400,7 +401,10 @@ function validateAndTokenizeAch(
  * confirms those; Step 0 Q3). Anything else answers as today (the status gate
  * further down reports current truth).
  *
- *   FX unavailable / frozen feed → 503 fx_unavailable, nothing written;
+ *   FX unavailable / frozen feed → 503 fx_unavailable, nothing written (a
+ *                                   QuoteError from the cross-rate, e.g. a
+ *                                   malformed destination leg, answers the same
+ *                                   — never a 400, never a cancel);
  *   refused, no funding intent   → ONE transaction: the guarded cancel
  *                                   (cancelIfCancellable: awaiting, no funding
  *                                   ref or intent, this tenant; no outbox row) +
@@ -423,8 +427,9 @@ async function payTimeRateRefusal(
   try {
     verdict = await checkMintedRate(transfer);
   } catch (err) {
-    if (!(err instanceof RateUnavailableError)) throw err;
-    logWarn('pay.rate-check-unavailable', `pay-time rate check could not run: ${err.reason}`, { transferId: transfer.id });
+    if (!(err instanceof RateUnavailableError) && !(err instanceof QuoteError)) throw err;
+    const why = err instanceof RateUnavailableError ? err.reason : 'quote_error';
+    logWarn('pay.rate-check-unavailable', `pay-time rate check could not run: ${why}`, { transferId: transfer.id });
     return fxUnavailable();
   }
   if (verdict.ok) return null;
