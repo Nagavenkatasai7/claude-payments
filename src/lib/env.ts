@@ -391,6 +391,33 @@ export const env = {
   get whatsappWindowAware(): boolean {
     return trimmedEnv('WHATSAPP_WINDOW_AWARE') === 'true';
   },
+  // Step 1 voice notes (Azure AI Speech, "Speech to text REST API for short
+  // audio"). All OPTIONAL, never boot-asserted: a missing key or region makes
+  // voice behave as off (voice-notes.ts logs that once). The on/off switch is
+  // the `voice.notes` feature flag, not an env var.
+  get azureSpeechKey(): string {
+    return trimmedEnv('AZURE_SPEECH_KEY');
+  },
+  // The Speech resource's region identifier (e.g. eastus). It becomes the host
+  // name <region>.stt.speech.microsoft.com, so anything but a plain identifier
+  // reads as unset.
+  get azureSpeechRegion(): string {
+    const region = trimmedEnv('AZURE_SPEECH_REGION').toLowerCase();
+    return /^[a-z0-9]{2,40}$/.test(region) ? region : '';
+  },
+  // English only: en-IN (Indian English, the default) or en-US. Anything else
+  // reads as the default.
+  get azureSpeechLanguage(): 'en-IN' | 'en-US' {
+    return trimmedEnv('AZURE_SPEECH_LANGUAGE').toLowerCase() === 'en-us' ? 'en-US' : 'en-IN';
+  },
+  // Comma list of sender phones that may use voice notes. Empty ⇒ nobody;
+  // exactly '*' ⇒ everyone. Never committed: set in Vercel only.
+  get voiceNotesBetaPhones(): string[] {
+    return trimmedEnv('VOICE_NOTES_BETA_PHONES')
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p !== '');
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

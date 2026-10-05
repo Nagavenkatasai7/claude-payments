@@ -47,6 +47,12 @@ describe('productionBootProblems — names only, never values', () => {
     expect(productionBootProblems(FULL_ENV)).toEqual([]);
   });
 
+  it('voice notes are optional: no Azure Speech or beta-list var is boot-required', () => {
+    const voiceVars = ['AZURE_SPEECH_KEY', 'AZURE_SPEECH_REGION', 'AZURE_SPEECH_LANGUAGE', 'VOICE_NOTES_BETA_PHONES'];
+    for (const name of voiceVars) expect(REQUIRED_PRODUCTION_VARS as readonly string[]).not.toContain(name);
+    expect(productionBootProblems(FULL_ENV)).toEqual([]); // FULL_ENV sets none of them
+  });
+
   it('flags EVERY missing or empty required var by name', () => {
     const problems = productionBootProblems({});
     expect(problems).toHaveLength(REQUIRED_PRODUCTION_VARS.length);
