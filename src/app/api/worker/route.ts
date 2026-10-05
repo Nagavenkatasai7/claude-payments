@@ -9,6 +9,8 @@ import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { amlSweep, amlRedis, type AmlSweepResult } from '@/lib/aml-sweep';
 import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
 import { escalateStuckPaid } from '@/lib/stale-money';
+import { deployErrorWatch } from '@/lib/deploy-error-watch';
+import { getRedis } from '@/lib/redis';
 import {
   cadenceRedis,
   checkCronQuiet,
@@ -239,6 +241,15 @@ async function run(req: NextRequest): Promise<NextResponse> {
     escalated = await escalateStuckPaid(deps.db, now);
   } catch (err) {
     logError('worker.stuck-escalation', err);
+  }
+
+  // Release safety part D: the new build's error count in its first 15
+  // minutes against the previous build's. One deduped `deployerrors:<sha>` ops
+  // alert on a spike. Redis reads only; a throw never blocks the drain.
+  try {
+    await deployErrorWatch(deps.db, getRedis(), now.getTime());
+  } catch (err) {
+    logError('worker.deploy-errors', err);
   }
 
   // Drain-gap SLA (Program-Fix 12): one deduped ops alert per hour while the

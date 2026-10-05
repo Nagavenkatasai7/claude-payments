@@ -37,7 +37,9 @@ export const onRequestError: Instrumentation.onRequestError = async (err, reques
       routeType: report.routeType,
       method: report.method,
     });
-    await reportRequestError(report);
+    // Release safety part D: count the error for this build (bounded, never throws).
+    const { countBuildError } = await import('@/lib/build-errors');
+    await Promise.all([reportRequestError(report), countBuildError()]);
   } catch {
     // Observability must never become the outage.
   }
