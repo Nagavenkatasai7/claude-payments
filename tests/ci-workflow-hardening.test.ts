@@ -145,3 +145,58 @@ describe('nightly.yml', () => {
     expect(read('.github/workflows/smoke.yml')).toMatch(/run: npm run e2e/);
   });
 });
+
+// Release safety Batch 2 part B (build thread): the pre-release synthetic
+// transfer (release-check.yml) and the automatic rollback (smoke.yml).
+describe('release safety part B: release check and rollback', () => {
+  const release = read('.github/workflows/release-check.yml');
+  const smoke = read('.github/workflows/smoke.yml');
+
+  it('release-check runs on vercel.deployment.ready for production only and reports the release-check status', () => {
+    expect(release).toMatch(/repository_dispatch:\n\s+types: \[vercel\.deployment\.ready\]/);
+    const job = jobBlock(release, 'release-check');
+    expect(job).toMatch(/if: github\.event\.client_payload\.environment == 'production'/);
+    expect(job).toMatch(/uses: vercel\/repository-dispatch\/actions\/status@[0-9a-f]{40} # v1\n\s+with:\n\s+name: release-check/);
+    expect(job).toMatch(/statuses: write/);
+    // No continue-on-error: the status action reads the step conclusions.
+    expect(job).not.toMatch(/continue-on-error/);
+  });
+
+  it('release-check never puts client_payload into a run: script or the checkout ref', () => {
+    const runs = [...release.matchAll(/run: \|?([\s\S]*?)(?=\n\s+- |\n {2}[a-z]|$)/g)].map((m) => m[1]);
+    for (const r of runs) expect(r).not.toMatch(/\$\{\{/);
+    expect(release).toMatch(/ref: \$\{\{ steps\.payload\.outputs\.sha \}\}/);
+    expect(jobBlock(release, 'release-check')).toMatch(/\^https:\/\/\[a-z0-9-\]\+\\\.vercel\\\.app\$/);
+  });
+
+  it('the synthetic spec runs opt-in with the sandbox key, never inside `npm run e2e`', () => {
+    expect(jobBlock(release, 'release-check')).toMatch(/SYNTHETIC_TRANSFER: '1'[\s\S]*run: npx playwright test tests\/e2e\/synthetic-transfer\.spec\.ts/);
+    const spec = read('tests/e2e/synthetic-transfer.spec.ts');
+    expect(spec).toMatch(/test\.skip\(!ENABLED/);
+    expect(spec).toMatch(/startsWith\('sr_test_'\)/);
+  });
+
+  it('smoke exposes money_failed from the health and synthetic steps only', () => {
+    const job = jobBlock(smoke, 'smoke');
+    expect(job).toMatch(/money_failed: \$\{\{ steps\.health\.outcome == 'failure' \|\| steps\.synthetic\.outcome == 'failure' \}\}/);
+    expect(job).toMatch(/id: health/);
+    expect(job).toMatch(/id: synthetic[\s\S]*SYNTHETIC_WAIT_DELIVERED: '1'/);
+  });
+
+  it('rollback runs only on a push run whose money test or health check failed', () => {
+    const job = jobBlock(smoke, 'rollback');
+    expect(job).toMatch(/needs: \[target, smoke\]/);
+    expect(job).toMatch(/if: always\(\) && github\.event_name == 'push' && needs\.smoke\.outputs\.money_failed == 'true'/);
+    expect(job).toMatch(/run: node scripts\/ci\/release-guard\.mjs rollback/);
+    expect(job).toMatch(/issues: write/);
+  });
+
+  it('the rollback token reaches only the rollback job', () => {
+    const jobs = jobIds(smoke);
+    for (const id of jobs) {
+      const has = /secrets\.VERCEL_ROLLBACK_TOKEN/.test(jobBlock(smoke, id));
+      expect({ id, has }).toEqual({ id, has: id === 'rollback' });
+    }
+    expect(release).not.toMatch(/VERCEL_ROLLBACK_TOKEN/);
+  });
+});
