@@ -11,6 +11,7 @@ import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransferWithOutcome, TransferIdConflictError } from './transfer-create';
+import { SendsPausedError, SENDS_PAUSED_RETRY_AFTER_SEC } from './flags';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isValidPhone, normalizePhone } from './phone';
 import { sendGateActive } from './kyc-gate';
@@ -55,7 +56,9 @@ import { logWarn } from './log';
 
 export type SvcResult<T> =
   | { ok: true; status: number; data: T }
-  | { ok: false; status: number; error: string };
+  // `code` / `retryAfterSec` (Release safety part A): a machine-readable error
+  // code and a Retry-After header. Only the sends_paused 503 sets them today.
+  | { ok: false; status: number; error: string; code?: string; retryAfterSec?: number };
 
 export interface PartnerApiDeps {
   store: Store;
@@ -86,7 +89,11 @@ const envOf = (deps: Pick<PartnerApiDeps, 'keyMode'>): TransferEnvironment =>
 /** A ledger row belongs to the key's environment (absent ⇒ live). */
 const sameEnv = (deps: Pick<PartnerApiDeps, 'keyMode'>, t: Transfer): boolean =>
   (t.environment ?? 'live') === envOf(deps);
-const err = (status: number, error: string): SvcResult<never> => ({ ok: false, status, error });
+const err = (
+  status: number,
+  error: string,
+  extra: { code?: string; retryAfterSec?: number } = {},
+): SvcResult<never> => ({ ok: false, status, error, ...extra });
 
 const num = (v: unknown): number | null => {
   const n = typeof v === 'string' ? Number(v) : typeof v === 'number' ? v : NaN;
@@ -500,6 +507,15 @@ export async function createTransaction(
     // The claimed id already names another tenant's row (unreachable by
     // provenance; never overwritten). The key stays bound; a new key mints.
     if (e instanceof TransferIdConflictError) return err(409, 'Idempotency-Key conflict. Retry with a new key.');
+    // Release safety part A: the sends.paused kill switch. Nothing was minted;
+    // the key stays bound-but-unminted, so the SAME Idempotency-Key mints once
+    // the switch is off.
+    if (e instanceof SendsPausedError) {
+      return err(503, 'New transfers are paused for a short time. Retry later with the same Idempotency-Key.', {
+        code: 'sends_paused',
+        retryAfterSec: SENDS_PAUSED_RETRY_AFTER_SEC,
+      });
+    }
     throw e;
   }
 

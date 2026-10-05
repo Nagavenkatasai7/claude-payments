@@ -43,6 +43,11 @@ const HELPERS: Record<string, string[]> = {
   // transition. Only Store.updateTransferFromWebhook calls it, reached from the
   // payment-webhook route (which pokes) and the worker's mock.settle.
   'src/lib/delivery-receipt.ts': ['deliverTransfer'],
+  // Release safety part A: the switch ops alert; its one caller, the
+  // /admin-dashboard/switches action, pokes.
+  'src/lib/flag-switch.ts': ['applyFlagChange'],
+  // Release safety part D: the deploy error watch runs only inside /api/worker.
+  'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';

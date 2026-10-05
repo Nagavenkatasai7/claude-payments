@@ -153,6 +153,10 @@ function envelope(report: ErrorReport, target: SentryTarget): string {
   if (report.method) tags.method = report.method;
   if (report.digest) tags.digest = logDigest(report.digest);
   if (process.env.NEXT_RUNTIME) tags.runtime = process.env.NEXT_RUNTIME;
+  // Release safety part D: the Vercel deployment id, so two deployments of one
+  // commit (a redeploy, a rollback) stay apart in Sentry.
+  const deploymentId = process.env.VERCEL_DEPLOYMENT_ID;
+  if (deploymentId && /^dpl_[A-Za-z0-9]{6,64}$/.test(deploymentId)) tags.deploymentId = deploymentId;
   const event = {
     event_id: eventId,
     timestamp: now.getTime() / 1000,

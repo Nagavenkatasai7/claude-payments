@@ -2,6 +2,7 @@ import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
+import { SendsPausedError } from './flags';
 import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
@@ -56,9 +57,12 @@ export type FinalizeResult =
       // has no legal name on file cannot be screened, so it is never minted.
       // Nothing was claimed or consumed; the route answers 400 and the SAME
       // link works once the customer gives their name in chat.
+      // 'sends_paused' (Release safety part A): the sends.paused kill switch
+      // refused the mint. Nothing was minted or consumed; the route answers 503
+      // and the SAME link works once the switch is off.
       error:
         | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
-        | 'bank_details_required' | 'busy' | 'sender_name_required';
+        | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -307,6 +311,7 @@ export async function finalizeDraftPayment(
     // the same crash-replay shape as an FX refusal.
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
+    if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
     throw err;
   }
 

@@ -6402,3 +6402,37 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
     expect((await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, ctx)).opened).toBe(true);
   });
 });
+
+// Release safety Batch 2 part A: the sends.paused kill switch in the chat tools.
+describe('create_transfer — sends.paused kill switch', () => {
+  it('approve-tap: a paused send restores the draft and returns the paused message; the same card works after', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const draftId = await ctx.draftStore.createDraft({
+      senderPhone: ctx.phone, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8_500 },
+    });
+    const { SENDS_PAUSED_MESSAGE, invalidateFlagCache } = await import('@/lib/flags');
+    vi.spyOn(ctx.store, 'isFlagOn').mockResolvedValueOnce(true);
+    const tap = () => runLegacyCreateTransferForTests({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const r = await tap();
+    expect(r).toMatchObject({ error: SENDS_PAUSED_MESSAGE, sends_paused: true });
+    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // put back
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+    invalidateFlagCache(db);
+    const r2 = await tap();
+    expect(r2.transfer_id).toBeTruthy();
+  });
+
+  it('legacy explicit-args path: a paused send returns the paused message and mints nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const { SENDS_PAUSED_MESSAGE } = await import('@/lib/flags');
+    vi.spyOn(ctx.store, 'isFlagOn').mockResolvedValueOnce(true);
+    const r = await runLegacyCreateTransferForTests({
+      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
+    }, ctx);
+    expect(r).toMatchObject({ error: SENDS_PAUSED_MESSAGE, sends_paused: true });
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+  });
+});

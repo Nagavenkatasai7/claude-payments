@@ -41,6 +41,7 @@ import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { resolveCorridorRules } from '@/lib/compliance-config';
+import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -826,6 +827,14 @@ export async function POST(
         return NextResponse.json(
           { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
           { status: 400 },
+        );
+      }
+      if (result.error === 'sends_paused') {
+        // Release safety part A: the sends.paused kill switch. Nothing was
+        // minted, charged or consumed; the SAME link works once it is off.
+        return NextResponse.json(
+          { ok: false, error: SENDS_PAUSED_MESSAGE, reason: 'sends_paused' },
+          { status: 503 },
         );
       }
       if (result.error === 'busy') {

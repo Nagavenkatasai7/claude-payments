@@ -187,3 +187,27 @@ describe('response contract', () => {
     }
   });
 });
+
+// Release safety Batch 2 part D: the Bearer tier shows this build's server
+// error count (the smoke health step prints it); the anonymous tier does not.
+describe('build error count (Bearer tier only)', () => {
+  const SHA = 'abcdef0123456789abcdef0123456789abcdef01';
+
+  it('reports builderr:<sha7> as a number; null without a commit SHA', async () => {
+    box.dbMode = 'real';
+    vi.stubEnv('VERCEL_GIT_COMMIT_SHA', SHA);
+    gate.strings.set('builderr:abcdef0', '4');
+    const r = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r.body.buildErrors).toBe(4);
+
+    vi.stubEnv('VERCEL_GIT_COMMIT_SHA', '');
+    const r2 = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r2.body.buildErrors).toBeNull();
+  });
+
+  it('the anonymous body has no buildErrors key', async () => {
+    vi.stubEnv('VERCEL_GIT_COMMIT_SHA', SHA);
+    const r = await read(await route.GET(anon()));
+    expect(r.body).not.toHaveProperty('buildErrors');
+  });
+});

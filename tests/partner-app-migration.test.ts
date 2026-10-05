@@ -247,7 +247,9 @@ describe('migration 0028 is safe for the build already in production (rolling re
     const journal = JSON.parse(readFileSync(join(process.cwd(), 'drizzle/meta/_journal.json'), 'utf8')) as {
       entries: Array<{ idx: number; when: number; tag: string }>;
     };
-    const [prev, last] = journal.entries.slice(-2);
+    // Located by tag, not by position: later migrations (0029+) append after it.
+    const at = journal.entries.findIndex((e) => e.tag === '0028_partner_app');
+    const [prev, last] = journal.entries.slice(at - 1, at + 1);
     expect(prev.tag).toBe('0027_customer_portal');
     expect(last).toMatchObject({ idx: 28, tag: '0028_partner_app' });
     expect(last.when).toBeGreaterThan(prev.when);

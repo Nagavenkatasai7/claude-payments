@@ -4,6 +4,7 @@ import { env } from '@/lib/env';
 import { bearerMatches } from '@/lib/cron-auth';
 import { getDb } from '@/db/client';
 import { gateRedis, LAST_FULL_KEY } from '@/lib/worker-gate';
+import { currentBuildErrors } from '@/lib/deploy-error-watch';
 import { evaluateHealth, withTimeout, HEALTH_DB_TIMEOUT_MS, HEALTH_MEMO_MS, type LastFullRead } from '@/lib/health';
 
 // GET /api/health — the PULL half of the external dead-man's switch
@@ -44,6 +45,14 @@ async function readLastFull(): Promise<LastFullRead> {
   }
 }
 
+async function readBuildErrors(): Promise<number | null> {
+  try {
+    return await currentBuildErrors(gateRedis());
+  } catch {
+    return null; // a missing KV env (constructor throw)
+  }
+}
+
 async function probeDb(): Promise<'ok' | 'fail'> {
   try {
     await withTimeout(getDb().execute(sql`select 1`), HEALTH_DB_TIMEOUT_MS);
@@ -59,9 +68,10 @@ export async function GET(req: NextRequest): Promise<Response> {
     if (!env.cronSecret || !bearerMatches(authorization, env.cronSecret)) {
       return new Response('Unauthorized', { status: 401, headers: HEADERS });
     }
-    const [lastFull, db] = await Promise.all([readLastFull(), probeDb()]);
+    const [lastFull, db, buildErrors] = await Promise.all([readLastFull(), probeDb(), readBuildErrors()]);
     const r = evaluateHealth({ nowMs: Date.now(), lastFull, db });
-    return Response.json(r.body, { status: r.status, headers: HEADERS });
+    // Release safety part D: this build's server error count (a number, or null).
+    return Response.json({ ...r.body, buildErrors }, { status: r.status, headers: HEADERS });
   }
 
   const nowMs = Date.now();
