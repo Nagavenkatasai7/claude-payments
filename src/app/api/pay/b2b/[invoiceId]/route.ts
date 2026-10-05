@@ -21,6 +21,7 @@ import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
 import { logError } from '@/lib/log';
+import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
 
 // Cross-border B2B bill checkout (Plan 4) — the country-aware sibling of
@@ -248,6 +249,13 @@ export async function POST(
         return NextResponse.json(
           { ok: false, reason: 'cap', error: 'This payment exceeds your current sending limit.' },
           { status: 400 },
+        );
+      }
+      if (minted.error === 'sends_paused') {
+        // Release safety part A: the sends.paused kill switch. Nothing was minted or charged.
+        return NextResponse.json(
+          { ok: false, reason: 'sends_paused', error: SENDS_PAUSED_MESSAGE },
+          { status: 503 },
         );
       }
       if (minted.error === 'busy') {

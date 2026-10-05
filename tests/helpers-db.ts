@@ -81,6 +81,7 @@ const ALL_TABLES = [
   'sanctions_list_versions',
   'staff',
   'funding_events',
+  'feature_flags', // Release safety part A (0029)
   'conversation_messages', // Partner-Demo R3b (also reached by CASCADE via partners; explicit for clarity)
 ].join(', ');
 

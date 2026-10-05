@@ -8,6 +8,7 @@ import { settleFundedTransfer } from '@/lib/stripe-funded-settle';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
+import { isFlagOn } from '@/lib/flags';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every FULL /api/worker
@@ -97,6 +98,18 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
   // BEFORE the failure landed is skipped by the instruct handler's own guard
   // (outbox-worker: cancelled / refund pending ⇒ done without a POST).
   for (const t of stuck) {
+    // Release safety part A: while settlement.paused matches this transfer, its
+    // instruction is held ON PURPOSE (outbox-worker defers it), so it is neither
+    // re-instructed nor alerted as stuck. The `recon:` alert stays available
+    // for a later sweep once the pause is off and the transfer is still stuck.
+    if (
+      await isFlagOn(db, 'settlement.paused', {
+        partnerId: [t.partnerId, t.settlementPartnerId],
+        corridor: t.destinationCountry,
+      })
+    ) {
+      continue;
+    }
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT
     // partner's when routed — classify (webhook-driven vs mock) by THEIR
     // config, or a routed stuck transfer reads the owner's (often mock)

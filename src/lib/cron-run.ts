@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isScheduleDueToday, upcomingDueDay } from './schedule';
 import { createTransfer, ScheduleMintRefusedError } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
+import { SendsPausedError } from './flags';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
 import { env } from './env';
@@ -224,6 +225,7 @@ export async function runDueSchedules(
         err instanceof RateUnavailableError ? err.reason
         : err instanceof SendCapError ? 'send_cap'   // Program fix 16: the schedule owner is at their cap today
         : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
+        : err instanceof SendsPausedError ? 'sends_paused' // Release safety part A: the kill switch is on
         : err instanceof ScheduleMintRefusedError ? 'recipient_deleted' // M2-10: the account's recipient was deleted
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });

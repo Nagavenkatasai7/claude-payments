@@ -7,6 +7,7 @@ import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-c
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
+import { SendsPausedError } from './flags';
 import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold } from './aml-hold';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
@@ -266,6 +267,22 @@ export async function createTransferWithOutcome(
   // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).
   const destinationCountry = input.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY;
   const destinationCurrency = input.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY;
+
+  // Release safety part A: the `sends.paused` kill switch (global, this
+  // partner, the routed rail partner, or this corridor). Checked BEFORE any
+  // other read or write, so a paused mint leaves nothing behind: a claim-first
+  // caller's key stays bound-but-unminted and the same request mints once the
+  // switch is off. A sandbox (test-key) mint moves no money and is never
+  // paused, so the pre-release synthetic transfer still runs during a pause.
+  if (
+    input.environment !== 'test' &&
+    (await store.isFlagOn('sends.paused', {
+      partnerId: [input.partnerId, input.settlementPartnerId],
+      corridor: destinationCountry,
+    }))
+  ) {
+    throw new SendsPausedError();
+  }
 
   // ── Root-handle reads, ALL ABOVE the sender lock (Program fix 16) ────────
   // Nothing below the lock may touch the store / partner store: the locked

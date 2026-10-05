@@ -799,3 +799,31 @@ describe('runDueSchedules — claim-first replay safety (Program-Fix 32)', () =>
     expect((await scheduleStore.getSchedule('b'))?.lastRunAt).toBeTruthy();
   });
 });
+
+// Release safety Batch 2 part A: a scheduled send during a sends.paused pause
+// creates nothing, is counted as failed and raises the deduped refusal alert.
+describe('runDueSchedules: sends.paused', () => {
+  it('a global pause ⇒ no transfer, failed++, lastRunAt NOT advanced, one alert naming sends_paused', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    const { createFeatureFlagRepo } = await import('@/db/repos/feature-flag-repo');
+    const { invalidateFlagCache } = await import('@/lib/flags');
+    await createFeatureFlagRepo(db).upsert({ key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: true, reason: 'incident', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => { throw new Error('must not send'); },
+    });
+
+    expect(result).toMatchObject({ fired: 0, failed: 1 });
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    const alerts = await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE kind = 'ops.alert'`);
+    const msgs = (alerts as unknown as { rows: Array<{ m: string }> }).rows.map((r) => r.m);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain('(sends_paused)');
+    invalidateFlagCache(db);
+  });
+});

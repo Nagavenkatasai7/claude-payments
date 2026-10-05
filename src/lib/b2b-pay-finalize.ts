@@ -1,5 +1,6 @@
 import { createTransfer } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
+import { SendsPausedError } from './flags';
 import { isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { countryForCurrency } from './partner-currency';
 import { newTransferId } from './id';
@@ -65,7 +66,10 @@ export type CrossBorderFinalizeResult =
         // or the per-sender mint lock timed out (route ⇒ 503, retryable). In
         // both cases the claimed id is bound-but-unminted: a retry replays it.
         | 'cap'
-        | 'busy';
+        | 'busy'
+        // Release safety part A: the sends.paused kill switch refused the mint
+        // (route ⇒ 503). Nothing was minted; the bound id replays once it is off.
+        | 'sends_paused';
       transferId?: string;
     };
 
@@ -253,6 +257,7 @@ export async function finalizeCrossBorderBillPayment(
     // Program fix 16: B2B bills are capped like every other mint path.
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
+    if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
     throw err;
   }
 

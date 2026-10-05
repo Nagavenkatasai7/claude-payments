@@ -1077,3 +1077,41 @@ describe('partner-api-service: a transfer without sender identity is held for re
     expect(deprecationLines()).toHaveLength(1);
   });
 });
+
+// Release safety Batch 2 part A: the sends.paused kill switch on the partner API.
+describe('partner-api-service: sends.paused kill switch', () => {
+  it('a paused partner gets 503 sends_paused with Retry-After; the same key mints once the switch is off', async () => {
+    const { deps, db } = await harness();
+    const { createFeatureFlagRepo } = await import('@/db/repos/feature-flag-repo');
+    const { invalidateFlagCache, SENDS_PAUSED_RETRY_AFTER_SEC } = await import('@/lib/flags');
+    const flags = createFeatureFlagRepo(db);
+    await flags.upsert({ key: 'sends.paused', scopeType: 'partner', scopeId: 'acme', enabled: true, reason: 'rail incident', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+
+    const paused = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-pause', txBody());
+    expect(paused).toMatchObject({ ok: false, status: 503, code: 'sends_paused', retryAfterSec: SENDS_PAUSED_RETRY_AFTER_SEC });
+    // Nothing minted: the key is bound to an id that names no row.
+    const bound = await createIdempotencyRepo(db).find('acme', 'idem-pause');
+    expect(bound).not.toBeNull();
+    expect(await deps.store.getTransfer(bound!)).toBeNull();
+
+    await flags.upsert({ key: 'sends.paused', scopeType: 'partner', scopeId: 'acme', enabled: false, reason: 'rail fixed', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-pause', txBody());
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect((r.data as { id: string }).id).toBe(bound);
+    invalidateFlagCache(db);
+  });
+
+  it('svcResponse puts the code in the body and the Retry-After header on the response', async () => {
+    const { svcResponse } = await import('@/lib/partner-api');
+    const res = svcResponse({ ok: false, status: 503, error: 'paused', code: 'sends_paused', retryAfterSec: 300 });
+    expect(res.status).toBe(503);
+    expect(res.headers.get('Retry-After')).toBe('300');
+    expect(await res.json()).toEqual({ error: 'paused', code: 'sends_paused' });
+    // Every other error keeps the exact { error } body and no header.
+    const plain = svcResponse({ ok: false, status: 400, error: 'bad' });
+    expect(plain.headers.get('Retry-After')).toBeNull();
+    expect(await plain.json()).toEqual({ error: 'bad' });
+  });
+});
