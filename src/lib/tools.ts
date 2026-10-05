@@ -6,6 +6,7 @@ import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
+import { SendsPausedError, SENDS_PAUSED_MESSAGE } from './flags';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
@@ -1801,6 +1802,12 @@ async function createTransferTool(
         await ctx.draftStore.restoreDraft(draft, ctxDraftId);
         return { error: SEND_BUSY_MESSAGE };
       }
+      // Release safety part A: the sends.paused kill switch. Nothing was
+      // written; put the draft back so the same card works once it is off.
+      if (err instanceof SendsPausedError) {
+        await ctx.draftStore.restoreDraft(draft, ctxDraftId);
+        return { error: SENDS_PAUSED_MESSAGE, sends_paused: true };
+      }
       throw err;
     }
   }
@@ -1919,6 +1926,7 @@ async function createTransferTool(
     if (err instanceof QuoteError) return { error: err.message };
     if (err instanceof SendCapError) return capRefusal(err);     // Program fix 16
     if (err instanceof SendBusyError) return { error: SEND_BUSY_MESSAGE };
+    if (err instanceof SendsPausedError) return { error: SENDS_PAUSED_MESSAGE, sends_paused: true }; // Release safety part A
     throw err;
   }
 }

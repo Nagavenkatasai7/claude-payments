@@ -8,6 +8,7 @@ import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo'
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
 import { logError } from './log';
+import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
@@ -201,6 +202,15 @@ export function createStore(redis: RedisLike, db: Db) {
   return {
     /** The D9 legacy-tenant resolver, shared with the volume + KYC-audit stores. */
     legacyTenantOf,
+
+    /**
+     * Release safety part A: is a feature flag / kill switch on for this request?
+     * Cached per instance (flags.ts, 15 s); never throws (a read failure is off).
+     * Read on the ROOT handle, never inside the sender lock.
+     */
+    isFlagOn(key: FlagKey, ctx: FlagContext = {}): Promise<boolean> {
+      return isFlagOn(db, key, ctx);
+    },
 
     // ── Conversations (Redis — hot, trimmed, ephemeral; keyed by TENANT + phone, fix 1 D12) ──
     // TRANSITIONAL (one 30-day window): a tenant key that does not exist reads

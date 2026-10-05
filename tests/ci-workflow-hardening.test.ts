@@ -145,3 +145,106 @@ describe('nightly.yml', () => {
     expect(read('.github/workflows/smoke.yml')).toMatch(/run: npm run e2e/);
   });
 });
+
+// Release safety Batch 2 part B (build thread): the pre-release synthetic
+// transfer (release-check.yml) and the automatic rollback (smoke.yml).
+describe('release safety part B: release check and rollback', () => {
+  const release = read('.github/workflows/release-check.yml');
+  const smoke = read('.github/workflows/smoke.yml');
+
+  it('release-check runs on vercel.deployment.ready for production only and reports the release-check status', () => {
+    expect(release).toMatch(/repository_dispatch:\n\s+types: \[vercel\.deployment\.ready\]/);
+    const job = jobBlock(release, 'release-check');
+    expect(job).toMatch(/if: github\.event\.client_payload\.environment == 'production'/);
+    expect(job).toMatch(/uses: vercel\/repository-dispatch\/actions\/status@[0-9a-f]{40} # v1\n\s+with:\n\s+name: release-check/);
+    expect(job).toMatch(/statuses: write/);
+    // No continue-on-error: the status action reads the step conclusions.
+    expect(job).not.toMatch(/continue-on-error/);
+  });
+
+  it('release-check never puts client_payload into a run: script or the checkout ref', () => {
+    const runs = [...release.matchAll(/run: \|?([\s\S]*?)(?=\n\s+- |\n {2}[a-z]|$)/g)].map((m) => m[1]);
+    for (const r of runs) expect(r).not.toMatch(/\$\{\{/);
+    expect(release).toMatch(/ref: \$\{\{ steps\.payload\.outputs\.sha \}\}/);
+    expect(jobBlock(release, 'release-check')).toMatch(/\^https:\/\/claude-payments-\[a-z0-9\]\+-\[a-z0-9-\]\+\\\.vercel\\\.app\$/);
+    expect(jobBlock(release, 'release-check')).toMatch(/"\$PROJECT_NAME" != "claude-payments"/);
+  });
+
+  it('the synthetic spec runs opt-in with the sandbox key, never inside `npm run e2e`', () => {
+    expect(jobBlock(release, 'release-check')).toMatch(/SYNTHETIC_TRANSFER: '1'[\s\S]*run: npx playwright test tests\/e2e\/synthetic-transfer\.spec\.ts/);
+    const spec = read('tests/e2e/synthetic-transfer.spec.ts');
+    expect(spec).toMatch(/test\.skip\(!ENABLED/);
+    expect(spec).toMatch(/startsWith\('sr_test_'\)/);
+  });
+
+  it('smoke exposes money_failed from the health and synthetic steps only', () => {
+    const job = jobBlock(smoke, 'smoke');
+    expect(job).toMatch(/money_failed: \$\{\{ steps\.health\.outcome == 'failure' \|\| steps\.synthetic\.outcome == 'failure' \}\}/);
+    expect(job).toMatch(/id: health/);
+    expect(job).toMatch(/id: synthetic[\s\S]*SYNTHETIC_WAIT_DELIVERED: '1'/);
+  });
+
+  it('a missing or non-sandbox key fails the smoke but never starts a rollback', () => {
+    const job = jobBlock(smoke, 'smoke');
+    // The key check never fails itself, so the page smoke still runs.
+    expect(job).toMatch(/id: synthetic_key[\s\S]*?"\$KEY" == sr_test_\*[\s\S]*?ready=true[\s\S]*?ready=false/);
+    // The synthetic step (whose failure starts a rollback) runs only with a sandbox key.
+    expect(job).toMatch(/if: steps\.dedupe\.outputs\.covered != 'true' && steps\.synthetic_key\.outputs\.ready == 'true'\n[\s\S]*?id: synthetic\n|id: synthetic\n\s+if: steps\.dedupe\.outputs\.covered != 'true' && steps\.synthetic_key\.outputs\.ready == 'true'/);
+    // A final step turns the smoke red when the key is not ready.
+    expect(job).toMatch(/if: steps\.synthetic_key\.outputs\.ready == 'false'\n[\s\S]*?exit 1/);
+    expect(job.indexOf('id: synthetic_key')).toBeLessThan(job.indexOf('id: synthetic\n'));
+  });
+
+  it('rollback runs only on a push run whose money test or health check failed', () => {
+    const job = jobBlock(smoke, 'rollback');
+    expect(job).toMatch(/needs: \[target, smoke\]/);
+    expect(job).toMatch(/if: always\(\) && github\.event_name == 'push' && needs\.smoke\.outputs\.money_failed == 'true'/);
+    expect(job).toMatch(/run: node scripts\/ci\/release-guard\.mjs rollback/);
+    expect(job).toMatch(/issues: write/);
+  });
+
+  it('the new jobs that read production secrets run in prod-secrets', () => {
+    for (const job of [jobBlock(release, 'release-check'), jobBlock(release, 'alert'), jobBlock(smoke, 'rollback')]) {
+      expect(job).toMatch(/\n {4}environment: prod-secrets\n/);
+    }
+  });
+
+  it('the rollback token reaches only the rollback job', () => {
+    const jobs = jobIds(smoke);
+    for (const id of jobs) {
+      const has = /secrets\.VERCEL_ROLLBACK_TOKEN/.test(jobBlock(smoke, id));
+      expect({ id, has }).toEqual({ id, has: id === 'rollback' });
+    }
+    expect(release).not.toMatch(/VERCEL_ROLLBACK_TOKEN/);
+    });
+  });
+
+describe('PR template (release safety plan, PR 1)', () => {
+  // SOC 2 CC8.1 and PCI DSS 6.5.2 ask each change to record its risk, its
+  // approval evidence and its rollback; GitHub prefills new PR bodies from
+  // this file.
+  const tpl = () => read('.github/pull_request_template.md');
+
+  it('has every section the change record needs, in order', () => {
+    const headings = [...tpl().matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+    expect(headings).toEqual([
+      'Before',
+      'After',
+      'Touches money, auth, webhooks, crypto or compliance?',
+      'Migration?',
+      'Risk',
+      'Rollback',
+      'Tests run',
+    ]);
+  });
+
+  it('asks for /security-review and /migrate-prod where they apply', () => {
+    expect(tpl()).toContain('/security-review');
+    expect(tpl()).toContain('/migrate-prod');
+    expect(tpl()).toContain('after-deploy');
+  });
+
+  it('keeps the Program-Fix line on its own line for the tracker', () => {
+    expect(tpl()).toMatch(/^Program-Fix: <n>/m);
+  });
+});

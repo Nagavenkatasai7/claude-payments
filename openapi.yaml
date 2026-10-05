@@ -56,6 +56,9 @@ components:
         error:
           type: string
           description: Human-readable message. Match on the HTTP status, not the text.
+        code:
+          type: string
+          description: 'Machine-readable reason, present on some errors only. sends_paused: new transfers are paused for a short time; retry after the Retry-After header.'
     Transaction:
       type: object
       properties:
@@ -268,7 +271,15 @@ paths:
         '409': { description: Idempotency-Key conflict. Retry with a new key. }
         '422': { description: 'Refused: the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
-        '503': { description: 'Live FX is temporarily unavailable, or another transfer for this sender is in progress. Nothing was minted; a retry may reuse the same Idempotency-Key.' }
+        '503':
+          description: 'Live FX is temporarily unavailable, another transfer for this sender is in progress, or new transfers are paused (code sends_paused, with a Retry-After header in seconds). Nothing was minted; a retry may reuse the same Idempotency-Key.'
+          headers:
+            Retry-After:
+              description: Seconds to wait before a retry. Sent with code sends_paused.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
     get:
       operationId: listTransactions
       summary: List your transfers

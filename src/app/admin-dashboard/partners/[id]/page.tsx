@@ -175,7 +175,7 @@ export default async function PartnerDetailPage({
   // previously this page serialized the whole ledger per render).
   const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange, staffFeed] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
-    scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
+    scoped.transfersPage({ limit: 50, partnerFilter: partner.id, environment: 'live' }),
     getAuthStore().listStaff(),
     getPartnerIntegrationsStore().getIntegrations(partner.id),
     getPartnerApiKeyStore().list(partner.id),
