@@ -125,7 +125,22 @@ export interface Transfer {
   kybReviewNotes?: string;
   // Program-Fix 44 P2 — absent ⇒ 'live'. Always set on a ledger read.
   environment?: TransferEnvironment;
+  // ── Step 0 FX-7: rate provenance (0030). WRITE-ONCE, all optional: absent on
+  // every row minted before 0030 or by an old build. Internal — never mapped
+  // into a partner-API or customer response.
+  fxAsOf?: string;              // the provider's fixing date (YYYY-MM-DD); absent for B2B locks
+  fxFetchedAt?: string;         // ISO time the rate behind fxRate was fetched (the OLDEST leg)
+  fxSource?: FxRateOrigin;      // which pricing produced fxRate
+  fxProvider?: string;          // e.g. FX_PROVIDER_ID (rate.ts); 'partner' for a partner rate
 }
+
+/**
+ * Step 0 FX-7: where a transfer's fxRate came from. 'platform' = the platform
+ * mid (Frankfurter/ECB); 'partner_push' / 'partner_margin' = a best-rate
+ * partner route (a pushed rate, or a margin off mid); 'b2b_lock' = the B2B
+ * cross-border quote lock. Enforced in code (the column has no CHECK).
+ */
+export type FxRateOrigin = 'platform' | 'partner_push' | 'partner_margin' | 'b2b_lock';
 
 /** Program-Fix 7: the PSP that holds an async funding intent. */
 export type FundingProviderId = 'stripe';

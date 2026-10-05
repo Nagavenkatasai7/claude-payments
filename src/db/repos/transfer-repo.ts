@@ -261,8 +261,12 @@ export function createTransferRepo(
       // Program-Fix 44 P2: environment is WRITE-ONCE — the insert sets it, the
       // conflict-update never does, so a read-modify-write can never flip a
       // sandbox row to live (or back).
-      const { environment: _env, ...updatable } = row;
-      void _env;
+      // Step 0 FX-7: the rate provenance columns are write-once the same way.
+      const {
+        environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
+        ...updatable
+      } = row;
+      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {

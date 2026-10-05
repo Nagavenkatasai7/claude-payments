@@ -144,6 +144,16 @@ export const transfers = pgTable(
     fundingProvider: text('funding_provider'),
     fundingIntentRef: text('funding_intent_ref'),
     fundingState: text('funding_state'),
+    // Step 0 FX-7 (0030): the rate's provenance, stamped once at mint.
+    // All NULL on every pre-0030 / old-build row — the old build never names
+    // them. WRITE-ONCE (saveTransfer's conflict-update never sets them).
+    // fx_source is code-enforced ('platform' | 'partner_push' |
+    // 'partner_margin' | 'b2b_lock', types.ts FxRateOrigin); no CHECK, so the
+    // migration never scans the table. date() is string mode (YYYY-MM-DD).
+    fxAsOf: date('fx_as_of'),
+    fxFetchedAt: timestamp('fx_fetched_at', { withTimezone: true }),
+    fxSource: text('fx_source'),
+    fxProvider: text('fx_provider'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
