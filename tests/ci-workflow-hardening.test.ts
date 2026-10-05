@@ -184,6 +184,17 @@ describe('release safety part B: release check and rollback', () => {
     expect(job).toMatch(/id: synthetic[\s\S]*SYNTHETIC_WAIT_DELIVERED: '1'/);
   });
 
+  it('a missing or non-sandbox key fails the smoke but never starts a rollback', () => {
+    const job = jobBlock(smoke, 'smoke');
+    // The key check never fails itself, so the page smoke still runs.
+    expect(job).toMatch(/id: synthetic_key[\s\S]*?"\$KEY" == sr_test_\*[\s\S]*?ready=true[\s\S]*?ready=false/);
+    // The synthetic step (whose failure starts a rollback) runs only with a sandbox key.
+    expect(job).toMatch(/if: steps\.dedupe\.outputs\.covered != 'true' && steps\.synthetic_key\.outputs\.ready == 'true'\n[\s\S]*?id: synthetic\n|id: synthetic\n\s+if: steps\.dedupe\.outputs\.covered != 'true' && steps\.synthetic_key\.outputs\.ready == 'true'/);
+    // A final step turns the smoke red when the key is not ready.
+    expect(job).toMatch(/if: steps\.synthetic_key\.outputs\.ready == 'false'\n[\s\S]*?exit 1/);
+    expect(job.indexOf('id: synthetic_key')).toBeLessThan(job.indexOf('id: synthetic\n'));
+  });
+
   it('rollback runs only on a push run whose money test or health check failed', () => {
     const job = jobBlock(smoke, 'rollback');
     expect(job).toMatch(/needs: \[target, smoke\]/);

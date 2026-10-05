@@ -415,9 +415,27 @@ jobs:
           echo "::error title=Production unhealthy::The new build cannot reach its database or Redis (${last})."
           exit 1
 
+      - name: Check the synthetic transfer key
+        id: synthetic_key
+        if: steps.dedupe.outputs.covered != 'true'
+        # A missing key (or a key that is not a sandbox sr_test_ key) is a
+        # setup problem, not a bad build: it must never start the `rollback`
+        # job. This step never fails, so the page smoke still runs; the last
+        # step of this job turns the smoke red instead.
+        shell: bash
+        env:
+          KEY: ${{ secrets.E2E_SANDBOX_API_KEY }}
+        run: |
+          if [[ "$KEY" == sr_test_* ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Synthetic transfer did not run::E2E_SANDBOX_API_KEY is missing or is not a sandbox (sr_test_) key. Automatic rollback cannot run until it is set."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Synthetic sandbox transfer on the live build
         id: synthetic
-        if: steps.dedupe.outputs.covered != 'true'
+        if: steps.dedupe.outputs.covered != 'true' && steps.synthetic_key.outputs.ready == 'true'
         # Release safety part B. The same test as release-check.yml, now on
         # the live build, and it also waits for `delivered`: that proves the
         # live worker settles the sandbox transfer on the mock rail. A failure
@@ -457,6 +475,12 @@ jobs:
             test-results/
             !test-results/**/*.zip
           retention-days: 7
+
+      - name: Fail when the synthetic transfer could not run
+        if: steps.synthetic_key.outputs.ready == 'false'
+        run: |
+          echo "::error title=Synthetic transfer did not run::Set the E2E_SANDBOX_API_KEY secret (the SmartRemit Synthetic partner's sr_test_ key), then re-run this smoke."
+          exit 1
 
   rollback:
     # Release safety part B, layer 2: put the previous production deployment
