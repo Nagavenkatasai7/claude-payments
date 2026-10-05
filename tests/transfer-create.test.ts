@@ -374,6 +374,37 @@ describe('createTransfer any-to-any corridors', () => {
   });
 });
 
+// Step 0 FX-1 (B3): the re-quote gates BOTH legs' fixing dates (flag ON only).
+describe('createTransfer — the re-quote gates both FX legs (Step 0 FX-1)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const today = () => new Date().toISOString().slice(0, 10);
+  function stubDated(aedDate: string) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=USD')) return { ok: true, json: async () => ({ date: today(), rates: { INR: 85 } }) };
+      // SGD is fetched on its own (AED is derived from USD, so it cannot stall alone).
+      return { ok: true, json: async () => ({ date: aedDate, rates: { INR: 65, USD: 0.78 } }) };
+    }));
+  }
+  const toSg = { ...base, destinationCountry: 'SG' as const, destinationCurrency: 'SGD' as const };
+
+  it('flag ON: a DESTINATION leg whose fixing is years old refuses the mint (stale_fixing); nothing written', async () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    const { db, store, partnerStore, mvs } = await makeStores();
+    stubDated('2016-01-04');
+    await expect(createTransfer(store, partnerStore, mvs, toSg)).rejects.toMatchObject({ reason: 'stale_fixing' });
+    const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)) as unknown as { rows: Array<{ n: number }> };
+    expect(rows.rows[0].n).toBe(0);
+  });
+
+  it('flag OFF (default): the same feed still mints', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated('2016-01-04');
+    const t = await createTransfer(store, partnerStore, mvs, toSg);
+    expect(t.destinationCurrency).toBe('SGD');
+  });
+});
+
 // ── U7 (audit): optional complete quote override ─────────────────────────────
 // The pay-time finalizer passes the DRAFT's stored quote so the ledger records
 // exactly what the approval card / pay page showed — no re-quote from current

@@ -7,7 +7,7 @@ import type {
 import type { ApiKeyMode } from './partner-api-scopes';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
-import { quote, QuoteError } from './fx';
+import { assertLegsUsable, quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransferWithOutcome, TransferIdConflictError } from './transfer-create';
@@ -243,6 +243,7 @@ export async function createQuote(
   try {
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getDestinationRates(destinationCurrency);
+    assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
     // transferCount drives the fee tier; a partner-API quote uses standard pricing.
     // Fix 16b: the preview has no customer, so its ceiling is the PARTNER-level
     // effective max; the mint itself applies any customer override.

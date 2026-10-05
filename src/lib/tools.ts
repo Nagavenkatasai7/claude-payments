@@ -1,4 +1,4 @@
-import { MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
+import { assertLegsUsable, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -1296,6 +1296,9 @@ async function resolveCurrencyAndRates(
 
   // undefined for INR: quote() prices an INR destination off rates.toInr.
   const destRates = await getDestinationRates(destinationCurrency);
+  // Step 0 FX-1 (B3): quote() only sees the destination leg as a number, so
+  // both legs' provenance (fetch age; fixing date under the flag) is gated here.
+  assertLegsUsable(rates, destRates);
   // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
   const stamps = [rates.fetchedAt, destRates?.fetchedAt].filter((t): t is number => t !== undefined);
   const fxFetchedAt = stamps.length > 0 ? Math.min(...stamps) : undefined;

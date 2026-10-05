@@ -250,6 +250,20 @@ export const env = {
     // verified events for ALREADY-bound debits either way — review M5.)
     return process.env.STRIPE_FUNDING_ENABLED === 'true';
   },
+  // ── Step 0 FX rate fixes (both OPTIONAL, default OFF; never in boot-assert) ──
+  get fxFixingGateEnabled(): boolean {
+    // 'true' ⇒ FX-1: quotes and mints REFUSE (stale_fixing) once the provider's
+    // fixing date is 3 business days behind under the 06:00-UTC rule
+    // (fx-fixing.ts). Off: only the ops alert fires (rate-staleness.ts).
+    return trimmedEnv('FX_FIXING_GATE_ENABLED') === 'true';
+  },
+  get fxPayRateCheckEnabled(): boolean {
+    // 'true' ⇒ FX-2: the pay page re-checks an existing transfer's rate before
+    // the OTP (minted-rate.ts) and refuses-and-cancels one that drifted > 0.5%;
+    // also FX-5 (a partner push's expiry ends the draft quote and shortens the
+    // card's lock line). Off: today's behaviour byte-for-byte.
+    return trimmedEnv('FX_PAY_RATE_CHECK_ENABLED') === 'true';
+  },
   get stripeFundingAllowTestMode(): boolean {
     // 'true' ⇒ a verified livemode:false (Stripe test-mode) success may settle
     // a transfer. Default false: test-mode money never pays out on a rail.

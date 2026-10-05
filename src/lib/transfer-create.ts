@@ -1,4 +1,4 @@
-import { quote } from './fx';
+import { assertLegsUsable, quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
@@ -318,6 +318,7 @@ export async function createTransferWithOutcome(
     // when no rate inside the ceiling exists: it propagates as a clean refusal
     // that every mint caller maps (503 / friendly tool error / fx_unavailable).
     const destRates = await getDestinationRates(destinationCurrency);
+    assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
     q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
   }
   // Best-rate routing: a route is only ever honored together with the quote it
