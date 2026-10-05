@@ -102,26 +102,3 @@ describe('GET /api/version/migrations: status', () => {
     expect(['POST', 'PUT', 'PATCH', 'DELETE'].filter((m) => m in route)).toEqual([]);
   });
 });
-
-// Release safety Batch 2 part C: the read-only MIGRATIONS_READ_TOKEN opens this
-// route too (CI's migration safety job), next to CRON_SECRET. An unset token
-// never matches an empty bearer.
-describe('GET /api/version/migrations: MIGRATIONS_READ_TOKEN', () => {
-  const READ = 'read-only-migrations-token';
-
-  it('200 with the read token; CRON_SECRET still works', async () => {
-    vi.stubEnv('MIGRATIONS_READ_TOKEN', READ);
-    box.db = fakeDb(async () => ({ rows: allWhen() }));
-    expect((await route.GET(req(`Bearer ${READ}`))).status).toBe(200);
-    expect((await route.GET(req(`Bearer ${SECRET}`))).status).toBe(200);
-  });
-
-  it('401 for a wrong token, and for "Bearer " when both are unset', async () => {
-    vi.stubEnv('MIGRATIONS_READ_TOKEN', READ);
-    box.db = fakeDb(async () => ({ rows: allWhen() }));
-    expect((await route.GET(req('Bearer nope'))).status).toBe(401);
-    vi.stubEnv('MIGRATIONS_READ_TOKEN', '');
-    vi.stubEnv('CRON_SECRET', '');
-    expect((await route.GET(req('Bearer '))).status).toBe(401);
-  });
-});

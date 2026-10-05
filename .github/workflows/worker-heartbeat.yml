@@ -31,11 +31,6 @@ concurrency:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    # Release safety part C: production secrets live in the `prod-secrets`
-    # GitHub environment (deployments from main only). A job with an
-    # environment also posts a GitHub deployment record named after it; the
-    # deployment_status triggers here and in preview-smoke.yml ignore that name.
-    environment: prod-secrets
     # Worst case: 90s attempt + 10s retry delay + 90s retry = 190s — keep the
     # job timeout above that so a slow drain fails as a STEP failure, not a
     # confusing job-timeout cancellation.

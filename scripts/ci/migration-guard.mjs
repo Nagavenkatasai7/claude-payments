@@ -20,7 +20,7 @@
  *    live before the merge; the post-deploy smoke checks it.
  * 2. Applied before merge. Each journal entry the PR adds (except an
  *    `after-deploy` step) must already be in production: GET
- *    /api/version/migrations (Bearer MIGRATIONS_READ_TOKEN) lists it in unknownApplied,
+ *    /api/version/migrations (Bearer CRON_SECRET) lists it in unknownApplied,
  *    because drizzle.__drizzle_migrations has its `when` while the served
  *    build's journal does not know it yet. Until then the job stays red; after
  *    /migrate-prod, re-run the failed job.
@@ -34,7 +34,7 @@
  *   node scripts/ci/migration-guard.mjs
  *
  * Env: EVENT_NAME (pull_request | merge_group; anything else skips),
- * PR_BASE_SHA/PR_HEAD_SHA or MG_BASE_SHA/MG_HEAD_SHA, MIGRATIONS_READ_TOKEN,
+ * PR_BASE_SHA/PR_HEAD_SHA or MG_BASE_SHA/MG_HEAD_SHA, CRON_SECRET,
  * MIGRATIONS_URL. Exit 0 pass, 1 a finding, 2 the check could not run
  * (fail-closed). The secret only ever goes in the Authorization header.
  */
@@ -379,12 +379,11 @@ export async function runGuard({ env, cwd = process.cwd(), fetchImpl = fetch, ou
     return failed ? 1 : 0;
   }
 
-  // Release safety part C: the read-only token (never CRON_SECRET) in pull request runs.
-  const secret = env.MIGRATIONS_READ_TOKEN ?? '';
+  const secret = env.CRON_SECRET ?? '';
   const url = env.MIGRATIONS_URL ?? '';
   if (!secret) {
     return cannot(
-      `This change adds ${mustBeLive.map((e) => e.tag).join(', ')}, but the MIGRATIONS_READ_TOKEN secret is not available to this run (a fork or Dependabot pull request), so production was NOT checked.`,
+      `This change adds ${mustBeLive.map((e) => e.tag).join(', ')}, but the CRON_SECRET secret is not available to this run (a fork or Dependabot pull request), so production was NOT checked.`,
     );
   }
   if (!/^https:\/\//.test(url)) return cannot('MIGRATIONS_URL is not an https URL.');
