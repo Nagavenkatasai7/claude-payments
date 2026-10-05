@@ -97,6 +97,11 @@ jobs:
   smoke:
     needs: target
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only). A job with an
+    # environment also posts a GitHub deployment record named after it; the
+    # deployment_status triggers here and in preview-smoke.yml ignore that name.
+    environment: prod-secrets
     # Up to 25 min waiting for the production build (below), up to 5
     # min for the migration check, plus the few minutes the install and
     # Playwright run need.

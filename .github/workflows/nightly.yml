@@ -111,6 +111,11 @@ jobs:
 
   prod-smoke:
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only). A job with an
+    # environment also posts a GitHub deployment record named after it; the
+    # deployment_status triggers here and in preview-smoke.yml ignore that name.
+    environment: prod-secrets
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
