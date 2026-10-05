@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, fxProvenanceFor, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
-import { RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
+import { FX_PROVIDER_ID, RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
@@ -650,6 +650,100 @@ describe('route expiry on the approved quote (Step 0 FX-5)', () => {
       quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600, feeSource: 1.57, totalChargeSource: 201.57, totalChargeUsd: 255.99, ...extra },
     });
     expect(gbp).toMatchObject(extra);
+  });
+});
+
+// Step 0 FX-7: which rate priced the row, when it was published and fetched.
+describe('rate provenance on the minted row (Step 0 FX-7)', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  function stubDated(usdDate: string, sgdDate = usdDate) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=USD')) return { ok: true, json: async () => ({ date: usdDate, rates: { INR: 85 } }) };
+      return { ok: true, json: async () => ({ date: sgdDate, rates: { INR: 65, USD: 0.78 } }) };
+    }));
+  }
+  const override = {
+    amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17_000,
+    amountSource: 200, feeSource: 0, totalChargeSource: 200,
+  };
+
+  it('fxProvenanceFor (pure): each origin stamps what it can vouch for', () => {
+    const at = Date.UTC(2026, 9, 2, 15, 0, 0);
+    const iso = new Date(at).toISOString();
+    expect(fxProvenanceFor('platform', '2026-10-02', at)).toEqual({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: '2026-10-02', fxFetchedAt: iso });
+    expect(fxProvenanceFor('partner_margin', '2026-10-02', at)).toEqual({ fxSource: 'partner_margin', fxProvider: 'partner', fxAsOf: '2026-10-02', fxFetchedAt: iso });
+    // A push is the partner's own number: the reference date does not describe it.
+    expect(fxProvenanceFor('partner_push', '2026-10-02', at)).toEqual({ fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: iso });
+    // A B2B locked quote: origin only, dates NULL.
+    expect(fxProvenanceFor('b2b_lock', '2026-10-02', at)).toEqual({ fxSource: 'b2b_lock' });
+    // An older draft without an origin: only the fetch time it carries.
+    expect(fxProvenanceFor(undefined, undefined, at)).toEqual({ fxFetchedAt: iso });
+    expect(fxProvenanceFor(undefined, undefined, undefined)).toEqual({});
+  });
+
+  it('re-quote: platform, the ECB provider, the fixing date and the fetch time, persisted', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const date = dayAgo(1);
+    stubDated(date);
+    const before = Date.now();
+    const t = await createTransfer(store, partnerStore, mvs, base);
+    const saved = await store.getTransfer(t.id);
+    expect(saved).toMatchObject({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date });
+    const fetched = Date.parse(saved!.fxFetchedAt!);
+    expect(fetched).toBeGreaterThanOrEqual(before - 1_000);
+    expect(fetched).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('re-quote with its own destination leg: the OLDER leg\'s date', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated(dayAgo(1), dayAgo(3));
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, destinationCountry: 'SG', destinationCurrency: 'SGD' });
+    expect((await store.getTransfer(t.id))?.fxAsOf).toBe(dayAgo(3));
+  });
+
+  it('override: the draft\'s origin, date and fetch time (platform and partner push)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const at = Date.now() - 5 * 60_000;
+    const p = await createTransfer(store, partnerStore, mvs, {
+      ...base, quote: { ...override, fxFetchedAt: at, fxAsOf: dayAgo(1), fxOrigin: 'platform' },
+    });
+    expect(await store.getTransfer(p.id)).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: dayAgo(1), fxFetchedAt: new Date(at).toISOString(),
+    });
+    await seedPartner(db, 'rail-partner-x');
+    const r = await createTransfer(store, partnerStore, mvs, {
+      ...base, phone: '15551234568',
+      quote: { ...override, fxRate: 86, amountInr: 17_200, fxFetchedAt: at, fxAsOf: dayAgo(1), fxOrigin: 'partner_push', routeExpiresAt: Date.now() + 600_000 },
+      settlementPartnerId: 'rail-partner-x',
+    });
+    const routed = await store.getTransfer(r.id);
+    expect(routed).toMatchObject({ fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: new Date(at).toISOString() });
+    expect(routed?.fxAsOf).toBeUndefined();
+  });
+
+  it('a watchlist-blocked mint keeps the provenance too', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated(dayAgo(1));
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John Doe' });
+    expect(t.status).toBe('blocked');
+    expect(await store.getTransfer(t.id)).toMatchObject({ fxSource: 'platform', fxAsOf: dayAgo(1) });
+  });
+
+  it('recordBlockedAttempt stamps the quote-time provenance it is given', async () => {
+    const { store } = await makeStores();
+    const at = Date.now() - 60_000;
+    const t = await recordBlockedAttempt(store, {
+      phone: '15551234567', recipientName: 'John Doe', recipientPhone: '919133001840',
+      payoutMethod: 'bank', payoutDestination: '', fundingMethod: 'bank_transfer',
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', feeUsd: 0, feeSource: 0,
+      fxRate: 85, amountInr: 8500, totalChargeUsd: 100, totalChargeSource: 100,
+      destinationCountry: 'IN', destinationCurrency: 'INR', partnerId: 'default',
+      reasons: ['Recipient is on the compliance watchlist.'],
+      fxOrigin: 'platform', fxAsOf: dayAgo(1), fxFetchedAt: at,
+    });
+    expect(await store.getTransfer(t.id)).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: dayAgo(1), fxFetchedAt: new Date(at).toISOString(),
+    });
   });
 });
 

@@ -244,6 +244,7 @@ export async function finalizeCrossBorderBillPayment(
       amountSource: buyerPrincipal, // principal: amountSource * fxRate ≈ amountDest
       feeSource: feeBuyer,
       totalChargeSource: buyerTotal, // the buyer pays principal + fee
+      fxOrigin: 'b2b_lock', // Step 0 FX-7: provenance is the lock itself (dates NULL)
     },
     transferType: 'b2b',
     senderEntityType: 'business',

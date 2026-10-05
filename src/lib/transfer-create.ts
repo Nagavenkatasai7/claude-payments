@@ -1,5 +1,5 @@
-import { assertLegsUsable, quote } from './fx';
-import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
+import { assertLegsUsable, legsProvenance, quote } from './fx';
+import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -194,6 +194,35 @@ export function assertQuoteOverrideFresh(
   }
 }
 
+/** Step 0 FX-7: the four write-once provenance fields of a transfer row. */
+export type FxProvenance = Pick<Transfer, 'fxAsOf' | 'fxFetchedAt' | 'fxSource' | 'fxProvider'>;
+
+/**
+ * Step 0 FX-7: what a row can vouch for about the rate that priced it. Pure;
+ * only defined fields are set.
+ *   - platform: the ECB reference feed (FX_PROVIDER_ID), its date and fetch time;
+ *   - partner_margin: a partner margin over that same mid (date kept);
+ *   - partner_push: the partner's own number, so no reference date; the fetch
+ *     time of the mid it beat is kept (the quote's age is measured from it);
+ *   - b2b_lock: a locked B2B quote, origin only (dates NULL);
+ *   - no origin (a draft from before this change): only its fetch time.
+ */
+export function fxProvenanceFor(
+  origin: FxRateOrigin | undefined,
+  asOf: string | undefined,
+  fetchedAtMs: number | undefined,
+): FxProvenance {
+  if (origin === 'b2b_lock') return { fxSource: origin };
+  const out: FxProvenance = {};
+  if (origin) {
+    out.fxSource = origin;
+    out.fxProvider = origin === 'platform' ? FX_PROVIDER_ID : 'partner';
+  }
+  if (asOf && (origin === 'platform' || origin === 'partner_margin')) out.fxAsOf = asOf;
+  if (fetchedAtMs !== undefined && Number.isFinite(fetchedAtMs)) out.fxFetchedAt = new Date(fetchedAtMs).toISOString();
+  return out;
+}
+
 /**
  * fix 6 (ctx-01): thrown by createTransfer when the payout destination is a
  * display placeholder (payout-format.isMaskedDestination). NOTHING has been
@@ -329,9 +358,12 @@ export async function createTransferWithOutcome(
   // sanctions + EDD use q.amountUsd, the Transfer row takes all eight figures,
   // and the cap check uses q.amountUsd.
   let q: NonNullable<CreateTransferInput['quote']>;
+  let provenance: FxProvenance;
   if (input.quote) {
     assertQuoteOverrideFresh(input.quote);
     q = input.quote;
+    // Step 0 FX-7: the approved quote's own provenance (the draft's).
+    provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt);
   } else {
     const transferCount = await store.getTransferCount(input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);
@@ -341,6 +373,8 @@ export async function createTransferWithOutcome(
     // that every mint caller maps (503 / friendly tool error / fx_unavailable).
     const destRates = await getDestinationRates(destinationCurrency);
     assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
+    const legs = legsProvenance(rates, destRates); // Step 0 FX-7: the OLDEST leg
+    provenance = fxProvenanceFor('platform', legs.asOf, legs.fetchedAt);
     q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
   }
   // Best-rate routing: a route is only ever honored together with the quote it
@@ -366,7 +400,7 @@ export async function createTransferWithOutcome(
   const minted = await store.mintUnderSenderLock(input.partnerId, input.phone, (ops) =>
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
-      subject, limits, kycGateActive, settlementPartnerId,
+      subject, limits, kycGateActive, settlementPartnerId, provenance,
     }),
   );
   const transfer = minted.transfer;
@@ -414,6 +448,7 @@ interface PreparedMint {
   limits: SendLimits;
   kycGateActive: boolean;
   settlementPartnerId?: PartnerId;
+  provenance: FxProvenance;      // Step 0 FX-7
 }
 
 /**
@@ -556,6 +591,7 @@ async function mintLocked(
     achTokenRef: input.achTokenRef,
     invoiceId: input.invoiceId,
     environment: input.environment ?? 'live',        // Program-Fix 44 P2
+    ...p.provenance,                                 // Step 0 FX-7 (write-once)
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the
@@ -628,6 +664,10 @@ export interface BlockedAttemptInput {
   reasons: string[];
   /** Program-Fix 14: the quote-time screen's evidence (screen.evidence). */
   evidence?: ScreeningEvidence;
+  /** Step 0 FX-7: the quote-time rate provenance (absent ⇒ none stamped). */
+  fxOrigin?: FxRateOrigin;
+  fxAsOf?: string;
+  fxFetchedAt?: number;
 }
 
 /**
@@ -669,6 +709,7 @@ export async function recordBlockedAttempt(
     amountSource: input.amountSource,
     feeSource: input.feeSource,
     totalChargeSource: input.totalChargeSource,
+    ...fxProvenanceFor(input.fxOrigin, input.fxAsOf, input.fxFetchedAt), // Step 0 FX-7
   };
   if (input.evidence) {
     // Program-Fix 14 (step 5): a blocked quote never reaches the mint, so this

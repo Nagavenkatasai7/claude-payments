@@ -31,7 +31,7 @@ import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, resto
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
-  resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
+  resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
 } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
@@ -6525,5 +6525,47 @@ describe('Step 0 FX-5: rate lock with a partner push expiry (FX_PAY_RATE_CHECK_E
     expect(r.error).toBeUndefined();
     expect(String(r.summary)).toContain('Rate locked for 7 min.');
     expect(String(r.reply_hint)).toContain('the rate is locked for 7 minutes');
+  });
+});
+
+// ── Step 0 FX-7: the draft and the blocked row carry the rate provenance ──
+describe('Step 0 FX-7: rate provenance from the chat send path', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  function stubDatedFx(date: string) {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+      String(url).includes('graph.facebook.com')
+        ? { ok: true, text: async () => '' }
+        : { ok: true, json: async () => ({ date, rates: { INR: MOCK_RATE } }) }));
+  }
+  const PICK = { amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' };
+
+  it('the draft stores the fixing date and origin; the approve-tap mint stamps them on the row', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const base = await buildCtx(fakeRedis(), '15550007711');
+    const r = await executeTool('send_approve_picker', PICK, base);
+    expect(r.sent).toBe(true);
+    const draft = await base.draftStore.getDraft(r.draft_id as string);
+    expect(draft?.quote).toMatchObject({ fxAsOf: date, fxOrigin: 'platform' });
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: r.draft_id as string } } };
+    const minted = await runLegacyCreateTransferForTests({}, ctx);
+    expect(minted.error).toBeUndefined();
+    const t = await base.store.getTransfer(minted.transfer_id as string);
+    expect(t).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date,
+      fxFetchedAt: new Date(draft!.quote.fxFetchedAt!).toISOString(),
+    });
+  });
+
+  it('a watchlist-blocked picker records its blocked row with the quote-time provenance', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007712');
+    const r = await executeTool('send_approve_picker', { ...PICK, recipient_name: 'John Doe' }, ctx);
+    expect(r.blocked).toBe(true);
+    const [row] = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect(row).toMatchObject({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date });
+    expect(row.fxFetchedAt).toBeDefined();
   });
 });

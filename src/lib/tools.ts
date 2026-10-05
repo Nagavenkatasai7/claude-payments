@@ -1,4 +1,4 @@
-import { assertLegsUsable, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
+import { assertLegsUsable, legsProvenance, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -1293,6 +1293,8 @@ async function resolveCurrencyAndRates(
   destinationCurrency: CurrencyCode;
   destToUsd: number | undefined;
   fxFetchedAt: number | undefined;
+  /** Step 0 FX-7: the oldest leg's publication date (YYYY-MM-DD), when every leg has one. */
+  fxAsOf: string | undefined;
 }> {
   // Destination resolution FIRST (Program-Fix 33): an unknown code is refused
   // before the customer upsert and before any rate fetch — never coerced to 'IN'.
@@ -1309,13 +1311,13 @@ async function resolveCurrencyAndRates(
   // Step 0 FX-1 (B3): quote() only sees the destination leg as a number, so
   // both legs' provenance (fetch age; fixing date under the flag) is gated here.
   assertLegsUsable(rates, destRates);
-  // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
-  const stamps = [rates.fetchedAt, destRates?.fetchedAt].filter((t): t is number => t !== undefined);
-  const fxFetchedAt = stamps.length > 0 ? Math.min(...stamps) : undefined;
+  // The OLDEST leg's fetch time — a stored draft quote's age is measured from
+  // it — and (Step 0 FX-7) its publication date.
+  const legs = legsProvenance(rates, destRates);
 
   return {
     customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency,
-    destToUsd: destRates?.toUsd, fxFetchedAt,
+    destToUsd: destRates?.toUsd, fxFetchedAt: legs.fetchedAt, fxAsOf: legs.asOf,
   };
 }
 
@@ -3968,7 +3970,7 @@ export async function prepareSendDraft(
     if (err instanceof QuoteError) return { kind: 'invalid_request', message: err.message };
     throw err;
   }
-  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
+  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt, fxAsOf } =
     resolved;
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
   // for an unverified sender; hand off the kyc_url instead. The B2B KYB gate
@@ -4076,6 +4078,8 @@ export async function prepareSendDraft(
           // Program-Fix 14: the blocked row and its sanctions.screen evidence
           // commit together (recordBlockedWithEvidence, one transaction).
           evidence: screen.evidence,
+          // Step 0 FX-7: the quote-time rate provenance.
+          fxOrigin, fxAsOf, fxFetchedAt,
         });
       } catch (err) {
         // Still best-effort: the customer gets the blocked reply either way.
@@ -4120,6 +4124,7 @@ export async function prepareSendDraft(
         // Step 0 FX-5: a partner push's expiry (the mint refuses past it, flagged).
         ...(routeExpiresAt !== undefined ? { routeExpiresAt } : {}),
         fxOrigin, // Step 0 FX-7: stamped on the minted row as fx_source
+        ...(fxAsOf !== undefined ? { fxAsOf } : {}),
       },
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).

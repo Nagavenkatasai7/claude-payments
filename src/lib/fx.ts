@@ -82,6 +82,23 @@ export function assertLegsUsable(
   if (dest) assertRatesUsable(dest, now, opts);
 }
 
+/**
+ * Step 0 FX-7: the provenance of a quote priced on these legs, taken from the
+ * OLDEST leg: the earliest fetch time (as a stored quote's age is measured)
+ * and the earliest publication date. The date is undefined when any leg in
+ * use lacks one, so a row never claims a fixing date it cannot vouch for.
+ */
+export function legsProvenance(src: FxRates, dest?: FxRates): { asOf?: string; fetchedAt?: number } {
+  const legs = dest ? [src, dest] : [src];
+  const stamps = legs.map((l) => l.fetchedAt).filter((t): t is number => t !== undefined);
+  const dates = legs.map((l) => l.asOf);
+  const known = dates.filter((d): d is string => d !== undefined);
+  return {
+    ...(stamps.length > 0 ? { fetchedAt: Math.min(...stamps) } : {}),
+    ...(known.length === dates.length ? { asOf: known.reduce((a, b) => (b < a ? b : a)) } : {}),
+  };
+}
+
 /** Format a whole amount in the given ISO-4217 currency ($, ₹, £, AED, …). */
 function fmtAmount(amount: number, currency: CurrencyCode): string {
   try {

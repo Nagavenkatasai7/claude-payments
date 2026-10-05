@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   sourceForInr, sourceForDest, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd,
-  usdPivotCrossRate, assertRatesUsable, assertLegsUsable,
+  usdPivotCrossRate, assertRatesUsable, assertLegsUsable, legsProvenance,
 } from '@/lib/fx';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from '@/lib/send-limits';
 import { FALLBACK_FX_RATES, FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from '@/lib/rate';
@@ -388,5 +388,18 @@ describe('quote() — amountInr finiteness guard (Program-Fix 48)', () => {
     expect(inr.fxRate).toBe(95.82);
     const aed = quote(1000, 'USD', fresh(), 'bank_transfer', 1, 'AED', 0.27);
     expect(aed.amountInr).toBe(Math.round(1000 * (1 / 0.27)));
+  });
+});
+
+describe('legsProvenance (Step 0 FX-7)', () => {
+  const leg = (fetchedAt?: number, asOf?: string): FxRates =>
+    ({ toInr: 85, toUsd: 1, fetchedAt, asOf } as FxRates);
+  it('takes the OLDEST leg: earliest fetch time, earliest date', () => {
+    expect(legsProvenance(leg(2_000, '2026-10-02'), leg(1_000, '2026-09-30'))).toEqual({ fetchedAt: 1_000, asOf: '2026-09-30' });
+    expect(legsProvenance(leg(2_000, '2026-10-02'))).toEqual({ fetchedAt: 2_000, asOf: '2026-10-02' });
+  });
+  it('no date when any leg in use lacks one; no fetch time when none carries one', () => {
+    expect(legsProvenance(leg(2_000, '2026-10-02'), leg(1_000))).toEqual({ fetchedAt: 1_000 });
+    expect(legsProvenance(leg())).toEqual({});
   });
 });
