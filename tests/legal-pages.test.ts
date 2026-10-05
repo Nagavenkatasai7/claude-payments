@@ -43,7 +43,7 @@ async function renderPage(route: 'terms' | 'privacy' | 'legal'): Promise<string>
 describe('src/lib/legal/drafts.ts', () => {
   it('exports the version id and the owner banner verbatim', async () => {
     const d = await drafts();
-    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-09-23c'); // Program-Fix 49B: the rate-lock wording matches the system (30 min)
+    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-10-05a'); // Step 1: voice notes name Microsoft Azure AI Speech (United States)
     expect(d.LEGAL_DRAFT_BANNER).toBe(BANNER);
   });
 
@@ -171,6 +171,18 @@ describe('drafts claim only what the product does today', () => {
     expect(d.DEMO_NO_PARTNER_NOTE).toMatch(/no licensed partner is attached and no real money moves/);
     const about = readFileSync(resolve(process.cwd(), 'src/app/about/page.tsx'), 'utf-8');
     expect(about).toContain('DEMO_NO_PARTNER_NOTE');
+  });
+
+  it('voice notes: the privacy notice names the speech-to-text provider and where it runs', async () => {
+    const d = await drafts();
+    const wa = d.PRIVACY_DRAFT.sections.find((s) => s.id === 'whatsapp')!;
+    const text = wa.paragraphs.join(' ');
+    expect(text).toMatch(/voice note/i);
+    expect(text).toContain('Microsoft Azure AI Speech (United States)');
+    expect(text).toMatch(/English/);
+    expect(text).not.toMatch(/Sarvam/i);
+    const glba = d.PRIVACY_DRAFT.sections.find((s) => s.id === 'glba-notice')!;
+    expect((glba.bullets ?? []).join(' ')).toMatch(/speech-to-text/);
   });
 
   it('chat retention matches the 30-days-after-last-message conversation TTL', async () => {
