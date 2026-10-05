@@ -470,6 +470,9 @@ jobs:
     needs: [target, smoke]
     if: always() && github.event_name == 'push' && needs.smoke.outputs.money_failed == 'true'
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
     timeout-minutes: 5
     permissions:
       contents: read

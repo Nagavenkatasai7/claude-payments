@@ -166,7 +166,8 @@ describe('release safety part B: release check and rollback', () => {
     const runs = [...release.matchAll(/run: \|?([\s\S]*?)(?=\n\s+- |\n {2}[a-z]|$)/g)].map((m) => m[1]);
     for (const r of runs) expect(r).not.toMatch(/\$\{\{/);
     expect(release).toMatch(/ref: \$\{\{ steps\.payload\.outputs\.sha \}\}/);
-    expect(jobBlock(release, 'release-check')).toMatch(/\^https:\/\/\[a-z0-9-\]\+\\\.vercel\\\.app\$/);
+    expect(jobBlock(release, 'release-check')).toMatch(/\^https:\/\/claude-payments-\[a-z0-9\]\+-\[a-z0-9-\]\+\\\.vercel\\\.app\$/);
+    expect(jobBlock(release, 'release-check')).toMatch(/"\$PROJECT_NAME" != "claude-payments"/);
   });
 
   it('the synthetic spec runs opt-in with the sandbox key, never inside `npm run e2e`', () => {
@@ -189,6 +190,12 @@ describe('release safety part B: release check and rollback', () => {
     expect(job).toMatch(/if: always\(\) && github\.event_name == 'push' && needs\.smoke\.outputs\.money_failed == 'true'/);
     expect(job).toMatch(/run: node scripts\/ci\/release-guard\.mjs rollback/);
     expect(job).toMatch(/issues: write/);
+  });
+
+  it('the new jobs that read production secrets run in prod-secrets', () => {
+    for (const job of [jobBlock(release, 'release-check'), jobBlock(release, 'alert'), jobBlock(smoke, 'rollback')]) {
+      expect(job).toMatch(/\n {4}environment: prod-secrets\n/);
+    }
   });
 
   it('the rollback token reaches only the rollback job', () => {

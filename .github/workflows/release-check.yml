@@ -32,6 +32,9 @@ jobs:
   release-check:
     if: github.event.client_payload.environment == 'production'
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
     timeout-minutes: 15
     permissions:
       contents: read
@@ -54,12 +57,15 @@ jobs:
         env:
           DEPLOY_URL: ${{ github.event.client_payload.url }}
           DEPLOY_SHA: ${{ github.event.client_payload.git.sha }}
+          PROJECT_NAME: ${{ github.event.client_payload.project.name }}
         run: |
           set -u
           url="$DEPLOY_URL"
           [[ "$url" == https://* ]] || url="https://${url}"
-          if [[ ! "$url" =~ ^https://[a-z0-9-]+\.vercel\.app$ ]]; then
-            echo "::error title=Release check::The deployment URL is not a *.vercel.app URL."
+          # The sandbox key and the bypass secret go only to this project's own
+          # deployment URLs (<project>-<hash>-<team>.vercel.app).
+          if [[ "$PROJECT_NAME" != "claude-payments" || ! "$url" =~ ^https://claude-payments-[a-z0-9]+-[a-z0-9-]+\.vercel\.app$ ]]; then
+            echo "::error title=Release check::The deployment is not a claude-payments *.vercel.app deployment."
             exit 1
           fi
           if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -97,6 +103,9 @@ jobs:
     needs: release-check
     if: failure() && github.event.client_payload.environment == 'production'
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
     timeout-minutes: 3
     permissions:
       contents: read
