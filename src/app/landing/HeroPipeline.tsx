@@ -9,7 +9,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { inr } from './format';
 
 interface Props {
-  /** USD→INR figure for the illustration (the live mid, or an illustrative one). */
+  /** USD→INR figure for the illustration (the daily reference rate, or an illustrative one). */
   rate: number;
   /** true only when `rate` was fetched live — otherwise it is labelled illustrative (ui-08). */
   live: boolean;
@@ -78,12 +78,12 @@ function Connector({ index }: { index: number }) {
 export default function HeroPipeline({ rate, live }: Props) {
   const payout = inr(200 * rate);
   const rateText = '₹' + rate.toFixed(2);
-  const rateLabel = live ? 'live mid-market' : 'illustrative rate';
+  const rateLabel = live ? 'daily reference rate' : 'illustrative rate';
 
   return (
     <div
       role="img"
-      aria-label={`A live transfer flowing through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at ${live ? 'the live rate' : 'an illustrative rate'} of 1 USD = ${rateText}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
+      aria-label={`A live transfer flowing through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at ${live ? 'the daily reference rate' : 'an illustrative rate'} of 1 USD = ${rateText}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
       className="mx-auto w-full max-w-[1180px]"
     >
       <div

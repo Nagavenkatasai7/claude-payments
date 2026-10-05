@@ -154,7 +154,7 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
         {rate === null
           ? `Our FX provider is temporarily unreachable, so no rate is shown. The exact rate is quoted and locked when you confirm${confirmWhere}.`
           : live
-            ? `Mid-market rate from our FX provider${asOf ? ` (ECB fixing of ${asOf})` : ''}. Final rate is locked when you confirm${confirmWhere}.`
+            ? `Daily reference rate from our FX provider${asOf ? ` (ECB fixing of ${asOf})` : ''}, for information. Your transfer's rate is quoted and locked when you confirm${confirmWhere}.`
             : `Indicative rate${asOf ? ` (ECB fixing of ${asOf})` : ''}: our FX provider is temporarily unreachable. The exact rate is quoted and locked when you confirm${confirmWhere}.`}
       </p>
     </div>
