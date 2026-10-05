@@ -28,6 +28,7 @@ import { renderSealedText } from '@/lib/sealed-text';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
+import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
@@ -1228,7 +1229,8 @@ const incompleteKey = (partnerId: string): string => `waincomplete:${partnerId}:
 
 /** fix B: a settlement rail failing raises one ops alert per (rail partner, hour), from this attempt on. */
 export const RAILFAIL_ALERT_MIN_ATTEMPT = 3;
-const railFailKey = (partnerId: string): string => `railfail:${partnerId}:${hourBucket()}`;
+// The key format is shared with the router's health check (rail-health.ts), which skips a rail with this alert.
+const railFailKey = (partnerId: string): string => railFailAlertKey(partnerId, hourBucket());
 
 /**
  * fix B: settlement.instruct retries for about a day, so its dead:<id> alert

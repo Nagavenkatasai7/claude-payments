@@ -1,6 +1,7 @@
 import type { CurrencyCode, FundingMethod, Quote } from './types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from './send-limits';
+import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
 
 export const MIN_USD = 10;
 export const MAX_USD = 2999; // pinned to PLATFORM_SEND_LIMITS.maxUsd (send-limits.ts) — ruling 12: this line only
@@ -163,7 +164,9 @@ export function quote(
     totalChargeUsd: round2(amountUsd + feeUsd),
     fxRate: crossRate,
     amountInr,
-    deliveryEstimate: 'within 10 minutes',
+    // R0 fix C: the disclosure's default estimate; tools.ts swaps in the
+    // tenant's own business-day count where the partner is known.
+    deliveryEstimate: deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS),
     sourceCurrency,
     amountSource,
     feeSource,

@@ -18,7 +18,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -60,7 +60,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $2.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: UPI ****@upi\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $2.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: UPI ****@upi\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -102,7 +102,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $150.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹12,750 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $150.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹12,750 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -360,7 +360,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -402,7 +402,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹86\nThey get ₹17,200 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹86\nThey get ₹17,200 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -452,7 +452,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -498,7 +498,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -519,7 +519,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -598,7 +598,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $400.00 to Globex Trading LLC.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹34,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $400.00 to Globex Trading LLC.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹34,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -640,7 +640,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -693,7 +693,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: bank a/c ****1234\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -714,7 +714,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $120.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹10,200 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $120.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹10,200 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -769,7 +769,7 @@
           "interactive": {
             "type": "cta_url",
             "body": {
-              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 10 minutes.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
+              "text": "Sending $200.00 to Mom.\nfirst transfer free — you save $1.99\nRate: 1 USD = ₹85\nThey get ₹17,000 within 1 business day.\nTo: their bank account (you'll enter the details on the secure page)\nRate locked for 30 min.\n\nTap to pay securely, or reply cancel to stop."
             },
             "action": {
               "name": "cta_url",
@@ -795,7 +795,7 @@
       {
         "ok": {
           "draft_id": "ID_1",
-          "summary": "Sending $50.00 to Seeded Recipient.\nFee $1.99\nRate: 1 USD = ₹85\nThey get ₹4,250 within 10 minutes.\nTo: bank a/c ****0001\nRate locked for 30 min.",
+          "summary": "Sending $50.00 to Seeded Recipient.\nFee $1.99\nRate: 1 USD = ₹85\nThey get ₹4,250 within 1 business day.\nTo: bank a/c ****0001\nRate locked for 30 min.",
           "pay_url": "https://smartremit.test/pay/ID_1",
           "reply_hint": "show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for 30 minutes"
         }
@@ -823,7 +823,7 @@
           "amount_dest": 17000,
           "destination_currency": "INR",
           "destination_country": "IN",
-          "delivery_estimate": "within 10 minutes",
+          "delivery_estimate": "within 1 business day",
           "amount_source_display": "$200.00 USD"
         }
       }
@@ -851,7 +851,7 @@
           "amount_dest": 10000,
           "destination_currency": "INR",
           "destination_country": "IN",
-          "delivery_estimate": "within 10 minutes",
+          "delivery_estimate": "within 1 business day",
           "amount_source_display": "$116.28 USD"
         }
       },
@@ -869,7 +869,7 @@
           "amount_dest": 8600,
           "destination_currency": "INR",
           "destination_country": "IN",
-          "delivery_estimate": "within 10 minutes",
+          "delivery_estimate": "within 1 business day",
           "amount_source_display": "$100.00 USD"
         }
       }

@@ -1144,6 +1144,26 @@ describe('multi-currency dormancy invariant', () => {
   });
 });
 
+// Smart-routing R0 fix C: the bot and the portal (getQuoteTyped) say the same
+// delivery time as the tenant's Reg E disclosure, never "within 10 minutes".
+describe('get_quote: delivery estimate follows the disclosure', () => {
+  it('default tenant ⇒ "within 1 business day"', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.delivery_estimate).toBe('within 1 business day');
+  });
+
+  it("a partner whose disclosure says 2 business days ⇒ the quote says 2 business days", async () => {
+    await seedPartner(db, 'acme');
+    await db.execute(sql`UPDATE partners SET support_config = '{"disclosure":{"deliveryEstimate":{"businessDays":2}}}'::jsonb WHERE id = 'acme'`);
+    const ctx = await buildCtx(fakeRedis(), PHONE, 'acme');
+    const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.delivery_estimate).toBe('within 2 business days');
+  });
+});
+
 describe('get_quote: receive-first (amount_inr) branch', () => {
   it('amount_inr back-solves the send amount; recipient gets ~the target INR', async () => {
     const ctx = await buildCtx(fakeRedis());
@@ -1504,7 +1524,7 @@ describe('cancel_draft — typed cancel via active-draft pointer (Batch 1)', () 
 
 const baseQuote = (over: Partial<Quote> = {}): Quote => ({
   amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99, fxRate: 83, amountInr: 41500,
-  deliveryEstimate: 'within 10 minutes', sourceCurrency: 'USD', amountSource: 500,
+  deliveryEstimate: 'within 1 business day', sourceCurrency: 'USD', amountSource: 500,
   feeSource: 1.99, totalChargeSource: 501.99, ...over,
 });
 
@@ -1515,7 +1535,7 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('1 USD = ₹83');
     expect(s).toContain('₹41,500');
-    expect(s).toContain('within 10 minutes');
+    expect(s).toContain('within 1 business day');
     expect(s).toContain('bank a/c ****6789');
     // The card now shows ONLY the last 4 — no IFSC/routing code, no IBAN body —
     // so it is leak-proof in every country format.

@@ -7,6 +7,7 @@ import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
+import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
@@ -1354,6 +1355,13 @@ function applyRouteToQuote(q: Quote, route: SettlementRoute): Quote {
   return { ...q, fxRate: route.fxRate, amountInr: Math.round(q.amountSource * route.fxRate) };
 }
 
+// Smart-routing R0 fix C: the delivery time the bot, the approve card and the
+// portal show is the tenant's Reg E disclosure estimate (business days), the
+// same count the pay page prints as "date available".
+function withDisclosedDelivery(q: Quote, partner: Partner): Quote {
+  return { ...q, deliveryEstimate: deliveryEstimatePhrase(resolvePartnerDisclosure(partner).deliveryBusinessDays) };
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -1616,6 +1624,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
         q = applyRouteToQuote(q, route);
       }
     }
+    q = withDisclosedDelivery(q, partner);
     return { kind: 'quote', quote: q, destinationCountry };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
@@ -3994,6 +4003,7 @@ export async function prepareSendDraft(
       q = applyRouteToQuote(q, route);
       settlementPartnerId = route.settlementPartnerId;
     }
+    q = withDisclosedDelivery(q, partner);
 
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
     // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).

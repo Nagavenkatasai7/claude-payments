@@ -492,6 +492,20 @@ export function createOutboxRepo(db: DbOrTx) {
     },
 
     /**
+     * Smart-routing R0 fix B: which of these dedupe keys exist (any status)?
+     * One indexed read (outbox_dedupe); rail-health reads `railfail:` alert
+     * keys through this.
+     */
+    async existingDedupeKeys(keys: string[]): Promise<Set<string>> {
+      if (keys.length === 0) return new Set();
+      const rows = await db
+        .select({ key: outbox.dedupeKey })
+        .from(outbox)
+        .where(inArray(outbox.dedupeKey, keys));
+      return new Set(rows.map((r) => r.key).filter((k): k is string => k !== null));
+    },
+
+    /**
      * Program-Fix 15 PR C: how long ago the customer was CHARGED, by the
      * database clock — the age of the `stage1:<id>` row, written in the same
      * transaction as the paid flip or the hold and never rewritten (deduped),

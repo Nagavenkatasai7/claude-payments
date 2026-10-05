@@ -445,6 +445,19 @@ describe('savePricingAction (admin corridor margin)', () => {
     expect(await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR')).toBeNull();
   });
 
+  // Smart-routing R0 fix A: the router ignores rates more than 5% above mid,
+  // so a margin outside ±500 bps is refused at save instead of silently ignored.
+  it('margin is bounded to ±500 bps (the router sanity band); the edges are accepted', async () => {
+    await expect(savePricingAction(marginForm({ marginBps: '501' }))).rejects.toThrow(/-500 and 500/);
+    await expect(savePricingAction(marginForm({ marginBps: '-501' }))).rejects.toThrow(/-500 and 500/);
+    await expect(savePricingAction(marginForm({ marginBps: '10000' }))).rejects.toThrow(/-500 and 500/);
+    expect(await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR')).toBeNull();
+    await savePricingAction(marginForm({ marginBps: '500' }));
+    expect((await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR'))?.marginBps).toBe(500);
+    await savePricingAction(marginForm({ marginBps: '-500' }));
+    expect((await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR'))?.marginBps).toBe(-500);
+  });
+
   // UI M5: the margin is platform-set (owner decision D7: read-only on /partner/settings), so a
   // partner admin can no longer set it here for ANY tenant, its own included.
   it("a partner-admin is sent to /partner for their OWN margin and another tenant's: nothing written", async () => {

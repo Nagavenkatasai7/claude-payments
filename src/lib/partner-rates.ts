@@ -5,6 +5,7 @@ import type { CurrencyCode, PartnerRate, SettlementRoute } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
+import { recentlyFailingRails } from './rail-health';
 
 // partner-rates — best-rate selection (internal). The platform mid-market rate
 // is ALWAYS the baseline competitor; an eligible partner wins a corridor only
@@ -20,11 +21,19 @@ import { checkSettlementUrl } from './settlement-url';
 //   • a routable rail: payment.providerType 'http' | 'simulator' AND a
 //     non-empty credentials.settlementUrl — anything else dead-letters money
 //     in `paid` (the settlement.instruct handler throws on a missing URL).
+//   • a PLAUSIBLE rate: at most MAX_ROUTE_PREMIUM above mid (smart-routing R0
+//     fix A). A pushed typo (850 for 85.0) or a fat-fingered margin would
+//     otherwise win every route at a rate the partner never meant to pay.
+//   • a HEALTHY rail: no `railfail` ops alert for the partner this hour or last
+//     (R0 fix B, rail-health.ts). Fail-open on a lookup error.
 //
 // Callers gate on the tenant BEFORE calling (white-label customers are pinned
 // to their partner — transmitter of record): only default-tenant quotes route.
 
 const ROUTABLE_PROVIDER_TYPES = new Set(['http', 'simulator']);
+
+/** The most a partner rate may beat mid by and still compete (5%). Above it the rate is treated as a typo. */
+export const MAX_ROUTE_PREMIUM = 0.05;
 
 /**
  * The rate a partner is offering for a corridor right now, or null when it
@@ -79,9 +88,20 @@ export async function selectSettlementRoute(
     .filter((r) => r.partnerId !== DEFAULT_PARTNER_ID)
     .map((r) => ({ partnerId: r.partnerId, fxRate: effectiveRateFor(r, mid, now) }))
     .filter((c): c is { partnerId: string; fxRate: number } => c.fxRate !== null && c.fxRate > mid)
+    .filter((c) => {
+      // Small epsilon so a margin of exactly +500 bps (float math) stays in band.
+      if (c.fxRate <= mid * (1 + MAX_ROUTE_PREMIUM) * (1 + 1e-9)) return true;
+      console.warn(`selectSettlementRoute: partner ${c.partnerId} rate is more than ${MAX_ROUTE_PREMIUM * 100}% above mid; ignored.`);
+      return false;
+    })
     .sort((a, b) => b.fxRate - a.fxRate);
+  if (contenders.length === 0) return platform;
+
+  // Skip rails that are failing right now (fail-open inside the helper).
+  const failing = await recentlyFailingRails(db, contenders.map((c) => c.partnerId), now);
 
   for (const c of contenders) {
+    if (failing.has(c.partnerId)) continue;
     try {
       const integrations = await integrationsStore.getIntegrations(c.partnerId);
       const providerType = integrations.payment.providerType ?? '';

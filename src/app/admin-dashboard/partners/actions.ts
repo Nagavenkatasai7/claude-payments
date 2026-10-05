@@ -73,6 +73,7 @@ import type {
 } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -474,6 +475,8 @@ const SUPPORTED_CURRENCIES: ReadonlySet<string> = new Set(
   Object.values(DEFAULT_CURRENCY_FOR_COUNTRY),
 );
 
+const MAX_MARGIN_BPS = Math.round(MAX_ROUTE_PREMIUM * 10_000);
+
 function parseCurrency(v: unknown): CurrencyCode {
   const s = String(v ?? '').trim().toUpperCase();
   if (!SUPPORTED_CURRENCIES.has(s)) throw new Error(`Unsupported currency: ${s || '(empty)'}.`);
@@ -495,8 +498,10 @@ export async function savePricingAction(formData: FormData): Promise<void> {
   let marginBps: number | null = null; // empty input ⇒ explicit null ⇒ clear
   if (raw !== '') {
     const n = Number(raw);
-    if (!Number.isInteger(n) || Math.abs(n) > 10_000) {
-      throw new Error('Margin must be an integer between -10000 and 10000 basis points.');
+    // Smart-routing R0 fix A: ±500 bps mirrors the router's sanity band
+    // (MAX_ROUTE_PREMIUM, 5% above mid); a wider margin would only be ignored.
+    if (!Number.isInteger(n) || Math.abs(n) > MAX_MARGIN_BPS) {
+      throw new Error(`Margin must be an integer between -${MAX_MARGIN_BPS} and ${MAX_MARGIN_BPS} basis points.`);
     }
     marginBps = n;
   }

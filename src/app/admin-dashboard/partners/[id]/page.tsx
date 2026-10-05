@@ -834,9 +834,9 @@ export default async function PartnerDetailPage({
                           name="marginBps"
                           type="number"
                           step="1"
-                          min="-10000"
-                          max="10000"
-                          placeholder="e.g. 25 — empty clears"
+                          min="-500"
+                          max="500"
+                          placeholder="e.g. 25 (−500 to 500), empty clears"
                         />
                       </div>
                     </div>

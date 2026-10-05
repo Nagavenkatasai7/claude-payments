@@ -63,6 +63,17 @@ export function resolvePartnerBranding(
 export const DEFAULT_DELIVERY_BUSINESS_DAYS = 1;
 export const MAX_DELIVERY_BUSINESS_DAYS = 10;
 
+/**
+ * Smart-routing R0 fix C: the delivery time the chat, the approve card and the
+ * portal show, from the SAME business-day count as the Reg E disclosure's
+ * "date available" (resolvePartnerDisclosure().deliveryBusinessDays), so the
+ * bot never promises faster than the legal estimate.
+ */
+export function deliveryEstimatePhrase(businessDays: number): string {
+  if (businessDays === 0) return 'the same business day';
+  return `within ${businessDays} business day${businessDays === 1 ? '' : 's'}`;
+}
+
 export interface ResolvedDisclosure {
   demo: boolean;
   configured: boolean; // staff supplied the licensed entity (never true for demo)
