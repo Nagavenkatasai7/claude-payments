@@ -70,6 +70,64 @@ describe('parseIncoming', () => {
     },
   );
 
+  // Step 1 voice notes: an audio message keeps its Meta media id (digits only,
+  // it goes into a Graph URL path) and a sanitised mime type. The webhook's
+  // audio.url is never read.
+  function audioWebhook(audio: Record<string, unknown>) {
+    const body = textWebhook() as { entry: { changes: { value: { messages: Record<string, unknown>[] } }[] }[] };
+    const msg = body.entry[0].changes[0].value.messages[0];
+    msg.type = 'audio';
+    delete msg.text;
+    msg.audio = audio;
+    return body;
+  }
+
+  it('audio with a numeric media id → unsupported + media { id, mimeType }', () => {
+    const body = audioWebhook({
+      id: '1234567890123456',
+      mime_type: 'audio/ogg; codecs=opus',
+      voice: true,
+      sha256: 'abc',
+      url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1',
+    });
+    expect(parseIncoming(body)).toEqual({
+      kind: 'unsupported',
+      from: '15551234567',
+      mediaType: 'audio',
+      messageId: 'wamid.ABC',
+      media: { id: '1234567890123456', mimeType: 'audio/ogg; codecs=opus' },
+    });
+  });
+
+  it('a media id that is not 1-32 digits is dropped (no media)', () => {
+    for (const id of ['../x', '12a', '', '1'.repeat(33), 42]) {
+      expect(parseIncoming(audioWebhook({ id, mime_type: 'audio/ogg' })), String(id)).toEqual({
+        kind: 'unsupported',
+        from: '15551234567',
+        mediaType: 'audio',
+        messageId: 'wamid.ABC',
+      });
+    }
+  });
+
+  it('a bad or oversized mime type becomes "" (the id is kept); case is folded', () => {
+    for (const mime of ['audio/ogg\nX-Evil: 1', 'audio/<script>', 'a'.repeat(101), 7, undefined]) {
+      const out = parseIncoming(audioWebhook({ id: '99', mime_type: mime }));
+      expect(out && out.kind === 'unsupported' && out.media, String(mime)).toEqual({ id: '99', mimeType: '' });
+    }
+    const upper = parseIncoming(audioWebhook({ id: '99', mime_type: 'Audio/OGG; Codecs=Opus' }));
+    expect(upper && upper.kind === 'unsupported' && upper.media).toEqual({ id: '99', mimeType: 'audio/ogg; codecs=opus' });
+  });
+
+  it('an image with an id is unchanged (only audio carries media)', () => {
+    const body = audioWebhook({ id: '99', mime_type: 'image/jpeg' });
+    const msg = body.entry[0].changes[0].value.messages[0];
+    msg.type = 'image';
+    msg.image = msg.audio;
+    delete msg.audio;
+    expect(parseIncoming(body)).toEqual({ kind: 'unsupported', from: '15551234567', mediaType: 'image', messageId: 'wamid.ABC' });
+  });
+
   it('a reaction (and any unknown type) still parses to null', () => {
     for (const type of ['reaction', 'system', 'mystery']) {
       const body = textWebhook();

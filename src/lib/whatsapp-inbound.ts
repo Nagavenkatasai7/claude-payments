@@ -5,7 +5,6 @@ import {
   OPT_OUT_REPLY,
   OPT_IN_REPLY,
   optOutReminder,
-  MEDIA_REPLY,
 } from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
 import { getStore, type Store } from '@/lib/store';
@@ -27,7 +26,17 @@ import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding, DEFAULT_BRAND } from '@/lib/partner-config';
 import { parseMetaAccountEvents, metaAccountEventAlert } from '@/lib/meta-account-events';
-import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
+import type { ButtonTap, InboundMedia, PartnerId, TurnContext } from '@/lib/types';
+import {
+  mediaReply,
+  voiceNotesOn,
+  voiceSenderEligible,
+  voiceSettingsFromEnv,
+  VOICE_FAIL_REPLY,
+  VOICE_PLACEHOLDER,
+  VOICE_UNSUPPORTED_REPLY,
+} from '@/lib/voice-notes';
+import { isOggOpusMime } from '@/lib/voice-transcribe';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
@@ -423,11 +432,34 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
 
   // Program-Fix 49A (whatsapp-08): media the bot cannot read gets ONE honest
   // reply (the wamid dedupe key makes a redelivery silent) and no agent turn.
-  // Never downloaded.
+  // Step 1 (voice-notes.ts): a WhatsApp voice note from a beta sender on the
+  // shared number, with the voice.notes switch on and Azure configured, falls
+  // through to an agent turn carrying its media id; the WORKER downloads and
+  // transcribes it after the per-phone gate. The switch is read only for a beta
+  // sender, so everyone else costs nothing extra and gets MEDIA_REPLY byte for
+  // byte. Nothing is downloaded here.
+  let voice: InboundMedia | undefined;
   if (incoming.kind === 'unsupported') {
-    logWarn('whatsapp.unsupported_type', incoming.mediaType, { tenant: tenantId });
-    await enqueueReply(deps, incoming, MEDIA_REPLY);
-    return true;
+    const settings = voiceSettingsFromEnv();
+    const voiceOn =
+      voiceSenderEligible({ routedPartnerId, from: incoming.from }, settings) && (await voiceNotesOn(getDb(), settings));
+    if (voiceOn && incoming.mediaType === 'audio') {
+      if (!incoming.media) {
+        logWarn('whatsapp.voice_note', 'audio without a usable media id', { tenant: tenantId });
+        await enqueueReply(deps, incoming, VOICE_FAIL_REPLY);
+        return true;
+      }
+      if (!isOggOpusMime(incoming.media.mimeType)) {
+        logWarn('whatsapp.voice_note', 'audio is not a WhatsApp voice note (Ogg/Opus)', { tenant: tenantId });
+        await enqueueReply(deps, incoming, VOICE_UNSUPPORTED_REPLY);
+        return true;
+      }
+      voice = incoming.media;
+    } else {
+      logWarn('whatsapp.unsupported_type', incoming.mediaType, { tenant: tenantId });
+      await enqueueReply(deps, incoming, mediaReply(voiceOn));
+      return true;
+    }
   }
 
   // D12: the "is this a new conversation" marker is per (tenant, phone) too —
@@ -458,7 +490,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   let buttonTap: ButtonTap | undefined;
   if (incoming.kind === 'text') {
     messageText = incoming.text;
-  } else {
+  } else if (incoming.kind === 'button') {
     const parsed = parseButtonId(incoming.buttonId);
     if (!parsed) {
       messageText = '(unrecognized button)';
@@ -466,6 +498,10 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
       buttonTap = parsed;
       messageText = synthesizeButtonText(parsed);
     }
+  } else {
+    // Step 1: a voice note. The worker replaces this with the transcript; only
+    // an older build (which ignores `media`) ever shows it to the model.
+    messageText = VOICE_PLACEHOLDER;
   }
 
   const turn: TurnContext = {
@@ -473,15 +509,23 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
     buttonTap,
     isNewCustomer: wasCreated,
     tierReminderDayOfWindow,
+    ...(voice ? { inputModality: 'voice' as const } : {}),
   };
 
   // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped). The
   // payload carries routedPartnerId (NOT the creds themselves) so the worker
   // re-resolves the partner's WhatsApp credentials at run time. Never the
-  // BSUID / username: those stay in memory.
+  // BSUID / username: those stay in memory. Step 1: a voice turn adds the Meta
+  // media id and mime type only (never the audio or a download URL).
   await outbox.enqueue(
     'agent.turn',
-    { phone: incoming.from, messageText: stripNul(messageText), turn, routedPartnerId },
+    {
+      phone: incoming.from,
+      messageText: stripNul(messageText),
+      turn,
+      routedPartnerId,
+      ...(voice ? { media: { id: voice.id, mimeType: voice.mimeType } } : {}),
+    },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
   await afterInsert('lastmsg', () => store.recordInboundNow(tenantId, incoming.from), tenantId);

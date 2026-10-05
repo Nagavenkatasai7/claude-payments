@@ -49,6 +49,8 @@ import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { safeFetch } from '@/lib/safe-fetch';
 import { pingDeadMan } from '@/lib/dead-man-ping';
 import { chat } from '@/lib/ollama';
+import { transcribeVoiceNote } from '@/lib/voice-transcribe';
+import { voiceSettingsFromEnv } from '@/lib/voice-notes';
 import { createAgent } from '@/lib/agent';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getScheduleStore } from '@/lib/schedule-store';
@@ -187,6 +189,20 @@ async function run(req: NextRequest): Promise<NextResponse> {
       });
       // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
       return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });
+    },
+    // Step 1 voice notes (shared number only): Meta media download with the
+    // shared number's token, then Azure AI Speech. Plain fetch, not safeFetch:
+    // the hosts are fixed (graph.facebook.com, lookaside.fbsbx.com,
+    // <region>.stt.speech.microsoft.com) and the audio is larger than its 64 KB cap.
+    transcribeVoice: (ref, signal) => {
+      const voice = voiceSettingsFromEnv();
+      return transcribeVoiceNote(ref, {
+        fetchFn: fetch,
+        graphToken: env.whatsappToken,
+        phoneNumberId: env.whatsappPhoneNumberId,
+        speech: { key: voice.key, region: voice.region, language: voice.language },
+        signal,
+      });
     },
   };
 

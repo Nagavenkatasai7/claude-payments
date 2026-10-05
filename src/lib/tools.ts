@@ -45,6 +45,7 @@ import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { VOICE_TYPED_ONLY_TOOLS } from './voice-notes';
 import { botScheduleAuditEvent, type BotScheduleAuditAction } from './bot-schedule-audit';
 import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './sender-identity';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
@@ -1436,6 +1437,14 @@ export async function executeTool(
       phone: ctx.phone,
     });
     return { error: 'not available here' };
+  }
+  // Step 1 voice notes (owner decision Q10): invoices and seller sign-up have no
+  // pay page or OTP behind them, so a misheard phone, amount or name would bill
+  // or name the wrong party. In a voice turn they are refused; the customer's
+  // typed "yes" (a text turn) runs them normally.
+  if (ctx.turn?.inputModality === 'voice' && VOICE_TYPED_ONLY_TOOLS.has(name)) {
+    logWarn('voice.tool-blocked', `typed-only tool refused in a voice turn: ${name}`, { phone: ctx.phone });
+    return { error: 'This needs a typed confirmation. Read back the details and ask the customer to type yes.' };
   }
   switch (name) {
     case 'get_quote':

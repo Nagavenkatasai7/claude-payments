@@ -6642,3 +6642,34 @@ describe('Step 0 §3.6: the daily reference rate date in chat', () => {
     expect('rate_date' in undated).toBe(false);
   });
 });
+
+// Step 1 voice notes (owner decision Q10): invoices and seller sign-up have no
+// pay page or OTP behind them, so they are refused in a voice turn. A typed
+// turn (the customer types "yes" after the read-back) runs them as before.
+describe('voice turns: typed-only tools are refused at dispatch', () => {
+  const VOICE_GATE = /typed confirmation/;
+
+  it.each([
+    ['create_invoice', { buyer_phone: '15550000002', amount: 500, currency: 'USD', description: 'Consulting' }],
+    ['register_seller', { business_name: 'Fake Test Traders' }],
+  ] as const)('%s in a voice turn → the gate error, nothing written', async (name, args) => {
+    const ctx = await buildCtx(fakeRedis());
+    const before = await db.execute(sql`SELECT count(*)::int AS n FROM sellers`);
+    const r = await executeTool(name, { ...args }, { ...ctx, turn: { isNewConversation: false, inputModality: 'voice' } });
+    expect(String((r as { error?: unknown }).error)).toMatch(VOICE_GATE);
+    expect(await db.execute(sql`SELECT count(*)::int AS n FROM sellers`)).toEqual(before);
+    expect(await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)).toMatchObject({ rows: [{ n: 0 }] });
+  });
+
+  it('a typed turn is not gated', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Fake Test Traders' }, ctx);
+    expect(String((r as { error?: unknown }).error ?? '')).not.toMatch(VOICE_GATE);
+  });
+
+  it('look-up tools still run in a voice turn', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('validate_phone', { phone: '15550000002' }, { ...ctx, turn: { isNewConversation: false, inputModality: 'voice' } });
+    expect(String((r as { error?: unknown }).error ?? '')).not.toMatch(VOICE_GATE);
+  });
+});

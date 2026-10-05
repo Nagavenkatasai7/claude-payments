@@ -42,11 +42,27 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect(FLAG_KEYS.sort()).toEqual(['sends.paused', 'settlement.paused']);
-    for (const k of FLAG_KEYS) {
+    expect([...FLAG_KEYS].sort()).toEqual(['sends.paused', 'settlement.paused', 'voice.notes']);
+    for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
     }
+  });
+
+  it('voice.notes is an ordinary feature switch (global or one partner), not a kill switch', () => {
+    const def = FLAG_DEFINITIONS['voice.notes'];
+    expect(def.label).toBe('Voice notes');
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner']);
+    expect(isKnownFlagKey('voice.notes')).toBe(true);
+  });
+
+  it('voice.notes is off with no row and on with a global or default-partner row', async () => {
+    const db = await freshDb();
+    expect(await isFlagOn(db, 'voice.notes', { partnerId: 'default' })).toBe(false);
+    await setFlag(db, 'voice.notes', 'partner', 'default');
+    expect(await isFlagOn(db, 'voice.notes', { partnerId: 'default' })).toBe(true);
+    expect(await isFlagOn(db, 'voice.notes', { partnerId: 'acme' })).toBe(false);
   });
 
   it('isKnownFlagKey accepts only defined keys', () => {

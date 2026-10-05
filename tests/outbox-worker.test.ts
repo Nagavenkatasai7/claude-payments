@@ -3025,4 +3025,14 @@ describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { r
     expect(r.status).toBe('done');
     expect(r.payload).toEqual({ phone: '1', turn: {} });
   });
+
+  it('Step 1: drops several keys in one statement (a voice turn loses messageText AND media)', async () => {
+    await outbox.enqueue('agent.turn', { phone: '1', messageText: 'placeholder', turn: {}, media: { id: '42', mimeType: 'audio/ogg' } });
+    const [row] = await outbox.claimBatch(1, 'w1');
+    expect(await outbox.markDone(row.id, 'someone-else', { dropPayloadKey: ['messageText', 'media'] })).toBe(false);
+    expect(await outbox.markDone(row.id, 'w1', { dropPayloadKey: ['messageText', 'media'] })).toBe(true);
+    const [r] = ((await db.execute(sql`SELECT status, payload FROM outbox WHERE id = ${row.id}`)) as unknown as { rows: Array<{ status: string; payload: Record<string, unknown> }> }).rows;
+    expect(r.status).toBe('done');
+    expect(r.payload).toEqual({ phone: '1', turn: {} });
+  });
 });

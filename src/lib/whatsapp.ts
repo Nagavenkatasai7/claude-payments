@@ -18,7 +18,7 @@ export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
 // The transfer_delivered template was created with "English" => language code 'en'.
 export const RECIPIENT_TEMPLATE_LANG = 'en';
 
-import type { IncomingMessage, UnsupportedMediaType } from './types';
+import type { InboundMedia, IncomingMessage, UnsupportedMediaType } from './types';
 import { isMetaAccountField } from './meta-account-events';
 import { isOptOutKeyword, isResumeKeyword } from './consent';
 export type { IncomingMessage }; // re-export for any caller using @/lib/whatsapp
@@ -53,6 +53,9 @@ interface RawMessage {
     button_reply?: { id?: string; title?: string };
     list_reply?: { id?: string; title?: string };
   };
+  // Step 1 voice notes. Only id and mime_type are read; the webhook's `url` is
+  // never used (the worker asks Graph for a fresh one with the media id).
+  audio?: { id?: unknown; mime_type?: unknown };
 }
 
 interface RawContact {
@@ -236,18 +239,42 @@ function parseMessageItem(message: RawMessage | undefined, contacts?: RawContact
     if (!chosen) return null;
     return { kind: 'text', from: message.from, text: chosen, messageId: message.id, ...ident };
   }
-  // Program-Fix 49A (whatsapp-08): media the bot cannot read. Never downloaded.
+  // Program-Fix 49A (whatsapp-08): media the bot cannot read. Step 1: an audio
+  // message keeps its media id so a beta voice note can be transcribed by the
+  // worker (whatsapp-inbound.ts decides); everything else is never downloaded.
   if (message.type && UNSUPPORTED_TYPES.has(message.type)) {
+    const media = message.type === 'audio' ? audioMediaOf(message.audio) : undefined;
     return {
       kind: 'unsupported',
       from: message.from,
       mediaType: message.type as UnsupportedMediaType,
       messageId: message.id,
+      ...(media ? { media } : {}),
       ...ident,
     };
   }
   // reaction, system, unknown ⇒ ignored (no reply).
   return null;
+}
+
+/** A Meta media id: digits only (it is interpolated into a Graph URL path). */
+export const MEDIA_ID_RE = /^\d{1,32}$/;
+
+/**
+ * A mime type as Meta sends it ("audio/ogg; codecs=opus"), lower-cased, or ''
+ * when it is not a plain `type/subtype[; params]` of at most 100 characters (no
+ * control characters or newlines). Pure.
+ */
+export function safeMime(v: unknown): string {
+  if (typeof v !== 'string') return '';
+  const m = v.trim().toLowerCase();
+  return m.length <= 100 && /^[a-z0-9.+-]+\/[a-z0-9.+-]+(; ?[a-z0-9=.+\- ;]+)?$/.test(m) ? m : '';
+}
+
+function audioMediaOf(audio: RawMessage['audio']): InboundMedia | undefined {
+  const id = audio?.id;
+  if (typeof id !== 'string' || !MEDIA_ID_RE.test(id)) return undefined;
+  return { id, mimeType: safeMime(audio?.mime_type) };
 }
 
 /** The first message of entry[0].changes[0] (legacy shape — parseWebhook reads them all). */
@@ -364,8 +391,11 @@ const UNSUPPORTED_TYPES: ReadonlySet<string> = new Set<UnsupportedMediaType>([
 const RATE_LIMIT_MAX_RETRIES = 2; // 1 initial attempt + 2 retries = 3 total
 const RATE_LIMIT_BASE_DELAY_MS = 6500; // 6s window for 131056 + small margin
 
+/** The one Graph API version pin (sends, media downloads, partner-number checks). */
+export const GRAPH_VERSION = 'v21.0';
+
 const GRAPH_MESSAGES_URL = (creds?: WaCreds) =>
-  `https://graph.facebook.com/v21.0/${creds?.phoneNumberId ?? env.whatsappPhoneNumberId}/messages`;
+  `https://graph.facebook.com/${GRAPH_VERSION}/${creds?.phoneNumberId ?? env.whatsappPhoneNumberId}/messages`;
 
 function authedJsonInit(payload: unknown, creds?: WaCreds): RequestInit {
   return {

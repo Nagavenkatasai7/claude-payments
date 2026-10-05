@@ -20,10 +20,12 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 
-// /admin-dashboard/switches — kill switches (Release safety Batch 2 part A).
-// Platform ADMIN only. Each switch can be on for every partner and corridor, for
-// one partner, or for one corridor (destination country). Turning one on or off
-// needs a reason; the action writes an audit row and sends one ops alert. A
+// /admin-dashboard/switches — kill switches (Release safety Batch 2 part A) and
+// feature switches (voice notes). Platform ADMIN only. Each switch can be on for
+// every partner and corridor, for one partner, or for one corridor (destination
+// country), as far as its definition's `scopes` allow (the form offers only
+// those). Turning one on or off needs a reason; the action writes an audit row,
+// and a kill switch also sends one ops alert. A
 // switch takes effect on every server instance within 15 seconds, without a
 // deploy. This page is only a view and a form: applyFlagChange is the guard.
 
@@ -66,7 +68,7 @@ export default async function SwitchesPage({
             <div className="sh-page-title">Switches</div>
             <div className="sh-page-sub">
               Kill switches stop money movement at once, without a deploy. A change reaches every server within 15 seconds.
-              Each change needs a reason, writes an audit row and sends one ops alert. Sanctions screening is not a switch.
+              Each change needs a reason and writes an audit row; a kill switch also sends one ops alert. Sanctions screening is not a switch.
             </div>
           </div>
         </div>
@@ -80,7 +82,7 @@ export default async function SwitchesPage({
         {params.ok === '1' && !error && (
           <Alert className="mb-4" role="status">
             <AlertTitle>Switch saved</AlertTitle>
-            <AlertDescription>The change is in the audit log. The ops alert is on its way.</AlertDescription>
+            <AlertDescription>The change is in the audit log. A kill switch change also sends an ops alert.</AlertDescription>
           </Alert>
         )}
 
@@ -95,7 +97,7 @@ export default async function SwitchesPage({
                 <CardTitle className="flex items-center gap-2">
                   {def.label}
                   {on.length > 0 ? (
-                    <Badge variant="destructive">ON for {on.length} {on.length === 1 ? 'scope' : 'scopes'}</Badge>
+                    <Badge variant={def.killSwitch ? 'destructive' : 'default'}>ON for {on.length} {on.length === 1 ? 'scope' : 'scopes'}</Badge>
                   ) : (
                     <Badge variant="secondary">off</Badge>
                   )}
@@ -143,21 +145,25 @@ export default async function SwitchesPage({
                   <div className="space-y-1.5">
                     <Label htmlFor={`${key}-scope`}>Turn on for</Label>
                     <select id={`${key}-scope`} name="scope" className={SELECT_CLASS} defaultValue="global:">
-                      <option value="global:">All partners and corridors</option>
-                      <optgroup label="One partner">
-                        {partners.map((p) => (
-                          <option key={p.id} value={`partner:${p.id}`}>{p.name} ({p.id})</option>
-                        ))}
-                      </optgroup>
-                      <optgroup label="One corridor (destination country)">
-                        {SUPPORTED_DESTINATIONS.map((c) => (
-                          <option key={c} value={`corridor:${c}`}>{c}</option>
-                        ))}
-                      </optgroup>
+                      {def.scopes.includes('global') && <option value="global:">All partners and corridors</option>}
+                      {def.scopes.includes('partner') && (
+                        <optgroup label="One partner">
+                          {partners.map((p) => (
+                            <option key={p.id} value={`partner:${p.id}`}>{p.name} ({p.id})</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {def.scopes.includes('corridor') && (
+                        <optgroup label="One corridor (destination country)">
+                          {SUPPORTED_DESTINATIONS.map((c) => (
+                            <option key={c} value={`corridor:${c}`}>{c}</option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </div>
                   <ReasonField id={`${key}-reason`} />
-                  <Button type="submit" variant="destructive">Turn on</Button>
+                  <Button type="submit" variant={def.killSwitch ? 'destructive' : 'default'}>Turn on</Button>
                 </form>
 
                 {off.length > 0 && (

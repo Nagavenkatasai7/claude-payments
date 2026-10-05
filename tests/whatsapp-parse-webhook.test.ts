@@ -104,6 +104,15 @@ describe('parseWebhook', () => {
     expect(c.dropped).toEqual([]);
   });
 
+  it('an audio message keeps its media through parseWebhook (Step 1 voice notes)', () => {
+    const [c] = parseWebhook(env(change({ messages: [
+      { from: '15550000001', id: 'wa1', type: 'audio', audio: { id: '4242', mime_type: 'audio/ogg; codecs=opus', voice: true } },
+    ] })));
+    expect(c.messages).toEqual([
+      { kind: 'unsupported', from: '15550000001', mediaType: 'audio', messageId: 'wa1', media: { id: '4242', mimeType: 'audio/ogg; codecs=opus' } },
+    ]);
+  });
+
   it('garbage never throws', () => {
     for (const b of [null, undefined, 'x', 42, {}, { entry: 'x' }, { entry: [null, { changes: [null, { value: null }] }] }]) {
       expect(() => parseWebhook(b)).not.toThrow();

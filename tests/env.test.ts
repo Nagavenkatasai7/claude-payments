@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { env } from '@/lib/env';
 
 describe('env', () => {
@@ -146,6 +146,52 @@ describe('env', () => {
       expect(() => env.whatsappToken).toThrow(/WHATSAPP_TOKEN/);
       set('META_APP_SECRET', ' \n');
       expect(env.metaAppSecret).toBe('');
+    });
+  });
+
+  // Step 1 voice notes: optional settings (never boot-asserted), read at call
+  // time so a drain sees the current value and vi.stubEnv reaches them.
+  describe('voice-note settings (Azure AI Speech)', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('trims the key and region; unset is empty', () => {
+      vi.stubEnv('AZURE_SPEECH_KEY', '');
+      vi.stubEnv('AZURE_SPEECH_REGION', '');
+      expect(env.azureSpeechKey).toBe('');
+      expect(env.azureSpeechRegion).toBe('');
+      vi.stubEnv('AZURE_SPEECH_KEY', ' fake-speech-key\n');
+      vi.stubEnv('AZURE_SPEECH_REGION', ' EastUS\n');
+      expect(env.azureSpeechKey).toBe('fake-speech-key');
+      expect(env.azureSpeechRegion).toBe('eastus');
+    });
+
+    it('a region that is not a plain region identifier reads as unset (it becomes a host name)', () => {
+      for (const bad of ['east us', 'evil.example.com/x', 'eastus#', 'a', 'x'.repeat(41)]) {
+        vi.stubEnv('AZURE_SPEECH_REGION', bad);
+        expect(env.azureSpeechRegion, bad).toBe('');
+      }
+    });
+
+    it('the language is en-IN by default and accepts only en-IN or en-US', () => {
+      vi.stubEnv('AZURE_SPEECH_LANGUAGE', '');
+      expect(env.azureSpeechLanguage).toBe('en-IN');
+      vi.stubEnv('AZURE_SPEECH_LANGUAGE', ' en-US\n');
+      expect(env.azureSpeechLanguage).toBe('en-US');
+      vi.stubEnv('AZURE_SPEECH_LANGUAGE', 'en-in');
+      expect(env.azureSpeechLanguage).toBe('en-IN');
+      for (const other of ['hi-IN', 'en-GB', 'fr', 'en-IN&format=simple']) {
+        vi.stubEnv('AZURE_SPEECH_LANGUAGE', other);
+        expect(env.azureSpeechLanguage, other).toBe('en-IN');
+      }
+    });
+
+    it('the beta phone list splits on commas, trims and drops empty entries', () => {
+      vi.stubEnv('VOICE_NOTES_BETA_PHONES', '');
+      expect(env.voiceNotesBetaPhones).toEqual([]);
+      vi.stubEnv('VOICE_NOTES_BETA_PHONES', ' +15550000001 , 15550000002,, \n');
+      expect(env.voiceNotesBetaPhones).toEqual(['+15550000001', '15550000002']);
+      vi.stubEnv('VOICE_NOTES_BETA_PHONES', '*');
+      expect(env.voiceNotesBetaPhones).toEqual(['*']);
     });
   });
 });
