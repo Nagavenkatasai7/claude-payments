@@ -274,9 +274,10 @@ export function createTransferRepo(
       // Step 0 FX-7: the rate provenance columns are write-once the same way.
       const {
         environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
+        fxExpiresAt: _fxExp,
         ...updatable
       } = row;
-      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv;
+      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {

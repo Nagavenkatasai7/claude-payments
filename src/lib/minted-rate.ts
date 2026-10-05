@@ -12,6 +12,10 @@ import type { CurrencyCode, Transfer } from './types';
 // awaiting_payment, uncaptured, not partner-API-minted).
 //
 // Rules, in order:
+//   0. a row priced on a partner PUSH (fxExpiresAt stamped at mint) is refused
+//      'routed_stale' from that expiry on, even inside the lock: the partner's
+//      offer is gone and its rail may refuse the instruction (review finding 1).
+//      A stored expiry that does not parse fails closed. NULL ⇒ no push, rule 1;
 //   1. inside the lock (default: FX_MAX_AGE_MS from the rate's fetch time, else
 //      createdAt) → OK, no rate fetch;
 //   2. a best-rate ROUTED row past the lock → refuse 'routed_stale' (the
@@ -19,7 +23,8 @@ import type { CurrencyCode, Transfer } from './types';
 //   3. otherwise fetch both legs (the fixing-date refusal applies here even
 //      while FX_FIXING_GATE_ENABLED is off — N12) and refuse 'drift' when the
 //      current cross-rate moved more than MINTED_RATE_DRIFT_TOLERANCE either way.
-// RateUnavailableError propagates (the route answers 503 fx_unavailable).
+// RateUnavailableError (and a QuoteError from a malformed cross-rate)
+// propagates; the route answers 503 fx_unavailable for both.
 
 /** How long a minted rate is honoured without a re-check, and from when. */
 export interface MintedRateLock {
@@ -52,6 +57,10 @@ export function mintedRateVerdict(
   current: number | null,
   lock: MintedRateLock = mintedRateLockFor(t),
 ): MintedRateVerdict {
+  if (t.fxExpiresAt !== undefined) {
+    const expiresAt = Date.parse(t.fxExpiresAt);
+    if (!Number.isFinite(expiresAt) || now >= expiresAt) return { ok: false, reason: 'routed_stale' };
+  }
   const createdAt = Date.parse(t.createdAt);
   const fxAt = t.fxFetchedAt ? Date.parse(t.fxFetchedAt) : Number.NaN;
   const anchorAt = lock.anchor === 'fx' && Number.isFinite(fxAt) ? fxAt : createdAt;

@@ -138,6 +138,7 @@ export function transferToRow(
     fxFetchedAt: t.fxFetchedAt ? new Date(t.fxFetchedAt) : null,
     fxSource: t.fxSource ?? null,
     fxProvider: t.fxProvider ?? null,
+    fxExpiresAt: t.fxExpiresAt ? new Date(t.fxExpiresAt) : null,
     createdAt: new Date(t.createdAt),
     paidAt: t.paidAt ? new Date(t.paidAt) : null,
     deliveredAt: t.deliveredAt ? new Date(t.deliveredAt) : null,
@@ -243,5 +244,7 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (fxFetchedAt) t.fxFetchedAt = fxFetchedAt;
   if (row.fxSource) t.fxSource = row.fxSource as FxRateOrigin;
   if (row.fxProvider) t.fxProvider = row.fxProvider;
+  const fxExpiresAt = isoOpt(row.fxExpiresAt);
+  if (fxExpiresAt) t.fxExpiresAt = fxExpiresAt;
   return t;
 }

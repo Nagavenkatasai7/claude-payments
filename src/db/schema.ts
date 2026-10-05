@@ -154,6 +154,9 @@ export const transfers = pgTable(
     fxFetchedAt: timestamp('fx_fetched_at', { withTimezone: true }),
     fxSource: text('fx_source'),
     fxProvider: text('fx_provider'),
+    // Review finding 1: the partner PUSH's expiry (the draft's routeExpiresAt);
+    // the pay-time rate check refuses the row from it on. NULL ⇒ not a push.
+    fxExpiresAt: timestamp('fx_expires_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),

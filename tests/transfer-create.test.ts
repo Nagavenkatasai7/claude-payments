@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
+import { checkMintedRate } from '@/lib/minted-rate';
 import { assertQuoteOverrideFresh, createTransfer, fxProvenanceFor, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
@@ -681,6 +682,17 @@ describe('rate provenance on the minted row (Step 0 FX-7)', () => {
     expect(fxProvenanceFor(undefined, undefined, undefined)).toEqual({});
   });
 
+  it('fxProvenanceFor (pure): the push expiry is stamped when given (review finding 1), never for a B2B lock', () => {
+    const at = Date.UTC(2026, 9, 2, 15, 0, 0);
+    const exp = at + 5 * 60_000;
+    expect(fxProvenanceFor('partner_push', undefined, at, exp)).toEqual({
+      fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: new Date(at).toISOString(), fxExpiresAt: new Date(exp).toISOString(),
+    });
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined)).not.toHaveProperty('fxExpiresAt');
+    expect(fxProvenanceFor('partner_push', undefined, at, Number.NaN)).not.toHaveProperty('fxExpiresAt');
+    expect(fxProvenanceFor('b2b_lock', undefined, at, exp)).toEqual({ fxSource: 'b2b_lock' });
+  });
+
   it('re-quote: platform, the ECB provider, the fixing date and the fetch time, persisted', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     const date = dayAgo(1);
@@ -719,6 +731,26 @@ describe('rate provenance on the minted row (Step 0 FX-7)', () => {
     const routed = await store.getTransfer(r.id);
     expect(routed).toMatchObject({ fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: new Date(at).toISOString() });
     expect(routed?.fxAsOf).toBeUndefined();
+    expect(routed?.fxExpiresAt).toBeDefined();
+    expect(await store.getTransfer(p.id)).not.toHaveProperty('fxExpiresAt');
+  });
+
+  it('review finding 1: a routed mint on a push expiring in 5 min is payable at +4 min and routed_stale at +6 min', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x');
+    const mintAt = Date.now();
+    const expiresAt = mintAt + 5 * 60_000;
+    const r = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: { ...override, fxRate: 86, amountInr: 17_200, fxFetchedAt: mintAt - 60_000, fxOrigin: 'partner_push', routeExpiresAt: expiresAt },
+      settlementPartnerId: 'rail-partner-x',
+    });
+    const saved = (await store.getTransfer(r.id))!;
+    expect(saved.fxExpiresAt).toBe(new Date(expiresAt).toISOString());
+    const noFetch = { getFxRates: vi.fn(), getDestinationRates: vi.fn() };
+    expect(await checkMintedRate(saved, mintAt + 4 * 60_000, noFetch)).toEqual({ ok: true });
+    expect(await checkMintedRate(saved, mintAt + 6 * 60_000, noFetch)).toEqual({ ok: false, reason: 'routed_stale' });
+    expect(noFetch.getFxRates).not.toHaveBeenCalled();
   });
 
   it('a watchlist-blocked mint keeps the provenance too', async () => {

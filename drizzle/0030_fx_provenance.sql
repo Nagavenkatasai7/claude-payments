@@ -1,8 +1,9 @@
 -- 0030 — Step 0 FX-7: rate provenance on "transfers" (fixing date, fetch time,
--- pricing source, provider). Stamped once at mint; read by ops and the pay-time
--- rate check (src/lib/minted-rate.ts).
+-- pricing source, provider), plus the partner push's expiry (fx_expires_at,
+-- review finding 1: the pay-time check ends the rate lock there). Stamped once
+-- at mint; read by ops and the pay-time rate check (src/lib/minted-rate.ts).
 --
--- PURELY ADDITIVE: four nullable ADD COLUMNs (no DEFAULT, no CHECK, no index,
+-- PURELY ADDITIVE: five nullable ADD COLUMNs (no DEFAULT, no CHECK, no index,
 -- no backfill, no DROP). NULL on every existing and every old-build row.
 --
 -- SAFE FOR THE BUILD ALREADY IN PRODUCTION: drizzle selects explicit column
@@ -16,10 +17,11 @@
 -- long transaction.
 --
 -- Rollback: revert the code FIRST (the new build selects these columns), then
---   ALTER TABLE "transfers" DROP COLUMN "fx_provider", DROP COLUMN "fx_source",
---     DROP COLUMN "fx_fetched_at", DROP COLUMN "fx_as_of";
+--   ALTER TABLE "transfers" DROP COLUMN "fx_expires_at", DROP COLUMN "fx_provider",
+--     DROP COLUMN "fx_source", DROP COLUMN "fx_fetched_at", DROP COLUMN "fx_as_of";
 SET LOCAL lock_timeout = '5s';--> statement-breakpoint
 ALTER TABLE "transfers" ADD COLUMN "fx_as_of" date;--> statement-breakpoint
 ALTER TABLE "transfers" ADD COLUMN "fx_fetched_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "transfers" ADD COLUMN "fx_source" text;--> statement-breakpoint
-ALTER TABLE "transfers" ADD COLUMN "fx_provider" text;
+ALTER TABLE "transfers" ADD COLUMN "fx_provider" text;--> statement-breakpoint
+ALTER TABLE "transfers" ADD COLUMN "fx_expires_at" timestamp with time zone;

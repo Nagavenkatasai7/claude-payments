@@ -124,3 +124,49 @@ describe('checkMintedRate (fetches only when the lock has passed)', () => {
     await expect(checkMintedRate(gbp, NOW, d)).rejects.toMatchObject({ reason: 'stale' });
   });
 });
+
+// Review finding 1: a row priced on a partner PUSH stops being payable when that
+// push expires (fxExpiresAt, stamped at mint), even inside the FX_MAX_AGE_MS
+// lock. The route runs this check only under FX_PAY_RATE_CHECK_ENABLED.
+describe('push expiry ends the lock (fxExpiresAt)', () => {
+  const MIN = 60_000;
+  const MINT = NOW;
+  const pushed = (o: Partial<Transfer> = {}) => row({
+    settlementPartnerId: 'p_rail', fxSource: 'partner_push', fxProvider: 'partner',
+    createdAt: iso(MINT), fxFetchedAt: iso(MINT - MIN), fxExpiresAt: iso(MINT + 5 * MIN), ...o,
+  });
+
+  it('a push expiring 5 min after the mint: payable at +4 min, routed_stale at +6 min and at the expiry itself', () => {
+    expect(mintedRateVerdict(pushed(), MINT + 4 * MIN, null)).toEqual({ ok: true });
+    expect(mintedRateVerdict(pushed(), MINT + 5 * MIN, null)).toEqual({ ok: false, reason: 'routed_stale' });
+    expect(mintedRateVerdict(pushed(), MINT + 6 * MIN, null)).toEqual({ ok: false, reason: 'routed_stale' });
+  });
+
+  it('checkMintedRate refuses an expired push with NO rate fetch', async () => {
+    const d = { getFxRates: vi.fn(), getDestinationRates: vi.fn() };
+    expect(await checkMintedRate(pushed(), MINT + 6 * MIN, d)).toEqual({ ok: false, reason: 'routed_stale' });
+    expect(await checkMintedRate(pushed(), MINT + 4 * MIN, d)).toEqual({ ok: true });
+    expect(d.getFxRates).not.toHaveBeenCalled();
+  });
+
+  it('the expiry also ends a longer custom lock (the Step 3 hook)', () => {
+    expect(mintedRateVerdict(pushed(), MINT + 6 * MIN, null, { lockMs: 6 * HOUR, anchor: 'created' }))
+      .toEqual({ ok: false, reason: 'routed_stale' });
+  });
+
+  it('a platform-rate row (no expiry) is unaffected', () => {
+    const platform = row({ fxSource: 'platform', createdAt: iso(MINT), fxFetchedAt: iso(MINT - MIN) });
+    expect(mintedRateVerdict(platform, MINT + 6 * MIN, null)).toEqual({ ok: true });
+  });
+
+  it('a routed row with a NULL expiry behaves as today (the FX_MAX_AGE_MS lock)', () => {
+    const legacy = pushed({ fxExpiresAt: undefined });
+    expect(mintedRateVerdict(legacy, MINT + 6 * MIN, null)).toEqual({ ok: true });
+    expect(mintedRateVerdict(legacy, MINT - MIN + FX_MAX_AGE_MS + 1, null)).toEqual({ ok: false, reason: 'routed_stale' });
+  });
+
+  it('an unparseable expiry fails closed (routed_stale, never a pass)', () => {
+    const bad = pushed({ fxExpiresAt: 'not-a-date' });
+    expect(mintedRateVerdict(bad, MINT + MIN, null)).toEqual({ ok: false, reason: 'routed_stale' });
+  });
+});

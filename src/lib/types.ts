@@ -132,6 +132,8 @@ export interface Transfer {
   fxFetchedAt?: string;         // ISO time the rate behind fxRate was fetched (the OLDEST leg)
   fxSource?: FxRateOrigin;      // which pricing produced fxRate
   fxProvider?: string;          // e.g. FX_PROVIDER_ID (rate.ts); 'partner' for a partner rate
+  fxExpiresAt?: string;         // ISO expiry of the partner PUSH that priced fxRate; the pay-time
+                                // check (minted-rate.ts) ends the lock here. Absent ⇒ no push.
 }
 
 /**

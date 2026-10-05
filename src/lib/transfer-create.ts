@@ -194,8 +194,8 @@ export function assertQuoteOverrideFresh(
   }
 }
 
-/** Step 0 FX-7: the four write-once provenance fields of a transfer row. */
-export type FxProvenance = Pick<Transfer, 'fxAsOf' | 'fxFetchedAt' | 'fxSource' | 'fxProvider'>;
+/** Step 0 FX-7: the write-once provenance fields of a transfer row (+ the push expiry, review finding 1). */
+export type FxProvenance = Pick<Transfer, 'fxAsOf' | 'fxFetchedAt' | 'fxSource' | 'fxProvider' | 'fxExpiresAt'>;
 
 /**
  * Step 0 FX-7: what a row can vouch for about the rate that priced it. Pure;
@@ -206,11 +206,15 @@ export type FxProvenance = Pick<Transfer, 'fxAsOf' | 'fxFetchedAt' | 'fxSource' 
  *     time of the mid it beat is kept (the quote's age is measured from it);
  *   - b2b_lock: a locked B2B quote, origin only (dates NULL);
  *   - no origin (a draft from before this change): only its fetch time.
+ * Review finding 1: `expiresAtMs` is the winning partner push's expiry (the
+ * draft's routeExpiresAt); stamped as fxExpiresAt so the pay-time rate check
+ * (minted-rate.ts) ends the lock there. Absent ⇒ not a push, no expiry.
  */
 export function fxProvenanceFor(
   origin: FxRateOrigin | undefined,
   asOf: string | undefined,
   fetchedAtMs: number | undefined,
+  expiresAtMs?: number,
 ): FxProvenance {
   if (origin === 'b2b_lock') return { fxSource: origin };
   const out: FxProvenance = {};
@@ -220,6 +224,7 @@ export function fxProvenanceFor(
   }
   if (asOf && (origin === 'platform' || origin === 'partner_margin')) out.fxAsOf = asOf;
   if (fetchedAtMs !== undefined && Number.isFinite(fetchedAtMs)) out.fxFetchedAt = new Date(fetchedAtMs).toISOString();
+  if (expiresAtMs !== undefined && Number.isFinite(expiresAtMs)) out.fxExpiresAt = new Date(expiresAtMs).toISOString();
   return out;
 }
 
@@ -362,8 +367,10 @@ export async function createTransferWithOutcome(
   if (input.quote) {
     assertQuoteOverrideFresh(input.quote);
     q = input.quote;
-    // Step 0 FX-7: the approved quote's own provenance (the draft's).
-    provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt);
+    // Step 0 FX-7: the approved quote's own provenance (the draft's), with the
+    // push expiry the mint just checked (review finding 1: the pay-time check
+    // ends the rate lock there).
+    provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt, q.routeExpiresAt);
   } else {
     const transferCount = await store.getTransferCount(input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);

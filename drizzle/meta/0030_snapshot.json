@@ -1,5 +1,5 @@
 {
-  "id": "00e20466-229d-494e-ba71-7492259a592f",
+  "id": "9c905f6d-c1c9-490f-868f-55a4b02ce392",
   "prevId": "1a51e6d0-6e35-4e3c-8c12-6dbc04e7acf9",
   "version": "7",
   "dialect": "postgresql",
@@ -4091,6 +4091,12 @@
         "fx_provider": {
           "name": "fx_provider",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fx_expires_at": {
+          "name": "fx_expires_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

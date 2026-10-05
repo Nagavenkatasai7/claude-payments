@@ -8,8 +8,8 @@ import { findDestructive } from '../scripts/ci/migration-guard.mjs';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
-// Step 0 FX-7 (migration 0030): four nullable, write-once provenance columns on
-// `transfers`. ADDITIVE ONLY, so it is applied to production BEFORE the merge
+// Step 0 FX-7 (migration 0030): five nullable, write-once provenance columns on
+// `transfers` (fx_expires_at: review finding 1, the partner push's expiry). ADDITIVE ONLY, so it is applied to production BEFORE the merge
 // while the old build (explicit column lists that never name them) still serves.
 
 let seq = 0;
@@ -36,13 +36,14 @@ describe('drizzle/0030_fx_provenance.sql', () => {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  it('is additive: lock_timeout, then four nullable ADD COLUMNs with no DEFAULT or constraint', () => {
+  it('is additive: lock_timeout, then five nullable ADD COLUMNs with no DEFAULT or constraint', () => {
     expect(statements[0]).toBe(`SET LOCAL lock_timeout = '5s';`);
     expect(statements.slice(1)).toEqual([
       'ALTER TABLE "transfers" ADD COLUMN "fx_as_of" date;',
       'ALTER TABLE "transfers" ADD COLUMN "fx_fetched_at" timestamp with time zone;',
       'ALTER TABLE "transfers" ADD COLUMN "fx_source" text;',
       'ALTER TABLE "transfers" ADD COLUMN "fx_provider" text;',
+      'ALTER TABLE "transfers" ADD COLUMN "fx_expires_at" timestamp with time zone;',
     ]);
   });
 
@@ -74,6 +75,7 @@ describe('transfers provenance columns (applied)', () => {
        WHERE table_name = 'transfers' AND column_name LIKE 'fx\\_%' AND column_name <> 'fx_rate' ORDER BY column_name`);
     expect(cols.map((c) => [c.column_name, c.data_type, c.is_nullable])).toEqual([
       ['fx_as_of', 'date', 'YES'],
+      ['fx_expires_at', 'timestamp with time zone', 'YES'],
       ['fx_fetched_at', 'timestamp with time zone', 'YES'],
       ['fx_provider', 'text', 'YES'],
       ['fx_source', 'text', 'YES'],
@@ -90,6 +92,10 @@ describe('transfers provenance columns (applied)', () => {
     expect(got).toMatchObject({
       fxAsOf: '2026-10-02', fxFetchedAt: '2026-10-05T12:00:00.000Z', fxSource: 'platform', fxProvider: 'frankfurter-v1-ecb',
     });
+    expect(got).not.toHaveProperty('fxExpiresAt');
+    const p = makeTransfer({ fxSource: 'partner_push', fxProvider: 'partner', fxExpiresAt: '2026-10-05T12:05:00.000Z' });
+    await repo.saveTransfer(p);
+    expect((await repo.getTransfer(p.id))?.fxExpiresAt).toBe('2026-10-05T12:05:00.000Z');
   });
 
   it('a row with no provenance reads with the fields absent (old-build and legacy rows)', async () => {
@@ -101,17 +107,19 @@ describe('transfers provenance columns (applied)', () => {
     expect(got).not.toHaveProperty('fxFetchedAt');
     expect(got).not.toHaveProperty('fxSource');
     expect(got).not.toHaveProperty('fxProvider');
+    expect(got).not.toHaveProperty('fxExpiresAt');
   });
 
   it('is WRITE-ONCE: saveTransfer\'s conflict-update never changes or clears it', async () => {
     const repo = createTransferRepo(db);
-    const t = makeTransfer({ fxAsOf: '2026-10-02', fxFetchedAt: '2026-10-05T12:00:00.000Z', fxSource: 'partner_push', fxProvider: 'partner' });
+    const exp = '2026-10-05T12:05:00.000Z';
+    const t = makeTransfer({ fxAsOf: '2026-10-02', fxFetchedAt: '2026-10-05T12:00:00.000Z', fxSource: 'partner_push', fxProvider: 'partner', fxExpiresAt: exp });
     await repo.saveTransfer(t);
     // A read-modify-write of a legacy-shaped object (no provenance) and an
     // attempt to rewrite it both leave the first values in place.
-    await repo.saveTransfer({ ...t, fxAsOf: undefined, fxFetchedAt: undefined, fxSource: undefined, fxProvider: undefined, adminNote: 'x' });
-    await repo.saveTransfer({ ...t, fxAsOf: '2026-01-01', fxSource: 'platform', adminNote: 'x' });
+    await repo.saveTransfer({ ...t, fxAsOf: undefined, fxFetchedAt: undefined, fxSource: undefined, fxProvider: undefined, fxExpiresAt: undefined, adminNote: 'x' });
+    await repo.saveTransfer({ ...t, fxAsOf: '2026-01-01', fxSource: 'platform', fxExpiresAt: '2027-01-01T00:00:00.000Z', adminNote: 'x' });
     const got = await repo.getTransfer(t.id);
-    expect(got).toMatchObject({ fxAsOf: '2026-10-02', fxSource: 'partner_push', fxProvider: 'partner', adminNote: 'x' });
+    expect(got).toMatchObject({ fxAsOf: '2026-10-02', fxSource: 'partner_push', fxProvider: 'partner', fxExpiresAt: exp, adminNote: 'x' });
   });
 });
