@@ -132,7 +132,8 @@ export interface QuoteTypedInput {
 }
 
 export type QuoteTypedResult =
-  | { kind: 'quote'; quote: Quote; destinationCountry: CountryCode }
+  /** rateDate (Step 0 §3.6): the platform rate's publication date (YYYY-MM-DD), when known. */
+  | { kind: 'quote'; quote: Quote; destinationCountry: CountryCode; rateDate?: string }
   | { kind: 'kyc_required'; kycUrl: string }
   /** kycUrl only when the partner's verify-before-send gate is on and the tier is T0/Suspended. */
   | { kind: 'cap'; evaluation: CapEvaluation; kycUrl?: string }

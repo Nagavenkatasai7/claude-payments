@@ -364,6 +364,18 @@ export function rateLockLine(lockMinutes: number): string {
   return lockMinutes < 2 ? RATE_LOCK_SHORT_LINE : `Rate locked for ${lockMinutes} min.`;
 }
 
+/**
+ * Step 0 §3.6: a publication date (YYYY-MM-DD) as the card shows it ("2 Oct"),
+ * always in UTC so the day never shifts with the server's zone. Anything that
+ * is not a real calendar date gives undefined (the card then omits it).
+ */
+export function formatRateDate(asOf: string | undefined): string | undefined {
+  if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return undefined;
+  const d = new Date(`${asOf}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== asOf) return undefined;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -372,6 +384,9 @@ export function buildApproveSummary(
   fundingMethod: FundingMethod,
   destinationCurrency: CurrencyCode = 'INR',
   lockMinutes: number = RATE_LOCK_MINUTES,
+  // Step 0 §3.6: the reference rate's publication date — passed only for a
+  // platform rate. Absent or malformed ⇒ the rate line is unchanged.
+  rateDate?: string,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
@@ -401,11 +416,15 @@ export function buildApproveSummary(
     // is byte-for-byte unchanged).
     `Sending ${fmt(q.amountSource)} to ${boundUntrustedText(recipientName, NAME_MAX)}.`,
     feeLine,
-    `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
+    rateLine(`Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`, formatRateDate(rateDate)),
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     rateLockLine(lockMinutes),
   ].join('\n');
+}
+
+function rateLine(base: string, shownDate: string | undefined): string {
+  return shownDate ? `${base} (daily reference rate, ${shownDate})` : base;
 }
 
 // ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
@@ -1535,6 +1554,9 @@ async function getQuoteTool(
         // Program-Fix 33: the unit the sender pays in, server-formatted; the
         // prompt makes the model restate it verbatim ("$50.00 USD").
         amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
+        // Step 0 §3.6: the reference rate's publication date (YYYY-MM-DD), only
+        // when the quote is on the platform rate and the feed dated it.
+        ...(r.rateDate !== undefined ? { rate_date: r.rateDate } : {}),
       };
     }
   }
@@ -1547,7 +1569,7 @@ async function getQuoteTool(
 export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): Promise<QuoteTypedResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
-    const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+    const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxAsOf } =
       await resolveCurrencyAndRates(ctx, input.sourceCurrency, input.destinationCountry);
 
     // Phase 3 verify-before-send gate — a NEW condition on kycStatus, independent
@@ -1614,6 +1636,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
     // the mid-market rate, re-price ONLY the rate-dependent fields. Fees and
     // the USD-equivalent (cap checks) are rate-independent and stay put.
     const route = await selectRouteForQuote(ctx, partner, sourceCurrency, destinationCurrency, q.fxRate);
+    let routed = false;
     if (route) {
       if (receiveFirst) {
         // Receive-first: back-solve the send amount with the WINNING rate so
@@ -1640,6 +1663,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
           );
           if (routedQ.amountUsd <= q.amountUsd) {
             q = applyRouteToQuote(routedQ, route);
+            routed = true;
           }
         } catch (err) {
           if (!(err instanceof QuoteError)) throw err;
@@ -1647,9 +1671,12 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
         }
       } else {
         q = applyRouteToQuote(q, route);
+        routed = true;
       }
     }
-    return { kind: 'quote', quote: q, destinationCountry };
+    // Step 0 §3.6: a partner rate is not the reference rate, so it carries no date.
+    const rateDate = !routed ? fxAsOf : undefined;
+    return { kind: 'quote', quote: q, destinationCountry, ...(rateDate !== undefined ? { rateDate } : {}) };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
     if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
@@ -4148,6 +4175,7 @@ export async function prepareSendDraft(
       fundingMethod,
       q.destinationCurrency ?? 'INR',
       rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
+      fxOrigin === 'platform' ? fxAsOf : undefined, // Step 0 §3.6
     );
     const payUrl = payUrlFor(draftId);
     return {

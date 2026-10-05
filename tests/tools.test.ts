@@ -6569,3 +6569,76 @@ describe('Step 0 FX-7: rate provenance from the chat send path', () => {
     expect(row.fxFetchedAt).toBeDefined();
   });
 });
+
+// ── Step 0 §3.6: the fixing date in chat (card line + get_quote rate_date) ──
+describe('Step 0 §3.6: the daily reference rate date in chat', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const short = (d: string) =>
+    new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  /** Dated (or undated) FX; the approve card's body text is captured. */
+  function stubDatedFx(date: string | undefined) {
+    resetRateCacheForTests();
+    const card = { text: '' };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes('graph.facebook.com')) {
+        return { ok: true, json: async () => ({ ...(date ? { date } : {}), rates: { INR: MOCK_RATE } }) };
+      }
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') card.text = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    return card;
+  }
+  const PUSH = {
+    fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x',
+    kind: 'partner_push' as const, expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  };
+  const PICK = { amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' };
+
+  it('buildApproveSummary: the rate line names the date, formatted in UTC', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, '2026-10-02');
+    expect(s.split('\n')).toContain('Rate: 1 USD = ₹83 (daily reference rate, 2 Oct)');
+    // New Year's Day stays 1 Jan in every server time zone (UTC formatting).
+    const ny = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, '2027-01-01');
+    expect(ny).toContain('(daily reference rate, 1 Jan)');
+  });
+
+  it('buildApproveSummary: no date (or a malformed one) leaves the card byte-identical', () => {
+    const plain = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30);
+    expect(plain.split('\n')).toContain('Rate: 1 USD = ₹83');
+    for (const bad of [undefined, '', '2026-13-45', '2026-02-30', 'yesterday']) {
+      expect(buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, bad)).toBe(plain);
+    }
+  });
+
+  it('send_approve_picker: a platform rate shows its date on the card', async () => {
+    const date = dayAgo(1);
+    const card = stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007721');
+    expect((await executeTool('send_approve_picker', PICK, ctx)).sent).toBe(true);
+    expect(card.text.split('\n')).toContain(`Rate: 1 USD = ₹85 (daily reference rate, ${short(date)})`);
+  });
+
+  it('send_approve_picker: a partner rate is not the reference rate, so no date', async () => {
+    const card = stubDatedFx(dayAgo(1));
+    const ctx = await buildCtx(fakeRedis(), '15550007723');
+    expect((await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => PUSH })).sent).toBe(true);
+    expect(card.text.split('\n')).toContain('Rate: 1 USD = ₹86');
+    expect(card.text).not.toContain('daily reference rate');
+  });
+
+  it('get_quote: rate_date is the platform rate\'s publication date; absent when routed or unknown', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007722');
+    const q = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, ctx);
+    expect(q.rate_date).toBe(date);
+    const routed = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, { ...ctx, routeSelector: async () => PUSH });
+    expect(routed.fx_rate).toBe(86);
+    expect('rate_date' in routed).toBe(false);
+    stubDatedFx(undefined);
+    const undated = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, ctx);
+    expect('rate_date' in undated).toBe(false);
+  });
+});
