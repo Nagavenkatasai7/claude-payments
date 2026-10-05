@@ -34,6 +34,8 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// Step 0 Q16: no draft:<id> claim behind an unknown id (tests/pay-page-draft-relink.test.ts covers it).
+vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({ isPayoutEditable }),
 }));
