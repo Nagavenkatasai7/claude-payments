@@ -34,9 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -61,14 +61,51 @@ jobs:
           fi
           echo "schema.ts and drizzle/ migrations agree"
 
+  # Migration safety (scripts/ci/migration-guard.mjs, tests/ci-migration-guard.test.ts).
+  # Prod migrations are applied by hand, so this job makes the PR wait for
+  # them instead of the deploy: (1) every drizzle/*.sql the PR adds must be
+  # additive (no DROP, RENAME, type change, SET NOT NULL, NOT NULL column
+  # without DEFAULT, TRUNCATE, DELETE, UPDATE) unless the file carries a
+  # reviewed "-- migration-guard: allow-destructive [after-deploy] <reason>"
+  # line; (2) a PR that adds a journal entry stays RED until production has
+  # applied it (GET /api/version/migrations, Bearer CRON_SECRET). Apply it
+  # with /migrate-prod from the PR branch, then re-run this job. A PR without
+  # migration changes never calls production. Fork and Dependabot PRs get no
+  # secrets, so one of them that adds a migration fails closed here.
+  migrations:
+    name: migration safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history: the guard diffs the PR against its merge base.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: New migrations are additive and already applied in production
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MIGRATIONS_URL: https://smartremit.ai/api/version/migrations
+        run: node scripts/ci/migration-guard.mjs
+
   typecheck:
     name: typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -84,9 +121,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -119,9 +156,9 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -139,9 +176,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -165,9 +202,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -178,11 +215,25 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+      # Pull requests only (the script skips other events): fails when the PR
+      # ADDS a runtime package version with a high/critical advisory, from
+      # GitHub's dependency graph diff; dev-scope findings and API errors only
+      # warn (scripts/ci/dependency-review.mjs).
+      - name: Dependency review (packages this PR adds)
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/dependency-review.mjs
+
   # Compliance A3: secret scan + SAST + lockfile scan, the free/OSS stand-in
-  # for GitHub Advanced Security (which a private repo on GitHub Pro lacks).
-  # No npm ci: the scanners are standalone. Every tool is pinned by version
-  # AND sha256 (or image digest); nothing uploads source anywhere, and no
-  # SARIF goes to code scanning (that needs GHAS once the repo is private).
+  # for GitHub Advanced Security, kept so the checks survive the repo going
+  # private (it is public as of 2026-10-04, so GitHub's own CodeQL default
+  # setup also runs, outside this file). No npm ci: the scanners are
+  # standalone. Every tool is pinned by version AND sha256 (or image digest);
+  # nothing uploads source anywhere, and no SARIF goes to code scanning.
   security:
     name: security scan
     runs-on: ubuntu-latest
@@ -204,7 +255,7 @@ jobs:
       # Full history: the diff range below must resolve both ends (the script
       # fails closed on a shallow clone). Cheap here (a few hundred commits).
       # No token left in .git/config: nothing below needs it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -286,7 +337,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [drift, typecheck, lint, test, build, audit, security]
+    needs: [drift, migrations, typecheck, lint, test, build, audit, security]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

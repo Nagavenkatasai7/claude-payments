@@ -1,15 +1,19 @@
 # Migration-apply guard
 
-After a migration PR merges, apply the pending drizzle migration to prod Neon and
-verify the altered table answers — then stop. Closes the gap that caused the
+Before a migration PR merges (from its branch), apply the pending drizzle
+migration to prod Neon and verify the altered table answers — then stop. CI's
+`migration safety` job keeps the PR red until this is done and only lets
+additive SQL through; a step marked `allow-destructive after-deploy` is applied
+right after its merge instead (see `.claude/skills/migrate-prod/SKILL.md`). Closes the gap that caused the
 2026-06-11 dashboard outage (an unapplied migration → every query on the altered
 table 404s).
 
 **Authority:** writes to the production database — **approval-gated.**
 
 ### Cycle
-1. **Observe** — a merged PR to `main` added a file under `drizzle/`. Read the
-   pending migration SQL.
+1. **Observe** — an open PR adds a file under `drizzle/` and its `migration
+   safety` job says production has not applied it (or a merged PR carries an
+   `after-deploy` step). Read the pending migration SQL.
 2. **Choose / gate** — only auto-apply **additive** SQL (`CREATE TABLE`,
    `ADD COLUMN`, `CREATE INDEX`). If it `DROP`s, `RENAME`s, destructively `ALTER`s,
    or backfills data → **stop and ask** (human review).
@@ -28,7 +32,9 @@ table 404s).
 - Cannot run forever: at most **one apply per trigger**, no retry loop.
 
 ### Prompt
-> Trigger: a merged PR to main added a file under `drizzle/`. Read the pending
+> Trigger: an open PR adds a file under `drizzle/` and its `migration safety`
+> job is red because production has not applied it (or a merged PR carries an
+> `after-deploy` step). Read the pending
 > migration SQL first. If it only adds (`CREATE TABLE` / `ADD COLUMN` /
 > `CREATE INDEX`), get approval, then apply **once** with
 > `set -a; source .env.local; set +a; npx drizzle-kit migrate` (idempotent — applies
