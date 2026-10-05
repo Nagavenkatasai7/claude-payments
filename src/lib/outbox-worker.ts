@@ -47,6 +47,19 @@ import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-w
 import { rowTemplate, sendBusinessInitiated, sendTextThenTemplate, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
+import { MEDIA_REPLY } from '@/lib/consent';
+import {
+  sttAuthAlertFor,
+  voiceNotesOn,
+  voiceRefOf,
+  voiceReplyFor,
+  voiceSenderEligible,
+  voiceSettingsFromEnv,
+  VOICE_LOG_MARKER,
+  VOICE_TRANSCRIPT_PREFIX,
+  type VoiceOutcome,
+  type VoiceRef,
+} from '@/lib/voice-notes';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
@@ -117,6 +130,13 @@ export interface WorkerDeps {
    * the worker route wires `() => getAuthStore().listStaff()`.
    */
   listStaff: () => Promise<Staff[]>;
+  /**
+   * Step 1 voice notes: download one voice note from Meta and transcribe it
+   * (voice-transcribe.ts, wired by the route with the shared number's token and
+   * the Azure settings). Never throws; the result carries no creds. Absent ⇒
+   * a voice row is answered with MEDIA_REPLY (voice behaves as off).
+   */
+  transcribeVoice?: (ref: VoiceRef, signal: AbortSignal) => Promise<VoiceOutcome>;
 }
 
 /**
@@ -431,6 +451,7 @@ async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promi
 async function runTurnForReply(
   deps: WorkerDeps,
   p: Payload,
+  messageText: string,
   signal: RowSignal,
   routedPartnerId: PartnerId | null,
   partner: PartnerResolver,
@@ -439,11 +460,38 @@ async function runTurnForReply(
   const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
   return deps.runAgentTurn(
     str(p.phone),
-    str(p.messageText),
+    messageText, // the payload's text, or a voice note's transcript (Step 1)
     (p.turn ?? {}) as TurnContext,
     waCreds,
     { signal, routedPartnerId, onFallback }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
   );
+}
+
+/**
+ * Step 1: transcribe a voice agent.turn, or answer `off`. The drain-time checks
+ * repeat the inbound ones (voice-notes.ts), so turning the voice.notes switch
+ * off, removing the phone from the beta list or removing the Azure key also
+ * stops rows already queued, and a hand-edited row naming a partner is refused.
+ * Voice is shared-number only, so no partner creds exist here; like
+ * runTurnForReply, it is kept apart from every enqueue payload and returns
+ * only the creds-free outcome.
+ */
+async function transcribeTurnAudio(
+  deps: WorkerDeps,
+  ref: VoiceRef,
+  phone: string,
+  routedPartnerId: PartnerId | null,
+  signal: AbortSignal,
+): Promise<VoiceOutcome | { kind: 'off' }> {
+  const settings = voiceSettingsFromEnv();
+  if (
+    !deps.transcribeVoice ||
+    !voiceSenderEligible({ routedPartnerId, from: phone }, settings) ||
+    !(await voiceNotesOn(deps.db, settings))
+  ) {
+    return { kind: 'off' };
+  }
+  return deps.transcribeVoice(ref, signal);
 }
 
 async function handle(
@@ -984,6 +1032,10 @@ async function handle(
         routedPartnerId = requested;
       }
       const tenant: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
+      // Step 1: a voice row carries the Meta media id (validated: digits only).
+      // Its payload text is a placeholder, so the log gets a marker instead and
+      // the transcript is logged as its own entry once it exists.
+      const voiceRef = voiceRefOf(p.media);
       // ── Partner-Demo R3b: the customer's text goes to the sealed, permanent
       // conversation log under (tenant, phone) — the same key the inbound
       // webhook created the customer under — BEFORE the gate, so a deferred or
@@ -996,7 +1048,7 @@ async function handle(
         phone,
         channel: 'wa',
         direction: 'in',
-        text: str(p.messageText),
+        text: voiceRef ? VOICE_LOG_MARKER : str(p.messageText),
       });
       // ── Program-Fix 34A: one turn at a time per (tenant, phone), in order ──
       // Order of checks: the bound (computed with the FIFO check in ONE query),
@@ -1044,7 +1096,56 @@ async function handle(
       }
       let fallbackErr: unknown;
       try {
-        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner, (e) => {
+        let messageText = str(p.messageText);
+        // ── Step 1: a voice note is transcribed HERE, after the gate and the
+        // lock, so a deferred turn never downloads or bills. Any outcome but
+        // `ok` is ONE fixed reply (reply:<row id>, logged with it) and the row
+        // is done: no row-level retry (voice-transcribe.ts already retried
+        // once), so the customer's later turns are never held behind it.
+        if (voiceRef) {
+          const heard = await transcribeTurnAudio(deps, voiceRef, phone, routedPartnerId, signal);
+          if (signal.abandoned) {
+            logWarn('worker.agent', 'voice note dropped: row deadline already passed', { id: row.id, kind: row.kind });
+            return;
+          }
+          if (heard.kind !== 'ok') {
+            const body = heard.kind === 'off' ? MEDIA_REPLY : voiceReplyFor(heard.kind);
+            await deps.db.transaction(async (tx) => {
+              await createOutboxRepo(tx).enqueue(
+                'whatsapp.text',
+                { to: phone, body, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+                { dedupeKey: `reply:${row.id}` },
+              );
+              await createConversationLogRepo(tx).append({
+                id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out', text: body,
+              });
+            });
+            if (heard.kind === 'off') {
+              logWarn('worker.agent', 'voice notes are off for this row: answered with the media reply', { id: row.id, kind: row.kind });
+            }
+            // Azure rejected the key: ONE ops alert per hour. Logged, never
+            // thrown (the reply already committed).
+            if (heard.kind === 'auth_failed') {
+              try {
+                const down = sttAuthAlertFor(heard.status, hourBucket());
+                await outbox.enqueue('ops.alert', { message: down.message }, { dedupeKey: down.dedupeKey });
+              } catch {
+                logWarn('worker.agent', 'sttauth alert enqueue failed', { id: row.id, kind: row.kind });
+              }
+            }
+            return;
+          }
+          await createConversationLogRepo(deps.db).append({
+            id: conversationMessageId('in', `${row.id}:t`),
+            partnerId: tenant,
+            phone,
+            channel: 'wa',
+            direction: 'in',
+            text: VOICE_TRANSCRIPT_PREFIX + heard.transcript,
+          });
+          messageText = heard.transcript;
+        }
+        const reply = await runTurnForReply(deps, p, messageText, signal, routedPartnerId, partner, (e) => {
           fallbackErr = e;
         });
         // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
@@ -1389,7 +1490,7 @@ export async function drainOnce(
       // Partner-Demo R3b: a finished agent.turn drops its plaintext messageText
       // in the SAME compare-and-set (the text now lives sealed in the log).
       // Failed / dead rows keep it (retry, ops Retry).
-      if (await outbox.markDone(row.id, workerId, row.kind === 'agent.turn' ? { dropPayloadKey: 'messageText' } : {})) {
+      if (await outbox.markDone(row.id, workerId, row.kind === 'agent.turn' ? { dropPayloadKey: ['messageText', 'media'] } : {})) {
         result.processed++;
         // Review S2: a finished turn's reply row is sent NEXT, not after every
         // other customer's turn in this batch. It is claimed like any row (lease,
