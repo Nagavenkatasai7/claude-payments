@@ -469,14 +469,31 @@ export interface TurnContext {
   buttonTap?: ButtonTap;
   isNewCustomer?: boolean;              // true only on the first inbound from a brand-new phone (never grandfathered)
   tierReminderDayOfWindow?: 1 | 2 | 3;  // T0 + new conversation + not new-customer → which day of the 3-day window
+  // Step 1: the customer's message is a transcribed voice note. The agent adds
+  // VOICE_INPUT_NOTE (read back before acting) and executeTool refuses the
+  // typed-only tools. A transcript never sets buttonTap.
+  inputModality?: 'voice';
+}
+
+/**
+ * Step 1: a WhatsApp audio message's Meta media id (digits only; it goes into a
+ * Graph URL path) and its sanitised mime type ('' when unusable). Never the
+ * webhook's download URL. The audio itself is fetched only by the worker.
+ */
+export interface InboundMedia {
+  id: string;
+  mimeType: string;
 }
 
 export type IncomingMessage = (
   | { kind: 'text'; from: string; text: string; messageId: string }
   | { kind: 'button'; from: string; buttonId: string; messageId: string }
   // Program-Fix 49A (whatsapp-08): a message the bot cannot read (image, voice,
-  // document, …). Never downloaded; the inbound pipeline answers it honestly.
-  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string }
+  // document, …); the inbound pipeline answers it honestly. Step 1: an audio
+  // message also carries `media`, and a voice note from a beta sender (with the
+  // voice.notes switch on) is downloaded and transcribed by the worker. Nothing
+  // else is ever downloaded.
+  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string; media?: InboundMedia }
 ) & {
   // R1: Meta business-scoped user id / username when the webhook carries them.
   // In memory only: never logged, never written to an outbox payload.
