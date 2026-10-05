@@ -837,7 +837,7 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
                 <li>Name <code>transfer_delivered</code> · category Utility · language English (<code>en</code>)</li>
                 <li>Exactly four body variables, in this order:</li>
               </ul>
-              <Code>{`Hi {{1}}, you've received {{2}} from the sender with phone number {{3}}. It's on its way to your {{4}}.
+              <Code>{`Hi {{1}}, you've received {{2}} from the sender with phone number {{3}}. It's on its way to your {{4}}. Reply here if you have any questions.
 
 {{1}} recipient name       sample: Priya
 {{2}} amount delivered     sample: ₹4,750

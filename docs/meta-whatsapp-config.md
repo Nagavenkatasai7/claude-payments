@@ -67,19 +67,19 @@ Create each in **WhatsApp Manager → Account tools → Message templates → Cr
 
 > Placeholders are positional `{{1}}, {{2}}, …`. "Sample" = what to type in the example fields. Dynamic-URL buttons allow exactly **one** variable and it must be the **suffix at the end** of the URL — so pay/verify link tokens must be **path-safe slugs** (no `/` or query chars in the `{{1}}` value).
 
-### 3.1 `transfer_delivered` — recipient delivery confirmation (REBUILD)
-- **Category:** Utility · **Language:** en
-- **Body:**
-  `Hi {{1}}, good news — you've received {{2}} from {{3}} via SmartRemit. It's been deposited to your bank account ending {{4}}.`
-- **Footer:** `SmartRemit · smartremit.ai`
-- **Samples:** {{1}}=`Priya`, {{2}}=`₹4,750`, {{3}}=`Anand`, {{4}}=`6789`
-- Replaces the stale 4-param UPI version. Params now: recipient name, **amount+currency string** (multi-currency), sender name, **last-4 of account** (never the full number).
+### 3.1 `transfer_delivered` — recipient delivery confirmation
+- **Category:** Utility · **Language:** en · **APPROVED** on the new WABA (submitted 2026-10-03)
+- **Body (as approved):**
+  `Hi {{1}}, you've received {{2}} from the sender with phone number {{3}}. It's on its way to your {{4}}. Reply here if you have any questions.`
+- **Footer:** none
+- **Samples:** {{1}}=`Priya`, {{2}}=`₹4,750`, {{3}}=`••••4567`, {{4}}=`bank account`
+- Params: recipient name, **amount+currency string** (multi-currency), sender phone **masked to its last 4 digits**, payout label. Meta rejects a body that ends in a placeholder, hence the closing sentence.
 
 ### 3.2 `transfer_delivered_sender` — sender delivery confirmation (out-of-window fallback)
-- **Category:** Utility · **Language:** en
-- **Body:**
-  `Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}.`
-- **Footer:** `SmartRemit · smartremit.ai`
+- **Category:** Utility · **Language:** en · **APPROVED** on the new WABA (submitted 2026-10-03)
+- **Body (as approved):**
+  `Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}. Reply here if you have any questions.`
+- **Footer:** none
 - **Samples:** {{1}}=`$50.00`, {{2}}=`Priya`, {{3}}=`tx_a1b2c3`
 - **Wired 2026-10-03:** sent instead of the plain "delivered" message only when the sender has not written in the last 24 hours (the `lastmsg:` marker); inside the window the plain text goes as before. Until the template is approved the plain text goes either way.
 

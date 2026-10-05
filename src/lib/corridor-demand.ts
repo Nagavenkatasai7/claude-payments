@@ -147,19 +147,23 @@ export async function rankCorridorDemand(
     const cur = normalizeCurrency(r.approxCurrency);
     if (cur) neededCurrencies.add(cur);
   }
+  //    The lookups run in parallel: one uncached currency (up to the FX fetch
+  //    timeout) must not hold up the others.
   const usdRateByCurrency = new Map<CurrencyCode, number>();
-  for (const cur of neededCurrencies) {
-    try {
-      const rates = await fxRates(cur);
-      const toUsd = rates?.toUsd;
-      if (typeof toUsd === 'number' && Number.isFinite(toUsd) && toUsd > 0) {
-        usdRateByCurrency.set(cur, toUsd);
+  await Promise.all(
+    [...neededCurrencies].map(async (cur) => {
+      try {
+        const rates = await fxRates(cur);
+        const toUsd = rates?.toUsd;
+        if (typeof toUsd === 'number' && Number.isFinite(toUsd) && toUsd > 0) {
+          usdRateByCurrency.set(cur, toUsd);
+        }
+      } catch {
+        // FX outage for this currency: the amount is simply unpriced — leads and
+        // distinct-sender counts (the primary signal) are unaffected.
       }
-    } catch {
-      // FX outage for this currency: the amount is simply unpriced — leads and
-      // distinct-sender counts (the primary signal) are unaffected.
-    }
-  }
+    }),
+  );
 
   // 2) Bucket leads by normalized destination.
   const byKey = new Map<string, Accum>();

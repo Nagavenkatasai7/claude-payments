@@ -1,12 +1,13 @@
 export const dynamic = 'force-dynamic';
 
+import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getFxRates } from '@/lib/rate';
 import { rankCorridorDemand, type CorridorDemand } from '@/lib/corridor-demand';
-import { narrateCorridorBrief } from '@/lib/corridor-brief-ai';
+import { getCorridorBrief } from '@/lib/corridor-brief-ai';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -60,6 +61,53 @@ function usdCell(d: CorridorDemand) {
   );
 }
 
+// The AI brief is the slow part of this page (one model call, up to
+// OLLAMA_TIMEOUT_MS). It streams in under its own Suspense boundary so the
+// ranked table never waits for it (node_modules/next/dist/docs/01-app/02-guides/
+// streaming.md: "Each <Suspense> boundary is an independent streaming point").
+// getCorridorBrief reuses a cached brief for the same numbers for an hour.
+// Best-effort: a model outage just hides the card.
+async function LaunchBrief({ ranked }: { ranked: CorridorDemand[] }) {
+  let brief: string | null = null;
+  try {
+    brief = await getCorridorBrief(ranked, 5);
+  } catch {
+    brief = null;
+  }
+  if (!brief) return null;
+  return (
+    <Card className="mb-4">
+      <CardHeader>
+        <CardTitle>Launch recommendation</CardTitle>
+        <CardDescription>AI-generated from the ranked demand below.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2 text-[13px] leading-relaxed whitespace-pre-line text-foreground">
+          {brief}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LaunchBriefPending() {
+  return (
+    <Card className="mb-4">
+      <CardHeader>
+        <CardTitle>Launch recommendation</CardTitle>
+        <CardDescription>Writing the AI brief from the ranked demand below…</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2 motion-safe:animate-pulse" aria-hidden="true">
+          <div className="h-3 w-full rounded bg-muted" />
+          <div className="h-3 w-5/6 rounded bg-muted" />
+          <div className="h-3 w-2/3 rounded bg-muted" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default async function CorridorsPage() {
   // Corridor requests are PLATFORM-WIDE demand data carrying sender phone
   // numbers across every tenant — partner-scoped staff must never see it
@@ -79,17 +127,6 @@ export default async function CorridorsPage() {
 
   const ranked = await rankCorridorDemand(requests, supported, getFxRates);
 
-  // AI expansion brief over the top destinations — best-effort. A model outage
-  // (or no demand at all) just hides the brief; the ranked table always renders.
-  let brief: string | null = null;
-  if (ranked.length > 0) {
-    try {
-      brief = await narrateCorridorBrief(ranked, 5);
-    } catch {
-      brief = null;
-    }
-  }
-
   const totalLeads = requests.length;
 
   return (
@@ -105,18 +142,11 @@ export default async function CorridorsPage() {
           </div>
         </div>
 
-        {brief && (
-          <Card className="mb-4">
-            <CardHeader>
-              <CardTitle>Launch recommendation</CardTitle>
-              <CardDescription>AI-generated from the ranked demand below.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2 text-[13px] leading-relaxed whitespace-pre-line text-foreground">
-                {brief}
-              </div>
-            </CardContent>
-          </Card>
+        {/* AI expansion brief over the top destinations. No demand → no brief. */}
+        {ranked.length > 0 && (
+          <Suspense fallback={<LaunchBriefPending />}>
+            <LaunchBrief ranked={ranked} />
+          </Suspense>
         )}
 
         <Card>

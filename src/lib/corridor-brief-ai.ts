@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { chat } from '@/lib/ollama';
+import type { RedisLike } from '@/lib/store';
 import type { ChatMessage } from '@/lib/types';
 import type { CorridorDemand } from '@/lib/corridor-demand';
 
@@ -53,7 +55,14 @@ export async function narrateCorridorBrief(
 ): Promise<string> {
   const top = ranked.slice(0, topN);
   if (top.length === 0) throw new Error('No corridor demand to narrate');
-  const table = top.map((d, i) => rowLine(d, i + 1)).join('\n');
+  return narrateTable(factTable(top));
+}
+
+function factTable(top: CorridorDemand[]): string {
+  return top.map((d, i) => rowLine(d, i + 1)).join('\n');
+}
+
+async function narrateTable(table: string): Promise<string> {
   const user: ChatMessage = {
     role: 'user',
     content: `Ranked demand table (highest first):\n${table}\n\nWrite the expansion brief.`,
@@ -62,4 +71,78 @@ export async function narrateCorridorBrief(
   const text = (reply.content ?? '').trim();
   if (!text) throw new Error('Empty AI response');
   return text;
+}
+
+// ── Cached entry point for the admin Corridors page ─────────────────────────
+// A model call takes seconds and can run to OLLAMA_TIMEOUT_MS, so the page
+// streams the brief in after the table and reuses one brief per set of top-N
+// numbers for an hour. The key is a hash of the fact table (counts and sums
+// only), so new demand gets a fresh brief and nothing readable is stored in the
+// key. The cache is best-effort: any Redis error just means one more model call.
+
+export const BRIEF_CACHE_TTL_S = 3600;
+
+export type BriefCache = Pick<RedisLike, 'get' | 'set'>;
+
+// Skipped under vitest by default (same reason as rate.ts's FX L2: tests stub
+// global fetch, which the Upstash REST client also rides). Tests pass a fake.
+async function defaultBriefCache(): Promise<BriefCache | null> {
+  if (process.env.VITEST) return null;
+  try {
+    const { getRedis } = await import('./redis');
+    return getRedis();
+  } catch {
+    return null;
+  }
+}
+
+// Page loads that land together on one instance share a single model call.
+const inflight = new Map<string, Promise<string>>();
+
+/**
+ * The brief for the top-N ranked destinations, from the shared cache when the
+ * same numbers were narrated in the last hour. Throws like narrateCorridorBrief
+ * (nothing to narrate, empty reply, model error); failures are never cached.
+ * Pass `cache: null` to skip caching; omit it to use the shared Redis.
+ */
+export async function getCorridorBrief(
+  ranked: CorridorDemand[],
+  topN = 5,
+  cache?: BriefCache | null,
+): Promise<string> {
+  const top = ranked.slice(0, topN);
+  if (top.length === 0) throw new Error('No corridor demand to narrate');
+  const table = factTable(top);
+  const key = `corridor-brief:v1:${createHash('sha256').update(table).digest('hex').slice(0, 32)}`;
+
+  const store = cache === undefined ? await defaultBriefCache() : cache;
+  if (store) {
+    try {
+      const hit = await store.get(key);
+      if (hit) return hit;
+    } catch {
+      /* fail-open: narrate below */
+    }
+  }
+
+  const running = inflight.get(key);
+  if (running) return running;
+
+  const call = (async () => {
+    const text = await narrateTable(table);
+    if (store) {
+      try {
+        await store.set(key, text, { ex: BRIEF_CACHE_TTL_S });
+      } catch {
+        /* best effort */
+      }
+    }
+    return text;
+  })();
+  inflight.set(key, call);
+  try {
+    return await call;
+  } finally {
+    inflight.delete(key);
+  }
 }
