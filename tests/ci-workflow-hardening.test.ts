@@ -91,8 +91,8 @@ describe('ci.yml migration safety job', () => {
 
   it('is the only place in ci.yml that receives a secret', () => {
     const secrets = [...ci.matchAll(/\$\{\{\s*secrets\.(\w+)\s*\}\}/g)].map((m) => m[1]);
-    expect(secrets).toEqual(['CRON_SECRET']);
-    expect(job).toMatch(/CRON_SECRET: \$\{\{ secrets\.CRON_SECRET \}\}/);
+    expect(secrets).toEqual(['MIGRATIONS_READ_TOKEN']);
+    expect(job).toMatch(/MIGRATIONS_READ_TOKEN: \$\{\{ secrets\.MIGRATIONS_READ_TOKEN \}\}/);
   });
 });
 
@@ -216,5 +216,38 @@ describe('release safety part B: release check and rollback', () => {
       expect({ id, has }).toEqual({ id, has: id === 'rollback' });
     }
     expect(release).not.toMatch(/VERCEL_ROLLBACK_TOKEN/);
+    });
+  });
+
+// Release safety Batch 2 part C (build thread): production secrets live in the
+// `prod-secrets` GitHub environment (main only). Every job that reads one
+// declares it; ci.yml (pull request runs) holds only the read-only
+// MIGRATIONS_READ_TOKEN, and the dormant preview-smoke.yml is left as it is.
+describe('release safety part C: the prod-secrets environment', () => {
+  const PROD_SECRET = /\$\{\{\s*secrets\.(CRON_SECRET|E2E_[A-Z_]+|VERCEL_[A-Z_]+)\s*\}\}/;
+  const files = readdirSync(join(root, '.github/workflows'))
+    .filter((f) => /\.ya?ml$/.test(f) && f !== 'ci.yml' && f !== 'preview-smoke.yml')
+    .map((f) => `.github/workflows/${f}`);
+
+  it('every job that reads a production secret runs in prod-secrets', () => {
+    const users: string[] = [];
+    for (const f of files) {
+      const wf = read(f);
+      for (const id of jobIds(wf)) {
+        const job = jobBlock(wf, id);
+        if (!PROD_SECRET.test(job)) continue;
+        users.push(`${f}#${id}`);
+        expect({ job: `${f}#${id}`, env: /\n {4}environment: prod-secrets\n/.test(job) }).toEqual({ job: `${f}#${id}`, env: true });
+      }
+    }
+    expect(users).toEqual(expect.arrayContaining([
+      '.github/workflows/smoke.yml#smoke',
+      '.github/workflows/nightly.yml#prod-smoke',
+      '.github/workflows/worker-heartbeat.yml#drain',
+    ]));
+  });
+
+  it('ci.yml never reads CRON_SECRET', () => {
+    expect(ci).not.toMatch(/secrets\.CRON_SECRET/);
   });
 });

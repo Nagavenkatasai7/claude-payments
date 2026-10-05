@@ -101,6 +101,11 @@ jobs:
       # Release safety part B: the `rollback` job runs only when the money
       # test or the health check failed on the LIVE build (never for a page test).
       money_failed: ${{ steps.health.outcome == 'failure' || steps.synthetic.outcome == 'failure' }}
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only). A job with an
+    # environment also posts a GitHub deployment record named after it; the
+    # deployment_status triggers here and in preview-smoke.yml ignore that name.
+    environment: prod-secrets
     # Up to 25 min waiting for the production build (below), up to 5
     # min for the migration check, up to 2 min for the health check, up to 8
     # min for the synthetic transfer, plus the few minutes the install and

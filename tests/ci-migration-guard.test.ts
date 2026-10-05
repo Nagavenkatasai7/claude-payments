@@ -187,7 +187,7 @@ describe('runGuard', () => {
     EVENT_NAME: 'pull_request',
     PR_BASE_SHA: base,
     PR_HEAD_SHA: head,
-    CRON_SECRET: 's3cret-test-value',
+    MIGRATIONS_READ_TOKEN: 's3cret-test-value',
     MIGRATIONS_URL: 'https://example.invalid/api/version/migrations',
     ...extra,
   });
@@ -245,7 +245,7 @@ describe('runGuard', () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('add 0001');
-    expect(await runGuard({ env: env(head, { CRON_SECRET: '' }), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(2);
+    expect(await runGuard({ env: env(head, { MIGRATIONS_READ_TOKEN: '' }), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(2);
   });
 
   it('fails (exit 2) when the endpoint does not answer 200', async () => {
@@ -349,7 +349,7 @@ describe('runGuard', () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('add 0001');
-    const e = { EVENT_NAME: 'merge_group', MG_BASE_SHA: base, MG_HEAD_SHA: head, CRON_SECRET: 'x', MIGRATIONS_URL: 'https://example.invalid/m' };
+    const e = { EVENT_NAME: 'merge_group', MG_BASE_SHA: base, MG_HEAD_SHA: head, MIGRATIONS_READ_TOKEN: 'x', MIGRATIONS_URL: 'https://example.invalid/m' };
     expect(await runGuard({ env: e, cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(0);
   });
 });
