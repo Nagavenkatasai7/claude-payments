@@ -53,7 +53,7 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     key: 'settlement.paused',
     label: 'Pause settlement',
     description:
-      'No settlement instruction goes to a partner rail. Each queued instruction waits and is tried again every 5 minutes, ' +
+      'No settlement instruction goes to a partner rail. Each queued instruction waits and is tried again after 5 minutes, ' +
       'without using a retry attempt. Payment capture, customer messages and the ledger continue.',
     bannerText: 'Settlement to partner rails is paused',
     scopes: ['global', 'partner', 'corridor'],
