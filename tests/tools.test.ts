@@ -6436,3 +6436,94 @@ describe('create_transfer — sends.paused kill switch', () => {
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
   });
 });
+
+// ── Step 0 FX-5: the card's lock line counts down to a partner push expiry ──
+describe('Step 0 FX-5: rate lock with a partner push expiry (FX_PAY_RATE_CHECK_ENABLED)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const NOW = 1_800_000_000_000;
+  const PUSH = (expiresInMs: number) => ({
+    fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x',
+    kind: 'partner_push' as const, expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+  });
+  const MARGIN = { fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x', kind: 'partner_margin' as const };
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer',
+    recipient_name: 'Mom', recipient_phone: '919876543210',
+  };
+  /** Prime the FX cache, then capture the approve card's body text. */
+  async function primedCtx(phone: string) {
+    const ctx = await buildCtx(fakeRedis(), phone);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    const card = { text: '' };
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') card.text = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    return { ctx, card };
+  }
+
+  it('flag ON: the lock is the shortest of the draft lifetime, the rate age left and the push expiry', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(rateLockMinutes(NOW, NOW, NOW + 7 * 60_000)).toBe(7);                      // the push ends first
+    expect(rateLockMinutes(NOW - 50 * 60_000, NOW, NOW + 20 * 60_000)).toBe(10);      // the rate age ends first
+    expect(rateLockMinutes(NOW, NOW, NOW + 45 * 60_000)).toBe(RATE_LOCK_MINUTES);    // the draft ends first
+    expect(rateLockMinutes(NOW, NOW, NOW - 1)).toBe(0);                               // already expired: never negative
+    expect(rateLockMinutes(NOW, NOW, undefined)).toBe(RATE_LOCK_MINUTES);             // no push: unchanged
+  });
+
+  it('flag OFF (default): the push expiry is ignored, exactly as today', () => {
+    expect(rateLockMinutes(NOW, NOW, NOW + 7 * 60_000)).toBe(RATE_LOCK_MINUTES);
+  });
+
+  it('send_approve_picker stores the push expiry and origin on the draft; flag ON the card counts down to it', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const { ctx, card } = await primedCtx('15550007701');
+    const route = PUSH(7 * 60_000 + 30_000);
+    const r = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => route });
+    expect(r.sent).toBe(true);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.quote.routeExpiresAt).toBe(Date.parse(route.expiresAt));
+    expect(draft?.quote.fxOrigin).toBe('partner_push');
+    expect(card.text).toContain('Rate locked for 7 min.');
+  });
+
+  it('flag OFF: the same push stores its expiry but the card keeps the full lock', async () => {
+    const { ctx, card } = await primedCtx('15550007702');
+    const route = PUSH(7 * 60_000 + 30_000);
+    const r = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => route });
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.quote.routeExpiresAt).toBe(Date.parse(route.expiresAt));
+    expect(card.text).toContain(`Rate locked for ${RATE_LOCK_MINUTES} min.`);
+  });
+
+  it('a margin route stores partner_margin and no expiry; an unrouted draft stores platform', async () => {
+    const { ctx } = await primedCtx('15550007703');
+    const routed = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => MARGIN });
+    const d1 = await ctx.draftStore.consumeDraft(routed.draft_id as string);
+    expect(d1?.quote.fxOrigin).toBe('partner_margin');
+    expect(d1?.quote.routeExpiresAt).toBeUndefined();
+    const plain = await executeTool('send_approve_picker', { ...PICK, amount_usd: 150 }, ctx);
+    const d2 = await ctx.draftStore.consumeDraft(plain.draft_id as string);
+    expect(d2?.quote.fxOrigin).toBe('platform');
+    expect(d2?.quote.routeExpiresAt).toBeUndefined();
+  });
+
+  it('web: the reply_hint states the same minutes as the summary (repeat_transfer, routed push, flag ON)', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const base = await buildCtx(fakeRedis(), '15550007704');
+    await base.store.upsertRecipient('default', base.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await runLegacyCreateTransferForTests({
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
+    }, base);
+    const ctx = { ...base, channel: 'web' as const, routeSelector: async () => PUSH(7 * 60_000 + 30_000) };
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(String(r.summary)).toContain('Rate locked for 7 min.');
+    expect(String(r.reply_hint)).toContain('the rate is locked for 7 minutes');
+  });
+});

@@ -12,7 +12,7 @@ import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
@@ -332,14 +332,24 @@ function sourceAmountDisplay(amount: number, currency: CurrencyCode): string {
  *     (transfer-create.ts assertQuoteOverrideFresh → "quote has expired").
  * A fresh rate gives the full draft lifetime (30 min). Never a literal: the old
  * "~10 min" copy under-stated a 30-minute lock.
+ *
+ * Step 0 FX-5: a quote priced on a partner PUSH also ends when the push
+ * expires (the mint refuses it from then on under FX_PAY_RATE_CHECK_ENABLED),
+ * so under the same flag the lock is the shortest of the three lifetimes.
  */
 export const RATE_LOCK_MINUTES = Math.floor(DRAFT_TTL_SECONDS / 60);
 
 /** Whole minutes the quote stays payable; `fxFetchedAt` undefined ⇒ the draft lifetime. */
-export function rateLockMinutes(fxFetchedAt: number | undefined, now: number = Date.now()): number {
+export function rateLockMinutes(
+  fxFetchedAt: number | undefined,
+  now: number = Date.now(),
+  routeExpiresAt?: number,
+): number {
   const draftMs = DRAFT_TTL_SECONDS * 1000;
   const fxLeftMs = fxFetchedAt === undefined ? draftMs : FX_MAX_AGE_MS - (now - fxFetchedAt);
-  return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs) / 60_000));
+  const routeLeftMs =
+    env.fxPayRateCheckEnabled && routeExpiresAt !== undefined ? routeExpiresAt - now : draftMs;
+  return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs, routeLeftMs) / 60_000));
 }
 
 /**
@@ -1347,6 +1357,23 @@ async function selectRouteForQuote(
     console.warn('routeSelector failed — quoting at mid:', err);
   }
   return null;
+}
+
+/** Step 0 FX-5: a winning partner push's expiry as epoch ms (none for a margin or platform rate). */
+function routeExpiryMs(route: SettlementRoute | null): number | undefined {
+  if (!route?.expiresAt) return undefined;
+  const at = Date.parse(route.expiresAt);
+  return Number.isFinite(at) ? at : undefined;
+}
+
+/**
+ * Step 0 FX-7: which rate a quote was priced on. A partner route names its
+ * kind (partner-rates.ts effectiveOfferFor); a route without one is read from
+ * its shape: an expiry means a push, none a standing margin.
+ */
+function rateOriginOf(route: SettlementRoute | null): FxRateOrigin {
+  if (!route) return 'platform';
+  return route.kind ?? (routeExpiryMs(route) !== undefined ? 'partner_push' : 'partner_margin');
 }
 
 // Apply a winning route to a mid-market quote: override ONLY the
@@ -4005,6 +4032,9 @@ export async function prepareSendDraft(
       q = applyRouteToQuote(q, route);
       settlementPartnerId = route.settlementPartnerId;
     }
+    // Step 0 FX-5 / FX-7: which rate won, and a partner push's own expiry.
+    const routeExpiresAt = routeExpiryMs(route);
+    const fxOrigin = rateOriginOf(route);
 
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
     // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).
@@ -4087,6 +4117,9 @@ export async function prepareSendDraft(
         totalChargeUsd: q.totalChargeUsd,
         destinationCurrency: q.destinationCurrency,
         fxFetchedAt, // Task 9: the mint refuses this quote once its rate is older than FX_MAX_AGE_MS
+        // Step 0 FX-5: a partner push's expiry (the mint refuses past it, flagged).
+        ...(routeExpiresAt !== undefined ? { routeExpiresAt } : {}),
+        fxOrigin, // Step 0 FX-7: stamped on the minted row as fx_source
       },
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).
@@ -4109,7 +4142,7 @@ export async function prepareSendDraft(
       payoutDestination,
       fundingMethod,
       q.destinationCurrency ?? 'INR',
-      rateLockMinutes(fxFetchedAt),
+      rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
     );
     const payUrl = payUrlFor(draftId);
     return {
@@ -4123,6 +4156,7 @@ export async function prepareSendDraft(
       sourceCurrency,
       destinationCountry,
       fxFetchedAt,
+      routeExpiresAt,
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
@@ -4205,7 +4239,7 @@ async function sendApprovePickerTool(
     { pointer: isWebChannel(ctx) ? 'web' : 'bot' },
   );
   if (r.kind !== 'draft') return prepareRefusalToTool(r);
-  const { draftId, summary, payUrl, recipientPhone, amountSource, sourceCurrency, destinationCountry, fxFetchedAt } = r;
+  const { draftId, summary, payUrl, recipientPhone, amountSource, sourceCurrency, destinationCountry, fxFetchedAt, routeExpiresAt } = r;
   // Web channel (B5): no WhatsApp interactive exists here — return the
   // canonical, code-generated pay-page URL instead of sending a card. The
   // agent appends pay_url verbatim after stripping every model-written URL,
@@ -4214,15 +4248,17 @@ async function sendApprovePickerTool(
   // ever moves through the secure pay page. Reached via repeat_transfer —
   // direct send_approve_picker calls are blocked at dispatch on web.
   if (isWebChannel(ctx)) {
+    // Step 0 FX-5 (N7): the same lifetimes as the card, push expiry included.
+    const lockMinutes = rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt);
     return {
       draft_id: draftId,
       summary,
       pay_url: payUrl,
       reply_hint:
         `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
-          rateLockMinutes(fxFetchedAt) < 2
+          lockMinutes < 2
             ? 'the rate is valid only for a moment, so they should tap soon'
-            : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
+            : `the rate is locked for ${lockMinutes} minutes`
         }`,
     };
   }

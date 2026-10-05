@@ -103,6 +103,8 @@ export type PrepareSendResult =
       sourceCurrency: CurrencyCode;
       destinationCountry: CountryCode;
       fxFetchedAt: number | undefined;
+      /** Step 0 FX-5: a winning partner push's expiry (epoch ms); bounds the lock line. */
+      routeExpiresAt: number | undefined;
     }
   | { kind: 'invalid_phone' }
   | { kind: 'bad_funding'; message: string }
