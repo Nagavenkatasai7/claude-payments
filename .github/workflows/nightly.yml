@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -46,19 +46,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
 
       - run: npm ci
 
-      # Full tree (dev deps included), unlike ci.yml's prod-only audit.
-      # Blocking at high: verified 2026-06-12 the current tree exits 0 here.
-      - name: Audit all dependencies
-        run: npm audit --audit-level=high
+      # Blocking, same gate as ci.yml's audit job: catches a high advisory
+      # published overnight against a production dependency already on main.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      # Full tree (dev deps included), REPORT-ONLY since 2026-10-05: `braces`
+      # (via eslint-config-next) has a high advisory with no fixed release,
+      # so a blocking full-tree audit kept the Nightly red from Sep 30 on and
+      # hid every other result. Dev tooling never ships to production;
+      # findings land as a warning plus the job summary, and Dependabot PRs
+      # fix what has a release.
+      - name: Audit all dependencies (report-only)
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          npm audit --audit-level=high > "$RUNNER_TEMP/audit.txt" 2>&1 || rc=$?
+          { echo '### Full-tree npm audit (report-only)'; echo '```'; tail -n 80 "$RUNNER_TEMP/audit.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=Dev dependency advisories::npm audit (all dependencies) reports high advisories; report-only, see the job summary."
+          else
+            echo "npm audit (all dependencies): no high advisories"
+          fi
 
   # Compliance A3: gitleaks over the FULL history of the default branch (the
   # per-PR job in ci.yml scans only new commits). Same pinned build and the
@@ -72,7 +90,7 @@ jobs:
       # gitleaks_8.30.1_linux_x64.tar.gz, from the release's checksums.txt.
       GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -95,9 +113,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: 'npm'
@@ -114,11 +132,14 @@ jobs:
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
-        run: npx playwright test tests/e2e/dashboard-smoke.spec.ts
+        # Every spec, the same set the post-deploy smoke runs (npm run e2e),
+        # so an overnight break of the pay page, portal or public pages shows
+        # up here too, not only the dashboard.
+        run: npm run e2e
 
       - name: Upload trace on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nightly-playwright-trace
           path: |
@@ -166,3 +187,33 @@ jobs:
             echo "::error title=Prod migrations behind::Production has $(jq -r '.pending | length' "$body_file") migration(s) pending that build ${sha} expects: $(jq -r '.pending | join(", ")' "$body_file"). Apply via /migrate-prod."
             exit 1
           fi
+
+  # Alert (scripts/ci/scheduled-alert.mjs): a failed job above opens one issue,
+  # "Scheduled workflow failing: Nightly", or comments on the open one; the
+  # next fully green run closes it. GitHub emails the repo owner about new
+  # issues; before this, only whoever last edited the schedule heard about a
+  # red run. The only job with write access, and only to issues.
+  alert:
+    needs: [full-tests, audit, secret-scan, prod-smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Open, update or close the failure issue
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          NEEDS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/scheduled-alert.mjs

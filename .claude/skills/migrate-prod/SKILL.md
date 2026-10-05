@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 Prod migrations are MANUAL (CLAUDE.md gotcha; 2026-06-11 outage). This skill is the only sanctioned way to run them. It encodes docs/loops/migration-apply-guard.md. Authority: **writes to the production database**. Follow the steps in order; never retry an apply.
 
+**When:** normally BEFORE the merge, from the PR's branch. CI's `migration safety` job keeps a PR that adds a migration red until production has applied it, and it only lets additive SQL through, which is safe to apply while the current build still serves. So: check out the PR branch (`git fetch origin <branch> && git checkout <branch>`), run this skill, then re-run the PR's failed `migration safety` job and merge. The exception is a file marked `-- migration-guard: allow-destructive after-deploy <reason>`: run this skill from main right AFTER that merge is live (step 2).
+
 ## 1. Ground truth first (read-only)
 ```
 set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/migration-status.ts
@@ -17,12 +19,12 @@ Prints every journal tag as APPLIED / PENDING by comparing `drizzle/meta/_journa
 ## 2. Classify the pending SQL
 `cat drizzle/<tag>.sql` for each PENDING tag. **Additive** = only `CREATE TABLE`, `ALTER TABLE … ADD COLUMN`, `CREATE [UNIQUE] INDEX`, `ADD CONSTRAINT`. Anything with `DROP`, `RENAME`, `ALTER COLUMN … TYPE`, `DELETE`, `UPDATE`, `TRUNCATE`, or a data backfill is **destructive** → print those statements verbatim and require the user to type explicit sign-off before step 4. If `$ARGUMENTS` contains `--dry-run`, stop after this step and report.
 
-**Destructive → confirm the rollout is at 100% first.** Production uses Vercel Rolling Releases: the merge's deployment serves 10% of traffic for 5 min, and the OLD code keeps taking new requests until the rollout auto-promotes to 100%. Before asking for sign-off on anything that rewrites or drops data, confirm ONE of these:
+**Destructive → check the timing first.** A destructive step carries an `allow-destructive` marker reviewed in its PR. Without `after-deploy` it was meant to run before the merge (e.g. widening a CHECK); check that the live build works with it before sign-off. With `after-deploy`, the OLD build may still use what it removes, so before asking for sign-off confirm ONE of these:
 - `curl -s 'https://smartremit.ai/api/version?vcrrForceStable=true'` returns `{"sha":"<first 7 chars of the merge SHA>"}` on several calls in a row;
-- the smoke run for the merge SHA passed its "Wait for the rolling release to reach 100%" step;
-- the Vercel dashboard (Deployments → Rolling Release) shows the rollout complete.
+- the smoke run for the merge SHA passed its "Wait until production serves this commit" step;
+- the Vercel dashboard (Deployments) shows the merge SHA as the current production deployment.
 
-Use `vcrrForceStable=true`: it forces the pre-rollout base while the rollout is below 100%. A plain `curl` is sticky per client (Vercel hashes client info such as the IP), so it can show the new SHA every time while 90% of traffic still runs old code (https://vercel.com/docs/rolling-releases). Not at 100% → stop and wait. Then add any drain time the migration's own runbook requires (0016: 5 more minutes).
+Rolling Releases are OFF (checked 2026-10-05). `vcrrForceStable=true` keeps the check correct if they are turned back on: it forces the pre-rollout base while a rollout is below 100% (https://vercel.com/docs/rolling-releases). Not live → stop and wait. Then add any drain time the migration's own runbook requires (0016: 5 more minutes).
 
 ## 3. Confirm
 State: the exact tags to apply, the tables/columns each touches, and that drizzle-kit connects with `DATABASE_URL_UNPOOLED` from `.env.local` (see drizzle.config.ts). Ask: "Apply these N migration(s) to prod now?" — wait for a yes.
@@ -41,4 +43,4 @@ set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/migration-statu
 Quote the output. A failing SELECT here means the app is about to break on that table — say so loudly.
 
 ## 6. Record
-Report tags applied + verify output, then run /post-merge-check (smoke on main must be green).
+Report tags applied + verify output. Before a merge: re-run the PR's failed `migration safety` job (it must turn green), and the PR is ready for the owner's merge go. After a merge (an `after-deploy` step): run /post-merge-check (smoke on main must be green).

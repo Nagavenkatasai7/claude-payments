@@ -1,7 +1,9 @@
-# Dependabot VERSION updates (npm, weekly). Minor + patch bumps arrive as one
+# Dependabot VERSION updates, weekly. npm: minor + patch bumps arrive as one
 # grouped PR to keep noise down; majors arrive individually so breaking
-# changes get their own review. Security updates are a separate repo-settings
-# toggle (coordinator), not configured here.
+# changes get their own review. github-actions: every workflow pins actions by
+# full commit SHA with the version in a comment (`@<sha> # v4`); Dependabot
+# bumps the SHA and the comment together, all actions in one grouped PR.
+# Security updates are a separate repo-settings toggle, not configured here.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -15,3 +17,17 @@ updates:
         update-types:
           - minor
           - patch
+
+  - package-ecosystem: github-actions
+    # '/' means .github/workflows/; a composite action is listed by its own
+    # directory.
+    directories:
+      - '/'
+      - '/.github/actions/setup-playwright'
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - '*'

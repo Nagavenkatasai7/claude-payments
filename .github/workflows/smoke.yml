@@ -7,11 +7,12 @@ run-name: Smoke ${{ inputs.sha || github.event.deployment.sha || github.sha }} (
 #
 # Triggers:
 # - push to main: the primary trigger. The run starts at merge time, and its
-#   "Wait for the rolling release to reach 100%" step covers the Vercel build
-#   AND the rolling release. With Rolling Releases on, Vercel no longer posts a
-#   GitHub deployment / deployment_status for production builds (only Preview
-#   records exist after 6269fda), so a deployment_status-only smoke never ran
-#   for 2365627. No paths filter: vercel.json's git.deploymentEnabled turns
+#   "Wait until production serves this commit" step covers the Vercel build
+#   (and a rolling release, if one is configured; Rolling Releases are OFF as
+#   of 2026-10-05). While Rolling Releases were on (Sep 21 - early Oct 2026),
+#   Vercel posted no GitHub deployment / deployment_status for production
+#   builds, so a deployment_status-only smoke never ran for 2365627; the push
+#   trigger does not depend on those records. No paths filter: vercel.json's git.deploymentEnabled turns
 #   off Git deployments for every branch except main (owner cost rules
 #   2026-09-29) and its ignoreCommand still skips component/*; main stays
 #   enabled, so every push to main deploys.
@@ -96,7 +97,7 @@ jobs:
   smoke:
     needs: target
     runs-on: ubuntu-latest
-    # Up to 25 min waiting for the build + rolling release (below), up to 5
+    # Up to 25 min waiting for the production build (below), up to 5
     # min for the migration check, plus the few minutes the install and
     # Playwright run need.
     timeout-minutes: 38
@@ -164,13 +165,13 @@ jobs:
           echo "::error title=Smoke covered by the push run::${url} tested ${TARGET_SHA:0:7} and concluded ${conclusion}. This deployment_status run does not re-test. Once production serves this commit (or after a fix), re-run with: gh workflow run smoke.yml -f sha=${TARGET_SHA}"
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: steps.dedupe.outputs.covered != 'true'
         with:
           ref: ${{ needs.target.outputs.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.dedupe.outputs.covered != 'true'
         with:
           node-version: '24'
@@ -183,13 +184,15 @@ jobs:
         if: steps.dedupe.outputs.covered != 'true'
         uses: ./.github/actions/setup-playwright
 
-      - name: Wait for the rolling release to reach 100%
+      - name: Wait until production serves this commit
         if: steps.dedupe.outputs.covered != 'true'
         # A push-triggered run starts at merge time, so this wait covers the
-        # Vercel production build (~3-6 min) AND the rolling release: a new
-        # deployment gets 10% of traffic for 5 min, then auto-promotes to 100%.
-        # Testing before that would mostly exercise the OLD deployment, and
-        # "smoke green on SHA X" would not prove X works.
+        # Vercel production build (~3-6 min). Testing before production serves
+        # the commit would exercise the OLD deployment, and "smoke green on
+        # SHA X" would not prove X works. Rolling Releases are OFF (Vercel
+        # project config null, checked 2026-10-05); if they are turned back on
+        # (10% for 5 min, then 100%), this same wait also covers the rollout,
+        # which is what the forced-stable polling below is for.
         #
         # Poll GET /api/version (src/app/api/version/route.ts) until it reports
         # the target's short SHA on REQUIRED_STREAK consecutive polls.
@@ -259,11 +262,11 @@ jobs:
             echo "poll ${polls} (+${elapsed}s): ${last} -> streak ${streak}/${REQUIRED_STREAK}"
 
             if (( streak >= REQUIRED_STREAK )); then
-              echo "Rolling release complete: production serves ${target} (${REQUIRED_STREAK} consecutive polls, ${elapsed}s after the wait began)."
+              echo "Production serves ${target} (${REQUIRED_STREAK} consecutive polls, ${elapsed}s after the wait began)."
               exit 0
             fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the Vercel production build failed or is still queued; or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments and its Rolling Release, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
+              echo "::error title=Production did not serve this commit::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: the Vercel production build failed or is still queued; or a newer production deployment replaced it; or, if Rolling Releases are on, an earlier rollout is still active (Vercel starts no new rollout until it resolves) or this one is paused, aborted or rolled back. Check Vercel > Deployments, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
               exit 1
             fi
             sleep "$POLL_INTERVAL_SECONDS"
@@ -379,7 +382,7 @@ jobs:
 
       - name: Upload trace on failure
         if: failure() && steps.dedupe.outputs.covered != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-trace
           path: |
