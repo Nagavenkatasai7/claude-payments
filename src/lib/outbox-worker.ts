@@ -30,6 +30,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
+import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { llmDownAlertFor } from '@/lib/llm-alert';
@@ -218,6 +219,20 @@ export class TurnBusyError extends Error {
   constructor(readonly delaySec: number = TURN_BUSY_DEFER_SEC) {
     super('turn_busy');
     this.name = 'TurnBusyError';
+  }
+}
+
+/**
+ * Release safety part A: thrown by the settlement.instruct handler when the
+ * `settlement.paused` kill switch matches the transfer (global, its owner or
+ * rail partner, or its corridor). Nothing was POSTed. drainOnce defers the row
+ * UNCHARGED for SETTLEMENT_PAUSED_DEFER_SEC (like TurnBusyError): a pause never
+ * spends the 56-attempt budget, never dead-letters and never raises railfail.
+ */
+export class SettlementPausedError extends Error {
+  constructor(readonly delaySec: number = SETTLEMENT_PAUSED_DEFER_SEC) {
+    super('settlement_paused');
+    this.name = 'SettlementPausedError';
   }
 }
 
@@ -610,6 +625,18 @@ async function handle(
       // their id in the instruction (the rail verifies with the partner_id it
       // carries). Unrouted ⇒ the owning partner, exactly as before.
       const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
+      // Release safety part A: the settlement.paused kill switch. Checked after
+      // every "not payable" guard above (those rows finish as before) and
+      // BEFORE the instruction is built or sent. The row waits, uncharged.
+      if (
+        await isFlagOn(deps.db, 'settlement.paused', {
+          partnerId: [transfer.partnerId, railPartnerId],
+          corridor: transfer.destinationCountry,
+        })
+      ) {
+        logWarn('outbox.instruct-paused', 'settlement.paused is on; instruction deferred', { transferId });
+        throw new SettlementPausedError();
+      }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
@@ -1383,7 +1410,8 @@ export async function drainOnce(
       // due in a few seconds. Checked BEFORE markFailed so waiting can never
       // spend the attempt budget or dead-letter a customer's message.
       // M3-16: a report that cannot fit this invocation is deferred the same way (never charged).
-      if (err instanceof TurnBusyError || err instanceof ReportDeferredError) {
+      // Release safety part A: a paused settlement instruction waits the same way.
+      if (err instanceof TurnBusyError || err instanceof ReportDeferredError || err instanceof SettlementPausedError) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;
         } else {

@@ -7,11 +7,12 @@ run-name: Smoke ${{ inputs.sha || github.event.deployment.sha || github.sha }} (
 #
 # Triggers:
 # - push to main: the primary trigger. The run starts at merge time, and its
-#   "Wait for the rolling release to reach 100%" step covers the Vercel build
-#   AND the rolling release. With Rolling Releases on, Vercel no longer posts a
-#   GitHub deployment / deployment_status for production builds (only Preview
-#   records exist after 6269fda), so a deployment_status-only smoke never ran
-#   for 2365627. No paths filter: vercel.json's git.deploymentEnabled turns
+#   "Wait until production serves this commit" step covers the Vercel build
+#   (and a rolling release, if one is configured; Rolling Releases are OFF as
+#   of 2026-10-05). While Rolling Releases were on (Sep 21 - early Oct 2026),
+#   Vercel posted no GitHub deployment / deployment_status for production
+#   builds, so a deployment_status-only smoke never ran for 2365627; the push
+#   trigger does not depend on those records. No paths filter: vercel.json's git.deploymentEnabled turns
 #   off Git deployments for every branch except main (owner cost rules
 #   2026-09-29) and its ignoreCommand still skips component/*; main stays
 #   enabled, so every push to main deploys.
@@ -96,10 +97,20 @@ jobs:
   smoke:
     needs: target
     runs-on: ubuntu-latest
-    # Up to 25 min waiting for the build + rolling release (below), up to 5
-    # min for the migration check, plus the few minutes the install and
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only). A job with an
+    # environment also posts a GitHub deployment record named after it; the
+    # deployment_status triggers here and in preview-smoke.yml ignore that name.
+    environment: prod-secrets
+    outputs:
+      # Release safety part B: the `rollback` job runs only when the money
+      # test or the health check failed on the LIVE build (never for a page test).
+      money_failed: ${{ steps.health.outcome == 'failure' || steps.synthetic.outcome == 'failure' }}
+    # Up to 25 min waiting for the production build (below), up to 5
+    # min for the migration check, up to 2 min for the health check, up to 8
+    # min for the synthetic transfer, plus the few minutes the install and
     # Playwright run need.
-    timeout-minutes: 38
+    timeout-minutes: 50
     # One smoke per commit at a time. A second run for the same commit (a
     # deployment_status event, or a dispatch while the push run is going)
     # waits instead of racing it. GitHub keeps at most ONE waiting job per
@@ -164,13 +175,13 @@ jobs:
           echo "::error title=Smoke covered by the push run::${url} tested ${TARGET_SHA:0:7} and concluded ${conclusion}. This deployment_status run does not re-test. Once production serves this commit (or after a fix), re-run with: gh workflow run smoke.yml -f sha=${TARGET_SHA}"
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: steps.dedupe.outputs.covered != 'true'
         with:
           ref: ${{ needs.target.outputs.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.dedupe.outputs.covered != 'true'
         with:
           node-version: '24'
@@ -183,13 +194,15 @@ jobs:
         if: steps.dedupe.outputs.covered != 'true'
         uses: ./.github/actions/setup-playwright
 
-      - name: Wait for the rolling release to reach 100%
+      - name: Wait until production serves this commit
         if: steps.dedupe.outputs.covered != 'true'
         # A push-triggered run starts at merge time, so this wait covers the
-        # Vercel production build (~3-6 min) AND the rolling release: a new
-        # deployment gets 10% of traffic for 5 min, then auto-promotes to 100%.
-        # Testing before that would mostly exercise the OLD deployment, and
-        # "smoke green on SHA X" would not prove X works.
+        # Vercel production build (~3-6 min). Testing before production serves
+        # the commit would exercise the OLD deployment, and "smoke green on
+        # SHA X" would not prove X works. Rolling Releases are OFF (Vercel
+        # project config null, checked 2026-10-05); if they are turned back on
+        # (10% for 5 min, then 100%), this same wait also covers the rollout,
+        # which is what the forced-stable polling below is for.
         #
         # Poll GET /api/version (src/app/api/version/route.ts) until it reports
         # the target's short SHA on REQUIRED_STREAK consecutive polls.
@@ -259,11 +272,11 @@ jobs:
             echo "poll ${polls} (+${elapsed}s): ${last} -> streak ${streak}/${REQUIRED_STREAK}"
 
             if (( streak >= REQUIRED_STREAK )); then
-              echo "Rolling release complete: production serves ${target} (${REQUIRED_STREAK} consecutive polls, ${elapsed}s after the wait began)."
+              echo "Production serves ${target} (${REQUIRED_STREAK} consecutive polls, ${elapsed}s after the wait began)."
               exit 0
             fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the Vercel production build failed or is still queued; or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments and its Rolling Release, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
+              echo "::error title=Production did not serve this commit::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: the Vercel production build failed or is still queued; or a newer production deployment replaced it; or, if Rolling Releases are on, an earlier rollout is still active (Vercel starts no new rollout until it resolves) or this one is paused, aborted or rolled back. Check Vercel > Deployments, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
               exit 1
             fi
             sleep "$POLL_INTERVAL_SECONDS"
@@ -360,6 +373,87 @@ jobs:
             sleep "$POLL_INTERVAL_SECONDS"
           done
 
+      - name: Production health (database and Redis)
+        id: health
+        if: steps.dedupe.outputs.covered != 'true'
+        # Release safety part B. Bearer GET /api/health adds a Neon `select 1`
+        # to the Redis read (src/app/api/health/route.ts). The new build must
+        # reach both. `worker: stale` only warns: the worker marker is up to 40
+        # min old by design and does not depend on this build. A failure here
+        # starts the `rollback` job. Three tries, 20 s apart.
+        timeout-minutes: 2
+        shell: bash
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          HEALTH_URL: https://smartremit.ai/api/health
+        run: |
+          set -u
+          if [[ -z "${CRON_SECRET:-}" ]]; then
+            echo "::error title=Health check could not run::The CRON_SECRET secret is not available to this run."
+            exit 1
+          fi
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+          last="none"
+          for attempt in 1 2 3; do
+            : > "$body_file"
+            code="$(curl -sS --max-time 15 -H "Authorization: Bearer ${CRON_SECRET}" -H 'Cache-Control: no-cache' \
+              -o "$body_file" -w '%{http_code}' "${HEALTH_URL}?cb=$(date +%s)-${attempt}")" || code="error"
+            db="$(jq -r '.db // "-"' "$body_file" 2>/dev/null || echo '-')"
+            redis="$(jq -r '.redis // "-"' "$body_file" 2>/dev/null || echo '-')"
+            worker="$(jq -r '.worker // "-"' "$body_file" 2>/dev/null || echo '-')"
+            errors="$(jq -r '.buildErrors // "-"' "$body_file" 2>/dev/null || echo '-')"
+            last="HTTP ${code}, db=${db}, redis=${redis}, worker=${worker}, buildErrors=${errors}"
+            echo "attempt ${attempt}: ${last}"
+            if [[ "$code" == "401" ]]; then
+              echo "::error title=Health check unauthorized::The CRON_SECRET secret does not match production's."
+              exit 1
+            fi
+            if [[ ( "$code" == "200" || "$code" == "503" ) && "$db" == "ok" && "$redis" == "ok" ]]; then
+              if [[ "$worker" != "ok" ]]; then
+                echo "::warning title=Worker marker not fresh::/api/health reports worker=${worker}. This does not depend on the new build; check the cron."
+              fi
+              exit 0
+            fi
+            [[ "$attempt" == "3" ]] || sleep 20
+          done
+          echo "::error title=Production unhealthy::The new build cannot reach its database or Redis (${last})."
+          exit 1
+
+      - name: Check the synthetic transfer key
+        id: synthetic_key
+        if: steps.dedupe.outputs.covered != 'true'
+        # A missing key (or a key that is not a sandbox sr_test_ key) is a
+        # setup problem, not a bad build: it must never start the `rollback`
+        # job. This step never fails, so the page smoke still runs; the last
+        # step of this job turns the smoke red instead.
+        shell: bash
+        env:
+          KEY: ${{ secrets.E2E_SANDBOX_API_KEY }}
+        run: |
+          if [[ "$KEY" == sr_test_* ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Synthetic transfer did not run::E2E_SANDBOX_API_KEY is missing or is not a sandbox (sr_test_) key. Automatic rollback cannot run until it is set."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Synthetic sandbox transfer on the live build
+        id: synthetic
+        if: steps.dedupe.outputs.covered != 'true' && steps.synthetic_key.outputs.ready == 'true'
+        # Release safety part B. The same test as release-check.yml, now on
+        # the live build, and it also waits for `delivered`: that proves the
+        # live worker settles the sandbox transfer on the mock rail. A failure
+        # here starts the `rollback` job.
+        timeout-minutes: 9
+        env:
+          CI: 'true'
+          SYNTHETIC_TRANSFER: '1'
+          SYNTHETIC_WAIT_DELIVERED: '1'
+          BASE_URL: https://smartremit.ai
+          E2E_SANDBOX_API_KEY: ${{ secrets.E2E_SANDBOX_API_KEY }}
+        run: npx playwright test tests/e2e/synthetic-transfer.spec.ts
+
       - name: Smoke test
         if: steps.dedupe.outputs.covered != 'true'
         # Target the canonical production domain, not target_url. The
@@ -379,10 +473,57 @@ jobs:
 
       - name: Upload trace on failure
         if: failure() && steps.dedupe.outputs.covered != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-trace
           path: |
             test-results/
             !test-results/**/*.zip
           retention-days: 7
+
+      - name: Fail when the synthetic transfer could not run
+        if: steps.synthetic_key.outputs.ready == 'false'
+        run: |
+          echo "::error title=Synthetic transfer did not run::Set the E2E_SANDBOX_API_KEY secret (the SmartRemit Synthetic partner's sr_test_ key), then re-run this smoke."
+          exit 1
+
+  rollback:
+    # Release safety part B, layer 2: put the previous production deployment
+    # back when the money test or the health check failed on the live build.
+    # Push runs only (the merge that deployed this build); a page-test failure
+    # never starts it. scripts/ci/release-guard.mjs refuses when a newer merge
+    # is already production, opens a GitHub issue and raises one ops alert.
+    # After a rollback Vercel promotes no new deploy until a person promotes
+    # one (the issue gives the step). Migrations are additive and work with the
+    # previous build (CLAUDE.md), so no database step is needed.
+    needs: [target, smoke]
+    if: always() && github.event_name == 'push' && needs.smoke.outputs.money_failed == 'true'
+    runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Roll back production, open the issue and raise one ops alert
+        env:
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+          VERCEL_ROLLBACK_TOKEN: ${{ secrets.VERCEL_ROLLBACK_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM_ID: ${{ vars.VERCEL_TEAM_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ALERT_URL: https://smartremit.ai/api/ops/deploy-alert
+        run: node scripts/ci/release-guard.mjs rollback

@@ -984,3 +984,29 @@ export const partnerWebhookDeliveries = pgTable(
     index('partner_webhook_deliveries_partner_created').on(t.partnerId, t.createdAt.desc()),
   ],
 );
+
+// ── Release safety Batch 2 part A (0029): feature flags and kill switches ────
+// A NEW table, so no existing explicit-column query changes shape. One row per
+// (key, scope): scope_type 'global' (scope_id ''), 'partner' (scope_id = a
+// partner id) or 'corridor' (scope_id = a destination country code). No FK to
+// partners on purpose: a flag row never blocks a partner erasure, and a
+// corridor scope is not a partner. Read through src/lib/flags.ts only; written
+// only by the platform-admin switch action (with a flag.change audit row in the
+// same transaction). Known keys live in FLAG_DEFINITIONS (src/lib/flags.ts).
+export const featureFlags = pgTable(
+  'feature_flags',
+  {
+    key: text('key').notNull(),
+    scopeType: text('scope_type').notNull(),
+    scopeId: text('scope_id').notNull().default(''),
+    enabled: boolean('enabled').notNull().default(false),
+    reason: text('reason'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.key, t.scopeType, t.scopeId] }),
+    check('feature_flags_scope_type', sql`${t.scopeType} IN ('global','partner','corridor')`),
+    check('feature_flags_global_scope_id', sql`${t.scopeType} <> 'global' OR ${t.scopeId} = ''`),
+  ],
+);

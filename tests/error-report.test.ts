@@ -208,3 +208,33 @@ describe('instrumentation onRequestError', () => {
     expect(f).not.toHaveBeenCalled();
   });
 });
+
+// Release safety Batch 2 part D: the deployment id tag and the per-build count.
+describe('release safety part D', () => {
+  it('tags the Sentry event with a valid VERCEL_DEPLOYMENT_ID only', async () => {
+    vi.stubEnv('SENTRY_DSN', DSN);
+    vi.stubEnv('VERCEL_DEPLOYMENT_ID', 'dpl_AbCdEf123456');
+    const fetchFn = vi.fn(async () => new Response(null, { status: 200 }));
+    await reportRequestError(buildErrorReport(new Error('x'), REQUEST, CONTEXT), fetchFn as unknown as typeof fetch);
+    const event = JSON.parse(sentBody(fetchFn).trimEnd().split('\n')[2]) as { tags: Record<string, string> };
+    expect(event.tags.deploymentId).toBe('dpl_AbCdEf123456');
+
+    vi.stubEnv('VERCEL_DEPLOYMENT_ID', 'evil value');
+    const f2 = vi.fn(async () => new Response(null, { status: 200 }));
+    await reportRequestError(buildErrorReport(new Error('x'), REQUEST, CONTEXT), f2 as unknown as typeof fetch);
+    expect(JSON.parse(sentBody(f2).trimEnd().split('\n')[2]).tags).not.toHaveProperty('deploymentId');
+  });
+
+  it('onRequestError adds one to the build counter when the KV REST env is set', async () => {
+    vi.stubEnv('SENTRY_DSN', '');
+    vi.stubEnv('VERCEL_GIT_COMMIT_SHA', 'abcdef0123456789abcdef0123456789abcdef01');
+    vi.stubEnv('KV_REST_API_URL', 'https://kv.example.upstash.io');
+    vi.stubEnv('KV_REST_API_TOKEN', 'tok');
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('[]', { status: 200 }));
+    await onRequestError(hostileError(), REQUEST, CONTEXT);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(String(f.mock.calls[0][0])).toBe('https://kv.example.upstash.io/pipeline');
+    expect(String((f.mock.calls[0][1] as RequestInit).body)).toContain('builderr:abcdef0');
+  });
+});

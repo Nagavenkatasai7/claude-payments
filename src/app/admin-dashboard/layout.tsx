@@ -5,6 +5,7 @@ import { requireStaff } from '@/lib/auth';
 import { resolveNavItems } from './nav';
 import { TopBar } from './top-bar';
 import { DrawerProvider, MobileNavDrawer } from './mobile-nav';
+import { KillSwitchBanner } from './kill-switch-banner';
 
 // SmartRemit-owned surface: the SmartRemit.ai tab icon for the whole subtree
 // (see ../brand-icons.ts for why icons are per-route, not app/icon.png).
@@ -21,8 +22,13 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   return (
     <div className="admin-brand">
     <DrawerProvider>
-      <div className="grid min-h-svh grid-rows-[60px_1fr] bg-background font-sans text-foreground antialiased">
+      <div className="grid min-h-svh grid-rows-[60px_auto_1fr] bg-background font-sans text-foreground antialiased">
         <TopBar />
+        {/* Release safety: the red kill-switch banner. The wrapper is always present so
+            the page column keeps its grid row; it is empty while every switch is off. */}
+        <div>
+          <KillSwitchBanner />
+        </div>
         {/* Sidebar + page column. Pages render `<Sidebar …/><main className="sh-main">…`
             as the two grid children; ≤1024px collapses to a single column and the
             off-canvas drawer (below) takes over from the static sidebar. */}

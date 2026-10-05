@@ -1,4 +1,4 @@
-import type { Customer, PartnerId, Staff } from './types';
+import type { Customer, PartnerId, Staff, TransferEnvironment } from './types';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
 import type { PartnerStore } from './partner-store';
@@ -36,6 +36,7 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
       const page = await store.listTransfersPage({
         limit,
         partnerId: scope.kind === 'partner' ? scope.partnerId : undefined,
+        environment: 'live', // Release safety: the synthetic sandbox transfer never takes an Overview slot
       });
       return page.items;
     },
@@ -44,10 +45,17 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
      * viewer may narrow to one partner; a partner-scoped viewer is ALWAYS
      * pinned to their own tenant regardless of the filter argument.
      */
-    async transfersPage(req: { limit: number; cursor?: string; partnerFilter?: string }) {
+    async transfersPage(req: {
+      limit: number;
+      cursor?: string;
+      partnerFilter?: string;
+      /** Omitted ⇒ every environment (the Transactions page badges sandbox rows). */
+      environment?: TransferEnvironment;
+    }) {
       return store.listTransfersPage({
         limit: req.limit,
         cursor: req.cursor,
+        environment: req.environment,
         partnerId:
           scope.kind === 'partner' ? scope.partnerId : (req.partnerFilter || undefined),
       });
@@ -56,7 +64,7 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
     async complianceViews(limit = 100) {
       const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;
       const [inReview, flagged, blocked, topVelocity] = await Promise.all([
-        store.listTransfersPage({ limit, partnerId, status: 'in_review' }).then((p) => p.items),
+        store.listTransfersPage({ limit, partnerId, status: 'in_review', environment: 'live' }).then((p) => p.items),
         store.listTransfersByCompliance('flagged', { partnerId, limit }),
         store.listTransfersByCompliance('blocked', { partnerId, limit }),
         store.topVelocityToday(10, partnerId),

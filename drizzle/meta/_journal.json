@@ -204,6 +204,13 @@
       "when": 1790633965081,
       "tag": "0028_partner_app",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791178756430,
+      "tag": "0029_feature_flags",
+      "breakpoints": true
     }
   ]
 }

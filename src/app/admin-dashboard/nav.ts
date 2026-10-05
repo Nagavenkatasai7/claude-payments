@@ -28,7 +28,8 @@ export type SidebarActive =
   | 'my-queue'
   | 'employee-questions'
   | 'refunds'
-  | 'waitlist';
+  | 'waitlist'
+  | 'switches';
 
 export type NavItem = SidebarActive;
 
@@ -77,7 +78,8 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
         'rates', // platform-wide cross-tenant pricing — never shown to partner-scoped staff
         'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
         // partner-requests + waitlist are SmartRemit's own inbound lists — platform admins only.
-        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys'] as NavItem[]) : []),
+        // switches (Release safety part A): the kill switches — platform admins only (requirePlatformAdmin).
+        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys', 'switches'] as NavItem[]) : []),
       ],
     },
   ];
@@ -110,6 +112,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   b2b:          { label: 'B2B',           icon: 'building',     hrefFor: () => '/admin-dashboard/b2b' },
   'partner-requests': { label: 'Partner requests', icon: 'building', hrefFor: () => '/admin-dashboard/partner-requests' },
   waitlist:     { label: 'Waitlist',     icon: 'queue',        hrefFor: () => '/admin-dashboard/waitlist' },
+  switches:     { label: 'Switches',     icon: 'shield',       hrefFor: () => '/admin-dashboard/switches' },
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
   tickets:      { label: 'Tickets',      icon: 'tickets',      hrefFor: () => '/admin-dashboard/tickets' },

@@ -74,9 +74,17 @@ export async function guardPartner(
 
 /** Map a service result to a JSON Response. */
 export function svcResponse(result: SvcResult<unknown>): NextResponse {
-  return result.ok
-    ? NextResponse.json(result.data as Record<string, unknown>, { status: result.status })
-    : NextResponse.json({ error: result.error }, { status: result.status });
+  if (result.ok) return NextResponse.json(result.data as Record<string, unknown>, { status: result.status });
+  // Release safety part A: an error with a machine-readable code (sends_paused)
+  // carries it in the body and, when set, a Retry-After header. Every other
+  // error keeps the exact { error } body.
+  return NextResponse.json(
+    result.code ? { error: result.error, code: result.code } : { error: result.error },
+    {
+      status: result.status,
+      ...(result.retryAfterSec !== undefined ? { headers: { 'Retry-After': String(result.retryAfterSec) } } : {}),
+    },
+  );
 }
 
 /** Parse a JSON body, tolerating an empty/invalid body as {}. */

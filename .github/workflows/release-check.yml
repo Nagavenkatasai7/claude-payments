@@ -1,0 +1,132 @@
+name: Release check
+run-name: Release check ${{ github.event.client_payload.git.shortSha }} (${{ github.event.client_payload.environment }})
+
+# Release safety Batch 2 part B, layer 1: one synthetic SANDBOX transfer
+# through each new production build BEFORE customers see it.
+#
+# Vercel sends `vercel.deployment.ready` when a deployment has built but is not
+# yet promoted (https://github.com/vercel/repository-dispatch, Supported
+# Events). With this check added to the project's Deployment Checks, Vercel
+# holds the production deployment until the `release-check` commit status is
+# green. A red status keeps it held: customers stay on the previous build.
+#
+# The test (tests/e2e/synthetic-transfer.spec.ts) uses the "SmartRemit
+# Synthetic" partner's TEST key, so the transfer is environment 'test': mock
+# rail only, no customer message, no live cap or velocity. It runs against the
+# held deployment URL with the Vercel automation bypass header
+# (playwright.config.ts). On failure the `alert` job opens a GitHub issue and
+# raises one ops alert (scripts/ci/release-guard.mjs).
+#
+# repository_dispatch runs the workflow file from the default branch; the job
+# checks out the commit Vercel built, so the spec matches that build. Payload
+# fields reach scripts through env only, never as inline expressions in `run:`.
+
+on:
+  repository_dispatch:
+    types: [vercel.deployment.ready]
+
+permissions:
+  contents: read
+
+jobs:
+  release-check:
+    if: github.event.client_payload.environment == 'production'
+    runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # the status action reads this job's step results
+      statuses: write # the `release-check` commit status Vercel waits on
+    concurrency:
+      group: release-check-${{ github.event.client_payload.git.sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Report the release-check status to Vercel
+        # Sets `release-check` to pending on the deployment's commit now, and to
+        # success or failure (from this job's step results) in its post step.
+        uses: vercel/repository-dispatch/actions/status@30f760c6640485cd92f8c785ef361382555fb712 # v1
+        with:
+          name: release-check
+
+      - name: Validate the deployment payload
+        id: payload
+        shell: bash
+        env:
+          DEPLOY_URL: ${{ github.event.client_payload.url }}
+          DEPLOY_SHA: ${{ github.event.client_payload.git.sha }}
+          PROJECT_NAME: ${{ github.event.client_payload.project.name }}
+        run: |
+          set -u
+          url="$DEPLOY_URL"
+          [[ "$url" == https://* ]] || url="https://${url}"
+          # The sandbox key and the bypass secret go only to this project's own
+          # deployment URLs (<project>-<hash>-<team>.vercel.app).
+          if [[ "$PROJECT_NAME" != "claude-payments" || ! "$url" =~ ^https://claude-payments-[a-z0-9]+-[a-z0-9-]+\.vercel\.app$ ]]; then
+            echo "::error title=Release check::The deployment is not a claude-payments *.vercel.app deployment."
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Release check::The deployment commit is not a full SHA."
+            exit 1
+          fi
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "sha=${DEPLOY_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.payload.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Setup Playwright (cached)
+        uses: ./.github/actions/setup-playwright
+
+      - name: Synthetic sandbox transfer on the held deployment
+        env:
+          CI: 'true'
+          SYNTHETIC_TRANSFER: '1'
+          BASE_URL: ${{ steps.payload.outputs.url }}
+          E2E_SANDBOX_API_KEY: ${{ secrets.E2E_SANDBOX_API_KEY }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: npx playwright test tests/e2e/synthetic-transfer.spec.ts
+
+  alert:
+    needs: release-check
+    if: failure() && github.event.client_payload.environment == 'production'
+    runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only).
+    environment: prod-secrets
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Open the issue and raise one ops alert
+        env:
+          TARGET_SHA: ${{ github.event.client_payload.git.sha }}
+          DEPLOYMENT_ID: ${{ github.event.client_payload.id }}
+          DEPLOYMENT_URL: ${{ github.event.client_payload.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ALERT_URL: https://smartremit.ai/api/ops/deploy-alert
+        run: node scripts/ci/release-guard.mjs release-check-failed

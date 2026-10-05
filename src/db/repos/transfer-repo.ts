@@ -1522,6 +1522,10 @@ export function createTransferRepo(
             // RETURNED is not "stuck" — it must never be re-instructed (its
             // dispute alert owns it). NULL (every non-async row) still listed.
             sql`${transfers.fundingState} IS DISTINCT FROM 'returned'`,
+            // Release safety part B: a sandbox row (the synthetic release check)
+            // never moves money; it is not a stuck payment, an ops alert or a
+            // "Stuck paid" tile count. The smoke's delivered-wait watches it.
+            LIVE_ONLY,
           ),
         )
         .orderBy(transfers.paidAt);

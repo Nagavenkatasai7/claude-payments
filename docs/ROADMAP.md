@@ -77,7 +77,7 @@ SmartRemit is white-label, non-custodial remittance **infrastructure**: a multi-
 | B2B invoicing | ✅ built (mock data) | Sellers issue bills the buyer pays in chat (`create_invoice`, `present_bill`, `b2b_invoices`, `sellers`). No real accounting integration. |
 | Customer account portal | ✅ built | `/account`: history, receipts, repeat sends, support tickets, web chat (restricted toolset). |
 | Partner email (lead alert + application invite) | ✅ built, honest when unset | SMTP via `src/lib/email.ts`, sent durably through the outbox. SMTP is optional: when it is unset a send is **skipped, not faked**. The worker writes an `email.skipped` audit row and raises one ops alert per day, `/admin-dashboard/ops` shows whether email is configured, and a platform admin can resend an invite (which issues a new link) from the partner request page. |
-| CI/CD | ✅ built | GitHub Actions `ci / ci` gate on PRs, Vercel rolling releases, post-deploy Playwright smoke (`smoke.yml`). |
+| CI/CD | ✅ built | GitHub Actions `ci / ci` gate on PRs (incl. the `migration safety` job: additive-only SQL, applied in prod before merge), post-deploy Playwright smoke (`smoke.yml`), Nightly + worker-heartbeat failures open an issue, rollback steps in `docs/ROLLBACK.md`. Vercel Rolling Releases are off. |
 | Feature flags | ❌ not built | |
 
 #### DNS and email runbook

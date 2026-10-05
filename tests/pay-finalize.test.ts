@@ -883,3 +883,27 @@ describe('finalizeDraftPayment — cap from the ledger (Program fix 16)', { retr
     expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
   });
 });
+
+// Release safety Batch 2 part A: the sends.paused kill switch on the pay page.
+describe('finalizeDraftPayment: sends.paused', { retry: 0 }, () => {
+  it('a global pause ⇒ { error: "sends_paused" }, draft NOT consumed, no transfer; the same link works once it is off', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    const { createFeatureFlagRepo } = await import('@/db/repos/feature-flag-repo');
+    const { invalidateFlagCache } = await import('@/lib/flags');
+    const flags = createFeatureFlagRepo(stores.db);
+    await flags.upsert({ key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: true, reason: 'incident', updatedBy: 'admin' });
+    invalidateFlagCache(stores.db);
+
+    const paused = await finalizeDraftPayment(stores, draftId);
+    expect(paused).toEqual({ ok: false, error: 'sends_paused' });
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+
+    await flags.upsert({ key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: false, reason: 'resolved', updatedBy: 'admin' });
+    invalidateFlagCache(stores.db);
+    const ok = await finalizeDraftPayment(stores, draftId);
+    expect(ok.ok).toBe(true);
+    invalidateFlagCache(stores.db);
+  });
+});

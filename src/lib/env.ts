@@ -177,6 +177,15 @@ export const env = {
   get cronSecret() {
     return process.env.CRON_SECRET ?? '';
   },
+  /**
+   * Release safety part C: a READ-ONLY token for GET /api/version/migrations
+   * (the migration safety job in ci.yml). It opens nothing else, so CI's pull
+   * request runs no longer need CRON_SECRET. Optional: unset ⇒ only
+   * CRON_SECRET is accepted there.
+   */
+  get migrationsReadToken() {
+    return process.env.MIGRATIONS_READ_TOKEN ?? '';
+  },
   get seedAdminUsername() {
     return required('SEED_ADMIN_USERNAME');
   },

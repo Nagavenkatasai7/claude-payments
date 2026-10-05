@@ -1,12 +1,15 @@
 # BACKUP clock for the outbox worker (Program-Fix 12). The Vercel per-minute
 # cron (vercel.json: /api/worker on `* * * * *`) is the worker's clock; this
-# hourly GitHub Actions run is the backup that drains anything if that cron
-# goes quiet, and its plain GET is what raises the `cronquiet` alarm (a
-# cron-sourced call cannot notice its own absence). Hourly, not every 5
-# minutes: the repo is private, so Actions minutes are billed, and a schedule
-# GitHub really honoured at that rate could exhaust the quota that the
-# required `ci / ci` check and smoke.yml depend on. Overlap-safe: the worker
-# claims rows with FOR UPDATE SKIP LOCKED.
+# GitHub Actions run is the backup that drains anything if that cron goes
+# quiet, and its plain GET is what raises the `cronquiet` alarm (a
+# cron-sourced call cannot notice its own absence). Scheduled hourly, but
+# GitHub delays scheduled runs: Sep 16 - Oct 4, 2026 the median gap between
+# runs was 4.1 h and the longest 8.6 h. So this is a slow backstop, not an
+# hourly guarantee; the outside watchdog on GET /api/health (and the optional
+# WORKER_HEARTBEAT_URL ping) is what notices a dead Vercel cron quickly. The
+# repo is public, so Actions minutes are free; a tighter cron would not make
+# GitHub run it on time. Overlap-safe: the worker claims rows with FOR UPDATE
+# SKIP LOCKED.
 # partner-demo R4 (Neon compute): while the Vercel cron marker is fresh and no
 # outbox work is marked due, this GET is GATED — it returns without touching
 # the database (the :17 cron tick is the backstop full run anyway). It runs a
@@ -28,6 +31,11 @@ concurrency:
 jobs:
   drain:
     runs-on: ubuntu-latest
+    # Release safety part C: production secrets live in the `prod-secrets`
+    # GitHub environment (deployments from main only). A job with an
+    # environment also posts a GitHub deployment record named after it; the
+    # deployment_status triggers here and in preview-smoke.yml ignore that name.
+    environment: prod-secrets
     # Worst case: 90s attempt + 10s retry delay + 90s retry = 190s — keep the
     # job timeout above that so a slow drain fails as a STEP failure, not a
     # confusing job-timeout cancellation.
@@ -45,3 +53,32 @@ jobs:
             -H "Authorization: Bearer ${CRON_SECRET}" \
             "https://smartremit.ai/api/worker" \
             -o /dev/null -w "worker drain HTTP %{http_code}\n"
+
+  # Alert (scripts/ci/scheduled-alert.mjs): a failed drain opens one issue,
+  # "Scheduled workflow failing: worker-heartbeat", or comments on the open
+  # one; the next green drain closes it. Only this job can write, and only
+  # to issues.
+  alert:
+    needs: [drain]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Open, update or close the failure issue
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          NEEDS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/ci/scheduled-alert.mjs
