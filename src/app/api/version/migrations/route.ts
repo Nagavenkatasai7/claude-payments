@@ -13,8 +13,10 @@ import { logError } from '@/lib/log';
 // Kept off /api/version on purpose: the rollout wait polls that route hundreds
 // of times per deploy and pins its body to { sha }.
 //
-// Bearer CRON_SECRET, FAIL-CLOSED: 401 when the secret is unset too (unlike
-// /api/cron), so it is never an anonymous DB hit. A database error answers
+// Bearer CRON_SECRET or Bearer MIGRATIONS_READ_TOKEN (Release safety part C: the
+// read-only token CI's migration safety job uses, so pull request runs never
+// hold CRON_SECRET). FAIL-CLOSED: 401 when neither is set too (unlike
+// /api/cron), so it is never an anonymous DB hit. An empty token never matches. A database error answers
 // 503 { error: 'unreadable' } without the driver's message.
 
 export const dynamic = 'force-dynamic';
@@ -22,8 +24,9 @@ export const dynamic = 'force-dynamic';
 const NO_STORE = { 'Cache-Control': 'no-store' };
 
 export async function GET(req: Request): Promise<Response> {
-  const secret = env.cronSecret;
-  if (!secret || !bearerMatches(req.headers.get('authorization'), secret)) {
+  const authorization = req.headers.get('authorization');
+  const accepted = [env.cronSecret, env.migrationsReadToken].filter((s) => s !== '');
+  if (!accepted.some((s) => bearerMatches(authorization, s))) {
     return Response.json({ error: 'unauthorized' }, { status: 401, headers: NO_STORE });
   }
   const sha = shortCommitSha(process.env.VERCEL_GIT_COMMIT_SHA);
