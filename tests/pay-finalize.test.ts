@@ -632,6 +632,46 @@ describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, n
     expect((await stores.store.getTransfer(result.transferId))?.fxRate).toBe(95.82);
   });
 
+  // Step 0 FX-5: a routed draft priced on a partner PUSH that has since expired.
+  async function expiredPushDraft(stores: Awaited<ReturnType<typeof buildStores>>) {
+    await seedPartner(stores.db, 'rail-partner-x');
+    return stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: {
+        feeUsd: 0, fxRate: 86, amountInr: 17_200, fxFetchedAt: Date.now() - 5 * 60_000,
+        routeExpiresAt: Date.now() - 1_000, fxOrigin: 'partner_push',
+      },
+      settlementPartnerId: 'rail-partner-x',
+    });
+  }
+
+  it('flag ON (FX-5): an expired partner push → fx_unavailable + quoteExpired; draft kept, key unclaimed, nothing minted', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    try {
+      const stores = await buildStores();
+      await verifiedSender(stores);
+      const draftId = await expiredPushDraft(stores);
+      expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'fx_unavailable', quoteExpired: true });
+      expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+      expect(await createIdempotencyRepo(stores.db).find('default', `draft:${draftId}`)).toBeNull();
+      expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('flag OFF (default): the same expired-push draft still mints at the card rate (today\'s behavior)', async () => {
+    const stores = await buildStores();
+    await verifiedSender(stores);
+    const draftId = await expiredPushDraft(stores);
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await stores.store.getTransfer(result.transferId))?.fxRate).toBe(86);
+  });
+
   it('a legacy draft that must re-quote while Frankfurter is down → fx_unavailable; the SAME link mints once FX is back', async () => {
     const stores = await buildStores();
     await verifiedSender(stores);

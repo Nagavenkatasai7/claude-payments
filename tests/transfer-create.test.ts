@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
@@ -592,6 +592,64 @@ describe('quoteOverrideFromDraft (pure)', () => {
       quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 },
     });
     expect(o).toBeUndefined();
+  });
+});
+
+// Step 0 FX-5: a partner push carries its own expiry; under the FX-2 flag the
+// approved quote stops being payable once that push expires.
+describe('route expiry on the approved quote (Step 0 FX-5)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  function reasonOf(fn: () => void): string | null {
+    try { fn(); return null; } catch (err) { return err instanceof RateUnavailableError ? err.reason : 'other'; }
+  }
+  const NOW = Date.now();
+
+  it('flag ON: a quote past its push expiry is refused as stale_quote (also at exactly the expiry)', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW - 1 }, NOW))).toBe('stale_quote');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW }, NOW))).toBe('stale_quote');
+  });
+
+  it('flag ON: before the push expires, and with no push expiry at all, the quote passes', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW + 1 }, NOW))).toBeNull();
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000 }, NOW))).toBeNull();
+  });
+
+  it('flag OFF (default): the push expiry is not checked; the fetch-age check is unchanged', () => {
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW - 1 }, NOW))).toBeNull();
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 61 * 60_000 }, NOW))).toBe('stale_quote');
+  });
+
+  it('flag ON: createTransfer refuses an expired routed override before any write', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x');
+    await expect(createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: {
+        amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 86, amountInr: 17_200,
+        amountSource: 200, feeSource: 0, totalChargeSource: 200,
+        fxFetchedAt: Date.now() - 60_000, routeExpiresAt: Date.now() - 1_000,
+      },
+      settlementPartnerId: 'rail-partner-x',
+    })).rejects.toMatchObject({ reason: 'stale_quote' });
+    const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)) as unknown as { rows: Array<{ n: number }> };
+    expect(rows.rows[0].n).toBe(0);
+  });
+
+  it('quoteOverrideFromDraft carries the push expiry and the rate provenance (USD and non-USD drafts)', () => {
+    const extra = { routeExpiresAt: NOW + 600_000, fxAsOf: '2026-10-02', fxOrigin: 'partner_push' as const };
+    const usd = quoteOverrideFromDraft({
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD',
+      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200, fxFetchedAt: NOW, ...extra },
+    });
+    expect(usd).toMatchObject({ fxFetchedAt: NOW, ...extra });
+    const gbp = quoteOverrideFromDraft({
+      amountUsd: 254, amountSource: 200, sourceCurrency: 'GBP',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600, feeSource: 1.57, totalChargeSource: 201.57, totalChargeUsd: 255.99, ...extra },
+    });
+    expect(gbp).toMatchObject(extra);
   });
 });
 

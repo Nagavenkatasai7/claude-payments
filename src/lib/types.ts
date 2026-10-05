@@ -453,6 +453,14 @@ export interface Draft {
     // refuses the quote once that rate is older than FX_MAX_AGE_MS (it never
     // re-quotes). Absent on drafts created before Task 9 (honored as before).
     fxFetchedAt?: number;
+    // Step 0 FX-5: epoch ms when the winning partner PUSH expires (a routed
+    // draft only). Under FX_PAY_RATE_CHECK_ENABLED the mint refuses the quote
+    // from then on, and the card's lock line counts down to it.
+    routeExpiresAt?: number;
+    // Step 0 FX-7: provenance stamped on the minted row. fxAsOf is the OLDEST
+    // leg's publication date (YYYY-MM-DD); fxOrigin is which rate won.
+    fxAsOf?: string;
+    fxOrigin?: FxRateOrigin;
   };
   // Best-rate routing: the partner whose rail settles this draft's transfer
   // when its rate won the corridor at quote time (default-tenant only).

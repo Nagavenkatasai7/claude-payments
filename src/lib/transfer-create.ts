@@ -24,8 +24,10 @@ import type {
   EntityType,                                                                // NEW (B2B)
   SendLimits,                                                                // Program fix 16
   TransferEnvironment,                                                       // Program-Fix 44 P2
+  FxRateOrigin,                                                              // Step 0 FX-7
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
+import { env } from './env';
 
 export interface CreateTransferInput {
   // Stage 2c: callers running CLAIM-FIRST idempotency (partner API, draft
@@ -70,6 +72,12 @@ export interface CreateTransferInput {
     // Task 9: when the rate behind these figures was fetched (the draft's
     // quote.fxFetchedAt). Beyond FX_MAX_AGE_MS the mint refuses; absent ⇒ no check.
     fxFetchedAt?: number;
+    // Step 0 FX-5: the winning partner push's expiry (epoch ms). Under
+    // FX_PAY_RATE_CHECK_ENABLED the mint refuses at or after it.
+    routeExpiresAt?: number;
+    // Step 0 FX-7: the provenance stamped on the row (the draft's).
+    fxAsOf?: string;
+    fxOrigin?: FxRateOrigin;
   };
   // Best-rate routing (internal — never customer/partner-API visible): the
   // partner whose RAIL settles this transfer because its rate won the corridor
@@ -138,6 +146,9 @@ export function quoteOverrideFromDraft(
       feeSource: dq.feeUsd,
       totalChargeSource: totalChargeUsd,
       fxFetchedAt: dq.fxFetchedAt,
+      routeExpiresAt: dq.routeExpiresAt,
+      fxAsOf: dq.fxAsOf,
+      fxOrigin: dq.fxOrigin,
     };
   }
   if (dq.feeSource !== undefined && dq.totalChargeSource !== undefined) {
@@ -151,6 +162,9 @@ export function quoteOverrideFromDraft(
       feeSource: dq.feeSource,
       totalChargeSource: dq.totalChargeSource,
       fxFetchedAt: dq.fxFetchedAt,
+      routeExpiresAt: dq.routeExpiresAt,
+      fxAsOf: dq.fxAsOf,
+      fxOrigin: dq.fxOrigin,
     };
   }
   return undefined;
@@ -162,12 +176,20 @@ export function quoteOverrideFromDraft(
  * it. Beyond FX_MAX_AGE_MS the mint REFUSES — it never silently re-quotes.
  * An override without fxFetchedAt (a pre-Task-9 draft, the B2B locked quote)
  * passes unchanged.
+ *
+ * Step 0 FX-5: a quote priced on a partner PUSH also ends when that push
+ * expires (a push competes only while expiresAt > now, partner-rates.ts).
+ * Checked only under FX_PAY_RATE_CHECK_ENABLED; no routeExpiresAt (platform
+ * rate, standing margin, older drafts) ⇒ no extra check.
  */
 export function assertQuoteOverrideFresh(
-  q: Pick<NonNullable<CreateTransferInput['quote']>, 'fxFetchedAt'>,
+  q: Pick<NonNullable<CreateTransferInput['quote']>, 'fxFetchedAt' | 'routeExpiresAt'>,
   now: number = Date.now(),
 ): void {
   if (q.fxFetchedAt !== undefined && now - q.fxFetchedAt > FX_MAX_AGE_MS) {
+    throw new RateUnavailableError('stale_quote');
+  }
+  if (env.fxPayRateCheckEnabled && q.routeExpiresAt !== undefined && now >= q.routeExpiresAt) {
     throw new RateUnavailableError('stale_quote');
   }
 }
