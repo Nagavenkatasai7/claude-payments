@@ -3,6 +3,7 @@ import type { Store } from './store';
 import type { CurrencyCode, Transfer } from './types';
 import { NAME_MAX, safeDisplayText } from './untrusted-text';
 import { maskPhoneLast4 } from './mask';
+import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
 
 export interface StageResult {
   transfer: Transfer;
@@ -81,6 +82,11 @@ export function recipientDisplayName(transfer: Transfer): string {
   return safeDisplayText(transfer.recipientName, NAME_MAX) || 'your recipient';
 }
 
+// R0 fix C: matches the disclosure's default estimate instead of "~10 minutes".
+// The transfer row does not carry its partner's own estimate; a per-rail speed
+// arrives with the Payout setup step.
+const STAGE1_DELIVERY = deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS);
+
 /**
  * The customer-facing stage-1 ("payment received") message — pure, so the
  * transactional settlement AND hold paths (settlement.ts beginSettlement /
@@ -102,12 +108,12 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
   if (isBusinessFunded(transfer)) {
     return opts?.held
       ? `✅ Payment received — ${sourceCharge} will be debited from your business account. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
-      : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
+      : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
   }
 
   return opts?.held
     ? `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
-    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
+    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
 }
 
 /**

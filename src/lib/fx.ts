@@ -1,6 +1,7 @@
 import type { CurrencyCode, FundingMethod, Quote } from './types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from './send-limits';
+import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
 import { isFixingRefused } from './fx-fixing';
 import { env } from './env';
 
@@ -212,7 +213,9 @@ export function quote(
     totalChargeUsd: round2(amountUsd + feeUsd),
     fxRate: crossRate,
     amountInr,
-    deliveryEstimate: 'within 10 minutes',
+    // R0 fix C: the disclosure's default estimate; tools.ts swaps in the
+    // tenant's own business-day count where the partner is known.
+    deliveryEstimate: deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS),
     sourceCurrency,
     amountSource,
     feeSource,

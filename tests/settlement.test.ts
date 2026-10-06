@@ -288,7 +288,7 @@ describe('beginHold — the transactional compliance hold', { retry: 0 }, () => 
     expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
     const body = await stage1Body('st_t1');
     expect(body).toContain('quick review');
-    expect(body).not.toContain('within ~10 minutes');
+    expect(body).not.toContain('within 1 business day');
     expect(body).not.toContain('123456789012'); // PII: the destination never enters the payload
   });
 

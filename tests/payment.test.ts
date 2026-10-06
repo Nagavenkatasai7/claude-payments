@@ -98,7 +98,7 @@ describe('completePaymentStage1', () => {
     expect(result.senderMessages[0]).toContain('Mom');
     expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
     expect(result.senderMessages[0]).not.toContain('…'); // no trailing ellipsis
-    expect(result.senderMessages[0]).toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).toContain('within 1 business day');
   });
 
   it('formats non-INR destination currency correctly (AED)', async () => {
@@ -115,7 +115,7 @@ describe('completePaymentStage1', () => {
     expect(result.senderMessages[0]).toContain('1,101');
     expect(result.senderMessages[0]).toContain('Ali');
     expect(result.senderMessages[0]).toContain('Transfer ID: pay99999');
-    expect(result.senderMessages[0]).toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).toContain('within 1 business day');
   });
 
   it('is idempotent — if already paid, returns empty message arrays', async () => {
@@ -157,7 +157,7 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
     // Must contain the charge amount
     expect(result.senderMessages[0]).toContain('$500.00');
     // Must NOT promise delivery time
-    expect(result.senderMessages[0]).not.toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).not.toContain('within 1 business day');
     expect(result.senderMessages[0]).not.toContain('will get');
     // Must contain the review/hold message
     expect(result.senderMessages[0]).toContain('quick review');
@@ -170,7 +170,7 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
 
     const result = await completePaymentStage1(store, 'pay12345');
 
-    expect(result.senderMessages[0]).toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).toContain('within 1 business day');
     expect(result.senderMessages[0]).not.toContain('quick review');
   });
 });
@@ -193,7 +193,7 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
   it('b2c wording is unchanged (byte-identical) — control', () => {
     const msg = buildStage1Message(awaitingTransfer());
     expect(msg).toBe(
-      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within ~10 minutes. Transfer ID: pay12345',
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within 1 business day. Transfer ID: pay12345',
     );
   });
 
@@ -208,7 +208,7 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
   it('B2B names the recipient business and uses "will receive" + the dest amount', () => {
     const msg = buildStage1Message(b2bTransfer());
     expect(msg).toContain('Mumbai Textiles Pvt Ltd will receive ₹42,600');
-    expect(msg).toContain('within ~10 minutes');
+    expect(msg).toContain('within 1 business day');
   });
 
   it('B2B NEVER leaks the raw bank account / ACH token', () => {
@@ -242,7 +242,7 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
     const msg = buildStage1Message(b2bTransfer(), { held: true });
     expect(msg).toContain('will be debited from your business account');
     expect(msg).toContain('quick review');
-    expect(msg).not.toContain('within ~10 minutes');
+    expect(msg).not.toContain('within 1 business day');
   });
 });
 
@@ -607,7 +607,7 @@ describe('fix 38: recipient names are display-clamped at render', () => {
 
   it('a clean name is byte-identical to before (control)', () => {
     expect(buildStage1Message(awaitingTransfer())).toBe(
-      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within ~10 minutes. Transfer ID: pay12345',
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within 1 business day. Transfer ID: pay12345',
     );
   });
 });

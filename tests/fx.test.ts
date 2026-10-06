@@ -391,6 +391,16 @@ describe('quote() — amountInr finiteness guard (Program-Fix 48)', () => {
   });
 });
 
+// Smart-routing R0 fix C: the quote no longer promises "within 10 minutes".
+// Its delivery estimate matches the Reg E disclosure's default (1 business day).
+describe('quote delivery estimate matches the disclosure default', () => {
+  it('a quote says "within 1 business day", never minutes', () => {
+    const q = quote(100, 'USD', USD, 'bank_transfer', 1);
+    expect(q.deliveryEstimate).toBe('within 1 business day');
+    expect(q.deliveryEstimate).not.toMatch(/minute/);
+  });
+});
+
 describe('legsProvenance (Step 0 FX-7)', () => {
   const leg = (fetchedAt?: number, asOf?: string): FxRates =>
     ({ toInr: 85, toUsd: 1, fetchedAt, asOf } as FxRates);

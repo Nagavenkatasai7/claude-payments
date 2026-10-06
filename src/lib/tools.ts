@@ -8,6 +8,7 @@ import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quo
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { SendsPausedError, SENDS_PAUSED_MESSAGE } from './flags';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
+import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
@@ -1407,6 +1408,13 @@ function applyRouteToQuote(q: Quote, route: SettlementRoute): Quote {
   return { ...q, fxRate: route.fxRate, amountInr: Math.round(q.amountSource * route.fxRate) };
 }
 
+// Smart-routing R0 fix C: the delivery time the bot, the approve card and the
+// portal show is the tenant's Reg E disclosure estimate (business days), the
+// same count the pay page prints as "date available".
+function withDisclosedDelivery(q: Quote, partner: Partner): Quote {
+  return { ...q, deliveryEstimate: deliveryEstimatePhrase(resolvePartnerDisclosure(partner).deliveryBusinessDays) };
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -1683,6 +1691,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
         routed = true;
       }
     }
+    q = withDisclosedDelivery(q, partner);
     // Step 0 §3.6: a partner rate is not the reference rate, so it carries no date.
     const rateDate = !routed ? fxAsOf : undefined;
     return { kind: 'quote', quote: q, destinationCountry, ...(rateDate !== undefined ? { rateDate } : {}) };
@@ -4070,6 +4079,7 @@ export async function prepareSendDraft(
       q = applyRouteToQuote(q, route);
       settlementPartnerId = route.settlementPartnerId;
     }
+    q = withDisclosedDelivery(q, partner);
     // Step 0 FX-5 / FX-7: which rate won, and a partner push's own expiry.
     const routeExpiresAt = routeExpiryMs(route);
     const fxOrigin = rateOriginOf(route);

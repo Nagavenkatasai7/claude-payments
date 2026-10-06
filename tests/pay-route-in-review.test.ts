@@ -80,7 +80,7 @@ describe('pay route logic: flagged transfer → in_review', () => {
     };
     expect(rows.rows.map((x) => [x.kind, x.dedupe_key])).toEqual([['whatsapp.text', 'stage1:f1']]);
     expect(rows.rows[0].body).toContain('quick review');
-    expect(rows.rows[0].body).not.toContain('within ~10 minutes');
+    expect(rows.rows[0].body).not.toContain('within 1 business day');
   });
 
   it('flagged: the held message does NOT promise delivery time', async () => {
@@ -105,7 +105,7 @@ describe('pay route logic: flagged transfer → in_review', () => {
     await store.saveTransfer(t);
 
     const { senderMessages } = await completePaymentStage1(store, 'c1');
-    expect(senderMessages[0]).toContain('within ~10 minutes');
+    expect(senderMessages[0]).toContain('within 1 business day');
     expect(senderMessages[0]).toContain('will get');
   });
 });

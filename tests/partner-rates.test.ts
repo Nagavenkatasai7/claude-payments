@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { effectiveOfferFor, effectiveRateFor, selectSettlementRoute } from '@/lib/partner-rates';
+import { effectiveOfferFor, effectiveRateFor, selectSettlementRoute, MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { railFailAlertKey, hourBucketAt, recentlyFailingRails } from '@/lib/rail-health';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -193,5 +195,124 @@ describe('selectSettlementRoute (PGlite)', () => {
   it('a nonsensical mid falls straight back to platform', async () => {
     expect((await selectSettlementRoute(db, stubIntegrations({}), 'USD', 'INR', 0)).source).toBe('platform');
     expect((await selectSettlementRoute(db, stubIntegrations({}), 'USD', 'INR', NaN)).source).toBe('platform');
+  });
+});
+
+// Smart-routing R0 fix A: a typo'd push (or a fat-fingered margin) must not win
+// every route. A rate more than MAX_ROUTE_PREMIUM above mid is implausible and
+// is treated as not competing; the next-best plausible contender (or mid) wins.
+describe('selectSettlementRoute: rate sanity band (R0 fix A)', () => {
+  let db: Db;
+
+  beforeEach(async () => {
+    db = await freshDb();
+    await seedPartner(db, 'p1');
+    await seedPartner(db, 'p2');
+  });
+
+  it('the band is 5% above mid', () => {
+    expect(MAX_ROUTE_PREMIUM).toBe(0.05);
+  });
+
+  it('a pushed rate more than 5% above mid never wins (typo guard), mid is kept', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 850, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID);
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+  });
+
+  it('an out-of-band contender is skipped and the next-best in-band contender wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: MID * 1.06, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE, p2: ROUTABLE }), 'USD', 'INR', MID);
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  it('a rate exactly at the band edge still competes', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', marginBps: 500 });
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID);
+    expect(route.source).toBe('partner');
+    expect(route.fxRate).toBeCloseTo(MID * 1.05, 6);
+  });
+
+  it('a legacy margin above the band (e.g. +10000 bps) never wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', marginBps: 10_000 });
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID);
+    expect(route.source).toBe('platform');
+  });
+});
+
+// Smart-routing R0 fix B: a rail that is failing right now must not keep
+// winning new quotes. The worker already raises one `railfail:<partner>:<hour>`
+// ops alert per failing rail per hour (outbox-worker alertRailFailing, from
+// attempt 3); a partner with that alert in the current or previous hour is
+// skipped. Fail-open: a lookup error never blocks quoting.
+describe('rail health: skip a partner whose rail is failing (R0 fix B)', () => {
+  let db: Db;
+
+  beforeEach(async () => {
+    db = await freshDb();
+    await seedPartner(db, 'p1');
+    await seedPartner(db, 'p2');
+  });
+
+  const raiseRailFail = (partnerId: string, bucket: number) =>
+    createOutboxRepo(db).enqueue('ops.alert', { message: 'rail failing' }, { dedupeKey: railFailAlertKey(partnerId, bucket) });
+
+  it('the key matches the worker alert format railfail:<partner>:<hour bucket>', () => {
+    expect(railFailAlertKey('p1', 123)).toBe('railfail:p1:123');
+    expect(hourBucketAt(7_200_000 + 5)).toBe(2);
+  });
+
+  it('a failing-rail alert this hour skips the best partner; the next-best healthy partner wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await raiseRailFail('p1', hourBucketAt(NOW.getTime()));
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE, p2: ROUTABLE }), 'USD', 'INR', MID, NOW);
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  it('an alert from the previous hour still skips the partner', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    await raiseRailFail('p1', hourBucketAt(NOW.getTime()) - 1);
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID, NOW);
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+  });
+
+  it('an alert two or more hours old no longer skips the partner', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    await raiseRailFail('p1', hourBucketAt(NOW.getTime()) - 2);
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID, NOW);
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  it("another partner's alert does not skip this partner", async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    await raiseRailFail('p2', hourBucketAt(NOW.getTime()));
+    const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID, NOW);
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  it('recentlyFailingRails returns only the partners with a current or previous-hour alert', async () => {
+    const h = hourBucketAt(NOW.getTime());
+    await raiseRailFail('p1', h);
+    await raiseRailFail('p2', h - 3);
+    expect([...(await recentlyFailingRails(db, ['p1', 'p2'], NOW))]).toEqual(['p1']);
+  });
+
+  it('recentlyFailingRails with no partners does not query and returns empty', async () => {
+    expect((await recentlyFailingRails(db, [], NOW)).size).toBe(0);
+  });
+
+  it('a health lookup error fails open (empty set, quoting continues)', async () => {
+    const broken = { select: () => { throw new Error('db down'); } } as unknown as Db;
+    expect((await recentlyFailingRails(broken, ['p1'], NOW)).size).toBe(0);
   });
 });

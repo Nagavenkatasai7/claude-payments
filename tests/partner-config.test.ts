@@ -100,3 +100,24 @@ describe('resolvePartnerIntegrations', () => {
     expect(await resolvePartnerIntegrations(partner({ id: 'acme' }), store)).toEqual({ kyc: {}, payment: { providerType: 'mock' }, whatsapp: { phoneNumberId: '999' } });
   });
 });
+
+// Smart-routing R0 fix C: the chat/portal delivery wording, derived from the
+// same business-day count the Reg E disclosure uses.
+describe('deliveryEstimatePhrase', () => {
+  it('0 ⇒ same business day; 1 ⇒ singular; n ⇒ plural', async () => {
+    const { deliveryEstimatePhrase, DEFAULT_DELIVERY_BUSINESS_DAYS } = await import('@/lib/partner-config');
+    expect(deliveryEstimatePhrase(0)).toBe('the same business day');
+    expect(deliveryEstimatePhrase(1)).toBe('within 1 business day');
+    expect(deliveryEstimatePhrase(3)).toBe('within 3 business days');
+    expect(deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS)).toBe('within 1 business day');
+  });
+
+  it('a partner-configured estimate drives the phrase via resolvePartnerDisclosure', async () => {
+    const { deliveryEstimatePhrase, resolvePartnerDisclosure } = await import('@/lib/partner-config');
+    const partner = {
+      id: 'acme', name: 'Acme', status: 'active', countries: ['US'], kycMode: 'ours',
+      supportConfig: { disclosure: { deliveryEstimate: { businessDays: 2 } } },
+    } as unknown as Parameters<typeof resolvePartnerDisclosure>[0];
+    expect(deliveryEstimatePhrase(resolvePartnerDisclosure(partner).deliveryBusinessDays)).toBe('within 2 business days');
+  });
+});
