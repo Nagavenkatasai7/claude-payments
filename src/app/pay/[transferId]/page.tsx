@@ -10,6 +10,7 @@ import { draftTenant } from '@/lib/legacy-tenant';
 import { accountLast4, isMaskedDestination } from '@/lib/payout-format';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { transferMintedFromDraft } from '@/lib/pay-link';
 import { PayForm } from './pay-form';
 import { RemittanceDisclosure } from './remittance-disclosure';
 import { headers } from 'next/headers';
@@ -143,7 +144,14 @@ async function renderPayPage(transferId: string) {
   if (await isIpRateLimited(await headers(), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT)) {
     return <InactiveSheet />;
   }
-  const transfer = await getStore().getTransfer(transferId);
+  let transfer = await getStore().getTransfer(transferId);
+  // Dual-lookup: no transfer ⇒ treat the segment as a draftId.
+  // Fix D: an idempotent PEEK, so a Redis blip gets one retry.
+  const draft = transfer ? null : await retryOnceOnInfra(() => getDraftStore().getDraft(transferId));
+  // Step 0 Q16 (build-changes B.2): a draft link whose draft was minted and
+  // consumed (a failed capture after the mint) renders the transfer it BECAME,
+  // exactly as that transfer's own link (the form then posts to its id).
+  if (!transfer && !draft) transfer = await transferMintedFromDraft(getDb(), getStore(), transferId);
 
   // ── Build a unified view object so JSX is shared between both paths ──
 
@@ -190,7 +198,7 @@ async function renderPayPage(transferId: string) {
     // read (boolean + last-4 label only); Edit only where the guarded write would
     // accept it (consumer, uncharged, awaiting, not partner-API-minted).
     const storedTransferDest =
-      ((await getStore().getTransferDecrypted(transferId))?.payoutDestination ?? '').trim();
+      ((await getStore().getTransferDecrypted(transfer.id))?.payoutDestination ?? '').trim();
     const transferNeedsDetails = storedTransferDest === '' || isMaskedDestination(storedTransferDest);
     const transferEditable =
       !transferNeedsDetails && (await createTransferRepo(getDb()).isPayoutEditable(transfer.id, transfer.partnerId));
@@ -216,44 +224,39 @@ async function renderPayPage(transferId: string) {
       needsBankDetails: transferNeedsDetails,
       savedAccountLabel: transferEditable ? savedAccountLabelFor(storedTransferDest) : null,
     };
-  } else {
-    // Dual-lookup: treat the segment as a draftId
-    // Fix D: an idempotent PEEK, so a Redis blip gets one retry.
-    const draft = await retryOnceOnInfra(() => getDraftStore().getDraft(transferId));
-    if (draft) {
-      // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
-      brandPartnerId = await draftTenant(draft, getStore().legacyTenantOf);
-      const destCurrency: string = draft.quote.destinationCurrency ?? draft.destinationCurrency ?? 'INR';
-      const sourceCurrency: string = draft.sourceCurrency ?? 'USD';
-      const feeSource = draft.quote.feeSource ?? draft.quote.feeUsd;
-      const totalChargeSource =
-        draft.quote.totalChargeSource ??
-        draft.quote.totalChargeUsd ??
-        draft.amountSource + feeSource;
-      // A cold-start draft carries NO bank string (Item 2). A draft carrying a REAL
-      // stored destination (rehydrated server-side) skips Step 1 but offers "Edit bank
-      // details" on a consumer draft. fix 6: a MASKED placeholder is not a stored
-      // destination — collect it on Step 1 like a cold start.
-      const storedDraftDest = (draft.recipient.payoutDestination ?? '').trim();
-      const hasStoredDest = storedDraftDest !== '' && !isMaskedDestination(storedDraftDest);
-      view = {
-        id: transferId,
-        recipientName: draft.recipient.name,
-        destAmount: draft.quote.amountInr,
-        destCurrency,
-        destinationCountry: draft.destinationCountry ?? 'IN',
-        sourceAmount: draft.amountSource,
-        sourceFee: feeSource,
-        sourceTotalCharge: totalChargeSource,
-        sourceCurrency,
-        fundingMethod: draft.fundingMethod,
-        fxRate: draft.quote.fxRate,
-        transferType: draft.transferType ?? 'b2c',
-        awaitingPayment: true, // a draft is always awaiting payment
-        needsBankDetails: !hasStoredDest,
-        savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
-      };
-    }
+  } else if (draft) {
+    // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
+    brandPartnerId = await draftTenant(draft, getStore().legacyTenantOf);
+    const destCurrency: string = draft.quote.destinationCurrency ?? draft.destinationCurrency ?? 'INR';
+    const sourceCurrency: string = draft.sourceCurrency ?? 'USD';
+    const feeSource = draft.quote.feeSource ?? draft.quote.feeUsd;
+    const totalChargeSource =
+      draft.quote.totalChargeSource ??
+      draft.quote.totalChargeUsd ??
+      draft.amountSource + feeSource;
+    // A cold-start draft carries NO bank string (Item 2). A draft carrying a REAL
+    // stored destination (rehydrated server-side) skips Step 1 but offers "Edit bank
+    // details" on a consumer draft. fix 6: a MASKED placeholder is not a stored
+    // destination — collect it on Step 1 like a cold start.
+    const storedDraftDest = (draft.recipient.payoutDestination ?? '').trim();
+    const hasStoredDest = storedDraftDest !== '' && !isMaskedDestination(storedDraftDest);
+    view = {
+      id: transferId,
+      recipientName: draft.recipient.name,
+      destAmount: draft.quote.amountInr,
+      destCurrency,
+      destinationCountry: draft.destinationCountry ?? 'IN',
+      sourceAmount: draft.amountSource,
+      sourceFee: feeSource,
+      sourceTotalCharge: totalChargeSource,
+      sourceCurrency,
+      fundingMethod: draft.fundingMethod,
+      fxRate: draft.quote.fxRate,
+      transferType: draft.transferType ?? 'b2c',
+      awaitingPayment: true, // a draft is always awaiting payment
+      needsBankDetails: !hasStoredDest,
+      savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
+    };
   }
 
   const partner = await loadPartner(brandPartnerId);

@@ -2,7 +2,7 @@
 // product surfaces (no screenshots, no client JS). Every number and label
 // reflects an actual product truth: non-custodial settlement, sanctions
 // screening that never turns off, the corridor count from ./corridors (10 at the
-// time of writing), live mid-market FX.
+// time of writing), FX quoted from the daily reference rate.
 //
 // Light brand theme: white surfaces on the #f5f9ff page, navy (#0b1b3f) text,
 // slate (#475569 / #52607a) secondary. Brand green is too light for text on
@@ -33,7 +33,7 @@ export function ChatMock({ rate }: { rate: number }) {
     <div
       className="relative mx-auto w-full max-w-[340px]"
       role="img"
-      aria-label="The SmartRemit WhatsApp conversation: a customer asks to send $500 to India, the assistant quotes the live rate, locks it behind a secure pay link, and confirms delivery."
+      aria-label="The SmartRemit WhatsApp conversation: a customer asks to send $500 to India, the assistant quotes the rate, locks it behind a secure pay link, and confirms delivery."
     >
       <div
         aria-hidden="true"

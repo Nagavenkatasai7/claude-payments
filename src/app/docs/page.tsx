@@ -458,10 +458,10 @@ curl -OJ "$BASE/settlements?from=2026-09-01&to=2026-09-08&format=csv" \\
           <p className="text-sm text-muted-foreground">
             Push the <strong className="text-foreground">wholesale conversion rate</strong> you
             offer per corridor with <code>PUT /rates</code>. When your fresh rate beats the
-            platform mid-market rate (and your settlement rail is configured), SmartRemit routes
+            platform reference rate (and your settlement rail is configured), SmartRemit routes
             eligible platform transfers to you for settlement. Pushing a rate does{' '}
             <strong className="text-foreground">not</strong> change the pricing of your own{' '}
-            <code>/quote</code> or <code>/transactions</code> — those stay at platform mid-market.
+            <code>/quote</code> or <code>/transactions</code> — those stay at the platform reference rate.
           </p>
           <Card>
             <CardHeader className="pb-2">

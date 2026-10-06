@@ -21,10 +21,14 @@ function parseEnvExample(src: string): Map<string, string> {
   return out;
 }
 
-/** Every name `env.ts` reads through `required('X')` or `process.env.X`. */
+/**
+ * Every name `env.ts` reads through `required('X')`, `requiredTrimmed('X')`,
+ * `trimmedEnv('X')` or `process.env.X`. (The two trimmed helpers came with
+ * Batch 1 A1; voice notes widened the scan so their names are checked too.)
+ */
 function namesReadByEnvTs(src: string): string[] {
   const names = new Set<string>();
-  for (const m of src.matchAll(/required\('([A-Z0-9_]+)'\)|process\.env\.([A-Z0-9_]+)/g)) {
+  for (const m of src.matchAll(/(?:required|requiredTrimmed|trimmedEnv)\('([A-Z0-9_]+)'\)|process\.env\.([A-Z0-9_]+)/g)) {
     names.add(m[1] ?? m[2]);
   }
   return [...names].sort();
@@ -51,6 +55,9 @@ describe('.env.example matches the code that reads it', () => {
   it('sanity: the env.ts scan finds the names it should', () => {
     expect(envTsNames).toContain('DATABASE_URL');
     expect(envTsNames).toContain('SEED_ADMIN_USERNAME');
+    expect(envTsNames).toContain('WHATSAPP_WINDOW_AWARE'); // a trimmedEnv name
+    expect(envTsNames).toContain('WHATSAPP_TOKEN'); // a requiredTrimmed name
+    expect(envTsNames).toContain('AZURE_SPEECH_KEY');
     expect(envTsNames.length).toBeGreaterThan(30);
   });
 

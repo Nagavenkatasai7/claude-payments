@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   sourceForInr, sourceForDest, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd,
-  usdPivotCrossRate, assertRatesUsable,
+  usdPivotCrossRate, assertRatesUsable, assertLegsUsable, legsProvenance,
 } from '@/lib/fx';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from '@/lib/send-limits';
 import { FALLBACK_FX_RATES, FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from '@/lib/rate';
@@ -314,6 +314,62 @@ describe('Task 9 / money-07: the provenance gate — never price off the display
   });
 });
 
+describe('Step 0 FX-1: the fixing-date gate (FX_FIXING_GATE_ENABLED, default OFF)', () => {
+  // Pure: every case passes its own `now`; asOf is set relative to it by the
+  // walk-through dates (fx-fixing.test.ts covers the calendar itself).
+  const WED_06 = Date.parse('2027-03-31T06:00:00Z'); // 3 fixings overdue under the REFUSE rule
+  const EASTER_TUE_18 = Date.parse('2027-03-30T18:00:00Z'); // 2 overdue (a late fixing after Easter)
+  const at = (now: number, asOf?: string): FxRates => ({ toInr: 95, toUsd: 1, fetchedAt: now, source: 'live', asOf });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('flag OFF (default): a frozen feed still prices', () => {
+    expect(() => assertRatesUsable(at(WED_06, '2027-03-25'), WED_06)).not.toThrow();
+    expect(() => assertLegsUsable(at(WED_06, '2027-03-25'), at(WED_06, '2027-03-25'), WED_06)).not.toThrow();
+  });
+
+  it('flag ON: REFUSE-lag >= 3 throws RateUnavailableError stale_fixing', () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    expect(() => assertRatesUsable(at(WED_06, '2027-03-25'), WED_06)).toThrow(
+      expect.objectContaining({ name: 'RateUnavailableError', reason: 'stale_fixing' }),
+    );
+  });
+
+  it('flag ON: the late fixing on Easter Tuesday still prices (closures never refuse)', () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    expect(() => assertRatesUsable(at(EASTER_TUE_18, '2027-03-25'), EASTER_TUE_18)).not.toThrow();
+  });
+
+  it('flag ON: a rate with no asOf (or a provenance-less literal) still prices', () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    expect(() => assertRatesUsable(at(WED_06), WED_06)).not.toThrow();
+    expect(() => assertRatesUsable({ toInr: 95, toUsd: 1 }, WED_06)).not.toThrow();
+  });
+
+  it('assertLegsUsable gates the DESTINATION leg too (a per-currency stall)', () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    expect(() => assertLegsUsable(at(WED_06, '2027-03-30'), at(WED_06, '2027-03-25'), WED_06)).toThrow(
+      expect.objectContaining({ reason: 'stale_fixing' }),
+    );
+    expect(() => assertLegsUsable(at(WED_06, '2027-03-30'), undefined, WED_06)).not.toThrow();
+    // ...and the existing fetch-age ceiling on it.
+    expect(() => assertLegsUsable(at(WED_06), { ...at(WED_06), fetchedAt: WED_06 - FX_MAX_AGE_MS - 1 }, WED_06)).toThrow(
+      expect.objectContaining({ reason: 'stale' }),
+    );
+  });
+
+  it('forceFixingGate refuses a frozen feed with the FX-1 flag OFF (the FX-2 pay check, N12)', () => {
+    expect(() => assertLegsUsable(at(WED_06, '2027-03-25'), undefined, WED_06, { forceFixingGate: true })).toThrow(
+      expect.objectContaining({ reason: 'stale_fixing' }),
+    );
+  });
+
+  it('quote() runs the gate on its source leg when the flag is ON', () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    const frozen: FxRates = { toInr: 95, toUsd: 1, fetchedAt: Date.now(), source: 'live', asOf: '2016-01-04' };
+    expect(() => quote(100, 'USD', frozen, 'bank_transfer', 1)).toThrow(expect.objectContaining({ reason: 'stale_fixing' }));
+  });
+});
+
 describe('quote() — amountInr finiteness guard (Program-Fix 48)', () => {
   const fresh = (): FxRates => ({ toInr: 95.82, toUsd: 1, fetchedAt: Date.now(), source: 'live' });
 
@@ -332,5 +388,18 @@ describe('quote() — amountInr finiteness guard (Program-Fix 48)', () => {
     expect(inr.fxRate).toBe(95.82);
     const aed = quote(1000, 'USD', fresh(), 'bank_transfer', 1, 'AED', 0.27);
     expect(aed.amountInr).toBe(Math.round(1000 * (1 / 0.27)));
+  });
+});
+
+describe('legsProvenance (Step 0 FX-7)', () => {
+  const leg = (fetchedAt?: number, asOf?: string): FxRates =>
+    ({ toInr: 85, toUsd: 1, fetchedAt, asOf } as FxRates);
+  it('takes the OLDEST leg: earliest fetch time, earliest date', () => {
+    expect(legsProvenance(leg(2_000, '2026-10-02'), leg(1_000, '2026-09-30'))).toEqual({ fetchedAt: 1_000, asOf: '2026-09-30' });
+    expect(legsProvenance(leg(2_000, '2026-10-02'))).toEqual({ fetchedAt: 2_000, asOf: '2026-10-02' });
+  });
+  it('no date when any leg in use lacks one; no fetch time when none carries one', () => {
+    expect(legsProvenance(leg(2_000, '2026-10-02'), leg(1_000))).toEqual({ fetchedAt: 1_000 });
+    expect(legsProvenance(leg())).toEqual({});
   });
 });

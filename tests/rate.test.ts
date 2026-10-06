@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getFxRate, getFxRates, getDestinationRates, resetRateCacheForTests, setFxL2ForTests,
   FALLBACK_FX_RATE, FALLBACK_FX_RATES, FX_MAX_AGE_MS, AED_PER_USD,
-  FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError, FX_FETCH_TIMEOUT_MS,
+  FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError, FX_FETCH_TIMEOUT_MS, FX_PROVIDER_ID,
 } from '@/lib/rate';
 import type { CurrencyCode } from '@/lib/types';
 
@@ -361,5 +361,33 @@ describe('getFxRates — the opt-in probe retry (R9)', () => {
     await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
     await expect(getFxRates('USD', { retryTimeoutMs: 7_000 })).rejects.toBeInstanceOf(RateUnavailableError);
     expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Step 0 FX-1 measurement — fx.fixing-advanced', () => {
+  const advancedLines = (warn: ReturnType<typeof vi.spyOn>) =>
+    warn.mock.calls.filter((c) => String(c[0]).includes('fx.fixing-advanced'));
+
+  it('logs ONE warn line when this instance sees a newer fixing date (never on the first sighting, never on a repeat)', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetch(95.82, '2026-09-21');
+    await getFxRates('USD');
+    expect(advancedLines(warn)).toHaveLength(0);
+    vi.advanceTimersByTime(301_000); // past the soft TTL: re-fetch, same date
+    await getFxRates('USD');
+    expect(advancedLines(warn)).toHaveLength(0);
+    mockFetch(96.1, '2026-09-22');
+    vi.advanceTimersByTime(301_000);
+    await getFxRates('USD');
+    const lines = advancedLines(warn);
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(String(lines[0][0])) as Record<string, unknown>;
+    expect(line).toMatchObject({ level: 'warn', scope: 'fx.fixing-advanced', currency: 'USD', asOf: '2026-09-22' });
+    expect(typeof line.seenAtUtc).toBe('string');
+  });
+
+  it('FX_PROVIDER_ID names the v1 ECB feed (stamped on transfers.fx_provider)', () => {
+    expect(FX_PROVIDER_ID).toBe('frankfurter-v1-ecb');
   });
 });

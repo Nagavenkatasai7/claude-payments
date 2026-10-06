@@ -25,7 +25,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -58,6 +58,20 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'Settlement to partner rails is paused',
     scopes: ['global', 'partner', 'corridor'],
     killSwitch: true,
+  },
+  // Step 1 voice notes: the on/off switch. Voice also needs the Azure Speech
+  // env settings and the sender on VOICE_NOTES_BETA_PHONES (voice-notes.ts).
+  // Only the shared SmartRemit number (the default partner) takes voice notes,
+  // so a partner row matters only for 'default'.
+  'voice.notes': {
+    key: 'voice.notes',
+    label: 'Voice notes',
+    description:
+      'The WhatsApp bot listens to English voice notes (up to 30 seconds) from the beta phone list and answers in text. ' +
+      'Off: a voice note gets the "please type" reply. Only the shared SmartRemit number takes voice notes.',
+    bannerText: 'Voice notes are on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
   },
 };
 

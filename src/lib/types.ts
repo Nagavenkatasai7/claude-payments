@@ -125,7 +125,24 @@ export interface Transfer {
   kybReviewNotes?: string;
   // Program-Fix 44 P2 — absent ⇒ 'live'. Always set on a ledger read.
   environment?: TransferEnvironment;
+  // ── Step 0 FX-7: rate provenance (0030). WRITE-ONCE, all optional: absent on
+  // every row minted before 0030 or by an old build. Internal — never mapped
+  // into a partner-API or customer response.
+  fxAsOf?: string;              // the provider's fixing date (YYYY-MM-DD); absent for B2B locks
+  fxFetchedAt?: string;         // ISO time the rate behind fxRate was fetched (the OLDEST leg)
+  fxSource?: FxRateOrigin;      // which pricing produced fxRate
+  fxProvider?: string;          // e.g. FX_PROVIDER_ID (rate.ts); 'partner' for a partner rate
+  fxExpiresAt?: string;         // ISO expiry of the partner PUSH that priced fxRate; the pay-time
+                                // check (minted-rate.ts) ends the lock here. Absent ⇒ no push.
 }
+
+/**
+ * Step 0 FX-7: where a transfer's fxRate came from. 'platform' = the platform
+ * mid (Frankfurter/ECB); 'partner_push' / 'partner_margin' = a best-rate
+ * partner route (a pushed rate, or a margin off mid); 'b2b_lock' = the B2B
+ * cross-border quote lock. Enforced in code (the column has no CHECK).
+ */
+export type FxRateOrigin = 'platform' | 'partner_push' | 'partner_margin' | 'b2b_lock';
 
 /** Program-Fix 7: the PSP that holds an async funding intent. */
 export type FundingProviderId = 'stripe';
@@ -438,6 +455,14 @@ export interface Draft {
     // refuses the quote once that rate is older than FX_MAX_AGE_MS (it never
     // re-quotes). Absent on drafts created before Task 9 (honored as before).
     fxFetchedAt?: number;
+    // Step 0 FX-5: epoch ms when the winning partner PUSH expires (a routed
+    // draft only). Under FX_PAY_RATE_CHECK_ENABLED the mint refuses the quote
+    // from then on, and the card's lock line counts down to it.
+    routeExpiresAt?: number;
+    // Step 0 FX-7: provenance stamped on the minted row. fxAsOf is the OLDEST
+    // leg's publication date (YYYY-MM-DD); fxOrigin is which rate won.
+    fxAsOf?: string;
+    fxOrigin?: FxRateOrigin;
   };
   // Best-rate routing: the partner whose rail settles this draft's transfer
   // when its rate won the corridor at quote time (default-tenant only).
@@ -469,14 +494,31 @@ export interface TurnContext {
   buttonTap?: ButtonTap;
   isNewCustomer?: boolean;              // true only on the first inbound from a brand-new phone (never grandfathered)
   tierReminderDayOfWindow?: 1 | 2 | 3;  // T0 + new conversation + not new-customer → which day of the 3-day window
+  // Step 1: the customer's message is a transcribed voice note. The agent adds
+  // VOICE_INPUT_NOTE (read back before acting) and executeTool refuses the
+  // typed-only tools. A transcript never sets buttonTap.
+  inputModality?: 'voice';
+}
+
+/**
+ * Step 1: a WhatsApp audio message's Meta media id (digits only; it goes into a
+ * Graph URL path) and its sanitised mime type ('' when unusable). Never the
+ * webhook's download URL. The audio itself is fetched only by the worker.
+ */
+export interface InboundMedia {
+  id: string;
+  mimeType: string;
 }
 
 export type IncomingMessage = (
   | { kind: 'text'; from: string; text: string; messageId: string }
   | { kind: 'button'; from: string; buttonId: string; messageId: string }
   // Program-Fix 49A (whatsapp-08): a message the bot cannot read (image, voice,
-  // document, …). Never downloaded; the inbound pipeline answers it honestly.
-  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string }
+  // document, …); the inbound pipeline answers it honestly. Step 1: an audio
+  // message also carries `media`, and a voice note from a beta sender (with the
+  // voice.notes switch on) is downloaded and transcribed by the worker. Nothing
+  // else is ever downloaded.
+  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string; media?: InboundMedia }
 ) & {
   // R1: Meta business-scoped user id / username when the webhook carries them.
   // In memory only: never logged, never written to an outbox payload.
@@ -759,6 +801,11 @@ export interface SettlementRoute {
   fxRate: number;                    // destination units per 1 source unit
   source: 'platform' | 'partner';
   settlementPartnerId?: PartnerId;   // set only when source==='partner'
+  // Step 0 FX-5: which partner offer won (source==='partner' only). A pushed
+  // rate carries its own expiry (ISO-8601); a standing margin rides the
+  // platform mid and has none.
+  kind?: 'partner_push' | 'partner_margin';
+  expiresAt?: string;
 }
 
 // ── Per-corridor compliance (P5) ──────────────────────────────────────

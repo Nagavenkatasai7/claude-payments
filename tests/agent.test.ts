@@ -12,6 +12,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { OllamaHttpError } from '@/lib/llm-provider-error';
 import { freshDb, seedPartner } from './helpers-db';
+import { VOICE_INPUT_NOTE } from '@/lib/voice-notes';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import type { ChatMessage, TurnContext } from '@/lib/types';
@@ -779,6 +780,59 @@ describe('createAgent — TurnContext', () => {
     await agent.runAgentTurn('15551234567', 'hi', turn);
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
     expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
+  });
+
+  // Step 1 voice notes: the read-back note rides EVERY round of a voice turn
+  // (a round-0-only note would be gone after the first tool call) and is never
+  // persisted; a typed turn never sees it.
+  it('a voice turn carries VOICE_INPUT_NOTE on round 0 AND on the round after a tool call', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async (messages) => {
+        seen.push(messages);
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'validate_phone', arguments: JSON.stringify({ phone: '15550000002' }) } }],
+          };
+        }
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn('15551234567', 'send money to my brother', { isNewConversation: false, inputModality: 'voice' });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const msgs of seen.slice(0, 2)) {
+      const sys = msgs.filter((m) => m.role === 'system').map((m) => m.content);
+      expect(sys).toContain(VOICE_INPUT_NOTE);
+    }
+    const history = JSON.stringify(await store.getConversation('default', '15551234567'));
+    expect(history).not.toContain('[VOICE NOTE]');
+  });
+
+  it('a typed turn has no VOICE_INPUT_NOTE', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
+    expect(seen[0].some((m) => m.content === VOICE_INPUT_NOTE)).toBe(false);
   });
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {

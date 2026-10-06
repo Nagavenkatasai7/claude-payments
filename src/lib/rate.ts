@@ -34,6 +34,8 @@ export interface FxRates {
 
 /** api.frankfurter.app 301-redirects every call here (live-03, verified 2026-09-21). */
 export const FRANKFURTER_BASE_URL = 'https://api.frankfurter.dev/v1';
+/** Step 0 FX-7: the provider id stamped on transfers.fx_provider for a platform rate. */
+export const FX_PROVIDER_ID = 'frankfurter-v1-ecb';
 /** Per-request budget. Rate fetches sit on the synchronous quote path. */
 export const FX_FETCH_TIMEOUT_MS = 5_000;
 /** Soft TTL: re-fetch after this (L1 = per-instance memory, L2 = shared Redis). */
@@ -65,6 +67,8 @@ export type FxUnavailableReason =
   | `http_${number}`
   | 'malformed_rates'
   | 'stale'
+  // Step 0 FX-1: the provider's fixing date is 3+ business days behind (fx-fixing.ts).
+  | 'stale_fixing'
   | 'fallback_table'
   | 'stale_quote'
   | 'unsupported_currency';
@@ -114,10 +118,31 @@ interface StampedFxRates extends FxRates {
 
 const cache = new Map<CurrencyCode, StampedFxRates>();
 const lastFailure = new Map<CurrencyCode, { at: number; reason: FxUnavailableReason }>();
+/** Step 0 FX-1 measurement: the newest fixing date this instance has fetched, per currency. */
+const lastSeenAsOf = new Map<CurrencyCode, string>();
 
 export function resetRateCacheForTests(): void {
   cache.clear();
   lastFailure.clear();
+  lastSeenAsOf.clear();
+}
+
+/**
+ * Step 0 FX-1 measurement: one warn line the first time THIS instance fetches
+ * a fixing date newer than the last one it saw (never on its first sighting —
+ * a cold start is not an advance). The UTC time of the line is when the new
+ * ECB fixing reached us through Frankfurter, which validates the 17:00 / 06:00
+ * UTC cutoffs (fx-fixing.ts) before FX_FIXING_GATE_ENABLED is turned on.
+ */
+function noteFixingDate(source: CurrencyCode, asOf: string | undefined, now: number): void {
+  if (!asOf) return;
+  const prev = lastSeenAsOf.get(source);
+  if (prev !== undefined && asOf <= prev) return;
+  lastSeenAsOf.set(source, asOf);
+  if (prev === undefined) return;
+  logWarn('fx.fixing-advanced', 'FX provider fixing date advanced', {
+    currency: source, asOf, seenAtUtc: new Date(now).toISOString(),
+  });
 }
 
 // ── L2 (shared Redis) ────────────────────────────────────────────────────────
@@ -295,6 +320,7 @@ export async function getFxRates(source: CurrencyCode, opts: FxFetchOptions = {}
     fetched = await fetchFromProvider(source, now, opts.retryTimeoutMs);
   }
   if (typeof fetched !== 'string') {
+    noteFixingDate(source, fetched.asOf, now);
     cache.set(source, fetched);
     lastFailure.delete(source);
     await l2Set(source, fetched);

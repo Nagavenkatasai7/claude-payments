@@ -18,6 +18,7 @@ import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
 import { logWarn } from './log';
+import { VOICE_INPUT_NOTE } from './voice-notes';
 import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { env } from './env';
@@ -275,6 +276,12 @@ export function createAgent(deps: AgentDeps) {
       // knows the channel's limits after tool results arrive. Never persisted.
       if (channel === 'web') {
         messages.push({ role: 'system', content: WEB_CHANNEL_NOTE });
+      }
+      // Step 1: a transcribed voice note. The read-back rule rides EVERY round
+      // (after a tool result the model must still read back before acting).
+      // Never persisted.
+      if (turn.inputModality === 'voice') {
+        messages.push({ role: 'system', content: VOICE_INPUT_NOTE });
       }
       if (turn.isNewConversation && round === 0) {
         messages.push({

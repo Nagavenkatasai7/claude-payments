@@ -175,6 +175,11 @@ describe('finalizeCrossBorderBillPayment — the cross-border mint', () => {
     expect(t!.invoiceId).toBe(invoiceId);
     expect(t!.phone).toBe(BUYER_PHONE);
     expect(t!.recipientPhone).toBe(SELLER.phone);
+    // Step 0 FX-7: a locked B2B quote is stamped b2b_lock, its dates left NULL.
+    expect(t!.fxSource).toBe('b2b_lock');
+    expect(t!.fxAsOf).toBeUndefined();
+    expect(t!.fxFetchedAt).toBeUndefined();
+    expect(t!.fxProvider).toBeUndefined();
   });
 
   it('SELLER PAYOUT comes from the seller PROFILE, never from buyer input', async () => {

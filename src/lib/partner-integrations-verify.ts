@@ -13,9 +13,9 @@
 // { ok: false }. This is registration, not a money path — a refused save can
 // simply be retried. The token rides ONLY in the Authorization header and is
 // never logged here (the caller logs partnerId + status only).
-import { META_TIMEOUT_MS } from './whatsapp';
+import { GRAPH_VERSION, META_TIMEOUT_MS } from './whatsapp';
 
-const GRAPH = 'https://graph.facebook.com/v21.0'; // same version as whatsapp.ts sends
+const GRAPH = `https://graph.facebook.com/${GRAPH_VERSION}`; // the same pin whatsapp.ts sends with
 const PNID_RE = /^\d{5,20}$/;
 const WABA_RE = /^\d{1,30}$/;
 

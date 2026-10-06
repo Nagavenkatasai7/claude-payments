@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import {
+  PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
+  PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
+} from '@/lib/pay-outcome';
+import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
 // Review S2 (Program-Fix 32): the pay route's contract is fixed (ruling 7) — a
 // POST on a row that is no longer awaiting payment answers 200
@@ -46,5 +50,36 @@ describe('payErrorMessage', () => {
     for (const body of [{ ok: false, error: '<b>injected</b>' }, { reason: 'otp' }, { reason: 'busy' }, null, 'x', { kyc_required: 'yes' }]) {
       expect(payErrorMessage(body), JSON.stringify(body)).toBeNull();
     }
+  });
+});
+
+// Step 0 FX-2: the rate refusals get their own copy (never the server text).
+describe('payErrorMessage — Step 0 rate refusals', () => {
+  it('rate_expired says the transfer was cancelled, nothing charged, and asks for a fresh quote in chat', () => {
+    const m = payErrorMessage({ ok: false, reason: 'rate_expired', status: 'cancelled', error: 'x' });
+    expect(m).toBe(PAY_RATE_EXPIRED_COPY);
+    expect(m).toMatch(/cancelled/);
+    expect(m).toMatch(/nothing was charged/);
+    expect(m).toMatch(/WhatsApp/);
+  });
+
+  it('rate_expired_payment_pending never says cancelled or "nothing was charged"', () => {
+    const m = payErrorMessage({ ok: false, reason: 'rate_expired_payment_pending' });
+    expect(m).toBe(PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY);
+    expect(m).not.toMatch(/cancel/i);
+    expect(m).not.toMatch(/nothing was charged/i);
+    expect(m).toMatch(/original rate/);
+  });
+
+  it('fx_unavailable asks to try again in a few minutes (the rate.ts text)', () => {
+    expect(payErrorMessage({ ok: false, reason: 'fx_unavailable' })).toBe(PAY_FX_UNAVAILABLE_COPY);
+    expect(PAY_FX_UNAVAILABLE_COPY).toBe(FX_UNAVAILABLE_MESSAGE);
+  });
+
+  it('the draft branch quoteExpired wins over fx_unavailable and never says cancelled (N9)', () => {
+    const m = payErrorMessage({ ok: false, reason: 'fx_unavailable', quoteExpired: true });
+    expect(m).toBe(PAY_QUOTE_EXPIRED_COPY);
+    expect(m).not.toBe(PAY_RATE_EXPIRED_COPY);
+    expect(m).not.toMatch(/cancel/i);
   });
 });

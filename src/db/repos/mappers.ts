@@ -14,6 +14,7 @@ import type {
   EntityType,
   FundingMethod,
   FundingState,
+  FxRateOrigin,
   PayoutMethod,
   RefundStatus,
   SenderRecipientRelationship,
@@ -131,6 +132,13 @@ export function transferToRow(
     // Program-Fix 44 P2: write-once — saveTransfer strips it from its
     // conflict-update, so only the first insert ever sets it.
     environment: t.environment ?? 'live',
+    // Step 0 FX-7: write-once provenance — saveTransfer strips these from its
+    // conflict-update too, so only the first insert ever sets them.
+    fxAsOf: t.fxAsOf ?? null,
+    fxFetchedAt: t.fxFetchedAt ? new Date(t.fxFetchedAt) : null,
+    fxSource: t.fxSource ?? null,
+    fxProvider: t.fxProvider ?? null,
+    fxExpiresAt: t.fxExpiresAt ? new Date(t.fxExpiresAt) : null,
     createdAt: new Date(t.createdAt),
     paidAt: t.paidAt ? new Date(t.paidAt) : null,
     deliveredAt: t.deliveredAt ? new Date(t.deliveredAt) : null,
@@ -229,5 +237,14 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (row.achTokenRef) t.achTokenRef = row.achTokenRef;
   if (row.invoiceId) t.invoiceId = row.invoiceId;
   if (row.kybReviewNotes) t.kybReviewNotes = row.kybReviewNotes;
+  // Step 0 FX-7: absent on every pre-0030 row. date() is string mode
+  // (drizzle-orm/pg-core/columns/date.d.ts: PgDateString maps to string).
+  if (row.fxAsOf) t.fxAsOf = row.fxAsOf;
+  const fxFetchedAt = isoOpt(row.fxFetchedAt);
+  if (fxFetchedAt) t.fxFetchedAt = fxFetchedAt;
+  if (row.fxSource) t.fxSource = row.fxSource as FxRateOrigin;
+  if (row.fxProvider) t.fxProvider = row.fxProvider;
+  const fxExpiresAt = isoOpt(row.fxExpiresAt);
+  if (fxExpiresAt) t.fxExpiresAt = fxExpiresAt;
   return t;
 }

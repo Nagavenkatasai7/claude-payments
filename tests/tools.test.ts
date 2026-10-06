@@ -31,7 +31,7 @@ import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, resto
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
-  resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
+  resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
 } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
@@ -6434,5 +6434,242 @@ describe('create_transfer — sends.paused kill switch', () => {
     }, ctx);
     expect(r).toMatchObject({ error: SENDS_PAUSED_MESSAGE, sends_paused: true });
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+  });
+});
+
+// ── Step 0 FX-5: the card's lock line counts down to a partner push expiry ──
+describe('Step 0 FX-5: rate lock with a partner push expiry (FX_PAY_RATE_CHECK_ENABLED)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const NOW = 1_800_000_000_000;
+  const PUSH = (expiresInMs: number) => ({
+    fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x',
+    kind: 'partner_push' as const, expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+  });
+  const MARGIN = { fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x', kind: 'partner_margin' as const };
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer',
+    recipient_name: 'Mom', recipient_phone: '919876543210',
+  };
+  /** Prime the FX cache, then capture the approve card's body text. */
+  async function primedCtx(phone: string) {
+    const ctx = await buildCtx(fakeRedis(), phone);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    const card = { text: '' };
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') card.text = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    return { ctx, card };
+  }
+
+  it('flag ON: the lock is the shortest of the draft lifetime, the rate age left and the push expiry', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(rateLockMinutes(NOW, NOW, NOW + 7 * 60_000)).toBe(7);                      // the push ends first
+    expect(rateLockMinutes(NOW - 50 * 60_000, NOW, NOW + 20 * 60_000)).toBe(10);      // the rate age ends first
+    expect(rateLockMinutes(NOW, NOW, NOW + 45 * 60_000)).toBe(RATE_LOCK_MINUTES);    // the draft ends first
+    expect(rateLockMinutes(NOW, NOW, NOW - 1)).toBe(0);                               // already expired: never negative
+    expect(rateLockMinutes(NOW, NOW, undefined)).toBe(RATE_LOCK_MINUTES);             // no push: unchanged
+  });
+
+  it('flag OFF (default): the push expiry is ignored, exactly as today', () => {
+    expect(rateLockMinutes(NOW, NOW, NOW + 7 * 60_000)).toBe(RATE_LOCK_MINUTES);
+  });
+
+  it('send_approve_picker stores the push expiry and origin on the draft; flag ON the card counts down to it', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const { ctx, card } = await primedCtx('15550007701');
+    const route = PUSH(7 * 60_000 + 30_000);
+    const r = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => route });
+    expect(r.sent).toBe(true);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.quote.routeExpiresAt).toBe(Date.parse(route.expiresAt));
+    expect(draft?.quote.fxOrigin).toBe('partner_push');
+    expect(card.text).toContain('Rate locked for 7 min.');
+  });
+
+  it('flag OFF: the same push stores its expiry but the card keeps the full lock', async () => {
+    const { ctx, card } = await primedCtx('15550007702');
+    const route = PUSH(7 * 60_000 + 30_000);
+    const r = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => route });
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.quote.routeExpiresAt).toBe(Date.parse(route.expiresAt));
+    expect(card.text).toContain(`Rate locked for ${RATE_LOCK_MINUTES} min.`);
+  });
+
+  it('a margin route stores partner_margin and no expiry; an unrouted draft stores platform', async () => {
+    const { ctx } = await primedCtx('15550007703');
+    const routed = await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => MARGIN });
+    const d1 = await ctx.draftStore.consumeDraft(routed.draft_id as string);
+    expect(d1?.quote.fxOrigin).toBe('partner_margin');
+    expect(d1?.quote.routeExpiresAt).toBeUndefined();
+    const plain = await executeTool('send_approve_picker', { ...PICK, amount_usd: 150 }, ctx);
+    const d2 = await ctx.draftStore.consumeDraft(plain.draft_id as string);
+    expect(d2?.quote.fxOrigin).toBe('platform');
+    expect(d2?.quote.routeExpiresAt).toBeUndefined();
+  });
+
+  it('web: the reply_hint states the same minutes as the summary (repeat_transfer, routed push, flag ON)', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const base = await buildCtx(fakeRedis(), '15550007704');
+    await base.store.upsertRecipient('default', base.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await runLegacyCreateTransferForTests({
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
+    }, base);
+    const ctx = { ...base, channel: 'web' as const, routeSelector: async () => PUSH(7 * 60_000 + 30_000) };
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(String(r.summary)).toContain('Rate locked for 7 min.');
+    expect(String(r.reply_hint)).toContain('the rate is locked for 7 minutes');
+  });
+});
+
+// ── Step 0 FX-7: the draft and the blocked row carry the rate provenance ──
+describe('Step 0 FX-7: rate provenance from the chat send path', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  function stubDatedFx(date: string) {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+      String(url).includes('graph.facebook.com')
+        ? { ok: true, text: async () => '' }
+        : { ok: true, json: async () => ({ date, rates: { INR: MOCK_RATE } }) }));
+  }
+  const PICK = { amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' };
+
+  it('the draft stores the fixing date and origin; the approve-tap mint stamps them on the row', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const base = await buildCtx(fakeRedis(), '15550007711');
+    const r = await executeTool('send_approve_picker', PICK, base);
+    expect(r.sent).toBe(true);
+    const draft = await base.draftStore.getDraft(r.draft_id as string);
+    expect(draft?.quote).toMatchObject({ fxAsOf: date, fxOrigin: 'platform' });
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: r.draft_id as string } } };
+    const minted = await runLegacyCreateTransferForTests({}, ctx);
+    expect(minted.error).toBeUndefined();
+    const t = await base.store.getTransfer(minted.transfer_id as string);
+    expect(t).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date,
+      fxFetchedAt: new Date(draft!.quote.fxFetchedAt!).toISOString(),
+    });
+  });
+
+  it('a watchlist-blocked picker records its blocked row with the quote-time provenance', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007712');
+    const r = await executeTool('send_approve_picker', { ...PICK, recipient_name: 'John Doe' }, ctx);
+    expect(r.blocked).toBe(true);
+    const [row] = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect(row).toMatchObject({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date });
+    expect(row.fxFetchedAt).toBeDefined();
+  });
+});
+
+// ── Step 0 §3.6: the fixing date in chat (card line + get_quote rate_date) ──
+describe('Step 0 §3.6: the daily reference rate date in chat', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const short = (d: string) =>
+    new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  /** Dated (or undated) FX; the approve card's body text is captured. */
+  function stubDatedFx(date: string | undefined) {
+    resetRateCacheForTests();
+    const card = { text: '' };
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).includes('graph.facebook.com')) {
+        return { ok: true, json: async () => ({ ...(date ? { date } : {}), rates: { INR: MOCK_RATE } }) };
+      }
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') card.text = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    return card;
+  }
+  const PUSH = {
+    fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x',
+    kind: 'partner_push' as const, expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  };
+  const PICK = { amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' };
+
+  it('buildApproveSummary: the rate line names the date, formatted in UTC', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, '2026-10-02');
+    expect(s.split('\n')).toContain('Rate: 1 USD = ₹83 (daily reference rate, 2 Oct)');
+    // New Year's Day stays 1 Jan in every server time zone (UTC formatting).
+    const ny = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, '2027-01-01');
+    expect(ny).toContain('(daily reference rate, 1 Jan)');
+  });
+
+  it('buildApproveSummary: no date (or a malformed one) leaves the card byte-identical', () => {
+    const plain = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30);
+    expect(plain.split('\n')).toContain('Rate: 1 USD = ₹83');
+    for (const bad of [undefined, '', '2026-13-45', '2026-02-30', 'yesterday']) {
+      expect(buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 30, bad)).toBe(plain);
+    }
+  });
+
+  it('send_approve_picker: a platform rate shows its date on the card', async () => {
+    const date = dayAgo(1);
+    const card = stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007721');
+    expect((await executeTool('send_approve_picker', PICK, ctx)).sent).toBe(true);
+    expect(card.text.split('\n')).toContain(`Rate: 1 USD = ₹85 (daily reference rate, ${short(date)})`);
+  });
+
+  it('send_approve_picker: a partner rate is not the reference rate, so no date', async () => {
+    const card = stubDatedFx(dayAgo(1));
+    const ctx = await buildCtx(fakeRedis(), '15550007723');
+    expect((await executeTool('send_approve_picker', PICK, { ...ctx, routeSelector: async () => PUSH })).sent).toBe(true);
+    expect(card.text.split('\n')).toContain('Rate: 1 USD = ₹86');
+    expect(card.text).not.toContain('daily reference rate');
+  });
+
+  it('get_quote: rate_date is the platform rate\'s publication date; absent when routed or unknown', async () => {
+    const date = dayAgo(1);
+    stubDatedFx(date);
+    const ctx = await buildCtx(fakeRedis(), '15550007722');
+    const q = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, ctx);
+    expect(q.rate_date).toBe(date);
+    const routed = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, { ...ctx, routeSelector: async () => PUSH });
+    expect(routed.fx_rate).toBe(86);
+    expect('rate_date' in routed).toBe(false);
+    stubDatedFx(undefined);
+    const undated = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, ctx);
+    expect('rate_date' in undated).toBe(false);
+  });
+});
+
+// Step 1 voice notes (owner decision Q10): invoices and seller sign-up have no
+// pay page or OTP behind them, so they are refused in a voice turn. A typed
+// turn (the customer types "yes" after the read-back) runs them as before.
+describe('voice turns: typed-only tools are refused at dispatch', () => {
+  const VOICE_GATE = /typed confirmation/;
+
+  it.each([
+    ['create_invoice', { buyer_phone: '15550000002', amount: 500, currency: 'USD', description: 'Consulting' }],
+    ['register_seller', { business_name: 'Fake Test Traders' }],
+  ] as const)('%s in a voice turn → the gate error, nothing written', async (name, args) => {
+    const ctx = await buildCtx(fakeRedis());
+    const before = await db.execute(sql`SELECT count(*)::int AS n FROM sellers`);
+    const r = await executeTool(name, { ...args }, { ...ctx, turn: { isNewConversation: false, inputModality: 'voice' } });
+    expect(String((r as { error?: unknown }).error)).toMatch(VOICE_GATE);
+    expect(await db.execute(sql`SELECT count(*)::int AS n FROM sellers`)).toEqual(before);
+    expect(await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)).toMatchObject({ rows: [{ n: 0 }] });
+  });
+
+  it('a typed turn is not gated', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Fake Test Traders' }, ctx);
+    expect(String((r as { error?: unknown }).error ?? '')).not.toMatch(VOICE_GATE);
+  });
+
+  it('look-up tools still run in a voice turn', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('validate_phone', { phone: '15550000002' }, { ...ctx, turn: { isNewConversation: false, inputModality: 'voice' } });
+    expect(String((r as { error?: unknown }).error ?? '')).not.toMatch(VOICE_GATE);
   });
 });

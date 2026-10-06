@@ -439,6 +439,23 @@ describe('transfer-repo — fix 6 (ctx-01): guarded payout write + rehydration p
     expect((await repo.setPayoutIfEditable('p_sched', 'acme', NEW))?.id).toBe('p_sched');
   });
 
+  it('Step 0 FX-2: isPartnerApiMinted is the SAME predicate payoutEditable negates (one shared helper)', async () => {
+    await seedPartner(db, 'acme');
+    for (const id of ['m_api', 'm_api_audit', 'm_draft', 'm_sched', 'm_plain']) {
+      await repo.saveTransfer(fixture({ id, ...(id === 'm_sched' ? { partnerId: 'acme' } : {}) }));
+    }
+    await createIdempotencyRepo(db).claim('default', 'order-9001', 'm_api');            // a partner-API claim
+    await createAuditRepo(db).record({ partnerId: 'default', actor: 'pk_1', actorType: 'api_key', action: 'transaction.create', subjectId: 'm_api_audit' });
+    await createIdempotencyRepo(db).claim('default', 'draft:d_9', 'm_draft');           // pay-page draft mint
+    await createIdempotencyRepo(db).claim('acme', 'sched:s_9:2026-06-09', 'm_sched');   // scheduled mint
+    expect(await repo.isPartnerApiMinted('m_api')).toBe(true);
+    expect(await repo.isPartnerApiMinted('m_api_audit')).toBe(true);
+    expect(await repo.isPartnerApiMinted('m_draft')).toBe(false);
+    expect(await repo.isPartnerApiMinted('m_sched')).toBe(false);
+    expect(await repo.isPartnerApiMinted('m_plain')).toBe(false);
+    expect(await repo.isPartnerApiMinted('no_such_id')).toBe(false);
+  });
+
   it('hasB2bTransferTo is an exact (tenant, sender, recipient, b2b) probe', async () => {
     await repo.saveTransfer(fixture({ id: 'b_1', transferType: 'b2b', recipientPhone: '919822222222' }));
     expect(await repo.hasB2bTransferTo('default', '15551230000', '919822222222')).toBe(true);

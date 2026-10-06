@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
+import { checkMintedRate } from '@/lib/minted-rate';
+import { assertQuoteOverrideFresh, createTransfer, fxProvenanceFor, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { FX_PROVIDER_ID, RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
@@ -374,6 +375,37 @@ describe('createTransfer any-to-any corridors', () => {
   });
 });
 
+// Step 0 FX-1 (B3): the re-quote gates BOTH legs' fixing dates (flag ON only).
+describe('createTransfer — the re-quote gates both FX legs (Step 0 FX-1)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const today = () => new Date().toISOString().slice(0, 10);
+  function stubDated(aedDate: string) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=USD')) return { ok: true, json: async () => ({ date: today(), rates: { INR: 85 } }) };
+      // SGD is fetched on its own (AED is derived from USD, so it cannot stall alone).
+      return { ok: true, json: async () => ({ date: aedDate, rates: { INR: 65, USD: 0.78 } }) };
+    }));
+  }
+  const toSg = { ...base, destinationCountry: 'SG' as const, destinationCurrency: 'SGD' as const };
+
+  it('flag ON: a DESTINATION leg whose fixing is years old refuses the mint (stale_fixing); nothing written', async () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    const { db, store, partnerStore, mvs } = await makeStores();
+    stubDated('2016-01-04');
+    await expect(createTransfer(store, partnerStore, mvs, toSg)).rejects.toMatchObject({ reason: 'stale_fixing' });
+    const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)) as unknown as { rows: Array<{ n: number }> };
+    expect(rows.rows[0].n).toBe(0);
+  });
+
+  it('flag OFF (default): the same feed still mints', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated('2016-01-04');
+    const t = await createTransfer(store, partnerStore, mvs, toSg);
+    expect(t.destinationCurrency).toBe('SGD');
+  });
+});
+
 // ── U7 (audit): optional complete quote override ─────────────────────────────
 // The pay-time finalizer passes the DRAFT's stored quote so the ledger records
 // exactly what the approval card / pay page showed — no re-quote from current
@@ -561,6 +593,189 @@ describe('quoteOverrideFromDraft (pure)', () => {
       quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 },
     });
     expect(o).toBeUndefined();
+  });
+});
+
+// Step 0 FX-5: a partner push carries its own expiry; under the FX-2 flag the
+// approved quote stops being payable once that push expires.
+describe('route expiry on the approved quote (Step 0 FX-5)', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  function reasonOf(fn: () => void): string | null {
+    try { fn(); return null; } catch (err) { return err instanceof RateUnavailableError ? err.reason : 'other'; }
+  }
+  const NOW = Date.now();
+
+  it('flag ON: a quote past its push expiry is refused as stale_quote (also at exactly the expiry)', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW - 1 }, NOW))).toBe('stale_quote');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW }, NOW))).toBe('stale_quote');
+  });
+
+  it('flag ON: before the push expires, and with no push expiry at all, the quote passes', () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW + 1 }, NOW))).toBeNull();
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000 }, NOW))).toBeNull();
+  });
+
+  it('flag OFF (default): the push expiry is not checked; the fetch-age check is unchanged', () => {
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 60_000, routeExpiresAt: NOW - 1 }, NOW))).toBeNull();
+    expect(reasonOf(() => assertQuoteOverrideFresh({ fxFetchedAt: NOW - 61 * 60_000 }, NOW))).toBe('stale_quote');
+  });
+
+  it('flag ON: createTransfer refuses an expired routed override before any write', async () => {
+    vi.stubEnv('FX_PAY_RATE_CHECK_ENABLED', 'true');
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x');
+    await expect(createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: {
+        amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 86, amountInr: 17_200,
+        amountSource: 200, feeSource: 0, totalChargeSource: 200,
+        fxFetchedAt: Date.now() - 60_000, routeExpiresAt: Date.now() - 1_000,
+      },
+      settlementPartnerId: 'rail-partner-x',
+    })).rejects.toMatchObject({ reason: 'stale_quote' });
+    const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)) as unknown as { rows: Array<{ n: number }> };
+    expect(rows.rows[0].n).toBe(0);
+  });
+
+  it('quoteOverrideFromDraft carries the push expiry and the rate provenance (USD and non-USD drafts)', () => {
+    const extra = { routeExpiresAt: NOW + 600_000, fxAsOf: '2026-10-02', fxOrigin: 'partner_push' as const };
+    const usd = quoteOverrideFromDraft({
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD',
+      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200, fxFetchedAt: NOW, ...extra },
+    });
+    expect(usd).toMatchObject({ fxFetchedAt: NOW, ...extra });
+    const gbp = quoteOverrideFromDraft({
+      amountUsd: 254, amountSource: 200, sourceCurrency: 'GBP',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600, feeSource: 1.57, totalChargeSource: 201.57, totalChargeUsd: 255.99, ...extra },
+    });
+    expect(gbp).toMatchObject(extra);
+  });
+});
+
+// Step 0 FX-7: which rate priced the row, when it was published and fetched.
+describe('rate provenance on the minted row (Step 0 FX-7)', () => {
+  const dayAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  function stubDated(usdDate: string, sgdDate = usdDate) {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=USD')) return { ok: true, json: async () => ({ date: usdDate, rates: { INR: 85 } }) };
+      return { ok: true, json: async () => ({ date: sgdDate, rates: { INR: 65, USD: 0.78 } }) };
+    }));
+  }
+  const override = {
+    amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17_000,
+    amountSource: 200, feeSource: 0, totalChargeSource: 200,
+  };
+
+  it('fxProvenanceFor (pure): each origin stamps what it can vouch for', () => {
+    const at = Date.UTC(2026, 9, 2, 15, 0, 0);
+    const iso = new Date(at).toISOString();
+    expect(fxProvenanceFor('platform', '2026-10-02', at)).toEqual({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: '2026-10-02', fxFetchedAt: iso });
+    expect(fxProvenanceFor('partner_margin', '2026-10-02', at)).toEqual({ fxSource: 'partner_margin', fxProvider: 'partner', fxAsOf: '2026-10-02', fxFetchedAt: iso });
+    // A push is the partner's own number: the reference date does not describe it.
+    expect(fxProvenanceFor('partner_push', '2026-10-02', at)).toEqual({ fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: iso });
+    // A B2B locked quote: origin only, dates NULL.
+    expect(fxProvenanceFor('b2b_lock', '2026-10-02', at)).toEqual({ fxSource: 'b2b_lock' });
+    // An older draft without an origin: only the fetch time it carries.
+    expect(fxProvenanceFor(undefined, undefined, at)).toEqual({ fxFetchedAt: iso });
+    expect(fxProvenanceFor(undefined, undefined, undefined)).toEqual({});
+  });
+
+  it('fxProvenanceFor (pure): the push expiry is stamped when given (review finding 1), never for a B2B lock', () => {
+    const at = Date.UTC(2026, 9, 2, 15, 0, 0);
+    const exp = at + 5 * 60_000;
+    expect(fxProvenanceFor('partner_push', undefined, at, exp)).toEqual({
+      fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: new Date(at).toISOString(), fxExpiresAt: new Date(exp).toISOString(),
+    });
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined)).not.toHaveProperty('fxExpiresAt');
+    expect(fxProvenanceFor('partner_push', undefined, at, Number.NaN)).not.toHaveProperty('fxExpiresAt');
+    expect(fxProvenanceFor('b2b_lock', undefined, at, exp)).toEqual({ fxSource: 'b2b_lock' });
+  });
+
+  it('re-quote: platform, the ECB provider, the fixing date and the fetch time, persisted', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const date = dayAgo(1);
+    stubDated(date);
+    const before = Date.now();
+    const t = await createTransfer(store, partnerStore, mvs, base);
+    const saved = await store.getTransfer(t.id);
+    expect(saved).toMatchObject({ fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: date });
+    const fetched = Date.parse(saved!.fxFetchedAt!);
+    expect(fetched).toBeGreaterThanOrEqual(before - 1_000);
+    expect(fetched).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('re-quote with its own destination leg: the OLDER leg\'s date', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated(dayAgo(1), dayAgo(3));
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, destinationCountry: 'SG', destinationCurrency: 'SGD' });
+    expect((await store.getTransfer(t.id))?.fxAsOf).toBe(dayAgo(3));
+  });
+
+  it('override: the draft\'s origin, date and fetch time (platform and partner push)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const at = Date.now() - 5 * 60_000;
+    const p = await createTransfer(store, partnerStore, mvs, {
+      ...base, quote: { ...override, fxFetchedAt: at, fxAsOf: dayAgo(1), fxOrigin: 'platform' },
+    });
+    expect(await store.getTransfer(p.id)).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: dayAgo(1), fxFetchedAt: new Date(at).toISOString(),
+    });
+    await seedPartner(db, 'rail-partner-x');
+    const r = await createTransfer(store, partnerStore, mvs, {
+      ...base, phone: '15551234568',
+      quote: { ...override, fxRate: 86, amountInr: 17_200, fxFetchedAt: at, fxAsOf: dayAgo(1), fxOrigin: 'partner_push', routeExpiresAt: Date.now() + 600_000 },
+      settlementPartnerId: 'rail-partner-x',
+    });
+    const routed = await store.getTransfer(r.id);
+    expect(routed).toMatchObject({ fxSource: 'partner_push', fxProvider: 'partner', fxFetchedAt: new Date(at).toISOString() });
+    expect(routed?.fxAsOf).toBeUndefined();
+    expect(routed?.fxExpiresAt).toBeDefined();
+    expect(await store.getTransfer(p.id)).not.toHaveProperty('fxExpiresAt');
+  });
+
+  it('review finding 1: a routed mint on a push expiring in 5 min is payable at +4 min and routed_stale at +6 min', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x');
+    const mintAt = Date.now();
+    const expiresAt = mintAt + 5 * 60_000;
+    const r = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: { ...override, fxRate: 86, amountInr: 17_200, fxFetchedAt: mintAt - 60_000, fxOrigin: 'partner_push', routeExpiresAt: expiresAt },
+      settlementPartnerId: 'rail-partner-x',
+    });
+    const saved = (await store.getTransfer(r.id))!;
+    expect(saved.fxExpiresAt).toBe(new Date(expiresAt).toISOString());
+    const noFetch = { getFxRates: vi.fn(), getDestinationRates: vi.fn() };
+    expect(await checkMintedRate(saved, mintAt + 4 * 60_000, noFetch)).toEqual({ ok: true });
+    expect(await checkMintedRate(saved, mintAt + 6 * 60_000, noFetch)).toEqual({ ok: false, reason: 'routed_stale' });
+    expect(noFetch.getFxRates).not.toHaveBeenCalled();
+  });
+
+  it('a watchlist-blocked mint keeps the provenance too', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    stubDated(dayAgo(1));
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John Doe' });
+    expect(t.status).toBe('blocked');
+    expect(await store.getTransfer(t.id)).toMatchObject({ fxSource: 'platform', fxAsOf: dayAgo(1) });
+  });
+
+  it('recordBlockedAttempt stamps the quote-time provenance it is given', async () => {
+    const { store } = await makeStores();
+    const at = Date.now() - 60_000;
+    const t = await recordBlockedAttempt(store, {
+      phone: '15551234567', recipientName: 'John Doe', recipientPhone: '919133001840',
+      payoutMethod: 'bank', payoutDestination: '', fundingMethod: 'bank_transfer',
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', feeUsd: 0, feeSource: 0,
+      fxRate: 85, amountInr: 8500, totalChargeUsd: 100, totalChargeSource: 100,
+      destinationCountry: 'IN', destinationCurrency: 'INR', partnerId: 'default',
+      reasons: ['Recipient is on the compliance watchlist.'],
+      fxOrigin: 'platform', fxAsOf: dayAgo(1), fxFetchedAt: at,
+    });
+    expect(await store.getTransfer(t.id)).toMatchObject({
+      fxSource: 'platform', fxProvider: FX_PROVIDER_ID, fxAsOf: dayAgo(1), fxFetchedAt: new Date(at).toISOString(),
+    });
   });
 });
 

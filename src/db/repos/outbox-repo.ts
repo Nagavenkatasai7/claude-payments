@@ -243,17 +243,20 @@ export function createOutboxRepo(db: DbOrTx) {
      * THE SAME compare-and-set (`payload = payload - key`): one statement, no
      * extra dead tuple, no window. The worker passes 'messageText' for a
      * finished agent.turn, whose text now lives sealed in conversation_messages.
+     * Step 1: it may name several keys (a voice turn also drops `media`); they
+     * fold into one expression, `payload - k1 - k2`, in the same statement.
      * Only done rows are touched; failed / dead rows keep their payload.
      */
-    async markDone(id: number, owner?: string, opts: { dropPayloadKey?: string } = {}): Promise<boolean> {
-      const drop = opts.dropPayloadKey;
+    async markDone(id: number, owner?: string, opts: { dropPayloadKey?: string | readonly string[] } = {}): Promise<boolean> {
+      const keys = opts.dropPayloadKey === undefined ? [] : typeof opts.dropPayloadKey === 'string' ? [opts.dropPayloadKey] : opts.dropPayloadKey;
+      const pruned = keys.filter((k) => k !== '').reduce((acc, k) => sql`${acc} - ${k}::text`, sql`${outbox.payload}`);
       const rows = await db
         .update(outbox)
         .set({
           status: 'done',
           leaseUntil: null,
           leaseOwner: null,
-          ...(drop ? { payload: sql`${outbox.payload} - ${drop}::text` } : {}),
+          ...(keys.some((k) => k !== '') ? { payload: pruned } : {}),
         })
         .where(owner === undefined ? eq(outbox.id, id) : and(eq(outbox.id, id), eq(outbox.leaseOwner, owner)))
         .returning({ id: outbox.id });
