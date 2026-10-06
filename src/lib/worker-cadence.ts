@@ -68,6 +68,21 @@ export function shouldProbeFx(source: InvocationSource, now: Date): boolean {
   return false;
 }
 
+/** Minutes between FX re-checks (Oct 6 alerts): the cron minutes :02, :07, … */
+export const FX_RECHECK_PERIOD_MIN = 5;
+
+/**
+ * Whether this invocation re-checks the currencies the last FX probe could not
+ * refresh (rate-staleness.ts recheckFailedFx). Cron only, every
+ * FX_RECHECK_PERIOD_MIN minutes in phase with the :17/:47 backstop, and never
+ * ON the backstop minute (the full probe runs there). With nothing listed the
+ * re-check is one Redis GET, so a gated tick stays Neon-free.
+ */
+export function shouldRecheckFx(source: InvocationSource, now: Date): boolean {
+  if (source !== 'cron' || isBackstopMinute(now)) return false;
+  return now.getUTCMinutes() % FX_RECHECK_PERIOD_MIN === 17 % FX_RECHECK_PERIOD_MIN;
+}
+
 type MarkerRedis = Pick<RedisLike, 'get' | 'set'>;
 
 /** Records that a cron-sourced invocation reached the worker at `now`. Fail-open. */

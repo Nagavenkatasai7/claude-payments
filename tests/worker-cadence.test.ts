@@ -12,6 +12,7 @@ import {
   CRON_MARKER_KEY,
   invocationSource,
   shouldProbeFx,
+  shouldRecheckFx,
   recordCronRun,
   checkCronQuiet,
   sweepDrainGap,
@@ -360,5 +361,18 @@ describe('no stale cadence promise in code or docs (test 10)', () => {
       });
     }
     expect(hits).toEqual([]);
+  });
+});
+
+describe('shouldRecheckFx (Oct 6 alerts)', () => {
+  // Cron only, every 5th minute in phase with :17/:47, never ON the backstop.
+  it('re-checks on the cron minutes :02, :07, … except :17 and :47', () => {
+    const at = (m: number) => new Date(`2026-09-22T10:${String(m).padStart(2, '0')}:00Z`);
+    const due = [...Array(60).keys()].filter((m) => shouldRecheckFx('cron', at(m)));
+    expect(due).toEqual([2, 7, 12, 22, 27, 32, 37, 42, 52, 57]);
+  });
+  it('never from the heartbeat or a poke', () => {
+    expect(shouldRecheckFx('heartbeat', new Date('2026-09-22T10:22:00Z'))).toBe(false);
+    expect(shouldRecheckFx('poke', new Date('2026-09-22T10:22:00Z'))).toBe(false);
   });
 });

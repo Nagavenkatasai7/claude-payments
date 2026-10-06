@@ -7,6 +7,8 @@ import { fakeGateRedis, type FakeGateRedis } from './helpers-gate-redis';
 import { CRON_MARKER_KEY } from '@/lib/worker-cadence';
 import { DUE_KEY, LAST_FULL_KEY, isWorkDue, markDue, markLease } from '@/lib/worker-gate';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { FX_RECHECK_KEY } from '@/lib/rate-staleness';
+import { resetRateCacheForTests } from '@/lib/rate';
 import type { Db } from '@/db/client';
 
 // partner-demo R4 — /api/worker's Neon gate. A cron tick off the :17/:47
@@ -177,6 +179,46 @@ describe('cron tick', () => {
     at(3);
     box.gateCtorThrows = true;
     expect(await body(await GET(cronReq()))).toMatchObject({ source: 'cron', gated: false });
+  });
+});
+
+// Oct 6 alerts: every 5th cron minute re-checks the currencies the last FX
+// probe could not refresh, before the gate. Network is stubbed off here.
+describe('FX re-check (Oct 6 alerts)', () => {
+  beforeEach(() => resetRateCacheForTests());
+
+  it('a re-check minute with nothing listed stays gated with ZERO Neon calls', async () => {
+    at(22);
+    box.neonThrows = true;
+    expect(await body(await GET(cronReq()))).toEqual({ ok: true, source: 'cron', gated: true });
+  });
+
+  it('a listed currency that still fails raises the alert, and the same tick runs full and drains it', async () => {
+    at(22);
+    await redis.set(FX_RECHECK_KEY, 'GBP');
+    const b = await body(await GET(cronReq()));
+    expect(b).toMatchObject({ source: 'cron', gated: false });
+    const r = await db.execute(sql`SELECT dedupe_key, status FROM outbox WHERE kind = 'ops.alert'`);
+    const rows = (r as unknown as { rows: Array<{ dedupe_key: string; status: string }> }).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toMatch(/^fx-health:UNAVAILABLE:/);
+    expect(rows[0].status).toBe('done');
+    expect(await redis.get(FX_RECHECK_KEY)).toBe('GBP');
+  });
+
+  it('off a re-check minute the list is not read', async () => {
+    at(23);
+    await redis.set(FX_RECHECK_KEY, 'GBP');
+    box.neonThrows = true;
+    expect(await body(await GET(cronReq()))).toEqual({ ok: true, source: 'cron', gated: true });
+  });
+
+  it('the :17 backstop probe writes the currencies it could not refresh', async () => {
+    at(17);
+    await body(await GET(cronReq()));
+    const listed = (await redis.get(FX_RECHECK_KEY))?.split(',') ?? [];
+    expect(listed).toContain('GBP');
+    expect(listed).toContain('USD');
   });
 });
 
