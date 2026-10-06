@@ -18,7 +18,7 @@
 
 import { DRAFT_TTL_SECONDS } from '../draft-ttl';
 
-export const LEGAL_DRAFT_VERSION = 'draft-2026-09-23c' as const;
+export const LEGAL_DRAFT_VERSION = 'draft-2026-10-05a' as const;
 
 /** Program-Fix 49B: the chat quote's lock, derived from the draft lifetime (the
  *  same source as the approve card's "Rate locked for N min."), never a literal. */
@@ -192,7 +192,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       ],
       bullets: [
         'For everyday business purposes, such as processing your transfers, responding to court orders and legal investigations, and reporting as the law requires: yes; you cannot limit this sharing.',
-        'With service providers acting for the partner, such as SmartRemit, messaging (WhatsApp), identity-verification, AI model, hosting and database providers: yes; you cannot limit this sharing.',
+        'With service providers acting for the partner, such as SmartRemit, messaging (WhatsApp), identity-verification, AI model, speech-to-text, hosting and database providers: yes; you cannot limit this sharing.',
         'For the partner’s or SmartRemit’s own marketing: no such sharing takes place.',
         'For joint marketing with other financial companies: no such sharing takes place.',
         'With affiliates or non-affiliates so they can market to you: no such sharing takes place.',
@@ -203,7 +203,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       heading: 'WhatsApp and the chat assistant',
       paragraphs: [
         'If you use the service on WhatsApp, your messages pass through WhatsApp, which is operated by Meta under its own terms and privacy policy. WhatsApp shows the service your phone number, your WhatsApp profile name and the messages you send.',
-        'Your messages are processed by an AI model provider to generate replies. Conversation history used to continue a conversation is kept until 30 days after your last message. Some records of message processing are kept longer: internal delivery records hold message content for about 7 days, records of failed deliveries and messages you send to support are kept until they are reviewed or deleted, and transfer records are kept separately, as described below.',
+        'Your messages are processed by an AI model provider to generate replies. If you send a voice note (English only), the audio is sent to a speech-to-text provider, Microsoft Azure AI Speech (United States), to turn it into text; the text is then handled like a typed message. The service does not store the audio. Conversation history used to continue a conversation is kept until 30 days after your last message. Some records of message processing are kept longer: internal delivery records hold message content for about 7 days, records of failed deliveries and messages you send to support are kept until they are reviewed or deleted, and transfer records are kept separately, as described below.',
         'Never send card numbers, bank passwords or one-time codes in the chat. Payment details are entered only on the pay page.',
       ],
     },

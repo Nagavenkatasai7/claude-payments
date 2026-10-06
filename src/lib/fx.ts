@@ -2,6 +2,8 @@ import type { CurrencyCode, FundingMethod, Quote } from './types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from './send-limits';
 import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
+import { isFixingRefused } from './fx-fixing';
+import { env } from './env';
 
 export const MIN_USD = 10;
 export const MAX_USD = 2999; // pinned to PLATFORM_SEND_LIMITS.maxUsd (send-limits.ts) — ruling 12: this line only
@@ -38,17 +40,64 @@ export function usdPivotCrossRate(
   return rates.toUsd / destToUsd;
 }
 
+export interface RateGateOptions {
+  /** Step 0 N12: apply the fixing-date refusal even while FX_FIXING_GATE_ENABLED
+   *  is off (the pay-time rate check, under its own flag). */
+  forceFixingGate?: boolean;
+}
+
 /**
  * The provenance gate (money-07). A quoted rate becomes a BINDING payout
  * instruction, so nothing from the static display table and nothing older than
  * FX_MAX_AGE_MS may price a transfer. getFxRates ALWAYS stamps real rates;
  * provenance-less literals (tests, injected fakes) pass.
+ *
+ * Step 0 FX-1: with FX_FIXING_GATE_ENABLED (or opts.forceFixingGate), a rate
+ * whose provider fixing date (`asOf`) is 3+ business days behind under the
+ * 06:00-UTC rule (fx-fixing.ts) is refused as 'stale_fixing': a frozen feed
+ * answers every fetch, so the fetch age alone never catches it. No asOf ⇒ no
+ * fixing check (rate-staleness.ts logs it).
  */
-export function assertRatesUsable(rates: FxRates, now: number = Date.now()): void {
+export function assertRatesUsable(rates: FxRates, now: number = Date.now(), opts: RateGateOptions = {}): void {
   if (rates.source === 'fallback') throw new RateUnavailableError('fallback_table');
   if (rates.fetchedAt !== undefined && now - rates.fetchedAt > FX_MAX_AGE_MS) {
     throw new RateUnavailableError('stale');
   }
+  if ((opts.forceFixingGate || env.fxFixingGateEnabled) && isFixingRefused(rates.asOf, now)) {
+    throw new RateUnavailableError('stale_fixing');
+  }
+}
+
+/**
+ * Step 0 FX-1 (B3): gate BOTH legs. quote() / sourceForDest() receive the
+ * destination leg as a bare number, so its provenance is checked here, right
+ * after the fetches, by every caller that prices a transfer.
+ */
+export function assertLegsUsable(
+  src: FxRates,
+  dest?: FxRates,
+  now: number = Date.now(),
+  opts: RateGateOptions = {},
+): void {
+  assertRatesUsable(src, now, opts);
+  if (dest) assertRatesUsable(dest, now, opts);
+}
+
+/**
+ * Step 0 FX-7: the provenance of a quote priced on these legs, taken from the
+ * OLDEST leg: the earliest fetch time (as a stored quote's age is measured)
+ * and the earliest publication date. The date is undefined when any leg in
+ * use lacks one, so a row never claims a fixing date it cannot vouch for.
+ */
+export function legsProvenance(src: FxRates, dest?: FxRates): { asOf?: string; fetchedAt?: number } {
+  const legs = dest ? [src, dest] : [src];
+  const stamps = legs.map((l) => l.fetchedAt).filter((t): t is number => t !== undefined);
+  const dates = legs.map((l) => l.asOf);
+  const known = dates.filter((d): d is string => d !== undefined);
+  return {
+    ...(stamps.length > 0 ? { fetchedAt: Math.min(...stamps) } : {}),
+    ...(known.length === dates.length ? { asOf: known.reduce((a, b) => (b < a ? b : a)) } : {}),
+  };
 }
 
 /** Format a whole amount in the given ISO-4217 currency ($, ₹, £, AED, …). */

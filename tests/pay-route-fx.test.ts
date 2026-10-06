@@ -50,7 +50,9 @@ describe('POST /api/pay/[transferId] — fx_unavailable (Task 9)', () => {
     finalizeDraftPayment.mockResolvedValueOnce({ ok: false, error: 'fx_unavailable', quoteExpired: true });
     const res = await post();
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ ok: false, error: FX_QUOTE_EXPIRED_MESSAGE, reason: 'fx_unavailable' });
+    // Step 0 (N9): plus quoteExpired, so the page says "This quote has expired"
+    // (nothing was minted or cancelled) instead of the retry line.
+    expect(await res.json()).toEqual({ ok: false, error: FX_QUOTE_EXPIRED_MESSAGE, reason: 'fx_unavailable', quoteExpired: true });
   });
 
   it('the other refusal arms keep their 400 (regression)', async () => {

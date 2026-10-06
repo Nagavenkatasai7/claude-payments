@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { effectiveRateFor, selectSettlementRoute, MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
+import { effectiveOfferFor, effectiveRateFor, selectSettlementRoute, MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { railFailAlertKey, hourBucketAt, recentlyFailingRails } from '@/lib/rail-health';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -53,6 +53,27 @@ describe('effectiveRateFor (pure)', () => {
   });
 });
 
+// Step 0 FX-5: the same rule, plus WHICH offer won and when a push expires,
+// so the draft can stop honouring a partner rate the partner no longer offers.
+describe('effectiveOfferFor (pure, Step 0 FX-5)', () => {
+  it('a fresh push → partner_push carrying its expiry', () => {
+    const exp = inHours(1);
+    expect(effectiveOfferFor(baseRate({ effectiveRate: 86.5, expiresAt: exp, marginBps: 10 }), MID, NOW))
+      .toEqual({ fxRate: 86.5, kind: 'partner_push', expiresAt: exp });
+  });
+  it('an expired push with a margin → partner_margin, no expiry', () => {
+    const offer = effectiveOfferFor(baseRate({ effectiveRate: 86.5, expiresAt: inHours(-1), marginBps: 100 }), MID, NOW);
+    expect(offer?.kind).toBe('partner_margin');
+    expect(offer?.fxRate).toBeCloseTo(MID * 1.01, 6);
+    expect(offer).not.toHaveProperty('expiresAt');
+  });
+  it('nothing competing → null; effectiveRateFor is its rate', () => {
+    expect(effectiveOfferFor(baseRate({}), MID, NOW)).toBeNull();
+    const r = baseRate({ effectiveRate: 86.5, expiresAt: inHours(1) });
+    expect(effectiveRateFor(r, MID, NOW)).toBe(effectiveOfferFor(r, MID, NOW)?.fxRate);
+  });
+});
+
 describe('selectSettlementRoute (PGlite)', () => {
   let db: Db;
 
@@ -74,7 +95,8 @@ describe('selectSettlementRoute (PGlite)', () => {
     const route = await selectSettlementRoute(
       db, stubIntegrations({ p1: ROUTABLE, p2: ROUTABLE }), 'USD', 'INR', MID,
     );
-    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p2' });
+    // Step 0 FX-5: a pushed winner carries its kind and expiry.
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('a winner without a usable rail is skipped — next-best routable partner wins', async () => {
@@ -89,7 +111,7 @@ describe('selectSettlementRoute (PGlite)', () => {
       }),
       'USD', 'INR', MID,
     );
-    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1' });
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('an empty settlementUrl disqualifies even an http rail', async () => {
@@ -129,7 +151,7 @@ describe('selectSettlementRoute (PGlite)', () => {
       }),
       'USD', 'INR', MID,
     );
-    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1' });
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('a rate merely EQUAL to mid never wins (strictly better required)', async () => {
@@ -145,6 +167,8 @@ describe('selectSettlementRoute (PGlite)', () => {
     const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID);
     expect(route.source).toBe('partner');
     expect(route.fxRate).toBeCloseTo(MID * 1.01, 6);
+    expect(route.kind).toBe('partner_margin');
+    expect(route.expiresAt).toBeUndefined();
   });
 
   it('the default partner is never a contender even with a rate row', async () => {
@@ -165,7 +189,7 @@ describe('selectSettlementRoute (PGlite)', () => {
       },
     } as unknown as PartnerIntegrationsStore;
     const route = await selectSettlementRoute(db, throwing, 'USD', 'INR', MID);
-    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2' });
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('a nonsensical mid falls straight back to platform', async () => {
@@ -202,7 +226,7 @@ describe('selectSettlementRoute: rate sanity band (R0 fix A)', () => {
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: MID * 1.06, expiresAt: inHours(1) });
     await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
     const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE, p2: ROUTABLE }), 'USD', 'INR', MID);
-    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2' });
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('a rate exactly at the band edge still competes', async () => {
@@ -249,7 +273,7 @@ describe('rail health: skip a partner whose rail is failing (R0 fix B)', () => {
     await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
     await raiseRailFail('p1', hourBucketAt(NOW.getTime()));
     const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE, p2: ROUTABLE }), 'USD', 'INR', MID, NOW);
-    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2' });
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('an alert from the previous hour still skips the partner', async () => {
@@ -265,7 +289,7 @@ describe('rail health: skip a partner whose rail is failing (R0 fix B)', () => {
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
     await raiseRailFail('p1', hourBucketAt(NOW.getTime()) - 2);
     const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID, NOW);
-    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1' });
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it("another partner's alert does not skip this partner", async () => {
@@ -273,7 +297,7 @@ describe('rail health: skip a partner whose rail is failing (R0 fix B)', () => {
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
     await raiseRailFail('p2', hourBucketAt(NOW.getTime()));
     const route = await selectSettlementRoute(db, stubIntegrations({ p1: ROUTABLE }), 'USD', 'INR', MID, NOW);
-    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1' });
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
   it('recentlyFailingRails returns only the partners with a current or previous-hour alert', async () => {

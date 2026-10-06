@@ -233,7 +233,10 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
   const timeoutError = (): Error => Object.assign(new Error('aborted due to timeout'), { name: 'TimeoutError' });
   const frankfurterOk = (url: string) => {
     const from = new URL(url).searchParams.get('from');
-    return { ok: true, json: async () => ({ date: '2026-09-21', rates: { INR: from === 'INR' ? undefined : 90, USD: 1.1 } }) };
+    // Today's UTC date (relative — never a fixed day): a current fixing, so
+    // the Step 0 FIXING alert stays quiet and these cases test fetch health only.
+    const date = new Date().toISOString().slice(0, 10);
+    return { ok: true, json: async () => ({ date, rates: { INR: from === 'INR' ? undefined : 90, USD: 1.1 } }) };
   };
 
   it('default probe: a single slow Frankfurter response is retried and sends NO alert', async () => {
@@ -285,5 +288,81 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     const rows = await outboxRows();
     expect(rows.map((r) => r.dedupe_key)).toEqual([`fx-health:UNAVAILABLE:${Math.floor(now.getTime() / 3_600_000)}`]);
     expect((await messages())[0]).toContain('USD (timeout)');
+  });
+});
+
+// Step 0 FX-4: a FROZEN feed answers every fetch (fetchedAt is fresh), so only
+// the fixing date shows it. The sweep is pure in `now`: every case passes its
+// own clock and stamps fetchedAt from it (no dependence on the real date).
+describe('sweepFxHealth — Step 0 FX-4: the frozen-feed (FIXING) alert', () => {
+  const MON_1730 = new Date('2026-10-05T17:30:00Z'); // Monday's fixing overdue under the ALERT rule
+  const TUE_1730 = new Date('2026-10-06T17:30:00Z');
+  const WED_0600 = new Date('2026-10-07T06:00:00Z'); // Fri fixing: REFUSE-lag 2 (Mon, Tue due) — not yet 3
+  const THU_0600 = new Date('2026-10-08T06:00:00Z'); // REFUSE-lag 3 (Mon, Tue, Wed)
+  const NO_STAGGER = { staggerMs: 0 };
+  const dated = (now: Date, asOf: string | undefined, only?: CurrencyCode[]): FxRatesFn => async (c) => ({
+    toInr: 95.82, toUsd: 1, fetchedAt: now.getTime(), source: 'live',
+    asOf: !only || only.includes(c) ? asOf : now.toISOString().slice(0, 10),
+  });
+  const messages = async (): Promise<string[]> => {
+    const r = await db.execute(sql`SELECT payload FROM outbox ORDER BY id`);
+    return (r as unknown as { rows: Array<{ payload: { message: string } }> }).rows.map((x) => x.payload.message);
+  };
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it('one overdue fixing raises ONE combined FIXING alert keyed on (asOf, lag)', async () => {
+    expect(await sweepFxHealth(db, dated(MON_1730, '2026-10-02'), MON_1730, NO_STAGGER)).toBe(1);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['fx-health:FIXING:2026-10-02:1']);
+    const [message] = await messages();
+    expect(message).toContain('FIXING');
+    expect(message).toContain('2026-10-02');
+    for (const c of FX_PROBE_CURRENCIES) expect(message).toContain(c);
+    expect(message).not.toMatch(/\d{7,}/);
+  });
+
+  it('re-running at the same lag adds nothing; a growing lag alerts again', async () => {
+    await sweepFxHealth(db, dated(MON_1730, '2026-10-02'), MON_1730, NO_STAGGER);
+    expect(await sweepFxHealth(db, dated(MON_1730, '2026-10-02'), new Date(MON_1730.getTime() + 2 * 3_600_000), NO_STAGGER)).toBe(0);
+    expect(await sweepFxHealth(db, dated(TUE_1730, '2026-10-02'), TUE_1730, NO_STAGGER)).toBe(1);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual([
+      'fx-health:FIXING:2026-10-02:1', 'fx-health:FIXING:2026-10-02:2',
+    ]);
+  });
+
+  it('only the stalled currency is named when one feed stalls alone', async () => {
+    await sweepFxHealth(db, dated(MON_1730, '2026-10-02', ['SGD']), MON_1730, NO_STAGGER);
+    const [message] = await messages();
+    expect(message).toContain('SGD');
+    expect(message).not.toContain('USD');
+  });
+
+  it('a current fixing (lag 0) raises nothing', async () => {
+    expect(await sweepFxHealth(db, dated(MON_1730, '2026-10-05'), MON_1730, NO_STAGGER)).toBe(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('no fixing date: no FIXING alert, one fx.no-fixing-date warn line', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await sweepFxHealth(db, dated(MON_1730, undefined), MON_1730, NO_STAGGER)).toBe(0);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('fx.no-fixing-date'))).toHaveLength(1);
+  });
+
+  it('gate OFF: REFUSE-lag 3 alerts FIXING only (quotes still price)', async () => {
+    await sweepFxHealth(db, dated(THU_0600, '2026-10-02'), THU_0600, NO_STAGGER);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['fx-health:FIXING:2026-10-02:3']);
+  });
+
+  it('gate ON: REFUSE-lag 3 also lists the currency as UNAVAILABLE (stale_fixing); lag 2 does not', async () => {
+    vi.stubEnv('FX_FIXING_GATE_ENABLED', 'true');
+    await sweepFxHealth(db, dated(WED_0600, '2026-10-02'), WED_0600, NO_STAGGER);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['fx-health:FIXING:2026-10-02:2']);
+    await sweepFxHealth(db, dated(THU_0600, '2026-10-02', ['GBP']), THU_0600, NO_STAGGER);
+    const hour = Math.floor(THU_0600.getTime() / 3_600_000);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual([
+      'fx-health:FIXING:2026-10-02:2', `fx-health:UNAVAILABLE:${hour}`, 'fx-health:FIXING:2026-10-02:3',
+    ]);
+    const msgs = await messages();
+    expect(msgs[1]).toContain('GBP (stale_fixing)');
+    expect(msgs[1]).not.toContain('USD');
   });
 });

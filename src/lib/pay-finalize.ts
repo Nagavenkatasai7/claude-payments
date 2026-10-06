@@ -1,5 +1,6 @@
 import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from './transfer-create';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
+import { assertLegsUsable } from './fx';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { SendsPausedError } from './flags';
@@ -198,8 +199,11 @@ export async function finalizeDraftPayment(
       if (quoteOverride) {
         assertQuoteOverrideFresh(quoteOverride);
       } else {
-        await getFxRates(draft.sourceCurrency);
-        await getDestinationRates(draft.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY);
+        // Step 0 FX-1 (B3): both legs, the same gate the re-quote applies.
+        assertLegsUsable(
+          await getFxRates(draft.sourceCurrency),
+          await getDestinationRates(draft.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY),
+        );
       }
     } catch (err) {
       if (err instanceof RateUnavailableError) return fxRefused(err);

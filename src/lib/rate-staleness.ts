@@ -2,6 +2,9 @@ import type { Db } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { FALLBACK_FX_RATES, FRANKFURTER_BASE_URL, RateUnavailableError, getFxRates } from './rate';
+import { FIXING_ALERT_LAG, FIXING_REFUSE_LAG, fixingLagBusinessDays } from './fx-fixing';
+import { env } from './env';
+import { logWarn } from './log';
 import type { FxRatesFn } from './corridor-demand';
 import type { CurrencyCode } from './types';
 
@@ -63,6 +66,16 @@ export async function sweepStaleRates(db: Db, now: Date = new Date()): Promise<n
 //     in the same instant.
 // Worst-case wall time (9 currencies): 8 × 250 ms stagger + 5 s first attempt
 // + 7 s retry = 14 s (the worker's drain start cutoff absorbs it).
+//
+// Step 0 FX-4: a FROZEN feed answers every probe (fetchedAt is fresh), so the
+// provider's fixing date (`asOf`) is checked too (fx-fixing.ts):
+//   • ALERT-lag >= 1 (a fixing due at 17:00 UTC has not arrived) → ONE FIXING
+//     alert per (asOf, lag), dedupe key fx-health:FIXING:<asOf>:<lag>: one alert
+//     per overdue fixing, never one per hour;
+//   • with FX_FIXING_GATE_ENABLED and REFUSE-lag >= FIXING_REFUSE_LAG, quotes in
+//     that currency ARE refused (fx.ts 'stale_fixing'), so it is listed as
+//     UNAVAILABLE too;
+//   • a probe with no asOf cannot be judged: one fx.no-fixing-date warn line.
 
 /** Every currency getFxRates actually fetches (the typed table lists them all). */
 export const FX_PROBE_CURRENCIES: readonly CurrencyCode[] = (
@@ -109,6 +122,8 @@ export async function sweepFxHealth(
 
   const unavailable: string[] = [];
   const degraded: string[] = [];
+  const fixing = new Map<string, { asOf: string; lag: number; currencies: string[] }>();
+  const undated: string[] = [];
   for (let i = 0; i < FX_PROBE_CURRENCIES.length; i++) {
     const currency = FX_PROBE_CURRENCIES[i];
     const r = results[i];
@@ -124,6 +139,29 @@ export async function sweepFxHealth(
         degraded.push(`${currency} (${Math.floor((now.getTime() - fetchedAt) / 60_000)} min old)`);
       }
     }
+    if (r.status === 'fulfilled') {
+      const asOf = r.value.asOf;
+      const lag = asOf === undefined ? null : fixingLagBusinessDays(asOf, now.getTime(), 'alert');
+      if (asOf === undefined || lag === null) {
+        undated.push(currency);
+      } else {
+        if (lag >= FIXING_ALERT_LAG) {
+          const key = `${asOf}:${lag}`;
+          const group = fixing.get(key) ?? { asOf, lag, currencies: [] };
+          group.currencies.push(currency);
+          fixing.set(key, group);
+        }
+        const refuseLag = fixingLagBusinessDays(asOf, now.getTime(), 'refuse') ?? 0;
+        if (env.fxFixingGateEnabled && refuseLag >= FIXING_REFUSE_LAG) {
+          unavailable.push(`${currency} (stale_fixing)`);
+        }
+      }
+    }
+  }
+  if (undated.length > 0) {
+    logWarn('fx.no-fixing-date', 'FX probe returned no fixing date; the frozen-feed check cannot run', {
+      currencies: undated.join(','),
+    });
   }
 
   let alerted = 0;
@@ -148,6 +186,22 @@ export async function sweepFxHealth(
           `good rate; quotes will be refused once it is 60 min old. Check ${FRANKFURTER_BASE_URL}.`,
       },
       { dedupeKey: `fx-health:DEGRADED:${hourBucket}` },
+    );
+    if (fresh) alerted++;
+  }
+  for (const g of fixing.values()) {
+    const fresh = await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: platform FX FIXING is ${g.lag} business day(s) behind for ${g.currencies.join(', ')} — ` +
+          `the latest ECB fixing we have is ${g.asOf}. ` +
+          (env.fxFixingGateEnabled
+            ? `Quotes are refused once ${FIXING_REFUSE_LAG} fixings are overdue. `
+            : `The fixing gate is off, so quotes still price. `) +
+          `Check ${FRANKFURTER_BASE_URL}.`,
+      },
+      { dedupeKey: `fx-health:FIXING:${g.asOf}:${g.lag}` },
     );
     if (fresh) alerted++;
   }

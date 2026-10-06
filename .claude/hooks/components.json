@@ -30,6 +30,7 @@
       "src/lib/draft-store.ts", "src/lib/sender-names.ts", "src/lib/providers/meta-signature-verify.ts",
       "src/lib/agent-fallback.ts", "src/lib/inbound-throttle.ts", "tests/inbound-throttle*",
       "src/lib/llm-alert.ts", "src/lib/llm-provider-error.ts", "tests/llm-*", "tests/ollama*",
+      "src/lib/voice-notes.ts", "src/lib/voice-transcribe.ts", "tests/voice-*",
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [

@@ -35,23 +35,39 @@ const ROUTABLE_PROVIDER_TYPES = new Set(['http', 'simulator']);
 /** The most a partner rate may beat mid by and still compete (5%). Above it the rate is treated as a typo. */
 export const MAX_ROUTE_PREMIUM = 0.05;
 
+/** Step 0 FX-5: a partner's live offer, with which kind won and its lifetime. */
+export interface PartnerOffer {
+  fxRate: number;
+  kind: 'partner_push' | 'partner_margin';
+  /** ISO-8601; set only for a pushed rate (a margin rides the platform mid). */
+  expiresAt?: string;
+}
+
 /**
- * The rate a partner is offering for a corridor right now, or null when it
+ * The offer a partner is making for a corridor right now, or null when it
  * isn't competing. Pure — freshness is judged against the passed `now`.
  */
-export function effectiveRateFor(rate: PartnerRate, mid: number, now: Date): number | null {
+export function effectiveOfferFor(rate: PartnerRate, mid: number, now: Date): PartnerOffer | null {
   if (
     rate.effectiveRate !== undefined &&
     rate.effectiveRate > 0 &&
     rate.expiresAt !== undefined &&
     Date.parse(rate.expiresAt) > now.getTime()
   ) {
-    return rate.effectiveRate;
+    return { fxRate: rate.effectiveRate, kind: 'partner_push', expiresAt: rate.expiresAt };
   }
   if (rate.marginBps !== undefined && Number.isFinite(rate.marginBps)) {
-    return mid * (1 + rate.marginBps / 10_000);
+    return { fxRate: mid * (1 + rate.marginBps / 10_000), kind: 'partner_margin' };
   }
   return null;
+}
+
+/**
+ * The rate a partner is offering for a corridor right now, or null when it
+ * isn't competing. Pure — freshness is judged against the passed `now`.
+ */
+export function effectiveRateFor(rate: PartnerRate, mid: number, now: Date): number | null {
+  return effectiveOfferFor(rate, mid, now)?.fxRate ?? null;
 }
 
 /**
@@ -86,15 +102,15 @@ export async function selectSettlementRoute(
 
   const contenders = candidates
     .filter((r) => r.partnerId !== DEFAULT_PARTNER_ID)
-    .map((r) => ({ partnerId: r.partnerId, fxRate: effectiveRateFor(r, mid, now) }))
-    .filter((c): c is { partnerId: string; fxRate: number } => c.fxRate !== null && c.fxRate > mid)
+    .map((r) => ({ partnerId: r.partnerId, offer: effectiveOfferFor(r, mid, now) }))
+    .filter((c): c is { partnerId: string; offer: PartnerOffer } => c.offer !== null && c.offer.fxRate > mid)
     .filter((c) => {
       // Small epsilon so a margin of exactly +500 bps (float math) stays in band.
-      if (c.fxRate <= mid * (1 + MAX_ROUTE_PREMIUM) * (1 + 1e-9)) return true;
+      if (c.offer.fxRate <= mid * (1 + MAX_ROUTE_PREMIUM) * (1 + 1e-9)) return true;
       console.warn(`selectSettlementRoute: partner ${c.partnerId} rate is more than ${MAX_ROUTE_PREMIUM * 100}% above mid; ignored.`);
       return false;
     })
-    .sort((a, b) => b.fxRate - a.fxRate);
+    .sort((a, b) => b.offer.fxRate - a.offer.fxRate);
   if (contenders.length === 0) return platform;
 
   // Skip rails that are failing right now (fail-open inside the helper).
@@ -113,7 +129,13 @@ export async function selectSettlementRoute(
         ROUTABLE_PROVIDER_TYPES.has(providerType) &&
         checkSettlementUrl(settlementUrl, { appOrigin: env.appBaseUrl, production: env.isProduction }).ok
       ) {
-        return { fxRate: c.fxRate, source: 'partner', settlementPartnerId: c.partnerId };
+        return {
+          fxRate: c.offer.fxRate,
+          source: 'partner',
+          settlementPartnerId: c.partnerId,
+          kind: c.offer.kind,
+          ...(c.offer.expiresAt ? { expiresAt: c.offer.expiresAt } : {}),
+        };
       }
     } catch (err) {
       console.warn(

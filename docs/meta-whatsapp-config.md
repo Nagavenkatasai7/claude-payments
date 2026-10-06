@@ -31,6 +31,7 @@
 | WABA | `1970049657289438` |
 | Business Portfolio | SmartRemit (new portfolio, 2026-10-03; unverified). The previous portfolio `1420039710147462`, WABA `1423798669516574` and test number +1 555-629-8293 are retired. |
 | Token | Permanent System-User token in `WHATSAPP_TOKEN` |
+| Voice notes (Step 1 beta) | The same token downloads beta voice notes: `GET /<GRAPH_VERSION>/<MEDIA_ID>?phone_number_id=…` → a `lookaside.fbsbx.com` URL valid 5 minutes → `GET` with the bearer token (`src/lib/voice-transcribe.ts`). Shared number only; off unless the `voice.notes` switch is on and `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` and `VOICE_NOTES_BETA_PHONES` are set |
 | Approved templates | None yet on the new WABA. The old WABA had `transfer_delivered` (en, UTILITY, **stale**, India/UPI-era); every template in §3 must be created on the new WABA |
 | Unsubmitted | `scheduled_payment_ready` — referenced in code, never created; cron falls back to free-form text |
 | Recipient allow-list | Only verified test recipients can receive messages on the test number |

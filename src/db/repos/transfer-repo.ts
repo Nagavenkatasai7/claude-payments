@@ -118,6 +118,17 @@ const senderClearForPartnerRelease = (partnerId: PartnerId) => [
 const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
 
 /**
+ * "Minted through the partner API" (fix 6 / Program-Fix 32; see payoutEditable
+ * below for why each marker means that): an Idempotency-Key claim that is
+ * neither a pay-page `draft:` claim under the default tenant nor a `sched:`
+ * schedule claim, OR a transaction.create audit row by an api_key. Shared by
+ * payoutEditable (its NOT form) and isPartnerApiMinted (Step 0 FX-2: those rows
+ * are exempt from the pay-time rate check — the partner owns `confirm`).
+ */
+const partnerApiMintedSql = () =>
+  sql`(EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%') OR EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key'))`;
+
+/**
  * Program-Fix 14 PR C: columns written only when a row is created. `screening`
  * is the mint's sanctions evidence (transfers.screening, migration 0023): list
  * identity, decision and keyed input hashes, never a name. It is deliberately
@@ -159,8 +170,7 @@ export function createTransferRepo(
       eq(transfers.status, 'awaiting_payment'),
       unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
-      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%')`,
-      sql`NOT EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key')`,
+      sql`NOT ${partnerApiMintedSql()}`,
     );
 
   async function page(
@@ -261,8 +271,13 @@ export function createTransferRepo(
       // Program-Fix 44 P2: environment is WRITE-ONCE — the insert sets it, the
       // conflict-update never does, so a read-modify-write can never flip a
       // sandbox row to live (or back).
-      const { environment: _env, ...updatable } = row;
-      void _env;
+      // Step 0 FX-7: the rate provenance columns are write-once the same way.
+      const {
+        environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
+        fxExpiresAt: _fxExp,
+        ...updatable
+      } = row;
+      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {
@@ -956,6 +971,19 @@ export function createTransferRepo(
     },
 
     /** fix 6: may the pay page write this transfer's payout? (the same guard setPayoutIfEditable applies) */
+    /**
+     * Step 0 FX-2: true when this transfer was minted through the partner API
+     * (partnerApiMintedSql). Read-only; false for a missing id. The pay route
+     * exempts these rows from its rate check (the partner confirms them).
+     */
+    async isPartnerApiMinted(id: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), partnerApiMintedSql()))
+        .limit(1);
+      return rows.length > 0;
+    },
     async isPayoutEditable(id: string, partnerId: PartnerId): Promise<boolean> {
       const rows = await db.select({ id: transfers.id }).from(transfers).where(payoutEditable(id, partnerId)).limit(1);
       return rows.length > 0;

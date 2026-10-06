@@ -37,11 +37,14 @@ import type { CountryCode, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
-import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE, RateUnavailableError } from '@/lib/rate';
 import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
+import { QuoteError } from '@/lib/fx';
+import { transferMintedFromDraft } from '@/lib/pay-link';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -386,6 +389,96 @@ function validateAndTokenizeAch(
 }
 
 /**
+ * Step 0 FX-2 (P1): the pay-time rate check for an EXISTING transfer, behind
+ * FX_PAY_RATE_CHECK_ENABLED (default OFF). Runs on EVERY POST to the row —
+ * before a code is issued (request_otp), before the OTP is verified (the
+ * customer keeps their code budget) and before the disclosure-ack write — so
+ * a stale rate never costs a code or a charge. Null ⇒ proceed exactly as today.
+ *
+ * Only rows we would CHARGE at the minted rate reach checkMintedRate: a live
+ * consumer awaiting_payment row that is not captured (a captured row only
+ * resumes settlement — fundTransfer) and not partner-API-minted (the partner
+ * confirms those; Step 0 Q3). Anything else answers as today (the status gate
+ * further down reports current truth).
+ *
+ *   FX unavailable / frozen feed → 503 fx_unavailable, nothing written (a
+ *                                   QuoteError from the cross-rate, e.g. a
+ *                                   malformed destination leg, answers the same
+ *                                   — never a 400, never a cancel);
+ *   refused, no funding intent   → ONE transaction: the guarded cancel
+ *                                   (cancelIfCancellable: awaiting, no funding
+ *                                   ref or intent, this tenant; no outbox row) +
+ *                                   a transfer.rate_expired audit row → 409
+ *                                   rate_expired + status cancelled;
+ *   refused, intent bound        → 409 rate_expired_payment_pending, NEVER
+ *                                   cancelled (a bank debit may be in flight:
+ *                                   its webhook can still settle it at the
+ *                                   minted rate; otherwise the fundstale alert
+ *                                   catches it after 7 days — Step 0 Q14).
+ */
+async function payTimeRateRefusal(
+  store: ReturnType<typeof getStore>,
+  transfer: Transfer,
+): Promise<NextResponse | null> {
+  if (transfer.status !== 'awaiting_payment' || transfer.transferType === 'b2b') return null;
+  if (transfer.fundingRef || transfer.fundingState === 'succeeded') return null;
+  if (await createTransferRepo(getDb()).isPartnerApiMinted(transfer.id)) return null;
+  let verdict: Awaited<ReturnType<typeof checkMintedRate>>;
+  try {
+    verdict = await checkMintedRate(transfer);
+  } catch (err) {
+    if (!(err instanceof RateUnavailableError) && !(err instanceof QuoteError)) throw err;
+    const why = err instanceof RateUnavailableError ? err.reason : 'quote_error';
+    logWarn('pay.rate-check-unavailable', `pay-time rate check could not run: ${why}`, { transferId: transfer.id });
+    return fxUnavailable();
+  }
+  if (verdict.ok) return null;
+  return refuseStaleRate(store, transfer, verdict);
+}
+
+function fxUnavailable(): NextResponse {
+  return NextResponse.json({ ok: false, reason: 'fx_unavailable', error: FX_UNAVAILABLE_MESSAGE }, { status: 503 });
+}
+
+const ratePaymentPending = () =>
+  NextResponse.json({ ok: false, reason: 'rate_expired_payment_pending' }, { status: 409 });
+
+async function refuseStaleRate(
+  store: ReturnType<typeof getStore>,
+  transfer: Transfer,
+  verdict: MintedRateRefusal,
+): Promise<NextResponse | null> {
+  if (transfer.fundingIntentRef) return ratePaymentPending();
+  const meta = verdict.reason === 'drift' ? { reason: verdict.reason, driftBps: verdict.driftBps } : { reason: verdict.reason };
+  const cancelled = await getDb().transaction(async (tx) => {
+    const row = await createTransferRepo(tx).cancelIfCancellable(transfer.id, transfer.partnerId);
+    if (row) {
+      await createAuditRepo(tx).record({
+        partnerId: transfer.partnerId,
+        actor: 'pay-page',
+        actorType: 'system',
+        action: 'transfer.rate_expired',
+        subjectId: transfer.id,
+        meta,
+      });
+    }
+    return row;
+  });
+  if (cancelled) {
+    logWarn('pay.rate-expired', 'stale rate on an existing transfer: cancelled', { transferId: transfer.id, ...meta });
+    return NextResponse.json({ ok: false, reason: 'rate_expired', status: 'cancelled' }, { status: 409 });
+  }
+  // Lost a race (verify3 L3): decide again on the row as it is NOW.
+  const current = await store.getTransfer(transfer.id);
+  if (!current) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+  const truth = refuseUnlessAwaiting(current);
+  if (truth) return truth;
+  if (current.fundingRef || current.fundingState === 'succeeded') return null; // captured meanwhile: resumes
+  if (current.fundingIntentRef) return ratePaymentPending();
+  return NextResponse.json({ ok: false, reason: 'rate_expired' }, { status: 409 });
+}
+
+/**
  * Program-Fix 15 PR B: one `remittance.disclosure_ack` audit row — subject the
  * route id (the transfer, or the draft before it is minted), meta the version + provider kind
  * only (no PII). Tenant: the transfer's partner, else the draft's (the same
@@ -460,11 +553,25 @@ export async function POST(
     // an existing transfer) so the code is bound to this exact transaction.
     // Fix D: the PEEK is idempotent, so a Redis blip gets one retry.
     const otpDraft = await retryOnceOnInfra(() => getDraftStore().getDraft(transferId));
-    const otpTransfer = otpDraft ? null : await store.getTransfer(transferId);
+    let otpTransfer = otpDraft ? null : await store.getTransfer(transferId);
+    // Step 0 Q16 (build-changes B.2): a draft link whose draft was minted and
+    // consumed (e.g. the capture failed after the mint) continues on the
+    // transfer it BECAME, never "expired_or_used". From here on `payId` names
+    // that transfer for every step (the code, its check, every read), so the
+    // link answers exactly as the transfer's own link would — every guard below
+    // still runs on it.
+    if (!otpDraft && !otpTransfer) otpTransfer = await transferMintedFromDraft(getDb(), store, transferId);
+    const payId = otpTransfer?.id ?? transferId;
     // Program-Fix 44 P2: a SANDBOX (test-key) transfer is never payable here —
     // no OTP to the partner-supplied phone, no capture. Same answer as a dead link.
     if (otpTransfer && otpTransfer.environment === 'test') {
       return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+    }
+    // Step 0 FX-2 (P1): the minted rate is re-checked BEFORE any code is issued
+    // or verified (payTimeRateRefusal). Flag OFF ⇒ nothing runs.
+    if (otpTransfer && env.fxPayRateCheckEnabled) {
+      const rateRefusal = await payTimeRateRefusal(store, otpTransfer);
+      if (rateRefusal) return rateRefusal;
     }
     const otpPhone = otpDraft?.senderPhone ?? otpTransfer?.phone ?? null;
 
@@ -536,7 +643,7 @@ export async function POST(
         if (!otpTemplate && !(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
       }
       const otpStore = getTransactionOtpStore();
-      const issued = await otpStore.issue(transferId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });
+      const issued = await otpStore.issue(payId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });
       // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
       // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
       if (!issued.ok && issued.reason === 'locked') {
@@ -558,7 +665,7 @@ export async function POST(
         } catch {
           // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
           // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.
-          try { await otpStore.shortenCooldown(transferId); } catch { /* the 30-s cooldown simply runs out */ }
+          try { await otpStore.shortenCooldown(payId); } catch { /* the 30-s cooldown simply runs out */ }
           return otpSendFailed();
         }
       }
@@ -568,7 +675,7 @@ export async function POST(
     // (2) Require a valid code before ANY money movement (covers BOTH branches).
     if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
     const otpCode = String(body.otp ?? '').replace(/\D/g, '');
-    const otpCheck = await getTransactionOtpStore().verify(transferId, otpPhone, otpCode);
+    const otpCheck = await getTransactionOtpStore().verify(payId, otpPhone, otpCode);
     if (!otpCheck.ok) {
       return NextResponse.json(
         { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
@@ -580,7 +687,7 @@ export async function POST(
     // the page. Recorded AFTER the OTP passed, best-effort: a failed audit write
     // never changes the payment outcome, and an absent/junk field records nothing.
     if (isDisclosureAckVersion(body.disclosureVersion)) {
-      await recordDisclosureAck(store, transferId, otpDraft, body.disclosureVersion);
+      await recordDisclosureAck(store, payId, otpDraft, body.disclosureVersion);
     }
 
     const country =
@@ -606,7 +713,7 @@ export async function POST(
       // fix 6: the per-country form is bound to THIS payment's destination
       // country (the transfer's, else the draft's) — a caller never picks
       // another country's field set for it.
-      const target = (await store.getTransfer(transferId)) ?? otpDraft;
+      const target = (await store.getTransfer(payId)) ?? otpDraft;
       if (country !== (target?.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY)) {
         return NextResponse.json(
           { ok: false, error: 'Please check the bank details.', fieldErrors: { country: 'These bank details are for a different country.' } },
@@ -634,7 +741,7 @@ export async function POST(
       bankDetails = { payoutMethod: 'bank', payoutDestination: validation.payoutDestination };
     }
 
-    const transfer = await store.getTransfer(transferId);
+    const transfer = await store.getTransfer(payId);
 
     if (transfer) {
       // F53: refuse BEFORE the KYC gate and before any saveTransfer below can
@@ -703,7 +810,7 @@ export async function POST(
       // stored value, real or poisoned, as "****<last4>". Decide on the explicit
       // decrypted read; the value only feeds this boolean (and, below, the
       // recipient legal name only feeds the re-screen).
-      const decrypted = await store.getTransferDecrypted(transferId);
+      const decrypted = await store.getTransferDecrypted(payId);
       const storedDestination = (decrypted?.payoutDestination ?? '').trim();
 
       // Program-Fix 14 follow-up: re-screen BOTH parties before any payout
@@ -734,7 +841,7 @@ export async function POST(
             logWarn('pay.rescreen_blocked', 'existing transfer blocked by the pay-time re-screen', { transferId: transfer.id });
             return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
           case 'moved': {
-            const current = await store.getTransfer(transferId);
+            const current = await store.getTransfer(payId);
             const nowRefused = current ? refuseUnlessAwaiting(current) : null;
             return nowRefused ?? NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 409 });
           }
@@ -756,7 +863,7 @@ export async function POST(
           // held it — the OTP verify is not atomic), or the row is not editable
           // here (charged, partner-API-minted). Never write around the guard:
           // report current truth.
-          const current = await store.getTransfer(transferId);
+          const current = await store.getTransfer(payId);
           const nowRefused = current ? refuseUnlessAwaiting(current) : null;
           if (nowRefused) return nowRefused;
           return NextResponse.json(
@@ -808,6 +915,9 @@ export async function POST(
             ok: false,
             error: result.quoteExpired ? FX_QUOTE_EXPIRED_MESSAGE : FX_UNAVAILABLE_MESSAGE,
             reason: 'fx_unavailable',
+            // Step 0 (N9): the client shows "This quote has expired" (nothing was
+            // minted or cancelled), not the retry line. `reason` is unchanged.
+            ...(result.quoteExpired ? { quoteExpired: true } : {}),
           },
           { status: 503 },
         );

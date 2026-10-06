@@ -1,4 +1,4 @@
-import { MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
+import { assertLegsUsable, legsProvenance, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -13,7 +13,7 @@ import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
@@ -46,6 +46,7 @@ import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { VOICE_TYPED_ONLY_TOOLS } from './voice-notes';
 import { botScheduleAuditEvent, type BotScheduleAuditAction } from './bot-schedule-audit';
 import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './sender-identity';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
@@ -333,14 +334,24 @@ function sourceAmountDisplay(amount: number, currency: CurrencyCode): string {
  *     (transfer-create.ts assertQuoteOverrideFresh → "quote has expired").
  * A fresh rate gives the full draft lifetime (30 min). Never a literal: the old
  * "~10 min" copy under-stated a 30-minute lock.
+ *
+ * Step 0 FX-5: a quote priced on a partner PUSH also ends when the push
+ * expires (the mint refuses it from then on under FX_PAY_RATE_CHECK_ENABLED),
+ * so under the same flag the lock is the shortest of the three lifetimes.
  */
 export const RATE_LOCK_MINUTES = Math.floor(DRAFT_TTL_SECONDS / 60);
 
 /** Whole minutes the quote stays payable; `fxFetchedAt` undefined ⇒ the draft lifetime. */
-export function rateLockMinutes(fxFetchedAt: number | undefined, now: number = Date.now()): number {
+export function rateLockMinutes(
+  fxFetchedAt: number | undefined,
+  now: number = Date.now(),
+  routeExpiresAt?: number,
+): number {
   const draftMs = DRAFT_TTL_SECONDS * 1000;
   const fxLeftMs = fxFetchedAt === undefined ? draftMs : FX_MAX_AGE_MS - (now - fxFetchedAt);
-  return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs) / 60_000));
+  const routeLeftMs =
+    env.fxPayRateCheckEnabled && routeExpiresAt !== undefined ? routeExpiresAt - now : draftMs;
+  return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs, routeLeftMs) / 60_000));
 }
 
 /**
@@ -355,6 +366,18 @@ export function rateLockLine(lockMinutes: number): string {
   return lockMinutes < 2 ? RATE_LOCK_SHORT_LINE : `Rate locked for ${lockMinutes} min.`;
 }
 
+/**
+ * Step 0 §3.6: a publication date (YYYY-MM-DD) as the card shows it ("2 Oct"),
+ * always in UTC so the day never shifts with the server's zone. Anything that
+ * is not a real calendar date gives undefined (the card then omits it).
+ */
+export function formatRateDate(asOf: string | undefined): string | undefined {
+  if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return undefined;
+  const d = new Date(`${asOf}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== asOf) return undefined;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -363,6 +386,9 @@ export function buildApproveSummary(
   fundingMethod: FundingMethod,
   destinationCurrency: CurrencyCode = 'INR',
   lockMinutes: number = RATE_LOCK_MINUTES,
+  // Step 0 §3.6: the reference rate's publication date — passed only for a
+  // platform rate. Absent or malformed ⇒ the rate line is unchanged.
+  rateDate?: string,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
@@ -392,11 +418,15 @@ export function buildApproveSummary(
     // is byte-for-byte unchanged).
     `Sending ${fmt(q.amountSource)} to ${boundUntrustedText(recipientName, NAME_MAX)}.`,
     feeLine,
-    `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
+    rateLine(`Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`, formatRateDate(rateDate)),
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     rateLockLine(lockMinutes),
   ].join('\n');
+}
+
+function rateLine(base: string, shownDate: string | undefined): string {
+  return shownDate ? `${base} (daily reference rate, ${shownDate})` : base;
 }
 
 // ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
@@ -1284,6 +1314,8 @@ async function resolveCurrencyAndRates(
   destinationCurrency: CurrencyCode;
   destToUsd: number | undefined;
   fxFetchedAt: number | undefined;
+  /** Step 0 FX-7: the oldest leg's publication date (YYYY-MM-DD), when every leg has one. */
+  fxAsOf: string | undefined;
 }> {
   // Destination resolution FIRST (Program-Fix 33): an unknown code is refused
   // before the customer upsert and before any rate fetch — never coerced to 'IN'.
@@ -1297,13 +1329,16 @@ async function resolveCurrencyAndRates(
 
   // undefined for INR: quote() prices an INR destination off rates.toInr.
   const destRates = await getDestinationRates(destinationCurrency);
-  // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
-  const stamps = [rates.fetchedAt, destRates?.fetchedAt].filter((t): t is number => t !== undefined);
-  const fxFetchedAt = stamps.length > 0 ? Math.min(...stamps) : undefined;
+  // Step 0 FX-1 (B3): quote() only sees the destination leg as a number, so
+  // both legs' provenance (fetch age; fixing date under the flag) is gated here.
+  assertLegsUsable(rates, destRates);
+  // The OLDEST leg's fetch time — a stored draft quote's age is measured from
+  // it — and (Step 0 FX-7) its publication date.
+  const legs = legsProvenance(rates, destRates);
 
   return {
     customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency,
-    destToUsd: destRates?.toUsd, fxFetchedAt,
+    destToUsd: destRates?.toUsd, fxFetchedAt: legs.fetchedAt, fxAsOf: legs.asOf,
   };
 }
 
@@ -1345,6 +1380,23 @@ async function selectRouteForQuote(
     console.warn('routeSelector failed — quoting at mid:', err);
   }
   return null;
+}
+
+/** Step 0 FX-5: a winning partner push's expiry as epoch ms (none for a margin or platform rate). */
+function routeExpiryMs(route: SettlementRoute | null): number | undefined {
+  if (!route?.expiresAt) return undefined;
+  const at = Date.parse(route.expiresAt);
+  return Number.isFinite(at) ? at : undefined;
+}
+
+/**
+ * Step 0 FX-7: which rate a quote was priced on. A partner route names its
+ * kind (partner-rates.ts effectiveOfferFor); a route without one is read from
+ * its shape: an expiry means a push, none a standing margin.
+ */
+function rateOriginOf(route: SettlementRoute | null): FxRateOrigin {
+  if (!route) return 'platform';
+  return route.kind ?? (routeExpiryMs(route) !== undefined ? 'partner_push' : 'partner_margin');
 }
 
 // Apply a winning route to a mid-market quote: override ONLY the
@@ -1393,6 +1445,14 @@ export async function executeTool(
       phone: ctx.phone,
     });
     return { error: 'not available here' };
+  }
+  // Step 1 voice notes (owner decision Q10): invoices and seller sign-up have no
+  // pay page or OTP behind them, so a misheard phone, amount or name would bill
+  // or name the wrong party. In a voice turn they are refused; the customer's
+  // typed "yes" (a text turn) runs them normally.
+  if (ctx.turn?.inputModality === 'voice' && VOICE_TYPED_ONLY_TOOLS.has(name)) {
+    logWarn('voice.tool-blocked', `typed-only tool refused in a voice turn: ${name}`, { phone: ctx.phone });
+    return { error: 'This needs a typed confirmation. Read back the details and ask the customer to type yes.' };
   }
   switch (name) {
     case 'get_quote':
@@ -1511,6 +1571,9 @@ async function getQuoteTool(
         // Program-Fix 33: the unit the sender pays in, server-formatted; the
         // prompt makes the model restate it verbatim ("$50.00 USD").
         amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
+        // Step 0 §3.6: the reference rate's publication date (YYYY-MM-DD), only
+        // when the quote is on the platform rate and the feed dated it.
+        ...(r.rateDate !== undefined ? { rate_date: r.rateDate } : {}),
       };
     }
   }
@@ -1523,7 +1586,7 @@ async function getQuoteTool(
 export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): Promise<QuoteTypedResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
-    const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+    const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxAsOf } =
       await resolveCurrencyAndRates(ctx, input.sourceCurrency, input.destinationCountry);
 
     // Phase 3 verify-before-send gate — a NEW condition on kycStatus, independent
@@ -1590,6 +1653,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
     // the mid-market rate, re-price ONLY the rate-dependent fields. Fees and
     // the USD-equivalent (cap checks) are rate-independent and stay put.
     const route = await selectRouteForQuote(ctx, partner, sourceCurrency, destinationCurrency, q.fxRate);
+    let routed = false;
     if (route) {
       if (receiveFirst) {
         // Receive-first: back-solve the send amount with the WINNING rate so
@@ -1616,6 +1680,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
           );
           if (routedQ.amountUsd <= q.amountUsd) {
             q = applyRouteToQuote(routedQ, route);
+            routed = true;
           }
         } catch (err) {
           if (!(err instanceof QuoteError)) throw err;
@@ -1623,10 +1688,13 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
         }
       } else {
         q = applyRouteToQuote(q, route);
+        routed = true;
       }
     }
     q = withDisclosedDelivery(q, partner);
-    return { kind: 'quote', quote: q, destinationCountry };
+    // Step 0 §3.6: a partner rate is not the reference rate, so it carries no date.
+    const rateDate = !routed ? fxAsOf : undefined;
+    return { kind: 'quote', quote: q, destinationCountry, ...(rateDate !== undefined ? { rateDate } : {}) };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
     if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
@@ -3947,7 +4015,7 @@ export async function prepareSendDraft(
     if (err instanceof QuoteError) return { kind: 'invalid_request', message: err.message };
     throw err;
   }
-  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
+  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt, fxAsOf } =
     resolved;
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
   // for an unverified sender; hand off the kyc_url instead. The B2B KYB gate
@@ -4012,6 +4080,9 @@ export async function prepareSendDraft(
       settlementPartnerId = route.settlementPartnerId;
     }
     q = withDisclosedDelivery(q, partner);
+    // Step 0 FX-5 / FX-7: which rate won, and a partner push's own expiry.
+    const routeExpiresAt = routeExpiryMs(route);
+    const fxOrigin = rateOriginOf(route);
 
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
     // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).
@@ -4053,6 +4124,8 @@ export async function prepareSendDraft(
           // Program-Fix 14: the blocked row and its sanctions.screen evidence
           // commit together (recordBlockedWithEvidence, one transaction).
           evidence: screen.evidence,
+          // Step 0 FX-7: the quote-time rate provenance.
+          fxOrigin, fxAsOf, fxFetchedAt,
         });
       } catch (err) {
         // Still best-effort: the customer gets the blocked reply either way.
@@ -4094,6 +4167,10 @@ export async function prepareSendDraft(
         totalChargeUsd: q.totalChargeUsd,
         destinationCurrency: q.destinationCurrency,
         fxFetchedAt, // Task 9: the mint refuses this quote once its rate is older than FX_MAX_AGE_MS
+        // Step 0 FX-5: a partner push's expiry (the mint refuses past it, flagged).
+        ...(routeExpiresAt !== undefined ? { routeExpiresAt } : {}),
+        fxOrigin, // Step 0 FX-7: stamped on the minted row as fx_source
+        ...(fxAsOf !== undefined ? { fxAsOf } : {}),
       },
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).
@@ -4116,7 +4193,8 @@ export async function prepareSendDraft(
       payoutDestination,
       fundingMethod,
       q.destinationCurrency ?? 'INR',
-      rateLockMinutes(fxFetchedAt),
+      rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
+      fxOrigin === 'platform' ? fxAsOf : undefined, // Step 0 §3.6
     );
     const payUrl = payUrlFor(draftId);
     return {
@@ -4130,6 +4208,7 @@ export async function prepareSendDraft(
       sourceCurrency,
       destinationCountry,
       fxFetchedAt,
+      routeExpiresAt,
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
@@ -4212,7 +4291,7 @@ async function sendApprovePickerTool(
     { pointer: isWebChannel(ctx) ? 'web' : 'bot' },
   );
   if (r.kind !== 'draft') return prepareRefusalToTool(r);
-  const { draftId, summary, payUrl, recipientPhone, amountSource, sourceCurrency, destinationCountry, fxFetchedAt } = r;
+  const { draftId, summary, payUrl, recipientPhone, amountSource, sourceCurrency, destinationCountry, fxFetchedAt, routeExpiresAt } = r;
   // Web channel (B5): no WhatsApp interactive exists here — return the
   // canonical, code-generated pay-page URL instead of sending a card. The
   // agent appends pay_url verbatim after stripping every model-written URL,
@@ -4221,15 +4300,17 @@ async function sendApprovePickerTool(
   // ever moves through the secure pay page. Reached via repeat_transfer —
   // direct send_approve_picker calls are blocked at dispatch on web.
   if (isWebChannel(ctx)) {
+    // Step 0 FX-5 (N7): the same lifetimes as the card, push expiry included.
+    const lockMinutes = rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt);
     return {
       draft_id: draftId,
       summary,
       pay_url: payUrl,
       reply_hint:
         `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
-          rateLockMinutes(fxFetchedAt) < 2
+          lockMinutes < 2
             ? 'the rate is valid only for a moment, so they should tap soon'
-            : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
+            : `the rate is locked for ${lockMinutes} minutes`
         }`,
     };
   }

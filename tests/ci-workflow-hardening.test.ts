@@ -189,7 +189,10 @@ describe('release safety part B: release check and rollback', () => {
     expect(release).toMatch(/repository_dispatch:\n\s+types: \[vercel\.deployment\.ready\]/);
     const job = jobBlock(release, 'release-check');
     expect(job).toMatch(/if: github\.event\.client_payload\.environment == 'production'/);
-    expect(job).toMatch(/uses: vercel\/repository-dispatch\/actions\/status@[0-9a-f]{40} # v1\n\s+with:\n\s+name: release-check/);
+    // Vercel lists a check by this name, so it must be unique: the job's own
+    // check run is also called `release-check`. The "Vercel - <project>: "
+    // prefix follows https://vercel.com/docs/deployment-checks.
+    expect(job).toMatch(/uses: vercel\/repository-dispatch\/actions\/status@[0-9a-f]{40} # v1\n\s+with:\n\s+name: 'Vercel - claude-payments: release-check'\n/);
     expect(job).toMatch(/statuses: write/);
     // No continue-on-error: the status action reads the step conclusions.
     expect(job).not.toMatch(/continue-on-error/);

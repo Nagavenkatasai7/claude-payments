@@ -126,7 +126,7 @@ export default function AboutPage() {
                 {`You message the SmartRemit number. An AI agent greets you and asks how much you want to send, to whom, and where.`}
               </Step>
               <Step n={2} title="Get a locked quote">
-                {`The agent fetches a live mid-market exchange rate and adds a clear, flat fee — your first transfer is free, then it's a low flat fee. The rate you approve is the rate that's used; there's no hidden markup baked into it.`}
+                {`The agent quotes the exchange rate for your transfer, starting from the daily reference rate, and adds a clear, flat fee — your first transfer is free, then it's a low flat fee. The rate you approve is the rate that's used.`}
               </Step>
               <Step n={3} title="Approve & pay securely">
                 {`You tap one button to open a secure SmartRemit pay page, enter the recipient's payout details, clear a one-time passcode, and pay the licensed partner. SmartRemit never receives or holds your money — the partner's rail processes the payment.`}
