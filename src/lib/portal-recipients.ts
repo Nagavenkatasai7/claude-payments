@@ -7,7 +7,7 @@ import { decodeMasterKey } from './field-crypto';
 import { env } from './env';
 import { auditSubjectId } from './customer-ref';
 import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
-import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields } from './payout-format';
+import { BANK_FIELDS_BY_COUNTRY, accountConfirmErrors, accountConfirmKey, validatePayoutFields } from './payout-format';
 import { countryForPhone } from './partner-currency';
 import { isValidPhone, normalizePhone } from './phone';
 import type { MessageKey } from './i18n';
@@ -89,6 +89,23 @@ function readBankFields(fd: FormData, country: CountryCode): Record<string, stri
   return out;
 }
 
+/** The bank fields plus each account field's re-enter box (Raj, Oct 7). Only for the match check. */
+function readBankFieldsWithConfirm(fd: FormData, country: CountryCode): Record<string, string> {
+  const out = readBankFields(fd, country);
+  for (const def of BANK_FIELDS_BY_COUNTRY[country]) {
+    if (def.isAccount) out[accountConfirmKey(def.key)] = str(fd, accountConfirmKey(def.key)).slice(0, 64);
+  }
+  return out;
+}
+
+/** The pay page's validator, then the re-enter match; both error sets land under `errors.bank`. */
+function validateBankWithConfirm(fd: FormData, country: CountryCode): ReturnType<typeof validatePayoutFields> {
+  const v = validatePayoutFields(country, readBankFields(fd, country));
+  const confirm = accountConfirmErrors(country, readBankFieldsWithConfirm(fd, country));
+  if (Object.keys(confirm).length === 0) return v;
+  return { ok: false, errors: { ...(v.ok ? {} : v.errors), ...confirm } };
+}
+
 export interface RecipientFormErrors {
   name?: MessageKey;
   recipientPhone?: MessageKey;
@@ -117,7 +134,7 @@ export function validateAddInput(fd: FormData): AddInputResult {
   }
   let payoutDestination = '';
   if (isCountry(country)) {
-    const v = validatePayoutFields(country, readBankFields(fd, country));
+    const v = validateBankWithConfirm(fd, country);
     if (v.ok) payoutDestination = v.payoutDestination;
     else errors.bank = v.errors;
   }
@@ -144,7 +161,7 @@ export function validateEditInput(fd: FormData, existing: Recipient): EditInputR
   if (country && isCountry(country)) {
     const fields = readBankFields(fd, country);
     if (Object.values(fields).some((v) => v.trim() !== '')) {
-      const v = validatePayoutFields(country, fields);
+      const v = validateBankWithConfirm(fd, country);
       if (v.ok) {
         destinationChanged = v.payoutDestination !== existing.payoutDestination || existing.payoutMethod !== 'bank';
         payoutMethod = 'bank';

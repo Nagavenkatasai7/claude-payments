@@ -26,6 +26,9 @@ const secondaryBtnClasses =
   'mt-2.5 w-full cursor-pointer rounded-3xl border border-[#2a3942] bg-transparent p-3 text-[15px] font-bold text-[#8696a0] disabled:cursor-default disabled:opacity-60';
 const stepLabelClasses = 'mb-3.5 text-xs leading-normal uppercase tracking-[0.04em] text-[#8696a0]';
 const fieldErrorClasses = 'mt-1 block text-xs leading-normal text-[#f15c6d]';
+// Raj (Oct 7): "Resend code" is a small link under the pay button, not a second big button.
+const resendLinkClasses =
+  'mt-3 block w-full cursor-pointer bg-transparent p-1 text-center text-[13px] font-semibold text-[#53bdeb] underline-offset-2 hover:underline focus-visible:underline disabled:cursor-default disabled:opacity-60';
 const formErrorClasses = 'mt-2 text-[13px] text-[#f15c6d]';
 const successClasses = 'flex items-center justify-center gap-2 font-semibold text-[#25d366]';
 
@@ -63,23 +66,15 @@ function SuccessCheck() {
   );
 }
 
-function OtpFields({
-  invoiceId,
-  code,
-  setCode,
-  sent,
-  setSent,
-  otpError,
-}: {
-  invoiceId: string;
-  code: string;
-  setCode: (v: string) => void;
-  sent: boolean;
-  setSent: (v: boolean) => void;
-  otpError?: string;
-}) {
+interface OtpRequest {
+  requesting: boolean;
+  requestError: string;
+  requestCode: () => Promise<void>;
+}
+
+/** Program-Fix 25 PR B: a refused code request says why (send failed / locked). */
+function useOtpRequest(invoiceId: string, setSent: (v: boolean) => void): OtpRequest {
   const [requesting, setRequesting] = useState(false);
-  // Program-Fix 25 PR B: a refused code request says why (send failed / locked).
   const [requestError, setRequestError] = useState('');
 
   async function requestCode() {
@@ -105,13 +100,29 @@ function OtpFields({
     }
   }
 
+  return { requesting, requestError, requestCode };
+}
+
+function OtpFields({
+  code,
+  setCode,
+  sent,
+  otpError,
+  otp,
+}: {
+  code: string;
+  setCode: (v: string) => void;
+  sent: boolean;
+  otpError?: string;
+  otp: OtpRequest;
+}) {
   if (!sent) {
     return (
       <div>
-        <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-          {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+        <button type="button" className={secondaryBtnClasses} onClick={otp.requestCode} disabled={otp.requesting}>
+          {otp.requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
         </button>
-        {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+        {otp.requestError && <span className={fieldErrorClasses} role="alert">{otp.requestError}</span>}
       </div>
     );
   }
@@ -132,10 +143,19 @@ function OtpFields({
         />
       </label>
       {otpError && <span className={fieldErrorClasses}>{otpError}</span>}
-      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-        {requesting ? 'Sending…' : 'Resend code'}
+    </div>
+  );
+}
+
+/** Raj (Oct 7): drawn after the pay button, so the code box and the pay button sit together. */
+function ResendCode({ sent, otp, disabled = false }: { sent: boolean; otp: OtpRequest; disabled?: boolean }) {
+  if (!sent) return null;
+  return (
+    <div>
+      <button type="button" className={resendLinkClasses} onClick={otp.requestCode} disabled={otp.requesting || disabled}>
+        {otp.requesting ? 'Sending…' : 'Resend code'}
       </button>
-      {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+      {otp.requestError && <span className={fieldErrorClasses} role="alert">{otp.requestError}</span>}
     </div>
   );
 }
@@ -163,6 +183,7 @@ export function BillPayForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
+  const otp = useOtpRequest(invoiceId, setSent);
   const [otpError, setOtpError] = useState('');
 
   function setField(key: string, v: string) {
@@ -239,14 +260,7 @@ export function BillPayForm({
           We&rsquo;ll debit {formatMoney(buyerTotal, buyerCurrency)} from your bank to settle your bill with{' '}
           {sellerBusinessName}.
         </p>
-        <OtpFields
-          invoiceId={invoiceId}
-          code={code}
-          setCode={setCode}
-          sent={sent}
-          setSent={setSent}
-          otpError={otpError}
-        />
+        <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
         <button
           type="button"
           className={primaryBtnClasses}
@@ -255,6 +269,7 @@ export function BillPayForm({
         >
           {status === 'paying' ? 'Processing…' : 'Authorize & pay'}
         </button>
+        <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
         <button
           type="button"
           className={secondaryBtnClasses}

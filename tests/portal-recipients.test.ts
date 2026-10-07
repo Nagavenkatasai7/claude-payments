@@ -20,6 +20,7 @@ import {
   validateEditInput,
   validateRecipientName,
 } from '@/lib/portal-recipients';
+import { ACCOUNT_CONFIRM_MISMATCH, ACCOUNT_CONFIRM_REQUIRED } from '@/lib/payout-format';
 import type { Recipient, Schedule, ScheduleStatus } from '@/lib/types';
 import { freshDb, seedPartner } from './helpers-db';
 
@@ -94,21 +95,37 @@ describe('edge validation', () => {
   });
 
   it('validateAddInput: an Indian bank recipient composes the pay-page destination', () => {
-    const r = validateAddInput(fd({ name: 'Asha', recipientPhone: '+91 90000 00001', country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC0001234' }));
+    const r = validateAddInput(fd({ name: 'Asha', recipientPhone: '+91 90000 00001', country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC0001234' }));
     expect(r).toEqual({ ok: true, value: { name: 'Asha', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}` } });
   });
 
   it('validateAddInput: bad phone, a phone from another country, a bad IFSC and an unknown country are refused', () => {
-    const bad = validateAddInput(fd({ name: 'Asha', recipientPhone: '12', country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC0001234' }));
+    const bad = validateAddInput(fd({ name: 'Asha', recipientPhone: '12', country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC0001234' }));
     expect(bad.ok === false && bad.errors.recipientPhone).toBe('portal.recipients.phone_invalid');
-    const mismatch = validateAddInput(fd({ name: 'Asha', recipientPhone: '+14155550999', country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC0001234' }));
+    const mismatch = validateAddInput(fd({ name: 'Asha', recipientPhone: '+14155550999', country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC0001234' }));
     expect(mismatch.ok === false && mismatch.errors.recipientPhone).toBe('portal.recipients.phone_country');
-    const ifsc = validateAddInput(fd({ name: 'Asha', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC123' }));
+    const ifsc = validateAddInput(fd({ name: 'Asha', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC123' }));
     expect(ifsc.ok === false && ifsc.errors.bank?.ifsc).toBeTruthy();
     const country = validateAddInput(fd({ name: 'Asha', recipientPhone: RP, country: 'ZZ' }));
     expect(country.ok === false && country.errors.country).toBe('portal.recipients.country_invalid');
-    const name = validateAddInput(fd({ name: '', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC0001234' }));
+    const name = validateAddInput(fd({ name: '', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC0001234' }));
     expect(name.ok === false && name.errors.name).toBe('portal.recipients.name_invalid');
+  });
+
+  it('validateAddInput: the re-entered account number must match (Raj, Oct 7)', () => {
+    const missing = validateAddInput(fd({ name: 'Asha', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, ifsc: 'HDFC0001234' }));
+    expect(missing.ok === false && missing.errors.bank?.accountNumberConfirm).toBe(ACCOUNT_CONFIRM_REQUIRED);
+    const wrong = validateAddInput(fd({ name: 'Asha', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: `${ACCOUNT}9`, ifsc: 'HDFC0001234' }));
+    expect(wrong.ok === false && wrong.errors.bank?.accountNumberConfirm).toBe(ACCOUNT_CONFIRM_MISMATCH);
+    expect(wrong.ok === false && wrong.errors.bank?.accountNumber).toBeUndefined();
+  });
+
+  it('validateEditInput: a new account number must be re-entered; blank fields still keep the current account', () => {
+    const existing: Recipient = { name: 'Asha', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}`, lastUsedAt: '2026-06-01T00:00:00.000Z' };
+    const wrong = validateEditInput(fd({ name: 'Asha', accountNumber: '999988887777', accountNumberConfirm: '999988887770', ifsc: 'ICIC0004321' }), existing);
+    expect(wrong.ok === false && wrong.errors.bank?.accountNumberConfirm).toBe(ACCOUNT_CONFIRM_MISMATCH);
+    const keep = validateEditInput(fd({ name: 'Asha', accountNumberConfirm: '' }), existing);
+    expect(keep.ok && keep.value.payoutDestination).toBe(`HDFC0001234 ${ACCOUNT}`);
   });
 
   it('validateEditInput: blank bank fields keep the current account; the changed field names are listed', () => {
@@ -117,7 +134,7 @@ describe('edge validation', () => {
       ok: true,
       value: { name: 'Asha S', payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}`, fields: ['name'] },
     });
-    expect(validateEditInput(fd({ name: 'Asha', accountNumber: '999988887777', ifsc: 'ICIC0004321' }), existing)).toEqual({
+    expect(validateEditInput(fd({ name: 'Asha', accountNumber: '999988887777', accountNumberConfirm: '999988887777', ifsc: 'ICIC0004321' }), existing)).toEqual({
       ok: true,
       value: { name: 'Asha', payoutMethod: 'bank', payoutDestination: 'ICIC0004321 999988887777', fields: ['destination'] },
     });
