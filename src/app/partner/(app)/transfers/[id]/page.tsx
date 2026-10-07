@@ -225,8 +225,9 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 {shown(destination, 'payout_destination', t('partner.transfers.destination'), caps.destination && destination !== '****')}
               </span>
             </Row>
-            {purpose ? (
-              <Row label={t('partner.transfers.purpose')}>
+            {/* A3: always shown, so "no purpose" reads as "Not stated", not as a missing feature. */}
+            <Row label={t('partner.transfers.purpose')}>
+              {purpose ? (
                 <span className="inline-flex flex-col items-end gap-0.5">
                   <span>{purpose.label}</span>
                   {purpose.suggestedCode ? (
@@ -235,8 +236,10 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                     </span>
                   ) : null}
                 </span>
-              </Row>
-            ) : null}
+              ) : (
+                <span className="text-ds-ink-muted">{t('partner.transfers.purposeNotStated')}</span>
+              )}
+            </Row>
             <Row label={t('partner.transfers.settledVia')}>{t(settlementRouteKey(transfer, ctx.partnerId))}</Row>
             <Row label={t('partner.transfers.assignedTo')}>
               {assignee.kind === 'tenant'

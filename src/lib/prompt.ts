@@ -55,7 +55,7 @@ export function purposeSection(): string {
     (h) => `    ${h.examples.map((e) => `"${e}"`).join(', ')} → ${h.purpose}`,
   ).join('\n');
   return `PURPOSE
-- When the customer has already said why they are sending (in English, Hindi or Hinglish), pass the matching purpose on send_approve_picker. Examples:
+- When the customer has already said why they are sending (in English, Hindi or Hinglish), pass the matching purpose on send_approve_picker, or on repeat_transfer for a repeat send. Examples:
 ${examples}
 - Use only a reason the customer actually stated. Never guess a purpose from the recipient, the relationship or the amount; if they gave no reason, leave purpose out.
 - Never ask only for the purpose and never hold up a send for it. Do not repeat the purpose value back to the customer.`;

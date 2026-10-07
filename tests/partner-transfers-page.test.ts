@@ -362,11 +362,13 @@ describe('/partner/transfers/[id]: A3 purpose row', () => {
     expect(html).toContain('Education');
     expect(html).not.toContain('Suggested RBI code');
   });
-  it('no purpose ⇒ no row', async () => {
+  it('no purpose ⇒ the row says Not stated', async () => {
     await asAdmin();
     const html = await detail('tr_A_done');
     expect(html).not.toContain('Suggested RBI code');
-    expect(html).not.toMatch(/>Purpose</);
+    // The row stays, so a missing purpose reads as "Not stated", not as a missing feature.
+    expect(html).toMatch(/>Purpose</);
+    expect(html).toContain('Not stated');
   });
   it("another tenant's transfer with a purpose is still NOT_FOUND", async () => {
     await seedPartnerTransfer(db, { id: 'tr_B_purpose', partnerId: 'pb', phone: PHONE, status: 'paid', purpose: 'family_support' });

@@ -1077,7 +1077,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'repeat_transfer',
       description:
-        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with the amount, source_currency, destination_country, recipient_name and recipient_phone it returned plus those two fields (never payout details — the stored ones are reused automatically).",
+        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with the amount, source_currency, destination_country, recipient_name, recipient_phone and purpose (when present) it returned plus those two fields (never payout details — the stored ones are reused automatically).",
       parameters: {
         type: 'object',
         properties: {
@@ -1086,6 +1086,11 @@ export const toolSchemas: ChatTool[] = [
           amount_source: { type: 'number', description: "Optional. New send amount in the sender's own currency; if omitted, reuse the last amount sent to this recipient." },
           amount_usd: { type: 'number', description: 'Back-compat alias of amount_source.' },
           funding_method: { type: 'string', enum: ['bank_transfer'], description: 'Optional. Omit it.' },
+          purpose: {
+            type: 'string',
+            enum: [...PURPOSES],
+            description: 'Optional. The reason the customer stated for THIS send. Never copy it from the past transfer.',
+          },
         },
         // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
         required: [],
@@ -4377,6 +4382,9 @@ async function repeatTransferTool(
   // fix 6: funding_method is a closed set (the schema's consumer enum).
   const repeatFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
   if (repeatFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
+  // A3: the purpose the customer stated for THIS send (never the past row's);
+  // an unknown value is dropped, like on send_approve_picker.
+  const purpose = asEnum(PURPOSES, args.purpose);
 
   // Hydrate from the customer's OWN transfers (own tenant + phone, newest-first).
   // Stage 4: indexed per-phone page, then a small in-JS filter. By id: an id that
@@ -4452,6 +4460,7 @@ async function repeatTransferTool(
       payout_method: stored?.payoutMethod ?? last.payoutMethod,
       payout_destination: stored ? maskAccount(stored.payoutMethod, stored.payoutDestination) : '',
       destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
+      ...(purpose ? { purpose } : {}),
     };
   }
 
@@ -4466,6 +4475,7 @@ async function repeatTransferTool(
       recipient_phone: recipientPhone,
       destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
       source_currency: last.sourceCurrency,
+      ...(purpose ? { purpose } : {}),
     },
     ctx,
   );
