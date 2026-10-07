@@ -12,6 +12,7 @@ import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold } from './am
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
+import { feeTierCount, isFirstTransferFree } from './fee-tier';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendCapError } from './send-limits';
 import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -364,6 +365,10 @@ export async function createTransferWithOutcome(
   // and the cap check uses q.amountUsd.
   let q: NonNullable<CreateTransferInput['quote']>;
   let provenance: FxProvenance;
+  // A5: a re-quote's fee tier is re-checked under the lock (mintLocked); this
+  // re-prices the same rates at the locked count (pure, no I/O).
+  let requote: RequoteAt | undefined;
+  let quotedCount: number | undefined;
   if (input.quote) {
     assertQuoteOverrideFresh(input.quote);
     q = input.quote;
@@ -372,7 +377,7 @@ export async function createTransferWithOutcome(
     // ends the rate lock there).
     provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt, q.routeExpiresAt);
   } else {
-    const transferCount = await store.getTransferCount(input.partnerId, input.phone);
+    const transferCount = await feeTierCount(store, input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);
     // The destination leg for the USD-pivot cross-rate (undefined for INR —
     // quote() prices INR off rates.toInr). Both legs THROW RateUnavailableError
@@ -382,7 +387,11 @@ export async function createTransferWithOutcome(
     assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
     const legs = legsProvenance(rates, destRates); // Step 0 FX-7: the OLDEST leg
     provenance = fxProvenanceFor('platform', legs.asOf, legs.fetchedAt);
-    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
+    const priceAt: RequoteAt = (count) =>
+      quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, count, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
+    q = priceAt(transferCount);
+    requote = priceAt;
+    quotedCount = transferCount;
   }
   // Best-rate routing: a route is only ever honored together with the quote it
   // priced. If the quote override is absent we re-quoted at the CURRENT mid
@@ -408,6 +417,7 @@ export async function createTransferWithOutcome(
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
+      requote, quotedCount,
     }),
   );
   const transfer = minted.transfer;
@@ -456,6 +466,38 @@ interface PreparedMint {
   kycGateActive: boolean;
   settlementPartnerId?: PartnerId;
   provenance: FxProvenance;      // Step 0 FX-7
+  /** A5: re-price the re-quote at another fee-tier count (absent on an approved quote). */
+  requote?: RequoteAt;
+  /** A5: the fee-tier count `q` was priced at (absent on an approved quote). */
+  quotedCount?: number;
+}
+
+/** A5: the re-quote at a given fee-tier count, over the rates read before the lock. */
+type RequoteAt = (transferCount: number) => NonNullable<CreateTransferInput['quote']>;
+
+/**
+ * A5: the fee tier, decided UNDER the sender lock. The count read before the
+ * lock can be stale: a concurrent mint for the same sender may have committed
+ * since. A re-quote (no approved quote: Partner API, cron, legacy chat) is
+ * re-priced at the locked count when the tier changed. An approved quote is
+ * honoured verbatim, except a fee waived as the free first transfer when the
+ * sender now has one: `stale` is set and mintLocked refuses it as stale_quote
+ * right before the insert (after sanctions and the cap, so their verdicts and
+ * refusals are unchanged; the throw rolls everything back, so nothing is
+ * minted and the customer gets a fresh quote).
+ */
+async function lockedFeeTierQuote(
+  ops: SenderLedgerOps,
+  p: PreparedMint,
+): Promise<{ q: NonNullable<CreateTransferInput['quote']>; stale: boolean }> {
+  const locked = await ops.transferCount();
+  if (p.input.quote) {
+    return { q: p.q, stale: p.input.quote.feeUsd === 0 && !isFirstTransferFree(locked) };
+  }
+  if (p.requote && p.quotedCount !== undefined && isFirstTransferFree(locked) !== isFirstTransferFree(p.quotedCount)) {
+    return { q: p.requote(locked), stale: false };
+  }
+  return { q: p.q, stale: false };
 }
 
 /**
@@ -480,7 +522,7 @@ async function mintLocked(
   ops: SenderLedgerOps,
   p: PreparedMint,
 ): Promise<{ transfer: Transfer; replayed: boolean }> {
-  const { input, q } = p;
+  const { input } = p;
   if (input.id) {
     // A same-key re-mint (claim-first callers only). The row must belong to
     // THIS tenant: an id that exists under another partner is neither replayed
@@ -499,6 +541,8 @@ async function mintLocked(
     const check = await ops.scheduleMintCheck(input.scheduleId, input.recipientPhone);
     if (check !== 'ok') throw new ScheduleMintRefusedError(check);
   }
+  // A5: the fee tier on the locked count (its stale refusal is applied below, before the insert).
+  const { q, stale: staleFreeQuote } = await lockedFeeTierQuote(ops, p);
   const now = new Date();
   const totals = await ops.totals(now);
   const compliance = await screenTransfer({                         // P5: corridor-aware
@@ -644,6 +688,11 @@ async function mintLocked(
   // API, cron, B2B) runs through here. A refusal rolls the transaction back.
   const ev = evaluateCap(p.subject, now, totals.todayUsdCents, requestedCents, p.kycGateActive, p.limits);
   if (!ev.withinCap) throw new SendCapError(ev);
+
+  // ── A5: an approved free-first-transfer quote the sender already used ─────
+  // The existing stale-quote refusal (every caller maps it to "ask for a fresh
+  // quote"); the throw rolls back the evidence row, so nothing is written.
+  if (staleFreeQuote) throw new RateUnavailableError('stale_quote');
 
   await ops.insertTransfer(transfer, { screening: compliance.evidence });
   return { transfer, replayed: false };

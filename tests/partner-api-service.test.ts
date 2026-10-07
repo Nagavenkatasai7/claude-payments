@@ -1115,3 +1115,89 @@ describe('partner-api-service: sends.paused kill switch', () => {
     expect(await plain.json()).toEqual({ error: 'bad' });
   });
 });
+
+// ── A5: the /quote preview prices the same fee tier the mint will ─────────
+// Before: createQuote passed a hardcoded transferCount 1, so a new sender's
+// preview showed $1.99 while the mint (count 0) charged $0.
+describe('createQuote fee parity with the mint', () => {
+  const NEW_PHONE = '15558880001';
+  const feeOf = (r: Awaited<ReturnType<typeof createQuote>>) => {
+    if (!r.ok) throw new Error(`quote refused: ${r.error}`);
+    return r.data as { fee_source: number; first_transfer_free: boolean };
+  };
+  const mintFee = (r: Awaited<ReturnType<typeof createTransaction>>) => {
+    if (!r.ok) throw new Error(`mint refused: ${r.error}`);
+    return (r.data as { fee_source: number }).fee_source;
+  };
+
+  it('a new sender phone ⇒ fee 0 and first_transfer_free true', async () => {
+    const { deps } = await harness();
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    expect(q.fee_source).toBe(0);
+    expect(q.first_transfer_free).toBe(true);
+  });
+
+  it('preview then createTransaction for the same phone ⇒ equal fee; the second preview and mint are both 1.99', async () => {
+    const { deps } = await harness();
+    const q1 = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    const m1 = mintFee(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fee-1', txBody({ sender: { phone: NEW_PHONE, name: 'Sender', kyc_status: 'not_started' } })));
+    expect(m1).toBe(q1.fee_source);
+    expect(m1).toBe(0);
+    const q2 = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    const m2 = mintFee(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fee-2', txBody({ sender: { phone: NEW_PHONE, name: 'Sender', kyc_status: 'not_started' } })));
+    expect([q2.fee_source, q2.first_transfer_free, m2]).toEqual([1.99, false, 1.99]);
+  });
+
+  it('no sender ⇒ the standard fee (1.99, first_transfer_free false)', async () => {
+    const { deps } = await harness();
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200 }));
+    expect([q.fee_source, q.first_transfer_free]).toEqual([1.99, false]);
+  });
+
+  it('an invalid sender phone ⇒ the standard fee, never a 400', async () => {
+    const { deps } = await harness();
+    for (const bad of ['abc', '12345', '1'.repeat(16)]) {
+      const r = await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: bad } });
+      expect(r.ok).toBe(true);
+      expect(feeOf(r)).toMatchObject({ fee_source: 1.99, first_transfer_free: false });
+    }
+  });
+
+  it('a formatted phone counts the same history as the mint normalisation', async () => {
+    const { deps, db } = await harness();
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: NEW_PHONE, amountUsd: 50 });
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: '+1 (555) 888-0001' } }));
+    expect([q.fee_source, q.first_transfer_free]).toEqual([1.99, false]);
+  });
+
+  it('a test key with only sandbox rows ⇒ 0 for both the preview and the mint', async () => {
+    const { deps } = await harness();
+    const testDeps: PartnerApiDeps = { ...deps, keyMode: 'test' };
+    const first = mintFee(await createTransaction(testDeps, DELEGATED, 'pk_t', 'idem-sbx-1', txBody({ sender: { phone: NEW_PHONE, name: 'Sender', kyc_status: 'not_started' } })));
+    expect(first).toBe(0);
+    const q = feeOf(await createQuote(testDeps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    const second = mintFee(await createTransaction(testDeps, DELEGATED, 'pk_t', 'idem-sbx-2', txBody({ sender: { phone: NEW_PHONE, name: 'Sender', kyc_status: 'not_started' } })));
+    expect([q.fee_source, q.first_transfer_free, second]).toEqual([0, true, 0]);
+  });
+
+  it('a live row under partner A does not use up the free first transfer under partner B', async () => {
+    const { deps, db } = await harness();
+    await seedLedgerSpend(db, { partnerId: 'globex', phone: NEW_PHONE, amountUsd: 50 });
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    expect([q.fee_source, q.first_transfer_free]).toEqual([0, true]);
+  });
+
+  it('a prior BLOCKED row still leaves the first transfer free', async () => {
+    const { deps, db } = await harness();
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: NEW_PHONE, amountUsd: 50, status: 'blocked' });
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    expect([q.fee_source, q.first_transfer_free]).toEqual([0, true]);
+  });
+
+  it('a store failure on the count ⇒ the standard fee (a safe over-quote), never a 500', async () => {
+    const { deps } = await harness();
+    vi.spyOn(deps.store, 'getTransferCount').mockRejectedValueOnce(new Error('db down'));
+    const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }));
+    expect([q.fee_source, q.first_transfer_free]).toEqual([1.99, false]);
+  });
+});
