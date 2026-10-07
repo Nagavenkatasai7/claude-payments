@@ -3,7 +3,7 @@ import { env } from './env';
 import { isFlagOn } from './flags';
 import { logWarn } from './log';
 import { MEDIA_REPLY } from './consent';
-import { normalizePhone } from './phone';
+import { demoPhoneList, phoneInList } from './demo-mode';
 import { MEDIA_ID_RE, safeMime } from './whatsapp';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { InboundMedia, PartnerId } from './types';
@@ -21,7 +21,8 @@ import type { InboundMedia, PartnerId } from './types';
 // a phone from the list, also stops voice notes already queued):
 //   • the message came to the shared number (routedPartnerId null);
 //   • AZURE_SPEECH_KEY and AZURE_SPEECH_REGION are set (env.ts);
-//   • the sender is on VOICE_NOTES_BETA_PHONES (empty ⇒ nobody, '*' ⇒ everyone);
+//   • the sender is a demo-mode phone (DEMO_PHONES, falling back to the legacy
+//     VOICE_NOTES_BETA_PHONES; empty ⇒ nobody, '*' ⇒ everyone; demo-mode.ts);
 //   • the `voice.notes` feature flag is on (global, or the default partner).
 // Otherwise a voice note gets today's MEDIA_REPLY, byte for byte.
 //
@@ -50,20 +51,12 @@ export function voiceSettingsFromEnv(): VoiceSettings {
     key: env.azureSpeechKey,
     region: env.azureSpeechRegion,
     language: env.azureSpeechLanguage,
-    betaPhones: env.voiceNotesBetaPhones,
+    betaPhones: demoPhoneList(),
   };
 }
 
-/** Is `from` on the beta list? Digits are compared; [] ⇒ nobody; exactly ['*'] ⇒ everyone. Pure. */
-export function onBetaList(from: string, list: readonly string[]): boolean {
-  const phone = normalizePhone(from);
-  if (phone === '') return false;
-  if (list.length === 1 && list[0] === '*') return true;
-  return list.some((entry) => {
-    const digits = normalizePhone(entry);
-    return digits !== '' && digits === phone;
-  });
-}
+/** Is `from` on the beta list? The demo-mode matcher (demo-mode.ts), kept under its old name. Pure. */
+export { phoneInList as onBetaList };
 
 function configured(s: VoiceSettings): boolean {
   return s.key !== '' && s.region !== '';
@@ -79,7 +72,7 @@ export function voiceSenderEligible(
   msg: { routedPartnerId: PartnerId | null; from: string },
   s: VoiceSettings,
 ): boolean {
-  return msg.routedPartnerId === null && onBetaList(msg.from, s.betaPhones);
+  return msg.routedPartnerId === null && phoneInList(msg.from, s.betaPhones);
 }
 
 let warnedUnconfigured = false;

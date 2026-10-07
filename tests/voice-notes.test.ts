@@ -62,10 +62,19 @@ describe('voiceSenderEligible (no database read)', () => {
     vi.stubEnv('AZURE_SPEECH_KEY', 'fake-key');
     vi.stubEnv('AZURE_SPEECH_REGION', 'eastus');
     vi.stubEnv('AZURE_SPEECH_LANGUAGE', 'en-US');
+    vi.stubEnv('DEMO_PHONES', '');
     vi.stubEnv('VOICE_NOTES_BETA_PHONES', '15550000001,15550000002');
     expect(voiceSettingsFromEnv()).toEqual({ key: 'fake-key', region: 'eastus', language: 'en-US', betaPhones: ['15550000001', '15550000002'] });
     vi.stubEnv('AZURE_SPEECH_KEY', '');
     expect(voiceSettingsFromEnv().key).toBe('');
+  });
+
+  it('betaPhones follows the demo-mode list: DEMO_PHONES first, VOICE_NOTES_BETA_PHONES as the legacy fallback', () => {
+    vi.stubEnv('DEMO_PHONES', '15550000002');
+    vi.stubEnv('VOICE_NOTES_BETA_PHONES', '*');
+    expect(voiceSettingsFromEnv().betaPhones).toEqual(['15550000002']);
+    vi.stubEnv('DEMO_PHONES', '');
+    expect(voiceSettingsFromEnv().betaPhones).toEqual(['*']);
   });
 });
 

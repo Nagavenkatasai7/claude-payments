@@ -20,8 +20,10 @@ import { logWarn } from './log';
 // Sanctions screening is NOT a flag and never reads this module: it stays
 // structurally on (CLAUDE.md architecture spine).
 //
-// New features (voice notes, the beta-phone switch) add their key to
+// New features (voice notes, purpose detection) add their key to
 // FLAG_DEFINITIONS and call isFlagOn; the admin page lists every defined key.
+// A beta feature also checks demo mode: only demo-mode phones (DEMO_PHONES,
+// src/lib/demo-mode.ts) see it, whatever its switch says.
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
@@ -60,14 +62,15 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     killSwitch: true,
   },
   // Step 1 voice notes: the on/off switch. Voice also needs the Azure Speech
-  // env settings and the sender on VOICE_NOTES_BETA_PHONES (voice-notes.ts).
+  // env settings and the sender among the demo-mode phones (DEMO_PHONES,
+  // demo-mode.ts; voice-notes.ts).
   // Only the shared SmartRemit number (the default partner) takes voice notes,
   // so a partner row matters only for 'default'.
   'voice.notes': {
     key: 'voice.notes',
     label: 'Voice notes',
     description:
-      'The WhatsApp bot listens to English voice notes (up to 30 seconds) from the beta phone list and answers in text. ' +
+      'The WhatsApp bot listens to English voice notes (up to 30 seconds) from demo-mode phones (DEMO_PHONES) and answers in text. ' +
       'Off: a voice note gets the "please type" reply. Only the shared SmartRemit number takes voice notes.',
     bannerText: 'Voice notes are on',
     scopes: ['global', 'partner'],

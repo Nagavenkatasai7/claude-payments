@@ -82,6 +82,7 @@ beforeEach(async () => {
   transcribeVoice.mockResolvedValue({ kind: 'ok', transcript: 'send 100 dollars to mom' });
   vi.stubEnv('AZURE_SPEECH_KEY', 'fake-speech-key');
   vi.stubEnv('AZURE_SPEECH_REGION', 'eastus');
+  vi.stubEnv('DEMO_PHONES', '');
   vi.stubEnv('VOICE_NOTES_BETA_PHONES', P);
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   await voiceSwitch(true);

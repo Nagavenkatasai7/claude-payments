@@ -193,5 +193,14 @@ describe('env', () => {
       vi.stubEnv('VOICE_NOTES_BETA_PHONES', '*');
       expect(env.voiceNotesBetaPhones).toEqual(['*']);
     });
+
+    it('the demo-mode phone list (DEMO_PHONES) is parsed the same way', () => {
+      vi.stubEnv('DEMO_PHONES', '');
+      expect(env.demoPhones).toEqual([]);
+      vi.stubEnv('DEMO_PHONES', ' +15550000001 , 15550000002,, \n');
+      expect(env.demoPhones).toEqual(['+15550000001', '15550000002']);
+      vi.stubEnv('DEMO_PHONES', '*');
+      expect(env.demoPhones).toEqual(['*']);
+    });
   });
 });
