@@ -1317,6 +1317,8 @@ async function resolveCurrencyAndRates(
   fxFetchedAt: number | undefined;
   /** Step 0 FX-7: the oldest leg's publication date (YYYY-MM-DD), when every leg has one. */
   fxAsOf: string | undefined;
+  /** The rate source(s) behind the legs (rate.ts provider ids), when every leg names one. */
+  fxProvider: string | undefined;
 }> {
   // Destination resolution FIRST (Program-Fix 33): an unknown code is refused
   // before the customer upsert and before any rate fetch — never coerced to 'IN'.
@@ -1339,7 +1341,7 @@ async function resolveCurrencyAndRates(
 
   return {
     customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency,
-    destToUsd: destRates?.toUsd, fxFetchedAt: legs.fetchedAt, fxAsOf: legs.asOf,
+    destToUsd: destRates?.toUsd, fxFetchedAt: legs.fetchedAt, fxAsOf: legs.asOf, fxProvider: legs.provider,
   };
 }
 
@@ -4016,7 +4018,7 @@ export async function prepareSendDraft(
     if (err instanceof QuoteError) return { kind: 'invalid_request', message: err.message };
     throw err;
   }
-  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt, fxAsOf } =
+  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt, fxAsOf, fxProvider } =
     resolved;
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
   // for an unverified sender; hand off the kyc_url instead. The B2B KYB gate
@@ -4126,7 +4128,7 @@ export async function prepareSendDraft(
           // commit together (recordBlockedWithEvidence, one transaction).
           evidence: screen.evidence,
           // Step 0 FX-7: the quote-time rate provenance.
-          fxOrigin, fxAsOf, fxFetchedAt,
+          fxOrigin, fxAsOf, fxFetchedAt, fxProvider,
         });
       } catch (err) {
         // Still best-effort: the customer gets the blocked reply either way.
@@ -4172,6 +4174,7 @@ export async function prepareSendDraft(
         ...(routeExpiresAt !== undefined ? { routeExpiresAt } : {}),
         fxOrigin, // Step 0 FX-7: stamped on the minted row as fx_source
         ...(fxAsOf !== undefined ? { fxAsOf } : {}),
+        ...(fxProvider !== undefined ? { fxProvider } : {}),
       },
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).

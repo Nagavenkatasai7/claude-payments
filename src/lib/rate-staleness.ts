@@ -1,7 +1,10 @@
 import type { Db } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { FALLBACK_FX_RATES, FRANKFURTER_BASE_URL, RateUnavailableError, getFxRates } from './rate';
+import { ECB_DAILY_URL, FALLBACK_FX_RATES, FRANKFURTER_BASE_URL, RateUnavailableError, getFxRates } from './rate';
+
+/** Both rate sources: an alert fires only when neither served the rate. */
+const CHECK_SOURCES = `Check ${ECB_DAILY_URL} and ${FRANKFURTER_BASE_URL}.`;
 import { FIXING_ALERT_LAG, FIXING_REFUSE_LAG, fixingLagBusinessDays } from './fx-fixing';
 import { env } from './env';
 import { logWarn } from './log';
@@ -68,8 +71,9 @@ export async function sweepStaleRates(db: Db, now: Date = new Date()): Promise<n
 //     can never swallow a later UNAVAILABLE one;
 //   • probe starts are staggered by FX_PROBE_STAGGER_MS instead of all firing
 //     in the same instant.
-// Worst-case wall time (9 currencies): 8 × 250 ms stagger + 5 s first attempt
-// + 7 s retry = 14 s (the worker's drain start cutoff absorbs it).
+// Worst-case wall time (9 currencies): 8 × 250 ms stagger + 6.5 s first attempt
+// + 8.5 s retry = 17 s (each attempt may wait ECB_HEDGE_MS before Frankfurter
+// is asked; the worker's drain start cutoff absorbs it).
 //
 // Step 0 FX-4: a FROZEN feed answers every probe (fetchedAt is fresh), so the
 // provider's fixing date (`asOf`) is checked too (fx-fixing.ts):
@@ -217,7 +221,7 @@ export async function sweepFxHealth(
       {
         message:
           `⚠️ SmartRemit ops: platform FX is UNAVAILABLE for ${unavailable.join(', ')} — ` +
-          `every quote in these currencies is being refused. Check ${FRANKFURTER_BASE_URL}.`,
+          `every quote in these currencies is being refused. ${CHECK_SOURCES}`,
       },
       { dedupeKey: `fx-health:UNAVAILABLE:${hourBucket}` },
     );
@@ -229,7 +233,7 @@ export async function sweepFxHealth(
       {
         message:
           `⚠️ SmartRemit ops: platform FX is DEGRADED for ${degraded.join(', ')} — serving the last ` +
-          `good rate; quotes will be refused once it is 60 min old. Check ${FRANKFURTER_BASE_URL}.`,
+          `good rate; quotes will be refused once it is 60 min old. ${CHECK_SOURCES}`,
       },
       { dedupeKey: `fx-health:DEGRADED:${hourBucket}` },
     );
@@ -245,7 +249,7 @@ export async function sweepFxHealth(
           (env.fxFixingGateEnabled
             ? `Quotes are refused once ${FIXING_REFUSE_LAG} fixings are overdue. `
             : `The fixing gate is off, so quotes still price. `) +
-          `Check ${FRANKFURTER_BASE_URL}.`,
+          CHECK_SOURCES,
       },
       { dedupeKey: `fx-health:FIXING:${g.asOf}:${g.lag}` },
     );
