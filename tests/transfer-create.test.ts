@@ -422,24 +422,28 @@ describe('createTransfer U7: draft-quote override', () => {
     totalChargeSource: 200,
   };
 
-  it('honors a complete override VERBATIM into the Transfer row (no count re-read, no FX fetch)', async () => {
+  it('honors a complete override VERBATIM into the Transfer row (no re-quote, no FX fetch)', async () => {
     const { store, partnerStore, mvs } = await makeStores();
-    // A prior transfer exists — a re-quote would charge the $1.99 repeat fee…
+    // A prior transfer exists (A5: an approved $0 first-transfer quote would
+    // now be stale — see the A5 describe — so the card here carries the fee)…
     await createTransfer(store, partnerStore, mvs, base);
     // …and live FX now differs from the override's rate (90 vs 85).
     resetRateCacheForTests();
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 90 } }) });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, quote: override });
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: { ...override, feeUsd: 1.99, totalChargeUsd: 201.99, feeSource: 1.99, totalChargeSource: 201.99 },
+    });
     expect(t.amountUsd).toBe(200);
-    expect(t.feeUsd).toBe(0);             // the card's first-transfer-free promise…
-    expect(t.totalChargeUsd).toBe(200);   // …not the re-quoted 201.99
-    expect(t.fxRate).toBe(85);
+    expect(t.feeUsd).toBe(1.99);          // the card's figures…
+    expect(t.totalChargeUsd).toBe(201.99);
+    expect(t.fxRate).toBe(85);            // …not a re-quote at the live 90
     expect(t.amountInr).toBe(17_000);
     expect(t.amountSource).toBe(200);
-    expect(t.feeSource).toBe(0);
-    expect(t.totalChargeSource).toBe(200);
+    expect(t.feeSource).toBe(1.99);
+    expect(t.totalChargeSource).toBe(201.99);
     // The override skips the re-quote block entirely — no FX dial-out.
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -472,8 +476,9 @@ describe('createTransfer U7: draft-quote override', () => {
       phone: '15559990001',
       amountSource: 600,
       quote: {
-        amountUsd: 100, feeUsd: 0, totalChargeUsd: 100, fxRate: 85,
-        amountInr: 8_500, amountSource: 600, feeSource: 0, totalChargeSource: 600,
+        // A5: the sender has history, so the card carries the standard fee.
+        amountUsd: 100, feeUsd: 1.99, totalChargeUsd: 100, fxRate: 85,
+        amountInr: 8_500, amountSource: 600, feeSource: 1.99, totalChargeSource: 600,
       },
     });
     expect(t.complianceReasons).not.toContain('edd_required');
@@ -489,8 +494,9 @@ describe('createTransfer U7: draft-quote override', () => {
       phone: '15559990002',
       amountSource: 600,
       quote: {
-        amountUsd: 600, feeUsd: 0, totalChargeUsd: 600, fxRate: 85,
-        amountInr: 51_000, amountSource: 600, feeSource: 0, totalChargeSource: 600,
+        // A5: the sender has history, so the card carries the standard fee.
+        amountUsd: 600, feeUsd: 1.99, totalChargeUsd: 600, fxRate: 85,
+        amountInr: 51_000, amountSource: 600, feeSource: 1.99, totalChargeSource: 600,
       },
     });
     expect(t.complianceStatus).toBe('flagged');
@@ -1433,5 +1439,70 @@ describe('createTransfer with SANCTIONS_LIST=ofac-sdn (Program-Fix 14 PR C)', ()
     const listReads = q.map((s, i) => (s.includes('sanctions_list_') ? i : -1)).filter((i) => i >= 0);
     expect(listReads.length).toBeGreaterThan(0);
     expect(Math.max(...listReads)).toBeLessThan(lockAt);
+  });
+});
+
+// ── A5: the free first transfer is decided UNDER the sender lock ──────────
+// Before: the fee-tier count was read OUTSIDE mintUnderSenderLock, so two
+// concurrent first mints (or two drafts both quoted at count 0) were both free.
+describe('createTransfer — first-transfer fee tier is re-read under the sender lock (A5)', () => {
+  const FREE_OVERRIDE = {
+    amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85,
+    amountInr: 17_000, amountSource: 200, feeSource: 0, totalChargeSource: 200,
+  };
+
+  it('two concurrent first mints for the same phone ⇒ exactly one has fee 0', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const phone = '15558870001';
+    const [a, b] = await Promise.all([
+      createTransfer(store, partnerStore, mvs, { ...base, phone }),
+      createTransfer(store, partnerStore, mvs, { ...base, phone }),
+    ]);
+    const fees = [a.feeUsd, b.feeUsd].sort();
+    expect(fees).toEqual([0, 1.99]);
+    const paid = [a, b].find((t) => t.feeUsd === 1.99)!;
+    expect(paid.totalChargeUsd).toBe(201.99);
+    expect(paid.feeSource).toBe(1.99);
+    expect(paid.totalChargeSource).toBe(201.99);
+  });
+
+  it('an approved $0 draft quote minted after another transfer exists ⇒ stale_quote, nothing minted', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const phone = '15558870002';
+    await createTransfer(store, partnerStore, mvs, { ...base, phone }); // the first (free) transfer
+    await expect(
+      createTransfer(store, partnerStore, mvs, { ...base, phone, id: 'tr_stale_free', quote: FREE_OVERRIDE }),
+    ).rejects.toMatchObject({ name: 'RateUnavailableError', reason: 'stale_quote' });
+    expect(await store.getTransfer('tr_stale_free')).toBeNull();
+    expect(await store.getTransferCount('default', phone)).toBe(1);
+  });
+
+  it('an approved $0 draft quote is still honoured while the sender has no transfer', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, phone: '15558870003', quote: FREE_OVERRIDE });
+    expect([t.feeUsd, t.totalChargeUsd]).toEqual([0, 200]);
+  });
+
+  it('two concurrent mints of approved $0 drafts ⇒ one mints, the other is stale_quote', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const phone = '15558870004';
+    const results = await Promise.allSettled([
+      createTransfer(store, partnerStore, mvs, { ...base, phone, quote: FREE_OVERRIDE }),
+      createTransfer(store, partnerStore, mvs, { ...base, phone, quote: FREE_OVERRIDE }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(RateUnavailableError);
+    expect((rejected[0].reason as RateUnavailableError).reason).toBe('stale_quote');
+    expect(await store.getTransferCount('default', phone)).toBe(1);
+  });
+
+  it('a prior BLOCKED row keeps the first transfer free on the locked re-read', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const phone = '15558870005';
+    await seedLedgerSpend(db, { partnerId: 'default', phone, amountUsd: 50, status: 'blocked' });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, phone, quote: FREE_OVERRIDE });
+    expect(t.feeUsd).toBe(0);
   });
 });

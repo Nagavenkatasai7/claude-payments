@@ -44,6 +44,7 @@ import { IssueRefundDialog } from './issue-refund-dialog';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
+import { PartnerAmlExplain } from './aml-explain';
 
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
@@ -281,6 +282,12 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 {t(releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
               </p>
             )}
+            {/* A4 (D5: admins only; the action re-gates): read-only AML explain. */}
+            {PARTNER_ADMIN.roles.includes(ctx.role) ? (
+              <div className="mt-4">
+                <PartnerAmlExplain transferId={transfer.id} />
+              </div>
+            ) : null}
           </Section>
         ) : null}
 
