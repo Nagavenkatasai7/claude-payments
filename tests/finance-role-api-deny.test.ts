@@ -41,6 +41,7 @@ import { POST as summarizePOST } from '@/app/api/copilot/summarize/route';
 import { POST as kycReviewPOST } from '@/app/api/copilot/kyc-review/route';
 import { POST as opsDiagnosePOST } from '@/app/api/copilot/ops-diagnose/route';
 import { POST as draftReplyPOST } from '@/app/api/copilot/draft-reply/route';
+import { POST as amlExplainPOST } from '@/app/api/copilot/aml-explain/route'; // A4
 
 function mk(o: Partial<Staff>): Staff {
   return {
@@ -69,6 +70,7 @@ const COPILOT = [
   ['kyc-review', kycReviewPOST],
   ['ops-diagnose', opsDiagnosePOST],
   ['draft-reply', draftReplyPOST],
+  ['aml-explain', amlExplainPOST], // A4: roles admin | agent only
 ] as const;
 
 beforeEach(async () => {

@@ -3,7 +3,7 @@
  *
  *   EVAL_OLLAMA_API_KEY=… npx tsx scripts/eval-bot.ts
  *
- * Runs the 15 recorded cases (scripts/eval-bot-cases.ts) once each against the
+ * Runs the 18 recorded cases (scripts/eval-bot-cases.ts) once each against the
  * model and prints one line per case. It does NOTHING without
  * EVAL_OLLAMA_API_KEY: it prints a skip line and exits 0 before importing the
  * prompt or tool code, so CI without the secret is a no-op. It never gates a
@@ -21,7 +21,7 @@ import type { ChatMessage, ChatTool } from '@/lib/types';
 
 export const EVAL_DEFAULT_BASE_URL = 'https://ollama.com/v1';
 export const EVAL_DEFAULT_MODEL = 'kimi-k2.6';
-/** Per call; 15 calls stay inside the nightly step's 8-minute timeout. */
+/** Per call; 18 calls (7.5 min) stay inside the nightly step's 9-minute timeout. */
 const EVAL_TIMEOUT_MS = 25_000;
 
 type Env = Record<string, string | undefined>;

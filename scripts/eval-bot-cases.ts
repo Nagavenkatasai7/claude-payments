@@ -1,5 +1,6 @@
 /**
- * Program-Fix 49B (prompt-11): the 15-case bot eval set (audit §4.7), as
+ * Program-Fix 49B (prompt-11): the 15-case bot eval set (audit §4.7), plus the
+ * three A2 language cases (16-18: Hinglish, Devanagari, English), as
  * RECORDED conversations. Each case is the context the agent would send the
  * model (the real buildSystemPrompt + the real WhatsApp tool schemas + the
  * server notes agent.ts injects + a recorded history, including prior tool
@@ -83,6 +84,11 @@ const noTool = (r: ChatMessage, name: string) => (toolNames(r).includes(name) ? 
 const hasTool = (r: ChatMessage, name: string) => (toolNames(r).includes(name) ? null : `did not call ${name}`);
 const textMatches = (r: ChatMessage, re: RegExp, why: string) => (re.test(textOf(r)) ? null : why);
 const textAvoids = (r: ChatMessage, re: RegExp, why: string) => (re.test(textOf(r)) ? why : null);
+
+// A2 language checks: Devanagari script, and common Hindi words written in
+// Roman letters (Hinglish).
+const DEVANAGARI = /[\u0900-\u097F]/;
+const ROMAN_HINDI = /\b(aap|aapko|aapka|kitna|kitne|bhejna|bhejne|hai|hain|kya|batayein|bataiye|paise|chahte|chahiye|kripya|theek|namaste|haan|ji)\b/i;
 
 const IN_RECIPIENT = '919876543210';
 const MX_RECIPIENT = '525512345678';
@@ -366,6 +372,53 @@ export const EVAL_CASES: EvalCase[] = [
     recorded: {
       pass: say('Who would you like to send to, and how much? Please share their name and WhatsApp number with country code.'),
       fail: calls(['send_approve_picker', { amount_source: 100, recipient_name: 'Test Person', recipient_phone: '15555550199', destination_country: 'US', payout_destination: '123456789' }]),
+    },
+  },
+  // ── A2 (owner decision): Hindi in either script ⇒ Hinglish in Roman letters,
+  // never Devanagari; English stays English. ──────────────────────────────────
+  {
+    id: 16,
+    title: 'Hinglish in: reply in Hinglish (Roman letters), no approve card yet',
+    history: [user('bhai ko paise bhejne hai India mein, kaise karu?')],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, DEVANAGARI, 'replied in Devanagari script'),
+        toolNames(r).length === 0 && textMatches(r, ROMAN_HINDI, 'did not reply in Hinglish'),
+      ),
+    recorded: {
+      pass: say('Zaroor! Aap kitna bhejna chahte hain? Aur bhai ka naam aur WhatsApp number (country code ke saath) batayein.'),
+      fail: say("Sure! How much would you like to send, and what's your brother's name and WhatsApp number?"),
+    },
+  },
+  {
+    id: 17,
+    title: 'Devanagari in: reply in Hinglish, never a Devanagari character',
+    history: [user('मुझे अपनी माँ को पैसे भेजने हैं')],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        toolNames(r).length === 0 && textMatches(r, ROMAN_HINDI, 'did not reply in Hinglish'),
+      ),
+    recorded: {
+      pass: say('Bilkul! Aap Mom ko kitna bhejna chahte hain? Unka naam aur WhatsApp number bhi batayein.'),
+      fail: say('ज़रूर! आप कितने पैसे भेजना चाहते हैं?'),
+    },
+  },
+  {
+    id: 18,
+    title: 'English in (with Indian names and a city): reply stays English',
+    history: [user('Hi, I want to send money to my mom Priya in Mumbai')],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        textAvoids(r, ROMAN_HINDI, 'switched to Hinglish for an English message'),
+      ),
+    recorded: {
+      pass: say("Happy to help! How much would you like to send to Priya, and what's her WhatsApp number with country code?"),
+      fail: say('Namaste! Aap Priya ji ko kitna bhejna chahte hain?'),
     },
   },
 ];

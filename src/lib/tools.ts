@@ -1,4 +1,5 @@
 import { assertLegsUsable, legsProvenance, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
+import { feeTierCount } from './fee-tier';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -1585,7 +1586,7 @@ async function getQuoteTool(
  */
 export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): Promise<QuoteTypedResult> {
   try {
-    const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
+    const transferCount = await feeTierCount(ctx.store, ctx.partnerId, ctx.phone);
     const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxAsOf } =
       await resolveCurrencyAndRates(ctx, input.sourceCurrency, input.destinationCountry);
 
@@ -4066,7 +4067,7 @@ export async function prepareSendDraft(
   // blocked attempt is recorded with real figures.
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.partnerId, ctx.phone);
   try {
-    const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
+    const transferCount = await feeTierCount(ctx.store, ctx.partnerId, ctx.phone);
     let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd, quoteCeilingUsd(limits));
 
     // Best-rate routing (default tenant only): the card, the draft, and the

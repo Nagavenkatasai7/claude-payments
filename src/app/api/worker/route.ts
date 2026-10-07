@@ -7,7 +7,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { amlSweep, amlRedis, type AmlSweepResult } from '@/lib/aml-sweep';
-import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
+import { recheckFailedFx, sweepFxHealth, sweepStaleRates, type FxRecheckRedis } from '@/lib/rate-staleness';
 import { escalateStuckPaid } from '@/lib/stale-money';
 import { deployErrorWatch } from '@/lib/deploy-error-watch';
 import { getRedis } from '@/lib/redis';
@@ -19,6 +19,7 @@ import {
   readLastCronAt,
   recordCronRun,
   shouldProbeFx,
+  shouldRecheckFx,
   sweepDrainGap,
   type CronQuietResult,
   type DrainGapResult,
@@ -107,6 +108,16 @@ const LEASE_MARK_SLACK_MS = 5_000;
 // the last minute (a poke racing this drain) keep one re-check.
 const TRIM_LAG_MS = 60_000;
 
+/** The FX re-check list's Redis client, or null when it cannot be built (KV env missing). */
+function fxRecheckRedis(): FxRecheckRedis | null {
+  try {
+    return cadenceRedis();
+  } catch (err) {
+    logError('worker.fx-recheck-client', err);
+    return null;
+  }
+}
+
 async function run(req: NextRequest): Promise<NextResponse> {
   // The platform's kill clock starts at invocation, not after the sweeps —
   // hardStopAt below must be derived from THIS instant.
@@ -141,6 +152,22 @@ async function run(req: NextRequest): Promise<NextResponse> {
   } catch (err) {
     logError('worker.gate-client', err);
   }
+  // FX re-check (Oct 6 alerts): every 5th cron minute, re-probe only the
+  // currencies the last FX probe could not refresh, BEFORE the gate. Nothing
+  // listed ⇒ one Redis GET (no Neon). A new alert marks the gate due, so this
+  // same tick runs full and drains it. Fail-open: a throw never blocks the run.
+  if (shouldRecheckFx(source, now)) {
+    const recheck = fxRecheckRedis();
+    if (recheck) {
+      try {
+        const alerted = await recheckFailedFx(getDb, recheck);
+        if (alerted > 0 && gate) await markDue(gate, now.getTime());
+      } catch (err) {
+        logError('worker.fx-recheck', err);
+      }
+    }
+  }
+
   if (source !== 'poke' && gate && !(source === 'cron' && isBackstopMinute(now))) {
     let gated = false;
     try {
@@ -279,7 +306,8 @@ async function run(req: NextRequest): Promise<NextResponse> {
   }
 
   // Platform FX health (Task 9, R9): at most one combined ops alert per
-  // severity (UNAVAILABLE / DEGRADED ≥ 15 min) per hour. shouldProbeFx
+  // severity (UNAVAILABLE / DEGRADED ≥ 45 min) per hour. The currencies it
+  // could not refresh go to the FX re-check list (see the re-check above). shouldProbeFx
   // (src/lib/worker-cadence.ts): the heartbeat GET whenever it runs full, the
   // per-minute cron only on the :17/:47 backstop minute (partner-demo R4),
   // never a POST poke (src/lib/outbox.ts) — during an outage every poke (or
@@ -290,7 +318,8 @@ async function run(req: NextRequest): Promise<NextResponse> {
   let fxHealth = 0;
   if (shouldProbeFx(source, now)) {
     try {
-      fxHealth = await sweepFxHealth(deps.db);
+      const recheck = fxRecheckRedis();
+      fxHealth = await sweepFxHealth(deps.db, undefined, undefined, recheck ? { recheck } : {});
     } catch (err) {
       logError('worker.fx-sweep', err);
     }

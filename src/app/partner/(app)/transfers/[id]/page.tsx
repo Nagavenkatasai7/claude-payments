@@ -23,6 +23,7 @@ import {
 } from '@/lib/partner-transfers';
 import { maskPhoneLast4 } from '@/lib/mask';
 import { payoutMethodLabel } from '@/lib/payout-format';
+import { purposeView } from '@/lib/purpose-codes';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { logWarn } from '@/lib/log';
 import { t } from '@/lib/i18n';
@@ -43,6 +44,7 @@ import { IssueRefundDialog } from './issue-refund-dialog';
 import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
+import { PartnerAmlExplain } from './aml-explain';
 
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
@@ -137,6 +139,8 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const test = (transfer.environment ?? 'live') === 'test';
   const currency = transfer.sourceCurrency ?? 'USD';
   const destination = transfer.payoutDestination.startsWith('****') ? transfer.payoutDestination : '****';
+  // A3: the stated purpose and, where one exists, the UNCONFIRMED suggested RBI code (staff/partner only).
+  const purpose = purposeView(transfer.purpose);
   const ops = PARTNER_OPS.roles.includes(ctx.role);
   const caps = ops ? revealCapabilities(revealViewer(ctx, await mfaEnrolled(ctx.username))) : { identity: false, destination: false };
   // An existing customer row in THIS tenant (admin and agent only): the sender-name reveal and the
@@ -221,6 +225,18 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 {shown(destination, 'payout_destination', t('partner.transfers.destination'), caps.destination && destination !== '****')}
               </span>
             </Row>
+            {purpose ? (
+              <Row label={t('partner.transfers.purpose')}>
+                <span className="inline-flex flex-col items-end gap-0.5">
+                  <span>{purpose.label}</span>
+                  {purpose.suggestedCode ? (
+                    <span className="text-[13px] text-ds-ink-muted">
+                      {t('partner.transfers.purposeSuggestedCode', { code: purpose.suggestedCode })}
+                    </span>
+                  ) : null}
+                </span>
+              </Row>
+            ) : null}
             <Row label={t('partner.transfers.settledVia')}>{t(settlementRouteKey(transfer, ctx.partnerId))}</Row>
             <Row label={t('partner.transfers.assignedTo')}>
               {assignee.kind === 'tenant'
@@ -266,6 +282,12 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 {t(releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
               </p>
             )}
+            {/* A4 (D5: admins only; the action re-gates): read-only AML explain. */}
+            {PARTNER_ADMIN.roles.includes(ctx.role) ? (
+              <div className="mt-4">
+                <PartnerAmlExplain transferId={transfer.id} />
+              </div>
+            ) : null}
           </Section>
         ) : null}
 

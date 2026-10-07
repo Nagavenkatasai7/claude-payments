@@ -14,6 +14,7 @@ import { RefundConfirmButton } from '../refund-confirm-button';
 import { SenderCell, FundingRefs } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
+import { purposeView } from '@/lib/purpose-codes';
 import type { RefundStatus } from '@/lib/types';
 
 // /admin-dashboard/transactions/[id] — read-only single-transfer detail. Surfaces
@@ -72,6 +73,8 @@ export default async function TransactionDetailPage({
     (t.status === 'paid' || t.status === 'delivered');
 
   const refundAmount = money(t.totalChargeSource ?? t.totalChargeUsd, t.sourceCurrency ?? 'USD');
+  // A3: the stated purpose; the RBI code is an UNCONFIRMED suggestion (staff only, never the customer).
+  const purpose = purposeView(t.purpose);
 
   return (
     <>
@@ -112,6 +115,16 @@ export default async function TransactionDetailPage({
                 <SenderCell name={senderName} phone={t.phone} partnerId={t.partnerId} />
               </Field>
               <Field label="Recipient">{t.recipientName}</Field>
+              {purpose && (
+                <Field label="Purpose">
+                  <span>{purpose.label}</span>
+                  {purpose.suggestedCode && (
+                    <span className="block text-xs text-muted-foreground">
+                      Suggested RBI code {purpose.suggestedCode} (not confirmed)
+                    </span>
+                  )}
+                </Field>
+              )}
               <Field label="Payout destination">
                 <span className="font-mono text-xs">{t.payoutDestination}</span>
               </Field>

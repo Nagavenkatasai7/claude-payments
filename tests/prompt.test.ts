@@ -913,3 +913,95 @@ describe('R6b: confidentiality rule', () => {
     for (const t of toolSchemasForChannel('whatsapp')) expect(CONFIDENTIAL_RULE).not.toContain(t.function.name);
   });
 });
+
+describe('A3: purpose detection section (demo mode + purpose.detect only)', () => {
+  const on = buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true });
+
+  it('is absent by default and when purposeDetect is false; the default prompt is unchanged', () => {
+    expect(SYSTEM_PROMPT).not.toContain('PURPOSE');
+    expect(buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: false })).toBe(SYSTEM_PROMPT);
+    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeDetect: false })).toBe(
+      buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+    );
+  });
+
+  it('with purposeDetect, names purpose, send_approve_picker, family_support and the Hinglish examples', () => {
+    const at = on.indexOf('\nPURPOSE\n');
+    expect(at).toBeGreaterThan(-1);
+    const section = on.slice(at);
+    for (const s of ['purpose', 'send_approve_picker', 'family_support', 'maa ki dawai', 'bhai ki fees', 'education']) {
+      expect(section, s).toContain(s);
+    }
+    // never guess, never ask only for the purpose
+    expect(section).toMatch(/never guess/i);
+    expect(section).toMatch(/never ask/i);
+  });
+
+  it('never mentions a code to the model (no RBI, no P1301)', () => {
+    // a word match: 'FORBIDDEN' elsewhere in the prompt contains the letters RBI
+    expect(on).not.toMatch(/\bRBI\b/);
+    expect(on).not.toContain('P1301');
+    const section = on.slice(on.indexOf('\nPURPOSE\n'));
+    expect(section).not.toContain('RBI');
+    expect(section).not.toMatch(/\bcode\b/i);
+  });
+
+  it('comes after ENHANCED VERIFICATION and before BRAND VOICE', () => {
+    const withPersona = buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', purposeDetect: true });
+    const ev = withPersona.indexOf('ENHANCED VERIFICATION');
+    const pur = withPersona.indexOf('\nPURPOSE\n');
+    const bv = withPersona.indexOf('BRAND VOICE');
+    expect(ev).toBeGreaterThan(-1);
+    expect(pur).toBeGreaterThan(ev);
+    expect(bv).toBeGreaterThan(pur);
+  });
+
+  it('is present in the gate-off variant too', () => {
+    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeDetect: true })).toContain('\nPURPOSE\n');
+  });
+});
+
+describe('A2: Hinglish replies (all customers, every variant)', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'ours' }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'delegated' }),
+    buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true }),
+  ];
+  const langLine = (p: string) => p.split('\n').find((l) => l.startsWith("- Reply in the customer's language")) ?? '';
+
+  it('Hindi in Devanagari or Roman letters gets Hinglish in Roman letters, never Devanagari', () => {
+    for (const p of variants) {
+      const line = langLine(p);
+      expect(line, 'the language rule is present').not.toBe('');
+      expect(line).toContain('Devanagari');
+      expect(line).toContain('Roman');
+      expect(line).toContain('Hinglish');
+      expect(line).toMatch(/never Devanagari/);
+    }
+  });
+
+  it('English stays English; names or places alone do not make a message Hindi; other languages are mirrored', () => {
+    for (const p of variants) {
+      const line = langLine(p);
+      expect(line).toMatch(/English → reply in English/);
+      expect(line).toMatch(/names or places alone/i);
+      expect(line).toContain('Spanish');
+      expect(line).toMatch(/switch with them/);
+    }
+  });
+
+  it('the prompt itself carries no Devanagari characters', () => {
+    for (const p of variants) expect(p).not.toMatch(/[\u0900-\u097F]/);
+  });
+
+  it('the faithful-translation and English-verbatim lines stay right after the rule', () => {
+    for (const p of variants) {
+      const lines = p.split('\n');
+      const at = lines.findIndex((l) => l.startsWith("- Reply in the customer's language"));
+      expect(lines[at + 1]).toMatch(/^- Tool text you are told to relay as-is/);
+      expect(lines[at + 2]).toMatch(/^- EXCEPTION \(translation parked for counsel\)/);
+    }
+  });
+});

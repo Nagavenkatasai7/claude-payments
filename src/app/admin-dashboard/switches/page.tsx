@@ -5,6 +5,7 @@ import { getDb } from '@/db/client';
 import { getPartnerStore } from '@/lib/partner-store';
 import { createFeatureFlagRepo, type FlagRow } from '@/db/repos/feature-flag-repo';
 import { FLAG_DEFINITIONS, FLAG_KEYS } from '@/lib/flags';
+import { demoModeLabel, demoModeSummary } from '@/lib/demo-mode';
 import { isFlagChangeMessage, scopeLabel } from '@/lib/flag-switch';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { STAFF_REASON_MIN, STAFF_REASON_MAX } from '@/lib/send-limits';
@@ -21,7 +22,7 @@ import {
 } from '@/components/ui/table';
 
 // /admin-dashboard/switches — kill switches (Release safety Batch 2 part A) and
-// feature switches (voice notes). Platform ADMIN only. Each switch can be on for
+// feature switches (voice notes, purpose detection). Platform ADMIN only. Each switch can be on for
 // every partner and corridor, for one partner, or for one corridor (destination
 // country), as far as its definition's `scopes` allow (the form offers only
 // those). Turning one on or off needs a reason; the action writes an audit row,
@@ -72,6 +73,10 @@ export default async function SwitchesPage({
             </div>
           </div>
         </div>
+
+        <p className="mb-4 text-sm text-muted-foreground" data-testid="demo-mode">
+          {demoModeLabel(demoModeSummary())}. Beta feature switches reach only demo-mode phones (DEMO_PHONES, set in Vercel).
+        </p>
 
         {error && (
           <Alert variant="destructive" className="mb-4" role="alert">

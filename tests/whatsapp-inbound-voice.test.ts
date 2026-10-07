@@ -54,6 +54,7 @@ beforeEach(async () => {
   pokeWorker.mockClear();
   vi.stubEnv('AZURE_SPEECH_KEY', 'fake-speech-key');
   vi.stubEnv('AZURE_SPEECH_REGION', 'eastus');
+  vi.stubEnv('DEMO_PHONES', '');
   vi.stubEnv('VOICE_NOTES_BETA_PHONES', `+${BETA}`);
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
@@ -112,6 +113,14 @@ describe('voice note → one agent.turn (switch on, beta sender, shared number)'
     await processInboundWebhook(webhook([voice('wamid.V4', OTHER)]), { routedPartnerId: null });
     expect((await outboxRows()).map((r) => r.kind)).toEqual(['agent.turn']);
   });
+
+  it("demo mode: DEMO_PHONES='*' with the legacy list unset creates the voice row", async () => {
+    await voiceSwitch(true);
+    vi.stubEnv('VOICE_NOTES_BETA_PHONES', '');
+    vi.stubEnv('DEMO_PHONES', '*');
+    await processInboundWebhook(webhook([voice('wamid.D1', OTHER)]), { routedPartnerId: null });
+    expect((await outboxRows()).map((r) => r.kind)).toEqual(['agent.turn']);
+  });
 });
 
 describe('everyone else gets MEDIA_REPLY byte for byte', () => {
@@ -149,6 +158,13 @@ describe('everyone else gets MEDIA_REPLY byte for byte', () => {
     await voiceSwitch(true);
     await processInboundWebhook(webhook([voice('wamid.P1')]), { routedPartnerId: 'acme' });
     expect(await outboxRows()).toEqual([mediaReplyRow('wamid.P1', MEDIA_REPLY, BETA, { partnerId: 'acme' })]);
+  });
+
+  it("a partner's own number still gets MEDIA_REPLY with DEMO_PHONES='*' (demo mode never widens voice past the shared number)", async () => {
+    await voiceSwitch(true);
+    vi.stubEnv('DEMO_PHONES', '*');
+    await processInboundWebhook(webhook([voice('wamid.P2', OTHER)]), { routedPartnerId: 'acme' });
+    expect(await outboxRows()).toEqual([mediaReplyRow('wamid.P2', MEDIA_REPLY, OTHER, { partnerId: 'acme' })]);
   });
 
   it('an opted-out beta sender gets only the opted-out reminder', async () => {

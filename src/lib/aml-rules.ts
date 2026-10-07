@@ -54,13 +54,23 @@ const AML_RULE_REASON: Record<AmlRule, string> = {
   cluster: 'many different senders paying one recipient',
 };
 
+/** A4: the closed rule list (an `aml.alert` row's meta.rule is checked against it). */
+export function isAmlRule(v: unknown): v is AmlRule {
+  return typeof v === 'string' && Object.hasOwn(AML_RULE_REASON, v);
+}
+
+/** A4: the plain-English meaning of a rule (staff text; shared with the AML explain copilot). */
+export function amlRuleReason(rule: AmlRule): string {
+  return AML_RULE_REASON[rule];
+}
+
 /**
  * The staff alert text for one hit (2026-10-03). Ids only, never a name, phone
  * or amount: the alert goes to the ops phone and the email/webhook mirrors.
  * Keeps the rule code for searching; says what it means for whoever reads it.
  */
 export function amlAlertMessage(rule: AmlRule, transferId: string): string {
-  return `AML review needed: ${AML_RULE_REASON[rule]} on transfer ${transferId} (rule ${rule}). Review it in the admin dashboard.`;
+  return `AML review needed: ${amlRuleReason(rule)} on transfer ${transferId} (rule ${rule}). Review it in the admin dashboard.`;
 }
 
 export interface AmlHit {

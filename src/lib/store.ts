@@ -29,6 +29,12 @@ import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride,
  */
 export interface SenderLedgerOps {
   totals(now?: Date): Promise<SenderTotals>;
+  /**
+   * A5: the fee-tier count (getTransferCount's query: live rows only, blocked
+   * excluded) read under the lock, so two concurrent first transfers cannot
+   * both be priced free.
+   */
+  transferCount(): Promise<number>;
   getTransfer(id: string): Promise<Transfer | null>;
   /** Program-Fix 14 PR C: `screening` is the mint's evidence, stored on the new row (transfers.screening). */
   insertTransfer(t: Transfer, opts?: { screening?: ScreeningEvidence }): Promise<void>;
@@ -427,6 +433,7 @@ export function createStore(redis: RedisLike, db: Db) {
             return fn({
               totals: (now: Date = new Date()) =>
                 repo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now)),
+              transferCount: () => repo.countByPhone(partnerId, phone),
               getTransfer: (id) => repo.getTransfer(id),
               insertTransfer: (t, opts) => repo.saveTransfer(t, opts),
               recordAudit: (e) => audit.record(e),

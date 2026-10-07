@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerRateRepo, type PartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { sweepStaleRates, sweepFxHealth, FX_PROBE_CURRENCIES } from '@/lib/rate-staleness';
+import {
+  sweepStaleRates, sweepFxHealth, recheckFailedFx, FX_PROBE_CURRENCIES, FX_RECHECK_KEY, type FxRecheckRedis,
+} from '@/lib/rate-staleness';
 import { RateUnavailableError, resetRateCacheForTests, type FxRates } from '@/lib/rate';
 import type { FxRatesFn } from '@/lib/corridor-demand';
 import type { Db } from '@/db/client';
@@ -124,8 +126,9 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
   type Bad = 'cache' | 'young-cache' | 'undated-cache' | 'down';
   const fxWith = (bad: Partial<Record<CurrencyCode, Bad>>): FxRatesFn => async (c) => {
     if (bad[c] === 'down') throw new RateUnavailableError('fetch_failed', c);
-    if (bad[c] === 'cache') return { ...live(), fetchedAt: Date.now() - 16 * MIN, source: 'cache' };
-    if (bad[c] === 'young-cache') return { ...live(), fetchedAt: Date.now() - 10 * MIN, source: 'cache' };
+    if (bad[c] === 'cache') return { ...live(), fetchedAt: Date.now() - 46 * MIN, source: 'cache' };
+    // Oct 6 alerts: one missed 30-min probe serves a ~30-min-old rate.
+    if (bad[c] === 'young-cache') return { ...live(), fetchedAt: Date.now() - 30 * MIN, source: 'cache' };
     if (bad[c] === 'undated-cache') return { toInr: 95.82, toUsd: 1, source: 'cache' };
     return live();
   };
@@ -149,7 +152,7 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     expect([...FX_PROBE_CURRENCIES].sort()).toEqual(['AUD', 'CAD', 'GBP', 'HKD', 'INR', 'MXN', 'NZD', 'SGD', 'USD']);
   });
 
-  it('refusing and degraded (>= 15 min) currencies raise ONE alert per severity, keyed on severity + hour bucket', async () => {
+  it('refusing and degraded (>= 45 min) currencies raise ONE alert per severity, keyed on severity + hour bucket', async () => {
     const now = new Date();
     const bucket = Math.floor(now.getTime() / 3_600_000);
     const fx = fxWith({ GBP: 'down', MXN: 'down', USD: 'cache', CAD: 'cache' });
@@ -168,7 +171,7 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     expect(degraded).toContain('CAD');
   });
 
-  it('a served cache younger than 15 min raises NO alert (the quote path is still pricing)', async () => {
+  it('a served cache younger than 45 min (one missed probe, ~30 min old) raises NO alert', async () => {
     expect(await sweepFxHealth(db, fxWith({ USD: 'young-cache', GBP: 'young-cache' }), new Date(), NO_STAGGER)).toBe(0);
     expect(await outboxRows()).toHaveLength(0);
   });
@@ -262,11 +265,11 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     expect(await outboxRows()).toHaveLength(0);
   });
 
-  it('default probe: a served cache >= 15 min old sends exactly ONE combined alert listing the currencies', async () => {
+  it('default probe: a served cache >= 45 min old sends exactly ONE combined alert listing the currencies', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => frankfurterOk(url)));
     expect(await sweepFxHealth(db, undefined, new Date(), NO_STAGGER)).toBe(0);
-    vi.advanceTimersByTime(16 * MIN);
+    vi.advanceTimersByTime(46 * MIN);
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError()));
     const now = new Date();
     expect(await sweepFxHealth(db, undefined, now, NO_STAGGER)).toBe(1);
@@ -277,7 +280,7 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     expect(rows[0].dedupe_key).toBe(`fx-health:DEGRADED:${Math.floor(now.getTime() / 3_600_000)}`);
     const [message] = await messages();
     for (const c of FX_PROBE_CURRENCIES) expect(message).toContain(c);
-    expect(message).toContain('16 min');
+    expect(message).toContain('46 min');
     expect(message).not.toMatch(/\d{7,}/);
   });
 
@@ -288,6 +291,125 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
     const rows = await outboxRows();
     expect(rows.map((r) => r.dedupe_key)).toEqual([`fx-health:UNAVAILABLE:${Math.floor(now.getTime() / 3_600_000)}`]);
     expect((await messages())[0]).toContain('USD (timeout)');
+  });
+});
+
+// Oct 6 alerts: a failed probe lists the currencies it could not refresh, and
+// the per-minute cron re-checks only those (every 5th minute) instead of
+// waiting 30 min for the next probe. Nothing listed ⇒ no fetch, no Neon.
+describe('FX re-check list (Oct 6 alerts)', () => {
+  const MIN = 60_000;
+  const live = (): FxRates => ({ toInr: 95.82, toUsd: 1, fetchedAt: Date.now(), source: 'live' });
+  const cacheAged = (min: number): FxRates => ({ ...live(), fetchedAt: Date.now() - min * MIN, source: 'cache' });
+  const NO_STAGGER = { staggerMs: 0 };
+  const fakeRecheck = (initial?: string) => {
+    const strings = new Map<string, string>();
+    if (initial !== undefined) strings.set(FX_RECHECK_KEY, initial);
+    const store = {
+      strings,
+      failing: false,
+      ttl: undefined as number | undefined,
+      async get(key: string) {
+        if (store.failing) throw new Error('upstash down');
+        return strings.get(key) ?? null;
+      },
+      async set(key: string, value: string, opts?: { ex?: number }) {
+        if (store.failing) throw new Error('upstash down');
+        strings.set(key, value);
+        store.ttl = opts?.ex;
+        return 'OK';
+      },
+    };
+    return store satisfies FxRecheckRedis;
+  };
+
+  it('a sweep lists every currency it served from cache or refused; all live clears the list', async () => {
+    const redis = fakeRecheck();
+    const fx: FxRatesFn = async (c) => {
+      if (c === 'GBP') return cacheAged(30);
+      if (c === 'MXN') throw new RateUnavailableError('timeout', c);
+      return live();
+    };
+    await sweepFxHealth(db, fx, new Date(), { ...NO_STAGGER, recheck: redis });
+    expect(redis.strings.get(FX_RECHECK_KEY)).toBe('GBP,MXN');
+    expect(redis.ttl).toBeGreaterThanOrEqual(30 * 60);
+    await sweepFxHealth(db, async () => live(), new Date(), { ...NO_STAGGER, recheck: redis });
+    expect(redis.strings.get(FX_RECHECK_KEY)).toBe('');
+  });
+
+  it('nothing listed: no fetch, no database, no write', async () => {
+    for (const initial of [undefined, '']) {
+      const redis = fakeRecheck(initial);
+      const fx = vi.fn<FxRatesFn>(async () => live());
+      const getDb = vi.fn(() => db);
+      expect(await recheckFailedFx(getDb, redis, fx, new Date(), NO_STAGGER)).toBe(0);
+      expect(fx).not.toHaveBeenCalled();
+      expect(getDb).not.toHaveBeenCalled();
+      expect(redis.ttl).toBeUndefined();
+    }
+  });
+
+  it('re-probes ONLY the listed currencies; a live answer clears them with no alert', async () => {
+    const redis = fakeRecheck('GBP,CAD');
+    const fx = vi.fn<FxRatesFn>(async () => live());
+    expect(await recheckFailedFx(() => db, redis, fx, new Date(), NO_STAGGER)).toBe(0);
+    expect(fx.mock.calls.map(([c]) => c).sort()).toEqual(['CAD', 'GBP']);
+    expect(redis.strings.get(FX_RECHECK_KEY)).toBe('');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('still failing under 45 min: stays listed, no alert', async () => {
+    const redis = fakeRecheck('GBP');
+    expect(await recheckFailedFx(() => db, redis, async () => cacheAged(35), new Date(), NO_STAGGER)).toBe(0);
+    expect(redis.strings.get(FX_RECHECK_KEY)).toBe('GBP');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('still failing at >= 45 min: ONE DEGRADED alert with the sweep\'s dedupe key', async () => {
+    const now = new Date();
+    const redis = fakeRecheck('GBP');
+    expect(await recheckFailedFx(() => db, redis, async () => cacheAged(50), now, NO_STAGGER)).toBe(1);
+    expect(await recheckFailedFx(() => db, redis, async () => cacheAged(55), now, NO_STAGGER)).toBe(0);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual([
+      `fx-health:DEGRADED:${Math.floor(now.getTime() / 3_600_000)}`,
+    ]);
+    expect(redis.strings.get(FX_RECHECK_KEY)).toBe('GBP');
+  });
+
+  it('a refusal alerts UNAVAILABLE at once', async () => {
+    const now = new Date();
+    const redis = fakeRecheck('GBP');
+    const fx: FxRatesFn = async (c) => { throw new RateUnavailableError('timeout', c); };
+    expect(await recheckFailedFx(() => db, redis, fx, now, NO_STAGGER)).toBe(1);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual([
+      `fx-health:UNAVAILABLE:${Math.floor(now.getTime() / 3_600_000)}`,
+    ]);
+  });
+
+  it('never dials a code outside the probe table (AED, junk)', async () => {
+    const redis = fakeRecheck('XXX,AED,GBP,../x');
+    const fx = vi.fn<FxRatesFn>(async () => live());
+    await recheckFailedFx(() => db, redis, fx, new Date(), NO_STAGGER);
+    expect(fx.mock.calls.map(([c]) => c)).toEqual(['GBP']);
+  });
+
+  it('skips the FIXING check (the :17/:47 sweep owns it)', async () => {
+    const redis = fakeRecheck('GBP');
+    const frozen: FxRatesFn = async () => ({ ...live(), asOf: '2026-01-02' });
+    expect(await recheckFailedFx(() => db, redis, frozen, new Date(), NO_STAGGER)).toBe(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('a Redis error is fail-open: no throw, nothing probed', async () => {
+    const redis = fakeRecheck('GBP');
+    redis.failing = true;
+    const fx = vi.fn<FxRatesFn>(async () => live());
+    expect(await recheckFailedFx(() => db, redis, fx, new Date(), NO_STAGGER)).toBe(0);
+    expect(fx).not.toHaveBeenCalled();
+    // ...and a sweep whose list write fails still alerts as before.
+    expect(await sweepFxHealth(db, async (c) => { throw new RateUnavailableError('timeout', c); }, new Date(), {
+      ...NO_STAGGER, recheck: redis,
+    })).toBe(1);
   });
 });
 

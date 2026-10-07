@@ -14,6 +14,7 @@ import { createTransferWithOutcome, TransferIdConflictError } from './transfer-c
 import { SendsPausedError, SENDS_PAUSED_RETRY_AFTER_SEC } from './flags';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isValidPhone, normalizePhone } from './phone';
+import { feeTierCount, isFirstTransferFree, STANDARD_FEE_TIER_COUNT } from './fee-tier';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -209,10 +210,37 @@ export function listCorridors(partner: Partner) {
 }
 
 // ── POST /quote ───────────────────────────────────────────────────────────
+
+/**
+ * A5: the preview's fee-tier count. An absent or invalid phone is the standard
+ * tier (never a 400: sender.phone stays optional on /quote); a store failure
+ * is the standard tier too (logged, never a 500).
+ */
+async function previewFeeTierCount(deps: PartnerApiDeps, partnerId: PartnerId, phone: string): Promise<number> {
+  if (!isValidPhone(phone)) return STANDARD_FEE_TIER_COUNT;
+  try {
+    return await feeTierCount(deps.store, partnerId, phone);
+  } catch (e) {
+    logWarn('partner_api.quote_fee_tier', e, { partnerId });
+    return STANDARD_FEE_TIER_COUNT;
+  }
+}
+
+export interface CreateQuoteOptions {
+  /**
+   * A5 security review: read the sender's fee tier only for a key that can
+   * also mint (transactions:write). Such a key already learns the tier from a
+   * mint's fee; a quote-only key gets the standard tier, so /quote is never a
+   * free, unaudited "is this phone a customer" check. Default false.
+   */
+  senderFeeTier?: boolean;
+}
+
 export async function createQuote(
   deps: PartnerApiDeps,
   partner: Partner,
   body: Record<string, unknown>,
+  opts: CreateQuoteOptions = {},
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
@@ -244,10 +272,17 @@ export async function createQuote(
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getDestinationRates(destinationCurrency);
     assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
-    // transferCount drives the fee tier; a partner-API quote uses standard pricing.
+    // A5: the fee tier the mint will price. A valid sender.phone (normalized
+    // exactly like createTransaction) reads this tenant's live, non-blocked
+    // count, so a new sender sees the free first transfer the mint gives;
+    // without one (or on a read failure) the standard fee is shown — a safe
+    // over-quote. The preview is not binding: the transaction's fee is final.
+    const transferCount = opts.senderFeeTier
+      ? await previewFeeTierCount(deps, partner.id, quoteSenderPhone)
+      : STANDARD_FEE_TIER_COUNT;
     // Fix 16b: the preview has no customer, so its ceiling is the PARTNER-level
     // effective max; the mint itself applies any customer override.
-    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(resolveEffectiveSendLimits(partner, null)));
+    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(resolveEffectiveSendLimits(partner, null)));
     return ok(200, {
       amount_source: q.amountSource,
       source_currency: sourceCurrency,
@@ -256,6 +291,7 @@ export async function createQuote(
       amount_destination: q.amountInr,
       destination_currency: destinationCurrency,
       fx_rate: q.fxRate,
+      first_transfer_free: isFirstTransferFree(transferCount), // A5 (additive)
     });
   } catch (e) {
     // Task 9: the FX provider is down / beyond the ceiling ⇒ 503 (retryable).

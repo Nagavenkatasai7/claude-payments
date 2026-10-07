@@ -257,7 +257,11 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
   // The approval card and the pay page both render from draft.quote; the mint
   // must record those exact figures, not a re-quote from current state.
 
-  it('U7: "first transfer free" survives an interleaved mint — finalized transfer keeps feeUsd 0', async () => {
+  // A5 (owner-approved): the free first transfer is decided under the sender
+  // lock. A card that promised it is no longer honoured once the sender has a
+  // transfer: the mint refuses as the existing stale quote, mints nothing, and
+  // the customer asks for a fresh quote.
+  it('A5: a "first transfer free" card after an interleaved mint is refused as an expired quote — nothing minted', async () => {
     const stores = await buildStores();
     const draftId = await makeDraft(stores, 200); // card showed quote.feeUsd 0 (first-transfer-free)
 
@@ -278,13 +282,9 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
     expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
 
     const result = await finalizeDraftPayment(stores, draftId);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unexpected');
-    const saved = await stores.store.getTransfer(result.transferId);
-    expect(saved?.feeUsd).toBe(0);                  // the card's promise…
-    expect(saved?.amountUsd).toBe(200);
-    expect(saved?.totalChargeUsd).toBe(200);        // …not the re-quoted 201.99
-    expect(saved?.totalChargeUsd).toBe(saved?.amountUsd);
+    expect(result).toEqual({ ok: false, error: 'fx_unavailable', quoteExpired: true });
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1); // nothing minted
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();      // the draft is not consumed
   });
 
   it('U7: FX drift between card and pay — the minted row carries the DRAFT fxRate and amountInr', async () => {
@@ -382,12 +382,13 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
       sourceCurrency: 'USD',
       fundingMethod: 'bank_transfer',
       // The card quoted the WINNING rate 86 (live mid is 85 via the fetch stub).
-      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200 },
+      // A5: with the standard fee (a $0 first-transfer card would now be stale).
+      quote: { feeUsd: 1.99, fxRate: 86, amountInr: 17_200 },
       settlementPartnerId: 'rail-partner-x',
     });
 
     // An unrelated transfer lands between card and pay — the draft must STILL
-    // win on fee AND rate AND route (the intervening-transfer U7 case).
+    // win on rate AND route (the intervening-transfer U7 case).
     await createTransfer(stores.store, stores.partnerStore, stores.monthlyVolumeStore, {
       phone: PHONE,
       recipientName: 'Uncle',
@@ -408,7 +409,7 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
     expect(saved?.settlementPartnerId).toBe('rail-partner-x'); // the winning rail
     expect(saved?.fxRate).toBe(86);                            // at the rate it offered
     expect(saved?.amountInr).toBe(17_200);
-    expect(saved?.feeUsd).toBe(0);                             // first-transfer-free promise honored
+    expect(saved?.feeUsd).toBe(1.99);                          // the card's fee, verbatim
     expect(saved?.partnerId).toBe('default');                  // ownership unchanged
   });
 

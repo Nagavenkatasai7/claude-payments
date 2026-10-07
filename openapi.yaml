@@ -136,7 +136,12 @@ paths:
       description: >
         FX and fee quote at platform mid-market. Nothing is stored. Pass
         destination_country (resolved to its home currency) or destination_currency
-        (default INR); destination_country wins when both are present.
+        (default INR); destination_country wins when both are present. Pass
+        sender.phone to price the sender's first transfer at no fee
+        (first_transfer_free: true); this needs a key that also holds
+        transactions:write. Without it, or with an invalid number, the
+        standard fee is shown. The quote is not binding: the transaction's fee is
+        final. Sandbox transfers never use up the free first transfer.
       tags: [Quotes]
       x-smartremit-scope: quote
       x-smartremit-sandbox: true
@@ -148,9 +153,10 @@ paths:
               amount_source: 200
               source_currency: USD
               destination_country: IN
+              sender: { phone: '12025550123' }
       responses:
         '200':
-          description: The quote.
+          description: The quote. first_transfer_free is true when the fee is waived as the sender's first transfer.
           content:
             application/json:
               example:
@@ -161,6 +167,7 @@ paths:
                 amount_destination: 17040
                 destination_currency: INR
                 fx_rate: 85.2
+                first_transfer_free: false
         '400': { description: 'Invalid request: amount_source is not a positive number, destination_country or destination_currency is not supported, or the amount is outside the allowed range.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks quote, or the partner is not active.' }

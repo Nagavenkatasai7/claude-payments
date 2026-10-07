@@ -1,5 +1,6 @@
 import { MIN_USD } from './fx';
 import { PLATFORM_SEND_LIMITS } from './send-limits';
+import { PURPOSE_HINTS } from './purpose-codes';
 import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 
@@ -36,6 +37,28 @@ export interface SystemPromptBrand {
    * $2,999 per transfer).
    */
   limits?: SendLimits;
+  /**
+   * A3 purpose detection (Raj #17): the agent sets this per turn only for a
+   * demo-mode phone with the `purpose.detect` switch on. true ⇒ the PURPOSE
+   * section is appended after ENHANCED VERIFICATION. Default false, so the
+   * default prompt (SYSTEM_PROMPT) stays byte-for-byte what it was.
+   */
+  purposeDetect?: boolean;
+}
+
+/**
+ * A3: the PURPOSE section. Built from PURPOSE_HINTS; it never names a purpose
+ * code or the regulator (those are staff/partner-only suggestions).
+ */
+export function purposeSection(): string {
+  const examples = PURPOSE_HINTS.map(
+    (h) => `    ${h.examples.map((e) => `"${e}"`).join(', ')} → ${h.purpose}`,
+  ).join('\n');
+  return `PURPOSE
+- When the customer has already said why they are sending (in English, Hindi or Hinglish), pass the matching purpose on send_approve_picker. Examples:
+${examples}
+- Use only a reason the customer actually stated. Never guess a purpose from the recipient, the relationship or the amount; if they gave no reason, leave purpose out.
+- Never ask only for the purpose and never hold up a send for it. Do not repeat the purpose value back to the customer.`;
 }
 
 /**
@@ -88,7 +111,7 @@ export function buildSystemPrompt(
 Your job: guide the user through sending money in a warm, brief, WhatsApp-style conversation.
 
 LANGUAGE & LENGTH
-- Reply in the customer's language and register: English, Hindi, Hinglish, Spanish (for example a customer sending to Mexico), or any other language they write in. If they switch language, switch with them.
+- Reply in the customer's language. English → reply in English. Hindi, written in Devanagari script or in Roman letters (Hinglish) → reply in Hinglish: Hindi words in Roman (Latin) letters mixed with everyday English, never Devanagari script. Names or places alone (a recipient's name, a city) do not make a message Hindi. Spanish (for example a customer sending to Mexico) or any other language → reply in that language. If they switch language, switch with them.
 - Tool text you are told to relay as-is (reply_to_customer, reply_hint): relay it word for word, or, when the customer writes in another language, translate it faithfully: the same meaning, nothing added, dropped or softened, and every amount, currency, name, date and id (transfer_id, case_id) kept exactly as written.
 - EXCEPTION (translation parked for counsel): compliance-block text (a tool result with blocked: true) and recall or refund text from request_refund or open_recall_dispute results are relayed VERBATIM IN ENGLISH, never translated. In the customer's language you may add ONE short line before it saying the following is required wording in English.
 - Keep every reply at most 600 characters and at most 6 lines. Only relayed tool text, a bill's line items, and a list the customer asked for (such as the supported countries) may run longer. Use emojis sparingly.
@@ -311,9 +334,10 @@ ENHANCED VERIFICATION
   Pass them as source_of_funds and occupation. Explain briefly: "For transfers totaling $3,000 or more this month we're required to ask a couple of quick questions." Map the user's wording to the closest option; never store or repeat back the values. If edd_required is false, NEVER ask these.`;
   // Program-Fix 38: the partner-written voice is framed as tone only and is
   // never the last thing the model reads — the fixed VOICE_TRAILER follows it.
+  const withPurpose = b.purposeDetect ? `${base}\n\n${purposeSection()}` : base;
   return persona
-    ? `${base}\n\nBRAND VOICE (tone only)\n- ${persona}\n${VOICE_TRAILER}`
-    : base;
+    ? `${withPurpose}\n\nBRAND VOICE (tone only)\n- ${persona}\n${VOICE_TRAILER}`
+    : withPurpose;
 }
 
 // Back-compat default export — the SmartRemit-branded prompt, byte-for-byte the

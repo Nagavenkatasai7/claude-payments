@@ -432,6 +432,14 @@ export const env = {
       .map((p) => p.trim())
       .filter((p) => p !== '');
   },
+  // Demo mode (src/lib/demo-mode.ts): the ONE list of phones that see new beta
+  // features. '*' alone ⇒ everyone; empty ⇒ falls back to VOICE_NOTES_BETA_PHONES.
+  get demoPhones(): string[] {
+    return trimmedEnv('DEMO_PHONES')
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => p !== '');
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

@@ -17,6 +17,8 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import type { ChatMessage, TurnContext } from '@/lib/types';
 import type { Db } from '@/db/client';
+import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { invalidateFlagCache } from '@/lib/flags';
 
 // Best-rate routing (B2): the agent wires the LIVE route selector into the
 // tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
@@ -2020,5 +2022,84 @@ describe('WhatsApp formatting: only the WhatsApp channel converts CommonMark', (
   it('the web channel reply is not converted', async () => {
     const reply = await build('web').runAgentTurn(PHONE, 'quote $100');
     expect(reply).toBe(MD);
+  });
+});
+
+// A3 purpose detection: the PURPOSE prompt section rides a turn only when the
+// sender is a demo-mode phone AND the purpose.detect switch is on for the
+// routed tenant. The switch is read at most once per turn, and never for a
+// sender outside demo mode.
+describe('A3: purpose detection gate (demo mode AND purpose.detect)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function purposeSwitch(on: boolean) {
+    await createFeatureFlagRepo(db).upsert({ key: 'purpose.detect', scopeType: 'global', scopeId: '', enabled: on, reason: 'purpose detect test', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+  }
+
+  async function systemPromptFor(phone: string) {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const flagSpy = vi.spyOn(store, 'isFlagOn');
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async (messages) => {
+        seen.push(messages);
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'validate_phone', arguments: JSON.stringify({ phone: '15550000002' }) } }],
+          };
+        }
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn(phone, 'maa ki dawai ke liye 200 bhejna hai', { isNewConversation: false });
+    const prompts = seen.map((msgs) => String(msgs.find((m) => m.role === 'system')?.content ?? ''));
+    const purposeReads = flagSpy.mock.calls.filter((c) => c[0] === 'purpose.detect');
+    return { prompts, purposeReads };
+  }
+
+  it('demo phone AND switch on ⇒ the PURPOSE section on every round, switch read once with the tenant', async () => {
+    vi.stubEnv('DEMO_PHONES', PHONE);
+    await purposeSwitch(true);
+    const { prompts, purposeReads } = await systemPromptFor(PHONE);
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    for (const p of prompts) {
+      expect(p).toContain('\nPURPOSE\n');
+      expect(p).not.toContain('P1301');
+    }
+    expect(purposeReads).toEqual([['purpose.detect', { partnerId: 'default' }]]);
+  });
+
+  it('demo phone, switch off ⇒ no section', async () => {
+    vi.stubEnv('DEMO_PHONES', PHONE);
+    await purposeSwitch(false);
+    const { prompts } = await systemPromptFor(PHONE);
+    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
+  });
+
+  it('switch on, phone not in demo mode ⇒ no section and no switch read', async () => {
+    vi.stubEnv('DEMO_PHONES', '15550000009');
+    await purposeSwitch(true);
+    const { prompts, purposeReads } = await systemPromptFor(PHONE);
+    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
+    expect(purposeReads).toEqual([]);
+  });
+
+  it('both off ⇒ no section, the default prompt', async () => {
+    vi.stubEnv('DEMO_PHONES', '');
+    vi.stubEnv('VOICE_NOTES_BETA_PHONES', '');
+    const { prompts, purposeReads } = await systemPromptFor(PHONE);
+    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
+    expect(purposeReads).toEqual([]);
   });
 });

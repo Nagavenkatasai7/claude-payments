@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   redis: null as unknown as ReturnType<typeof import('./helpers').fakeRedis>,
   scopesSeen: [] as string[],
   modesSeen: [] as string[],
+  quoteOpts: [] as unknown[],
   svcCalls: 0,
 }));
 
@@ -69,7 +70,7 @@ vi.mock('@/lib/partner-api-service', () => {
       h.svcCalls++;
       return { corridors: [] };
     },
-    createQuote: async () => ok(),
+    createQuote: async (_d: unknown, _p: unknown, _b: unknown, o: unknown) => (h.quoteOpts.push(o), ok()),
     validateBeneficiary: () => ok(),
     createBeneficiary: async () => ok(),
     createTransaction: async (d: { keyMode: string }) => (h.modesSeen.push(d.keyMode), ok()),
@@ -233,6 +234,19 @@ describe('partner API route scopes (Program-Fix 44 P1)', () => {
     const c = ROUTES.find((r) => r.route === 'corridors')!;
     expect((await call(q, narrow)).status).toBe(200);
     expect((await call(c, narrow)).status).toBe(403);
+  });
+
+  it('A5: /quote reads the sender fee tier only for a key holding transactions:write', async () => {
+    const { createPartnerApiKeyStore } = await import('@/lib/partner-api-key');
+    const narrow = (await createPartnerApiKeyStore(h.db, { pepper: PEPPER }).issue('acme')).plaintext;
+    const hash = createHash('sha256').update(`${narrow}${PEPPER}`).digest('hex');
+    await h.db.update(apiKeys).set({ scopes: ['quote'] }).where(eq(apiKeys.keyHash, hash));
+    const q = ROUTES.find((r) => r.route === 'quote')!;
+    h.quoteOpts = [];
+    await call(q, narrow);
+    await call(q, liveKey);
+    await call(q, testKey);
+    expect(h.quoteOpts).toEqual([{ senderFeeTier: false }, { senderFeeTier: true }, { senderFeeTier: true }]);
   });
 
   it('PINNED: a pre-fix legacy key (pk_<id> + sr_live_) passes ALL 11 handlers', async () => {

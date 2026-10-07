@@ -21,6 +21,7 @@ import {
 } from '../actions';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { ReviewCopilot } from './review-copilot';
+import { AmlExplain } from './aml-explain';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -261,6 +262,8 @@ export default async function CompliancePage() {
                         Release / Reject actions above stay the deterministic,
                         audited decision — the AI never executes. */}
                     <ReviewCopilot transferId={t.id} />
+                    {/* A4: read-only AML explain (facts + AI narrative); never decides. */}
+                    <AmlExplain transferId={t.id} />
                   </div>,
                 ],
               }))}
@@ -337,12 +340,15 @@ export default async function CompliancePage() {
                       <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />
                     ) : '—',
                     new Date(a.at).toLocaleString(),
-                    <form key="review" action={reviewAmlAlertAction} className="flex flex-wrap items-center gap-1">
-                      <input type="hidden" name="alertId" value={a.id} />
-                      <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                      <Button type="submit" size="sm" variant="outline" name="disposition" value="no_action">No action</Button>
-                      <Button type="submit" size="sm" name="disposition" value="escalated">Escalate</Button>
-                    </form>,
+                    <div key="review">
+                      <form action={reviewAmlAlertAction} className="flex flex-wrap items-center gap-1">
+                        <input type="hidden" name="alertId" value={a.id} />
+                        <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                        <Button type="submit" size="sm" variant="outline" name="disposition" value="no_action">No action</Button>
+                        <Button type="submit" size="sm" name="disposition" value="escalated">Escalate</Button>
+                      </form>
+                      {a.subjectId ? <AmlExplain transferId={a.subjectId} /> : null}
+                    </div>,
                   ],
                 };
               })}
