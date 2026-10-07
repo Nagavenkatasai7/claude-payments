@@ -3,7 +3,7 @@ import { createAuditRepo, type AuditRow } from '@/db/repos/aux-repos';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { resolveCorridorRules } from '@/lib/compliance-config';
-import { amlHoldHit } from '@/lib/aml-hold';
+import { AML_HOLD_REASON, amlHoldHit } from '@/lib/aml-hold';
 import { logWarn } from '@/lib/log';
 import type { AmlHit, AmlRuleConfig } from '@/lib/aml-rules';
 import type { PartnerId, Transfer } from '@/lib/types';
@@ -11,8 +11,8 @@ import type { PartnerId, Transfer } from '@/lib/types';
 // A4: the READS behind the AML explain copilot, shared by the platform route
 // (/api/copilot/aml-explain) and the partner action. Read-only: the transfer's
 // aml.alert rows (tenant-pinned), its corridor's AML thresholds, and, for a
-// held row with no alert yet (the sweep writes alerts >= 2 min after the
-// mint), the in-mint rules re-run on the sender's ledger.
+// row the AML hold held with no alert yet (the sweep writes alerts >= 2 min
+// after the mint), the in-mint rules re-run on the sender's ledger.
 
 const DAY_MS = 86_400_000;
 
@@ -40,7 +40,9 @@ export async function loadAmlExplainContext(
   const cfg: AmlRuleConfig = { ...rules.aml, largeAmountUsd: rules.largeAmountUsd };
 
   let recomputed: AmlHit | null = null;
-  if (eligible && alerts.length === 0) {
+  // Only a row the in-mint AML hold actually held: re-running the rules on a
+  // sanctions or identity hold would name a rule that never held it.
+  if (eligible && alerts.length === 0 && t.complianceReasons.includes(AML_HOLD_REASON)) {
     try {
       const prior = await createTransferRepo(db).senderAmlStats(
         t.partnerId, t.phone, { at: new Date(t.createdAt), id: t.id }, cfg.largeAmountUsd, cfg.band,

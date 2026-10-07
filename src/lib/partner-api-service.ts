@@ -226,10 +226,21 @@ async function previewFeeTierCount(deps: PartnerApiDeps, partnerId: PartnerId, p
   }
 }
 
+export interface CreateQuoteOptions {
+  /**
+   * A5 security review: read the sender's fee tier only for a key that can
+   * also mint (transactions:write). Such a key already learns the tier from a
+   * mint's fee; a quote-only key gets the standard tier, so /quote is never a
+   * free, unaudited "is this phone a customer" check. Default false.
+   */
+  senderFeeTier?: boolean;
+}
+
 export async function createQuote(
   deps: PartnerApiDeps,
   partner: Partner,
   body: Record<string, unknown>,
+  opts: CreateQuoteOptions = {},
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
@@ -266,7 +277,9 @@ export async function createQuote(
     // count, so a new sender sees the free first transfer the mint gives;
     // without one (or on a read failure) the standard fee is shown — a safe
     // over-quote. The preview is not binding: the transaction's fee is final.
-    const transferCount = await previewFeeTierCount(deps, partner.id, quoteSenderPhone);
+    const transferCount = opts.senderFeeTier
+      ? await previewFeeTierCount(deps, partner.id, quoteSenderPhone)
+      : STANDARD_FEE_TIER_COUNT;
     // Fix 16b: the preview has no customer, so its ceiling is the PARTNER-level
     // effective max; the mint itself applies any customer override.
     const q = quote(amount, sourceCurrency, rates, 'bank_transfer', transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(resolveEffectiveSendLimits(partner, null)));

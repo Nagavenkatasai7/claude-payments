@@ -1754,7 +1754,7 @@ export const en = {
   'partner.amlExplain.next.verify_recipient_relationship': 'Verify the recipient relationship',
   'partner.amlExplain.next.escalate': 'Escalate',
   'partner.amlExplain.next.keep_on_hold': 'Keep on hold',
-  'partner.amlExplain.next.close_alert_no_action': 'Close the alert (no action)',
+  'partner.amlExplain.next.close_alert_no_action': 'You may close the alert if every check is clear',
   'partner.kyc.decisionTitle': 'KYC decision',
   'partner.kyc.decisionSub': 'You are responsible for KYC on your customers. Each decision is kept in the audit log.',
   'partner.kyc.approve.trigger': 'Approve',
