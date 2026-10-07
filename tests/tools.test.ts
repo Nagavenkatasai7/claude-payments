@@ -1931,6 +1931,51 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
     expect(r.sent).toBeUndefined();
     expect(r.payout_destination).toBe('****@okhdfc'); // fix 5: masked — the follow-up card rehydrates server-side
   });
+
+  // A3 follow-up: "send Mom again, for her medicine" goes through repeat_transfer,
+  // so the stated purpose must reach the new draft like it does on send_approve_picker.
+  it('carries a stated purpose into the draft; an unknown value is dropped; none ⇒ no purpose', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedPastTransfer(ctx);
+    const withPurpose = await executeTool('repeat_transfer', { recipient_phone: '919876543210', purpose: 'medical' }, ctx);
+    expect((await ctx.draftStore.consumeDraft(withPurpose.draft_id as string))?.purpose).toBe('medical');
+    const bogus = await executeTool('repeat_transfer', { recipient_phone: '919876543210', purpose: 'P1301' }, ctx);
+    expect((await ctx.draftStore.consumeDraft(bogus.draft_id as string))?.purpose).toBeUndefined();
+    const none = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect((await ctx.draftStore.consumeDraft(none.draft_id as string))?.purpose).toBeUndefined();
+  });
+
+  it('never copies the past transfer\'s purpose into the repeat', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await runLegacyCreateTransferForTests({
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer', purpose: 'education',
+    }, ctx);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.purpose).toBeUndefined();
+  });
+
+  it('needs_edd hands the stated purpose back for the follow-up send_approve_picker', async () => {
+    pinMidMonth();
+    const ctx = await buildCtx(fakeRedis());
+    await seedPastTransfer(ctx);
+    await seedMonthSpend(ctx.phone, 3000);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100, purpose: 'medical' }, ctx);
+    expect(r.needs_edd).toBe(true);
+    expect(r.purpose).toBe('medical');
+    const plain = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
+    expect(plain.purpose).toBeUndefined();
+  });
+
+  it('the repeat_transfer schema offers the same purpose enum as send_approve_picker', () => {
+    const enumOf = (name: string) =>
+      (toolSchemas.find((t) => t.function.name === name)!.function.parameters as { properties: Record<string, { enum?: string[] }> })
+        .properties.purpose?.enum;
+    expect(enumOf('repeat_transfer')).toEqual(enumOf('send_approve_picker'));
+  });
 });
 
 describe('any-to-any corridors — destination_country threading', () => {

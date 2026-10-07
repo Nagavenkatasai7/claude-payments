@@ -929,7 +929,7 @@ describe('A3: purpose detection section (demo mode + purpose.detect only)', () =
     const at = on.indexOf('\nPURPOSE\n');
     expect(at).toBeGreaterThan(-1);
     const section = on.slice(at);
-    for (const s of ['purpose', 'send_approve_picker', 'family_support', 'maa ki dawai', 'bhai ki fees', 'education']) {
+    for (const s of ['purpose', 'send_approve_picker', 'repeat_transfer', 'family_support', 'maa ki dawai', 'bhai ki fees', 'education']) {
       expect(section, s).toContain(s);
     }
     // never guess, never ask only for the purpose

@@ -20,6 +20,10 @@ import { TransferRows, toPartnerRow } from '../transfers/transfer-rows';
 import { AmlReviewForm } from './aml-review-form';
 import { PartnerAmlExplain } from '../transfers/[id]/aml-explain';
 
+// The AML Explain server action waits up to AML_EXPLAIN_TIMEOUT_MS (45 s) for
+// the model; a page-level maxDuration sets the limit for this page's actions.
+export const maxDuration = 60;
+
 export const metadata: Metadata = {
   title: t('partner.reviews.title'),
   robots: { index: false, follow: false },

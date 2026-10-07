@@ -115,16 +115,21 @@ export default async function TransactionDetailPage({
                 <SenderCell name={senderName} phone={t.phone} partnerId={t.partnerId} />
               </Field>
               <Field label="Recipient">{t.recipientName}</Field>
-              {purpose && (
-                <Field label="Purpose">
-                  <span>{purpose.label}</span>
-                  {purpose.suggestedCode && (
-                    <span className="block text-xs text-muted-foreground">
-                      Suggested RBI code {purpose.suggestedCode} (not confirmed)
-                    </span>
-                  )}
-                </Field>
-              )}
+              {/* A3: always shown, so "no purpose" reads as "Not stated", not as a missing feature. */}
+              <Field label="Purpose">
+                {purpose ? (
+                  <>
+                    <span>{purpose.label}</span>
+                    {purpose.suggestedCode && (
+                      <span className="block text-xs text-muted-foreground">
+                        Suggested RBI code {purpose.suggestedCode} (not confirmed)
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">Not stated</span>
+                )}
+              </Field>
               <Field label="Payout destination">
                 <span className="font-mono text-xs">{t.payoutDestination}</span>
               </Field>

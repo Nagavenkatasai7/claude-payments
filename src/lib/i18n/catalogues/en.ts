@@ -402,6 +402,7 @@ export const en = {
   'partner.transfers.destination': 'Paid to',
   'partner.transfers.purpose': 'Purpose',
   'partner.transfers.purposeSuggestedCode': 'Suggested RBI code {code} (not confirmed)',
+  'partner.transfers.purposeNotStated': 'Not stated',
   'partner.transfers.youSend': 'Amount sent',
   'partner.transfers.fee': 'Fee',
   'partner.transfers.total': 'Total charged',

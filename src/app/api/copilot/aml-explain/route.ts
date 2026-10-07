@@ -11,6 +11,9 @@ import { loadAmlExplainContext } from '@/lib/aml-explain-load';
 import { logWarn } from '@/lib/log';
 
 export const dynamic = 'force-dynamic';
+// The model call may take up to AML_EXPLAIN_TIMEOUT_MS (45 s); give the click room
+// (route segment config: node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/02-route-segment-config/maxDuration.md).
+export const maxDuration = 60;
 
 // /api/copilot/aml-explain — the AML "Explain" copilot (A4) for ONE transfer
 // that raised a behavioural AML alert or sits in review, on the compliance page.
