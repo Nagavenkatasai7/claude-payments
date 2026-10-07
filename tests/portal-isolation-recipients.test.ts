@@ -109,7 +109,7 @@ const audits = async (action?: string) =>
 const tombstoned = async (partnerId: string, sender: string, rp: string) =>
   (await db.select().from(recipientTombstones).where(and(eq(recipientTombstones.partnerId, partnerId), eq(recipientTombstones.senderPhone, sender), eq(recipientTombstones.recipientPhone, rp)))).length === 1;
 const addForm = (o: Record<string, string> = {}) =>
-  fd({ requestKey: newRequestKey(), name: 'New Person', recipientPhone: '+91 90000 00077', country: 'IN', accountNumber: NEW_ACCOUNT, ifsc: 'HDFC0001234', ...o });
+  fd({ requestKey: newRequestKey(), name: 'New Person', recipientPhone: '+91 90000 00077', country: 'IN', accountNumber: NEW_ACCOUNT, accountNumberConfirm: NEW_ACCOUNT, ifsc: 'HDFC0001234', ...o });
 async function listHtml() {
   return renderToStaticMarkup(await PortalRecipientsPage({ searchParams: Promise.resolve({}) }));
 }
@@ -297,7 +297,7 @@ describe('edit', () => {
     await signIn('pa');
     const rid = recipientRid('pa', PHONE, A_RP);
     await expectRedirect(
-      editRecipientAction(rid, init(), fd({ requestKey: newRequestKey(), name: 'Recipient PA', accountNumber: NEW_ACCOUNT, ifsc: 'ICIC0004321' })),
+      editRecipientAction(rid, init(), fd({ requestKey: newRequestKey(), name: 'Recipient PA', accountNumber: NEW_ACCOUNT, accountNumberConfirm: NEW_ACCOUNT, ifsc: 'ICIC0004321' })),
       '/portal/recipients?done=updated',
     );
     expect((await createRecipientRepo(db).getRecipient('pa', PHONE, A_RP))?.payoutDestination).toBe(`ICIC0004321 ${NEW_ACCOUNT}`);

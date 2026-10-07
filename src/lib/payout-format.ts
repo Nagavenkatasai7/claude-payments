@@ -258,6 +258,49 @@ export function maskAccountDisplay(dest: string): string {
   return l4 ? `****${l4}` : (dest ?? '');
 }
 
+// ── Re-enter the account number (Raj, 2026-10-07) ───────────────────────────
+//
+// The account box is typed hidden, so a second "re-enter" box catches a typo
+// before money goes to a wrong account. The confirm value is never composed
+// into the destination; it only has to match the account field. Separators
+// (space, hyphen, dot) and letter case (IBAN) do not count.
+
+export const ACCOUNT_CONFIRM_MISMATCH = 'Account numbers do not match.';
+export const ACCOUNT_CONFIRM_REQUIRED = 'Re-enter the account number.';
+
+/** The form key of the re-enter box for an account field. */
+export function accountConfirmKey(fieldKey: string): string {
+  return `${fieldKey}Confirm`;
+}
+
+/** The re-enter box label: "Re-enter account number", "Re-enter IBAN", "Re-enter CLABE". */
+export function accountConfirmLabel(fieldLabel: string): string {
+  return fieldLabel === ACCOUNT_FIELD.label ? 'Re-enter account number' : `Re-enter ${fieldLabel}`;
+}
+
+function accountCompareForm(v: string): string {
+  return (v ?? '').replace(/[\s.-]/g, '').toUpperCase();
+}
+
+/**
+ * Per-box errors, keyed by the confirm key, for every `isAccount` field whose
+ * re-entered value is blank or different. A blank account gives no error here:
+ * its own "required" error belongs to the account box (validatePayoutFields).
+ */
+export function accountConfirmErrors(country: CountryCode, fields: Record<string, string>): Record<string, string> {
+  const errors: Record<string, string> = {};
+  for (const def of BANK_FIELDS_BY_COUNTRY[country] ?? []) {
+    if (!def.isAccount) continue;
+    const account = accountCompareForm(fields[def.key] ?? '');
+    if (account === '') continue;
+    const key = accountConfirmKey(def.key);
+    const confirm = accountCompareForm(fields[key] ?? '');
+    if (confirm === '') errors[key] = ACCOUNT_CONFIRM_REQUIRED;
+    else if (confirm !== account) errors[key] = ACCOUNT_CONFIRM_MISMATCH;
+  }
+  return errors;
+}
+
 // ── Display placeholders are never payout accounts (fix 6 / ctx-01) ─────────
 //
 // Default ledger reads (mappers.rowToTransfer), the LLM-facing tool results
