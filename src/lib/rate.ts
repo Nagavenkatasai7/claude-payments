@@ -2,8 +2,14 @@ import type { CurrencyCode } from './types';
 import type { RedisLike } from './store';
 import { logError, logWarn } from './log';
 
-// rate.ts — the platform FX source: Frankfurter, which serves the ECB reference
-// rates (one fixing per TARGET business day).
+// rate.ts — the platform FX source: the ECB reference rates (one fixing per
+// TARGET business day). Two copies of the same fixing are read (Oct 7 2026
+// incident: Frankfurter v1 timed out for hours from Vercel):
+//   1. the ECB's own daily file (ECB_DAILY_URL) — one call carries every
+//      currency per EUR, so one fetch serves the whole corridor table;
+//   2. Frankfurter v1, which republishes that fixing — asked when the ECB file
+//      errors, or has not answered within ECB_HEDGE_MS.
+// Every rate carries the `provider` that served it (stamped on transfers).
 //
 // FAIL CLOSED (Phase 1 Task 9). A quoted rate becomes a BINDING payout
 // instruction (http-payment-provider.ts ships transfer.fxRate to the rail), so
@@ -28,14 +34,35 @@ export interface FxRates {
    *  is the last good rate (≤ FX_MAX_AGE_MS old); 'fallback' = the static
    *  display table, which fx.ts refuses unconditionally. */
   source?: FxSource;
-  /** The provider's fixing date (Frankfurter `date`, YYYY-MM-DD) — display only. */
+  /** The provider's fixing date (ECB `time` / Frankfurter `date`, YYYY-MM-DD) — display only. */
   asOf?: string;
+  /** Which source served this rate: ECB_PROVIDER_ID or FX_PROVIDER_ID (Frankfurter).
+   *  Optional so hand-built literals compile; getFxRates sets it on every fetch. */
+  provider?: string;
 }
 
 /** api.frankfurter.app 301-redirects every call here (live-03, verified 2026-09-21). */
 export const FRANKFURTER_BASE_URL = 'https://api.frankfurter.dev/v1';
-/** Step 0 FX-7: the provider id stamped on transfers.fx_provider for a platform rate. */
+/** Step 0 FX-7: the provider id stamped on transfers.fx_provider for a platform
+ *  rate Frankfurter served (and for drafts made before rates named a provider). */
 export const FX_PROVIDER_ID = 'frankfurter-v1-ecb';
+/** The ECB's own daily reference-rate file: EUR base, every currency, one call. */
+export const ECB_DAILY_URL = 'https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml';
+/** The provider id stamped on transfers.fx_provider for a rate the ECB file served. */
+export const ECB_PROVIDER_ID = 'ecb-eurofxref-daily';
+const KNOWN_PROVIDERS: ReadonlySet<string> = new Set([FX_PROVIDER_ID, ECB_PROVIDER_ID]);
+
+/** A provider id a transfer row may carry: one known id, or known ids joined
+ *  with '+' (legsProvenance, when two legs came from different sources). */
+export function isKnownFxProvider(p: unknown): p is string {
+  return typeof p === 'string' && p !== '' && p.split('+').every((id) => KNOWN_PROVIDERS.has(id));
+}
+/** When the ECB file has not answered in this time, Frankfurter is asked too and
+ *  the first good answer wins. Worst case (both silent) is this plus one timeout. */
+export const ECB_HEDGE_MS = 1_500;
+/** One ECB file serves every currency asked for inside this window (the health
+ *  probe asks for 8 at once). A failed file is never reused. */
+const ECB_FILE_REUSE_MS = 60_000;
 /** Per-request budget. Rate fetches sit on the synchronous quote path. */
 export const FX_FETCH_TIMEOUT_MS = 5_000;
 /** Soft TTL: re-fetch after this (L1 = per-instance memory, L2 = shared Redis). */
@@ -117,6 +144,8 @@ interface StampedFxRates extends FxRates {
 }
 
 const cache = new Map<CurrencyCode, StampedFxRates>();
+/** The ECB file in flight or fetched inside ECB_FILE_REUSE_MS (shared by currencies). */
+let ecbFile: { at: number; result: Promise<FetchedEcbFile | FxUnavailableReason> } | null = null;
 const lastFailure = new Map<CurrencyCode, { at: number; reason: FxUnavailableReason }>();
 /** Step 0 FX-1 measurement: the newest fixing date this instance has fetched, per currency. */
 const lastSeenAsOf = new Map<CurrencyCode, string>();
@@ -125,6 +154,22 @@ export function resetRateCacheForTests(): void {
   cache.clear();
   lastFailure.clear();
   lastSeenAsOf.clear();
+  ecbFile = null;
+}
+
+// ── The ECB file source ─────────────────────────────────────────────────────
+// Off under vitest by default, like L2: about 50 suites stub GLOBAL fetch with a
+// Frankfurter-shaped answer (some per call, in order), and an extra ECB call
+// would consume it. setEcbSourceForTests(true) turns it on for its own tests.
+let ecbOverride: boolean | undefined;
+
+/** Test seam: true / false forces the ECB source on / off; undefined restores the default. */
+export function setEcbSourceForTests(on: boolean | undefined): void {
+  ecbOverride = on;
+}
+
+function ecbSourceOn(): boolean {
+  return ecbOverride ?? !process.env.VITEST;
 }
 
 /**
@@ -196,6 +241,8 @@ async function l2Get(source: CurrencyCode, now: number): Promise<StampedFxRates 
       fetchedAt: parsed.fetchedAt,
       source: 'live',
       asOf: isoDateOrUndefined(parsed.asOf),
+      // Stamped on transfer rows: only a known id, never free text from L2.
+      provider: typeof parsed.provider === 'string' && KNOWN_PROVIDERS.has(parsed.provider) ? parsed.provider : undefined,
     };
   } catch {
     return null; // fail-open: no L2 just means one more upstream call
@@ -238,10 +285,10 @@ function serveCacheOrRefuse(
   throw new RateUnavailableError(reason, source);
 }
 
-async function fetchFromProvider(
+async function fetchFromFrankfurter(
   source: CurrencyCode,
   now: number,
-  timeoutMs: number = FX_FETCH_TIMEOUT_MS,
+  timeoutMs: number,
 ): Promise<StampedFxRates | FxUnavailableReason> {
   try {
     const to = source === 'USD' ? 'INR' : 'USD,INR';
@@ -263,10 +310,131 @@ async function fetchFromProvider(
       fetchedAt: now,
       source: 'live',
       asOf: isoDateOrUndefined(data.date),
+      provider: FX_PROVIDER_ID,
     };
   } catch (err) {
-    return err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'fetch_failed';
+    return failureReason(err);
   }
+}
+
+function failureReason(err: unknown): FxUnavailableReason {
+  return err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'fetch_failed';
+}
+
+/** The parsed ECB file: units of each currency per 1 EUR, and the fixing date. */
+export interface EcbFile {
+  asOf?: string;
+  perEur: Map<string, number>;
+}
+
+/**
+ * Parse eurofxref-daily.xml. Only `<Cube time='…'>` and
+ * `<Cube currency='XXX' rate='n'/>` are read; a rate that is not a positive
+ * number is dropped. Malformed unless both USD and INR are present, because
+ * every cross rate needs them.
+ */
+export function parseEcbDaily(xml: string): EcbFile | 'malformed_rates' {
+  const perEur = new Map<string, number>();
+  const cube = /<Cube\s+currency=['"]([A-Z]{3})['"]\s+rate=['"]([^'"]*)['"]\s*\/>/g;
+  for (const m of xml.matchAll(cube)) {
+    // Plain decimals only: Number() would also accept '0x1A' or '1e2'.
+    if (!/^\d+(\.\d+)?$/.test(m[2])) continue;
+    const rate = Number(m[2]);
+    if (isPositiveFinite(rate)) perEur.set(m[1], rate);
+  }
+  if (!perEur.has('USD') || !perEur.has('INR')) return 'malformed_rates';
+  const time = /<Cube\s+time=['"]([^'"]*)['"]/.exec(xml);
+  return { asOf: isoDateOrUndefined(time?.[1]), perEur };
+}
+
+/** A parsed file and when it was fetched (a reused file keeps its own time). */
+type FetchedEcbFile = EcbFile & { fetchedAt: number };
+
+async function fetchEcbFile(now: number, timeoutMs: number): Promise<FetchedEcbFile | FxUnavailableReason> {
+  try {
+    const res = await fetch(ECB_DAILY_URL, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return `http_${res.status}`;
+    const file = parseEcbDaily(await res.text());
+    return typeof file === 'string' ? file : { ...file, fetchedAt: now };
+  } catch (err) {
+    return failureReason(err);
+  }
+}
+
+/** One ECB file per ECB_FILE_REUSE_MS for every currency; a failure is dropped
+ *  as soon as it settles, so the next refresh dials again. */
+function loadEcbFile(now: number, timeoutMs: number): Promise<FetchedEcbFile | FxUnavailableReason> {
+  if (ecbFile && now - ecbFile.at < ECB_FILE_REUSE_MS) return ecbFile.result;
+  const entry = { at: now, result: fetchEcbFile(now, timeoutMs) };
+  ecbFile = entry;
+  void entry.result.then((r) => {
+    if (typeof r === 'string' && ecbFile === entry) ecbFile = null;
+  });
+  return entry.result;
+}
+
+/** Six significant digits: the ECB publishes 5 to 6, so this keeps every digit
+ *  the data carries and drops only float noise from the division. */
+const sig6 = (x: number): number => Number(x.toPrecision(6));
+
+function ecbRatesFor(source: CurrencyCode, file: FetchedEcbFile): StampedFxRates | FxUnavailableReason {
+  const perSource = file.perEur.get(source);
+  const usd = file.perEur.get('USD');
+  const inr = file.perEur.get('INR');
+  if (!isPositiveFinite(perSource) || !isPositiveFinite(usd) || !isPositiveFinite(inr)) return 'malformed_rates';
+  return {
+    toInr: source === 'INR' ? 1 : sig6(inr / perSource),
+    toUsd: source === 'USD' ? 1 : sig6(usd / perSource),
+    fetchedAt: file.fetchedAt,
+    source: 'live',
+    asOf: file.asOf,
+    provider: ECB_PROVIDER_ID,
+  };
+}
+
+type FetchResult = StampedFxRates | FxUnavailableReason;
+
+/** The first good answer of the two; when both fail, the reason of the last to fail. */
+function firstGood(a: Promise<FetchResult>, b: Promise<FetchResult>): Promise<FetchResult> {
+  return new Promise((resolve) => {
+    let pending = 2;
+    const settle = (r: FetchResult) => {
+      pending -= 1;
+      if (typeof r !== 'string' || pending === 0) resolve(r);
+    };
+    void a.then(settle);
+    void b.then(settle);
+  });
+}
+
+/**
+ * One upstream attempt across both sources: the ECB file first; Frankfurter
+ * when the ECB file errors, lacks the currency, or is still silent after
+ * ECB_HEDGE_MS. Never rejects. Each source gets the full timeout.
+ */
+async function fetchFromProvider(
+  source: CurrencyCode,
+  now: number,
+  timeoutMs: number = FX_FETCH_TIMEOUT_MS,
+): Promise<FetchResult> {
+  if (!ecbSourceOn()) return fetchFromFrankfurter(source, now, timeoutMs);
+  const fromEcb = loadEcbFile(now, timeoutMs).then((f) => (typeof f === 'string' ? f : ecbRatesFor(source, f)));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hedge = new Promise<'hedge'>((resolve) => {
+    timer = setTimeout(() => resolve('hedge'), ECB_HEDGE_MS);
+  });
+  const first = await Promise.race([fromEcb, hedge]);
+  clearTimeout(timer);
+  if (first !== 'hedge' && typeof first !== 'string') return first;
+
+  const fromFrankfurter = fetchFromFrankfurter(source, now, timeoutMs);
+  const result = first === 'hedge' ? await firstGood(fromEcb, fromFrankfurter) : await fromFrankfurter;
+  if (typeof result !== 'string' && result.provider !== ECB_PROVIDER_ID) {
+    logWarn('fx.ecb-fallback', 'ECB file did not serve the rate; Frankfurter did', {
+      currency: source, reason: first === 'hedge' ? 'slow' : first,
+    });
+  }
+  return result;
 }
 
 /**
@@ -300,7 +468,7 @@ export async function getFxRates(source: CurrencyCode, opts: FxFetchOptions = {}
   const l1 = cache.get(source);
   if (l1 && now - l1.fetchedAt < CACHE_TTL_MS) return l1;
 
-  // Shared L2 before the upstream call — one Frankfurter fetch per soft TTL
+  // Shared L2 before the upstream call — one upstream fetch per soft TTL
   // across the whole fleet, not per instance.
   const shared = await l2Get(source, now);
   if (shared && now - shared.fetchedAt < CACHE_TTL_MS) {

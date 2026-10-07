@@ -1,5 +1,5 @@
 import { assertLegsUsable, legsProvenance, quote } from './fx';
-import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
+import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRates, getFxRates, isKnownFxProvider } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -79,6 +79,8 @@ export interface CreateTransferInput {
     // Step 0 FX-7: the provenance stamped on the row (the draft's).
     fxAsOf?: string;
     fxOrigin?: FxRateOrigin;
+    // Which rate source served a platform rate (rate.ts ECB_PROVIDER_ID / FX_PROVIDER_ID).
+    fxProvider?: string;
   };
   // Best-rate routing (internal — never customer/partner-API visible): the
   // partner whose RAIL settles this transfer because its rate won the corridor
@@ -150,6 +152,7 @@ export function quoteOverrideFromDraft(
       routeExpiresAt: dq.routeExpiresAt,
       fxAsOf: dq.fxAsOf,
       fxOrigin: dq.fxOrigin,
+      fxProvider: dq.fxProvider,
     };
   }
   if (dq.feeSource !== undefined && dq.totalChargeSource !== undefined) {
@@ -166,6 +169,7 @@ export function quoteOverrideFromDraft(
       routeExpiresAt: dq.routeExpiresAt,
       fxAsOf: dq.fxAsOf,
       fxOrigin: dq.fxOrigin,
+      fxProvider: dq.fxProvider,
     };
   }
   return undefined;
@@ -210,18 +214,22 @@ export type FxProvenance = Pick<Transfer, 'fxAsOf' | 'fxFetchedAt' | 'fxSource' 
  * Review finding 1: `expiresAtMs` is the winning partner push's expiry (the
  * draft's routeExpiresAt); stamped as fxExpiresAt so the pay-time rate check
  * (minted-rate.ts) ends the lock there. Absent ⇒ not a push, no expiry.
+ * Oct 7 ECB source: `provider` is the source that served a platform rate
+ * (legsProvenance); absent (a draft from before) ⇒ FX_PROVIDER_ID as before.
  */
 export function fxProvenanceFor(
   origin: FxRateOrigin | undefined,
   asOf: string | undefined,
   fetchedAtMs: number | undefined,
   expiresAtMs?: number,
+  provider?: string,
 ): FxProvenance {
   if (origin === 'b2b_lock') return { fxSource: origin };
   const out: FxProvenance = {};
   if (origin) {
     out.fxSource = origin;
-    out.fxProvider = origin === 'platform' ? FX_PROVIDER_ID : 'partner';
+    // A draft lives in Redis: only a known id reaches the row, else the default.
+    out.fxProvider = origin === 'platform' ? (isKnownFxProvider(provider) ? provider : FX_PROVIDER_ID) : 'partner';
   }
   if (asOf && (origin === 'platform' || origin === 'partner_margin')) out.fxAsOf = asOf;
   if (fetchedAtMs !== undefined && Number.isFinite(fetchedAtMs)) out.fxFetchedAt = new Date(fetchedAtMs).toISOString();
@@ -375,7 +383,7 @@ export async function createTransferWithOutcome(
     // Step 0 FX-7: the approved quote's own provenance (the draft's), with the
     // push expiry the mint just checked (review finding 1: the pay-time check
     // ends the rate lock there).
-    provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt, q.routeExpiresAt);
+    provenance = fxProvenanceFor(q.fxOrigin, q.fxAsOf, q.fxFetchedAt, q.routeExpiresAt, q.fxProvider);
   } else {
     const transferCount = await feeTierCount(store, input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);
@@ -386,7 +394,7 @@ export async function createTransferWithOutcome(
     const destRates = await getDestinationRates(destinationCurrency);
     assertLegsUsable(rates, destRates); // Step 0 FX-1: both legs (B3)
     const legs = legsProvenance(rates, destRates); // Step 0 FX-7: the OLDEST leg
-    provenance = fxProvenanceFor('platform', legs.asOf, legs.fetchedAt);
+    provenance = fxProvenanceFor('platform', legs.asOf, legs.fetchedAt, undefined, legs.provider);
     const priceAt: RequoteAt = (count) =>
       quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, count, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
     q = priceAt(transferCount);
@@ -724,6 +732,7 @@ export interface BlockedAttemptInput {
   fxOrigin?: FxRateOrigin;
   fxAsOf?: string;
   fxFetchedAt?: number;
+  fxProvider?: string;
 }
 
 /**
@@ -765,7 +774,7 @@ export async function recordBlockedAttempt(
     amountSource: input.amountSource,
     feeSource: input.feeSource,
     totalChargeSource: input.totalChargeSource,
-    ...fxProvenanceFor(input.fxOrigin, input.fxAsOf, input.fxFetchedAt), // Step 0 FX-7
+    ...fxProvenanceFor(input.fxOrigin, input.fxAsOf, input.fxFetchedAt, undefined, input.fxProvider), // Step 0 FX-7
   };
   if (input.evidence) {
     // Program-Fix 14 (step 5): a blocked quote never reaches the mint, so this
