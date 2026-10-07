@@ -24,6 +24,7 @@ import {
   amlExplainPrompt,
   buildAmlExplainBundle,
   explainAml,
+  AML_EXPLAIN_TIMEOUT_MS,
 } from '@/lib/aml-explain-ai';
 
 const chatMock = vi.mocked(chat);
@@ -205,6 +206,16 @@ describe('explainAml (one chat call, clamped)', () => {
       checks: ['Look at the sender history.', 'Compare with stated purpose.'],
       next_step: 'request_source_of_funds',
     });
+  });
+
+  // Prod 2026-10-07 17:04Z: the explain call hit the agent's 20 s budget and fell back.
+  // A staff click is not the worker's row deadline, so it gets the longer copilot budget.
+  it('calls the model with the copilot timeout, not the 20 s agent budget', async () => {
+    chatMock.mockResolvedValueOnce(reply('{"summary":"ok","checks":[],"next_step":"escalate"}'));
+    await explainAml(bundle());
+    expect(chatMock.mock.calls[0][2]).toEqual({ timeoutMs: AML_EXPLAIN_TIMEOUT_MS });
+    expect(AML_EXPLAIN_TIMEOUT_MS).toBeGreaterThan(20_000);
+    expect(AML_EXPLAIN_TIMEOUT_MS).toBeLessThanOrEqual(50_000);
   });
 
   it('the messages sent to the model carry no PII', async () => {

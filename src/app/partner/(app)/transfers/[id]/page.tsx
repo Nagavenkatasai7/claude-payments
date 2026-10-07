@@ -46,6 +46,10 @@ import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
 import { PartnerAmlExplain } from './aml-explain';
 
+// The AML Explain server action waits up to AML_EXPLAIN_TIMEOUT_MS (45 s) for
+// the model; a page-level maxDuration sets the limit for this page's actions.
+export const maxDuration = 60;
+
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
   robots: { index: false, follow: false },

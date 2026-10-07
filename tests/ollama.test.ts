@@ -96,6 +96,23 @@ describe('chat', () => {
     );
   });
 
+  it('a click-driven caller may set its own timeoutMs; the timeout message names it', async () => {
+    const spy = vi.spyOn(AbortSignal, 'timeout');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      }),
+    );
+    await expect(chat([{ role: 'user', content: 'hi' }], [], { timeoutMs: 45_000 })).rejects.toThrow(
+      /Ollama request timed out after 45000ms/,
+    );
+    expect(spy).toHaveBeenCalledWith(45_000);
+    await expect(chat([{ role: 'user', content: 'hi' }], [])).rejects.toThrow(/after 20000ms/);
+    expect(spy).toHaveBeenLastCalledWith(OLLAMA_TIMEOUT_MS);
+    spy.mockRestore();
+  });
+
   it("a caller's AbortSignal (the worker's row deadline) aborts the call too, with a distinct message", async () => {
     let seen: AbortSignal | null | undefined;
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {

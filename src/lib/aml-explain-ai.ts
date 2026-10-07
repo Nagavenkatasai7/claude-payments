@@ -290,9 +290,16 @@ function clampChecks(v: unknown): string[] {
     .slice(0, MAX_CHECKS);
 }
 
+/**
+ * The model budget for one Explain click. Prod 2026-10-07: the agent's 20 s
+ * budget (OLLAMA_TIMEOUT_MS) timed out and the analyst got the fixed text. The
+ * route and the partner page allow 60 s (maxDuration), so this stays below it.
+ */
+export const AML_EXPLAIN_TIMEOUT_MS = 45_000;
+
 /** ONE chat(messages, []) call. Throws on any failure or an empty summary. */
 export async function explainAml(f: AmlExplainFacts): Promise<AmlExplanation> {
-  const reply = await chat(amlExplainPrompt(f), []);
+  const reply = await chat(amlExplainPrompt(f), [], { timeoutMs: AML_EXPLAIN_TIMEOUT_MS });
   const parsed = extractJsonObject(reply.content ?? '');
   const summary = typeof parsed?.summary === 'string' ? parsed.summary.trim().slice(0, MAX_SUMMARY) : '';
   if (!summary) throw new Error('Empty AI response');
