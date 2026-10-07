@@ -128,6 +128,7 @@ export async function seedLedgerSpend(
     status?: TransferStatus;
     createdAt?: Date | string;
     id?: string;
+    complianceReasons?: string[];
   },
 ): Promise<string> {
   const id = input.id ?? newTransferId();
@@ -149,7 +150,7 @@ export async function seedLedgerSpend(
     payoutDestination: '000011112222|HDFC0000001',
     fundingMethod: 'bank_transfer',
     complianceStatus: status === 'blocked' ? 'blocked' : 'cleared',
-    complianceReasons: [],
+    complianceReasons: input.complianceReasons ?? [],
     status,
     createdAt,
     sourceCountry: 'US',

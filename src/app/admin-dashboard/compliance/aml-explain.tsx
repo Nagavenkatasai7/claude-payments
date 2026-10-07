@@ -24,7 +24,7 @@ const NEXT_STEP_LABEL: Record<AmlExplanation['next_step'], string> = {
   verify_recipient_relationship: 'Verify the recipient relationship',
   escalate: 'Escalate',
   keep_on_hold: 'Keep on hold',
-  close_alert_no_action: 'Close the alert (no action)',
+  close_alert_no_action: 'You may close the alert if every check is clear',
 };
 
 const usd = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;

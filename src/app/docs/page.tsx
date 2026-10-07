@@ -224,7 +224,7 @@ export default function DocsPage() {
           <Card>
             <CardContent className="divide-y divide-border pt-4">
               <Endpoint method="GET" path="/corridors" desc="Your enabled send corridors + brand" />
-              <Endpoint method="POST" path="/quote" desc="Price a transfer (amount_source, source_currency). Pass sender.phone to price a first transfer at no fee (first_transfer_free); without it the standard fee is shown. Not binding: the transaction's fee is final" />
+              <Endpoint method="POST" path="/quote" desc="Price a transfer (amount_source, source_currency). Pass sender.phone to price a first transfer at no fee (first_transfer_free; needs a key with transactions:write); without it the standard fee is shown. Not binding: the transaction's fee is final" />
               <Endpoint method="POST" path="/beneficiaries/validate" desc="Validate payout fields for a country" />
               <Endpoint method="POST" path="/beneficiaries" desc="Store a beneficiary (payout details encrypted at rest)" />
               <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header REQUIRED" />

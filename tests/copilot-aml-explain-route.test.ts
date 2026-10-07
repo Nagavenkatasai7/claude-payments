@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
+import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import type { Staff } from '@/lib/types';
 
@@ -82,7 +83,7 @@ beforeEach(async () => {
     meta: { rule: 'structuring', window: '7d', count: 3, sumUsd: 2550 },
   });
   // An in_review hold with no alert yet (recompute path).
-  held = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15557770043', amountUsd: 900, status: 'in_review' });
+  held = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15557770043', amountUsd: 900, status: 'in_review', complianceReasons: [AML_HOLD_REASON] });
   // A plain row: neither held nor alerted.
   plain = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15557770044', amountUsd: 20, status: 'delivered' });
 });
@@ -183,6 +184,16 @@ describe('/api/copilot/aml-explain — explanation', () => {
       { rule: 'first_transfer', reason: 'a large first send from a new customer', source: 'recomputed', window: 'first', count: 1, sumUsd: 900 },
     ]);
     expect(body.facts.onHold).toBe(true);
+  });
+
+  it('a row held for another reason (no AML hold, no alert) shows no recomputed rule', async () => {
+    // Security review: re-running the AML rules on a sanctions/identity hold
+    // would name a rule that never held the transfer.
+    const other = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15557770045', amountUsd: 900, status: 'in_review', complianceReasons: ['Possible sanctions match.'] });
+    chatMock.mockRejectedValueOnce(new Error('down'));
+    const res = await POST(req({ subjectId: other }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).facts.rules).toEqual([]);
   });
 
   it('never changes the transfer or the alert, and writes no outbox row', async () => {
