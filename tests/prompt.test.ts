@@ -960,3 +960,48 @@ describe('A3: purpose detection section (demo mode + purpose.detect only)', () =
     expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeDetect: true })).toContain('\nPURPOSE\n');
   });
 });
+
+describe('A2: Hinglish replies (all customers, every variant)', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'ours' }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'delegated' }),
+    buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true }),
+  ];
+  const langLine = (p: string) => p.split('\n').find((l) => l.startsWith("- Reply in the customer's language")) ?? '';
+
+  it('Hindi in Devanagari or Roman letters gets Hinglish in Roman letters, never Devanagari', () => {
+    for (const p of variants) {
+      const line = langLine(p);
+      expect(line, 'the language rule is present').not.toBe('');
+      expect(line).toContain('Devanagari');
+      expect(line).toContain('Roman');
+      expect(line).toContain('Hinglish');
+      expect(line).toMatch(/never Devanagari/);
+    }
+  });
+
+  it('English stays English; names or places alone do not make a message Hindi; other languages are mirrored', () => {
+    for (const p of variants) {
+      const line = langLine(p);
+      expect(line).toMatch(/English → reply in English/);
+      expect(line).toMatch(/names or places alone/i);
+      expect(line).toContain('Spanish');
+      expect(line).toMatch(/switch with them/);
+    }
+  });
+
+  it('the prompt itself carries no Devanagari characters', () => {
+    for (const p of variants) expect(p).not.toMatch(/[\u0900-\u097F]/);
+  });
+
+  it('the faithful-translation and English-verbatim lines stay right after the rule', () => {
+    for (const p of variants) {
+      const lines = p.split('\n');
+      const at = lines.findIndex((l) => l.startsWith("- Reply in the customer's language"));
+      expect(lines[at + 1]).toMatch(/^- Tool text you are told to relay as-is/);
+      expect(lines[at + 2]).toMatch(/^- EXCEPTION \(translation parked for counsel\)/);
+    }
+  });
+});
