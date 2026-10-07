@@ -33,6 +33,7 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 // hourly fallback alert without importing this file.
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
+import { inDemo } from './demo-mode';
 export { FALLBACK_REPLY };
 
 export interface AgentDeps {
@@ -211,6 +212,10 @@ export function createAgent(deps: AgentDeps) {
     // its tools refuse on. Never a literal.
     const sendLimits = resolveEffectiveSendLimits(notePartner, noteCustomer);
     const t0CapTxt = `$${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}`;
+    // A3 purpose detection: once per turn. A demo-mode phone (DEMO_PHONES) AND
+    // the purpose.detect switch for the routed tenant; the switch is never read
+    // for anyone else. A failed read is off (isFlagOn fails open to false).
+    const purposeDetect = inDemo(phone) && (await deps.store.isFlagOn('purpose.detect', { partnerId }));
 
     // ONE tool context per turn: the tools and the round-0 customer context
     // read the same tenant, phone, stores and tap.
@@ -270,7 +275,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeDetect }) },
       ];
       // Web channel: injected EVERY round (not just round 0) so the model still
       // knows the channel's limits after tool results arrive. Never persisted.

@@ -27,7 +27,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -73,6 +73,20 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'The WhatsApp bot listens to English voice notes (up to 30 seconds) from demo-mode phones (DEMO_PHONES) and answers in text. ' +
       'Off: a voice note gets the "please type" reply. Only the shared SmartRemit number takes voice notes.',
     bannerText: 'Voice notes are on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // A3 purpose detection (Raj #17): the bot fills the transfer purpose from
+  // what the customer says. Also needs the sender among the demo-mode phones
+  // (DEMO_PHONES, demo-mode.ts); read once per agent turn for the routed tenant.
+  'purpose.detect': {
+    key: 'purpose.detect',
+    label: 'Purpose detection',
+    description:
+      'When a customer says why they are sending (English or Hinglish, e.g. "maa ki dawai ke liye"), the bot records the purpose ' +
+      'on the transfer. Only demo-mode phones (DEMO_PHONES). The purpose reaches the settlement instruction to the payout partner; ' +
+      'staff and the partner see a suggested purpose code that is not confirmed.',
+    bannerText: 'Purpose detection is on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

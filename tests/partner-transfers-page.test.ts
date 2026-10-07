@@ -344,3 +344,33 @@ describe('lost-features A6: the Business invoices link', () => {
     expect(await list()).not.toContain('href="/partner/invoices"');
   });
 });
+
+describe('/partner/transfers/[id]: A3 purpose row', () => {
+  it('shows the purpose and the unconfirmed suggested code for family support', async () => {
+    await seedPartnerTransfer(db, { id: 'tr_A_purpose', partnerId: 'pa', phone: PHONE, status: 'paid', purpose: 'family_support' });
+    await asAdmin();
+    const html = await detail('tr_A_purpose');
+    expect(html).toContain('Purpose');
+    expect(html).toContain('Family support');
+    expect(html).toContain('Suggested RBI code P1301 (not confirmed)');
+    expectNoPii(html);
+  });
+  it('a purpose without a code shows the label only', async () => {
+    await seedPartnerTransfer(db, { id: 'tr_A_edu', partnerId: 'pa', phone: PHONE, status: 'paid', purpose: 'education' });
+    await asAgent();
+    const html = await detail('tr_A_edu');
+    expect(html).toContain('Education');
+    expect(html).not.toContain('Suggested RBI code');
+  });
+  it('no purpose ⇒ no row', async () => {
+    await asAdmin();
+    const html = await detail('tr_A_done');
+    expect(html).not.toContain('Suggested RBI code');
+    expect(html).not.toMatch(/>Purpose</);
+  });
+  it("another tenant's transfer with a purpose is still NOT_FOUND", async () => {
+    await seedPartnerTransfer(db, { id: 'tr_B_purpose', partnerId: 'pb', phone: PHONE, status: 'paid', purpose: 'family_support' });
+    await asAdmin();
+    await expect(detail('tr_B_purpose')).rejects.toThrow('NOT_FOUND');
+  });
+});

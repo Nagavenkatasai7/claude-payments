@@ -42,7 +42,7 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['sends.paused', 'settlement.paused', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['purpose.detect', 'sends.paused', 'settlement.paused', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
@@ -63,6 +63,24 @@ describe('flag definitions', () => {
     await setFlag(db, 'voice.notes', 'partner', 'default');
     expect(await isFlagOn(db, 'voice.notes', { partnerId: 'default' })).toBe(true);
     expect(await isFlagOn(db, 'voice.notes', { partnerId: 'acme' })).toBe(false);
+  });
+
+  it('purpose.detect is an ordinary feature switch (global or one partner) that says the purpose reaches the payout partner', () => {
+    const def = FLAG_DEFINITIONS['purpose.detect'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner']);
+    expect(def.description).toMatch(/settlement instruction/i);
+    expect(def.description).toMatch(/payout partner/i);
+    expect(def.description).toMatch(/DEMO_PHONES/);
+    expect(isKnownFlagKey('purpose.detect')).toBe(true);
+  });
+
+  it('purpose.detect is off with no row; a partner row is that partner only', async () => {
+    const db = await freshDb();
+    expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'acme' })).toBe(false);
+    await setFlag(db, 'purpose.detect', 'partner', 'acme');
+    expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'acme' })).toBe(true);
+    expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'default' })).toBe(false);
   });
 
   it('isKnownFlagKey accepts only defined keys', () => {

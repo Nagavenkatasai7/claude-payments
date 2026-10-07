@@ -22,6 +22,7 @@ const PROMPTS = {
   gateOn: SYSTEM_PROMPT,
   gateOffOurs: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'ours' }),
   gateOffDelegated: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'delegated' }),
+  purposeDetect: buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true }),
 };
 
 describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
