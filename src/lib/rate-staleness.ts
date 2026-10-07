@@ -5,6 +5,7 @@ import { FALLBACK_FX_RATES, FRANKFURTER_BASE_URL, RateUnavailableError, getFxRat
 import { FIXING_ALERT_LAG, FIXING_REFUSE_LAG, fixingLagBusinessDays } from './fx-fixing';
 import { env } from './env';
 import { logWarn } from './log';
+import type { RedisLike } from './store';
 import type { FxRatesFn } from './corridor-demand';
 import type { CurrencyCode } from './types';
 
@@ -57,6 +58,9 @@ export async function sweepStaleRates(db: Db, now: Date = new Date()): Promise<n
 //     before a fetch counts as failed (the quote path never passes that option);
 //   • DEGRADED (a stale cache is being served) alerts only once the served rate
 //     is ≥ FX_DEGRADED_ALERT_AGE_MS old; UNAVAILABLE (quotes REFUSED) alerts at once;
+//     (Oct 6 alerts) 45 min, not 15: the probe runs every 30 min and nothing
+//     else refreshes the non-USD legs, so ONE missed probe always served a
+//     ~30-min-old rate and paged. 45 min means "one more miss refuses quotes";
 //   • ONE combined alert per severity per clock hour lists every affected
 //     currency: dedupe key fx-health:<SEVERITY>:<hourBucket>. Dedupe keys are
 //     forever, so the hour bucket is what lets a lasting outage alert again, and
@@ -86,8 +90,28 @@ export const FX_PROBE_CURRENCIES: readonly CurrencyCode[] = (
 export const FX_PROBE_RETRY_TIMEOUT_MS = 7_000;
 /** Delay between successive probe STARTS (the probes still overlap). */
 export const FX_PROBE_STAGGER_MS = 250;
-/** A served (stale) cache younger than this is not worth paging anyone. */
-export const FX_DEGRADED_ALERT_AGE_MS = 15 * 60_000;
+/** A served (stale) cache younger than this is not worth paging anyone: 15 min
+ *  before FX_MAX_AGE_MS (60 min) refuses quotes, and older than one missed
+ *  30-min probe. */
+export const FX_DEGRADED_ALERT_AGE_MS = 45 * 60_000;
+
+// ── FX re-check (Oct 6 alerts) ───────────────────────────────────────────────
+// A failed probe used to wait 30 min for the next one, so two misses in a row
+// reached the 60-min refusal ceiling. Now every sweep writes the currencies it
+// could not refresh to FX_RECHECK_KEY (Redis, comma-separated; '' = none), and
+// the per-minute cron re-checks ONLY those every FX_RECHECK_PERIOD_MIN
+// (worker-cadence.ts shouldRecheckFx). The re-check needs no Neon: getFxRates
+// refreshes the shared L2. Neon is touched only when a re-check must enqueue a
+// DEGRADED / UNAVAILABLE alert (same dedupe keys as the sweep). Fail-open: a
+// Redis error loses a re-check, and the :17/:47 sweep still runs.
+
+/** Redis key: the currencies the last sweep or re-check could not refresh. */
+export const FX_RECHECK_KEY = 'fx:probe-retry';
+/** Outlives one backstop period; every sweep rewrites it. */
+const FX_RECHECK_TTL_SEC = 35 * 60;
+
+/** The two Upstash commands the re-check list uses (automaticDeserialization off). */
+export type FxRecheckRedis = Pick<RedisLike, 'get' | 'set'>;
 
 /** The probe the worker runs: getFxRates plus ONE retry at a longer timeout. */
 const probeFxRates: FxRatesFn = (c) => getFxRates(c, { retryTimeoutMs: FX_PROBE_RETRY_TIMEOUT_MS });
@@ -97,6 +121,23 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export interface FxHealthSweepOptions {
   /** Delay between probe starts (default FX_PROBE_STAGGER_MS; tests pass 0). */
   staggerMs?: number;
+  /** Probe only these (default FX_PROBE_CURRENCIES). */
+  currencies?: readonly CurrencyCode[];
+  /** When set, the currencies this sweep could not refresh (a served cache or
+   *  a refusal) are written to FX_RECHECK_KEY; '' when every probe was live. */
+  recheck?: FxRecheckRedis;
+  /** The frozen-feed (FIXING) check (default true; the re-check skips it). */
+  fixingCheck?: boolean;
+}
+
+async function writeRecheckList(redis: FxRecheckRedis, currencies: readonly CurrencyCode[]): Promise<void> {
+  try {
+    await redis.set(FX_RECHECK_KEY, currencies.join(','), { ex: FX_RECHECK_TTL_SEC });
+  } catch (err) {
+    logWarn('fx.recheck', 'FX re-check list write failed (fail-open)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -111,10 +152,12 @@ export async function sweepFxHealth(
   opts: FxHealthSweepOptions = {},
 ): Promise<number> {
   const staggerMs = opts.staggerMs ?? FX_PROBE_STAGGER_MS;
+  const currencies = opts.currencies ?? FX_PROBE_CURRENCIES;
+  const fixingCheck = opts.fixingCheck ?? true;
   const outbox = createOutboxRepo(db);
   const hourBucket = Math.floor(now.getTime() / 3_600_000);
   const results = await Promise.allSettled(
-    FX_PROBE_CURRENCIES.map(async (c, i) => {
+    currencies.map(async (c, i) => {
       if (staggerMs > 0 && i > 0) await sleep(i * staggerMs);
       return fx(c);
     }),
@@ -124,9 +167,11 @@ export async function sweepFxHealth(
   const degraded: string[] = [];
   const fixing = new Map<string, { asOf: string; lag: number; currencies: string[] }>();
   const undated: string[] = [];
-  for (let i = 0; i < FX_PROBE_CURRENCIES.length; i++) {
-    const currency = FX_PROBE_CURRENCIES[i];
+  const notRefreshed: CurrencyCode[] = [];
+  for (let i = 0; i < currencies.length; i++) {
+    const currency = currencies[i];
     const r = results[i];
+    if (r.status === 'rejected' || r.value.source === 'cache') notRefreshed.push(currency);
     if (r.status === 'rejected') {
       const reason = r.reason instanceof RateUnavailableError ? r.reason.reason : 'error';
       unavailable.push(`${currency} (${reason})`);
@@ -139,7 +184,7 @@ export async function sweepFxHealth(
         degraded.push(`${currency} (${Math.floor((now.getTime() - fetchedAt) / 60_000)} min old)`);
       }
     }
-    if (r.status === 'fulfilled') {
+    if (r.status === 'fulfilled' && fixingCheck) {
       const asOf = r.value.asOf;
       const lag = asOf === undefined ? null : fixingLagBusinessDays(asOf, now.getTime(), 'alert');
       if (asOf === undefined || lag === null) {
@@ -158,6 +203,7 @@ export async function sweepFxHealth(
       }
     }
   }
+  if (opts.recheck) await writeRecheckList(opts.recheck, notRefreshed);
   if (undated.length > 0) {
     logWarn('fx.no-fixing-date', 'FX probe returned no fixing date; the frozen-feed check cannot run', {
       currencies: undated.join(','),
@@ -206,4 +252,38 @@ export async function sweepFxHealth(
     if (fresh) alerted++;
   }
   return alerted;
+}
+
+/** The re-check runs every few minutes, so it takes the quote path's single
+ *  5 s attempt (no retry of its own). */
+const recheckFxRates: FxRatesFn = (c) => getFxRates(c);
+
+/**
+ * Re-probe ONLY the currencies the last sweep (or re-check) could not refresh,
+ * and keep FX_RECHECK_KEY current. Nothing listed ⇒ one Redis GET and nothing
+ * else (no Frankfurter call, no Neon). `getDb` is called only when something
+ * is listed, and the database is only queried when an alert must be enqueued.
+ * Returns the number of NEW alerts. Never throws on a Redis error.
+ */
+export async function recheckFailedFx(
+  getDb: () => Db,
+  redis: FxRecheckRedis,
+  fx: FxRatesFn = recheckFxRates,
+  now: Date = new Date(),
+  opts: Pick<FxHealthSweepOptions, 'staggerMs'> = {},
+): Promise<number> {
+  let raw: string | null;
+  try {
+    raw = await redis.get(FX_RECHECK_KEY);
+  } catch (err) {
+    logWarn('fx.recheck', 'FX re-check list read failed (fail-open)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 0;
+  }
+  // Only codes the probe table knows ever reach the provider URL.
+  const listed = new Set((raw ?? '').split(','));
+  const currencies = FX_PROBE_CURRENCIES.filter((c) => listed.has(c));
+  if (currencies.length === 0) return 0;
+  return sweepFxHealth(getDb(), fx, now, { ...opts, currencies, recheck: redis, fixingCheck: false });
 }
