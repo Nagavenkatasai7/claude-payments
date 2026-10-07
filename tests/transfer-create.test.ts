@@ -8,7 +8,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
-import { FX_PROVIDER_ID, RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
+import { ECB_DAILY_URL, ECB_PROVIDER_ID, FX_PROVIDER_ID, RateUnavailableError, resetRateCacheForTests, setEcbSourceForTests } from '@/lib/rate';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
@@ -657,6 +657,12 @@ describe('route expiry on the approved quote (Step 0 FX-5)', () => {
       quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600, feeSource: 1.57, totalChargeSource: 201.57, totalChargeUsd: 255.99, ...extra },
     });
     expect(gbp).toMatchObject(extra);
+    // Oct 7 ECB source: the draft's rate provider rides along to the mint.
+    const ecb = quoteOverrideFromDraft({
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD',
+      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200, fxFetchedAt: NOW, fxOrigin: 'platform', fxProvider: ECB_PROVIDER_ID },
+    });
+    expect(ecb).toMatchObject({ fxProvider: ECB_PROVIDER_ID });
   });
 });
 
@@ -686,6 +692,15 @@ describe('rate provenance on the minted row (Step 0 FX-7)', () => {
     // An older draft without an origin: only the fetch time it carries.
     expect(fxProvenanceFor(undefined, undefined, at)).toEqual({ fxFetchedAt: iso });
     expect(fxProvenanceFor(undefined, undefined, undefined)).toEqual({});
+    // Oct 7 ECB source: a platform rate names the source that actually served it;
+    // a partner rate stays 'partner'; no provider (an older draft) keeps FX_PROVIDER_ID.
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined, 'ecb-eurofxref-daily')).toMatchObject({ fxProvider: 'ecb-eurofxref-daily' });
+    expect(fxProvenanceFor('partner_margin', '2026-10-02', at, undefined, 'ecb-eurofxref-daily')).toMatchObject({ fxProvider: 'partner' });
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined, 'ecb-eurofxref-daily+frankfurter-v1-ecb'))
+      .toMatchObject({ fxProvider: 'ecb-eurofxref-daily+frankfurter-v1-ecb' });
+    // A draft is Redis data: an unknown provider never reaches the row.
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined, '<script>')).toMatchObject({ fxProvider: FX_PROVIDER_ID });
+    expect(fxProvenanceFor('platform', '2026-10-02', at, undefined, 'ecb-eurofxref-daily+evil')).toMatchObject({ fxProvider: FX_PROVIDER_ID });
   });
 
   it('fxProvenanceFor (pure): the push expiry is stamped when given (review finding 1), never for a B2B lock', () => {
@@ -710,6 +725,33 @@ describe('rate provenance on the minted row (Step 0 FX-7)', () => {
     const fetched = Date.parse(saved!.fxFetchedAt!);
     expect(fetched).toBeGreaterThanOrEqual(before - 1_000);
     expect(fetched).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('re-quote with the ECB file serving: the row names the ECB provider (Oct 7 ECB source)', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const date = dayAgo(1);
+    setEcbSourceForTests(true);
+    try {
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        if (String(url) === ECB_DAILY_URL) {
+          return { ok: true, text: async () => `<Cube time='${date}'><Cube currency='USD' rate='1.1269'/><Cube currency='INR' rate='108.6615'/>` };
+        }
+        throw new Error('Frankfurter must not be called while the ECB file answers');
+      }));
+      const t = await createTransfer(store, partnerStore, mvs, base);
+      expect(await store.getTransfer(t.id)).toMatchObject({ fxSource: 'platform', fxProvider: ECB_PROVIDER_ID, fxAsOf: date });
+    } finally {
+      setEcbSourceForTests(undefined);
+    }
+  });
+
+  it('override: a draft that names its rate provider stamps it (Oct 7 ECB source)', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const at = Date.now() - 5 * 60_000;
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, quote: { ...override, fxFetchedAt: at, fxAsOf: dayAgo(1), fxOrigin: 'platform', fxProvider: ECB_PROVIDER_ID },
+    });
+    expect(await store.getTransfer(t.id)).toMatchObject({ fxSource: 'platform', fxProvider: ECB_PROVIDER_ID });
   });
 
   it('re-quote with its own destination leg: the OLDER leg\'s date', async () => {

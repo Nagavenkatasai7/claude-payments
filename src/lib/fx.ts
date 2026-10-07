@@ -88,15 +88,23 @@ export function assertLegsUsable(
  * OLDEST leg: the earliest fetch time (as a stored quote's age is measured)
  * and the earliest publication date. The date is undefined when any leg in
  * use lacks one, so a row never claims a fixing date it cannot vouch for.
+ * The provider (Oct 7 ECB source) follows the same rule: set only when every
+ * leg names one; two different providers are joined with '+' in sorted order.
  */
-export function legsProvenance(src: FxRates, dest?: FxRates): { asOf?: string; fetchedAt?: number } {
+export function legsProvenance(
+  src: FxRates,
+  dest?: FxRates,
+): { asOf?: string; fetchedAt?: number; provider?: string } {
   const legs = dest ? [src, dest] : [src];
   const stamps = legs.map((l) => l.fetchedAt).filter((t): t is number => t !== undefined);
   const dates = legs.map((l) => l.asOf);
   const known = dates.filter((d): d is string => d !== undefined);
+  const providers = legs.map((l) => l.provider);
+  const named = providers.filter((p): p is string => p !== undefined);
   return {
     ...(stamps.length > 0 ? { fetchedAt: Math.min(...stamps) } : {}),
     ...(known.length === dates.length ? { asOf: known.reduce((a, b) => (b < a ? b : a)) } : {}),
+    ...(named.length === providers.length ? { provider: [...new Set(named)].sort().join('+') } : {}),
   };
 }
 

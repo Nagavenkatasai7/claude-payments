@@ -412,4 +412,13 @@ describe('legsProvenance (Step 0 FX-7)', () => {
     expect(legsProvenance(leg(2_000, '2026-10-02'), leg(1_000))).toEqual({ fetchedAt: 1_000 });
     expect(legsProvenance(leg())).toEqual({});
   });
+  it('carries the rate provider when every leg has one; two providers are joined in a fixed order', () => {
+    const p = (provider?: string): FxRates => ({ toInr: 85, toUsd: 1, fetchedAt: 1_000, provider } as FxRates);
+    expect(legsProvenance(p('ecb-eurofxref-daily'))).toEqual({ fetchedAt: 1_000, provider: 'ecb-eurofxref-daily' });
+    expect(legsProvenance(p('ecb-eurofxref-daily'), p('ecb-eurofxref-daily'))).toMatchObject({ provider: 'ecb-eurofxref-daily' });
+    expect(legsProvenance(p('frankfurter-v1-ecb'), p('ecb-eurofxref-daily'))).toMatchObject({
+      provider: 'ecb-eurofxref-daily+frankfurter-v1-ecb',
+    });
+    expect(legsProvenance(p('ecb-eurofxref-daily'), p())).not.toHaveProperty('provider');
+  });
 });

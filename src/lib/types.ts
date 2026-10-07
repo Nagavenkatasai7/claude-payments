@@ -463,6 +463,9 @@ export interface Draft {
     // leg's publication date (YYYY-MM-DD); fxOrigin is which rate won.
     fxAsOf?: string;
     fxOrigin?: FxRateOrigin;
+    // The source that served a platform rate (rate.ts provider ids); absent on
+    // drafts made before the ECB source (the mint then stamps FX_PROVIDER_ID).
+    fxProvider?: string;
   };
   // Best-rate routing: the partner whose rail settles this draft's transfer
   // when its rate won the corridor at quote time (default-tenant only).
