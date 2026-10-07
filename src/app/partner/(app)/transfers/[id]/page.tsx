@@ -46,6 +46,10 @@ import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
 import { PartnerAmlExplain } from './aml-explain';
 
+// The AML Explain server action waits up to AML_EXPLAIN_TIMEOUT_MS (45 s) for
+// the model; a page-level maxDuration sets the limit for this page's actions.
+export const maxDuration = 60;
+
 export const metadata: Metadata = {
   title: t('partner.transfers.detailTitle'),
   robots: { index: false, follow: false },
@@ -225,8 +229,9 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 {shown(destination, 'payout_destination', t('partner.transfers.destination'), caps.destination && destination !== '****')}
               </span>
             </Row>
-            {purpose ? (
-              <Row label={t('partner.transfers.purpose')}>
+            {/* A3: always shown, so "no purpose" reads as "Not stated", not as a missing feature. */}
+            <Row label={t('partner.transfers.purpose')}>
+              {purpose ? (
                 <span className="inline-flex flex-col items-end gap-0.5">
                   <span>{purpose.label}</span>
                   {purpose.suggestedCode ? (
@@ -235,8 +240,10 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                     </span>
                   ) : null}
                 </span>
-              </Row>
-            ) : null}
+              ) : (
+                <span className="text-ds-ink-muted">{t('partner.transfers.purposeNotStated')}</span>
+              )}
+            </Row>
             <Row label={t('partner.transfers.settledVia')}>{t(settlementRouteKey(transfer, ctx.partnerId))}</Row>
             <Row label={t('partner.transfers.assignedTo')}>
               {assignee.kind === 'tenant'

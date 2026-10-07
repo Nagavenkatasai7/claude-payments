@@ -68,7 +68,7 @@ export interface PurposeView {
   suggestedCode: string | null;
 }
 
-/** What the staff and partner detail pages show for a transfer's purpose; null ⇒ no row. Pure. */
+/** What the staff and partner detail pages show for a transfer's purpose; null ⇒ the page shows "Not stated". Pure. */
 export function purposeView(p?: TransferPurpose | null): PurposeView | null {
   if (!p || !Object.prototype.hasOwnProperty.call(PURPOSE_LABELS, p)) return null;
   return { label: PURPOSE_LABELS[p], suggestedCode: suggestedRbiCode(p) };

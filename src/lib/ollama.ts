@@ -19,12 +19,15 @@ function isTimeout(err: unknown): boolean {
 export async function chat(
   messages: ChatMessage[],
   tools: ChatTool[],
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<ChatMessage> {
+  // A staff click (a copilot button) is not bound by the worker's row deadline
+  // and may pass a longer timeoutMs; the agent keeps OLLAMA_TIMEOUT_MS.
+  const timeoutMs = opts.timeoutMs ?? OLLAMA_TIMEOUT_MS;
   // The caller's signal (the worker's row deadline, fix 7) is combined with
   // this call's own timeout: whichever fires first aborts the fetch.
   // AbortSignal.any — node_modules/typescript/lib/lib.dom.d.ts:2787 (Node ≥20).
-  const timeout = AbortSignal.timeout(OLLAMA_TIMEOUT_MS);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = opts.signal ? AbortSignal.any([timeout, opts.signal]) : timeout;
   let res: Response;
   try {
@@ -47,7 +50,7 @@ export async function chat(
     // on OUR timeout, never on the caller's abort (the agent then degrades to
     // its friendly fallback — never a stuck turn, never a call past the row deadline).
     if (opts.signal?.aborted) throw new Error('Ollama request aborted by the caller (row deadline)');
-    if (isTimeout(err)) throw new Error(`Ollama request timed out after ${OLLAMA_TIMEOUT_MS}ms`);
+    if (isTimeout(err)) throw new Error(`Ollama request timed out after ${timeoutMs}ms`);
     throw err;
   }
 
