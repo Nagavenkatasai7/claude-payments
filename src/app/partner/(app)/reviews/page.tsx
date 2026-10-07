@@ -18,6 +18,7 @@ import { Card, EmptyState, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
 import { TransferRows, toPartnerRow } from '../transfers/transfer-rows';
 import { AmlReviewForm } from './aml-review-form';
+import { PartnerAmlExplain } from '../transfers/[id]/aml-explain';
 
 export const metadata: Metadata = {
   title: t('partner.reviews.title'),
@@ -188,6 +189,7 @@ export default async function PartnerReviewsPage() {
                       </span>
                     ) : null}
                     <AmlReviewForm alertId={a.id} />
+                    {isTransferId(a.subjectId) ? <PartnerAmlExplain transferId={a.subjectId} /> : null}
                   </li>
                 ))}
               </ul>

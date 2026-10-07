@@ -5,6 +5,8 @@ import {
   cluster,
   AML_DEFAULTS,
   amlAlertMessage,
+  amlRuleReason,
+  isAmlRule,
   type SenderAmlStats,
 } from '@/lib/aml-rules';
 
@@ -111,5 +113,30 @@ describe('amlAlertMessage (2026-10-03: readable staff alert, ids only)', () => {
       expect(m).toContain('tx_9');
       expect(m).not.toContain('undefined');
     }
+  });
+});
+
+describe('amlRuleReason + isAmlRule (A4: shared with the AML explain copilot)', () => {
+  it('returns the plain-English reason for each rule', () => {
+    expect(amlRuleReason('structuring')).toBe('several smaller sends that add up to a large amount');
+    expect(amlRuleReason('first_transfer')).toBe('a large first send from a new customer');
+    expect(amlRuleReason('new_beneficiary')).toBe('a large send to a new recipient');
+    expect(amlRuleReason('cluster')).toBe('many different senders paying one recipient');
+  });
+
+  it('amlAlertMessage output is byte-identical (built from the same reason)', () => {
+    for (const rule of ['structuring', 'first_transfer', 'new_beneficiary', 'cluster'] as const) {
+      expect(amlAlertMessage(rule, 'tx_7')).toBe(
+        `AML review needed: ${amlRuleReason(rule)} on transfer tx_7 (rule ${rule}). Review it in the admin dashboard.`,
+      );
+    }
+    expect(amlAlertMessage('structuring', 'tx_1')).toBe(
+      'AML review needed: several smaller sends that add up to a large amount on transfer tx_1 (rule structuring). Review it in the admin dashboard.',
+    );
+  });
+
+  it('isAmlRule accepts only the closed rule list', () => {
+    for (const r of ['structuring', 'first_transfer', 'new_beneficiary', 'cluster']) expect(isAmlRule(r)).toBe(true);
+    for (const r of ['other', '', 'toString', '__proto__', 1, null, undefined]) expect(isAmlRule(r)).toBe(false);
   });
 });

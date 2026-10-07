@@ -224,7 +224,7 @@ describe('M3-6: the gate and session-reader inventory is complete', () => {
       [
         'src/lib/auth.ts',
         'src/app/api/dashboard/summary/route.ts',
-        ...['review-triage', 'summarize', 'kyc-review', 'ops-diagnose', 'draft-reply'].map(
+        ...['review-triage', 'summarize', 'kyc-review', 'ops-diagnose', 'draft-reply', 'aml-explain'].map(
           (r) => `src/app/api/copilot/${r}/route.ts`,
         ),
       ].sort(),
