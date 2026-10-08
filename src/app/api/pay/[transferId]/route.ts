@@ -315,6 +315,12 @@ export async function POST(
     if (otpTransfer && otpTransfer.environment === 'test') {
       return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
     }
+    // Batch B2: a payment-link transfer is paid ONLY through /api/pay/l/[token],
+    // which re-runs the link checks (switch, payee approved, link open/unexpired).
+    // Here it gets the same answer as a dead link, before any code or charge.
+    if (otpTransfer && (await createTransferRepo(getDb()).isPaymentLinkTransfer(otpTransfer.id))) {
+      return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+    }
     // Step 0 FX-2 (P1): the minted rate is re-checked BEFORE any code is issued
     // or verified (payTimeRateRefusal). Flag OFF ⇒ nothing runs.
     if (otpTransfer && env.fxPayRateCheckEnabled) {

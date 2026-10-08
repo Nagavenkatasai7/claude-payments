@@ -199,6 +199,12 @@ async function renderPayPage(transferId: string) {
     if (transfer.status === 'cancelled') {
       return <InactiveSheet />;
     }
+    // Batch B2: a payment-link transfer is paid only on its link page
+    // (/pay/l/[token]), which re-runs the link checks; the POST here refuses it
+    // too. Here it is a dead link: no payable form, no payee figures.
+    if (await createTransferRepo(getDb()).isPaymentLinkTransfer(transfer.id)) {
+      return <InactiveSheet />;
+    }
     brandPartnerId = transfer.partnerId;
     // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
     // read (boolean + last-4 label only); Edit only where the guarded write would
