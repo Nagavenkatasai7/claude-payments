@@ -267,4 +267,63 @@ describe('finalizeLinkPayment', { retry: 0 }, () => {
     expect(await pay('A'.repeat(22))).toEqual({ ok: false, error: 'inactive' });
     expect(await pay('../x')).toEqual({ ok: false, error: 'inactive' });
   });
+
+  it('isPaymentLinkTransfer: true for the link transfer only (the hosted pay route and page refuse it)', async () => {
+    const l = await link({ payeeId: await payee() });
+    const r = await pay(l.token);
+    if (!r.ok) throw new Error('unexpected');
+    const repo = createTransferRepo(db);
+    expect(await repo.isPaymentLinkTransfer(r.transferId)).toBe(true);
+    expect(await repo.isPaymentLinkTransfer('no_such_transfer')).toBe(false);
+    // A transfer bound to any other claim is not a link transfer.
+    await db.execute(sql.raw(`UPDATE idempotency_keys SET key = 'draft:x' WHERE transfer_id = '${r.transferId}'`));
+    expect(await repo.isPaymentLinkTransfer(r.transferId)).toBe(false);
+  });
+});
+
+describe('finalizeLinkPayment — a retry on the minted transfer (the charge failed before)', { retry: 0 }, () => {
+  const status = async (id: string) =>
+    ((await db.execute(sql.raw(`SELECT status, compliance_status, funding_ref FROM transfers WHERE id = '${id}'`))) as unknown as {
+      rows: Array<{ status: string; compliance_status: string; funding_ref: string | null }>;
+    }).rows[0];
+
+  it('a sender whose KYC was rejected since the mint is refused (kyc_required), nothing charged', async () => {
+    const dflt = await stores.partnerStore.ensureDefaultPartner();
+    await stores.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 30, kycStatus: 'verified' });
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 30, kycStatus: 'rejected' });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'kyc_required' });
+    expect(await status(first.transferId)).toEqual({ status: 'awaiting_payment', compliance_status: 'cleared', funding_ref: null });
+  });
+
+  it('a sender now on the watchlist is re-screened and blocked, never charged, evidence recorded', async () => {
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    const evidence = () =>
+      count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${first.transferId}'`);
+    const before = await evidence();
+    const c = await stores.customerStore.getCustomer('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...c!, fullName: 'John Doe' });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'blocked', transferId: first.transferId });
+    expect(await status(first.transferId)).toEqual({ status: 'blocked', compliance_status: 'blocked', funding_ref: null });
+    expect(await evidence()).toBe(before + 1);
+    // Blocked is final: the link no longer resolves as payable.
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'inactive' });
+  });
+
+  it('a clean retry re-screens and resumes the SAME transfer', async () => {
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    const evidence = () =>
+      count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${first.transferId}'`);
+    const before = await evidence();
+    expect(await pay(l.token)).toEqual({ ok: true, transferId: first.transferId });
+    expect(await evidence()).toBe(before + 1);
+    expect(await transfersN()).toBe(1);
+  });
 });
