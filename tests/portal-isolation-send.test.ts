@@ -82,7 +82,7 @@ const fd = (f: Record<string, string> = {}) => {
   for (const [k, v] of Object.entries(f)) x.set(k, v);
   return x;
 };
-const value: SendFormValue = { amountSource: 120, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' } };
+const value: SendFormValue = { amountSource: 120, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' }, purpose: 'gift' };
 const redirectOf = async (p: Promise<unknown>) => {
   const e = await p.then(() => null, (x: Error) => x);
   if (!e?.message.startsWith('REDIRECT:')) throw new Error(`no redirect: ${e?.message}`);
@@ -133,12 +133,12 @@ describe('portal Send — tenant isolation', () => {
   it("A's saved recipient cannot be picked on B's host (and B's on A's)", async () => {
     onHost('pb');
     const ridA = recipientRid('pa', phone, A.recipientPhones[0]);
-    const r = await startSendReviewAction({}, fd({ amount: '10', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: ridA }));
+    const r = await startSendReviewAction({}, fd({ amount: '10', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: ridA, purpose: 'gift' }));
     expect(r.error).toBe('portal.send.recipient_not_found');
     expect(await loadSendReview(redis, { partnerId: 'pb', phone })).toBeNull();
     onHost('pa');
     const ridB = recipientRid('pb', phone, B.recipientPhones[0]);
-    const r2 = await startSendReviewAction({}, fd({ amount: '10', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: ridB }));
+    const r2 = await startSendReviewAction({}, fd({ amount: '10', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: ridB, purpose: 'gift' }));
     expect(r2.error).toBe('portal.send.recipient_not_found');
   });
 

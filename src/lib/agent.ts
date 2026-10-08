@@ -33,7 +33,6 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 // hourly fallback alert without importing this file.
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
-import { inDemo } from './demo-mode';
 export { FALLBACK_REPLY };
 
 export interface AgentDeps {
@@ -177,7 +176,6 @@ export function createAgent(deps: AgentDeps) {
     // Channel seam (B5): resolve once per turn. 'web' narrows the schemas the
     // model sees to WEB_TOOL_ALLOWLIST; executeTool re-checks at dispatch.
     const channel: AgentChannel = deps.channel ?? 'whatsapp';
-    const channelTools = toolSchemasForChannel(channel);
     // Resolve the partner's allowed send currencies ONCE before the round loop.
     // Use distinct names (noteCustomer / notePartner) to avoid shadowing any
     // variables introduced by tool calls later in the same scope.
@@ -212,10 +210,24 @@ export function createAgent(deps: AgentDeps) {
     // its tools refuse on. Never a literal.
     const sendLimits = resolveEffectiveSendLimits(notePartner, noteCustomer);
     const t0CapTxt = `$${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}`;
-    // A3 purpose detection: once per turn. A demo-mode phone (DEMO_PHONES) AND
-    // the purpose.detect switch for the routed tenant; the switch is never read
-    // for anyone else. A failed read is off (isFlagOn fails open to false).
-    const purposeDetect = inDemo(phone) && (await deps.store.isFlagOn('purpose.detect', { partnerId }));
+    // Required purpose (owner decision 2026-10-08): the purpose.detect switch for
+    // the routed tenant, read once per turn, for EVERY phone. On ⇒ the PURPOSE
+    // prompt section, purpose required in the send tools' schemas, and the tool
+    // handlers refuse a send without one (needs_purpose, which always tells the
+    // model to ask, so a send is never stuck). Off, unreadable (isFlagOn fails
+    // open to false) or a throwing read ⇒ OFF: purpose optional and never asked,
+    // exactly the behaviour before this change. Failing off keeps every send
+    // working through a flag outage; the portal and Partner API require purpose
+    // on their own, with no switch.
+    let purposeRequired = false;
+    try {
+      purposeRequired = await deps.store.isFlagOn('purpose.detect', { partnerId });
+    } catch (err) {
+      logWarn('agent.purpose-flag', err instanceof Error ? err.name : 'unknown');
+    }
+    // Channel seam (B5): 'web' narrows the schemas the model sees to
+    // WEB_TOOL_ALLOWLIST; executeTool re-checks at dispatch.
+    const channelTools = toolSchemasForChannel(channel, { purposeRequired });
 
     // ONE tool context per turn: the tools and the round-0 customer context
     // read the same tenant, phone, stores and tap.
@@ -238,6 +250,7 @@ export function createAgent(deps: AgentDeps) {
         waCreds: deps.waCreds,
       },
       webStepUp: deps.webStepUp,
+      purposeRequired,
     });
 
     // Customer context (fix 5 / F43): the customer's OWN recent sends and, after
@@ -275,7 +288,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeDetect }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired }) },
       ];
       // Web channel: injected EVERY round (not just round 0) so the model still
       // knows the channel's limits after tool results arrive. Never persisted.

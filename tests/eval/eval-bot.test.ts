@@ -18,19 +18,19 @@ describe('eval-bot main()', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('with a key it runs all 18 cases against the endpoint and never prints the key', async () => {
+  it('with a key it runs all 21 cases against the endpoint and never prints the key', async () => {
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { role: 'assistant', content: '' } }] }),
     }));
     const lines: string[] = [];
     const code = await main({ EVAL_OLLAMA_API_KEY: 'test-key-not-real' }, fetchSpy as unknown as typeof fetch, (l) => lines.push(l));
-    expect(fetchSpy).toHaveBeenCalledTimes(18);
+    expect(fetchSpy).toHaveBeenCalledTimes(21);
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`${EVAL_DEFAULT_BASE_URL}/chat/completions`);
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-key-not-real');
     expect(lines.join('\n')).not.toContain('test-key-not-real');
-    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/18 passed$/);
+    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/21 passed$/);
     expect(code).toBe(1); // an empty reply fails at least one case
   });
 
@@ -59,5 +59,25 @@ describe('the recorded cases prove their own checks', () => {
     expect(seen[0].first.role).toBe('system');
     expect(seen[0].first.content).toContain('You are the assistant for SmartRemit');
     expect(seen[0].toolNames).not.toContain('create_transfer');
+  });
+
+  it('a required-purpose case sees the PURPOSE section and a picker that requires purpose; the others do not', async () => {
+    const seen = new Map<number, { prompt: string; pickerRequired: string[] }>();
+    const required = EVAL_CASES.find((c) => c.purposeRequired)!;
+    const plain = EVAL_CASES.find((c) => !c.purposeRequired)!;
+    for (const c of [required, plain]) {
+      await runEval(async (messages, tools) => {
+        const picker = tools.find((t) => t.function.name === 'send_approve_picker')!;
+        seen.set(c.id, {
+          prompt: String(messages[0].content),
+          pickerRequired: (picker.function.parameters as { required?: string[] }).required ?? [],
+        });
+        return { role: 'assistant', content: 'ok' };
+      }, [c]);
+    }
+    expect(seen.get(required.id)!.prompt).toContain('PURPOSE\n');
+    expect(seen.get(required.id)!.pickerRequired).toContain('purpose');
+    expect(seen.get(plain.id)!.prompt).not.toContain('PURPOSE\n');
+    expect(seen.get(plain.id)!.pickerRequired).not.toContain('purpose');
   });
 });

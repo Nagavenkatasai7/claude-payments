@@ -48,6 +48,8 @@ export interface ScheduleInput {
   sourceCurrency?: unknown;
   /** A parseable date string, else ignored. */
   endDate?: unknown;
+  /** parsePurpose: one of the 8 purposes, else absent (refused when requirePurpose). */
+  purpose?: unknown;
 }
 
 export interface ScheduleValidateOptions {
@@ -55,6 +57,11 @@ export interface ScheduleValidateOptions {
   amountBounds?: boolean;
   /** Refuse when no stored payout resolves (portal only). */
   requirePayout?: boolean;
+  /**
+   * Required purpose (owner decision 2026-10-08): refuse a schedule without one of the 8 purposes
+   * (code 'purpose'). The portal always sets it; the bot sets it while the purpose.detect switch is on.
+   */
+  requirePurpose?: boolean;
 }
 
 export type ScheduleRefusalCode =
@@ -65,7 +72,8 @@ export type ScheduleRefusalCode =
   | 'corridor'
   | 'sender_name'
   | 'amount'
-  | 'no_payout';
+  | 'no_payout'
+  | 'purpose';
 
 export type ScheduleValidateResult =
   | { ok: true; schedule: Omit<Schedule, 'id' | 'createdAt'> }

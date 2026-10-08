@@ -3,19 +3,21 @@
 import { useActionState, useState } from 'react';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Field, Input, Select } from '@/components/ds';
+import { PURPOSE_LABELS, TRANSFER_PURPOSES } from '@/lib/purpose-codes';
 import { startSendReviewAction, type SendFormState } from './actions';
 import { SendAlert } from './kyc-card';
 
 // The Send form (UI redesign M2-9). Amount, currency, destination, how the customer pays, and the
 // recipient: a saved one (by its opaque rid, account masked) or someone new (name + phone only; the
-// bank details are entered on the pay page, as today). The server re-validates every field.
+// bank details are entered on the pay page, as today), then why the customer is sending (required).
+// The server re-validates every field.
 
 export interface SendFormProps {
   currencies: string[];
   destinations: Array<{ code: string; name: string }>;
   funding: Array<{ value: string; label: MessageKey }>;
   saved: Array<{ rid: string; name: string; masked: string }>;
-  initial: { amount: string; currency: string; destination: string; funding: string; recipient: string; name?: string; phone?: string };
+  initial: { amount: string; currency: string; destination: string; funding: string; recipient: string; name?: string; phone?: string; purpose?: string };
 }
 
 export function SendForm({ currencies, destinations, funding, saved, initial }: SendFormProps) {
@@ -102,6 +104,18 @@ export function SendForm({ currencies, destinations, funding, saved, initial }: 
           </div>
         ) : null}
       </fieldset>
+
+      {/* Required purpose (owner decision 2026-10-08): one of the 8, no default (the customer chooses). */}
+      <Field name="purpose" label={t('portal.send.purposeLabel')} error={err('purpose')} required>
+        {({ id, describedBy, invalid }) => (
+          <Select id={id} name="purpose" defaultValue={v.purpose ?? ''} required aria-describedby={describedBy} invalid={invalid}>
+            <option value="" disabled>{t('portal.send.purposePlaceholder')}</option>
+            {TRANSFER_PURPOSES.map((p) => (
+              <option key={p} value={p}>{PURPOSE_LABELS[p]}</option>
+            ))}
+          </Select>
+        )}
+      </Field>
 
       <div>
         <Button type="submit" disabled={busy}>

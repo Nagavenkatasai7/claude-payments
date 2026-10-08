@@ -15,7 +15,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import { VOICE_INPUT_NOTE } from '@/lib/voice-notes';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
-import type { ChatMessage, TurnContext } from '@/lib/types';
+import type { ChatMessage, ChatTool, TurnContext } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
@@ -2025,13 +2025,15 @@ describe('WhatsApp formatting: only the WhatsApp channel converts CommonMark', (
   });
 });
 
-// A3 purpose detection: the PURPOSE prompt section rides a turn only when the
-// sender is a demo-mode phone AND the purpose.detect switch is on for the
-// routed tenant. The switch is read at most once per turn, and never for a
-// sender outside demo mode.
-describe('A3: purpose detection gate (demo mode AND purpose.detect)', () => {
+// Required purpose (owner decision 2026-10-08): the purpose.detect switch is
+// read once per turn for the routed tenant, for EVERY phone (no demo-mode gate).
+// On ⇒ the PURPOSE prompt section, the send tools' schemas require purpose and
+// the tool handlers refuse a send without one (needs_purpose). Off, unreadable or
+// throwing ⇒ exactly the behaviour before this change: no section, purpose optional.
+describe('Required purpose: the purpose.detect switch applies to every phone', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   async function purposeSwitch(on: boolean) {
@@ -2039,39 +2041,47 @@ describe('A3: purpose detection gate (demo mode AND purpose.detect)', () => {
     invalidateFlagCache(db);
   }
 
-  async function systemPromptFor(phone: string) {
+  const requiredOf = (tools: ChatTool[], name: string) =>
+    ((tools.find((t) => t.function.name === name)?.function.parameters as { required?: string[] } | undefined)?.required ?? []);
+
+  async function turnFor(phone: string, opts: { flagThrows?: boolean } = {}) {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const flagSpy = vi.spyOn(store, 'isFlagOn');
+    if (opts.flagThrows) flagSpy.mockRejectedValue(new Error('flag store down'));
     const seen: ChatMessage[][] = [];
+    const toolsSeen: ChatTool[][] = [];
     let call = 0;
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(redis, store),
-      chat: async (messages) => {
+      chat: async (messages, tools) => {
         seen.push(messages);
+        toolsSeen.push(tools);
         if (call++ === 0) {
+          // A schedule with no purpose: refused with needs_purpose only when the requirement applies.
           return {
             role: 'assistant',
             content: '',
-            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'validate_phone', arguments: JSON.stringify({ phone: '15550000002' }) } }],
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'create_schedule', arguments: JSON.stringify({ amount_source: 50, recipient_name: 'Mom', recipient_phone: '919876543210', frequency: 'monthly', day_of_month: 5 }) } }],
           };
         }
         return { role: 'assistant', content: 'ok' };
       },
     });
-    await agent.runAgentTurn(phone, 'maa ki dawai ke liye 200 bhejna hai', { isNewConversation: false });
+    await agent.runAgentTurn(phone, 'send mom 50 every month', { isNewConversation: false });
     const prompts = seen.map((msgs) => String(msgs.find((m) => m.role === 'system')?.content ?? ''));
+    const toolResult = String(seen[1]?.find((m) => m.role === 'tool')?.content ?? '');
     const purposeReads = flagSpy.mock.calls.filter((c) => c[0] === 'purpose.detect');
-    return { prompts, purposeReads };
+    return { prompts, toolsSeen, toolResult, purposeReads };
   }
 
-  it('demo phone AND switch on ⇒ the PURPOSE section on every round, switch read once with the tenant', async () => {
-    vi.stubEnv('DEMO_PHONES', PHONE);
+  it('switch on ⇒ a phone OUTSIDE demo mode gets the PURPOSE section on every round, the switch read once with the tenant', async () => {
+    vi.stubEnv('DEMO_PHONES', '');
     await purposeSwitch(true);
-    const { prompts, purposeReads } = await systemPromptFor(PHONE);
+    const { prompts, purposeReads } = await turnFor(PHONE);
     expect(prompts.length).toBeGreaterThanOrEqual(2);
     for (const p of prompts) {
       expect(p).toContain('\nPURPOSE\n');
@@ -2080,26 +2090,38 @@ describe('A3: purpose detection gate (demo mode AND purpose.detect)', () => {
     expect(purposeReads).toEqual([['purpose.detect', { partnerId: 'default' }]]);
   });
 
-  it('demo phone, switch off ⇒ no section', async () => {
-    vi.stubEnv('DEMO_PHONES', PHONE);
-    await purposeSwitch(false);
-    const { prompts } = await systemPromptFor(PHONE);
-    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
-  });
-
-  it('switch on, phone not in demo mode ⇒ no section and no switch read', async () => {
-    vi.stubEnv('DEMO_PHONES', '15550000009');
+  it('switch on ⇒ send_approve_picker and create_schedule require purpose in the schemas the model sees', async () => {
     await purposeSwitch(true);
-    const { prompts, purposeReads } = await systemPromptFor(PHONE);
-    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
-    expect(purposeReads).toEqual([]);
+    const { toolsSeen } = await turnFor(PHONE);
+    for (const tools of toolsSeen) {
+      expect(requiredOf(tools, 'send_approve_picker')).toContain('purpose');
+      expect(requiredOf(tools, 'create_schedule')).toContain('purpose');
+    }
   });
 
-  it('both off ⇒ no section, the default prompt', async () => {
-    vi.stubEnv('DEMO_PHONES', '');
-    vi.stubEnv('VOICE_NOTES_BETA_PHONES', '');
-    const { prompts, purposeReads } = await systemPromptFor(PHONE);
+  it('switch on ⇒ the tool context carries the requirement: a schedule without purpose is refused with needs_purpose', async () => {
+    await purposeSwitch(true);
+    const { toolResult } = await turnFor(PHONE);
+    expect(JSON.parse(toolResult)).toMatchObject({ needs_purpose: true });
+  });
+
+  it('switch off ⇒ no section, purpose optional in the schemas, no needs_purpose', async () => {
+    await purposeSwitch(false);
+    const { prompts, toolsSeen, toolResult, purposeReads } = await turnFor(PHONE);
     for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
-    expect(purposeReads).toEqual([]);
+    for (const tools of toolsSeen) {
+      expect(requiredOf(tools, 'send_approve_picker')).not.toContain('purpose');
+      expect(requiredOf(tools, 'create_schedule')).not.toContain('purpose');
+    }
+    expect(toolResult).not.toContain('needs_purpose');
+    expect(purposeReads).toEqual([['purpose.detect', { partnerId: 'default' }]]);
+  });
+
+  it('an unreadable switch (the read throws) ⇒ off: no section, no needs_purpose, the turn still answers', async () => {
+    await purposeSwitch(true);
+    const { prompts, toolResult } = await turnFor(PHONE, { flagThrows: true });
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
+    expect(toolResult).not.toContain('needs_purpose');
   });
 });

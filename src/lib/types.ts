@@ -280,6 +280,11 @@ export interface Schedule {
   partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
   sourceCurrency: CurrencyCode;   // NEW (P4)
   amountSource: number;           // NEW (P4)
+  /**
+   * Required purpose (owner decision 2026-10-08): the reason every run's transfer carries. Absent
+   * on a schedule made before the requirement: it keeps running and its transfers show "Not stated".
+   */
+  purpose?: TransferPurpose;
 }
 
 // 'support' (NEW): tickets-only staff — answers customer queries, escalates to

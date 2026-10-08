@@ -827,3 +827,52 @@ describe('runDueSchedules: sends.paused', () => {
     invalidateFlagCache(db);
   });
 });
+
+// Required purpose (owner decision 2026-10-08, Q2): every run's transfer carries
+// the schedule's purpose. A schedule made before the requirement (no purpose)
+// KEEPS RUNNING; its transfers have no purpose ("Not stated" on the pages).
+describe('runDueSchedules — the schedule purpose rides every run (required purpose)', () => {
+  it('a schedule with a purpose mints its transfer with that purpose', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule({ ...sched('with-purpose', 21), purpose: 'medical' });
+    expect((await scheduleStore.getSchedule('with-purpose'))?.purpose).toBe('medical');
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result).toEqual({ fired: 1, failed: 0 });
+    const [t] = await store.listTransfers();
+    expect(t.purpose).toBe('medical');
+  });
+
+  it('a schedule from before the requirement (no purpose) still runs; its transfer has no purpose', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('legacy', 21));
+    expect((await scheduleStore.getSchedule('legacy'))?.purpose).toBeUndefined();
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    expect(result).toEqual({ fired: 1, failed: 0 });
+    expect(notified).toHaveLength(1);
+    const [t] = await store.listTransfers();
+    expect(t.purpose).toBeUndefined();
+  });
+
+  it('an unknown purpose stored on a schedule row reads as absent and the run still mints', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('odd', 21));
+    await db.execute(sql`UPDATE schedules SET purpose = 'P1301' WHERE id = 'odd'`);
+    expect((await scheduleStore.getSchedule('odd'))?.purpose).toBeUndefined();
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result.fired).toBe(1);
+    expect((await store.listTransfers())[0].purpose).toBeUndefined();
+  });
+});

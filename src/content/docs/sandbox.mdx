@@ -28,6 +28,7 @@ curl -X POST https://smartremit.ai/api/partner/v1/transactions \
   -d '{
     "amount_source": 200,
     "source_currency": "USD",
+    "purpose": "family_support",
     "sender":      { "phone": "+12025550142", "name": "Jane Doe", "kyc_status": "verified" },
     "beneficiary": { "name": "Anita Sharma", "phone": "+12025550143",
                      "payout_method": "bank", "payout_destination": "123456789012|HDFC0001234" }

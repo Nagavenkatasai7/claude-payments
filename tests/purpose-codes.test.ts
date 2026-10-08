@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PURPOSE_HINTS, PURPOSE_LABELS, SUGGESTED_RBI_CODE, TRANSFER_PURPOSES, purposeView, suggestedRbiCode } from '@/lib/purpose-codes';
+import { PURPOSE_CHOICES_TEXT, PURPOSE_HINTS, PURPOSE_LABELS, PURPOSE_REQUIRED_HINT, SUGGESTED_RBI_CODE, TRANSFER_PURPOSES, parsePurpose, purposeView, suggestedRbiCode } from '@/lib/purpose-codes';
 import { toolSchemasForChannel } from '@/lib/tools';
 
 // Purpose detection (Raj #17): the RBI purpose code is a staff/partner-only
@@ -51,5 +51,24 @@ describe('purposeView (staff and partner detail pages)', () => {
   });
   it('an unknown stored value is no row (never echoed)', () => {
     expect(purposeView('<script>' as never)).toBeNull();
+  });
+});
+
+describe('required purpose helpers', () => {
+  it('PURPOSE_CHOICES_TEXT lists the 8 labels in enum order, in plain words', () => {
+    expect(PURPOSE_CHOICES_TEXT).toBe('Family support, Gift, Education, Medical, Savings, Bills, Business or Other');
+  });
+
+  it('parsePurpose accepts exactly the 8 values; anything else is undefined', () => {
+    for (const p of ALL) expect(parsePurpose(p)).toBe(p);
+    for (const bad of [undefined, null, '', 'P1301', 'Family support', 'FAMILY_SUPPORT', 1, {}, ['gift'], 'toString', '__proto__']) {
+      expect(parsePurpose(bad), String(bad)).toBeUndefined();
+    }
+  });
+
+  it('PURPOSE_REQUIRED_HINT tells the model to ask the question and lists the choices', () => {
+    expect(PURPOSE_REQUIRED_HINT).toMatch(/ask/i);
+    expect(PURPOSE_REQUIRED_HINT).toContain(PURPOSE_CHOICES_TEXT);
+    expect(PURPOSE_REQUIRED_HINT).toMatch(/again[^.]*purpose/i);
   });
 });
