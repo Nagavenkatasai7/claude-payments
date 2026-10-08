@@ -50,6 +50,9 @@ export function createScheduleRepo(
     // Required purpose: an unknown stored value reads as absent ("Not stated"), never cast.
     const purpose = parsePurpose(row.purpose);
     if (purpose) s.purpose = purpose;
+    // Batch B follow-up A2: decrypted like the payout destination (the cron run and the owner's form need it).
+    const detail = openOptional(row.purposeDetailEnc, provider, ctx.schedule(row.id, 'purpose_detail_enc'));
+    if (detail) s.purposeDetail = detail;
     return s;
   }
 
@@ -75,6 +78,7 @@ export function createScheduleRepo(
       status: s.status,
       endDate: s.endDate ?? null,
       purpose: s.purpose ?? null,
+      purposeDetailEnc: s.purposeDetail ? encryptField(s.purposeDetail, provider, ctx.schedule(s.id, 'purpose_detail_enc')) : null,
       lastRunAt: s.lastRunAt ? new Date(s.lastRunAt) : null,
       createdAt: new Date(s.createdAt),
     };

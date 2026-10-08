@@ -119,10 +119,11 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
         'partner_integrations.payment_credentials_enc', 'partner_integrations.payment_webhook_secret_enc',
         'partner_integrations.wa_app_secret_enc', 'partner_integrations.wa_token_enc', 'partner_integrations.wa_verify_token_enc',
         'recipients.payout_destination_enc',
-        'schedules.payout_destination_enc',
+        'schedules.payout_destination_enc', 'schedules.purpose_detail_enc', // Batch B follow-up A2 (born v2)
         'sellers.payout_destination_enc',
         'transfers.payout_destination_enc', 'transfers.recipient_business_name_enc',
         'transfers.recipient_legal_name_enc', 'transfers.sender_business_name_enc',
+        'transfers.purpose_detail_enc', // Batch B follow-up A2 (born v2)
         'waitlist_signups.email_enc', 'waitlist_signups.full_name_enc',
         'waitlist_signups.location_enc', 'waitlist_signups.phone_enc',
       ].sort(),

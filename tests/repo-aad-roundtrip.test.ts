@@ -107,6 +107,34 @@ describe('repo AAD v2 round trips (every table, v2 is the default writer)', { re
     expect(back!.recipientBusinessName).toBe('Mumbai Textiles Pvt');
   });
 
+  it('transfers.purpose_detail_enc: sealed v2, decrypted read only, write-once across a masked re-save', async () => {
+    const repo = createTransferRepo(db, provider);
+    await repo.saveTransfer(transferFixture({ purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' }));
+    const [row] = await raw(`SELECT purpose_detail_enc FROM transfers`);
+    expect(row.purpose_detail_enc).toMatch(/^v2\.k0\./);
+    expect(row.purpose_detail_enc).not.toContain('neighbour');
+    const masked = await repo.getTransfer('tr_aad1');
+    expect(masked!.purposeDetail).toBeUndefined();
+    expect((await repo.getTransfer('tr_aad1', { decrypt: true }))!.purposeDetail).toBe('helping a neighbour repair the roof');
+    // A read-modify-write of the masked read (no reason on it) keeps the stored reason.
+    await repo.saveTransfer({ ...masked!, adminNote: 'checked' });
+    expect((await repo.getTransfer('tr_aad1', { decrypt: true }))!.purposeDetail).toBe('helping a neighbour repair the roof');
+    // A transfer with no reason stores NULL (no crypto touch).
+    await repo.saveTransfer(transferFixture({ id: 'tr_aad2' }));
+    const [none] = await raw(`SELECT purpose_detail_enc FROM transfers WHERE id = 'tr_aad2'`);
+    expect(none.purpose_detail_enc).toBeNull();
+  });
+
+  it('ctx-mismatched transfers.purpose_detail_enc → the decrypted read throws', async () => {
+    const repo = createTransferRepo(db, provider);
+    await repo.saveTransfer(transferFixture({ purposeDetail: 'helping a neighbour repair the roof' }));
+    await repo.saveTransfer(transferFixture({ id: 'tr_aad2', purposeDetail: 'school fees for my son' }));
+    await db.execute(
+      sql`UPDATE transfers SET purpose_detail_enc = (SELECT purpose_detail_enc FROM transfers WHERE id = 'tr_aad1') WHERE id = 'tr_aad2'`,
+    );
+    await expect(repo.getTransfer('tr_aad2', { decrypt: true })).rejects.toThrow();
+  });
+
   it('transfers: setPayoutIfEditable (the pay page payout write)', async () => {
     const repo = createTransferRepo(db, provider);
     await repo.saveTransfer(transferFixture({ payoutDestination: '' }));
@@ -216,6 +244,21 @@ describe('repo AAD v2 round trips (every table, v2 is the default writer)', { re
     const [row] = await raw(`SELECT payout_destination_enc FROM schedules`);
     expect(row.payout_destination_enc).toMatch(/^v2\.k0\./);
     expect(await repo.getSchedule('sch_aad1')).toEqual(s);
+  });
+
+  it('schedules.purpose_detail_enc: saveSchedule → getSchedule', async () => {
+    const repo = createScheduleRepo(db, provider);
+    const s: Schedule = {
+      id: 'sch_aad2', phone: '15551230000', amountUsd: 100, recipientName: 'Mom',
+      recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '',
+      fundingMethod: 'bank_transfer', frequency: 'monthly', dayOfMonth: 5, status: 'active',
+      createdAt: now, partnerId: 'default', sourceCurrency: 'USD', amountSource: 100,
+      purpose: 'other', purposeDetail: 'helping a neighbour repair the roof',
+    };
+    await repo.saveSchedule(s);
+    const [row] = await raw(`SELECT purpose_detail_enc FROM schedules`);
+    expect(row.purpose_detail_enc).toMatch(/^v2\.k0\./);
+    expect(await repo.getSchedule('sch_aad2')).toEqual(s);
   });
 
   it('partner_integrations: 7 columns via saveIntegrations → getIntegrations', async () => {
