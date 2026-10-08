@@ -404,6 +404,7 @@ export const en = {
   'partner.transfers.purpose': 'Purpose',
   'partner.transfers.purposeSuggestedCode': 'Suggested RBI code {code} (not confirmed)',
   'partner.transfers.purposeNotStated': 'Not stated',
+  'partner.transfers.reasonGiven': 'Reason given',
   'partner.transfers.clientReference': 'Your order reference',
   'partner.transfers.payoutReference': 'Payout reference',
   'partner.transfers.referenceNone': 'None',

@@ -222,10 +222,10 @@ describe('POST /transactions purpose_detail (required with purpose other)', () =
   });
 
   it('any other purpose ignores purpose_detail (nothing stored, null back)', async () => {
-    const { deps, store } = await harness();
+    const { deps, db } = await harness();
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-pd-gift', txBody({ purpose: 'gift', purpose_detail: 'to claim my lottery prize' }));
     expect(view(r)).toMatchObject({ purpose: 'gift', purpose_detail: null, compliance_status: 'cleared' });
-    expect((await store.getTransfer(String(view(r).id), { decrypt: true }))?.purposeDetail).toBeUndefined();
+    expect((await createTransferRepo(db).getTransfer(String(view(r).id), { decrypt: true }))?.purposeDetail).toBeUndefined();
   });
 
   it('a matching reason is held for review with the generic reason only; the answer names no rule', async () => {
