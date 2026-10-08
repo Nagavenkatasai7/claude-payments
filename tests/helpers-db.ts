@@ -51,6 +51,12 @@ async function initOnce() {
 }
 
 const ALL_TABLES = [
+  // Batch B rewards (B3): FK children of transfers / partners, truncated first.
+  'reward_redemptions',
+  'platform_fee_ledger',
+  'partner_rewards',
+  'partner_reward_terms',
+  'reward_catalog',
   'outbox',
   'conversation_messages',
   'partner_sites', // UI redesign M1 (0026): FK child of partners, truncated before it

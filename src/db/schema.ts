@@ -1023,3 +1023,121 @@ export const featureFlags = pgTable(
     check('feature_flags_global_scope_id', sql`${t.scopeType} <> 'global' OR ${t.scopeId} = ''`),
   ],
 );
+
+// ── Batch B rewards (B3): rewards v1 and the platform fee ledger ─────────────
+// Five NEW tables; `transfers` does not change. Read and written only through
+// src/db/repos/reward-repo.ts and the sender-locked mint (src/lib/store.ts).
+// A missing catalog / terms row reads as the code defaults (src/lib/rewards/
+// settings.ts): no catalog row ⇒ the reward is not available; no terms row ⇒
+// the $0.60 platform fee, 40% give-back and a $0 budget (no SmartRemit-funded
+// reward until the admin sets one). First transfer free stays today's pricing
+// rule (fee-tier.ts); its redemption row is a record only, never budgeted.
+
+/** The admin's reward list: which SmartRemit-funded rewards partners may offer, and their limits. */
+export const rewardCatalog = pgTable(
+  'reward_catalog',
+  {
+    kind: text('kind').primaryKey(), // 'nth_transfer' | 'festival'
+    available: boolean('available').notNull().default(false),
+    nthMin: integer('nth_min').notNull().default(3),
+    nthMax: integer('nth_max').notNull().default(10),
+    maxDays: integer('max_days').notNull().default(14),
+    // The most one reward may take off a fee (a card fee's % part above it is still charged).
+    maxDiscountUsd: numeric('max_discount_usd', { precision: 12, scale: 2 }).notNull().default('2.99'),
+    customerMonthlyCap: integer('customer_monthly_cap').notNull().default(1),
+    festivalNames: jsonb('festival_names').notNull().default([]), // string[] the partner picks from
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('reward_catalog_kind', sql`${t.kind} IN ('nth_transfer','festival')`),
+    check('reward_catalog_nth', sql`${t.nthMin} >= 2 AND ${t.nthMax} >= ${t.nthMin} AND ${t.nthMax} <= 50`),
+    check('reward_catalog_days', sql`${t.maxDays} BETWEEN 1 AND 31`),
+    check('reward_catalog_discount', sql`${t.maxDiscountUsd} >= 0`),
+    check('reward_catalog_cap', sql`${t.customerMonthlyCap} BETWEEN 1 AND 31`),
+  ],
+);
+
+/** Admin-set money terms per partner (statement only in v1: no invoice, no payment). */
+export const partnerRewardTerms = pgTable(
+  'partner_reward_terms',
+  {
+    partnerId: text('partner_id').primaryKey().references(() => partners.id),
+    platformFeeUsd: numeric('platform_fee_usd', { precision: 12, scale: 2 }).notNull().default('0.60'),
+    giveBackPct: numeric('give_back_pct', { precision: 5, scale: 2 }).notNull().default('40'),
+    monthlyBudgetUsd: numeric('monthly_budget_usd', { precision: 12, scale: 2 }).notNull().default('0'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('partner_reward_terms_fee', sql`${t.platformFeeUsd} >= 0`),
+    check('partner_reward_terms_pct', sql`${t.giveBackPct} BETWEEN 0 AND 100`),
+    check('partner_reward_terms_budget', sql`${t.monthlyBudgetUsd} >= 0`),
+  ],
+);
+
+/** A partner's own choices inside the catalog limits (partner admin; own tenant only). */
+export const partnerRewards = pgTable(
+  'partner_rewards',
+  {
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    kind: text('kind').notNull(), // 'nth_transfer' | 'festival'
+    enabled: boolean('enabled').notNull().default(false),
+    nth: integer('nth'), // nth_transfer: every Nth delivered transfer in a month is free
+    festivalName: text('festival_name'), // festival: one of the catalog's names
+    startsOn: date('starts_on'), // festival: first and last ET day (inclusive)
+    endsOn: date('ends_on'),
+    minAmountUsd: numeric('min_amount_usd', { precision: 12, scale: 2 }), // festival: smallest qualifying send
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.kind] }),
+    check('partner_rewards_kind', sql`${t.kind} IN ('nth_transfer','festival')`),
+  ],
+);
+
+/**
+ * One reward per transfer (the PK), saved in the SAME transaction as the mint. A cancelled
+ * (or expired, which cancels), blocked or refunded transfer releases it: every count and sum
+ * joins `transfers` and leaves those rows out, so no status writer has to release it.
+ */
+export const rewardRedemptions = pgTable(
+  'reward_redemptions',
+  {
+    transferId: text('transfer_id').primaryKey().references(() => transfers.id),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(),
+    kind: text('kind').notNull(), // 'first_transfer' | 'nth_transfer' | 'festival'
+    month: text('month').notNull(), // ET month of the mint, 'YYYY-MM'
+    discountUsd: numeric('discount_usd', { precision: 12, scale: 2 }).notNull(),
+    // SmartRemit's give-back credit reserved for this reward (0 for first transfer free and when withheld).
+    giveBackUsd: numeric('give_back_usd', { precision: 12, scale: 2 }).notNull().default('0'),
+    // Compliance flagged the transfer: the customer keeps the price, the partner pays the discount.
+    giveBackWithheld: boolean('give_back_withheld').notNull().default(false),
+    detail: jsonb('detail').notNull().default({}), // { nth?, festivalName? } for the receipt line
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('reward_redemptions_kind', sql`${t.kind} IN ('first_transfer','nth_transfer','festival')`),
+    check('reward_redemptions_amounts', sql`${t.discountUsd} >= 0 AND ${t.giveBackUsd} >= 0`),
+    index('reward_redemptions_partner_month').on(t.partnerId, t.month),
+    index('reward_redemptions_sender_month').on(t.partnerId, t.phone, t.month),
+  ],
+);
+
+/** The platform fee SmartRemit charges per LIVE delivered transfer: one row per transfer, written with the delivery. */
+export const platformFeeLedger = pgTable(
+  'platform_fee_ledger',
+  {
+    transferId: text('transfer_id').primaryKey().references(() => transfers.id),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    month: text('month').notNull(), // ET month of the delivery, 'YYYY-MM'
+    feeUsd: numeric('fee_usd', { precision: 12, scale: 2 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('platform_fee_ledger_fee', sql`${t.feeUsd} >= 0`),
+    index('platform_fee_ledger_partner_month').on(t.partnerId, t.month),
+  ],
+);

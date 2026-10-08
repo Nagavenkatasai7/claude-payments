@@ -27,7 +27,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -87,6 +87,23 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'on the transfer. Only demo-mode phones (DEMO_PHONES). The purpose reaches the settlement instruction to the payout partner; ' +
       'staff and the partner see a suggested purpose code that is not confirmed.',
     bannerText: 'Purpose detection is on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // B3 rewards v1: SmartRemit-funded customer rewards (every Nth transfer in a
+  // month, festival offers). Also needs the sender among the demo-mode phones
+  // (DEMO_PHONES). Money-affecting, so it FAILS CLOSED: isFlagOn answers false
+  // on a read failure, and false means no new discount (src/lib/rewards/).
+  // First transfer free is today's pricing rule and never reads this switch.
+  'rewards.enabled': {
+    key: 'rewards.enabled',
+    label: 'Customer rewards',
+    description:
+      'Customers get the rewards their partner turned on at /partner/rewards, inside the limits and the monthly budget set at ' +
+      '/admin-dashboard/rewards: every Nth transfer in a month free, festival offers. Only demo-mode phones (DEMO_PHONES). ' +
+      'Off (or unreadable): new quotes show the normal fee; quotes already approved with a reward get "This offer has ended". ' +
+      'First transfer free works either way.',
+    bannerText: 'Customer rewards are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

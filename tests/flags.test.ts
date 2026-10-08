@@ -42,7 +42,7 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['purpose.detect', 'sends.paused', 'settlement.paused', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
@@ -81,6 +81,19 @@ describe('flag definitions', () => {
     await setFlag(db, 'purpose.detect', 'partner', 'acme');
     expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'acme' })).toBe(true);
     expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'default' })).toBe(false);
+  });
+
+  it('rewards.enabled (B3) is a feature switch (global or one partner), off with no row, demo-mode only', async () => {
+    const def = FLAG_DEFINITIONS['rewards.enabled'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner']);
+    expect(def.description).toMatch(/DEMO_PHONES/);
+    expect(def.description).toMatch(/First transfer free works either way/);
+    const db = await freshDb();
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'default' })).toBe(false);
+    await setFlag(db, 'rewards.enabled', 'partner', 'default');
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'default' })).toBe(true);
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'acme' })).toBe(false);
   });
 
   it('isKnownFlagKey accepts only defined keys', () => {
