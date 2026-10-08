@@ -90,6 +90,28 @@ const TABLE: Array<[string, unknown, Want]> = [
   ['authority', 'police said I must pay to avoid arrest', { ok: true, risk: 'authority' }],
   ['gambling', 'satta khelne ke liye paisa', { ok: true, risk: 'gambling' }],
   ['risk with a suggestion', 'registration fee for college admission', { ok: true, suggested: 'education', risk: 'advance_fee' }],
+  // ── risk: plural and longer forms (security review M1) ──
+  ['crypto is a prefix: cryptocurrency', 'cryptocurrency investment plan', { ok: true, risk: 'investment' }],
+  ['bitcoin is a prefix: bitcoins', 'buying bitcoins for uncle', { ok: true, risk: 'investment' }],
+  ['plural: lottery -> lotteries', 'won lotteries abroad', { ok: true, risk: 'prize' }],
+  ['plural: prizes', 'claim my prizes from contest', { ok: true, risk: 'prize' }],
+  ['plural: parcels', 'parcels stuck at airport', { ok: true, risk: 'delivery' }],
+  ['plural on a phrase: release payments', 'release payments for my account', { ok: true, risk: 'advance_fee' }],
+  ['phrase: pay fine', 'pay fine to the officer today', { ok: true, risk: 'authority' }],
+  ['phrase: paying the fine', 'paying the fine they asked for', { ok: true, risk: 'authority' }],
+  ['phrase: fine payment', 'fine payment for the notice', { ok: true, risk: 'authority' }],
+  ['phrase: court fee', 'court fee before the hearing', { ok: true, risk: 'authority' }],
+  ['phrase: court case fee', 'court case fee for my brother', { ok: true, risk: 'authority' }],
+  ['phrase: trading account', 'top up my trading account', { ok: true, risk: 'investment' }],
+  ['phrase: trading profits', 'release my trading profits', { ok: true, risk: 'investment' }],
+  ['phrase: trading platform', 'money on a trading platform', { ok: true, risk: 'investment' }],
+  // ── no risk: ordinary words that used to over-trigger (security review M1) ──
+  ['"fine" alone is not a fine', 'I am fine, sending for house', { ok: true }],
+  ['"court" alone is not a court', 'food court shop rent payment', { ok: true }],
+  ['"trading" alone is not investment', 'trading goods with supplier', { ok: true, suggested: 'business' }],
+  // ── suggestion: plural forms ──
+  ['suggest plural: hospitals', 'visits to two hospitals', { ok: true, suggested: 'medical' }],
+  ['suggest plural: universities', 'universities application costs', { ok: true, suggested: 'education' }],
 ];
 
 describe('checkPurposeDetail', () => {

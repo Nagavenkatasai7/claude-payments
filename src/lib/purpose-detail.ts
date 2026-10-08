@@ -31,7 +31,10 @@ export type PurposeDetailResult =
   | { ok: true; detail: string; suggested?: TransferPurpose; risk?: { category: PurposeRiskCategory } }
   | { ok: false; code: PurposeDetailCode };
 
-/** Keywords that suggest a named purpose. Matched on word boundaries, case-insensitive. */
+/**
+ * Keywords that suggest a named purpose. Matched on word boundaries, case-insensitive; the last
+ * word also matches its plural (s / es, and y -> ies), so "hospitals" and "universities" match.
+ */
 export const PURPOSE_SUGGEST_KEYWORDS: Readonly<Partial<Record<TransferPurpose, readonly string[]>>> = {
   education: ['school', 'college', 'tuition', 'fees', 'exam', 'university', 'padhai', 'books'],
   medical: ['hospital', 'medicine', 'medicines', 'doctor', 'surgery', 'treatment', 'operation', 'dawai', 'ilaj', 'clinic'],
@@ -44,15 +47,26 @@ export const PURPOSE_SUGGEST_KEYWORDS: Readonly<Partial<Record<TransferPurpose, 
   business: ['business', 'invoice', 'supplier', 'vendor', 'salary for staff', 'shop'],
 };
 
-/** Scam-pattern keywords per risk category. Matched on word boundaries, case-insensitive. */
+/**
+ * Scam-pattern keywords per risk category. Matched like the suggestion keywords (word boundaries,
+ * case-insensitive, plural last word); a trailing `*` makes the keyword a PREFIX ("crypto*" matches
+ * "cryptocurrency", "bitcoin*" matches "bitcoins"). Ordinary words that mean something harmless on
+ * their own ("fine", "court", "trading") only count inside a phrase.
+ */
 export const PURPOSE_RISK_KEYWORDS: Readonly<Record<PurposeRiskCategory, readonly string[]>> = {
   prize: ['lottery', 'prize', 'lucky draw', 'jackpot', 'winning', 'inaam'],
-  investment: ['crypto', 'bitcoin', 'forex', 'trading', 'investment return', 'double money', 'guaranteed return', 'paisa double'],
+  investment: [
+    'crypto*', 'bitcoin*', 'forex', 'trading account', 'trading profit', 'trading platform', 'investment return',
+    'double money', 'guaranteed return', 'paisa double',
+  ],
   advance_fee: ['processing fee', 'loan fee', 'advance fee', 'registration fee', 'unlock fee', 'release fee', 'release payment'],
   delivery: ['customs', 'parcel', 'courier fee', 'clearance fee'],
   romance: ['online friend', 'met online', 'dating', 'never met'],
   job: ['job fee', 'visa fee', 'placement fee'],
-  authority: ['police', 'arrest', 'tax refund', 'irs', 'fine', 'court', 'cbi'],
+  authority: [
+    'police', 'arrest', 'tax refund', 'irs', 'cbi', 'pay fine', 'pay a fine', 'pay the fine', 'paying fine',
+    'paying a fine', 'paying the fine', 'fine payment', 'court fee', 'court case fee',
+  ],
   gambling: ['betting', 'casino', 'gambling', 'satta'],
 };
 
@@ -88,17 +102,37 @@ const KEYBOARD_LINES = [...KEYBOARD_ROWS, ...KEYBOARD_ROWS.map((r) => [...r].rev
 const LETTER = /\p{L}/u;
 const LETTER_ALL = /\p{L}/gu;
 
+/** A lowercase phrase with single spaces as a regex source: special characters escaped, any whitespace between words. */
+function phraseSource(phrase: string): string {
+  return phrase.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/ /g, '\\s+');
+}
+
+/** A regex source matched on Unicode word boundaries. */
+function bounded(source: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}])${source}(?![\\p{L}\\p{N}])`, 'u');
+}
+
 /** A compiled keyword: lowercase phrase with single spaces, matched on Unicode word boundaries. */
 function wordRegex(phrase: string): RegExp {
-  const escaped = phrase.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/ /g, '\\s+');
-  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'u');
+  return bounded(phraseSource(phrase));
+}
+
+/**
+ * A compiled suggestion or risk keyword: like wordRegex, but the last word also matches its plural
+ * (s / es; a consonant + y ending also matches ies: lottery -> lotteries), and a trailing `*` turns
+ * the keyword into a prefix (crypto* matches cryptocurrency).
+ */
+function keywordRegex(keyword: string): RegExp {
+  if (keyword.endsWith('*')) return bounded(`${phraseSource(keyword.slice(0, -1))}[\\p{L}\\p{N}]*`);
+  if (/[^aeiou]y$/.test(keyword)) return bounded(`${phraseSource(keyword.slice(0, -1))}(?:y|ies)`);
+  return bounded(`${phraseSource(keyword)}(?:e?s)?`);
 }
 
 const SUGGEST_MATCHERS: ReadonlyArray<[TransferPurpose, RegExp[]]> = Object.entries(PURPOSE_SUGGEST_KEYWORDS).map(
-  ([p, words]) => [p as TransferPurpose, (words ?? []).map(wordRegex)],
+  ([p, words]) => [p as TransferPurpose, (words ?? []).map(keywordRegex)],
 );
 const RISK_MATCHERS: ReadonlyArray<[PurposeRiskCategory, RegExp[]]> = PURPOSE_RISK_CATEGORIES.map(
-  (c) => [c, PURPOSE_RISK_KEYWORDS[c].map(wordRegex)],
+  (c) => [c, PURPOSE_RISK_KEYWORDS[c].map(keywordRegex)],
 );
 const FILLER_PHRASES = PURPOSE_DETAIL_FILLER.filter((w) => w.includes(' '));
 const FILLER_WORDS = new Set(PURPOSE_DETAIL_FILLER.filter((w) => !w.includes(' ')));
