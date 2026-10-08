@@ -100,6 +100,7 @@ export async function addPayee(
     });
     throw new PaymentLinkOpsError('refused');
   }
+  const screening = screen.verdict; // 'clear' | 'review' here
   await db.transaction(async (tx) => {
     await createPayeeRepo(tx).insert({
       id,
@@ -108,14 +109,14 @@ export async function addPayee(
       accountHolder: parsed.value.accountHolder,
       payoutDestination: parsed.value.payoutDestination,
       last4: parsed.value.last4,
-      screening: screen.verdict,
+      screening,
       createdBy: actor.username,
     });
     const audit = createAuditRepo(tx);
     if (screen.evidence) await audit.record(sanctionsAuditEvent(actor.partnerId, id, screen.evidence));
     await audit.record({
       partnerId: actor.partnerId, actor: actor.username, actorType: 'staff', action: 'payee.create', subjectId: id,
-      meta: { screening: screen.verdict },
+      meta: { screening },
     });
   });
   const payee = await createPayeeRepo(db).getForPartner(actor.partnerId, id);
