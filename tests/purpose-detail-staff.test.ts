@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents } from '@/db/schema';
@@ -68,6 +68,24 @@ describe('readPurposeDetailsForStaff', () => {
     const audits = await piiViews();
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({ partnerId: 'acme', meta: { fields: ['purpose_detail'], transferId: 'tr_acme', actorScope: 'partner' } });
+  });
+
+  it('writes the pii.view rows in ONE batch insert (security review L5)', async () => {
+    const rows = await seed();
+    const insert = vi.spyOn(db, 'insert');
+    await readPurposeDetailsForStaff(db, { username: 'ops1' }, rows, { tenant: null });
+    expect(insert.mock.calls.filter(([table]) => table === auditEvents)).toHaveLength(1);
+    expect(await piiViews()).toHaveLength(3);
+    insert.mockRestore();
+  });
+
+  it('a failed audit write fails the read (awaited, not caught)', async () => {
+    const rows = await seed();
+    const insert = vi.spyOn(db, 'insert').mockImplementation(() => {
+      throw new Error('audit down');
+    });
+    await expect(readPurposeDetailsForStaff(db, { username: 'ops1' }, rows, { tenant: null })).rejects.toThrow('audit down');
+    insert.mockRestore();
   });
 
   it('a transfer shown twice (in review AND flagged) is read and audited once; nothing shown ⇒ no query, no audit', async () => {

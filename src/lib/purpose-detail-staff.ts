@@ -1,5 +1,5 @@
 import type { DbOrTx } from '@/db/client';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { auditSubjectId } from './customer-ref';
 import { purposeDetailRisk, PURPOSE_RISK_LABELS } from './purpose-detail';
@@ -10,9 +10,9 @@ import type { PartnerId, Transfer } from './types';
  * admin transaction page, the compliance review queue, the partner transfer page). Server only.
  *
  * The reason is the customer's own words, sealed at rest (transfers.purpose_detail_enc), so every
- * staff read is a decrypted read and writes ONE `pii.view` row per transfer shown (actor = staff,
- * subject = the keyed customer subject, meta = { fields: ['purpose_detail'], transferId } and, for
- * the partner app, actorScope 'partner'). The audit write is awaited and not caught: if it fails the
+ * staff read is a decrypted read and writes ONE `pii.view` row per transfer shown, all in one insert
+ * (actor = staff, subject = the keyed customer subject, meta = { fields: ['purpose_detail'],
+ * transferId } and, for the partner app, actorScope 'partner'). The audit write is awaited and not caught: if it fails the
  * page fails rather than show the words without a record (the dash-05 rule, customer-ref.ts).
  *
  * `riskLabel` is the staff name of the scam pattern the reason matched (purpose-detail.ts), or null.
@@ -40,11 +40,11 @@ export async function readPurposeDetailsForStaff(
   if (shown.length === 0) return out;
   const byId = new Map(shown.map((t) => [t.id, t]));
   const details = await createTransferRepo(db).listPurposeDetails(opts.tenant, [...byId.keys()]);
-  const audit = createAuditRepo(db);
+  const views: AuditEvent[] = [];
   for (const [id, detail] of details) {
     const t = byId.get(id);
     if (!t) continue;
-    await audit.record({
+    views.push({
       partnerId: t.partnerId,
       actor: staff.username,
       actorType: 'staff',
@@ -55,5 +55,7 @@ export async function readPurposeDetailsForStaff(
     const risk = purposeDetailRisk(detail);
     out.set(id, { detail, riskLabel: risk ? PURPOSE_RISK_LABELS[risk] : null });
   }
+  // ONE insert for every row shown (security review L5), awaited and not caught: no record, no words.
+  await createAuditRepo(db).recordMany(views);
   return out;
 }
