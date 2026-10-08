@@ -98,6 +98,18 @@ describe('purpose hold', { retry: 0 }, () => {
     expect((await purposeAudits(db))[0].meta).toEqual({ category: 'delivery' });
   });
 
+  it('a sandbox (test-environment) mint is held and audited but raises no ops alert (security review L3)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores('acme');
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, partnerId: 'acme', environment: 'test', purposeDetail: 'to claim my lottery prize',
+    });
+    expect(t.environment).toBe('test');
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual([AML_HOLD_REASON]);
+    expect((await purposeAudits(db)).map((a) => [a.subject_id, a.meta])).toEqual([[t.id, { category: 'prize' }]]);
+    expect(await alerts(db)).toEqual([]);
+  });
+
   it('a plain reason is stored and not held; no audit, no alert', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     const t = await createTransfer(store, partnerStore, mvs, {

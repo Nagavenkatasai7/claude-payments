@@ -849,7 +849,9 @@ async function mintLocked(
   if (rewardWrite) await ops.insertRedemption({ transferId: transfer.id, ...rewardWrite });
   // Batch B follow-up A4: a scam-pattern reason is audited (category and id, no
   // free text) and raises one deduped ops alert, committed with the row. Also
-  // when another rule already flagged it: staff should know the category.
+  // when another rule already flagged it: staff should know the category. A
+  // sandbox (test-environment) mint is held and audited but pages no one
+  // (security review L3).
   if (purposeRisk) {
     await ops.recordAudit({
       partnerId: input.partnerId,
@@ -859,7 +861,7 @@ async function mintLocked(
       subjectId: transfer.id,
       meta: { category: purposeRisk },
     });
-    await ops.enqueuePurposeFlagAlert(transfer.id, purposeRisk);
+    if (transfer.environment !== 'test') await ops.enqueuePurposeFlagAlert(transfer.id, purposeRisk);
   }
   return { transfer, replayed: false };
 }
