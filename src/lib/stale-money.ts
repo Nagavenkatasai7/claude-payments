@@ -2,6 +2,7 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 
 // stale-money — Program-Fix 32. Two sweeps over money that has stopped moving:
 //
@@ -132,4 +133,23 @@ export async function expireUnpaidLinks(
     if (done) expired++;
   }
   return expired;
+}
+
+/**
+ * Batch B2: every OPEN payment link past its 7-day expiry moves to 'expired'
+ * (one guarded UPDATE on status = 'open', so a link a customer is paying right
+ * now cannot also expire), with one `paylink.expired` audit row per link in the
+ * SAME transaction. Ids only, no customer data. The pay path checks expires_at
+ * itself, so the daily lag of this job is never a way to pay a stale link; this
+ * only makes the partner's list say so. Runs from /api/cron with expireUnpaidLinks.
+ */
+export async function expirePaymentLinks(db: Db, now: Date = new Date()): Promise<number> {
+  return db.transaction(async (tx) => {
+    const expired = await createPaymentLinkRepo(tx).expireDue(now);
+    const audit = createAuditRepo(tx);
+    for (const l of expired) {
+      await audit.record({ partnerId: l.partnerId, actor: 'system', actorType: 'system', action: 'paylink.expired', subjectId: l.id });
+    }
+    return expired.length;
+  });
 }
