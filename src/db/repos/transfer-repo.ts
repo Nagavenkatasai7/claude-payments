@@ -163,6 +163,10 @@ export function createTransferRepo(
   // The partner API refuses the 'sched:' prefix at its edge as well
   // (createTransaction), so a 'sched:' key is never a partner claim. Either
   // partner-API marker locks the payout the partner supplied.
+  // Batch B2: a payment-link transfer ('paylink:<linkId>' claim) pays the payee
+  // SmartRemit approved; the customer can never change it. Its claim already
+  // reads as partner-API-minted above, but the lock must not depend on that, so
+  // it is spelled out here on its own.
   const payoutEditable = (id: string, partnerId: PartnerId) =>
     and(
       eq(transfers.id, id),
@@ -171,6 +175,7 @@ export function createTransferRepo(
       unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
       sql`NOT ${partnerApiMintedSql()}`,
+      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND ${idempotencyKeys.key} LIKE 'paylink:%')`,
     );
 
   async function page(
