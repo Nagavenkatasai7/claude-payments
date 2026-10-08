@@ -1091,6 +1091,12 @@ export const en = {
   'portal.schedules.frequency_invalid': 'Choose how often.',
   'portal.schedules.day_invalid': 'Choose a day.',
   'portal.schedules.endDate_invalid': 'Enter a future date, or leave it blank.',
+  // Required purpose (owner decision 2026-10-08).
+  'portal.schedules.purposeLabel': 'Why you are sending',
+  'portal.schedules.purposePlaceholder': 'Choose a reason',
+  'portal.schedules.purpose_invalid': 'Choose why you are sending this money.',
+  'portal.schedules.purposeLine': 'Purpose: {purpose}',
+  'portal.schedules.purposeNotStated': 'Not stated',
   'portal.schedules.recipient_gone': 'That recipient is no longer saved. Choose another one.',
   'portal.schedules.recipient_changed': 'That recipient\'s bank details just changed. Check them and try again.',
   'portal.schedules.corridor': 'Scheduled payments can go to India only for now.',
@@ -1490,6 +1496,10 @@ export const en = {
   'portal.send.currency_invalid': 'Choose a currency.',
   'portal.send.destination_invalid': 'Choose a country.',
   'portal.send.funding_invalid': 'Choose how you pay.',
+  // Required purpose (owner decision 2026-10-08).
+  'portal.send.purposeLabel': 'Why you are sending',
+  'portal.send.purposePlaceholder': 'Choose a reason',
+  'portal.send.purpose_invalid': 'Choose why you are sending this money.',
   'portal.send.recipient_invalid': 'Choose a recipient.',
   'portal.send.name_invalid': 'Enter a name of 1 to 80 characters, without special control characters.',
   'portal.send.phone_invalid': 'Enter a valid mobile number with its country code.',

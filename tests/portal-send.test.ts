@@ -32,6 +32,8 @@ import {
   PORTAL_FUNDING_METHODS,
   type SendFormValue,
 } from '@/lib/portal-send';
+import { TRANSFER_PURPOSES } from '@/lib/purpose-codes';
+import { t } from '@/lib/i18n';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
@@ -86,10 +88,12 @@ describe('portalToolContext', () => {
   it('is the one builder on the web channel: host partner + session phone, a web form turn, routeSelector present', () => {
     const d = deps();
     const ctx = portalToolContext(owner, d);
-    const bot = buildToolContext({ partnerId: 'pa', phone: PHONE, channel: 'web', turn: webFormTurn(), deps: d });
+    const bot = buildToolContext({ partnerId: 'pa', phone: PHONE, channel: 'web', turn: webFormTurn(), deps: d, purposeRequired: true });
     const plain = (c: object) =>
       Object.fromEntries(Object.entries(c).filter(([k, v]) => typeof v !== 'function' && k !== 'kycProvider'));
     expect(plain(ctx)).toEqual(plain(bot));
+    // Required purpose: the portal always requires one (no switch), so its Send again asks too.
+    expect(ctx.purposeRequired).toBe(true);
     expect(ctx.channel).toBe('web');
     expect(ctx.partnerId).toBe('pa');
     expect(ctx.phone).toBe(PHONE);
@@ -188,17 +192,25 @@ describe('toPrepareSendInput — consumer only', () => {
       sourceCurrency: 'USD',
       destinationCountry: 'IN',
       fundingMethod: 'bank_transfer',
+      purpose: 'medical',
     });
     expect(r).not.toBeNull();
-    expect(Object.keys(r!).sort()).toEqual(['amountSource', 'destinationCountry', 'fundingMethod', 'recipientName', 'recipientPhone', 'sourceCurrency']);
+    expect(Object.keys(r!).sort()).toEqual(['amountSource', 'destinationCountry', 'fundingMethod', 'purpose', 'recipientName', 'recipientPhone', 'sourceCurrency']);
+    expect(r!.purpose).toBe('medical');
     expect([...r!.recipientName].length).toBeLessThanOrEqual(80);
     expect(r!.recipientName).not.toContain('‮');
   });
 
   it('refuses a name that clamps to nothing, and a non-consumer funding method', () => {
-    const base = { recipientPhone: '919876543210', amountSource: 1, sourceCurrency: 'USD' as const, destinationCountry: 'IN' as const };
+    const base = { recipientPhone: '919876543210', amountSource: 1, sourceCurrency: 'USD' as const, destinationCountry: 'IN' as const, purpose: 'gift' as const };
     expect(toPrepareSendInput({ ...base, recipientName: '​', fundingMethod: 'bank_transfer' })).toBeNull();
     expect(toPrepareSendInput({ ...base, recipientName: 'Mom', fundingMethod: 'ach_pull' as never })).toBeNull();
+  });
+
+  it('required purpose: refuses a missing or unknown purpose (defense in depth behind the form)', () => {
+    const base = { recipientPhone: '919876543210', recipientName: 'Mom', amountSource: 1, sourceCurrency: 'USD' as const, destinationCountry: 'IN' as const, fundingMethod: 'bank_transfer' as const };
+    expect(toPrepareSendInput({ ...base, purpose: undefined as never })).toBeNull();
+    expect(toPrepareSendInput({ ...base, purpose: 'P1301' as never })).toBeNull();
   });
 });
 
@@ -208,14 +220,30 @@ describe('edge validation', () => {
     for (const [k, v] of Object.entries(f)) fd.set(k, v);
     return fd;
   };
-  const good = { amount: '150.50', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: 'new', name: 'Mom', phone: '+91 98765 43210' };
+  const good = { amount: '150.50', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: 'new', name: 'Mom', phone: '+91 98765 43210', purpose: 'medical' };
 
   it('accepts a good new-recipient form', () => {
     const r = validateSendForm(form(good), { allowedCurrencies: ['USD'] });
     expect(r).toEqual({
       ok: true,
-      value: { amountSource: 150.5, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' } },
+      value: { amountSource: 150.5, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' }, purpose: 'medical' },
     });
+  });
+
+  it('required purpose: a missing or unknown purpose is the form error "Choose why you are sending this money."', () => {
+    for (const purpose of ['', 'Medical', 'P1301', 'MEDICAL', 'toString']) {
+      const r = validateSendForm(form({ ...good, purpose }), { allowedCurrencies: ['USD'] });
+      expect(r, purpose).toEqual({ ok: false, errors: { purpose: 'portal.send.purpose_invalid' } });
+    }
+    const { purpose: _omit, ...noPurpose } = good;
+    expect(validateSendForm(form(noPurpose), { allowedCurrencies: ['USD'] })).toEqual({ ok: false, errors: { purpose: 'portal.send.purpose_invalid' } });
+    expect(t('portal.send.purpose_invalid')).toBe('Choose why you are sending this money.');
+  });
+
+  it('each of the 8 purposes is accepted', () => {
+    for (const purpose of TRANSFER_PURPOSES) {
+      expect(validateSendForm(form({ ...good, purpose }), { allowedCurrencies: ['USD'] })).toMatchObject({ ok: true, value: { purpose } });
+    }
   });
 
   it('refuses ach_pull (it would make the send B2B) and any non-consumer funding', () => {
@@ -241,7 +269,7 @@ describe('edge validation', () => {
 
   it('a single-currency partner needs no currency field; a saved rid is carried as-is', () => {
     const rid = 'a'.repeat(32);
-    const r = validateSendForm(form({ amount: '10', destination: 'IN', funding: 'debit_card', recipient: rid }), { allowedCurrencies: ['USD'] });
+    const r = validateSendForm(form({ amount: '10', destination: 'IN', funding: 'debit_card', recipient: rid, purpose: 'gift' }), { allowedCurrencies: ['USD'] });
     expect(r).toMatchObject({ ok: true, value: { sourceCurrency: 'USD', recipient: { kind: 'saved', rid } } });
   });
 
@@ -270,7 +298,7 @@ describe('H2: the Send pre-fill (initial values only; doubtful values dropped si
 });
 
 describe('the review slot', () => {
-  const v: SendFormValue = { amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' } };
+  const v: SendFormValue = { amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', fundingMethod: 'bank_transfer', recipient: { kind: 'new', name: 'Mom', phone: '919876543210' }, purpose: 'education' };
 
   it('is bound to (partner, phone): another tenant or phone reads nothing; no PII in the key', async () => {
     const id = await saveSendReview(redis, owner, v);
@@ -300,6 +328,18 @@ describe('the review slot', () => {
     await redis.set(k, JSON.stringify({ id: 'x', amountSource: 1 }));
     expect(await loadSendReview(redis, owner)).toBeNull();
     await redis.set(k, 'not json');
+    expect(await loadSendReview(redis, owner)).toBeNull();
+  });
+
+  it('required purpose: a slot with no (or an unknown) purpose — written before the requirement — reads as none (back to the form)', async () => {
+    await saveSendReview(redis, owner, v);
+    const [k] = [...redis.dump.keys()].filter((x) => x.startsWith('psend:'));
+    const stored = JSON.parse(String(await redis.get(k))) as Record<string, unknown>;
+    expect(stored.purpose).toBe('education');
+    const { purpose: _omit, ...old } = stored;
+    await redis.set(k, JSON.stringify(old));
+    expect(await loadSendReview(redis, owner)).toBeNull();
+    await redis.set(k, JSON.stringify({ ...old, purpose: 'P1301' }));
     expect(await loadSendReview(redis, owner)).toBeNull();
   });
 });
