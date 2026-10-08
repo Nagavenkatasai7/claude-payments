@@ -77,6 +77,7 @@ import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import CustomersPage from '@/app/partner/(app)/customers/page';
 import CustomerDetailPage from '@/app/partner/(app)/customers/[ref]/page';
 import NewCustomerPage from '@/app/partner/(app)/customers/new/page';
+import { createReferralRepo } from '@/db/repos/referral-repo';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -575,5 +576,20 @@ describe('/partner/customers/new (p2 A5)', () => {
     expect(html).toContain('value="verified"');
     expect(html).toMatch(/<textarea[^>]*name="reason"/);
     expect(html).not.toContain('grandfathered');
+  });
+});
+
+describe('/partner/customers/[ref]: referred by (Batch B4)', () => {
+  it("shows the referral partner's name for the tenant's own customer only; nothing when not referred", async () => {
+    const r = createReferralRepo(db);
+    await r.insertPartner({ id: 'rp_tana', name: 'TANA Referrals', contact: '', commissionCents: 100, createdBy: 'admin' });
+    await r.insertCode({ code: 'REF-TANA01', referralPartnerId: 'rp_tana', createdBy: 'admin' });
+    await r.recordAttribution({ partnerId: PB, phone: SHARED, code: 'REF-TANA01', channel: 'whatsapp' }); // B's customer
+    await signInAs({ partnerId: PA, role: 'agent' });
+    expect(await detail(sealCustomerRef(PA, SHARED))).not.toContain('TANA Referrals'); // A's row of the same phone
+    await r.recordAttribution({ partnerId: PA, phone: ONLY_A, code: 'REF-TANA01', channel: 'portal' });
+    const html = await detail(sealCustomerRef(PA, ONLY_A));
+    expect(html).toContain('Referred by');
+    expect(html).toContain('TANA Referrals');
   });
 });

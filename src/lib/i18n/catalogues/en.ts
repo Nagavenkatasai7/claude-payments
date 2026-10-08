@@ -54,6 +54,7 @@ export const en = {
   'partner.customers.tier': 'Send tier',
   'partner.customers.verifiedAt': 'Verified on',
   'partner.customers.firstSeen': 'First seen',
+  'partner.customers.referredBy': 'Referred by',
   'partner.customers.revealNote': 'Revealing a value is recorded in your audit log with your name.',
   'partner.customers.notFound': 'That customer was not found.',
   'partner.customers.field.phone': 'Phone',
