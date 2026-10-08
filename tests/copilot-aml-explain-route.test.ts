@@ -196,6 +196,22 @@ describe('/api/copilot/aml-explain — explanation', () => {
     expect((await res.json()).facts.rules).toEqual([]);
   });
 
+  it('a purpose hold (purpose.flag row) skips the AML recompute and reads purpose_hold with the category (security review L1)', async () => {
+    // $900 first-ever send would recompute to first_transfer, but the purpose check held it.
+    const purposeHeld = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15557770046', amountUsd: 900, status: 'in_review', complianceReasons: [AML_HOLD_REASON] });
+    await createAuditRepo(db).record({
+      partnerId: 'acme', actor: 'system:purpose-check', actorType: 'system', action: 'purpose.flag', subjectId: purposeHeld,
+      meta: { category: 'investment' },
+    });
+    chatMock.mockRejectedValueOnce(new Error('down'));
+    const res = await POST(req({ subjectId: purposeHeld }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.facts.rules).toEqual([]);
+    expect(body.facts.holdReasons).toEqual(['purpose_hold']);
+    expect(body.facts.purposeRisk).toEqual({ category: 'investment', label: 'Investment or crypto' });
+  });
+
   it('never changes the transfer or the alert, and writes no outbox row', async () => {
     const before = await transferRow(alerted);
     const alertsBefore = await rows(sql`SELECT * FROM audit_events WHERE action = 'aml.alert' ORDER BY id`);

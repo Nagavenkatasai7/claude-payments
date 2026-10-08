@@ -143,6 +143,21 @@ describe('explainAmlAction: success', () => {
     ]);
   });
 
+  it('a purpose hold reads purpose_hold with NO category for the partner, and no recomputed AML rule (security review L1)', async () => {
+    await createAuditRepo(db).record({
+      partnerId: 'pa', actor: 'system:purpose-check', actorType: 'system', action: 'purpose.flag', subjectId: 'tr_xA2',
+      meta: { category: 'prize' },
+    });
+    await asAdmin();
+    const r = await explainAmlAction(form('tr_xA2'));
+    if (!r.ok) throw new Error('unexpected');
+    expect(r.facts.rules).toEqual([]);
+    expect(r.facts.holdReasons).toEqual(['purpose_hold']);
+    expect(r.facts.purposeRisk).toBeUndefined();
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    for (const s of [JSON.stringify(r), sent]) expect(s).not.toMatch(/prize|lottery/i);
+  });
+
   it('a held transfer without an alert is eligible; AI down ⇒ the fallback, still audited', async () => {
     chatMock.mockRejectedValue(new Error('timeout'));
     await asAdmin();
