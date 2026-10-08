@@ -96,7 +96,7 @@ const fd = (o: Record<string, string>) => {
 };
 const init = (): ScheduleFormState => ({ requestKey: newRequestKey() });
 const createForm = (o: Record<string, string> = {}) =>
-  fd({ requestKey: newRequestKey(), rid: recipientRid('pa', PHONE, A_RP), amount: '120', frequency: 'monthly', dayOfMonth: '9', ...o });
+  fd({ requestKey: newRequestKey(), rid: recipientRid('pa', PHONE, A_RP), amount: '120', frequency: 'monthly', dayOfMonth: '9', purpose: 'savings', ...o });
 async function expectRedirect(p: Promise<unknown>, to: string) {
   await expect(p).rejects.toThrow(`REDIRECT:${to}`);
 }
@@ -222,7 +222,7 @@ describe('create', () => {
     const mine = await schedulesOf('pa');
     expect(mine).toHaveLength(2);
     const created = mine.find((s) => s.id !== A.scheduleIds[0])!;
-    expect(created).toMatchObject({ recipientPhone: A_RP, amountSource: 120, dayOfMonth: 9, payoutDestination: `${A_FULL}|HDFC0001111`, status: 'active' });
+    expect(created).toMatchObject({ recipientPhone: A_RP, amountSource: 120, dayOfMonth: 9, payoutDestination: `${A_FULL}|HDFC0001111`, status: 'active', purpose: 'savings' });
     const a = await audits();
     expect(a).toEqual([{ action: 'schedule.create', partner_id: 'pa', meta: { scheduleId: created.id } }]);
   });
@@ -248,6 +248,17 @@ describe('create', () => {
     await signIn('pa');
     const s = await createScheduleAction(init(), createForm({ frequency: 'weekly', dayOfWeek: '9' }));
     expect(s.errors?.day).toBe('portal.schedules.day_invalid');
+  });
+
+  it('required purpose: none chosen ⇒ the purpose field error, the choice echoed, nothing saved', async () => {
+    await signIn('pa');
+    const before = (await schedulesOf('pa')).length;
+    for (const purpose of ['', 'P1301']) {
+      const s = await createScheduleAction(init(), createForm({ purpose }));
+      expect(s.errors?.purpose, purpose).toBe('portal.schedules.purpose_invalid');
+      expect(s.values?.purpose).toBe(purpose);
+    }
+    expect(await schedulesOf('pa')).toHaveLength(before);
   });
 
   it('more than 20 schedule changes an hour → too_many', async () => {
@@ -291,5 +302,23 @@ describe('status changes and the list', () => {
     for (const secret of [A_FULL, A_RP, 'Recipient PB']) expect(html).not.toContain(secret);
     await createRecipientRepo(db).tombstoneRecipient('pa', PHONE, A_RP);
     expect(renderToStaticMarkup(await NewSchedulePage())).toContain('Save a recipient first');
+  });
+
+  it('required purpose: the new page has a required "Why you are sending" select with the 8 reasons, none chosen', async () => {
+    await signIn('pa');
+    const html = renderToStaticMarkup(await NewSchedulePage());
+    expect(html).toContain('Why you are sending');
+    expect(html).toMatch(/<select[^>]*name="purpose"[^>]*required/);
+    expect(html).toMatch(/<option value="" disabled="" selected="">Choose a reason<\/option>/);
+    for (const label of ['Family support', 'Gift', 'Education', 'Medical', 'Savings', 'Bills', 'Business', 'Other']) expect(html).toContain(`>${label}</option>`);
+  });
+
+  it('required purpose (Q2): the list shows each schedule\'s purpose; one from before the requirement says "Not stated"', async () => {
+    await signIn('pa');
+    expect(await listHtml()).toContain('Purpose: Not stated');
+    await db.execute(sql`UPDATE schedules SET purpose = 'medical' WHERE id = ${A.scheduleIds[0]}`);
+    const html = await listHtml();
+    expect(html).toContain('Purpose: Medical');
+    expect(html).not.toContain('Not stated');
   });
 });

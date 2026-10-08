@@ -4,6 +4,7 @@ import { useActionState, useState } from 'react';
 import Link from 'next/link';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Field, Input, Select } from '@/components/ds';
+import { PURPOSE_LABELS, TRANSFER_PURPOSES } from '@/lib/purpose-codes';
 import type { ScheduleFormState } from './actions';
 
 // The new-schedule form (UI redesign M2-10). The recipient is picked by its opaque rid; the server
@@ -45,6 +46,17 @@ export function ScheduleForm(props: {
           <Select id={id} name="rid" key={`rid-${state.requestKey}`} defaultValue={v.rid ?? props.recipients[0]?.rid} aria-describedby={describedBy} invalid={invalid}>
             {props.recipients.map((r) => (
               <option key={r.rid} value={r.rid}>{r.label}</option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      {/* Required purpose (owner decision 2026-10-08): one of the 8, none chosen up front. */}
+      <Field name="purpose" label={t('portal.schedules.purposeLabel')} error={msg(e.purpose)} required>
+        {({ id, describedBy, invalid }) => (
+          <Select id={id} name="purpose" key={`purpose-${state.requestKey}`} defaultValue={v.purpose ?? ''} required aria-describedby={describedBy} invalid={invalid}>
+            <option value="" disabled>{t('portal.schedules.purposePlaceholder')}</option>
+            {TRANSFER_PURPOSES.map((p) => (
+              <option key={p} value={p}>{PURPOSE_LABELS[p]}</option>
             ))}
           </Select>
         )}

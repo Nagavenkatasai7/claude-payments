@@ -11,7 +11,8 @@ import { normalizePhone } from './phone';
 import { boundUntrustedText, NAME_MAX } from './untrusted-text';
 import { t, type MessageKey } from './i18n';
 import type { ToolContext } from './tools';
-import type { PartnerId, Schedule, ScheduleStatus } from './types';
+import type { PartnerId, Schedule, ScheduleStatus, TransferPurpose } from './types';
+import { parsePurpose } from './purpose-codes';
 
 /**
  * portal-schedules — the customer portal's recurring payments (UI redesign M2-10). Server only.
@@ -68,6 +69,7 @@ export interface ScheduleFormErrors {
   frequency?: MessageKey;
   day?: MessageKey;
   endDate?: MessageKey;
+  purpose?: MessageKey;
 }
 
 export interface ScheduleFormValue {
@@ -77,6 +79,8 @@ export interface ScheduleFormValue {
   dayOfMonth: number | undefined;
   dayOfWeek: number | undefined;
   endDate: string | undefined;
+  /** Required purpose (owner decision 2026-10-08): one of the 8. */
+  purpose: TransferPurpose;
 }
 
 const str = (fd: FormData, k: string) => {
@@ -121,8 +125,11 @@ export function parseScheduleForm(fd: FormData, now: number = Date.now()): { ok:
       endDate = e;
     }
   }
-  if (Object.keys(errors).length > 0 || !frequency) return { ok: false, errors };
-  return { ok: true, value: { rid, amount, frequency, dayOfMonth, dayOfWeek, endDate } };
+  // Required purpose: one of the 8 values exactly (the select's option values).
+  const purpose = parsePurpose(str(fd, 'purpose'));
+  if (!purpose) errors.purpose = 'portal.schedules.purpose_invalid';
+  if (Object.keys(errors).length > 0 || !frequency || !purpose) return { ok: false, errors };
+  return { ok: true, value: { rid, amount, frequency, dayOfMonth, dayOfWeek, endDate, purpose } };
 }
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
@@ -193,8 +200,10 @@ export async function createPortalSchedule(
       // refused (corridor). An explicit 'IN' would let any number through the India-only check.
       destinationCountry: undefined,
       endDate: value.endDate,
+      purpose: value.purpose,
     },
-    { amountBounds: true, requirePayout: true },
+    // Required purpose: the portal always requires one (no switch).
+    { amountBounds: true, requirePayout: true, requirePurpose: true },
   );
   if (!v.ok) return { ok: false, code: v.code };
   const schedule: Schedule = { id: newTransferId(), ...v.schedule, createdAt: new Date().toISOString() };

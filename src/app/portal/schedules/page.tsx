@@ -13,6 +13,7 @@ import { cancelScheduleAction, pauseScheduleAction, resumeScheduleAction } from 
 import { portalMetadata } from '@/lib/portal-metadata';
 import { hasSenderName } from '@/lib/sender-identity';
 import { ScheduleNameCard } from './name-card';
+import { PURPOSE_LABELS } from '@/lib/purpose-codes';
 
 export const generateMetadata = () => portalMetadata('portal.schedules.title');
 
@@ -60,6 +61,8 @@ export default async function PortalSchedulesPage({ searchParams }: { searchPara
       cadence: t(cadence.key, cadence.vars),
       account: s.payoutDestination ? t('portal.schedules.account', { masked: maskAccount(s.payoutMethod, s.payoutDestination) }) : t('portal.schedules.accountOnPayPage'),
       paused: s.status === 'paused',
+      // Required purpose (Q2): a schedule made before the requirement has none and says "Not stated".
+      purpose: t('portal.schedules.purposeLine', { purpose: s.purpose ? PURPOSE_LABELS[s.purpose] : t('portal.schedules.purposeNotStated') }),
       endsOn: fmtDate(s.endDate),
       lastRun: fmtDate(s.lastRunAt),
     };
@@ -99,6 +102,7 @@ export default async function PortalSchedulesPage({ searchParams }: { searchPara
                 </div>
                 <p className="text-[14px] text-ds-ink-muted">{r.cadence}</p>
                 <p className="text-[14px] text-ds-ink-muted">{r.account}</p>
+                <p className="text-[14px] text-ds-ink-muted">{r.purpose}</p>
                 {r.endsOn ? <p className="text-[13px] text-ds-ink-muted">{t('portal.schedules.endsOn', { date: r.endsOn })}</p> : null}
                 {r.lastRun ? <p className="text-[13px] text-ds-ink-muted">{t('portal.schedules.lastRun', { date: r.lastRun })}</p> : null}
               </div>
