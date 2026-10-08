@@ -6,6 +6,8 @@ import {
   qualifies,
   rewardFeeLine,
   rewardReceiptLine,
+  rewardPayNote,
+  ordinal,
   etDateKey,
   type RewardEligibilityInput,
 } from '@/lib/rewards/engine';
@@ -154,5 +156,13 @@ describe('customer-facing lines (SmartRemit wording)', () => {
     expect(rewardReceiptLine({ kind: 'nth_transfer', discountUsd: 1.99, detail: { nth: 5 } }, usd)).toBe('Reward: 5th transfer this month (saved $1.99).');
     expect(rewardReceiptLine({ kind: 'nth_transfer', discountUsd: 1.99, detail: { nth: 2 } }, usd)).toBe('Reward: 2nd transfer this month (saved $1.99).');
     expect(rewardReceiptLine({ kind: 'festival', discountUsd: 2.99, detail: { festivalName: 'Holi' } }, usd)).toBe('Reward: Holi offer (saved $2.99).');
+  });
+  it('pay page note (before paying: "you save")', () => {
+    expect(rewardPayNote({ kind: 'first_transfer', discountUsd: 1.99, detail: {} }, usd)).toBe('Reward: first transfer free (you save $1.99).');
+    expect(rewardPayNote({ kind: 'nth_transfer', discountUsd: 1.99, detail: { nth: 5 } }, usd)).toBe('Reward: your 5th transfer this month (you save $1.99).');
+    expect(rewardPayNote({ kind: 'festival', discountUsd: 2.99, detail: { festivalName: 'Holi' } }, usd)).toBe('Reward: Holi offer (you save $2.99).');
+  });
+  it('ordinal', () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(ordinal)).toEqual(['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st']);
   });
 });

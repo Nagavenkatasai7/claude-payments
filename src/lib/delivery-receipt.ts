@@ -14,6 +14,8 @@ import { env } from './env';
 import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { logWarn } from './log';
 import { recordDeliveryFee } from './rewards/fee-ledger';
+import { transferRewardOrNull } from './rewards/read';
+import type { QuotedReward } from './rewards/types';
 import type { PartnerId, Transfer } from './types';
 
 /**
@@ -90,7 +92,8 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
     const to = await verifiedReceiptEmail(db, { partnerId, senderPhone: phone, email: blob ?? undefined });
     if (!to) return null;
     const brand = resolvePartnerBranding(await createPartnerRepo(db).getPartner(partnerId)).brand;
-    return buildDeliveryReceipt(transfer, to, brand);
+    const reward = await transferRewardOrNull(db, partnerId, transfer.id);
+    return buildDeliveryReceipt(transfer, to, brand, reward);
   } catch (err) {
     logWarn('delivery-receipt.prepare', 'receipt pre-read failed; delivery proceeds without a receipt', {
       transferId,
@@ -101,9 +104,14 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
 }
 
 /** Render + seal the receipt for `transfer` as it will read once delivered. Pure apart from the seal. */
-export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: string): DeliveryReceipt {
-  // M2-14 (PR 417 L2): an automatic email says how to stop it.
-  const body = `${renderReceiptText(receiptView({ ...transfer, status: 'delivered' }), brand)}\n\n${t('portal.receipt.autoFooter', { brand })}`;
+export function buildDeliveryReceipt(
+  transfer: Transfer,
+  to: string,
+  brand: string,
+  reward?: Pick<QuotedReward, 'kind' | 'discountUsd' | 'detail'> | null,
+): DeliveryReceipt {
+  // M2-14 (PR 417 L2): an automatic email says how to stop it. B3: the reward line, when it had one.
+  const body = `${renderReceiptText(receiptView({ ...transfer, status: 'delivered' }, reward), brand)}\n\n${t('portal.receipt.autoFooter', { brand })}`;
   return {
     partnerId: transfer.partnerId,
     phone: transfer.phone,

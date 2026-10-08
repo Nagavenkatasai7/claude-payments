@@ -12,6 +12,8 @@ import { t } from '@/lib/i18n';
 import { Money, PageHeader } from '@/components/ds';
 import { ReceiptDisclosureCard } from '@/app/account/receipt/[transferId]/disclosure-card';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { getDb } from '@/db/client';
+import { transferRewardOrNull } from '@/lib/rewards/read';
 import { EntityBadge, fromLabel, fundingLabel } from '../b2b-parties';
 
 export const generateMetadata = () => portalMetadata('portal.receipt.title', { referrer: 'no-referrer' });
@@ -41,7 +43,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
   const owner = portalOwner(ctx);
   const transfer = await getPortalTransfer(owner, id);
   if (!transfer) notFound();
-  const v = receiptView(transfer);
+  const v = receiptView(transfer, await transferRewardOrNull(getDb(), owner.partnerId, transfer.id));
   const parties = await getPortalB2bParties(owner, transfer);
 
   const disclosure = buildReceiptDisclosure(
@@ -110,6 +112,11 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
               <Money amount={v.amountDest} currency={v.destCurrency} />
             </Row>
           </dl>
+          {v.rewardLine ? (
+            <p data-reward-line className="mt-3 text-[14px] font-semibold text-ds-ink">
+              {v.rewardLine}
+            </p>
+          ) : null}
         </section>
         {parties ? (
           <section

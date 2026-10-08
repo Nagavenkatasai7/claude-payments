@@ -97,7 +97,8 @@ export function budgetAllows(terms: PartnerRewardTerms, usedUsd: number, giveBac
   return Math.round(usedUsd * 100) + Math.round(giveBackUsd * 100) <= budget;
 }
 
-function ordinal(n: number): string {
+/** 1 → '1st', 2 → '2nd', 11 → '11th'. */
+export function ordinal(n: number): string {
   const tens = n % 100;
   if (tens >= 11 && tens <= 13) return `${n}th`;
   return `${n}${({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'}`;
@@ -120,4 +121,12 @@ export function rewardReceiptLine(r: Pick<QuotedReward, 'kind' | 'discountUsd' |
   if (r.kind === 'first_transfer') return `Reward: first transfer free (saved ${saved}).`;
   if (r.kind === 'nth_transfer') return `Reward: ${ordinal(r.detail.nth ?? 0)} transfer this month (saved ${saved}).`;
   return `Reward: ${r.detail.festivalName ?? 'festival'} offer (saved ${saved}).`;
+}
+
+/** The pay page's note above the legal disclosure (before paying, so "you save"). */
+export function rewardPayNote(r: Pick<QuotedReward, 'kind' | 'discountUsd' | 'detail'>, fmt: (usd: number) => string): string {
+  const saved = fmt(r.discountUsd);
+  if (r.kind === 'first_transfer') return `Reward: first transfer free (you save ${saved}).`;
+  if (r.kind === 'nth_transfer') return `Reward: your ${ordinal(r.detail.nth ?? 0)} transfer this month (you save ${saved}).`;
+  return `Reward: ${r.detail.festivalName ?? 'festival'} offer (you save ${saved}).`;
 }
