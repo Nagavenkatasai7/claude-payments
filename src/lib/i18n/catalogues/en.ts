@@ -1003,6 +1003,8 @@ export const en = {
   'portal.recipients.countryLabel': 'Country of the bank account',
   'portal.recipients.bankHeading': 'Bank details',
   'portal.recipients.bankEditHint': 'Only fill these in to change the account.',
+  'portal.recipients.showAccount': 'Show',
+  'portal.recipients.hideAccount': 'Hide',
   'portal.recipients.save': 'Save recipient',
   'portal.recipients.saving': 'Saving…',
   'portal.recipients.back': 'Back to recipients',

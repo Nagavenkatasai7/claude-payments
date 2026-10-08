@@ -7,6 +7,9 @@ import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 import {
   BANK_FIELDS_BY_COUNTRY,
+  accountConfirmErrors,
+  accountConfirmKey,
+  accountConfirmLabel,
   composePayoutDestination,
   maskAccountDisplay,
   validatePayoutFields,
@@ -56,6 +59,16 @@ const secondaryBtnClasses =
 const stepLabelClasses = 'mb-3.5 text-xs leading-normal uppercase tracking-[0.04em] text-[#8696a0]';
 const fieldErrorClasses = 'mt-1 block text-xs leading-normal text-[#f15c6d]';
 const formErrorClasses = 'mt-2 text-[13px] text-[#f15c6d]';
+// Raj (Oct 7): "Resend code" is a small link under the pay button, not a second big button.
+const resendLinkClasses =
+  'mt-3 block w-full cursor-pointer bg-transparent p-1 text-center text-[13px] font-semibold text-[#53bdeb] underline-offset-2 hover:underline focus-visible:underline disabled:cursor-default disabled:opacity-60';
+// Raj (Oct 7): the account number is typed hidden (dots). A text input with
+// -webkit-text-security (every current browser; Firefox from 114, per MDN
+// browser-compat-data) keeps the numeric keypad and does not invite the
+// browser's password manager the way type="password" does.
+const hiddenTextClasses = '[-webkit-text-security:disc]';
+const showToggleClasses =
+  'mb-3 cursor-pointer bg-transparent p-0 text-xs font-semibold text-[#53bdeb] underline-offset-2 hover:underline focus-visible:underline';
 const successClasses = 'flex items-center justify-center gap-2 font-semibold text-[#25d366]';
 const panelClasses = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
 const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
@@ -125,23 +138,15 @@ export function PayForm({
 // sender enters. The parent includes `code` in its pay POST; a 403 reason:'otp'
 // bounces here with an inline error.
 
-function OtpFields({
-  transferId,
-  code,
-  setCode,
-  sent,
-  setSent,
-  otpError,
-}: {
-  transferId: string;
-  code: string;
-  setCode: (v: string) => void;
-  sent: boolean;
-  setSent: (v: boolean) => void;
-  otpError?: string;
-}) {
+interface OtpRequest {
+  requesting: boolean;
+  requestError: string;
+  requestCode: () => Promise<void>;
+}
+
+/** Program-Fix 25 PR B: a refused code request says why (send failed / locked). */
+function useOtpRequest(transferId: string, setSent: (v: boolean) => void): OtpRequest {
   const [requesting, setRequesting] = useState(false);
-  // Program-Fix 25 PR B: a refused code request says why (send failed / locked).
   const [requestError, setRequestError] = useState('');
 
   async function requestCode() {
@@ -167,13 +172,29 @@ function OtpFields({
     }
   }
 
+  return { requesting, requestError, requestCode };
+}
+
+function OtpFields({
+  code,
+  setCode,
+  sent,
+  otpError,
+  otp,
+}: {
+  code: string;
+  setCode: (v: string) => void;
+  sent: boolean;
+  otpError?: string;
+  otp: OtpRequest;
+}) {
   if (!sent) {
     return (
       <div>
-        <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-          {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+        <button type="button" className={secondaryBtnClasses} onClick={otp.requestCode} disabled={otp.requesting}>
+          {otp.requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
         </button>
-        {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+        {otp.requestError && <span className={fieldErrorClasses} role="alert">{otp.requestError}</span>}
       </div>
     );
   }
@@ -194,10 +215,19 @@ function OtpFields({
         />
       </label>
       {otpError && <span className={fieldErrorClasses}>{otpError}</span>}
-      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-        {requesting ? 'Sending…' : 'Resend code'}
+    </div>
+  );
+}
+
+/** Raj (Oct 7): drawn after the pay button, so the code box and "Pay now" sit together. */
+function ResendCode({ sent, otp, disabled = false }: { sent: boolean; otp: OtpRequest; disabled?: boolean }) {
+  if (!sent) return null;
+  return (
+    <div>
+      <button type="button" className={resendLinkClasses} onClick={otp.requestCode} disabled={otp.requesting || disabled}>
+        {otp.requesting ? 'Sending…' : 'Resend code'}
       </button>
-      {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+      {otp.requestError && <span className={fieldErrorClasses} role="alert">{otp.requestError}</span>}
     </div>
   );
 }
@@ -245,6 +275,7 @@ function SimplePayForm({
   const ackMissing = disclosureVersion !== null && !acked;
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
+  const otp = useOtpRequest(transferId, setSent);
   const [otpError, setOtpError] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -318,11 +349,12 @@ function SimplePayForm({
           </div>
         </div>
       )}
-      <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
       {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
+      <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
       {onEditBankDetails && (
         <button type="button" className={secondaryBtnClasses} onClick={onEditBankDetails} disabled={status === 'paying'}>
           Edit bank details
@@ -358,8 +390,12 @@ function BankDetailsPayForm({
     Object.fromEntries(defs.map((d) => [d.key, ''])),
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Raj (Oct 7): the re-enter box value per account field. Never sent: it only has to match.
+  const [confirms, setConfirms] = useState<Record<string, string>>({});
+  const [showAccount, setShowAccount] = useState(false);
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
+  const otp = useOtpRequest(transferId, setSent);
   const [otpError, setOtpError] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [acked, setAcked] = useState(false);
@@ -370,13 +406,19 @@ function BankDetailsPayForm({
     if (errors[key]) setErrors((prev) => ({ ...prev, [key]: '' }));
   }
 
+  function setConfirm(key: string, v: string) {
+    setConfirms((prev) => ({ ...prev, [key]: v }));
+    if (errors[key]) setErrors((prev) => ({ ...prev, [key]: '' }));
+  }
+
   // Step 1 → Step 2: client-side validate via the SAME validator the server
   // re-runs authoritatively (single source of truth, no drift).
   function handleContinue(e: FormEvent) {
     e.preventDefault();
     const result = validatePayoutFields(destinationCountry, values);
-    if (!result.ok) {
-      setErrors(result.errors);
+    const confirmErrors = accountConfirmErrors(destinationCountry, { ...values, ...confirms });
+    if (!result.ok || Object.keys(confirmErrors).length > 0) {
+      setErrors({ ...(result.ok ? {} : result.errors), ...confirmErrors });
       return;
     }
     setErrors({});
@@ -475,11 +517,12 @@ function BankDetailsPayForm({
             <span>{formatMoney(summary.sourceTotalCharge, summary.sourceCurrency)}</span>
           </div>
         </div>
-        <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+        <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
         {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
         <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
+        <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
         <button
           type="button"
           className={secondaryBtnClasses}
@@ -504,6 +547,58 @@ function BankDetailsPayForm({
       <div className={stepLabelClasses}>Step 1 of 2 · Recipient bank details</div>
       {defs.map((def) => {
         const digitOnly = typeof def.digits === 'number';
+        if (def.isAccount) {
+          // Raj (Oct 7): typed hidden, with Show / Hide, then a re-enter box that must match.
+          const confirmKey = accountConfirmKey(def.key);
+          const boxClasses = showAccount ? inputClasses : `${inputClasses} ${hiddenTextClasses}`;
+          // An IBAN holds letters; every other account field is digits.
+          const accountInputMode = def.pattern ? 'text' : 'numeric';
+          return (
+            <div key={def.key}>
+              <label className={labelClasses}>
+                {def.label}
+                <input
+                  className={boxClasses}
+                  name={def.key}
+                  required
+                  value={values[def.key] ?? ''}
+                  onChange={(e) => setField(def.key, e.target.value)}
+                  inputMode={accountInputMode}
+                  maxLength={digitOnly ? def.digits : undefined}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                {errors[def.key] && <span className={fieldErrorClasses}>{errors[def.key]}</span>}
+              </label>
+              <label className={labelClasses}>
+                {accountConfirmLabel(def.label)}
+                <input
+                  className={boxClasses}
+                  name={confirmKey}
+                  required
+                  value={confirms[confirmKey] ?? ''}
+                  onChange={(e) => setConfirm(confirmKey, e.target.value)}
+                  inputMode={accountInputMode}
+                  maxLength={digitOnly ? def.digits : undefined}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                {errors[confirmKey] && <span className={fieldErrorClasses}>{errors[confirmKey]}</span>}
+              </label>
+              <button
+                type="button"
+                className={showToggleClasses}
+                onClick={() => setShowAccount((v) => !v)}
+                aria-pressed={showAccount}
+                aria-label={`${showAccount ? 'Hide' : 'Show'} ${def.label}`}
+              >
+                {showAccount ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          );
+        }
         return (
           <label key={def.key} className={labelClasses}>
             {def.label}
@@ -552,6 +647,7 @@ function AchDebitPayForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
+  const otp = useOtpRequest(transferId, setSent);
   const [otpError, setOtpError] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -686,10 +782,11 @@ function AchDebitPayForm({
         </select>
         {errors.accountType && <span className={fieldErrorClasses}>{errors.accountType}</span>}
       </label>
-      <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Authorize & pay'}
       </button>
+      <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
       {status === 'error' && !otpError && (
         <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}

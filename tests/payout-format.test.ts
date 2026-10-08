@@ -13,6 +13,11 @@ import {
   isMaskedDestination,
   ACCOUNT_ON_FILE_PLACEHOLDER,
   NO_BANK_DETAILS_PLACEHOLDER,
+  accountConfirmKey,
+  accountConfirmLabel,
+  accountConfirmErrors,
+  ACCOUNT_CONFIRM_MISMATCH,
+  ACCOUNT_CONFIRM_REQUIRED,
 } from '@/lib/payout-format';
 import type { CountryCode } from '@/lib/types';
 
@@ -457,5 +462,60 @@ describe('validatePayoutFields — a masked value is never composed into a desti
     expect(inr.ok && inr.payoutDestination).toBe('HDFC0001234 123456789012');
     const mx = validatePayoutFields('MX', { clabe: '0123 4567 8901 2345 67' });
     expect(mx.ok && mx.payoutDestination).toBe('012345678901234567');
+  });
+});
+
+// Raj, Oct 7: the account box is typed hidden, so a second "re-enter" box catches a typo
+// before the money goes to a wrong account. The check runs on the pay page and the portal form.
+describe('accountConfirmErrors', () => {
+  it('names the confirm box after the account field', () => {
+    expect(accountConfirmKey('accountNumber')).toBe('accountNumberConfirm');
+    expect(accountConfirmKey('iban')).toBe('ibanConfirm');
+  });
+
+  it('labels the confirm box in plain words', () => {
+    expect(accountConfirmLabel('Account number')).toBe('Re-enter account number');
+    expect(accountConfirmLabel('IBAN')).toBe('Re-enter IBAN');
+    expect(accountConfirmLabel('CLABE')).toBe('Re-enter CLABE');
+  });
+
+  it('a matching confirm gives no error', () => {
+    expect(accountConfirmErrors('IN', { accountNumber: '123456789012', ifsc: 'HDFC0001234', accountNumberConfirm: '123456789012' })).toEqual({});
+  });
+
+  it('a different confirm gives the mismatch error on the confirm box', () => {
+    expect(accountConfirmErrors('IN', { accountNumber: '123456789012', accountNumberConfirm: '123456789013' })).toEqual({
+      accountNumberConfirm: ACCOUNT_CONFIRM_MISMATCH,
+    });
+  });
+
+  it('a blank confirm under a typed account asks for it', () => {
+    expect(accountConfirmErrors('US', { routingNumber: '021000021', accountNumber: '12345678' })).toEqual({
+      accountNumberConfirm: ACCOUNT_CONFIRM_REQUIRED,
+    });
+    expect(accountConfirmErrors('US', { routingNumber: '021000021', accountNumber: '12345678', accountNumberConfirm: '   ' })).toEqual({
+      accountNumberConfirm: ACCOUNT_CONFIRM_REQUIRED,
+    });
+  });
+
+  it('spaces, hyphens, dots and letter case do not count', () => {
+    expect(accountConfirmErrors('IN', { accountNumber: '1234 5678 9012', accountNumberConfirm: '1234-5678.9012' })).toEqual({});
+    expect(accountConfirmErrors('AE', { iban: 'AE07 0331 2345 6789 0123 456', ibanConfirm: 'ae070331234567890123456' })).toEqual({});
+    expect(accountConfirmErrors('MX', { clabe: '012345678901234567', clabeConfirm: '012345678901234568' })).toEqual({
+      clabeConfirm: ACCOUNT_CONFIRM_MISMATCH,
+    });
+  });
+
+  it('a blank account gives no confirm error (the required error belongs to the account box)', () => {
+    expect(accountConfirmErrors('IN', { accountNumber: '', accountNumberConfirm: '' })).toEqual({});
+    expect(accountConfirmErrors('IN', { accountNumber: '  ', accountNumberConfirm: '123' })).toEqual({});
+  });
+
+  it('only fields marked isAccount get a confirm box; an unknown country has none', () => {
+    for (const [country, defs] of Object.entries(BANK_FIELDS_BY_COUNTRY)) {
+      const accountFields = defs.filter((d) => d.isAccount);
+      expect(accountFields.length, country).toBe(1);
+    }
+    expect(accountConfirmErrors('ZZ' as CountryCode, { accountNumber: '123456' })).toEqual({});
   });
 });
