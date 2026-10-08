@@ -26,6 +26,7 @@ const getTransferDecrypted = vi.fn<(id: string) => Promise<Transfer | null>>();
 const getDraft = vi.fn<(id: string) => Promise<Draft | null>>();
 const getPartner = vi.fn<(id: string) => Promise<Partner | null>>();
 const isPayoutEditable = vi.fn(async () => false);
+const isPaymentLinkTransfer = vi.fn(async (id: string) => id === LINK_TRANSFER_ID);
 
 vi.mock('@/lib/store', () => ({
   getStore: () => ({ getTransfer, getTransferDecrypted, legacyTenantOf: async () => null }),
@@ -37,7 +38,7 @@ vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 // Step 0 Q16: no draft:<id> claim behind an unknown id (tests/pay-page-draft-relink.test.ts covers it).
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable }),
+  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer }),
 }));
 
 import PayPage from '@/app/pay/[transferId]/page';
@@ -45,6 +46,7 @@ import PayPage from '@/app/pay/[transferId]/page';
 const PARTNER: Partner = { id: 'p_acme', displayName: 'Acme Money Co' } as unknown as Partner;
 const EXPIRED_ID = 'Ex_9-Cd_E-fG0hIjKlMnOp';
 const LIVE_ID = 'Lv_9-Cd_E-fG0hIjKlMnOp';
+const LINK_TRANSFER_ID = 'Pl_9-Cd_E-fG0hIjKlMnOp'; // minted by a payment link ('paylink:' claim)
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -72,6 +74,7 @@ beforeEach(() => {
   const rows: Record<string, Transfer> = {
     [EXPIRED_ID]: makeTransfer({ id: EXPIRED_ID, status: 'cancelled' }),
     [LIVE_ID]: makeTransfer({ id: LIVE_ID }),
+    [LINK_TRANSFER_ID]: makeTransfer({ id: LINK_TRANSFER_ID, recipientName: 'Sunrise Public School' }),
   };
   getTransfer.mockImplementation(async (id) => rows[id] ?? null);
   getTransferDecrypted.mockImplementation(async (id) => rows[id] ?? null);
@@ -101,5 +104,14 @@ describe('/pay/[transferId] — an expired (cancelled) link (Program-Fix 32)', (
     const html = await render(LIVE_ID);
     expect(html).toContain('Secure payment');
     expect(html).toContain('Acme Money Co');
+  });
+});
+
+describe('/pay/[transferId] — a payment-link transfer (Batch B2)', () => {
+  it('awaiting payment: the dead-link sheet, byte-equal to not-found (the link page is the only way to pay it)', async () => {
+    const html = await render(LINK_TRANSFER_ID);
+    expect(html).toBe(await render('doesnotexist'));
+    expect(html).not.toContain('Sunrise Public School');
+    expect(getTransferDecrypted).not.toHaveBeenCalledWith(LINK_TRANSFER_ID);
   });
 });

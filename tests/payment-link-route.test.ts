@@ -63,6 +63,8 @@ const T0 = '2026-05-01T00:00:00.000Z';
 
 let token: string;
 let linkId: string;
+let lockedAt: string; // the lock identity the page rendered (LinkPayForm posts it back)
+let redis: ReturnType<typeof fakeRedis>;
 
 const req = (b: object) =>
   new NextRequest(`http://x/api/pay/l/${token}`, { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
@@ -77,6 +79,7 @@ async function flag(enabled: boolean) {
 beforeEach(async () => {
   vi.stubEnv('DEMO_PHONES', '*');
   const r = fakeRedis();
+  redis = r;
   db = await freshDb();
   invalidateFlagCache(db);
   store = createStore(r, db);
@@ -101,7 +104,7 @@ beforeEach(async () => {
     id: linkId, partnerId: 'default', payeeId: 'pye_1', token, reference: 'INV-77', customerName: 'Asha Patel',
     customerPhone: PHONE, amountInr: 25000, purpose: 'education', expiresAt: linkExpiresAt(), createdBy: 'pa',
   }]);
-  await quotes.lock(linkId, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' });
+  lockedAt = (await quotes.lock(linkId, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' })).lockedAt;
   sendTransactionOtp.mockClear();
 });
 afterEach(() => {
@@ -122,7 +125,7 @@ describe('POST /api/pay/l/[token]', () => {
     expect(res.status).toBe(404);
     expect((await res.json()).error).toBe('This payment link is no longer active.');
     expect(sendTransactionOtp).not.toHaveBeenCalled();
-    const pay = await call({ otp: '654321', fundingMethod: 'bank_transfer' });
+    const pay = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
     expect(pay.status).toBe(404);
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
   });
@@ -141,30 +144,30 @@ describe('POST /api/pay/l/[token]', () => {
 
   it('a wrong or missing code ⇒ 403, nothing minted, the link stays open', async () => {
     await call({ action: 'request_otp' });
-    expect((await call({ otp: '000000', fundingMethod: 'bank_transfer' })).status).toBe(403);
-    expect((await call({ fundingMethod: 'bank_transfer' })).status).toBe(403);
+    expect((await call({ otp: '000000', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt })).status).toBe(403);
+    expect((await call({ fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt })).status).toBe(403);
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
     expect(await count(`SELECT count(*)::int AS n FROM payment_links WHERE status = 'open'`)).toBe(1);
   });
 
   it('no funding method ⇒ 400 before the code is checked', async () => {
     await call({ action: 'request_otp' });
-    expect((await call({ otp: '654321' })).status).toBe(400);
+    expect((await call({ otp: '654321', quoteLockedAt: lockedAt })).status).toBe(400);
     // The code was not burned: the real pay still works.
-    expect((await call({ otp: '654321', fundingMethod: 'bank_transfer' })).status).toBe(200);
+    expect((await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt })).status).toBe(200);
   });
 
   it('no locked rate ⇒ 409 quote_expired, the code not burned', async () => {
     quotes = createLinkQuoteStore(fakeRedis());
     await call({ action: 'request_otp' });
-    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
     expect(res.status).toBe(409);
     expect((await res.json()).reason).toBe('quote_expired');
   });
 
   it('the right code ⇒ ONE paid transfer to the payee; a replay reports it, never a second', async () => {
     await call({ action: 'request_otp' });
-    const res = await call({ otp: '654321', fundingMethod: 'debit_card', disclosureVersion: DISCLOSURE_DRAFT_VERSION });
+    const res = await call({ otp: '654321', fundingMethod: 'debit_card', disclosureVersion: DISCLOSURE_DRAFT_VERSION, quoteLockedAt: lockedAt });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
@@ -175,5 +178,70 @@ describe('POST /api/pay/l/[token]', () => {
     // The link is used and paid: the same 404 as any other unpayable link.
     expect((await call({ action: 'request_otp' })).status).toBe(404);
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+  });
+
+  it('the lock the page showed: a missing or different lock ⇒ 409 quote_expired, nothing minted, the code not burned', async () => {
+    await call({ action: 'request_otp' });
+    for (const quoteLockedAt of [undefined, '', '2026-01-01T00:00:00.000Z', 42]) {
+      const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt });
+      expect(res.status).toBe(409);
+      expect((await res.json()).reason).toBe('quote_expired');
+    }
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+    // The matching lock pays (the code was never spent on a refusal).
+    const ok = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(ok.status).toBe(200);
+    expect((await store.getTransfer((await ok.json()).transferId))?.fxRate).toBe(85);
+  });
+
+  it('an old tab after the lock lapsed and a later visit locked a NEW rate ⇒ 409, never charged at the new rate', async () => {
+    // 16 minutes later: the old lock has lapsed; a new page view locks 90.
+    const later = createLinkQuoteStore(redis, { now: () => Date.now() + 16 * 60_000 });
+    expect(await later.get(linkId)).toBeNull();
+    const fresh = await later.lock(linkId, { toInr: 90, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' });
+    quotes = later;
+    expect(fresh.lockedAt).not.toBe(lockedAt);
+    await call({ action: 'request_otp' });
+    const stale = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).reason).toBe('quote_expired');
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+  });
+
+  it('a failed disclosure-ack write logs the error NAME only (never the query text or its params)', async () => {
+    // The ack's INSERT fails the way a real query error does (message + params).
+    await db.execute(sql.raw(`CREATE FUNCTION fail_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'ack-leak %', NEW.subject_id; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_ack BEFORE INSERT ON audit_events FOR EACH ROW
+      WHEN (NEW.action = 'remittance.disclosure_ack') EXECUTE FUNCTION fail_ack()`));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await call({ action: 'request_otp' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', disclosureVersion: DISCLOSURE_DRAFT_VERSION, quoteLockedAt: lockedAt });
+    expect(res.status).toBe(200); // best-effort: the payment outcome is unchanged
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('paylink.disclosure_ack'));
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]) as { msg: string };
+    expect(line.msg).toMatch(/^[A-Za-z]*Error$/);
+    expect(lines[0]).not.toContain('ack-leak');
+    expect(lines[0]).not.toContain('insert into');
+    warn.mockRestore();
+  });
+
+  it('an unexpected failure logs the error NAME only (never a token or a name riding in the message)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(store, 'getTransfer').mockRejectedValue(
+      new Error(`Failed query: select * from payment_links where token = $1 params: ${token},Asha Patel`),
+    );
+    // A claimed link reads its transfer while resolving: that read throws.
+    await db.execute(sql.raw(`UPDATE payment_links SET status = 'used', transfer_id = 'tx_x' WHERE id = '${linkId}'`));
+    const res = await call({ action: 'request_otp' });
+    expect(res.status).toBe(400);
+    const lines = err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('paylink.route'));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).msg).toBe('Error');
+    expect(lines[0]).not.toContain(token);
+    expect(lines[0]).not.toContain('Asha');
+    err.mockRestore();
+    vi.restoreAllMocks();
   });
 });

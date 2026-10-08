@@ -125,6 +125,15 @@ const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfer
  * payoutEditable (its NOT form) and isPartnerApiMinted (Step 0 FX-2: those rows
  * are exempt from the pay-time rate check — the partner owns `confirm`).
  */
+/**
+ * Batch B2: a payment-link transfer — its id is bound to a 'paylink:<linkId>'
+ * claim (payment-link-finalize.ts). Shared by payoutEditable (its NOT form) and
+ * isPaymentLinkTransfer (the hosted pay route and page refuse these rows: the
+ * link route, with its link checks, is the only way to pay them).
+ */
+const paymentLinkSql = () =>
+  sql`EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND ${idempotencyKeys.key} LIKE 'paylink:%')`;
+
 const partnerApiMintedSql = () =>
   sql`(EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%') OR EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key'))`;
 
@@ -175,7 +184,7 @@ export function createTransferRepo(
       unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
       sql`NOT ${partnerApiMintedSql()}`,
-      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND ${idempotencyKeys.key} LIKE 'paylink:%')`,
+      sql`NOT ${paymentLinkSql()}`,
     );
 
   async function page(
@@ -1001,6 +1010,18 @@ export function createTransferRepo(
         .select({ id: transfers.id })
         .from(transfers)
         .where(and(eq(transfers.id, id), partnerApiMintedSql()))
+        .limit(1);
+      return rows.length > 0;
+    },
+    /**
+     * Batch B2: true when this transfer was minted by a payment link (its id is
+     * bound to a 'paylink:' claim). Read-only; false for a missing id.
+     */
+    async isPaymentLinkTransfer(id: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), paymentLinkSql()))
         .limit(1);
       return rows.length > 0;
     },

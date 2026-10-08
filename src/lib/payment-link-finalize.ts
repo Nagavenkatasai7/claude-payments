@@ -11,6 +11,7 @@ import { sanctionsAuditEvent } from './sanctions/evidence';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
+import { rescreenBeforePay } from './pay-rescreen';
 import type { LockedLinkRate } from './payment-link-quote';
 import { createIdempotencyRepo, createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo, type PaymentLink } from '@/db/repos/payment-link-repo';
@@ -21,7 +22,7 @@ import type { CustomerStore } from './customer-store';
 import type { PartnerStore } from './partner-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { DailyVolumeStore } from './daily-volume-store';
-import type { Transfer } from './types';
+import type { Partner, Transfer } from './types';
 
 // payment-link-finalize — Batch B2. The customer's payment of a link becomes ONE
 // transfer, minted claim-first:
@@ -31,6 +32,8 @@ import type { Transfer } from './types';
 //   APPROVED and the link's own tenant's, the link is open (or claimed with no
 //   paid transfer yet: a retry), sends.paused is off, the quote is fresh;
 //   → payee sanctions screen (both names; a sanctions.screen evidence row)
+//   → a retry on an already-minted transfer: KYC gate + sender/recipient
+//     re-screen (resumeMinted), then the pay route resumes THAT transfer
 //   → ensureCustomer (NO WhatsApp opt-in) → KYC gate → cap pre-check
 //   → CLAIM, one transaction: the `paylink:<linkId>` idempotency key is bound to
 //     a pre-generated transfer id AND the link moves open → used. A second tab, a
@@ -148,9 +151,10 @@ export async function finalizeLinkPayment(
   }
 
   // A claim whose transfer already exists (the charge failed before): the pay
-  // route resumes THAT transfer (after the payee screen above, which runs at
-  // every payment attempt); nothing is re-priced or re-minted here.
-  if (payable.transfer) return { ok: true, transferId: payable.transfer.id };
+  // route resumes THAT transfer; nothing is re-priced or re-minted here. Time
+  // has passed since the mint, so the KYC gate and a sender + recipient
+  // re-screen run again first (the hosted pay route's Program-Fix 14 follow-up).
+  if (payable.transfer) return resumeMinted(stores, partner, link, payable.transfer, bank.accountHolder);
 
   // sends.paused BEFORE anything is written (createTransfer re-checks under the
   // claim; that refusal is the resumable bound-but-unminted shape).
@@ -262,4 +266,38 @@ export async function finalizeLinkPayment(
   }
   if (transfer.complianceStatus === 'blocked') return { ok: false, error: 'blocked', transferId: transfer.id };
   return { ok: true, transferId: transfer.id };
+}
+
+/**
+ * The retry on a minted, still-unpaid link transfer: the same KYC gate as the
+ * mint, then rescreenBeforePay on the sender (the legal name on file, else the
+ * name the partner gave, exactly as the mint screened it) and the payee's
+ * account holder. Blocked ⇒ never charged; flagged ⇒ the normal hold after the
+ * charge; a row that moved meanwhile (paid, cancelled, already blocked) ⇒ the
+ * one "no longer active" answer.
+ */
+async function resumeMinted(
+  stores: LinkFinalizeStores,
+  partner: Partner,
+  link: PaymentLink,
+  transfer: Transfer,
+  accountHolder: string,
+): Promise<LinkFinalizeResult> {
+  const customer = await stores.customerStore.ensureCustomer(link.partnerId, link.customerPhone);
+  if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  const rescreen = await rescreenBeforePay(
+    stores.db,
+    transfer,
+    { senderName: (customer.fullName ?? '').trim() || link.customerName, recipientName: accountHolder },
+    resolveCorridorRules(partner, transfer.sourceCountry ?? 'US'),
+  );
+  switch (rescreen.kind) {
+    case 'blocked':
+      return { ok: false, error: 'blocked', transferId: transfer.id };
+    case 'moved':
+      return { ok: false, error: 'inactive' };
+    case 'flagged':
+    case 'cleared':
+      return { ok: true, transferId: transfer.id };
+  }
 }
