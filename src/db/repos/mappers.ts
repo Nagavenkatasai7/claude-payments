@@ -139,6 +139,9 @@ export function transferToRow(
     fxSource: t.fxSource ?? null,
     fxProvider: t.fxProvider ?? null,
     fxExpiresAt: t.fxExpiresAt ? new Date(t.fxExpiresAt) : null,
+    // Batch B1: write-once — saveTransfer strips both from its conflict-update.
+    clientReference: t.clientReference ?? null,
+    payoutReference: t.payoutReference ?? null,
     createdAt: new Date(t.createdAt),
     paidAt: t.paidAt ? new Date(t.paidAt) : null,
     deliveredAt: t.deliveredAt ? new Date(t.deliveredAt) : null,
@@ -246,5 +249,8 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (row.fxProvider) t.fxProvider = row.fxProvider;
   const fxExpiresAt = isoOpt(row.fxExpiresAt);
   if (fxExpiresAt) t.fxExpiresAt = fxExpiresAt;
+  // Batch B1: absent on every older row.
+  if (row.clientReference) t.clientReference = row.clientReference;
+  if (row.payoutReference) t.payoutReference = row.payoutReference;
   return t;
 }

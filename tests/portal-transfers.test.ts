@@ -348,4 +348,18 @@ describe('renderReceiptText', () => {
     expect(text).toContain('tx_12345678');
     expect(text).not.toContain(FULL_ACCOUNT);
   });
+
+  it('Batch B1: "Payout reference" shows only after delivery', () => {
+    const base = {
+      id: 'tx_ref1', createdAt: '2026-01-02T03:04:05.000Z', recipientName: 'R', payoutDestination: '****2222', payoutMethod: 'bank',
+      amountUsd: 100, feeUsd: 1, totalChargeUsd: 101, fxRate: 85, amountInr: 8500, refundStatus: 'none',
+      sourceCurrency: 'USD', destinationCurrency: 'INR', payoutReference: 'SIMPAY-tx_ref1',
+    };
+    const delivered = receiptView({ ...base, status: 'delivered' } as unknown as Transfer);
+    expect(delivered.payoutReference).toBe('SIMPAY-tx_ref1');
+    expect(renderReceiptText(delivered, 'Acme')).toContain('Payout reference: SIMPAY-tx_ref1');
+    const paid = receiptView({ ...base, status: 'paid' } as unknown as Transfer);
+    expect(paid.payoutReference).toBeUndefined();
+    expect(renderReceiptText(paid, 'Acme')).not.toContain('Payout reference');
+  });
 });

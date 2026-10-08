@@ -157,6 +157,14 @@ export const transfers = pgTable(
     // Review finding 1: the partner PUSH's expiry (the draft's routeExpiresAt);
     // the pay-time rate check refuses the row from it on. NULL ⇒ not a push.
     fxExpiresAt: timestamp('fx_expires_at', { withTimezone: true }),
+    // Batch B1: order references. client_reference is the partner's own order
+    // number, set at mint by the Partner API (order-references.ts checks it at
+    // the edge). payout_reference is the payout partner's confirmation (e.g. a
+    // bank UTR), set once from a SIGNED status callback (setPayoutReference).
+    // Both NULL on every older row; both WRITE-ONCE (saveTransfer's
+    // conflict-update never sets them).
+    clientReference: text('client_reference'),
+    payoutReference: text('payout_reference'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),

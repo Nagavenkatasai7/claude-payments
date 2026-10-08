@@ -47,6 +47,7 @@ import { recordChannelHealth } from '@/lib/channel-health';
 import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-worker';
 import { rowTemplate, sendBusinessInitiated, sendTextThenTemplate, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
+import { simulatorPayoutReference } from '@/lib/order-references';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 import { MEDIA_REPLY } from '@/lib/consent';
 import {
@@ -751,6 +752,8 @@ async function handle(
         status: cbStatus,
         ...(cbReason ? { reason: cbReason } : {}),
         ...(cbAmount ? { amount: cbAmount } : {}),
+        // Batch B1: the reference rail's simulated payout confirmation, on a payout only.
+        ...(cbStatus === 'paid_out' ? { payout_reference: simulatorPayoutReference(reference) } : {}),
       });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
         method: 'POST',

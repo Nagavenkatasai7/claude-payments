@@ -121,6 +121,12 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
             <Row label={t('portal.receipt.theyGet')} strong>
               <Money amount={transfer.amountInr} currency={destCurrency} />
             </Row>
+            {/* Batch B1: the payout partner's confirmation, shown after delivery. */}
+            {transfer.status === 'delivered' && transfer.payoutReference ? (
+              <Row label={t('portal.receipt.payoutReference')}>
+                <span className="font-mono">{transfer.payoutReference}</span>
+              </Row>
+            ) : null}
           </dl>
         </Card>
 

@@ -244,6 +244,21 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 <span className="text-ds-ink-muted">{t('partner.transfers.purposeNotStated')}</span>
               )}
             </Row>
+            {/* Batch B1: the partner's own order number and the payout partner's confirmation. */}
+            <Row label={t('partner.transfers.clientReference')}>
+              {transfer.clientReference ? (
+                <span className="font-mono text-[13.5px]">{transfer.clientReference}</span>
+              ) : (
+                <span className="text-ds-ink-muted">{t('partner.transfers.referenceNone')}</span>
+              )}
+            </Row>
+            <Row label={t('partner.transfers.payoutReference')}>
+              {transfer.payoutReference ? (
+                <span className="font-mono text-[13.5px]">{transfer.payoutReference}</span>
+              ) : (
+                <span className="text-ds-ink-muted">{t('partner.transfers.referenceNone')}</span>
+              )}
+            </Row>
             <Row label={t('partner.transfers.settledVia')}>{t(settlementRouteKey(transfer, ctx.partnerId))}</Row>
             <Row label={t('partner.transfers.assignedTo')}>
               {assignee.kind === 'tenant'

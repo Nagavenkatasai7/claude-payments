@@ -144,6 +144,11 @@ export function buildSettlementInstruction(transfer: Transfer) {
       destination_currency: transfer.destinationCurrency ?? 'INR',
       fx_rate: transfer.fxRate, // FX locked at quote time
     },
+    // Batch B1: the owning partner's own order number, ADDITIVE. Only to its own rail:
+    // a routed row settles on another tenant's rail, which never sees it.
+    ...(transfer.clientReference && !transfer.settlementPartnerId
+      ? { client_reference: transfer.clientReference }
+      : {}),
     // B2B ACH-pull (non-custodial): SmartRemit performs NO funding capture — the
     // LICENSED PARTNER's rail ACH-debits the payer using the opaque mandate token
     // it already holds. SmartRemit only instructs; funds never touch us.
