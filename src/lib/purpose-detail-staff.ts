@@ -12,8 +12,9 @@ import type { PartnerId, Transfer } from './types';
  * The reason is the customer's own words, sealed at rest (transfers.purpose_detail_enc), so every
  * staff read is a decrypted read and writes ONE `pii.view` row per transfer shown, all in one insert
  * (actor = staff, subject = the keyed customer subject, meta = { fields: ['purpose_detail'],
- * transferId } and, for the partner app, actorScope 'partner'). The audit write is awaited and not caught: if it fails the
- * page fails rather than show the words without a record (the dash-05 rule, customer-ref.ts).
+ * transferId } and, for the partner app, actorScope 'partner'). The audit write is awaited and not
+ * caught: if it fails the page fails rather than show the words without a record (the dash-05 rule,
+ * customer-ref.ts).
  *
  * `riskLabel` is the staff name of the scam pattern the reason matched (purpose-detail.ts), or null.
  * It is for SmartRemit and compliance staff only: callers decide whether to render it, and it never
