@@ -1,5 +1,5 @@
 {
-  "id": "f90d0b39-da4e-44e6-902a-81835c3effcc",
+  "id": "555c9139-639b-428f-8eff-90ae3f2b03e0",
   "prevId": "9c905f6d-c1c9-490f-868f-55a4b02ce392",
   "version": "7",
   "dialect": "postgresql",
@@ -2237,6 +2237,188 @@
       },
       "isRLSEnabled": false
     },
+    "public.partner_reward_terms": {
+      "name": "partner_reward_terms",
+      "schema": "",
+      "columns": {
+        "partner_id": {
+          "name": "partner_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "platform_fee_usd": {
+          "name": "platform_fee_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.60'"
+        },
+        "give_back_pct": {
+          "name": "give_back_pct",
+          "type": "numeric(5, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'40'"
+        },
+        "monthly_budget_usd": {
+          "name": "monthly_budget_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "partner_reward_terms_partner_id_partners_id_fk": {
+          "name": "partner_reward_terms_partner_id_partners_id_fk",
+          "tableFrom": "partner_reward_terms",
+          "tableTo": "partners",
+          "columnsFrom": [
+            "partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "partner_reward_terms_fee": {
+          "name": "partner_reward_terms_fee",
+          "value": "\"partner_reward_terms\".\"platform_fee_usd\" >= 0"
+        },
+        "partner_reward_terms_pct": {
+          "name": "partner_reward_terms_pct",
+          "value": "\"partner_reward_terms\".\"give_back_pct\" BETWEEN 0 AND 100"
+        },
+        "partner_reward_terms_budget": {
+          "name": "partner_reward_terms_budget",
+          "value": "\"partner_reward_terms\".\"monthly_budget_usd\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.partner_rewards": {
+      "name": "partner_rewards",
+      "schema": "",
+      "columns": {
+        "partner_id": {
+          "name": "partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enabled": {
+          "name": "enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "nth": {
+          "name": "nth",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "festival_name": {
+          "name": "festival_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starts_on": {
+          "name": "starts_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ends_on": {
+          "name": "ends_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "min_amount_usd": {
+          "name": "min_amount_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "partner_rewards_partner_id_partners_id_fk": {
+          "name": "partner_rewards_partner_id_partners_id_fk",
+          "tableFrom": "partner_rewards",
+          "tableTo": "partners",
+          "columnsFrom": [
+            "partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "partner_rewards_partner_id_kind_pk": {
+          "name": "partner_rewards_partner_id_kind_pk",
+          "columns": [
+            "partner_id",
+            "kind"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "partner_rewards_kind": {
+          "name": "partner_rewards_kind",
+          "value": "\"partner_rewards\".\"kind\" IN ('nth_transfer','festival')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.partner_sites": {
       "name": "partner_sites",
       "schema": "",
@@ -2633,6 +2815,104 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.platform_fee_ledger": {
+      "name": "platform_fee_ledger",
+      "schema": "",
+      "columns": {
+        "transfer_id": {
+          "name": "transfer_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "partner_id": {
+          "name": "partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "month": {
+          "name": "month",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fee_usd": {
+          "name": "fee_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "platform_fee_ledger_partner_month": {
+          "name": "platform_fee_ledger_partner_month",
+          "columns": [
+            {
+              "expression": "partner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "month",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "platform_fee_ledger_transfer_id_transfers_id_fk": {
+          "name": "platform_fee_ledger_transfer_id_transfers_id_fk",
+          "tableFrom": "platform_fee_ledger",
+          "tableTo": "transfers",
+          "columnsFrom": [
+            "transfer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "platform_fee_ledger_partner_id_partners_id_fk": {
+          "name": "platform_fee_ledger_partner_id_partners_id_fk",
+          "tableFrom": "platform_fee_ledger",
+          "tableTo": "partners",
+          "columnsFrom": [
+            "partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "platform_fee_ledger_fee": {
+          "name": "platform_fee_ledger_fee",
+          "value": "\"platform_fee_ledger\".\"fee_usd\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.recipient_tombstones": {
       "name": "recipient_tombstones",
       "schema": "",
@@ -2781,6 +3061,562 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.referral_attributions": {
+      "name": "referral_attributions",
+      "schema": "",
+      "columns": {
+        "partner_id": {
+          "name": "partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "referral_partner_id": {
+          "name": "referral_partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "channel": {
+          "name": "channel",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "referral_attributions_partner": {
+          "name": "referral_attributions_partner",
+          "columns": [
+            {
+              "expression": "referral_partner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "referral_attributions_referral_partner_id_referral_partners_id_fk": {
+          "name": "referral_attributions_referral_partner_id_referral_partners_id_fk",
+          "tableFrom": "referral_attributions",
+          "tableTo": "referral_partners",
+          "columnsFrom": [
+            "referral_partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "referral_attributions_partner_id_phone_pk": {
+          "name": "referral_attributions_partner_id_phone_pk",
+          "columns": [
+            "partner_id",
+            "phone"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "referral_attributions_channel": {
+          "name": "referral_attributions_channel",
+          "value": "\"referral_attributions\".\"channel\" IN ('whatsapp','portal')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.referral_codes": {
+      "name": "referral_codes",
+      "schema": "",
+      "columns": {
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "referral_partner_id": {
+          "name": "referral_partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "active": {
+          "name": "active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "referral_codes_partner": {
+          "name": "referral_codes_partner",
+          "columns": [
+            {
+              "expression": "referral_partner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "referral_codes_referral_partner_id_referral_partners_id_fk": {
+          "name": "referral_codes_referral_partner_id_referral_partners_id_fk",
+          "tableFrom": "referral_codes",
+          "tableTo": "referral_partners",
+          "columnsFrom": [
+            "referral_partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "referral_codes_format": {
+          "name": "referral_codes_format",
+          "value": "\"referral_codes\".\"code\" ~ '^REF-[A-Z0-9]{6}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.referral_partners": {
+      "name": "referral_partners",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contact": {
+          "name": "contact",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "commission_cents": {
+          "name": "commission_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "referral_partners_status": {
+          "name": "referral_partners_status",
+          "value": "\"referral_partners\".\"status\" IN ('active','inactive')"
+        },
+        "referral_partners_commission": {
+          "name": "referral_partners_commission",
+          "value": "\"referral_partners\".\"commission_cents\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.referral_program_settings": {
+      "name": "referral_program_settings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "'global'"
+        },
+        "plum_portal_url": {
+          "name": "plum_portal_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "referral_program_settings_singleton": {
+          "name": "referral_program_settings_singleton",
+          "value": "\"referral_program_settings\".\"id\" = 'global'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.reward_catalog": {
+      "name": "reward_catalog",
+      "schema": "",
+      "columns": {
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "available": {
+          "name": "available",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "nth_min": {
+          "name": "nth_min",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 3
+        },
+        "nth_max": {
+          "name": "nth_max",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 10
+        },
+        "max_days": {
+          "name": "max_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 14
+        },
+        "max_discount_usd": {
+          "name": "max_discount_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'2.99'"
+        },
+        "customer_monthly_cap": {
+          "name": "customer_monthly_cap",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "festival_names": {
+          "name": "festival_names",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "updated_by": {
+          "name": "updated_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "reward_catalog_kind": {
+          "name": "reward_catalog_kind",
+          "value": "\"reward_catalog\".\"kind\" IN ('nth_transfer','festival')"
+        },
+        "reward_catalog_nth": {
+          "name": "reward_catalog_nth",
+          "value": "\"reward_catalog\".\"nth_min\" >= 2 AND \"reward_catalog\".\"nth_max\" >= \"reward_catalog\".\"nth_min\" AND \"reward_catalog\".\"nth_max\" <= 50"
+        },
+        "reward_catalog_days": {
+          "name": "reward_catalog_days",
+          "value": "\"reward_catalog\".\"max_days\" BETWEEN 1 AND 31"
+        },
+        "reward_catalog_discount": {
+          "name": "reward_catalog_discount",
+          "value": "\"reward_catalog\".\"max_discount_usd\" >= 0"
+        },
+        "reward_catalog_cap": {
+          "name": "reward_catalog_cap",
+          "value": "\"reward_catalog\".\"customer_monthly_cap\" BETWEEN 1 AND 31"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.reward_redemptions": {
+      "name": "reward_redemptions",
+      "schema": "",
+      "columns": {
+        "transfer_id": {
+          "name": "transfer_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "partner_id": {
+          "name": "partner_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "month": {
+          "name": "month",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "discount_usd": {
+          "name": "discount_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "give_back_usd": {
+          "name": "give_back_usd",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "give_back_withheld": {
+          "name": "give_back_withheld",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "detail": {
+          "name": "detail",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "reward_redemptions_partner_month": {
+          "name": "reward_redemptions_partner_month",
+          "columns": [
+            {
+              "expression": "partner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "month",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "reward_redemptions_sender_month": {
+          "name": "reward_redemptions_sender_month",
+          "columns": [
+            {
+              "expression": "partner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "phone",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "month",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "reward_redemptions_transfer_id_transfers_id_fk": {
+          "name": "reward_redemptions_transfer_id_transfers_id_fk",
+          "tableFrom": "reward_redemptions",
+          "tableTo": "transfers",
+          "columnsFrom": [
+            "transfer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "reward_redemptions_partner_id_partners_id_fk": {
+          "name": "reward_redemptions_partner_id_partners_id_fk",
+          "tableFrom": "reward_redemptions",
+          "tableTo": "partners",
+          "columnsFrom": [
+            "partner_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "reward_redemptions_kind": {
+          "name": "reward_redemptions_kind",
+          "value": "\"reward_redemptions\".\"kind\" IN ('first_transfer','nth_transfer','festival')"
+        },
+        "reward_redemptions_amounts": {
+          "name": "reward_redemptions_amounts",
+          "value": "\"reward_redemptions\".\"discount_usd\" >= 0 AND \"reward_redemptions\".\"give_back_usd\" >= 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.sanctions_list_entries": {
@@ -3101,6 +3937,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {

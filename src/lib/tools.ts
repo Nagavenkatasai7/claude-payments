@@ -5,7 +5,10 @@ import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPho
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
+import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt, REWARD_ENDED_MESSAGE, RewardEndedError } from './transfer-create';
+import { resolveQuoteReward } from './rewards/resolver';
+import { rewardFeeLine } from './rewards/engine';
+import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { SendsPausedError, SENDS_PAUSED_MESSAGE } from './flags';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
@@ -390,6 +393,9 @@ export function buildApproveSummary(
   // Step 0 §3.6: the reference rate's publication date — passed only for a
   // platform rate. Absent or malformed ⇒ the rate line is unchanged.
   rateDate?: string,
+  // B3 rewards v1: a SmartRemit-funded reward on this quote (its fee is already
+  // lowered). Absent, or first transfer free ⇒ the fee line is unchanged.
+  reward?: QuotedReward,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
@@ -404,7 +410,11 @@ export function buildApproveSummary(
     }).format(n);
 
   let feeLine: string;
-  if (q.feeUsd === 0) {
+  if (reward && isFundedRewardKind(reward.kind)) {
+    // "Fee $0.00, your 5th transfer this month is free (you save $1.99)."
+    const ratio = q.amountUsd > 0 ? q.amountSource / q.amountUsd : 1; // USD→source scalar
+    feeLine = rewardFeeLine(reward, q.feeUsd, fmt(q.feeSource), fmt(Math.round(reward.discountUsd * ratio * 100) / 100));
+  } else if (q.feeUsd === 0) {
     // A2: first-transfer-free framing — show what the user saves vs a repeat send
     const ratio = q.amountUsd > 0 ? q.amountSource / q.amountUsd : 1; // USD→source scalar
     const wouldBeSource = Math.round(wouldBeFeeUsd(q.amountUsd, fundingMethod) * ratio * 100) / 100;
@@ -424,6 +434,13 @@ export function buildApproveSummary(
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     rateLockLine(lockMinutes),
   ].join('\n');
+}
+
+/** B3 rewards v1: get_quote's reward_note ("Fee $0.00, … (you save $1.99)."), in the sender's currency. */
+function quoteRewardNote(reward: QuotedReward, q: import('./types').Quote): string {
+  const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
+  const ratio = q.amountUsd > 0 ? q.amountSource / q.amountUsd : 1;
+  return rewardFeeLine(reward, q.feeUsd, fmt(q.feeSource), fmt(Math.round(reward.discountUsd * ratio * 100) / 100));
 }
 
 function rateLine(base: string, shownDate: string | undefined): string {
@@ -1582,6 +1599,8 @@ async function getQuoteTool(
         // Step 0 §3.6: the reference rate's publication date (YYYY-MM-DD), only
         // when the quote is on the platform rate and the feed dated it.
         ...(r.rateDate !== undefined ? { rate_date: r.rateDate } : {}),
+        // B3 rewards v1: the reward line the model restates verbatim (only when one applies).
+        ...(r.reward !== undefined ? { reward_note: quoteRewardNote(r.reward, q) } : {}),
       };
     }
   }
@@ -1657,6 +1676,14 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
       destToUsd,
       quoteCeilingUsd(limits), // fix 16b: the sender's quote ceiling (<= the $10,000 hard ceiling)
     );
+    // B3 rewards v1: demo mode + rewards.enabled; fails closed (null). A funded
+    // reward re-prices the fee only (amount, rate and payout unchanged).
+    const offer = await resolveQuoteReward(ctx.store, {
+      partnerId: ctx.partnerId, phone: ctx.phone, amountUsd: q.amountUsd, fundingMethod, transferCount,
+    });
+    if (offer?.pricing) {
+      q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd, quoteCeilingUsd(limits), offer.pricing);
+    }
     // Best-rate routing (default tenant only): when a competing partner beat
     // the mid-market rate, re-price ONLY the rate-dependent fields. Fees and
     // the USD-equivalent (cap checks) are rate-independent and stay put.
@@ -1685,6 +1712,7 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
             destinationCurrency,
             destToUsd,
             quoteCeilingUsd(limits),
+            offer?.pricing, // B3: the same reward (the fee never below $0)
           );
           if (routedQ.amountUsd <= q.amountUsd) {
             q = applyRouteToQuote(routedQ, route);
@@ -1702,7 +1730,11 @@ export async function getQuoteTyped(ctx: ToolContext, input: QuoteTypedInput): P
     q = withDisclosedDelivery(q, partner);
     // Step 0 §3.6: a partner rate is not the reference rate, so it carries no date.
     const rateDate = !routed ? fxAsOf : undefined;
-    return { kind: 'quote', quote: q, destinationCountry, ...(rateDate !== undefined ? { rateDate } : {}) };
+    return {
+      kind: 'quote', quote: q, destinationCountry,
+      ...(rateDate !== undefined ? { rateDate } : {}),
+      ...(offer ? { reward: offer.reward } : {}),
+    };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
     if (refusal) return { kind: 'fx_unavailable', message: String(refusal.error) };
@@ -1839,6 +1871,7 @@ async function createTransferTool(
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
         quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
         settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+        reward: quoteOverride ? draft.reward : undefined, // B3: re-checked under the sender lock
         // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
         transferType: draft.transferType,
         senderEntityType: draft.senderEntityType,
@@ -1892,6 +1925,12 @@ async function createTransferTool(
       if (err instanceof SendsPausedError) {
         await ctx.draftStore.restoreDraft(draft, ctxDraftId);
         return { error: SENDS_PAUSED_MESSAGE, sends_paused: true };
+      }
+      // B3: the reward on the approved quote ended. Nothing was written; the
+      // draft is kept (owner rule) and the customer asks for a new quote.
+      if (err instanceof RewardEndedError) {
+        await ctx.draftStore.restoreDraft(draft, ctxDraftId);
+        return { error: REWARD_ENDED_MESSAGE, reward_ended: true };
       }
       throw err;
     }
@@ -4076,6 +4115,15 @@ export async function prepareSendDraft(
   try {
     const transferCount = await feeTierCount(ctx.store, ctx.partnerId, ctx.phone);
     let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd, quoteCeilingUsd(limits));
+    // B3 rewards v1: the card, the draft and the mint carry the same reward.
+    // Never B2B (resolveQuoteReward refuses it); fails closed (null).
+    const offer = await resolveQuoteReward(ctx.store, {
+      partnerId: ctx.partnerId, phone: ctx.phone, amountUsd: q.amountUsd, fundingMethod, transferCount,
+      transferType: b2b ? 'b2b' : 'b2c',
+    });
+    if (offer?.pricing) {
+      q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd, quoteCeilingUsd(limits), offer.pricing);
+    }
 
     // Best-rate routing (default tenant only): the card, the draft, and the
     // eventual mint all carry the WINNING rate. The route's settlement partner
@@ -4184,6 +4232,7 @@ export async function prepareSendDraft(
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).
       settlementPartnerId,
+      ...(offer ? { reward: offer.reward } : {}), // B3: re-checked at the mint
       // ── B2B: carry the discriminators + business names + linked invoice so the
       // approve-tap mint threads exactly what the card showed. Absent (b2b===null)
       // ⇒ undefined everywhere ⇒ the consumer draft shape is unchanged. The
@@ -4204,6 +4253,7 @@ export async function prepareSendDraft(
       q.destinationCurrency ?? 'INR',
       rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
       fxOrigin === 'platform' ? fxAsOf : undefined, // Step 0 §3.6
+      offer?.reward, // B3: the reward fee line
     );
     const payUrl = payUrlFor(draftId);
     return {

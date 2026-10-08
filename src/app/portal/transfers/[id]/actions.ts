@@ -20,6 +20,7 @@ import { pokeWorker } from '@/lib/outbox';
 import { getRedis } from '@/lib/redis';
 import { logWarn } from '@/lib/log';
 import { t, type MessageKey } from '@/lib/i18n';
+import { transferRewardOrNull } from '@/lib/rewards/read';
 
 /**
  * The customer portal's transfer-detail actions (UI redesign M2-7, Tasks 7.3 and 7.4). Each is a
@@ -192,7 +193,7 @@ export async function emailReceiptAction(
         windowSec: PORTAL_RECEIPT_LIMIT.windowSec,
       });
       if (!rl.allowed) return { code: 'rate_limited' };
-      const body = renderReceiptText(receiptView(transfer), ctx.site.brand);
+      const body = renderReceiptText(receiptView(transfer, await transferRewardOrNull(db, owner.partnerId, transfer.id)), ctx.site.brand);
       await db.transaction(async (tx) => {
         await createOutboxRepo(tx).enqueue(
           'email.send',

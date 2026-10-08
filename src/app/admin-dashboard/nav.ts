@@ -30,7 +30,8 @@ export type SidebarActive =
   | 'refunds'
   | 'waitlist'
   | 'switches'
-  | 'referrals';
+  | 'referrals'
+  | 'rewards';
 
 export type NavItem = SidebarActive;
 
@@ -80,8 +81,8 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
         'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
         // partner-requests + waitlist are SmartRemit's own inbound lists — platform admins only.
         // switches (Release safety part A): the kill switches — platform admins only (requirePlatformAdmin).
-        // referrals (Batch B4): referral partners, codes and the commission statement — platform admins only.
-        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys', 'switches', 'referrals'] as NavItem[]) : []),
+        // referrals (Batch B4) and rewards (B3): platform admins only.
+        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys', 'switches', 'referrals', 'rewards'] as NavItem[]) : []),
       ],
     },
   ];
@@ -116,6 +117,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   waitlist:     { label: 'Waitlist',     icon: 'queue',        hrefFor: () => '/admin-dashboard/waitlist' },
   switches:     { label: 'Switches',     icon: 'shield',       hrefFor: () => '/admin-dashboard/switches' },
   referrals:    { label: 'Referrals',    icon: 'partners',     hrefFor: () => '/admin-dashboard/referrals' },
+  rewards:      { label: 'Rewards',      icon: 'rates',        hrefFor: () => '/admin-dashboard/rewards' },
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
   tickets:      { label: 'Tickets',      icon: 'tickets',      hrefFor: () => '/admin-dashboard/tickets' },

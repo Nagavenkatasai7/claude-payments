@@ -1,3 +1,4 @@
+import { REWARD_ENDED_MESSAGE } from './rewards/copy';
 // Review S2 (Program-Fix 32): the pay routes answer a POST on a row that is no
 // longer awaiting payment with 200 { ok: true, status } (ruling 7 keeps that
 // contract fixed — api/pay/[transferId]/route.ts refuseUnlessAwaiting). A
@@ -41,6 +42,8 @@ export const PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY =
 export const PAY_FX_UNAVAILABLE_COPY =
   'Exchange rates are temporarily unavailable — please try again in a few minutes.';
 export const PAY_QUOTE_EXPIRED_COPY = 'This quote has expired. Reply in the WhatsApp chat to get a fresh quote.';
+/** B3 rewards v1: the reward on this quote ended before payment; nothing was charged. */
+export const PAY_REWARD_ENDED_COPY = REWARD_ENDED_MESSAGE;
 
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
 export function payErrorMessage(body: unknown): string | null {
@@ -53,5 +56,6 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.reason === 'sender_name_required') return PAY_SENDER_NAME_REQUIRED_COPY;
   if (b.kyc_required === true || b.reason === 'kyc_required') return PAY_KYC_REQUIRED_COPY;
   if (b.reason === 'temporarily_unavailable') return PAY_TEMPORARY_COPY;
+  if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
   return null;
 }

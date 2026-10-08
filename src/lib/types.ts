@@ -474,6 +474,10 @@ export interface Draft {
   // when its rate won the corridor at quote time (default-tenant only).
   // Internal — never shown to the customer. Absent ⇒ platform default.
   settlementPartnerId?: PartnerId;
+  // B3 rewards v1: the reward the quote carries (its fee is already lowered in
+  // `quote`). The mint re-checks it under the sender lock and records it; a
+  // reward that ended meanwhile refuses the mint and the draft is kept.
+  reward?: import('./rewards/types').QuotedReward;
   // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
   // Carried on the draft so the approve-tap mint threads the same discriminators,
   // business names, and linked invoice into createTransfer that the card showed.

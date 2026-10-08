@@ -13,6 +13,9 @@ import { t } from './i18n';
 import { env } from './env';
 import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { logWarn } from './log';
+import { recordDeliveryFee } from './rewards/fee-ledger';
+import { transferRewardOrNull } from './rewards/read';
+import type { QuotedReward } from './rewards/types';
 import type { PartnerId, Transfer } from './types';
 
 /**
@@ -89,7 +92,8 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
     const to = await verifiedReceiptEmail(db, { partnerId, senderPhone: phone, email: blob ?? undefined });
     if (!to) return null;
     const brand = resolvePartnerBranding(await createPartnerRepo(db).getPartner(partnerId)).brand;
-    return buildDeliveryReceipt(transfer, to, brand);
+    const reward = await transferRewardOrNull(db, partnerId, transfer.id);
+    return buildDeliveryReceipt(transfer, to, brand, reward);
   } catch (err) {
     logWarn('delivery-receipt.prepare', 'receipt pre-read failed; delivery proceeds without a receipt', {
       transferId,
@@ -100,9 +104,14 @@ export async function prepareDeliveryReceipt(db: Db, transferId: string): Promis
 }
 
 /** Render + seal the receipt for `transfer` as it will read once delivered. Pure apart from the seal. */
-export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: string): DeliveryReceipt {
-  // M2-14 (PR 417 L2): an automatic email says how to stop it.
-  const body = `${renderReceiptText(receiptView({ ...transfer, status: 'delivered' }), brand)}\n\n${t('portal.receipt.autoFooter', { brand })}`;
+export function buildDeliveryReceipt(
+  transfer: Transfer,
+  to: string,
+  brand: string,
+  reward?: Pick<QuotedReward, 'kind' | 'discountUsd' | 'detail'> | null,
+): DeliveryReceipt {
+  // M2-14 (PR 417 L2): an automatic email says how to stop it. B3: the reward line, when it had one.
+  const body = `${renderReceiptText(receiptView({ ...transfer, status: 'delivered' }, reward), brand)}\n\n${t('portal.receipt.autoFooter', { brand })}`;
   return {
     partnerId: transfer.partnerId,
     phone: transfer.phone,
@@ -115,7 +124,10 @@ export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: stri
 /**
  * The delivered transition. ONE transaction: the guarded UPDATE, then — only when it moved the row,
  * and only for the same tenant and sender the receipt was prepared for — the receipt row, inside a
- * savepoint so a receipt failure never holds back delivery (owner decision 2026-09-28). Returns
+ * savepoint so a receipt failure never holds back delivery (owner decision 2026-09-28). B3 rewards
+ * v1: a real transition of a LIVE transfer also writes its platform fee row (and withholds the
+ * give-back of a flagged transfer's reward) in its OWN savepoint: a ledger failure is logged and the
+ * delivery commits without it (rewards/fee-ledger.ts sweepPlatformFeeGaps fills it later). Returns
  * the UPDATE's result exactly as transferRepo.updateTransferFromWebhook does (non-null ⇒ a real
  * transition), so every caller's notify contract is unchanged.
  */
@@ -123,6 +135,16 @@ export async function deliverTransfer(db: Db, transferId: string): Promise<Trans
   const receipt = await prepareDeliveryReceipt(db, transferId);
   return db.transaction(async (tx) => {
     const updated = await createTransferRepo(tx).updateTransferFromWebhook(transferId, 'delivered');
+    if (updated && (updated.environment ?? 'live') === 'live') {
+      try {
+        await tx.transaction((sp) => recordDeliveryFee(sp, updated));
+      } catch (err) {
+        logWarn('delivery.platform_fee', 'platform fee row failed; delivery committed without it', {
+          transferId,
+          error: err instanceof Error ? err.name : 'unknown',
+        });
+      }
+    }
     if (updated && receipt && updated.partnerId === receipt.partnerId && updated.phone === receipt.phone) {
       try {
         // Owner decision (2026-09-28): delivery ALWAYS commits. The receipt enqueue runs in a
