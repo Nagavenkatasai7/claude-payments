@@ -13,6 +13,7 @@ import { t } from './i18n';
 import { env } from './env';
 import { getPortalSettings } from '@/db/repos/portal-settings-repo';
 import { logWarn } from './log';
+import { recordDeliveryFee } from './rewards/fee-ledger';
 import type { PartnerId, Transfer } from './types';
 
 /**
@@ -115,7 +116,10 @@ export function buildDeliveryReceipt(transfer: Transfer, to: string, brand: stri
 /**
  * The delivered transition. ONE transaction: the guarded UPDATE, then — only when it moved the row,
  * and only for the same tenant and sender the receipt was prepared for — the receipt row, inside a
- * savepoint so a receipt failure never holds back delivery (owner decision 2026-09-28). Returns
+ * savepoint so a receipt failure never holds back delivery (owner decision 2026-09-28). B3 rewards
+ * v1: a real transition of a LIVE transfer also writes its platform fee row (and withholds the
+ * give-back of a flagged transfer's reward) in its OWN savepoint: a ledger failure is logged and the
+ * delivery commits without it (rewards/fee-ledger.ts sweepPlatformFeeGaps fills it later). Returns
  * the UPDATE's result exactly as transferRepo.updateTransferFromWebhook does (non-null ⇒ a real
  * transition), so every caller's notify contract is unchanged.
  */
@@ -123,6 +127,16 @@ export async function deliverTransfer(db: Db, transferId: string): Promise<Trans
   const receipt = await prepareDeliveryReceipt(db, transferId);
   return db.transaction(async (tx) => {
     const updated = await createTransferRepo(tx).updateTransferFromWebhook(transferId, 'delivered');
+    if (updated && (updated.environment ?? 'live') === 'live') {
+      try {
+        await tx.transaction((sp) => recordDeliveryFee(sp, updated));
+      } catch (err) {
+        logWarn('delivery.platform_fee', 'platform fee row failed; delivery committed without it', {
+          transferId,
+          error: err instanceof Error ? err.name : 'unknown',
+        });
+      }
+    }
     if (updated && receipt && updated.partnerId === receipt.partnerId && updated.phone === receipt.phone) {
       try {
         // Owner decision (2026-09-28): delivery ALWAYS commits. The receipt enqueue runs in a
