@@ -76,17 +76,22 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     scopes: ['global', 'partner'],
     killSwitch: false,
   },
-  // A3 purpose detection (Raj #17): the bot fills the transfer purpose from
-  // what the customer says. Also needs the sender among the demo-mode phones
-  // (DEMO_PHONES, demo-mode.ts); read once per agent turn for the routed tenant.
+  // Required purpose (owner decision 2026-10-08; A3 purpose detection, Raj #17,
+  // before it): read once per agent turn for the routed tenant, for EVERY phone
+  // (no demo-mode gate). It is only the bot's OFF switch for the question: on
+  // (prod) ⇒ the bot requires a purpose; off or unreadable ⇒ the bot behaves as
+  // before (optional, never asked), so sends keep working through a flag outage.
+  // The portal, scheduled sends and the Partner API require a purpose whatever
+  // this switch says.
   'purpose.detect': {
     key: 'purpose.detect',
-    label: 'Purpose detection',
+    label: 'Required purpose (bot)',
     description:
-      'When a customer says why they are sending (English or Hinglish, e.g. "maa ki dawai ke liye"), the bot records the purpose ' +
-      'on the transfer. Only demo-mode phones (DEMO_PHONES). The purpose reaches the settlement instruction to the payout partner; ' +
-      'staff and the partner see a suggested purpose code that is not confirmed.',
-    bannerText: 'Purpose detection is on',
+      'The WhatsApp bot needs a purpose for every send, for every customer: it uses the reason the customer gave (English or Hinglish, ' +
+      'e.g. "maa ki dawai ke liye") and otherwise asks once before the Approve card. Off: the purpose is optional in the bot and never asked. ' +
+      'The portal, scheduled sends and the Partner API always require a purpose. The purpose reaches the settlement instruction to the ' +
+      'payout partner; staff and the partner see a suggested purpose code that is not confirmed.',
+    bannerText: 'The bot asks for the purpose',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

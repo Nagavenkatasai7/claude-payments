@@ -5,6 +5,7 @@ import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto'
 import { last4, openOptional } from './mappers';
 import { encryptField } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
+import { parsePurpose } from '@/lib/purpose-codes';
 import type {
   CurrencyCode,
   FundingMethod,
@@ -46,6 +47,9 @@ export function createScheduleRepo(
     if (row.dayOfWeek !== null) s.dayOfWeek = row.dayOfWeek;
     if (row.lastRunAt) s.lastRunAt = row.lastRunAt.toISOString();
     if (row.endDate) s.endDate = row.endDate;
+    // Required purpose: an unknown stored value reads as absent ("Not stated"), never cast.
+    const purpose = parsePurpose(row.purpose);
+    if (purpose) s.purpose = purpose;
     return s;
   }
 
@@ -70,6 +74,7 @@ export function createScheduleRepo(
       dayOfWeek: s.dayOfWeek ?? null,
       status: s.status,
       endDate: s.endDate ?? null,
+      purpose: s.purpose ?? null,
       lastRunAt: s.lastRunAt ? new Date(s.lastRunAt) : null,
       createdAt: new Date(s.createdAt),
     };

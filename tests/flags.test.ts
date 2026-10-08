@@ -83,7 +83,13 @@ describe('flag definitions', () => {
     expect(def.scopes).toEqual(['global', 'partner']);
     expect(def.description).toMatch(/settlement instruction/i);
     expect(def.description).toMatch(/payout partner/i);
-    expect(def.description).toMatch(/DEMO_PHONES/);
+    // Required purpose (owner decision 2026-10-08): every customer, and the switch is only the bot's OFF switch.
+    expect(def.description).not.toMatch(/DEMO_PHONES/);
+    expect(def.description).toMatch(/every customer/i);
+    expect(def.description).toMatch(/asks once/i);
+    expect(def.description).toMatch(/Off[^.]*optional/i);
+    expect(def.description).toMatch(/portal[^.]*Partner API[^.]*(always|whatever)/i);
+    expect(def.label).toBe('Required purpose (bot)');
     expect(isKnownFlagKey('purpose.detect')).toBe(true);
   });
 

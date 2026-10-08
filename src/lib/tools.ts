@@ -17,8 +17,9 @@ import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
+import { PURPOSE_CHOICES_TEXT, PURPOSE_LABELS, PURPOSE_REQUIRED_HINT, TRANSFER_PURPOSES, parsePurpose } from './purpose-codes';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
 import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
@@ -124,14 +125,34 @@ export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
  */
 export const WHATSAPP_HIDDEN_TOOLS: ReadonlySet<string> = new Set(['create_transfer', 'generate_payment_link']);
 
-/** The tool schemas the model is shown for a given channel. */
-export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
-  if (channel !== 'web') {
-    return toolSchemas.filter(
-      (t) => !WEB_ONLY_TOOLS.has(t.function.name) && !WHATSAPP_HIDDEN_TOOLS.has(t.function.name),
-    );
-  }
-  return toolSchemas.filter((t) => WEB_TOOL_ALLOWLIST.has(t.function.name));
+/**
+ * Required purpose (owner decision 2026-10-08): the tools whose schema lists
+ * `purpose` as required while the requirement is on. repeat_transfer is NOT
+ * here on purpose: its handler asks, offering the last transfer's purpose (Q1),
+ * so a required schema field would push the model to guess one instead.
+ */
+const PURPOSE_REQUIRED_TOOLS: ReadonlySet<string> = new Set(['send_approve_picker', 'create_transfer', 'create_schedule']);
+
+/** A copy of a tool schema with `purpose` added to its required list (the shared array is never mutated). */
+function withRequiredPurpose(t: ChatTool): ChatTool {
+  const params = t.function.parameters as { required?: string[] };
+  const required = [...(params.required ?? [])];
+  if (!required.includes('purpose')) required.push('purpose');
+  return { ...t, function: { ...t.function, parameters: { ...t.function.parameters, required } } };
+}
+
+/**
+ * The tool schemas the model is shown for a given channel. `purposeRequired`
+ * (the agent's per-turn read of the purpose.detect switch) marks purpose as
+ * required on PURPOSE_REQUIRED_TOOLS; absent or false ⇒ the schemas as before.
+ */
+export function toolSchemasForChannel(channel: AgentChannel, opts: { purposeRequired?: boolean } = {}): ChatTool[] {
+  const visible =
+    channel !== 'web'
+      ? toolSchemas.filter((t) => !WEB_ONLY_TOOLS.has(t.function.name) && !WHATSAPP_HIDDEN_TOOLS.has(t.function.name))
+      : toolSchemas.filter((t) => WEB_TOOL_ALLOWLIST.has(t.function.name));
+  if (!opts.purposeRequired) return visible;
+  return visible.map((t) => (PURPOSE_REQUIRED_TOOLS.has(t.function.name) ? withRequiredPurpose(t) : t));
 }
 
 /** The one place the ToolContext channel default is interpreted. */
@@ -452,7 +473,6 @@ function rateLine(base: string, shownDate: string | undefined): string {
 const SOURCE_OF_FUNDS = ['employment','business','investment','gift','savings','other'] as const;
 const OCCUPATIONS = ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] as const;
 const RELATIONSHIPS = ['self','spouse','parent','child','sibling','other_family','friend','business','other'] as const;
-const PURPOSES = ['family_support','gift','education','medical','savings','bills','business','other'] as const;
 function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | undefined {
   return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
 }
@@ -547,6 +567,10 @@ async function refuseUnlessOwnOpenBill(
 // the model reads all ten codes, never "Defaults to India".
 const DESTINATION_COUNTRY_DESCRIPTION =
   `Required. ISO country code of where the money is going. One of: ${destinationListText()}. Use the country the recipient's number belongs to unless the sender named another; never guess India.`;
+
+/** The purpose argument's description (send_approve_picker, create_transfer, create_schedule). */
+const PURPOSE_ARG_DESCRIPTION =
+  "Why the customer is sending this money. Use the reason they stated or chose; never guess it from the recipient, the relationship or the amount.";
 
 export const toolSchemas: ChatTool[] = [
   {
@@ -720,7 +744,7 @@ export const toolSchemas: ChatTool[] = [
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
-          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           destination_country: {
@@ -913,7 +937,7 @@ export const toolSchemas: ChatTool[] = [
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
-          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
@@ -1006,7 +1030,7 @@ export const toolSchemas: ChatTool[] = [
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
-          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
@@ -1105,8 +1129,8 @@ export const toolSchemas: ChatTool[] = [
           funding_method: { type: 'string', enum: ['bank_transfer'], description: 'Optional. Omit it.' },
           purpose: {
             type: 'string',
-            enum: [...PURPOSES],
-            description: 'Optional. The reason the customer stated for THIS send. Never copy it from the past transfer.',
+            enum: [...TRANSFER_PURPOSES],
+            description: 'The reason the customer stated or confirmed for THIS send. Never copy it from the past transfer without their yes.',
           },
         },
         // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
@@ -1183,6 +1207,12 @@ export interface ToolContext {
   // whether its session passes the transfer page's 15-minute step-up rule (isPortalSessionFresh).
   // Web channel only. Absent ⇒ the legacy account chat or WhatsApp, byte-for-byte unchanged.
   webStepUp?: WebStepUp;
+  // Required purpose (owner decision 2026-10-08): true ⇒ send_approve_picker,
+  // create_transfer (explicit args), repeat_transfer and create_schedule refuse a
+  // consumer send without one of the 8 purposes (needs_purpose, which tells the
+  // model to ask). The agent sets it from the purpose.detect switch; the portal
+  // always sets it. Absent ⇒ purpose optional, exactly as before.
+  purposeRequired?: boolean;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
@@ -1937,6 +1967,11 @@ async function createTransferTool(
   }
 
   // Legacy explicit-args path (cold-start without buttons, or cron).
+  // Required purpose: refused before any read or mint (a business bill payment
+  // is excluded). The approve-tap path above is not: its draft was made by
+  // send_approve_picker, which already required it (and an in-flight draft from
+  // before the requirement still mints).
+  if (ctx.purposeRequired && !isB2bArgs(args) && !parsePurpose(args.purpose)) return purposeRequiredResult();
   const recipientPhone = normalizePhone(args.recipient_phone);
   if (!isValidPhone(recipientPhone)) {
     return {
@@ -2017,7 +2052,7 @@ async function createTransferTool(
       // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
       relationship: asEnum(RELATIONSHIPS, args.relationship),
-      purpose: asEnum(PURPOSES, args.purpose),
+      purpose: legacyB2b ? BUSINESS_PURPOSE : parsePurpose(args.purpose),
       sourceOfFunds: legacySof,
       occupation: legacyOcc,
       // For B2B, screen the PAYER business name (else the individual sender name).
@@ -3686,6 +3721,10 @@ export async function validateScheduleInput(
   if (impliedDestination !== undefined && impliedDestination !== DEFAULT_DESTINATION_COUNTRY) {
     return { ok: false, code: 'corridor' };
   }
+  // Required purpose: refused BEFORE resolveSender, so nothing is written. A
+  // stated purpose is kept whether or not it is required.
+  const purpose = parsePurpose(input.purpose);
+  if (opts.requirePurpose && !purpose) return { ok: false, code: 'purpose' };
   // M2-10 (portal only): the amount is checked BEFORE resolveSender, so a refusal writes nothing.
   if (opts.amountBounds && !scheduleAmountInBounds(input.amountSource)) return { ok: false, code: 'amount' };
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
@@ -3729,6 +3768,7 @@ export async function validateScheduleInput(
       partnerId,
       sourceCurrency,
       amountSource,
+      ...(purpose ? { purpose } : {}),
     },
   };
 }
@@ -3755,7 +3795,8 @@ async function createScheduleTool(
     destinationCountry: args.destination_country,
     sourceCurrency: args.source_currency,
     endDate: args.end_date,
-  });
+    purpose: args.purpose,
+  }, { requirePurpose: ctx.purposeRequired === true });
   if (!v.ok) return scheduleRefusalToolResult(v);
   const schedule: Schedule = {
     id: newTransferId(),
@@ -3801,6 +3842,8 @@ function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: fals
       return { error: 'Please give a valid amount.' };
     case 'no_payout':
       return { error: 'No saved bank details for this recipient.' };
+    case 'purpose':
+      return purposeRequiredResult();
   }
 }
 
@@ -3964,6 +4007,38 @@ async function sendRecipientPickerTool(
 // Sanctions screening covers BOTH parties, so a consumer send needs the
 // sender's legal name on file before any card, draft or mint. The B2B paths
 // already refuse a nameless payer (b2b-pay-finalize buyer_unscreened).
+/**
+ * Required purpose: the refusal a send tool returns when ctx.purposeRequired is
+ * on and no valid purpose was passed. Nothing was drafted, sent or saved; the
+ * hint tells the model to ask (once) and call the same tool again, so a send is
+ * never stuck. Model-facing only.
+ */
+function purposeRequiredResult(): ToolResult {
+  return { needs_purpose: true, reply_hint: PURPOSE_REQUIRED_HINT };
+}
+
+/**
+ * repeat_transfer's refusal (Q1): the last transfer's purpose is OFFERED as the
+ * default ("Same reason as last time: Medical?"), never copied; a yes makes the
+ * model pass it back. A last transfer with no purpose gets the plain question.
+ */
+function repeatPurposeRequiredResult(last: TransferPurpose | null): ToolResult {
+  if (!last) return { needs_purpose: true, last_purpose: null, last_purpose_label: null, reply_hint: PURPOSE_REQUIRED_HINT };
+  const label = PURPOSE_LABELS[last];
+  return {
+    needs_purpose: true,
+    last_purpose: last,
+    last_purpose_label: label,
+    reply_hint:
+      `Ask once: "Same reason as last time: ${label}?" (in Hinglish for a Hinglish customer). A yes ⇒ call repeat_transfer again ` +
+      `with the same details plus purpose '${last}'. Any other answer ⇒ ask why they are sending, listing: ${PURPOSE_CHOICES_TEXT}, ` +
+      'then call repeat_transfer again with that purpose. Never reuse the last purpose without their yes.',
+  };
+}
+
+/** Every business bill payment's purpose: the customer is never asked. */
+const BUSINESS_PURPOSE: TransferPurpose = 'business';
+
 function senderNameRequired(): ToolResult {
   return { needs_sender_name: true, reply_to_customer: SENDER_NAME_QUESTION };
 }
@@ -4211,7 +4286,7 @@ export async function prepareSendDraft(
       // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
       recipientLegalName: typeof input.recipientLegalName === 'string' ? input.recipientLegalName : undefined,
       relationship: asEnum(RELATIONSHIPS, input.relationship),
-      purpose: asEnum(PURPOSES, input.purpose),
+      purpose: b2b ? BUSINESS_PURPOSE : parsePurpose(input.purpose),
       sourceOfFunds: asEnum(SOURCE_OF_FUNDS, input.sourceOfFunds),
       occupation: asEnum(OCCUPATIONS, input.occupation),
       quote: {
@@ -4325,6 +4400,10 @@ async function sendApprovePickerTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // Required purpose: a consumer send without one of the 8 purposes is refused
+  // before anything is quoted or drafted. A business bill payment is excluded
+  // (its draft is always 'business').
+  if (ctx.purposeRequired && !isB2bArgs(args) && !parsePurpose(args.purpose)) return purposeRequiredResult();
   // UI redesign M2-4: the gates, screen and draft are prepareSendDraft; this
   // tool keeps only the channel tail. Raw model args pass through uncoerced
   // (each parser sees what it saw before); payout_* is never read.
@@ -4432,9 +4511,9 @@ async function repeatTransferTool(
   // fix 6: funding_method is a closed set (the schema's consumer enum).
   const repeatFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
   if (repeatFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
-  // A3: the purpose the customer stated for THIS send (never the past row's);
-  // an unknown value is dropped, like on send_approve_picker.
-  const purpose = asEnum(PURPOSES, args.purpose);
+  // A3: the purpose the customer stated (or confirmed) for THIS send, never the
+  // past row's; an unknown value is dropped, like on send_approve_picker.
+  const purpose = parsePurpose(args.purpose);
 
   // Hydrate from the customer's OWN transfers (own tenant + phone, newest-first).
   // Stage 4: indexed per-phone page, then a small in-JS filter. By id: an id that
@@ -4459,6 +4538,9 @@ async function repeatTransferTool(
   if (!recipientName) {
     return { error: "I can't reuse the name on that past transfer — who would you like to send to?" };
   }
+  // Required purpose (Q1): no purpose for THIS send ⇒ offer the last one as the
+  // default; nothing is checked, drafted or sent until the customer answers.
+  if (ctx.purposeRequired && !purpose) return repeatPurposeRequiredResult(parsePurpose(last.purpose) ?? null);
 
   // Amount + funding fallback chain.
   const overrideAmount = Number(args.amount_source ?? args.amount_usd);

@@ -45,6 +45,8 @@ export function buildToolContext(args: {
   deps?: Partial<ToolContextDeps>;
   /** The portal chat's step-up state; absent ⇒ the field is left off (every other caller unchanged). */
   webStepUp?: WebStepUp;
+  /** Required purpose: the send tools refuse a send without one. Absent ⇒ the field is left off (optional, as before). */
+  purposeRequired?: boolean;
 }): ToolContext {
   const { partnerId, phone, channel, turn } = args;
   const deps = args.deps ?? {};
@@ -70,5 +72,6 @@ export function buildToolContext(args: {
     routeSelector: (s, d, m) =>
       selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
     ...(args.webStepUp ? { webStepUp: args.webStepUp } : {}),
+    ...(args.purposeRequired ? { purposeRequired: true } : {}),
   };
 }
