@@ -207,4 +207,41 @@ describe('POST /api/pay/l/[token]', () => {
     expect((await stale.json()).reason).toBe('quote_expired');
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
   });
+
+  it('a failed disclosure-ack write logs the error NAME only (never the query text or its params)', async () => {
+    // The ack's INSERT fails the way a real query error does (message + params).
+    await db.execute(sql.raw(`CREATE FUNCTION fail_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'ack-leak %', NEW.subject_id; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_ack BEFORE INSERT ON audit_events FOR EACH ROW
+      WHEN (NEW.action = 'remittance.disclosure_ack') EXECUTE FUNCTION fail_ack()`));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await call({ action: 'request_otp' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', disclosureVersion: DISCLOSURE_DRAFT_VERSION, quoteLockedAt: lockedAt });
+    expect(res.status).toBe(200); // best-effort: the payment outcome is unchanged
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('paylink.disclosure_ack'));
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]) as { msg: string };
+    expect(line.msg).toMatch(/^[A-Za-z]*Error$/);
+    expect(lines[0]).not.toContain('ack-leak');
+    expect(lines[0]).not.toContain('insert into');
+    warn.mockRestore();
+  });
+
+  it('an unexpected failure logs the error NAME only (never a token or a name riding in the message)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(store, 'getTransfer').mockRejectedValue(
+      new Error(`Failed query: select * from payment_links where token = $1 params: ${token},Asha Patel`),
+    );
+    // A claimed link reads its transfer while resolving: that read throws.
+    await db.execute(sql.raw(`UPDATE payment_links SET status = 'used', transfer_id = 'tx_x' WHERE id = '${linkId}'`));
+    const res = await call({ action: 'request_otp' });
+    expect(res.status).toBe(400);
+    const lines = err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('paylink.route'));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).msg).toBe('Error');
+    expect(lines[0]).not.toContain(token);
+    expect(lines[0]).not.toContain('Asha');
+    err.mockRestore();
+    vi.restoreAllMocks();
+  });
 });

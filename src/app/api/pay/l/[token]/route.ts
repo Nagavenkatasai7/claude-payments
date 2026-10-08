@@ -62,7 +62,8 @@ async function recordDisclosureAck(partnerId: PartnerId, transferId: string, ver
       meta: { version, providerKind },
     });
   } catch (err) {
-    logWarn('paylink.disclosure_ack', err, { transferId });
+    // The error NAME only: a query error's message carries its params.
+    logWarn('paylink.disclosure_ack', err instanceof Error ? err.name : 'error', { transferId });
   }
 }
 
@@ -224,7 +225,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     const out = (await res.clone().json()) as Record<string, unknown>;
     return NextResponse.json({ ...out, transferId: transfer.id }, { status: res.status });
   } catch (err) {
-    logError('paylink.route', err, {});
+    // The error NAME only: a query error's message carries its params (the link
+    // token, names), and the scrubber masks digits and emails, not those.
+    logError('paylink.route', err instanceof Error ? err.name : 'error', {});
     if (isInfraError(err)) {
       return NextResponse.json(
         { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
