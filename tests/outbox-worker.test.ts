@@ -595,7 +595,7 @@ describe('drainOnce — rail.callback (the reference rail settle leg)', () => {
     expect(r.processed).toBe(1);
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/api/payment-webhook/simulator');
-    expect(JSON.parse(String(init.body))).toEqual({ reference: 'wk_t1', status: 'paid_out' });
+    expect(JSON.parse(String(init.body))).toEqual({ reference: 'wk_t1', status: 'paid_out', payout_reference: 'SIMPAY-wk_t1' }); // Batch B1
     expect((init.headers as Record<string, string>)['x-signature']).toMatch(/^[0-9a-f]{64}$/);
   });
 });
@@ -624,7 +624,7 @@ describe('drainOnce — rail.callback carries a failure status through (fix 8)',
   it('a non-string status / reason falls back to paid_out with no reason key', async () => {
     await outbox.enqueue('rail.callback', { reference: 'wk_t1', partner_id: 'acme', status: 7, reason: null });
     await drainOnce(deps(), 'w1');
-    expect(JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body))).toEqual({ reference: 'wk_t1', status: 'paid_out' });
+    expect(JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body))).toEqual({ reference: 'wk_t1', status: 'paid_out', payout_reference: 'SIMPAY-wk_t1' }); // Batch B1
   });
 });
 
@@ -2235,7 +2235,7 @@ describe('drainOnce — rail signature v2, rotation, amount (fix 29)', () => {
     await drainOnce(deps(), 'w1');
     const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
     const raw = String(init.body);
-    expect(JSON.parse(raw)).toEqual({ reference: 'wk_t1', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+    expect(JSON.parse(raw)).toEqual({ reference: 'wk_t1', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' }, payout_reference: 'SIMPAY-wk_t1' });
     expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'whk').update(raw).digest('hex'));
     const { t, v1 } = parseV2(v2Of(init));
     expect(v1).toEqual([

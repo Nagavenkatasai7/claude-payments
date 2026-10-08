@@ -54,8 +54,12 @@ vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }))
 const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable: async () => false }),
+  createTransferRepo: () => ({ isPayoutEditable: async () => false, isPaymentLinkTransfer: async () => false }),
 }));
+
+// B3 rewards v1: the minted transfer's reward row (none unless a test sets it).
+const transferReward = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock('@/lib/rewards/read', () => ({ transferRewardOrNull: transferReward }));
 
 import PayPage from '@/app/pay/[transferId]/page';
 import { PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
@@ -194,5 +198,35 @@ describe('/pay/[transferId] — Reg E pre-payment disclosure', { retry: 0 }, () 
     const html = await render();
     expect(html).toContain('1 USD = 84.50 INR');
     expect(html).toContain('₹8,450.00');
+  });
+
+  it('B3: a reward shows one note ABOVE the legal disclosure (draft and minted transfer)', async () => {
+    expect(await render()).not.toContain('data-reward-note');
+    transferReward.mockResolvedValueOnce({ kind: 'nth_transfer', discountUsd: 2.99, detail: { nth: 5 } });
+    const html = await render();
+    expect(transferReward).toHaveBeenCalledWith(expect.anything(), 'p_acme', ID);
+    const note = html.indexOf('Reward: your 5th transfer this month (you save $2.99).');
+    expect(note).toBeGreaterThan(-1);
+    expect(note).toBeLessThan(html.indexOf('Before you pay'));
+
+    getTransfer.mockResolvedValue(null);
+    getTransferDecrypted.mockResolvedValue(null);
+    getDraft.mockResolvedValue({
+      senderPhone: '15551234567',
+      partnerId: 'p_acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 84.5, amountInr: 8450, feeSource: 0, totalChargeSource: 100 },
+      reward: { kind: 'festival', discountUsd: 1.99, detail: { festivalName: 'Diwali' } },
+    } as unknown as Draft);
+    expect(await render()).toContain('Reward: Diwali offer (you save $1.99).');
+  });
+
+  it('B3: a paid transfer shows no reward note', async () => {
+    current = { status: 'paid' };
+    transferReward.mockResolvedValue({ kind: 'first_transfer', discountUsd: 2.99, detail: {} });
+    expect(await render()).not.toContain('data-reward-note');
+    transferReward.mockResolvedValue(null);
   });
 });

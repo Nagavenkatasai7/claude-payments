@@ -9,6 +9,7 @@ import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { amlSweep, amlRedis, type AmlSweepResult } from '@/lib/aml-sweep';
 import { recheckFailedFx, sweepFxHealth, sweepStaleRates, type FxRecheckRedis } from '@/lib/rate-staleness';
 import { escalateStuckPaid } from '@/lib/stale-money';
+import { sweepPlatformFeeGaps } from '@/lib/rewards/fee-ledger';
 import { deployErrorWatch } from '@/lib/deploy-error-watch';
 import { getRedis } from '@/lib/redis';
 import {
@@ -284,6 +285,17 @@ async function run(req: NextRequest): Promise<NextResponse> {
     escalated = await escalateStuckPaid(deps.db, now);
   } catch (err) {
     logError('worker.stuck-escalation', err);
+  }
+
+  // B3 rewards v1: platform fee rows a delivery could not write (its savepoint
+  // failed). Twice an hour (the FX probe's cadence: heartbeat, cron :17/:47),
+  // never on a poke. Idempotent (one row per transfer); a throw never blocks the drain.
+  if (shouldProbeFx(source, now)) {
+    try {
+      await sweepPlatformFeeGaps(deps.db, now);
+    } catch (err) {
+      logError('worker.fee-sweep', err);
+    }
   }
 
   // Release safety part D: the new build's error count in its first 15

@@ -43,6 +43,7 @@
 
 import type { Quote, CapEvaluation, CountryCode, CurrencyCode, FundingMethod } from './types';
 import type { DraftPointer } from './draft-store';
+import type { QuotedReward } from './rewards/types';
 import { payUrlFor } from './pay-url';
 
 export { prepareSendDraft, getQuoteTyped } from './tools';
@@ -133,7 +134,7 @@ export interface QuoteTypedInput {
 
 export type QuoteTypedResult =
   /** rateDate (Step 0 §3.6): the platform rate's publication date (YYYY-MM-DD), when known. */
-  | { kind: 'quote'; quote: Quote; destinationCountry: CountryCode; rateDate?: string }
+  | { kind: 'quote'; quote: Quote; destinationCountry: CountryCode; rateDate?: string; reward?: QuotedReward }
   | { kind: 'kyc_required'; kycUrl: string }
   /** kycUrl only when the partner's verify-before-send gate is on and the tier is T0/Suspended. */
   | { kind: 'cap'; evaluation: CapEvaluation; kycUrl?: string }

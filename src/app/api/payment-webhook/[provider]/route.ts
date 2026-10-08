@@ -10,6 +10,8 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { parsePayoutReference } from '@/lib/order-references';
 import { pokeWorker } from '@/lib/outbox';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { logWarn } from '@/lib/log';
@@ -169,6 +171,13 @@ async function handleVerified(
     }
   }
 
+  // Batch B1: the payout partner's confirmation (e.g. a UTR), saved write-once BELOW the
+  // signature gate, ONLY on a paid_out that passed the hold and amount checks above (an early
+  // status or a held callback never takes the slot of the real UTR), and BEFORE the status
+  // update (so the delivered receipt can show it). A bad value is ignored; a save error is
+  // logged. Neither ever stops the status from applying.
+  if (result.status === 'delivered') await savePayoutReference(result.transferId, body);
+
   const updated = await store.updateTransferFromWebhook(result.transferId, result.status);
   // fix 8: a REFUSED paid_out on a cancelled row, or on a paid row with a refund
   // in progress, is never silent — money may have moved twice (railconflict:<id>).
@@ -246,6 +255,22 @@ async function handleVerified(
     });
   }
   return NextResponse.json({ ok: true });
+}
+
+/** Batch B1: best effort — the callback's status applies whatever happens here. */
+async function savePayoutReference(transferId: string, body: unknown): Promise<void> {
+  const raw = body && typeof body === 'object' ? (body as Record<string, unknown>).payout_reference : undefined;
+  if (raw === undefined || raw === null) return;
+  const ref = parsePayoutReference(raw);
+  if (!ref) {
+    logWarn('payment-webhook.payout_reference', 'payout_reference ignored: not a valid reference', { transferId });
+    return;
+  }
+  try {
+    await createTransferRepo(getDb()).setPayoutReference(transferId, ref);
+  } catch (err) {
+    logWarn('payment-webhook.payout_reference', err instanceof Error ? err.name : 'error', { transferId });
+  }
 }
 
 /**

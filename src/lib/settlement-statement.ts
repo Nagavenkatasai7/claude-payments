@@ -52,8 +52,12 @@ export interface SettledTransfer {
   paidAt?: string;
   deliveredAt?: string;
   refundedAt?: string;
+  clientReference?: string; // Batch B1
+  payoutReference?: string; // Batch B1
 }
 
+// Batch B1: client_reference and payout_reference are the LAST two columns, so
+// a partner's existing CSV import (by position) keeps working.
 export const STATEMENT_COLUMNS = [
   'reference',
   'status',
@@ -75,6 +79,8 @@ export const STATEMENT_COLUMNS = [
   'paid_at',
   'delivered_at',
   'refunded_at',
+  'client_reference',
+  'payout_reference',
 ] as const;
 
 export type StatementColumn = (typeof STATEMENT_COLUMNS)[number];
@@ -255,6 +261,8 @@ export function statementRow(t: SettledTransfer): StatementRow {
     paid_at: t.paidAt ?? null,
     delivered_at: t.deliveredAt ?? null,
     refunded_at: t.refundedAt ?? null,
+    client_reference: t.clientReference ?? null,
+    payout_reference: t.payoutReference ?? null,
   };
 }
 

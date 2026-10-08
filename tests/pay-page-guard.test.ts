@@ -57,7 +57,7 @@ vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }))
 const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable: async () => false }),
+  createTransferRepo: () => ({ isPayoutEditable: async () => false, isPaymentLinkTransfer: async () => false }),
 }));
 
 import PayPage from '@/app/pay/[transferId]/page';

@@ -108,6 +108,11 @@ vi.mock('@/db/repos/outbox-repo', () => ({
     },
   }),
 }));
+// Batch B1: the payout reference is saved through the transfer repo (write-once).
+const setPayoutReference = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => true));
+vi.mock('@/db/repos/transfer-repo', () => ({
+  createTransferRepo: () => ({ setPayoutReference: (...a: unknown[]) => setPayoutReference(...a) }),
+}));
 const logWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
@@ -154,6 +159,7 @@ beforeEach(() => {
   replay.marked.clear(); replay.state = null; replay.markCalls = 0;
   outboxFake.keys.clear(); outboxFake.enqueued.length = 0;
   logWarnSpy.mockClear();
+  setPayoutReference.mockReset(); setPayoutReference.mockResolvedValue(true);
 });
 
 describe('POST /api/payment-webhook/[provider]', () => {
@@ -701,5 +707,71 @@ describe('POST /api/payment-webhook/[provider] — sandbox (Program-Fix 44 P2)',
     expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
     expect(sendText).not.toHaveBeenCalled();
     expect(sendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/payment-webhook — payout reference (Batch B1)', { retry: 0 }, () => {
+  const withRef = (ref: unknown, status = 'paid_out') => JSON.stringify({ reference: 'wh_1', status, payout_reference: ref });
+
+  it('a SIGNED paid_out with a payout_reference saves it once, before the status update', async () => {
+    const order: string[] = [];
+    setPayoutReference.mockImplementation(async () => { order.push('ref'); return true; });
+    updateTransferFromWebhook.mockImplementation(async () => { order.push('status'); return deliveredTransfer; });
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    const raw = withRef('HDFCR52026100812345678');
+    expect((await post('uniteller', raw, sig(raw))).status).toBe(200);
+    await flushAfter();
+    expect(setPayoutReference).toHaveBeenCalledTimes(1);
+    expect(setPayoutReference).toHaveBeenCalledWith('wh_1', 'HDFCR52026100812345678');
+    expect(order).toEqual(['ref', 'status']);
+  });
+
+  it('only a paid_out that will be applied saves it: a funded callback and a signed failure save nothing', async () => {
+    // the reference is write-once, so an early status must never take the slot of the real UTR
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    updateTransferFromWebhook.mockResolvedValue(null);
+    const funded = withRef('UTR-1', 'funded');
+    expect((await post('uniteller', funded, sig(funded))).status).toBe(200);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
+    const failed = withRef('UTR-2', 'failed');
+    expect((await post('uniteller', failed, sig(failed))).status).toBe(200);
+    expect(setPayoutReference).not.toHaveBeenCalled();
+  });
+
+  it('a callback WITHOUT a valid signature never saves a payout reference', async () => {
+    const raw = withRef('UTR-EVIL');
+    expect((await post('uniteller', raw, 'deadbeef')).status).toBe(401);
+    expect((await post('uniteller', raw)).status).toBe(401);
+    expect(setPayoutReference).not.toHaveBeenCalled();
+  });
+
+  it('a bad payout_reference is ignored and the status still applies', async () => {
+    for (const bad of ['has space', 'x'.repeat(65), 42, { a: 1 }, '']) {
+      handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+      updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+      const raw = withRef(bad);
+      expect((await post('uniteller', raw, sig(raw))).status, JSON.stringify(bad)).toBe(200);
+      await flushAfter();
+    }
+    expect(setPayoutReference).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).toHaveBeenCalledTimes(5);
+  });
+
+  it('a failure while saving the reference is logged and the status still applies', async () => {
+    setPayoutReference.mockRejectedValue(new Error('db down'));
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    const raw = withRef('UTR-3');
+    expect((await post('uniteller', raw, sig(raw))).status).toBe(200);
+    await flushAfter();
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(logWarnSpy.mock.calls.some((c) => c[0] === 'payment-webhook.payout_reference')).toBe(true);
+  });
+
+  it('an ignored callback (handleWebhook → null) saves nothing', async () => {
+    handleWebhook.mockResolvedValue(null);
+    const raw = withRef('UTR-4', 'weird');
+    expect((await post('uniteller', raw, sig(raw))).status).toBe(200);
+    expect(setPayoutReference).not.toHaveBeenCalled();
   });
 });

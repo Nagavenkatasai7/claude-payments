@@ -227,7 +227,7 @@ export default function DocsPage() {
               <Endpoint method="POST" path="/quote" desc="Price a transfer (amount_source, source_currency). Pass sender.phone to price a first transfer at no fee (first_transfer_free; needs a key with transactions:write); without it the standard fee is shown. Not binding: the transaction's fee is final" />
               <Endpoint method="POST" path="/beneficiaries/validate" desc="Validate payout fields for a country" />
               <Endpoint method="POST" path="/beneficiaries" desc="Store a beneficiary (payout details encrypted at rest)" />
-              <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header REQUIRED" />
+              <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header and purpose REQUIRED" />
               <Endpoint method="GET" path="/transactions" desc="List your transfers (keyset: ?limit=&cursor=)" />
               <Endpoint method="GET" path="/transactions/:id" desc="Fetch one transfer (404 outside your scope)" />
               <Endpoint method="GET" path="/settlements" desc="Settlements statement for reconciliation (?from=&to=&limit=&cursor=&format=json|csv)" />
@@ -244,16 +244,20 @@ curl -X POST $BASE/transactions \\
   -d '{
     "amount_source": 200,
     "source_currency": "USD",
+    "client_reference": "INV-2026-0042",
+    "purpose": "family_support",
     "sender":      { "phone": "15551230000", "name": "Maria Lopez", "kyc_status": "verified" },
     "beneficiary": { "name": "Anita Sharma", "phone": "919876543210",
                      "payout_method": "bank", "payout_destination": "123456789012|HDFC0001234" }
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A later request with the same Idempotency-Key returns that blocked transaction with 200 — see <a href="#idempotency" className="underline">Idempotency</a>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code>, <code>sched:</code> or <code>test:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A later request with the same Idempotency-Key returns that blocked transaction with 200 — see <a href="#idempotency" className="underline">Idempotency</a>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code>, <code>sched:</code>, <code>test:</code> or <code>paylink:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
           </p>
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+            <code>purpose</code> is required: why the money is sent, exactly one of <code>family_support</code>, <code>gift</code>, <code>education</code>, <code>medical</code>, <code>savings</code>, <code>bills</code>, <code>business</code> or <code>other</code> (lower case). A missing or unknown purpose is refused with 422 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. It is saved, comes back as <code>purpose</code> in every answer and is in the settlement instruction&apos;s <code>compliance</code> object.
+            <code>client_reference</code> is optional: your own order number, 1–64 letters, digits and <code>{'. _ : / # -'}</code> characters. A value that does not fit is refused with 400 before the Idempotency-Key is bound. It is saved once (a later request with the same Idempotency-Key returns the first value) and comes back as <code>client_reference</code> in every answer, in the settlements statement and in the settlement instruction to your rail. <code>payout_reference</code> is the payout partner&apos;s confirmation (for example a bank UTR), set once from its signed status callback; it is <code>null</code> until then.
             <code>sender.name</code> is optional today but strongly recommended: a transaction created without it is held for manual review (it is created with <code>compliance_status</code> <code>flagged</code>, and confirming it returns <code>in_review</code> until compliance staff release it). <code>sender.name</code> will become required in a future version.
           </p>
 
@@ -307,7 +311,7 @@ curl -X POST $BASE/transactions \\
                 </li>
                 <li>
                   Reserved prefixes, refused with <code>400</code>: <code>draft:</code>,{' '}
-                  <code>b2binvoice:</code>, <code>sched:</code> and <code>test:</code>.
+                  <code>b2binvoice:</code>, <code>sched:</code>, <code>test:</code> and <code>paylink:</code>.
                 </li>
               </ul>
             </CardContent>
@@ -364,7 +368,8 @@ curl -X POST $BASE/transactions \\
       "destination_country": "IN", "payout_rail": "bank",
       "provider_ref": "simrail-Qm9…", "funding_ref": null, "refund_ref": null,
       "created_at": "2026-09-02T10:00:00.000Z", "paid_at": "2026-09-02T10:01:12.345Z",
-      "delivered_at": "2026-09-02T10:01:20.000Z", "refunded_at": null }
+      "delivered_at": "2026-09-02T10:01:20.000Z", "refunded_at": null,
+      "client_reference": "INV-2026-0042", "payout_reference": "SIMPAY-Qm9…" }
   ],
   "next_cursor": null,
   "totals": { "count": 1,
@@ -440,6 +445,11 @@ curl -OJ "$BASE/settlements?from=2026-09-01&to=2026-09-08&format=csv" \\
                     <td className="py-1.5 pr-4"><code>{`created_at · paid_at · delivered_at · refunded_at`}</code></td>
                     <td className="py-1.5 pr-4">string | null</td>
                     <td className="py-1.5">ISO 8601 UTC. For a released compliance hold, <code>paid_at</code> is the release time.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`client_reference · payout_reference`}</code></td>
+                    <td className="py-1.5 pr-4">string | null</td>
+                    <td className="py-1.5">Your order number from <code>/transactions</code>, and the payout partner&apos;s confirmation (for example a UTR). The last two CSV columns. On the reference simulator rail the payout reference is simulated (<code>SIMPAY-…</code>).</td>
                   </tr>
                 </tbody>
               </table>
@@ -546,7 +556,8 @@ x-signature: 3f1a…                              # deprecated — HMAC-SHA256 o
     "source": 200, "currency": "USD",
     "destination": 16600, "destination_currency": "INR",
     "fx_rate": 83                     // locked at quote time
-  }
+  },
+  "client_reference": "INV-2026-0042" // the partner's order number, when it sent one
 }`}</Code>
           <p className="text-sm text-muted-foreground">
             Respond <code>2xx</code> with an optional <code>{`{ "providerRef": "…" }`}</code> —
@@ -674,7 +685,14 @@ valid = |now - t| <= 300 seconds
 x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t + "." + rawBody)
 
 { "reference": "tr_abc123", "status": "paid_out",
-  "amount": { "destination": 16600, "destination_currency": "INR" } }`}</Code>
+  "amount": { "destination": 16600, "destination_currency": "INR" },
+  "payout_reference": "HDFCR52026100812345678" }`}</Code>
+          <p className="text-sm text-muted-foreground">
+            <strong>Payout reference (optional):</strong> send your payout confirmation (for example the
+            bank UTR) as <code>payout_reference</code>, 1–64 letters, digits and{' '}
+            <code>{'. _ : / # -'}</code> characters, on any status. We save the first one we receive and
+            ignore later ones; a value that does not fit is ignored and the status still applies.
+          </p>
           <p className="text-sm text-muted-foreground">
             <strong>Amount on <code>paid_out</code>:</strong> echo the <code>amount.destination</code>{' '}
             and <code>destination_currency</code> from our instruction. If they differ from what we

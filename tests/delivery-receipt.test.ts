@@ -54,6 +54,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { emailVerifiedTag, markEmailVerified, setEmailReceipts } from '@/lib/portal-prefs';
 import { renderSealedText } from '@/lib/sealed-text';
+import { createRewardRepo } from '@/db/repos/reward-repo';
 import { completePaymentStage2 } from '@/lib/payment';
 
 const PHONE = '14155550123';
@@ -150,6 +151,19 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     const body = renderSealedText(String(rows[0].payload.text), rows[0].payload.sealed);
     expect(body).toMatch(/turn off email receipts/i);
     expect(body).toContain('Notifications');
+  });
+
+  it('B3: a transfer that carried a reward gets the reward line in its receipt', async () => {
+    await optIn('pa');
+    await store().saveTransfer(transfer({ feeUsd: 0, feeSource: 0, totalChargeUsd: 200, totalChargeSource: 200 }));
+    await createRewardRepo(db).insertRedemption({
+      transferId: 'rc_t1', partnerId: 'pa', phone: PHONE, month: '2026-10',
+      reward: { kind: 'first_transfer', discountUsd: 5, detail: {} }, giveBackUsd: 0, giveBackWithheld: false,
+    });
+    await store().updateTransferFromWebhook('rc_t1', 'delivered');
+    const [row] = await emailRows();
+    const body = renderSealedText(String(row.payload.text), row.payload.sealed);
+    expect(body).toContain('Fee: $0.00\nReward: first transfer free (saved $5.00).');
   });
 
   it('the body is sealed at rest and carries the MASKED destination only', async () => {

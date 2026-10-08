@@ -1,6 +1,8 @@
 /**
  * Program-Fix 49B (prompt-11): the 15-case bot eval set (audit §4.7), plus the
- * three A2 language cases (16-18: Hinglish, Devanagari, English), as
+ * three A2 language cases (16-18: Hinglish, Devanagari, English) and the three
+ * required-purpose cases (19-21: reason stated, no reason, Hinglish with no
+ * reason; run with the purpose.detect switch on), as
  * RECORDED conversations. Each case is the context the agent would send the
  * model (the real buildSystemPrompt + the real WhatsApp tool schemas + the
  * server notes agent.ts injects + a recorded history, including prior tool
@@ -26,6 +28,8 @@ export interface EvalCase {
   title: string;
   /** The partner's verify-before-send gate (agent.ts sendGateActive). Default true. */
   gateActive?: boolean;
+  /** The purpose.detect switch (agent.ts purposeRequired): prompt section + required schema arg. Default false. */
+  purposeRequired?: boolean;
   /** Server-injected system notes, verbatim from agent.ts. */
   notes?: string[];
   /** The conversation so far (user, assistant, tool), newest last. */
@@ -92,6 +96,28 @@ const ROMAN_HINDI = /\b(aap|aapko|aapka|kitna|kitne|bhejna|bhejne|hai|hain|kya|b
 
 const IN_RECIPIENT = '919876543210';
 const MX_RECIPIENT = '525512345678';
+
+// Required purpose: the 8 reasons in plain words, as the bot lists them.
+const PURPOSE_WORDS = /family support|gift|education|medical|savings|bills|business|other/gi;
+const listsPurposes = (r: ChatMessage) =>
+  new Set((textOf(r).match(PURPOSE_WORDS) ?? []).map((w) => w.toLowerCase())).size >= 4 ? null : 'did not list the purpose choices';
+
+/** A confirmed send to Mom: recipient resolved, limit checked, quoted, and the customer said yes. */
+function confirmedSendToMom(first: string, quoteLine: string, yes: string): ChatMessage[] {
+  return [
+    user(first),
+    ...toolTurn('resolve_recipient', { name: 'Mom' }, {
+      match: 'exact', recipient: { name: 'Mom', recipient_phone: IN_RECIPIENT, destination_country: 'IN' },
+    }),
+    ...toolTurn('check_send_limit', { amount_usd: 200 }, { within_cap: true, tier: 'T1', edd_required: false }),
+    ...toolTurn('get_quote', { amount_source: 200, destination_country: 'IN' }, {
+      amount_source_display: '$200.00 USD', fee_usd: 1.99, fx_rate: 83, amount_dest: 16600, destination_currency: 'INR', delivery_estimate: 'within minutes',
+    }),
+    say(quoteLine),
+    user(yes),
+  ];
+}
+const PICKER_TO_MOM = { amount_source: 200, recipient_name: 'Mom', recipient_phone: IN_RECIPIENT, destination_country: 'IN' };
 
 export const EVAL_CASES: EvalCase[] = [
   {
@@ -421,12 +447,65 @@ export const EVAL_CASES: EvalCase[] = [
       fail: say('Namaste! Aap Priya ji ko kitna bhejna chahte hain?'),
     },
   },
+  // ── Required purpose (owner decision 2026-10-08), with the purpose.detect switch on: a stated
+  // reason is used without asking; otherwise the bot asks ONCE before the Approve card, listing
+  // the choices, in Hinglish for a Hinglish customer. ─────────────────────────────────────────
+  {
+    id: 19,
+    title: 'Required purpose, reason stated: the card carries it and the bot does not ask',
+    purposeRequired: true,
+    history: confirmedSendToMom('send Mom $200 for her surgery', 'Sending $200.00 USD — Mom gets ₹16,600. Shall I go ahead?', 'yes'),
+    check: (r) => {
+      const card = argsOf(r, 'send_approve_picker');
+      return fail(
+        hasTool(r, 'send_approve_picker'),
+        card && card.purpose !== 'medical' && `send_approve_picker purpose=${String(card.purpose)}`,
+      );
+    },
+    recorded: {
+      pass: calls(['send_approve_picker', { ...PICKER_TO_MOM, purpose: 'medical' }]),
+      fail: say('Why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+    },
+  },
+  {
+    id: 20,
+    title: 'Required purpose, no reason given: ask once, listing the choices, before the card',
+    purposeRequired: true,
+    history: confirmedSendToMom('send Mom $200', 'Sending $200.00 USD — Mom gets ₹16,600. Shall I go ahead?', 'yes'),
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        listsPurposes(r),
+        textAvoids(r, /family_support/, 'repeated an internal purpose value'),
+      ),
+    recorded: {
+      pass: say('One quick question before I send it: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+      fail: calls(['send_approve_picker', { ...PICKER_TO_MOM, purpose: 'family_support' }]),
+    },
+  },
+  {
+    id: 21,
+    title: 'Required purpose, Hinglish with no reason: ask in Hinglish (Roman letters), no card yet',
+    purposeRequired: true,
+    history: confirmedSendToMom('Mom ko 200 dollar bhejne hai', '200 USD bhej rahe hain — Mom ko ₹16,600 milenge. Aage badhein?', 'haan'),
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        textMatches(r, ROMAN_HINDI, 'did not ask in Hinglish'),
+        listsPurposes(r),
+      ),
+    recorded: {
+      pass: say('Bas ek sawaal: yeh paise kis liye bhej rahe hain? Family support, Gift, Education, Medical, Savings, Bills, Business ya Other?'),
+      fail: say('One quick question: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+    },
+  },
 ];
 
 /** The messages the agent would send the model for this case (agent.ts order). */
 export function buildEvalMessages(c: EvalCase): ChatMessage[] {
   return [
-    { role: 'system', content: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: c.gateActive ?? true }) },
+    { role: 'system', content: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: c.gateActive ?? true, purposeRequired: c.purposeRequired ?? false }) },
     ...(c.notes ?? []).map((content): ChatMessage => ({ role: 'system', content })),
     ...c.history,
   ];
@@ -441,9 +520,10 @@ export interface EvalResult {
 
 /** Runs every case once through `chat`; never throws (a model error is a failed case). */
 export async function runEval(chat: ChatFn, cases: EvalCase[] = EVAL_CASES): Promise<EvalResult[]> {
-  const tools = toolSchemasForChannel('whatsapp');
   const results: EvalResult[] = [];
   for (const c of cases) {
+    // Per case, like agent.ts per turn: the purpose.detect switch adds purpose to the send tools' required args.
+    const tools = toolSchemasForChannel('whatsapp', { purposeRequired: c.purposeRequired ?? false });
     try {
       const reply = await chat(buildEvalMessages(c), tools);
       results.push({ id: c.id, title: c.title, failures: c.check(reply) });

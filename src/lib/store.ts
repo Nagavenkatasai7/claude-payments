@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { getRedis } from './redis';
-import { easternDayStart, easternMonthStart } from './dates';
+import { easternDayStart, easternMonth, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
 import { getDb, type Db, type Tx } from '@/db/client';
 import { partnerIntegrations } from '@/db/schema';
@@ -15,6 +15,8 @@ import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createRewardRepo, type RedemptionWrite } from '@/db/repos/reward-repo';
+import type { Catalog, PartnerRewardSettings, PartnerRewardTerms, SenderRewardUsage } from './rewards/types';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
 import { SANCTIONS_AUDIT_ACTION, type ScreeningEvidence } from './sanctions/evidence';
@@ -61,6 +63,36 @@ export interface SenderLedgerOps {
    * the schedule still carries its own stored account for a recipient the sender deleted.
    */
   scheduleMintCheck(scheduleId: string, recipientPhone: string): Promise<'ok' | 'inactive' | 'recipient_deleted'>;
+  /**
+   * B3 rewards v1 (the three locked reward operations): this sender's reward
+   * usage for the ET month, read under the lock so a concurrent mint's
+   * committed reward is seen (two parallel Nth-free transfers give one reward).
+   */
+  rewardUsage(month: string, monthStart: Date): Promise<SenderRewardUsage>;
+  /**
+   * B3: takes the PARTNER's budget lock (pg_advisory_xact_lock, inside this
+   * sender lock, always in that order) and returns the give-back the budget
+   * already holds this month, so two senders cannot both spend its last cents.
+   */
+  rewardBudgetUsed(month: string): Promise<number>;
+  /** B3: the redemption row, in the SAME transaction as the transfer insert (one per transfer: the PK). */
+  insertRedemption(w: Omit<RedemptionWrite, 'partnerId' | 'phone'>): Promise<void>;
+}
+
+/** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
+export interface RewardQuoteFacts {
+  catalog: Catalog;
+  settings: PartnerRewardSettings;
+  terms: PartnerRewardTerms;
+  usage: SenderRewardUsage;
+  budgetUsedUsd: number;
+}
+
+/** B3 rewards v1: what the mint re-checks before the lock (the programs as they are now). */
+export interface RewardMintFacts {
+  catalog: Catalog;
+  settings: PartnerRewardSettings;
+  terms: PartnerRewardTerms;
 }
 
 export interface AmlHoldQuery {
@@ -438,6 +470,13 @@ export function createStore(redis: RedisLike, db: Db) {
               insertTransfer: (t, opts) => repo.saveTransfer(t, opts),
               recordAudit: (e) => audit.record(e),
               amlHoldInputs: (q) => readAmlHoldInputs(tx, partnerId, phone, q),
+              rewardUsage: (month, monthStart) => createRewardRepo(tx).senderUsage(partnerId, phone, month, monthStart),
+              rewardBudgetUsed: async (month) => {
+                const rewards = createRewardRepo(tx);
+                await rewards.lockBudget(partnerId);
+                return rewards.budgetUsed(partnerId, month);
+              },
+              insertRedemption: (w) => createRewardRepo(tx).insertRedemption({ ...w, partnerId, phone }),
               scheduleMintCheck: async (scheduleId, recipientPhone) => {
                 const s = await createScheduleRepo(tx).lockForMint(scheduleId, partnerId, phone);
                 if (!s || s.status !== 'active') return 'inactive';
@@ -454,6 +493,31 @@ export function createStore(redis: RedisLike, db: Db) {
         if (isLockTimeout(err)) throw new SendBusyError();
         throw err;
       }
+    },
+
+    // ── B3 rewards v1: root-handle reads, never inside the sender lock ──────
+    /** The quote-time facts (catalog, the partner's choices and terms, this sender's month). Throws on a read error. */
+    async rewardQuoteFacts(partnerId: PartnerId, phone: string, now: Date = new Date()): Promise<RewardQuoteFacts> {
+      const rewards = createRewardRepo(db);
+      const month = easternMonth(now.getTime());
+      const [catalog, settings, terms, usage, budgetUsedUsd] = await Promise.all([
+        rewards.getCatalog(),
+        rewards.getPartnerSettings(partnerId),
+        rewards.getTerms(partnerId),
+        rewards.senderUsage(partnerId, phone, month, easternMonthStart(now)),
+        rewards.budgetUsed(partnerId, month),
+      ]);
+      return { catalog, settings, terms, usage, budgetUsedUsd };
+    },
+    /** The mint's pre-lock re-read of the programs. Throws on a read error. */
+    async rewardMintFacts(partnerId: PartnerId): Promise<RewardMintFacts> {
+      const rewards = createRewardRepo(db);
+      const [catalog, settings, terms] = await Promise.all([
+        rewards.getCatalog(),
+        rewards.getPartnerSettings(partnerId),
+        rewards.getTerms(partnerId),
+      ]);
+      return { catalog, settings, terms };
     },
 
     // ── Inbound plumbing (Redis) ─────────────────────────────────────────

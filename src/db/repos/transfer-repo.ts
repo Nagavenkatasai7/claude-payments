@@ -125,6 +125,15 @@ const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfer
  * payoutEditable (its NOT form) and isPartnerApiMinted (Step 0 FX-2: those rows
  * are exempt from the pay-time rate check — the partner owns `confirm`).
  */
+/**
+ * Batch B2: a payment-link transfer — its id is bound to a 'paylink:<linkId>'
+ * claim (payment-link-finalize.ts). Shared by payoutEditable (its NOT form) and
+ * isPaymentLinkTransfer (the hosted pay route and page refuse these rows: the
+ * link route, with its link checks, is the only way to pay them).
+ */
+const paymentLinkSql = () =>
+  sql`EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND ${idempotencyKeys.key} LIKE 'paylink:%')`;
+
 const partnerApiMintedSql = () =>
   sql`(EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%') OR EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key'))`;
 
@@ -163,6 +172,10 @@ export function createTransferRepo(
   // The partner API refuses the 'sched:' prefix at its edge as well
   // (createTransaction), so a 'sched:' key is never a partner claim. Either
   // partner-API marker locks the payout the partner supplied.
+  // Batch B2: a payment-link transfer ('paylink:<linkId>' claim) pays the payee
+  // SmartRemit approved; the customer can never change it. Its claim already
+  // reads as partner-API-minted above, but the lock must not depend on that, so
+  // it is spelled out here on its own.
   const payoutEditable = (id: string, partnerId: PartnerId) =>
     and(
       eq(transfers.id, id),
@@ -171,6 +184,7 @@ export function createTransferRepo(
       unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
       sql`NOT ${partnerApiMintedSql()}`,
+      sql`NOT ${paymentLinkSql()}`,
     );
 
   async function page(
@@ -272,12 +286,14 @@ export function createTransferRepo(
       // conflict-update never does, so a read-modify-write can never flip a
       // sandbox row to live (or back).
       // Step 0 FX-7: the rate provenance columns are write-once the same way.
+      // Batch B1: client_reference and payout_reference are write-once too (the
+      // payout reference is set only by setPayoutReference, from a signed callback).
       const {
         environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
-        fxExpiresAt: _fxExp,
+        fxExpiresAt: _fxExp, clientReference: _clientRef, payoutReference: _payoutRef,
         ...updatable
       } = row;
-      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp;
+      void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp; void _clientRef; void _payoutRef;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {
@@ -405,6 +421,19 @@ export function createTransferRepo(
         .where(and(eq(transfers.id, id), eq(transfers.status, 'paid')))
         .returning();
       return { prior, updated: rows[0] ? toDomain(rows[0]) : null };
+    },
+
+    /**
+     * Batch B1: persist the payout partner's confirmation (e.g. a UTR) exactly once. Only the
+     * status-callback route calls it, AFTER the signature check. True ⇒ this call set it.
+     */
+    async setPayoutReference(id: string, ref: string): Promise<boolean> {
+      const rows = await db
+        .update(transfers)
+        .set({ payoutReference: ref })
+        .where(and(eq(transfers.id, id), isNull(transfers.payoutReference)))
+        .returning({ id: transfers.id });
+      return rows.length > 0;
     },
 
     /** Persist the settlement ref exactly once (never clobbers an existing ref). */
@@ -984,6 +1013,18 @@ export function createTransferRepo(
         .limit(1);
       return rows.length > 0;
     },
+    /**
+     * Batch B2: true when this transfer was minted by a payment link (its id is
+     * bound to a 'paylink:' claim). Read-only; false for a missing id.
+     */
+    async isPaymentLinkTransfer(id: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), paymentLinkSql()))
+        .limit(1);
+      return rows.length > 0;
+    },
     async isPayoutEditable(id: string, partnerId: PartnerId): Promise<boolean> {
       const rows = await db.select({ id: transfers.id }).from(transfers).where(payoutEditable(id, partnerId)).limit(1);
       return rows.length > 0;
@@ -1217,6 +1258,8 @@ export function createTransferRepo(
           paidAt: transfers.paidAt,
           deliveredAt: transfers.deliveredAt,
           refundedAt: transfers.refundedAt,
+          clientReference: transfers.clientReference,
+          payoutReference: transfers.payoutReference,
           // Fixed-format UTC text (6 µs digits, '+00') — independent of the
           // session TimeZone and DateStyle, so the cursor always validates.
           paidAtText: sql<string>`to_char(${transfers.paidAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'`.as('paid_at_text'),
@@ -1247,6 +1290,8 @@ export function createTransferRepo(
         paidAt: r.paidAt ? r.paidAt.toISOString() : undefined,
         deliveredAt: r.deliveredAt ? r.deliveredAt.toISOString() : undefined,
         refundedAt: r.refundedAt ? r.refundedAt.toISOString() : undefined,
+        clientReference: r.clientReference ?? undefined,
+        payoutReference: r.payoutReference ?? undefined,
       }));
       const last = pageRows[pageRows.length - 1];
       return {

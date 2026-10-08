@@ -42,11 +42,23 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['purpose.detect', 'sends.paused', 'settlement.paused', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
     }
+  });
+
+  it('B2: paylinks.enabled is an ordinary feature switch (global or one partner), off with no row', async () => {
+    const def = FLAG_DEFINITIONS['paylinks.enabled'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner']);
+    const db = await freshDb();
+    invalidateFlagCache(db);
+    expect(await isFlagOn(db, 'paylinks.enabled', { partnerId: 'default' })).toBe(false);
+    await setFlag(db, 'paylinks.enabled', 'partner', 'default');
+    expect(await isFlagOn(db, 'paylinks.enabled', { partnerId: 'default' })).toBe(true);
+    expect(await isFlagOn(db, 'paylinks.enabled', { partnerId: 'other' })).toBe(false);
   });
 
   it('voice.notes is an ordinary feature switch (global or one partner), not a kill switch', () => {
@@ -71,7 +83,13 @@ describe('flag definitions', () => {
     expect(def.scopes).toEqual(['global', 'partner']);
     expect(def.description).toMatch(/settlement instruction/i);
     expect(def.description).toMatch(/payout partner/i);
-    expect(def.description).toMatch(/DEMO_PHONES/);
+    // Required purpose (owner decision 2026-10-08): every customer, and the switch is only the bot's OFF switch.
+    expect(def.description).not.toMatch(/DEMO_PHONES/);
+    expect(def.description).toMatch(/every customer/i);
+    expect(def.description).toMatch(/asks once/i);
+    expect(def.description).toMatch(/Off[^.]*optional/i);
+    expect(def.description).toMatch(/portal[^.]*Partner API[^.]*(always|whatever)/i);
+    expect(def.label).toBe('Required purpose (bot)');
     expect(isKnownFlagKey('purpose.detect')).toBe(true);
   });
 
@@ -81,6 +99,19 @@ describe('flag definitions', () => {
     await setFlag(db, 'purpose.detect', 'partner', 'acme');
     expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'acme' })).toBe(true);
     expect(await isFlagOn(db, 'purpose.detect', { partnerId: 'default' })).toBe(false);
+  });
+
+  it('rewards.enabled (B3) is a feature switch (global or one partner), off with no row, demo-mode only', async () => {
+    const def = FLAG_DEFINITIONS['rewards.enabled'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner']);
+    expect(def.description).toMatch(/DEMO_PHONES/);
+    expect(def.description).toMatch(/First transfer free works either way/);
+    const db = await freshDb();
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'default' })).toBe(false);
+    await setFlag(db, 'rewards.enabled', 'partner', 'default');
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'default' })).toBe(true);
+    expect(await isFlagOn(db, 'rewards.enabled', { partnerId: 'acme' })).toBe(false);
   });
 
   it('isKnownFlagKey accepts only defined keys', () => {

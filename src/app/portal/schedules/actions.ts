@@ -37,7 +37,7 @@ export interface ScheduleFormState {
   error?: MessageKey;
   errors?: ScheduleFormErrors;
   /** Echo of the inputs (none is secret: an opaque rid, an amount and a day). */
-  values?: { rid?: string; amount?: string; frequency?: string; dayOfMonth?: string; dayOfWeek?: string; endDate?: string };
+  values?: { rid?: string; amount?: string; frequency?: string; dayOfMonth?: string; dayOfWeek?: string; endDate?: string; purpose?: string };
 }
 
 const text = (fd: FormData, k: string) => {
@@ -51,6 +51,7 @@ const echo = (fd: FormData): ScheduleFormState['values'] => ({
   dayOfMonth: text(fd, 'dayOfMonth'),
   dayOfWeek: text(fd, 'dayOfWeek'),
   endDate: text(fd, 'endDate'),
+  purpose: text(fd, 'purpose'),
 });
 const refuse = (fd: FormData, e: Omit<ScheduleFormState, 'requestKey' | 'values'>): ScheduleFormState => ({
   requestKey: newRequestKey(),
@@ -84,6 +85,7 @@ const CREATE_REFUSAL: Record<string, MessageKey> = {
   day_range: 'portal.schedules.day_invalid',
   invalid_phone: 'portal.schedules.recipient_unusable',
   bad_funding: 'portal.schedules.failed',
+  purpose: 'portal.schedules.purpose_invalid',
 };
 
 /** Create a scheduled payment to a saved recipient (by its opaque rid). */

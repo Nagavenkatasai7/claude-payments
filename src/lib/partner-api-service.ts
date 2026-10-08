@@ -45,6 +45,8 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
+import { parseClientReference } from './order-references';
+import { parsePurpose, TRANSFER_PURPOSES } from './purpose-codes';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -147,6 +149,11 @@ function transferView(t: Transfer, senderName: string | null = null) {
     refund_ref: t.refundRef ?? null,
     created_at: t.createdAt,
     partner_id: t.partnerId,
+    // Batch B1: the partner's own order number, and the payout partner's confirmation.
+    client_reference: t.clientReference ?? null,
+    payout_reference: t.payoutReference ?? null,
+    // Required purpose (owner decision 2026-10-08); null on a transaction made before it.
+    purpose: t.purpose ?? null,
   };
 }
 
@@ -163,6 +170,10 @@ async function transferViewWithName(deps: PartnerApiDeps, t: Transfer) {
 // DEFAULT_CURRENCY_FOR_COUNTRY authority (all ten codes; see destination-country.ts).
 const SUPPORTED_DESTINATIONS = (Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as [CountryCode, CurrencyCode][])
   .map(([destination_country, destination_currency]) => ({ destination_country, destination_currency }));
+
+// Required purpose (owner decision 2026-10-08): the two 422s for POST /transactions.
+export const PURPOSE_REQUIRED_422 = `purpose is required: one of ${TRANSFER_PURPOSES.join(', ')}.`;
+export const PURPOSE_INVALID_422 = `purpose must be one of: ${TRANSFER_PURPOSES.join(', ')}.`;
 
 // Program-Fix 33 (owner decision 2): the 400 for an unknown destination_country.
 const DESTINATION_COUNTRY_400 = `destination_country must be one of: ${destinationListText()}.`;
@@ -244,6 +255,11 @@ export async function createQuote(
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
+  // Batch B1: the partner's own order number. Optional; a present but bad value is a
+  // 400 HERE, before the customer write and the claim, so a corrected retry under the
+  // same key mints normally. A replay returns the FIRST value (the row is write-once).
+  const clientRef = parseClientReference(body.client_reference);
+  if (!clientRef.ok) return err(400, clientRef.error);
   // Program fix 16 (review): the same normalization createTransaction applies,
   // so a formatted number auto-detects the same currency it will mint under.
   const quoteSenderPhone = normalizePhone((body.sender as Record<string, unknown> | undefined)?.phone);
@@ -374,8 +390,10 @@ export async function createTransaction(
   // Program-Fix 44 P2: 'test:' is the sandbox claim namespace (a test key's
   // key K is claimed as 'test:K'), so no client key may start with it — the
   // live and sandbox namespaces can then never collide.
-  if (/^(draft|b2binvoice|sched|test):/.test(idempotencyKey)) {
-    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:', 'sched:' or 'test:' (reserved).");
+  // Batch B2: 'paylink:' is the payment-link claim (payment-link-finalize.ts); a
+  // partner key using it could bind a link's namespace to its own transfer.
+  if (/^(draft|b2binvoice|sched|test|paylink):/.test(idempotencyKey)) {
+    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:', 'sched:', 'test:' or 'paylink:' (reserved).");
   }
 
   // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):
@@ -385,6 +403,11 @@ export async function createTransaction(
   // is identical to "unknown phone" (no enumeration oracle; 404-never-403 spirit).
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
+  // Batch B1: the partner's own order number. Optional; a present but bad value is a
+  // 400 HERE, before the customer write and the claim, so a corrected retry under the
+  // same key mints normally. A replay returns the FIRST value (the row is write-once).
+  const clientRef = parseClientReference(body.client_reference);
+  if (!clientRef.ok) return err(400, clientRef.error);
 
   const sender = (body.sender && typeof body.sender === 'object' ? body.sender : {}) as Record<string, unknown>;
   if (!str(sender.phone)) return err(400, 'sender.phone is required.');
@@ -455,6 +478,14 @@ export async function createTransaction(
   // never fed into screening.
   const destination = resolveDestination(body.destination_country);
   if (!destination) return err(400, DESTINATION_COUNTRY_400);
+  // Required purpose (owner decision 2026-10-08): one of the 8 values, exactly. Missing or unknown
+  // is a 422 HERE — after the 400 shape checks, above the customer write and the Idempotency-Key
+  // claim (the client_reference pattern), so a corrected retry under the same key mints normally.
+  // A sandbox (test key) mint needs one too.
+  const purposeArg = body.purpose;
+  if (purposeArg === undefined || purposeArg === null || purposeArg === '') return err(422, PURPOSE_REQUIRED_422);
+  const purpose = parsePurpose(purposeArg);
+  if (!purpose) return err(422, PURPOSE_INVALID_422);
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
   // later inserts its beneficiary name / destination edge validation ABOVE this
@@ -524,6 +555,8 @@ export async function createTransaction(
       // customer's WhatsApp picker.
       saveRecipient: false,
       environment, // Program-Fix 44 P2 — from the key, never the body
+      clientReference: clientRef.value, // Batch B1
+      purpose, // required purpose (validated above)
     }));
   } catch (e) {
     // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing

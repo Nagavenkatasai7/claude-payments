@@ -29,7 +29,10 @@ export type SidebarActive =
   | 'employee-questions'
   | 'refunds'
   | 'waitlist'
-  | 'switches';
+  | 'switches'
+  | 'referrals'
+  | 'rewards'
+  | 'payees';
 
 export type NavItem = SidebarActive;
 
@@ -79,7 +82,9 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
         'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
         // partner-requests + waitlist are SmartRemit's own inbound lists — platform admins only.
         // switches (Release safety part A): the kill switches — platform admins only (requirePlatformAdmin).
-        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys', 'switches'] as NavItem[]) : []),
+        // referrals (Batch B4), rewards (B3) and payees (B2: approve, reject or suspend the companies
+        // partners add for payment links): platform admins only.
+        ...(staff.role === 'admin' ? (['partner-requests', 'waitlist', 'team', 'api-keys', 'switches', 'referrals', 'rewards', 'payees'] as NavItem[]) : []),
       ],
     },
   ];
@@ -113,6 +118,9 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   'partner-requests': { label: 'Partner requests', icon: 'building', hrefFor: () => '/admin-dashboard/partner-requests' },
   waitlist:     { label: 'Waitlist',     icon: 'queue',        hrefFor: () => '/admin-dashboard/waitlist' },
   switches:     { label: 'Switches',     icon: 'shield',       hrefFor: () => '/admin-dashboard/switches' },
+  referrals:    { label: 'Referrals',    icon: 'partners',     hrefFor: () => '/admin-dashboard/referrals' },
+  rewards:      { label: 'Rewards',      icon: 'rates',        hrefFor: () => '/admin-dashboard/rewards' },
+  payees:       { label: 'Payees',       icon: 'building',     hrefFor: () => '/admin-dashboard/payees' },
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
   tickets:      { label: 'Tickets',      icon: 'tickets',      hrefFor: () => '/admin-dashboard/tickets' },

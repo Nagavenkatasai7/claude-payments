@@ -11,6 +11,7 @@ import { getCustomerMfaStore } from '@/lib/customer-mfa';
 import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
 import { openMfaRecoveryRequest } from '@/lib/customer-mfa-recovery';
 import { isValidPhone, normalizePhone } from '@/lib/phone';
+import { recordPortalReferral } from '@/lib/referral-portal';
 import type { MessageKey } from '@/lib/i18n';
 import type { PartnerId } from '@/lib/types';
 
@@ -124,6 +125,7 @@ async function nextAfterProof(pid: PartnerId, phone: string, totp = false): Prom
     const pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'consent' });
     return { step: 'consent', pending };
   }
+  await recordPortalReferral(pid, phone); // Batch B4: best effort, never blocks the sign-in
   await completePortalSignIn(pid, phone, { totp });
   return 'signed_in';
 }
@@ -305,6 +307,7 @@ export async function consentAction(_prev: PortalLoginState | null, formData: Fo
   if (!before) await audit(pid, phone, 'register');
   await repo.setOptedIn(pid, phone);
   await audit(pid, phone, 'consent', { whatsapp: true, terms: true });
+  await recordPortalReferral(pid, phone); // Batch B4: the referral cookie; best effort, never blocks
   await completePortalSignIn(pid, phone);
   redirect(safePortalNext(field(formData, 'next')));
 }

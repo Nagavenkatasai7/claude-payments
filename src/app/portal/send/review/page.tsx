@@ -25,6 +25,7 @@ import {
   type SendCopy,
 } from '@/lib/portal-send';
 import { t, type MessageKey } from '@/lib/i18n';
+import { PURPOSE_LABELS } from '@/lib/purpose-codes';
 import { buttonVariants, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { KycCard, SendAlert } from '../kyc-card';
 import { ContinueForm, NameForm } from './review-forms';
@@ -201,6 +202,7 @@ export default async function PortalSendReviewPage() {
           </Row>
           <Row label={t('portal.send.delivery')}>{quote.deliveryEstimate}</Row>
           <Row label={t('portal.send.payingWith')}>{t(FUNDING_LABEL[review.fundingMethod] ?? 'portal.send.funding.bank_transfer')}</Row>
+          <Row label={t('portal.send.purposeLabel')}>{PURPOSE_LABELS[review.purpose]}</Row>
         </dl>
         <p className="text-[13.5px] text-ds-ink-muted">{t('portal.send.payNote', { brand: site.brand })}</p>
         <ContinueForm rv={review.id} requestKey={newRequestKey()} />

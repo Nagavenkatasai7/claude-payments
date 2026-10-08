@@ -119,6 +119,7 @@ const newRecipient: SendFormValue = {
   destinationCountry: 'IN',
   fundingMethod: 'bank_transfer',
   recipient: { kind: 'new', name: 'Mom', phone: MOM },
+  purpose: 'education',
 };
 
 async function review(partnerId: string, v: SendFormValue = newRecipient): Promise<string> {
@@ -215,6 +216,8 @@ describe('continueToPayAction — the draft', () => {
     expect(rows[0]).toMatchObject({ partnerId: 'pa', actor: 'system:customer-portal', actorType: 'system', subjectId: auditSubjectId('pa', phone) });
     expect(rows[0].meta).toEqual({ draftId, via: 'send' });
     expect((await loadSendReview(redis, { partnerId: 'pa', phone }))?.draftId).toBe(draftId);
+    // Required purpose: the review's purpose rides the draft (pay-finalize copies it onto the transfer).
+    expect((await createDraftStore(redis).getDraft(draftId))?.purpose).toBe('education');
   });
 
   it('(1) double submit (concurrent, same request key) → ONE draft, both go to the same pay link, ONE audit row', async () => {
@@ -278,7 +281,7 @@ describe('continueToPayAction — the draft', () => {
     expect(prepareSpy.mock.calls[0][1]).toEqual({ pointer: 'web' });
   });
 
-  it('(11) no B2B / EDD smuggling: extra POST fields never reach the seam; the draft is a consumer send', async () => {
+  it('(11) no B2B / EDD smuggling: extra POST fields never reach the seam; the draft is a consumer send with the REVIEW\'s purpose', async () => {
     const rv = await review('pa');
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({
       rv, invoice_id: 'inv_1', invoiceId: 'inv_1', sender_business_name: 'X LLC', entity_type: 'business', entityType: 'business',
@@ -286,8 +289,9 @@ describe('continueToPayAction — the draft', () => {
       recipient_legal_name: 'Z', funding: 'ach_pull', fundingMethod: 'ach_pull',
     })));
     const [input] = prepareSpy.mock.calls[0];
-    expect(Object.keys(input).sort()).toEqual(['amountSource', 'destinationCountry', 'fundingMethod', 'recipientName', 'recipientPhone', 'sourceCurrency']);
+    expect(Object.keys(input).sort()).toEqual(['amountSource', 'destinationCountry', 'fundingMethod', 'purpose', 'recipientName', 'recipientPhone', 'sourceCurrency']);
     expect(input.fundingMethod).toBe('bank_transfer');
+    expect(input.purpose).toBe('education'); // the stored review's, never the posted 'family_support'
     const draft = await createDraftStore(redis).getDraft(drafts()[0].slice('recipient_draft:'.length));
     expect(draft?.transferType).toBeUndefined();
     expect(draft?.sourceOfFunds).toBeUndefined();
@@ -404,11 +408,11 @@ describe('continueToPayAction — refusals before the seam', () => {
 
 describe('startSendReviewAction', () => {
   const form = (over: Record<string, string> = {}) =>
-    fd({ amount: '150', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: 'new', name: 'Mom', phone: MOM, ...over });
+    fd({ amount: '150', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: 'new', name: 'Mom', phone: MOM, purpose: 'medical', ...over });
 
   it('stores the review for THIS customer and goes to the review page (no PII in the URL)', async () => {
     expect(await redirectOf(startSendReviewAction({}, form()))).toBe('/portal/send/review');
-    expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toMatchObject({ amountSource: 150, recipient: { kind: 'new', name: 'Mom', phone: MOM } });
+    expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toMatchObject({ amountSource: 150, recipient: { kind: 'new', name: 'Mom', phone: MOM }, purpose: 'medical' });
     expect(await loadSendReview(redis, { partnerId: 'pb', phone })).toBeNull();
     expect(prepareSpy).not.toHaveBeenCalled();
   });
@@ -421,6 +425,17 @@ describe('startSendReviewAction', () => {
     expect((await startSendReviewAction({}, form({ recipient: rid }))).error).toBe('portal.send.recipient_not_found');
     const r = await startSendReviewAction({}, form({ funding: 'ach_pull' }));
     expect(r.errors?.funding).toBe('portal.send.funding_invalid');
+    expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toBeNull();
+  });
+
+  it('required purpose: missing or unknown ⇒ the form error "Choose why you are sending this money.", nothing stored, the purpose echoed back', async () => {
+    for (const purpose of ['', 'P1301', 'Medical']) {
+      const r = await startSendReviewAction({}, form({ purpose }));
+      expect(r.errors?.purpose, purpose).toBe('portal.send.purpose_invalid');
+      expect(r.values?.purpose).toBe(purpose);
+    }
+    const noField = fd({ amount: '150', currency: 'USD', destination: 'IN', funding: 'bank_transfer', recipient: 'new', name: 'Mom', phone: MOM });
+    expect((await startSendReviewAction({}, noField)).errors?.purpose).toBe('portal.send.purpose_invalid');
     expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toBeNull();
   });
 
@@ -484,8 +499,16 @@ describe('sendAgainAction (Task 9.4)', () => {
     expect(drafts()).toHaveLength(0);
   });
 
+  it('required purpose: none (or unknown) chosen ⇒ the form error, nothing drafted', async () => {
+    for (const f of [fd(), fd({ purpose: '' }), fd({ purpose: 'P1301' })]) {
+      const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, f);
+      expect(r.error).toBe('portal.send.purpose_invalid');
+    }
+    expect(drafts()).toHaveLength(0);
+  });
+
   it('own transfer → a web draft, redirect to payUrlFor(draftId); the bot pointer untouched; audited', async () => {
-    const url = await redirectOf(sendAgainAction(A.transferIds[0], { requestKey: '' }, fd()));
+    const url = await redirectOf(sendAgainAction(A.transferIds[0], { requestKey: '' }, fd({ purpose: 'gift' })));
     expect(drafts()).toHaveLength(1);
     const draftId = drafts()[0].slice('recipient_draft:'.length);
     expect(url).toBe(payUrlFor(draftId));
@@ -494,6 +517,8 @@ describe('sendAgainAction (Task 9.4)', () => {
     expect(await ds.getActiveDraftId('pa', phone, 'web')).toBe(draftId);
     const rows = await db.select().from(auditEvents).where(and(eq(auditEvents.action, 'customer.send.draft'), eq(auditEvents.partnerId, 'pa')));
     expect(rows.map((r) => r.meta)).toEqual([{ draftId, via: 'send_again' }]);
+    // the purpose the customer confirmed for THIS send rides the draft
+    expect((await ds.getDraft(draftId))?.purpose).toBe('gift');
   });
 
   it('a business bill payment is never repeated as a consumer send → not found', async () => {
@@ -513,7 +538,7 @@ describe('sendAgainAction (Task 9.4)', () => {
   it('EDD → the WhatsApp copy, nothing drafted', async () => {
     await raiseDaily();
     await seedLedgerSpend(db, { partnerId: 'pa', phone, amountUsd: 2950, status: 'paid' });
-    const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd());
+    const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd({ purpose: 'gift' }));
     expect(r.error).toBe('portal.send.edd_whatsapp');
     expect(drafts()).toHaveLength(0);
   });

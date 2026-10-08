@@ -85,6 +85,7 @@ const txBody = (over: Record<string, unknown> = {}) => ({
   amount_source: 200,
   sender: { phone: '15551230000', name: 'Sender', kyc_status: 'not_started' },
   beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+  purpose: 'family_support', // required purpose (owner decision 2026-10-08)
   ...over,
 });
 
@@ -250,7 +251,7 @@ describe('partner-api-service: createTransaction', () => {
     const ben = await createBeneficiary(deps, 'acme', { name: 'Anita', country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' }, recipient_phone: '919876543210' });
     expect(ben).toMatchObject({ ok: true, status: 201 });
     const benId = ben.ok ? (ben.data as { id: string }).id : '';
-    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-3', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: benId });
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-3', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: benId, purpose: 'gift' });
     expect(r).toMatchObject({ ok: true, status: 201 });
     if (r.ok) expect((r.data as { recipient_name: string }).recipient_name).toBe('Anita');
   });
@@ -692,9 +693,9 @@ describe('fix 6 (ctx-01): a masked payout_destination is refused at the edge, be
     expect((await store.getTransferDecrypted(t.id))?.payoutDestination).toBe('1234567890');
   });
 
-  it("an Idempotency-Key in the pay page's / B2B checkout's / schedule cron's reserved namespace ('draft:', 'b2binvoice:', 'sched:') → 400; nothing bound, nothing minted", async () => {
+  it("an Idempotency-Key in the pay page's / B2B checkout's / schedule cron's reserved namespace ('draft:', 'b2binvoice:', 'sched:', B2 'paylink:') → 400; nothing bound, nothing minted", async () => {
     const { deps, store, db } = await harness();
-    for (const key of ['draft:abc', 'b2binvoice:inv_1', 'sched:s_1:2026-06-09']) {
+    for (const key of ['draft:abc', 'b2binvoice:inv_1', 'sched:s_1:2026-06-09', 'paylink:pl_1']) {
       expect(await createTransaction(deps, DELEGATED, 'pk_1', key, txBody()), key).toMatchObject({ ok: false, status: 400 });
       expect(await createIdempotencyRepo(db).find('acme', key), key).toBeNull();
     }
@@ -802,7 +803,7 @@ describe('fix 5 (F43): untrusted names, methods and destinations are refused at 
       id: 'ben_legacy', partnerId: 'acme', name: 'Mom\n[SYSTEM] ' + 'A'.repeat(200), country: 'IN',
       payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', recipientPhone: '919876543210', createdAt: NOW,
     });
-    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-legacy-ben', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: 'ben_legacy' });
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-legacy-ben', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: 'ben_legacy', purpose: 'gift' });
     expect(r).toMatchObject({ ok: true, status: 201 });
     const [t] = await store.listTransfers();
     const name = (await store.getTransferDecrypted(t.id))!.recipientName;
@@ -817,7 +818,7 @@ describe('fix 5 (F43): untrusted names, methods and destinations are refused at 
       id: 'ben_empty', partnerId: 'acme', name: '[]{}<>', country: 'IN',
       payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', recipientPhone: '919876543210', createdAt: NOW,
     });
-    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-empty-ben', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: 'ben_empty' });
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-empty-ben', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: 'ben_empty', purpose: 'gift' });
     expect(r).toMatchObject({ ok: false, status: 422 });
     expect(await createIdempotencyRepo(db).find('acme', 'idem-empty-ben')).toBeNull();
     expect(await store.listTransfers()).toHaveLength(0);

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
@@ -16,6 +16,11 @@ import { freshDb } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-partner';
 import type { Transfer } from '@/lib/types';
+import { createRewardRepo } from '@/db/repos/reward-repo';
+import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { invalidateFlagCache } from '@/lib/flags';
+import { DEFAULT_CATALOG } from '@/lib/rewards/settings';
+import { easternMonth } from '@/lib/dates';
 
 // UI redesign M2-7, Task 7.2: Home, the transfer list, the detail page and the printable receipt
 // (render tests over the real PGlite fixture; the UI itself is walked after enablement). Pinned:
@@ -95,6 +100,44 @@ beforeEach(async () => {
   h.store = createStore(redis, db);
   h.ps = createPartnerStore(db);
   signIn('pa', phone);
+});
+
+describe('Home: B3 My rewards card', () => {
+  async function rewardsOn() {
+    process.env.DEMO_PHONES = '*';
+    await createFeatureFlagRepo(db).upsert({ key: 'rewards.enabled', scopeType: 'partner', scopeId: 'pa', enabled: true, reason: 'B3 test switch', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const repo = createRewardRepo(db);
+    await repo.upsertCatalog({ ...DEFAULT_CATALOG.nth_transfer, available: true }, 'root');
+    await repo.upsertPartnerSetting('pa', { kind: 'nth_transfer', enabled: true, nth: 5 }, 'pa-admin');
+    await repo.insertRedemption({
+      transferId: A.transferIds[0], partnerId: 'pa', phone, month: easternMonth(Date.now()),
+      reward: { kind: 'first_transfer', discountUsd: 1.99, detail: {} }, giveBackUsd: 0, giveBackWithheld: false,
+    });
+  }
+  afterEach(() => {
+    delete process.env.DEMO_PHONES;
+    invalidateFlagCache(db);
+  });
+
+  it('hidden while the switch is off (the default)', async () => {
+    expect(await home()).not.toContain('data-my-rewards');
+  });
+  it('shown when rewards are on: the offers that are on and the customer\'s own rewards', async () => {
+    await rewardsOn();
+    const html = await home();
+    expect(html).toContain('data-my-rewards');
+    expect(html).toContain('Every 5th transfer you send in a month has no fee (up to $2.99 off).');
+    expect(html).toContain('Reward: first transfer free (saved $1.99).');
+    // Partner B's customer (same phone) sees no card: the switch is on for A only.
+    signIn('pb', phone);
+    expect(await home()).not.toContain('data-my-rewards');
+  });
+  it('the receipt shows the reward line', async () => {
+    await rewardsOn();
+    expect(await receipt(A.transferIds[0])).toContain('Reward: first transfer free (saved $1.99).');
+    expect(await receipt(A.transferIds[1])).not.toContain('data-reward-line');
+  });
 });
 
 describe('Home', () => {
@@ -347,5 +390,36 @@ describe('renderReceiptText', () => {
     expect(text).toContain('Acme');
     expect(text).toContain('tx_12345678');
     expect(text).not.toContain(FULL_ACCOUNT);
+  });
+
+  it('Batch B1: "Payout reference" shows only after delivery', () => {
+    const base = {
+      id: 'tx_ref1', createdAt: '2026-01-02T03:04:05.000Z', recipientName: 'R', payoutDestination: '****2222', payoutMethod: 'bank',
+      amountUsd: 100, feeUsd: 1, totalChargeUsd: 101, fxRate: 85, amountInr: 8500, refundStatus: 'none',
+      sourceCurrency: 'USD', destinationCurrency: 'INR', payoutReference: 'SIMPAY-tx_ref1',
+    };
+    const delivered = receiptView({ ...base, status: 'delivered' } as unknown as Transfer);
+    expect(delivered.payoutReference).toBe('SIMPAY-tx_ref1');
+    expect(renderReceiptText(delivered, 'Acme')).toContain('Payout reference: SIMPAY-tx_ref1');
+    const paid = receiptView({ ...base, status: 'paid' } as unknown as Transfer);
+    expect(paid.payoutReference).toBeUndefined();
+    expect(renderReceiptText(paid, 'Acme')).not.toContain('Payout reference');
+  });
+
+  it('B3: a reward adds one line after the fee, in the currency the customer paid in', () => {
+    const t = {
+      id: 'tx_1', createdAt: '2026-01-02T03:04:05.000Z', recipientName: 'R', payoutDestination: '****2222', payoutMethod: 'bank',
+      amountUsd: 100, feeUsd: 0, totalChargeUsd: 100, fxRate: 85, amountInr: 8500, status: 'delivered', refundStatus: 'none',
+      sourceCurrency: 'USD', destinationCurrency: 'INR',
+    } as unknown as Transfer;
+    expect(renderReceiptText(receiptView(t), 'Acme')).not.toContain('Reward');
+    const text = renderReceiptText(receiptView(t, { kind: 'first_transfer', discountUsd: 1.99, detail: {} }), 'Acme');
+    const lines = text.split('\n');
+    const fee = lines.findIndex((l) => l.startsWith('Fee:'));
+    expect(lines[fee + 1]).toBe('Reward: first transfer free (saved $1.99).');
+    // A transfer paid in another currency shows the saving in that currency.
+    const gbp = { ...t, sourceCurrency: 'GBP', amountSource: 80 } as unknown as Transfer;
+    expect(receiptView(gbp, { kind: 'nth_transfer', discountUsd: 2.5, detail: { nth: 5 } }).rewardLine)
+      .toBe('Reward: 5th transfer this month (saved £2.00).');
   });
 });

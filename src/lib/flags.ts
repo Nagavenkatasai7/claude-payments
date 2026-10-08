@@ -27,7 +27,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled' | 'paylinks.enabled';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -76,17 +76,53 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     scopes: ['global', 'partner'],
     killSwitch: false,
   },
-  // A3 purpose detection (Raj #17): the bot fills the transfer purpose from
-  // what the customer says. Also needs the sender among the demo-mode phones
-  // (DEMO_PHONES, demo-mode.ts); read once per agent turn for the routed tenant.
+  // Required purpose (owner decision 2026-10-08; A3 purpose detection, Raj #17,
+  // before it): read once per agent turn for the routed tenant, for EVERY phone
+  // (no demo-mode gate). It is only the bot's OFF switch for the question: on
+  // (prod) ⇒ the bot requires a purpose; off or unreadable ⇒ the bot behaves as
+  // before (optional, never asked), so sends keep working through a flag outage.
+  // The portal, scheduled sends and the Partner API require a purpose whatever
+  // this switch says.
   'purpose.detect': {
     key: 'purpose.detect',
-    label: 'Purpose detection',
+    label: 'Required purpose (bot)',
     description:
-      'When a customer says why they are sending (English or Hinglish, e.g. "maa ki dawai ke liye"), the bot records the purpose ' +
-      'on the transfer. Only demo-mode phones (DEMO_PHONES). The purpose reaches the settlement instruction to the payout partner; ' +
-      'staff and the partner see a suggested purpose code that is not confirmed.',
-    bannerText: 'Purpose detection is on',
+      'The WhatsApp bot needs a purpose for every send, for every customer: it uses the reason the customer gave (English or Hinglish, ' +
+      'e.g. "maa ki dawai ke liye") and otherwise asks once before the Approve card. Off: the purpose is optional in the bot and never asked. ' +
+      'The portal, scheduled sends and the Partner API always require a purpose. The purpose reaches the settlement instruction to the ' +
+      'payout partner; staff and the partner see a suggested purpose code that is not confirmed.',
+    bannerText: 'The bot asks for the purpose',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // B3 rewards v1: SmartRemit-funded customer rewards (every Nth transfer in a
+  // month, festival offers). Also needs the sender among the demo-mode phones
+  // (DEMO_PHONES). Money-affecting, so it FAILS CLOSED: isFlagOn answers false
+  // on a read failure, and false means no new discount (src/lib/rewards/).
+  // First transfer free is today's pricing rule and never reads this switch.
+  'rewards.enabled': {
+    key: 'rewards.enabled',
+    label: 'Customer rewards',
+    description:
+      'Customers get the rewards their partner turned on at /partner/rewards, inside the limits and the monthly budget set at ' +
+      '/admin-dashboard/rewards: every Nth transfer in a month free, festival offers. Only demo-mode phones (DEMO_PHONES). ' +
+      'Off (or unreadable): new quotes show the normal fee; quotes already approved with a reward get "This offer has ended". ' +
+      'First transfer free works either way.',
+    bannerText: 'Customer rewards are on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // Batch B2 payment links: partners make a link per customer to pay an approved
+  // company in India. Also needs the customer among the demo-mode phones
+  // (DEMO_PHONES, demo-mode.ts). FAILS CLOSED: isFlagOn answers false on a read
+  // failure, and for this switch false means every link page and payment refuses.
+  'paylinks.enabled': {
+    key: 'paylinks.enabled',
+    label: 'Payment links',
+    description:
+      'Partners can add companies (approved on the Payees page) and send customers a payment link to pay that company an exact rupee amount. ' +
+      'Only demo-mode phones (DEMO_PHONES) can pay. Off: every link shows "no longer active" and nothing can be paid; partners can still see their links.',
+    bannerText: 'Payment links are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

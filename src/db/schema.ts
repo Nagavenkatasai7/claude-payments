@@ -157,6 +157,14 @@ export const transfers = pgTable(
     // Review finding 1: the partner PUSH's expiry (the draft's routeExpiresAt);
     // the pay-time rate check refuses the row from it on. NULL ⇒ not a push.
     fxExpiresAt: timestamp('fx_expires_at', { withTimezone: true }),
+    // Batch B1: order references. client_reference is the partner's own order
+    // number, set at mint by the Partner API (order-references.ts checks it at
+    // the edge). payout_reference is the payout partner's confirmation (e.g. a
+    // bank UTR), set once from a SIGNED status callback (setPayoutReference).
+    // Both NULL on every older row; both WRITE-ONCE (saveTransfer's
+    // conflict-update never sets them).
+    clientReference: text('client_reference'),
+    payoutReference: text('payout_reference'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -463,6 +471,9 @@ export const schedules = pgTable(
     endDate: date('end_date'),
     lastRunAt: timestamp('last_run_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // Required purpose (owner decision Oct 8): the reason each scheduled send carries
+    // onto its transfers. Nullable: schedules made before it read as "Not stated".
+    purpose: text('purpose'),
   },
   (t) => [index('schedules_status').on(t.status, t.frequency)],
 );
@@ -1021,5 +1032,274 @@ export const featureFlags = pgTable(
     primaryKey({ columns: [t.key, t.scopeType, t.scopeId] }),
     check('feature_flags_scope_type', sql`${t.scopeType} IN ('global','partner','corridor')`),
     check('feature_flags_global_scope_id', sql`${t.scopeType} <> 'global' OR ${t.scopeId} = ''`),
+  ],
+);
+
+// ── Batch B4: referral partners and commissions (Xoxoday Plum) ──────────────
+// Outside affiliates (accountants, travel agents, associations) who send customers
+// to SmartRemit. They are NOT licensed partners: no tenant, no dashboard. NEW
+// tables only. Written only by src/db/repos/referral-repo.ts: the admin page
+// (/admin-dashboard/referrals, platform admin, audited) and the best-effort
+// attribution from a WhatsApp message or the portal sign-in.
+export const referralPartners = pgTable(
+  'referral_partners',
+  {
+    id: text('id').primaryKey(), // 'rp_' + random
+    name: text('name').notNull(),
+    contact: text('contact').notNull().default(''), // the referral partner's own business contact
+    // A fixed USD amount per delivered, not refunded transfer of a referred customer,
+    // for 12 months after that customer's first delivered transfer.
+    commissionCents: integer('commission_cents').notNull().default(0),
+    status: text('status').notNull().default('active'),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('referral_partners_status', sql`${t.status} IN ('active','inactive')`),
+    check('referral_partners_commission', sql`${t.commissionCents} >= 0`),
+  ],
+);
+
+export const referralCodes = pgTable(
+  'referral_codes',
+  {
+    code: text('code').primaryKey(), // REF-XXXXXX (src/lib/referrals.ts REFERRAL_CODE_RE)
+    referralPartnerId: text('referral_partner_id').notNull().references(() => referralPartners.id),
+    active: boolean('active').notNull().default(true),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('referral_codes_format', sql`${t.code} ~ '^REF-[A-Z0-9]{6}$'`),
+    index('referral_codes_partner').on(t.referralPartnerId),
+  ],
+);
+
+// One attribution per customer (tenant, phone): first referral wins. The customer's
+// licensed partner (partner_id) never changes because of a code. No FK to customers:
+// an attribution never blocks a customer erasure.
+export const referralAttributions = pgTable(
+  'referral_attributions',
+  {
+    partnerId: text('partner_id').notNull(),
+    phone: text('phone').notNull(),
+    referralPartnerId: text('referral_partner_id').notNull().references(() => referralPartners.id),
+    code: text('code').notNull(),
+    channel: text('channel').notNull(), // 'whatsapp' | 'portal'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.phone] }),
+    check('referral_attributions_channel', sql`${t.channel} IN ('whatsapp','portal')`),
+    index('referral_attributions_partner').on(t.referralPartnerId),
+  ],
+);
+
+// The program's one admin-set setting: the "Referral rewards" Plum portal address
+// (https only; the public link is hidden while it is empty). One row, id 'global'.
+export const referralProgramSettings = pgTable(
+  'referral_program_settings',
+  {
+    id: text('id').primaryKey().default('global'),
+    plumPortalUrl: text('plum_portal_url'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check('referral_program_settings_singleton', sql`${t.id} = 'global'`)],
+);
+
+// ── Batch B rewards (B3): rewards v1 and the platform fee ledger ─────────────
+// Five NEW tables; `transfers` does not change. Read and written only through
+// src/db/repos/reward-repo.ts and the sender-locked mint (src/lib/store.ts).
+// A missing catalog / terms row reads as the code defaults (src/lib/rewards/
+// settings.ts): no catalog row ⇒ the reward is not available; no terms row ⇒
+// the $0.60 platform fee, 40% give-back and a $0 budget (no SmartRemit-funded
+// reward until the admin sets one). First transfer free stays today's pricing
+// rule (fee-tier.ts); its redemption row is a record only, never budgeted.
+
+/** The admin's reward list: which SmartRemit-funded rewards partners may offer, and their limits. */
+export const rewardCatalog = pgTable(
+  'reward_catalog',
+  {
+    kind: text('kind').primaryKey(), // 'nth_transfer' | 'festival'
+    available: boolean('available').notNull().default(false),
+    nthMin: integer('nth_min').notNull().default(3),
+    nthMax: integer('nth_max').notNull().default(10),
+    maxDays: integer('max_days').notNull().default(14),
+    // The most one reward may take off a fee (a card fee's % part above it is still charged).
+    maxDiscountUsd: numeric('max_discount_usd', { precision: 12, scale: 2 }).notNull().default('2.99'),
+    customerMonthlyCap: integer('customer_monthly_cap').notNull().default(1),
+    festivalNames: jsonb('festival_names').notNull().default([]), // string[] the partner picks from
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('reward_catalog_kind', sql`${t.kind} IN ('nth_transfer','festival')`),
+    check('reward_catalog_nth', sql`${t.nthMin} >= 2 AND ${t.nthMax} >= ${t.nthMin} AND ${t.nthMax} <= 50`),
+    check('reward_catalog_days', sql`${t.maxDays} BETWEEN 1 AND 31`),
+    check('reward_catalog_discount', sql`${t.maxDiscountUsd} >= 0`),
+    check('reward_catalog_cap', sql`${t.customerMonthlyCap} BETWEEN 1 AND 31`),
+  ],
+);
+
+/** Admin-set money terms per partner (statement only in v1: no invoice, no payment). */
+export const partnerRewardTerms = pgTable(
+  'partner_reward_terms',
+  {
+    partnerId: text('partner_id').primaryKey().references(() => partners.id),
+    platformFeeUsd: numeric('platform_fee_usd', { precision: 12, scale: 2 }).notNull().default('0.60'),
+    giveBackPct: numeric('give_back_pct', { precision: 5, scale: 2 }).notNull().default('40'),
+    monthlyBudgetUsd: numeric('monthly_budget_usd', { precision: 12, scale: 2 }).notNull().default('0'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('partner_reward_terms_fee', sql`${t.platformFeeUsd} >= 0`),
+    check('partner_reward_terms_pct', sql`${t.giveBackPct} BETWEEN 0 AND 100`),
+    check('partner_reward_terms_budget', sql`${t.monthlyBudgetUsd} >= 0`),
+  ],
+);
+
+/** A partner's own choices inside the catalog limits (partner admin; own tenant only). */
+export const partnerRewards = pgTable(
+  'partner_rewards',
+  {
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    kind: text('kind').notNull(), // 'nth_transfer' | 'festival'
+    enabled: boolean('enabled').notNull().default(false),
+    nth: integer('nth'), // nth_transfer: every Nth delivered transfer in a month is free
+    festivalName: text('festival_name'), // festival: one of the catalog's names
+    startsOn: date('starts_on'), // festival: first and last ET day (inclusive)
+    endsOn: date('ends_on'),
+    minAmountUsd: numeric('min_amount_usd', { precision: 12, scale: 2 }), // festival: smallest qualifying send
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.kind] }),
+    check('partner_rewards_kind', sql`${t.kind} IN ('nth_transfer','festival')`),
+  ],
+);
+
+/**
+ * One reward per transfer (the PK), saved in the SAME transaction as the mint. A cancelled
+ * (or expired, which cancels), blocked or refunded transfer releases it: every count and sum
+ * joins `transfers` and leaves those rows out, so no status writer has to release it.
+ */
+export const rewardRedemptions = pgTable(
+  'reward_redemptions',
+  {
+    transferId: text('transfer_id').primaryKey().references(() => transfers.id),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(),
+    kind: text('kind').notNull(), // 'first_transfer' | 'nth_transfer' | 'festival'
+    month: text('month').notNull(), // ET month of the mint, 'YYYY-MM'
+    discountUsd: numeric('discount_usd', { precision: 12, scale: 2 }).notNull(),
+    // SmartRemit's give-back credit reserved for this reward (0 for first transfer free and when withheld).
+    giveBackUsd: numeric('give_back_usd', { precision: 12, scale: 2 }).notNull().default('0'),
+    // Compliance flagged the transfer: the customer keeps the price, the partner pays the discount.
+    giveBackWithheld: boolean('give_back_withheld').notNull().default(false),
+    detail: jsonb('detail').notNull().default({}), // { nth?, festivalName? } for the receipt line
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('reward_redemptions_kind', sql`${t.kind} IN ('first_transfer','nth_transfer','festival')`),
+    check('reward_redemptions_amounts', sql`${t.discountUsd} >= 0 AND ${t.giveBackUsd} >= 0`),
+    index('reward_redemptions_partner_month').on(t.partnerId, t.month),
+    index('reward_redemptions_sender_month').on(t.partnerId, t.phone, t.month),
+  ],
+);
+
+/** The platform fee SmartRemit charges per LIVE delivered transfer: one row per transfer, written with the delivery. */
+export const platformFeeLedger = pgTable(
+  'platform_fee_ledger',
+  {
+    transferId: text('transfer_id').primaryKey().references(() => transfers.id),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    month: text('month').notNull(), // ET month of the delivery, 'YYYY-MM'
+    feeUsd: numeric('fee_usd', { precision: 12, scale: 2 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('platform_fee_ledger_fee', sql`${t.feeUsd} >= 0`),
+    index('platform_fee_ledger_partner_month').on(t.partnerId, t.month),
+  ],
+);
+
+// ── Batch B2: payment links for each customer ───────────────────────────────
+// A partner adds a company in India it works with (a school, a supplier): the
+// PAYEE. SmartRemit platform admins approve it (/admin-dashboard/payees) before
+// any link can pay it. The partner then makes one PAYMENT LINK per customer: the
+// customer opens /pay/l/<token> and pays the payee an exact rupee amount. NEW
+// tables only. Written only by src/db/repos/payee-repo.ts and
+// payment-link-repo.ts (every partner-facing query takes partner_id).
+//
+// Bank details are sealed (field-crypto v2, ctx.payee) and never edited: a change
+// needs a new payee. legal_name is the company's legal name in clear (a business
+// name, shown to the customer and screened), never a person's.
+export const payees = pgTable(
+  'payees',
+  {
+    id: text('id').primaryKey(), // 'pye_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    legalName: text('legal_name').notNull(),
+    accountHolderEnc: text('account_holder_enc').notNull(),
+    // The composed IN payout destination ("<IFSC> <account>", payout-format.ts).
+    payoutDestinationEnc: text('payout_destination_enc').notNull(),
+    payoutLast4: text('payout_last4').notNull(),
+    country: text('country').notNull().default('IN'),
+    status: text('status').notNull().default('pending'),
+    // The latest sanctions screen of BOTH names: 'clear' | 'review' (a possible
+    // match, or the list could not load). A full match is never saved.
+    screening: text('screening').notNull(),
+    createdBy: text('created_by').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('payees_status', sql`${t.status} IN ('pending','approved','rejected','suspended')`),
+    check('payees_screening', sql`${t.screening} IN ('clear','review')`),
+    index('payees_partner_created').on(t.partnerId, t.createdAt.desc()),
+    index('payees_status_created').on(t.status, t.createdAt.desc()),
+  ],
+);
+
+// One payment per link: open → used (in the SAME transaction as the
+// `paylink:<id>` idempotency claim), or open → cancelled / expired. The token
+// is the 128-bit capability in the URL (no personal data). The reference is the
+// partner's own order number, unique per partner, so uploading the same file
+// twice never makes a second link; it becomes the paid transfer's
+// client_reference, and `purpose` its purpose.
+export const paymentLinks = pgTable(
+  'payment_links',
+  {
+    id: text('id').primaryKey(), // 'pl_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    payeeId: text('payee_id').notNull().references(() => payees.id),
+    token: text('token').notNull(),
+    reference: text('reference').notNull(),
+    customerNameEnc: text('customer_name_enc').notNull(),
+    customerPhone: text('customer_phone').notNull(), // digits only (a lookup key, like transfers.phone)
+    amountInr: numeric('amount_inr', { precision: 14, scale: 2 }).notNull(),
+    purpose: text('purpose').notNull(),
+    status: text('status').notNull().default('open'),
+    transferId: text('transfer_id'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdBy: text('created_by').notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    cancelledBy: text('cancelled_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('payment_links_status', sql`${t.status} IN ('open','used','cancelled','expired')`),
+    check('payment_links_amount', sql`${t.amountInr} > 0`),
+    uniqueIndex('payment_links_token').on(t.token),
+    uniqueIndex('payment_links_partner_reference').on(t.partnerId, t.reference),
+    index('payment_links_partner_created').on(t.partnerId, t.createdAt.desc()),
+    index('payment_links_status_expires').on(t.status, t.expiresAt),
   ],
 );

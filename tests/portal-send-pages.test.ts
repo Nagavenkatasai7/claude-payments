@@ -127,6 +127,7 @@ const newRecipient: SendFormValue = {
   destinationCountry: 'IN',
   fundingMethod: 'bank_transfer',
   recipient: { kind: 'new', name: 'Mom', phone: MOM },
+  purpose: 'medical',
 };
 
 async function review(partnerId: string, v: SendFormValue = newRecipient): Promise<string> {
@@ -198,6 +199,18 @@ describe('the Send page (GET)', () => {
     expect(html).not.toContain(A.recipientPhones[0]);
     expect(html).not.toContain('000011112222');
     expect(prepareSpy).not.toHaveBeenCalled();
+  });
+
+  it('required purpose: a "Why you are sending" select with the 8 reasons and no reason chosen up front', async () => {
+    const html = await sendHtml();
+    expect(html).toContain('Why you are sending');
+    expect(html).toMatch(/<select[^>]*name="purpose"[^>]*required/);
+    expect(html).toMatch(/<option value="" disabled="" selected="">Choose a reason<\/option>/);
+    for (const [value, label] of [['family_support', 'Family support'], ['gift', 'Gift'], ['education', 'Education'], ['medical', 'Medical'], ['savings', 'Savings'], ['bills', 'Bills'], ['business', 'Business'], ['other', 'Other']]) {
+      expect(html).toContain(`<option value="${value}">${label}</option>`);
+    }
+    // after the recipient choice
+    expect(html.indexOf('name="purpose"')).toBeGreaterThan(html.indexOf('name="recipient"'));
   });
 
   it('H2: doubtful values are dropped silently (never echoed)', async () => {
@@ -300,6 +313,10 @@ describe('the Review page (GET)', () => {
     expect(html).toMatch(/1 USD = 85 INR/);
     expect(html).not.toMatch(/name="(amount|rate|fee|fxRate)"/);
     expect(prepareSpy).not.toHaveBeenCalled();
+    // Required purpose: the review shows the chosen reason in plain words (no code)
+    expect(html).toContain('Why you are sending');
+    expect(html).toContain('Medical');
+    expect(html).not.toContain('medical<');
   });
 
   it('EDD → the WhatsApp copy and no Continue', async () => {
@@ -351,5 +368,14 @@ describe('the transfer detail', () => {
   it('shows Send again for an own transfer', async () => {
     const html = renderToStaticMarkup(await TransferDetailPage({ params: Promise.resolve({ id: A.transferIds[0] }) }));
     expect(html).toContain('data-send-again');
+  });
+
+  it('required purpose (Q1): Send again offers the last purpose as the visible default; none ⇒ "Choose a reason"', async () => {
+    const none = renderToStaticMarkup(await TransferDetailPage({ params: Promise.resolve({ id: A.transferIds[0] }) }));
+    expect(none).toMatch(/<select[^>]*name="purpose"/);
+    expect(none).toMatch(/<option value="" disabled="" selected="">Choose a reason<\/option>/);
+    await db.execute(sql`UPDATE transfers SET purpose = 'medical' WHERE id = ${A.transferIds[0]}`);
+    const withLast = renderToStaticMarkup(await TransferDetailPage({ params: Promise.resolve({ id: A.transferIds[0] }) }));
+    expect(withLast).toMatch(/<option value="medical" selected="">Medical<\/option>/);
   });
 });

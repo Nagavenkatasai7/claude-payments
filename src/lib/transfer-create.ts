@@ -1,4 +1,4 @@
-import { assertLegsUsable, legsProvenance, quote } from './fx';
+import { assertLegsUsable, legsProvenance, quote, wouldBeFeeUsd } from './fx';
 import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRates, getFxRates, isKnownFxProvider } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
@@ -13,10 +13,14 @@ import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
 import { feeTierCount, isFirstTransferFree } from './fee-tier';
+import { easternMonth, easternMonthStart } from './dates';
+import { budgetAllows, discountFor, giveBackFor, qualifies } from './rewards/engine';
+import { rewardsActive } from './rewards/resolver';
+import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendCapError } from './send-limits';
 import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
-import type { SenderLedgerOps, Store } from './store';
+import type { RewardMintFacts, SenderLedgerOps, Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type {
   CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
@@ -120,6 +124,31 @@ export interface CreateTransferInput {
   // ScheduleMintRefusedError with nothing written. Its address-book refresh never clears a
   // tombstone. Absent ⇒ unchanged for every other caller.
   scheduleId?: string;
+  // Batch B1: the partner's own order number (Partner API client_reference, checked at
+  // the edge). Stored write-once on the row. Absent ⇒ unchanged for every other caller.
+  clientReference?: string;
+  // B3 rewards v1: the reward the approved quote carries (the draft's). Honoured
+  // ONLY together with `quote` (whose fee it already lowered): re-checked under
+  // the sender lock (and the partner budget under its own lock), then saved as
+  // the redemption row in the mint transaction. A reward that ended since the
+  // quote throws RewardEndedError with nothing written. Absent ⇒ unchanged.
+  reward?: QuotedReward;
+}
+
+/** B3: what a customer sees when the reward on an approved quote ended before the mint. */
+export { REWARD_ENDED_MESSAGE } from './rewards/copy';
+
+/**
+ * B3: thrown by createTransfer when the reward on the approved quote no longer
+ * applies (the switch or the program is off, the customer cap or the partner
+ * budget is used up). NOTHING was written; the caller keeps the draft and maps
+ * it to REWARD_ENDED_MESSAGE. The approved price is never changed silently.
+ */
+export class RewardEndedError extends Error {
+  constructor() {
+    super('reward_ended');
+    this.name = 'RewardEndedError';
+  }
 }
 
 /**
@@ -420,12 +449,13 @@ export async function createTransferWithOutcome(
   // SANCTIONS_LIST=ofac-sdn) BEFORE the lock, so the screen inside the mint
   // transaction reads a cached list and never needs a second pool connection.
   // Never throws; a missing list fails the screen closed (flagged).
+  const rewardPlan = await prepareReward(store, input);
   await warmSanctionsList();
   const minted = await store.mintUnderSenderLock(input.partnerId, input.phone, (ops) =>
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
-      requote, quotedCount,
+      requote, quotedCount, rewardPlan,
     }),
   );
   const transfer = minted.transfer;
@@ -478,6 +508,88 @@ interface PreparedMint {
   requote?: RequoteAt;
   /** A5: the fee-tier count `q` was priced at (absent on an approved quote). */
   quotedCount?: number;
+  /** B3: the approved quote's reward, cleared by the pre-lock checks (absent ⇒ none). */
+  rewardPlan?: RewardPlan;
+}
+
+/** B3: a reward the mint will re-check under the lock and record. */
+interface RewardPlan {
+  reward: QuotedReward;
+  /** The programs as they are now (funded rewards only; first transfer free needs none). */
+  facts?: RewardMintFacts;
+}
+
+/**
+ * B3: the root-handle reward checks, ABOVE the sender lock (no store call may
+ * run inside it). Only an approved quote's reward counts (the re-quote paths
+ * never price one). First transfer free is today's rule: the switch only
+ * decides whether it is RECORDED, never its price. A SmartRemit-funded reward
+ * needs the switch and demo mode NOW (fail closed) and is never sandbox or
+ * B2B; otherwise RewardEndedError, before anything is read under the lock.
+ */
+async function prepareReward(store: Store, input: CreateTransferInput): Promise<RewardPlan | undefined> {
+  const reward = input.reward;
+  if (!reward || !input.quote) return undefined;
+  const funded = isFundedRewardKind(reward.kind);
+  if ((input.transferType ?? 'b2c') !== 'b2c' || input.environment === 'test') {
+    if (funded) throw new RewardEndedError();
+    return undefined;
+  }
+  const active = await rewardsActive(store, input.partnerId, input.phone);
+  if (!funded) return active ? { reward } : undefined;
+  if (!active) throw new RewardEndedError();
+  try {
+    return { reward, facts: await store.rewardMintFacts(input.partnerId) };
+  } catch (err) {
+    logWarn('rewards.mint_facts', err instanceof Error ? err.name : 'error', { partnerId: input.partnerId });
+    throw new RewardEndedError();
+  }
+}
+
+/** B3: the redemption the locked mint writes with the transfer. */
+interface RewardWrite {
+  month: string;
+  reward: QuotedReward;
+  giveBackUsd: number;
+  giveBackWithheld: boolean;
+}
+
+/**
+ * B3: the reward decided UNDER the sender lock, after sanctions and the cap.
+ * First transfer free: recorded as it is (A5's stale check already refused a
+ * sender who has a transfer). A funded reward must still qualify on this
+ * sender's locked usage (a concurrent mint's reward is seen), then, unless
+ * compliance flagged the transfer, fit the partner budget read under the
+ * partner budget lock. Flagged (owner decision, question 9): the customer
+ * keeps the price, the partner pays the discount, no give-back, budget
+ * untouched; nothing tells the customer. null ⇒ the reward ended.
+ */
+async function lockedReward(
+  ops: SenderLedgerOps,
+  p: PreparedMint,
+  q: NonNullable<CreateTransferInput['quote']>,
+  complianceStatus: Transfer['complianceStatus'],
+  now: Date,
+): Promise<RewardWrite | null> {
+  const plan = p.rewardPlan!;
+  const month = easternMonth(now.getTime());
+  const { reward } = plan;
+  if (!isFundedRewardKind(reward.kind) || !plan.facts) {
+    return { month, reward, giveBackUsd: 0, giveBackWithheld: false };
+  }
+  const { catalog, settings, terms } = plan.facts;
+  const usage = await ops.rewardUsage(month, easternMonthStart(now));
+  const standardFeeUsd = wouldBeFeeUsd(q.amountUsd, p.input.fundingMethod) ?? 0;
+  const facts = { now, amountUsd: q.amountUsd, standardFeeUsd, catalog, settings, usage };
+  if (!qualifies(reward.kind, facts)) return null;
+  // The quoted discount must still fit today's catalog: an admin who lowers the maximum stops
+  // the old, larger discount (and its give-back) at once. Compared in cents.
+  if (Math.round(reward.discountUsd * 100) > Math.round(discountFor(reward.kind, facts) * 100)) return null;
+  if (complianceStatus === 'flagged') return { month, reward, giveBackUsd: 0, giveBackWithheld: true };
+  const giveBackUsd = giveBackFor(reward.discountUsd, terms.giveBackPct);
+  const used = await ops.rewardBudgetUsed(month);
+  if (!budgetAllows(terms, used, giveBackUsd)) return null;
+  return { month, reward, giveBackUsd, giveBackWithheld: false };
 }
 
 /** A5: the re-quote at a given fee-tier count, over the rates read before the lock. */
@@ -500,7 +612,10 @@ async function lockedFeeTierQuote(
 ): Promise<{ q: NonNullable<CreateTransferInput['quote']>; stale: boolean }> {
   const locked = await ops.transferCount();
   if (p.input.quote) {
-    return { q: p.q, stale: p.input.quote.feeUsd === 0 && !isFirstTransferFree(locked) };
+    // B3: a $0 fee from a SmartRemit-funded reward is not the first-transfer
+    // waiver; lockedReward re-checks it instead.
+    const fundedReward = p.rewardPlan !== undefined && isFundedRewardKind(p.rewardPlan.reward.kind);
+    return { q: p.q, stale: p.input.quote.feeUsd === 0 && !isFirstTransferFree(locked) && !fundedReward };
   }
   if (p.requote && p.quotedCount !== undefined && isFirstTransferFree(locked) !== isFirstTransferFree(p.quotedCount)) {
     return { q: p.requote(locked), stale: false };
@@ -651,6 +766,7 @@ async function mintLocked(
     invoiceId: input.invoiceId,
     environment: input.environment ?? 'live',        // Program-Fix 44 P2
     ...p.provenance,                                 // Step 0 FX-7 (write-once)
+    ...(input.clientReference ? { clientReference: input.clientReference } : {}), // Batch B1
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the
@@ -702,7 +818,13 @@ async function mintLocked(
   // quote"); the throw rolls back the evidence row, so nothing is written.
   if (staleFreeQuote) throw new RateUnavailableError('stale_quote');
 
+  // ── B3: the reward, re-checked under the lock (its refusal rolls back) ─────
+  const rewardWrite = p.rewardPlan ? await lockedReward(ops, p, q, complianceStatus, now) : null;
+  if (p.rewardPlan && !rewardWrite) throw new RewardEndedError();
+
   await ops.insertTransfer(transfer, { screening: compliance.evidence });
+  // One reward per transfer (the PK), committed with the transfer or not at all.
+  if (rewardWrite) await ops.insertRedemption({ transferId: transfer.id, ...rewardWrite });
   return { transfer, replayed: false };
 }
 

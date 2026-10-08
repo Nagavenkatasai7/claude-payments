@@ -6738,3 +6738,226 @@ describe('voice turns: typed-only tools are refused at dispatch', () => {
     expect(String((r as { error?: unknown }).error ?? '')).not.toMatch(VOICE_GATE);
   });
 });
+
+// ── Required purpose (owner decision 2026-10-08) ─────────────────────────────
+// With the requirement on (ctx.purposeRequired: the purpose.detect switch for
+// the bot; always for the portal), a new send, a repeat and a schedule need one
+// of the 8 purposes. A call without one is refused with needs_purpose and a hint
+// that tells the model to ask; nothing is drafted, sent or saved. A business bill
+// payment is excluded (always 'business'). Off ⇒ exactly the behaviour before.
+describe('Required purpose: the send tools refuse a send without one', () => {
+  const IN_MOM = '919876543210';
+  const required = async (phone?: string) => ({ ...(await buildCtx(fakeRedis(), phone)), purposeRequired: true as const });
+  const stubWhatsApp = () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(String(url));
+      return { ok: true, text: async () => '', json: async () => ({ rates: { INR: MOCK_RATE } }) };
+    }));
+    return calls;
+  };
+  const picker = (over: Record<string, unknown> = {}) => ({
+    amount_source: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, destination_country: 'IN', ...over,
+  });
+  const seedPast = async (ctx: Awaited<ReturnType<typeof buildCtx>>, purpose?: string) => {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    // A past transfer from before the requirement (seeded with it off, so one with no purpose exists).
+    await runLegacyCreateTransferForTests({
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, funding_method: 'bank_transfer',
+      ...(purpose ? { purpose } : {}),
+    }, { ...ctx, purposeRequired: false });
+  };
+
+  describe('schemas', () => {
+    const requiredOf = (tools: ReturnType<typeof toolSchemasForChannel>, name: string) =>
+      (tools.find((t) => t.function.name === name)?.function.parameters as { required?: string[] } | undefined)?.required ?? [];
+
+    it('on ⇒ send_approve_picker and create_schedule list purpose as required; off (the default) ⇒ unchanged', () => {
+      const on = toolSchemasForChannel('whatsapp', { purposeRequired: true });
+      expect(requiredOf(on, 'send_approve_picker')).toContain('purpose');
+      expect(requiredOf(on, 'create_schedule')).toContain('purpose');
+      for (const off of [toolSchemasForChannel('whatsapp'), toolSchemasForChannel('whatsapp', { purposeRequired: false })]) {
+        expect(requiredOf(off, 'send_approve_picker')).not.toContain('purpose');
+        expect(requiredOf(off, 'create_schedule')).not.toContain('purpose');
+      }
+      // the shared schema array is never mutated by the per-turn copy
+      expect(requiredOf(toolSchemas, 'send_approve_picker')).not.toContain('purpose');
+      expect(requiredOf(toolSchemas, 'create_transfer')).not.toContain('purpose');
+    });
+
+    it('repeat_transfer keeps purpose optional in its schema (the handler asks, offering the last one)', () => {
+      expect(requiredOf(toolSchemasForChannel('whatsapp', { purposeRequired: true }), 'repeat_transfer')).not.toContain('purpose');
+      expect(requiredOf(toolSchemasForChannel('web', { purposeRequired: true }), 'repeat_transfer')).not.toContain('purpose');
+    });
+
+    it('every purpose enum in the schemas is the canonical TRANSFER_PURPOSES list', async () => {
+      const { TRANSFER_PURPOSES } = await import('@/lib/purpose-codes');
+      for (const name of ['send_approve_picker', 'create_transfer', 'create_schedule', 'repeat_transfer']) {
+        const props = (toolSchemas.find((t) => t.function.name === name)!.function.parameters as { properties: Record<string, { enum?: string[] }> }).properties;
+        expect(props.purpose.enum, name).toEqual([...TRANSFER_PURPOSES]);
+      }
+    });
+  });
+
+  describe('send_approve_picker', () => {
+    it('no purpose ⇒ needs_purpose with the ask hint; no draft, no card', async () => {
+      const ctx = await required();
+      const calls = stubWhatsApp();
+      const r = await executeTool('send_approve_picker', picker(), ctx);
+      expect(r.needs_purpose).toBe(true);
+      expect(String(r.reply_hint)).toContain('Family support, Gift, Education, Medical, Savings, Bills, Business or Other');
+      expect(r.sent).toBeUndefined();
+      expect(r.draft_id).toBeUndefined();
+      expect(calls.some((u) => u.includes('graph.facebook.com'))).toBe(false);
+    });
+
+    it('an unknown purpose (a code, a label) is refused the same way', async () => {
+      const ctx = await required();
+      stubWhatsApp();
+      for (const purpose of ['P1301', 'Medical', '']) {
+        const r = await executeTool('send_approve_picker', picker({ purpose }), ctx);
+        expect(r.needs_purpose, purpose).toBe(true);
+      }
+    });
+
+    it('a valid purpose ⇒ the card, and the draft carries it', async () => {
+      const ctx = await required();
+      stubWhatsApp();
+      const r = await executeTool('send_approve_picker', picker({ purpose: 'medical' }), ctx);
+      expect(r.sent).toBe(true);
+      expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.purpose).toBe('medical');
+    });
+
+    it('requirement off ⇒ no purpose still sends the card (unchanged)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      stubWhatsApp();
+      const r = await executeTool('send_approve_picker', picker(), ctx);
+      expect(r.sent).toBe(true);
+      expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.purpose).toBeUndefined();
+    });
+
+    it('a business bill payment is never asked: no purpose ⇒ the card, and the draft is business', async () => {
+      const ctx = await required();
+      await db.execute(sql`TRUNCATE b2b_invoices`);
+      await ctx.store.saveB2bInvoice({
+        id: 'inv_purpose', partnerId: 'default', businessName: 'Globex Trading LLC',
+        buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }],
+        amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+      });
+      await executeTool('get_quote', { amount_usd: 100, funding_method: 'ach_pull' }, ctx);
+      stubWhatsApp();
+      const r = await executeTool('send_approve_picker', {
+        amount_source: 400, funding_method: 'ach_pull', entity_type: 'business',
+        recipient_name: 'Globex Trading LLC', recipient_business_name: 'Globex Trading LLC',
+        sender_business_name: 'Acme Imports Ltd', recipient_phone: IN_MOM, invoice_id: 'inv_purpose',
+      }, ctx);
+      expect(r.needs_purpose).toBeUndefined();
+      expect(r.sent).toBe(true);
+      expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.purpose).toBe('business');
+    });
+  });
+
+  describe('create_transfer (explicit-args path)', () => {
+    it('no purpose ⇒ needs_purpose and nothing minted; a valid purpose is stored on the transfer', async () => {
+      const ctx = await required();
+      await ctx.store.upsertRecipient('default', ctx.phone, {
+        name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
+      });
+      const before = await ctx.store.getTransferCount('default', ctx.phone);
+      const refused = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM }, ctx);
+      expect(refused.needs_purpose).toBe(true);
+      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(before);
+      const ok = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'gift' }, ctx);
+      expect((await ctx.store.getTransfer(String(ok.transfer_id)))?.purpose).toBe('gift');
+    });
+
+    it('the approve-tap path mints a draft made before the requirement (no purpose) — an in-flight card still works', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      stubWhatsApp();
+      const r = await executeTool('send_approve_picker', picker(), ctx);
+      const tapCtx = { ...ctx, purposeRequired: true as const, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
+      const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+      expect(minted.needs_purpose).toBeUndefined();
+      expect(minted.transfer_id).toBeTruthy();
+    });
+  });
+
+  describe('repeat_transfer (Q1: the last purpose is offered, never copied)', () => {
+    it('no purpose ⇒ needs_purpose with the last purpose and its label to offer; no draft', async () => {
+      const ctx = await required();
+      await seedPast(ctx, 'medical');
+      stubWhatsApp();
+      const r = await executeTool('repeat_transfer', { recipient_phone: IN_MOM }, ctx);
+      expect(r.needs_purpose).toBe(true);
+      expect(r.last_purpose).toBe('medical');
+      expect(r.last_purpose_label).toBe('Medical');
+      expect(String(r.reply_hint)).toContain('Same reason as last time: Medical?');
+      expect(r.draft_id).toBeUndefined();
+      expect(r.sent).toBeUndefined();
+    });
+
+    it('a last transfer with no purpose ⇒ needs_purpose with last_purpose null and the plain question', async () => {
+      const ctx = await required();
+      await seedPast(ctx);
+      const r = await executeTool('repeat_transfer', { recipient_phone: IN_MOM }, ctx);
+      expect(r.needs_purpose).toBe(true);
+      expect(r.last_purpose).toBeNull();
+      expect(r.last_purpose_label).toBeNull();
+      expect(String(r.reply_hint)).toContain('Family support, Gift, Education, Medical, Savings, Bills, Business or Other');
+      expect(String(r.reply_hint)).not.toContain('Same reason as last time');
+    });
+
+    it('the confirmed purpose (yes ⇒ the model passes it back) rides the new draft', async () => {
+      const ctx = await required();
+      await seedPast(ctx, 'medical');
+      stubWhatsApp();
+      const r = await executeTool('repeat_transfer', { recipient_phone: IN_MOM, purpose: 'medical' }, ctx);
+      expect(r.sent).toBe(true);
+      expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.purpose).toBe('medical');
+    });
+
+    it('works by transfer_id on the web channel too (the portal Send again path)', async () => {
+      const ctx = await required();
+      await seedPast(ctx, 'education');
+      const [last] = await ctx.store.listTransfersByPhone('default', ctx.phone, 1);
+      const webCtx = { ...ctx, channel: 'web' as const };
+      const r = await executeTool('repeat_transfer', { transfer_id: last.id }, webCtx);
+      expect(r).toMatchObject({ needs_purpose: true, last_purpose: 'education' });
+      const ok = await executeTool('repeat_transfer', { transfer_id: last.id, purpose: 'education' }, webCtx);
+      expect(typeof ok.pay_url).toBe('string');
+      expect((await ctx.draftStore.consumeDraft(ok.draft_id as string))?.purpose).toBe('education');
+    });
+  });
+
+  describe('create_schedule', () => {
+    const sched = (over: Record<string, unknown> = {}) => ({
+      amount_source: 150, recipient_name: 'Mom', recipient_phone: '919133001840', frequency: 'monthly', day_of_month: 10, ...over,
+    });
+
+    it('no purpose ⇒ needs_purpose and nothing saved', async () => {
+      const ctx = await required();
+      const r = await executeTool('create_schedule', sched(), ctx);
+      expect(r.needs_purpose).toBe(true);
+      expect(r.schedule_id).toBeUndefined();
+      expect((await ctx.scheduleStore.listSchedules()).filter((s) => s.phone === ctx.phone)).toEqual([]);
+    });
+
+    it('a valid purpose is saved on the schedule', async () => {
+      const ctx = await required();
+      const r = await executeTool('create_schedule', sched({ purpose: 'family_support' }), ctx);
+      expect(r.schedule_id).toBeTruthy();
+      expect((await ctx.scheduleStore.getSchedule(r.schedule_id as string))?.purpose).toBe('family_support');
+    });
+
+    it('requirement off ⇒ saved without a purpose; a stated one is kept (it used to be dropped)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const none = await executeTool('create_schedule', sched(), ctx);
+      expect((await ctx.scheduleStore.getSchedule(none.schedule_id as string))?.purpose).toBeUndefined();
+      const stated = await executeTool('create_schedule', sched({ purpose: 'bills', day_of_month: 11 }), ctx);
+      expect((await ctx.scheduleStore.getSchedule(stated.schedule_id as string))?.purpose).toBe('bills');
+    });
+  });
+});

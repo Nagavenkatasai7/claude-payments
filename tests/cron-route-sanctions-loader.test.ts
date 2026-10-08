@@ -12,7 +12,7 @@ process.env.CRON_SECRET = SECRET;
 
 const runDueSchedules = vi.hoisted(() => vi.fn(async () => ({ fired: 2, failed: 1 })));
 vi.mock('@/lib/cron-run', () => ({ runDueSchedules }));
-vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks: vi.fn(async () => 4) }));
+vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks: vi.fn(async () => 4), expirePaymentLinks: vi.fn(async () => 0) }));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads: vi.fn(async () => 7) }));
 const record = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('@/db/repos/aux-repos', async (importOriginal) => ({

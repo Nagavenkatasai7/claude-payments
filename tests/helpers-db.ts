@@ -51,6 +51,12 @@ async function initOnce() {
 }
 
 const ALL_TABLES = [
+  // Batch B rewards (B3): FK children of transfers / partners, truncated first.
+  'reward_redemptions',
+  'platform_fee_ledger',
+  'partner_rewards',
+  'partner_reward_terms',
+  'reward_catalog',
   'outbox',
   'conversation_messages',
   'partner_sites', // UI redesign M1 (0026): FK child of partners, truncated before it
@@ -82,6 +88,12 @@ const ALL_TABLES = [
   'staff',
   'funding_events',
   'feature_flags', // Release safety part A (0029)
+  'payment_links', // Batch B2: FK child of payees and partners
+  'payees',
+  'referral_attributions', // Batch B4: FK children of referral_partners
+  'referral_codes',
+  'referral_partners',
+  'referral_program_settings',
   'conversation_messages', // Partner-Demo R3b (also reached by CASCADE via partners; explicit for clarity)
 ].join(', ');
 

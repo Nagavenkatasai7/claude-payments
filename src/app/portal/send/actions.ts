@@ -15,6 +15,7 @@ import { executeTool } from '@/lib/tools';
 import { prepareSendDraft, portalPayUrl, type PrepareSendResult } from '@/lib/send-seam';
 import { allowedSendCurrencies } from '@/lib/partner-currency';
 import { normalizeSenderName } from '@/lib/sender-identity';
+import { parsePurpose } from '@/lib/purpose-codes';
 import { logWarn } from '@/lib/log';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import {
@@ -78,7 +79,7 @@ const text = (fd: FormData, k: string, max = 200) => {
   return typeof v === 'string' ? v.slice(0, max) : '';
 };
 
-const ECHO = ['amount', 'currency', 'destination', 'funding', 'recipient', 'name', 'phone'] as const;
+const ECHO = ['amount', 'currency', 'destination', 'funding', 'recipient', 'name', 'phone', 'purpose'] as const;
 const echo = (fd: FormData) => Object.fromEntries(ECHO.map((k) => [k, text(fd, k, 80)]));
 
 const ownerOf = (ctx: PortalCustomerContext): PortalOwner => ({ partnerId: ctx.site.partnerId, phone: ctx.session.phone });
@@ -239,6 +240,8 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
     sourceCurrency: review.sourceCurrency,
     destinationCountry: review.destinationCountry,
     fundingMethod: review.fundingMethod,
+    // Required purpose: the review's (validated on the form and again when the slot is read).
+    purpose: review.purpose,
   });
   if (!input) return refuse({ error: 'portal.send.recipient_not_found' });
 
@@ -289,6 +292,8 @@ const TRANSFER_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
 /** The bot's repeat_transfer record, narrowed. Model-facing text is never read. */
 function narrowRepeat(r: Record<string, unknown>, brand: string): { kind: 'draft'; draftId: string } | { kind: 'copy'; copy: SendCopy } {
   if (isDraftId(r.draft_id) && typeof r.pay_url === 'string') return { kind: 'draft', draftId: r.draft_id };
+  // Required purpose (defense in depth: the action checks the posted purpose first).
+  if (r.needs_purpose === true) return { kind: 'copy', copy: { error: 'portal.send.purpose_invalid' } };
   if (r.needs_edd === true) return { kind: 'copy', copy: { error: 'portal.send.edd_whatsapp' } };
   if (r.needs_sender_name === true) return { kind: 'copy', copy: { error: 'portal.send.name_needed' } };
   if (r.kyc_required === true) return { kind: 'copy', copy: { error: 'portal.send.kycBody', kyc: 'verify' } };
@@ -332,12 +337,16 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
   const { customer, partner } = loaded;
   const gated = portalKycGate(partner, customer, site.brand);
   if (gated) return refuse(gated);
+  // Required purpose (Q1): the customer confirms the reason for THIS send on the form (it starts on
+  // the last transfer's purpose, visible, never copied silently). Missing or unknown ⇒ the form error.
+  const purpose = parsePurpose(text(formData, 'purpose', 40));
+  if (!purpose) return refuse({ error: 'portal.send.purpose_invalid' });
 
   let outcome: { kind: string; draftId?: string };
   let copy: SendCopy | undefined;
   try {
     ({ value: outcome } = await runOnce(getRedis(), 'portal-send-again', owner.partnerId, owner.phone, text(formData, 'requestKey', 64), async () => {
-      const r = narrowRepeat(await executeTool('repeat_transfer', { transfer_id: t.id }, portalToolContext(owner)), site.brand);
+      const r = narrowRepeat(await executeTool('repeat_transfer', { transfer_id: t.id, purpose }, portalToolContext(owner)), site.brand);
       if (r.kind === 'copy') {
         copy = r.copy;
         return { kind: 'refused' };

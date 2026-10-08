@@ -1,4 +1,5 @@
 import type { CurrencyCode, FundingMethod, Quote } from './types';
+import type { QuotePricing } from './rewards/types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 import { SEND_LIMIT_HARD_CEILING_CENTS } from './send-limits';
 import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
@@ -155,6 +156,10 @@ export function quote(
   destinationCurrency: CurrencyCode = 'INR',  // NEW (any-to-any) — defaults to INR (back-compat)
   destToUsd?: number,                          // NEW — destination currency's USD rate (for the cross-rate via USD pivot)
   maxUsd: number = MAX_USD,                    // fix 16b — the sender's effective quote ceiling (<= $10,000; default = platform)
+  // B3 rewards v1: an approved reward's fee discount (src/lib/rewards/). Absent
+  // ⇒ today's prices byte-for-byte (tests/fx-reward-pricing.test.ts). Only the
+  // fee moves, never below $0; the amount, the rate and the payout never do.
+  pricing?: QuotePricing,
 ): Quote {
   assertRatesUsable(rates);
   if (!Number.isFinite(amountSource)) {
@@ -195,6 +200,11 @@ export function quote(
           'Please choose how to pay: credit card, debit card, or bank transfer.',
         );
     }
+  }
+
+  const discount = pricing?.feeDiscountUsd;
+  if (discount !== undefined && Number.isFinite(discount) && discount > 0) {
+    feeUsd = Math.max(0, round2(feeUsd - discount));
   }
 
   const feeSource = round2(feeUsd / rates.toUsd);

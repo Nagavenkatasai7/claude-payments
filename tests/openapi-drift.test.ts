@@ -54,4 +54,18 @@ describe('openapi.yaml ⇄ src/app/api/partner/v1 drift', () => {
     const mint = loadPartnerOpenApi().find((o) => key(o) === 'POST /transactions')!;
     expect(mint.parameters).toContainEqual(expect.objectContaining({ name: 'Idempotency-Key', in: 'header', required: true }));
   });
+
+  // Required purpose (owner decision 2026-10-08): the API reference renders the documented example
+  // as the copyable request, so an example without a valid purpose would 422; the schema and the
+  // 422 text name the 8 values.
+  it('the POST /transactions example carries a valid purpose; the Transaction schema and the 422 document it', async () => {
+    const { loadPartnerOpenApi, loadPartnerOpenApiDocument } = await import('@/lib/openapi/load-spec');
+    const { TRANSFER_PURPOSES } = await import('@/lib/purpose-codes');
+    const mint = loadPartnerOpenApi().find((o) => key(o) === 'POST /transactions')!;
+    expect(TRANSFER_PURPOSES as readonly string[]).toContain((mint.requestExample as Record<string, unknown>).purpose);
+    for (const p of TRANSFER_PURPOSES) expect(mint.responses[422]).toContain(p);
+    expect(mint.description).toMatch(/purpose is required/);
+    const tx = loadPartnerOpenApiDocument().schemas.find((s) => s.name === 'Transaction')!;
+    expect(tx.fields.find((f) => f.name === 'purpose')).toMatchObject({ type: 'string | null' });
+  });
 });

@@ -22,7 +22,8 @@ import { isValidPhone, normalizePhone } from './phone';
 import { isRid, validateRecipientName } from './portal-recipients';
 import type { MessageKey } from './i18n';
 import type { PortalOwner } from './portal-transfers';
-import type { CountryCode, CurrencyCode, Customer, Partner, TurnContext } from './types';
+import type { CountryCode, CurrencyCode, Customer, Partner, TransferPurpose, TurnContext } from './types';
+import { parsePurpose } from './purpose-codes';
 
 /**
  * portal-send — the customer portal's Send adapter (UI redesign M2-9). Server only.
@@ -84,6 +85,8 @@ export function nonMintingKyc(real: KycProvider): KycProvider {
 /**
  * The bot's ToolContext for a portal customer: the host partner + session phone, channel 'web', a
  * web form turn, and the non-minting KYC provider. Every other dep is the bot's own singleton.
+ * Required purpose (owner decision 2026-10-08): the portal always requires one (no switch), so the
+ * bot tools it runs (repeat_transfer for Send again) refuse a send without one.
  */
 export function portalToolContext(owner: PortalOwner, deps: Partial<ToolContextDeps> = {}): ToolContext {
   const kyc =
@@ -94,6 +97,7 @@ export function portalToolContext(owner: PortalOwner, deps: Partial<ToolContextD
     channel: 'web',
     turn: webFormTurn(),
     deps: { ...deps, kycProvider: nonMintingKyc(kyc) },
+    purposeRequired: true,
   });
 }
 
@@ -185,17 +189,22 @@ export interface PortalSendInput {
   sourceCurrency: CurrencyCode;
   destinationCountry: CountryCode;
   fundingMethod: PortalFundingMethod;
+  /** Required purpose (owner decision 2026-10-08): one of the 8, chosen on the Send form. */
+  purpose: TransferPurpose;
 }
 
 /**
- * Map to the seam's input. Sets ONLY the consumer fields: never entityType, the business names,
- * invoiceId, nor the EDD enums (recipientLegalName, relationship, purpose, sourceOfFunds,
- * occupation). The name is clamped like repeat_transfer's; null when it clamps to nothing.
+ * Map to the seam's input. Sets ONLY the consumer fields and the required purpose: never
+ * entityType, the business names, invoiceId, nor the EDD enums (recipientLegalName, relationship,
+ * sourceOfFunds, occupation). The name is clamped like repeat_transfer's; null when it clamps to
+ * nothing, and null when the purpose is not one of the 8 (defense in depth behind the form).
  */
 export function toPrepareSendInput(i: PortalSendInput): PrepareSendInput | null {
   const recipientName = boundUntrustedText(i.recipientName, NAME_MAX);
   if (!recipientName) return null;
   if (!isPortalFunding(i.fundingMethod)) return null;
+  const purpose = parsePurpose(i.purpose);
+  if (!purpose) return null;
   return {
     recipientPhone: i.recipientPhone,
     recipientName,
@@ -203,6 +212,7 @@ export function toPrepareSendInput(i: PortalSendInput): PrepareSendInput | null 
     sourceCurrency: i.sourceCurrency,
     destinationCountry: i.destinationCountry,
     fundingMethod: i.fundingMethod,
+    purpose,
   };
 }
 
@@ -227,9 +237,11 @@ export interface SendFormValue {
   destinationCountry: CountryCode;
   fundingMethod: PortalFundingMethod;
   recipient: SendRecipientChoice;
+  /** Required purpose (owner decision 2026-10-08). */
+  purpose: TransferPurpose;
 }
 
-export type SendFormField = 'amount' | 'currency' | 'destination' | 'funding' | 'recipient' | 'name' | 'phone';
+export type SendFormField = 'amount' | 'currency' | 'destination' | 'funding' | 'recipient' | 'name' | 'phone' | 'purpose';
 export type SendFormErrors = Partial<Record<SendFormField, MessageKey>>;
 
 const str = (fd: FormData, k: string) => {
@@ -271,11 +283,14 @@ export function validateSendForm(
   } else {
     errors.recipient = 'portal.send.recipient_invalid';
   }
+  // Required purpose: one of the 8 values exactly (the select's option values); anything else is refused.
+  const purpose = parsePurpose(str(fd, 'purpose'));
+  if (!purpose) errors.purpose = 'portal.send.purpose_invalid';
 
-  if (Object.keys(errors).length > 0 || amountSource === null || !sourceCurrency || !destinationCountry || !isPortalFunding(fundingRaw) || !recipient) {
+  if (Object.keys(errors).length > 0 || amountSource === null || !sourceCurrency || !destinationCountry || !isPortalFunding(fundingRaw) || !recipient || !purpose) {
     return { ok: false, errors };
   }
-  return { ok: true, value: { amountSource, sourceCurrency, destinationCountry, fundingMethod: fundingRaw, recipient } };
+  return { ok: true, value: { amountSource, sourceCurrency, destinationCountry, fundingMethod: fundingRaw, recipient, purpose } };
 }
 
 /**
@@ -340,6 +355,10 @@ function parseReview(raw: unknown): PortalSendReview | null {
   }
   if (!v || typeof v !== 'object') return null;
   const { id, amountSource, sourceCurrency, destinationCountry, fundingMethod, recipient, draftId } = v;
+  // Required purpose: a slot written before the requirement (or tampered) has none and reads as no
+  // review, so the customer is sent back to the form to choose one.
+  const purpose = parsePurpose(v.purpose);
+  if (!purpose) return null;
   if (typeof id !== 'string' || !REVIEW_ID_RE.test(id)) return null;
   if (!num(amountSource) || amountSource <= 0) return null;
   if (typeof sourceCurrency !== 'string' || !/^[A-Z]{3}$/.test(sourceCurrency)) return null;
@@ -358,6 +377,7 @@ function parseReview(raw: unknown): PortalSendReview | null {
     destinationCountry,
     fundingMethod,
     recipient: choice,
+    purpose,
   };
   if (typeof draftId === 'string' && DRAFT_ID_RE.test(draftId)) out.draftId = draftId;
   return out;

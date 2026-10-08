@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { Send, ShieldAlert, Wallet } from 'lucide-react';
+import { Gift, Send, ShieldAlert, Wallet } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { listPortalTransfers, portalOwner } from '@/lib/portal-transfers';
@@ -20,6 +20,7 @@ import { formatMoney } from '@/lib/ui/money';
 import { Button, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { TransferRows } from './transfers/transfer-rows';
 import { portalMetadata } from '@/lib/portal-metadata';
+import { loadMyRewards, type MyRewards } from '@/lib/rewards/read';
 
 export const generateMetadata = () => portalMetadata('portal.home.title');
 
@@ -40,6 +41,50 @@ function StatTile({ label, value, sub }: { label: string; value: ReactNode; sub:
 }
 
 /**
+ * B3 rewards v1: the "My rewards" card. Only while rewards are active for this customer (demo mode
+ * AND the rewards.enabled switch, loadMyRewards returns null otherwise): the offers that are on and
+ * the rewards the customer kept. Escaped text only.
+ */
+function MyRewardsCard({ rewards }: { rewards: MyRewards }) {
+  return (
+    <div data-my-rewards>
+      <Card as="section" className="flex flex-col gap-3">
+        <h2 className="flex items-center gap-2 text-[18px] font-bold text-ds-ink">
+          <Gift aria-hidden="true" className="size-5" />
+          {t('portal.home.rewards.title')}
+        </h2>
+        {rewards.offers.length > 0 ? (
+          <div>
+            <p className="text-[13px] font-semibold uppercase tracking-wide text-ds-ink-muted">{t('portal.home.rewards.offers')}</p>
+            <ul className="mt-1 list-disc pl-5 text-[14px] text-ds-ink">
+              {rewards.offers.map((o) => (
+                <li key={o}>{o}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div>
+          <p className="text-[13px] font-semibold uppercase tracking-wide text-ds-ink-muted">{t('portal.home.rewards.kept')}</p>
+          {rewards.kept.length > 0 ? (
+            <ul className="mt-1 flex flex-col gap-1 text-[14px] text-ds-ink">
+              {rewards.kept.map((k) => (
+                <li key={k.transferId}>
+                  <Link href={`/portal/transfers/${encodeURIComponent(k.transferId)}`} className="hover:underline">
+                    {k.text}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-[14px] text-ds-ink-muted">{t('portal.home.rewards.none')}</p>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+/**
  * Home (UI redesign M2-7, Task 7.2): quick send, the KYC banner when the partner gates sends and the
  * customer is not verified, and the last 5 transfers (masked). The gates run on every render (the
  * layout is never the guard).
@@ -54,12 +99,13 @@ export default async function PortalHomePage() {
   const site = await requirePortalSite();
   const ctx = await requirePortalCustomer();
   const owner = portalOwner(ctx);
-  const [recent, partner, scanned, todayUsedCents, book] = await Promise.all([
+  const [recent, partner, scanned, todayUsedCents, book, rewards] = await Promise.all([
     listPortalTransfers(owner, { limit: 5 }),
     getPartnerStore().getPartner(site.partnerId),
     getStore().listTransfersByPhone(owner.partnerId, owner.phone, STATS_SCAN),
     getDailyVolumeStore().getTodayCents(owner.partnerId, owner.phone),
     createRecipientRepo(getDb()).listAllForSender(owner.partnerId, owner.phone),
+    loadMyRewards(getDb(), getStore(), owner.partnerId, owner.phone, new Date(), (usd) => formatMoney(usd, 'USD')),
   ]);
   const gateActive = sendGateActive(partner);
   const kycNeeded = gateActive && !isSendVerified(ctx.customer);
@@ -114,6 +160,8 @@ export default async function PortalHomePage() {
             </Link>
           </Button>
         </Card>
+
+        {rewards ? <MyRewardsCard rewards={rewards} /> : null}
 
         <section aria-labelledby="recent-heading" className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">

@@ -20,7 +20,7 @@ vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
-vi.mock('@/db/repos/transfer-repo', () => ({ createTransferRepo: () => ({ isPayoutEditable: async () => false }) }));
+vi.mock('@/db/repos/transfer-repo', () => ({ createTransferRepo: () => ({ isPayoutEditable: async () => false, isPaymentLinkTransfer: async () => false }) }));
 
 describe('/site-inactive', () => {
   it('renders a <main> byte-identical to the pay page’s dead-link sheet (no oracle, same look)', async () => {

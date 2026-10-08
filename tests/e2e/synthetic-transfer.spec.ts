@@ -68,6 +68,8 @@ test.describe('@synthetic sandbox transfer', () => {
           amount_source: AMOUNT_USD,
           source_currency: 'USD',
           destination_country: 'IN',
+          // Required purpose: a create without one is 422, which would fail the release check.
+          purpose: 'family_support',
           sender: { phone: SENDER_PHONE, name: 'Synthetic Release Check', kyc_status: 'verified' },
           beneficiary: {
             name: 'Synthetic Recipient',

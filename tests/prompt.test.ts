@@ -914,40 +914,66 @@ describe('R6b: confidentiality rule', () => {
   });
 });
 
-describe('A3: purpose detection section (demo mode + purpose.detect only)', () => {
-  const on = buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true });
+describe('Required purpose: the PURPOSE section (purpose.detect on ⇒ every phone)', () => {
+  const on = buildSystemPrompt({ brand: 'SmartRemit', purposeRequired: true });
+  const section = on.slice(on.indexOf('\nPURPOSE\n'));
 
-  it('is absent by default and when purposeDetect is false; the default prompt is unchanged', () => {
+  it('is absent by default and when purposeRequired is false; the default prompt is unchanged', () => {
     expect(SYSTEM_PROMPT).not.toContain('PURPOSE');
-    expect(buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: false })).toBe(SYSTEM_PROMPT);
-    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeDetect: false })).toBe(
+    expect(buildSystemPrompt({ brand: 'SmartRemit', purposeRequired: false })).toBe(SYSTEM_PROMPT);
+    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeRequired: false })).toBe(
       buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
     );
   });
 
-  it('with purposeDetect, names purpose, send_approve_picker, family_support and the Hinglish examples', () => {
-    const at = on.indexOf('\nPURPOSE\n');
-    expect(at).toBeGreaterThan(-1);
-    const section = on.slice(at);
-    for (const s of ['purpose', 'send_approve_picker', 'repeat_transfer', 'family_support', 'maa ki dawai', 'bhai ki fees', 'education']) {
+  it('names purpose, the three send tools, family_support and the Hinglish examples', () => {
+    expect(on.indexOf('\nPURPOSE\n')).toBeGreaterThan(-1);
+    for (const s of ['purpose', 'send_approve_picker', 'repeat_transfer', 'create_schedule', 'family_support', 'maa ki dawai', 'bhai ki fees', 'education']) {
       expect(section, s).toContain(s);
     }
-    // never guess, never ask only for the purpose
+  });
+
+  it('a stated reason is used without asking; no reason ⇒ ask ONCE before the Approve card, listing the 8 purposes in plain words', () => {
+    expect(section).toMatch(/already said why[^\n]*do not ask/i);
+    expect(section).toMatch(/ask ONCE[^\n]*before the Approve/);
+    expect(section).toContain('Family support, Gift, Education, Medical, Savings, Bills, Business or Other');
+    // the old optional rule is gone
+    expect(section).not.toMatch(/never hold up a send/i);
+    expect(section).not.toMatch(/leave purpose out/i);
+  });
+
+  it('the question follows the language rule: Hinglish for a Hinglish customer, English stays English', () => {
+    expect(section).toMatch(/Hinglish customer[^\n]*Hinglish/);
+    expect(section).toMatch(/English stays English/);
+  });
+
+  it('never guesses; needs_purpose ⇒ ask, then call the same tool again with purpose', () => {
     expect(section).toMatch(/never guess/i);
-    expect(section).toMatch(/never ask/i);
+    expect(section).toMatch(/needs_purpose: true/);
+    expect(section).toMatch(/same tool again[^\n]*purpose/i);
+  });
+
+  it('a repeat send offers the last reason as the default and keeps it only on a yes', () => {
+    expect(section).toContain('last_purpose_label');
+    expect(section).toMatch(/Same reason as last time: <last_purpose_label>\?/);
+    expect(section).toMatch(/yes keeps it/i);
+    expect(section).toMatch(/never reuse the last purpose without/i);
+  });
+
+  it('a business bill payment is not asked', () => {
+    expect(section).toMatch(/business bill payment[^\n]*(no purpose|not asked|never ask)/i);
   });
 
   it('never mentions a code to the model (no RBI, no P1301)', () => {
     // a word match: 'FORBIDDEN' elsewhere in the prompt contains the letters RBI
     expect(on).not.toMatch(/\bRBI\b/);
     expect(on).not.toContain('P1301');
-    const section = on.slice(on.indexOf('\nPURPOSE\n'));
     expect(section).not.toContain('RBI');
     expect(section).not.toMatch(/\bcode\b/i);
   });
 
   it('comes after ENHANCED VERIFICATION and before BRAND VOICE', () => {
-    const withPersona = buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', purposeDetect: true });
+    const withPersona = buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', purposeRequired: true });
     const ev = withPersona.indexOf('ENHANCED VERIFICATION');
     const pur = withPersona.indexOf('\nPURPOSE\n');
     const bv = withPersona.indexOf('BRAND VOICE');
@@ -957,7 +983,7 @@ describe('A3: purpose detection section (demo mode + purpose.detect only)', () =
   });
 
   it('is present in the gate-off variant too', () => {
-    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeDetect: true })).toContain('\nPURPOSE\n');
+    expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeRequired: true })).toContain('\nPURPOSE\n');
   });
 });
 
@@ -967,7 +993,7 @@ describe('A2: Hinglish replies (all customers, every variant)', () => {
     buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'ours' }),
     buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, kycMode: 'delegated' }),
     buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'warm', kycGateActive: true }),
-    buildSystemPrompt({ brand: 'SmartRemit', purposeDetect: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', purposeRequired: true }),
   ];
   const langLine = (p: string) => p.split('\n').find((l) => l.startsWith("- Reply in the customer's language")) ?? '';
 
@@ -1003,5 +1029,12 @@ describe('A2: Hinglish replies (all customers, every variant)', () => {
       expect(lines[at + 1]).toMatch(/^- Tool text you are told to relay as-is/);
       expect(lines[at + 2]).toMatch(/^- EXCEPTION \(translation parked for counsel\)/);
     }
+  });
+});
+
+describe('B3 rewards v1: reward_note', () => {
+  it('the model restates reward_note verbatim and never invents a reward', () => {
+    expect(SYSTEM_PROMPT).toContain('If get_quote returns reward_note, state that line exactly as written');
+    expect(SYSTEM_PROMPT).toContain('Never promise, invent or describe a reward or discount that a tool did not return.');
   });
 });

@@ -133,6 +133,21 @@ export default async function TransactionDetailPage({
               <Field label="Payout destination">
                 <span className="font-mono text-xs">{t.payoutDestination}</span>
               </Field>
+              {/* Batch B1: the partner's order number and the payout partner's confirmation. */}
+              <Field label="Client reference">
+                {t.clientReference ? (
+                  <span className="font-mono text-xs">{t.clientReference}</span>
+                ) : (
+                  <span className="text-muted-foreground">None</span>
+                )}
+              </Field>
+              <Field label="Payout reference">
+                {t.payoutReference ? (
+                  <span className="font-mono text-xs">{t.payoutReference}</span>
+                ) : (
+                  <span className="text-muted-foreground">None</span>
+                )}
+              </Field>
               <Field label="Created">{new Date(t.createdAt).toLocaleString()}</Field>
               <Field label="Owning partner">
                 {owningPartner?.name ?? t.partnerId}

@@ -20,6 +20,9 @@ import { isInfraError } from '@/lib/infra-error';
 import { retryOnceOnInfra } from '@/lib/infra-retry';
 import { logWarn } from '@/lib/log';
 import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
+import { transferRewardOrNull } from '@/lib/rewards/read';
+import { rewardPayNote } from '@/lib/rewards/engine';
+import { usdToSource } from '@/lib/rewards/customer';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -178,6 +181,9 @@ async function renderPayPage(transferId: string) {
     // A re-opened link whose destination is already set skips Step 1 (bodyless POST).
     needsBankDetails: boolean;
     savedAccountLabel: string | null; // fix 6: non-null ⇒ the single-step form offers "Edit bank details"
+    // B3 rewards v1: the reward the price carries (the draft's quote, or the minted
+    // transfer's redemption row), shown above the legal disclosure. Null: none.
+    rewardNote: string | null;
   };
 
   let view: View | null = null;
@@ -193,6 +199,12 @@ async function renderPayPage(transferId: string) {
     if (transfer.status === 'cancelled') {
       return <InactiveSheet />;
     }
+    // Batch B2: a payment-link transfer is paid only on its link page
+    // (/pay/l/[token]), which re-runs the link checks; the POST here refuses it
+    // too. Here it is a dead link: no payable form, no payee figures.
+    if (await createTransferRepo(getDb()).isPaymentLinkTransfer(transfer.id)) {
+      return <InactiveSheet />;
+    }
     brandPartnerId = transfer.partnerId;
     // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
     // read (boolean + last-4 label only); Edit only where the guarded write would
@@ -204,6 +216,8 @@ async function renderPayPage(transferId: string) {
       !transferNeedsDetails && (await createTransferRepo(getDb()).isPayoutEditable(transfer.id, transfer.partnerId));
     const destCurrency: string = transfer.destinationCurrency ?? 'INR';
     const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
+    const reward =
+      transfer.status === 'awaiting_payment' ? await transferRewardOrNull(getDb(), transfer.partnerId, transfer.id) : null;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -223,6 +237,11 @@ async function renderPayPage(transferId: string) {
       // 2: never collected in chat) — collect the recipient's bank details here.
       needsBankDetails: transferNeedsDetails,
       savedAccountLabel: transferEditable ? savedAccountLabelFor(storedTransferDest) : null,
+      rewardNote: reward
+        ? rewardPayNote(reward, (usd) =>
+            formatMoney(usdToSource(usd, sourceCurrency, transfer.amountSource, transfer.amountUsd), sourceCurrency),
+          )
+        : null,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -256,6 +275,11 @@ async function renderPayPage(transferId: string) {
       awaitingPayment: true, // a draft is always awaiting payment
       needsBankDetails: !hasStoredDest,
       savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
+      rewardNote: draft.reward
+        ? rewardPayNote(draft.reward, (usd) =>
+            formatMoney(usdToSource(usd, sourceCurrency, draft.amountSource, draft.amountUsd), sourceCurrency),
+          )
+        : null,
     };
   }
 
@@ -302,6 +326,11 @@ async function renderPayPage(transferId: string) {
             value={view.fundingMethod === 'ach_pull' ? 'ACH bank debit' : 'Bank transfer'}
           />
         </div>
+        {view.awaitingPayment && view.rewardNote && (
+          <p data-reward-note className="mb-4 rounded-xl bg-[#202c33] p-3.5 text-sm font-semibold text-[#25d366]">
+            {view.rewardNote}
+          </p>
+        )}
         {disclosure && <RemittanceDisclosure disclosure={disclosure} />}
         {view.awaitingPayment ? (
           <PayForm

@@ -91,6 +91,7 @@ const txBody = {
   amount_source: 200,
   sender: { phone: '15551230000', name: 'Sender Person', kyc_status: 'verified' },
   beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+  purpose: 'family_support',
 };
 
 let keys: { acmeLive: string; acmeTest: string; betaTest: string };

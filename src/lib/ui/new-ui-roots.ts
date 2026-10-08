@@ -18,6 +18,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/app/site-inactive',
   // M2-5: the customer portal on partner subdomains (hex-scanned and state-walked).
   'src/app/portal',
+  // Batch B4: the public "Referral rewards" page (a link to the admin-set rewards portal).
+  'src/app/referral-rewards',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */

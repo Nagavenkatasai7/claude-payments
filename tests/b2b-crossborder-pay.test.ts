@@ -182,6 +182,17 @@ describe('finalizeCrossBorderBillPayment — the cross-border mint', () => {
     expect(t!.fxProvider).toBeUndefined();
   });
 
+  it('required purpose: every bill payment is business; the buyer is never asked', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedInvoice(stores);
+    const res = await finalize(stores, invoiceId);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect((await stores.store.getTransfer(res.transferId))?.purpose).toBe('business');
+  });
+
   it('SELLER PAYOUT comes from the seller PROFILE, never from buyer input', async () => {
     const stores = await buildStores();
     await seedActiveSeller(stores);

@@ -253,6 +253,9 @@ export async function finalizeCrossBorderBillPayment(
     recipientBusinessName: sellerMasked.businessName,
     achTokenRef: fundingToken, // OPAQUE buyer-bank funding token (no raw digits)
     invoiceId: invoice.id,
+    // Required purpose (owner decision 2026-10-08): every bill payment is a business
+    // payment; the buyer is never asked.
+    purpose: 'business',
     });
   } catch (err) {
     // Program fix 16: B2B bills are capped like every other mint path.

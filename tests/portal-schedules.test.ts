@@ -26,6 +26,7 @@ import type { Customer, Schedule } from '@/lib/types';
 import { fakeRedis } from './helpers';
 import { freshDb, seedSender, clearLegalName } from './helpers-db';
 import { seedTwoPartners, TWO_PARTNER_PHONE, type TwoPartnerFixture } from './helpers-portal-two-partner';
+import { t } from '@/lib/i18n';
 
 // UI redesign M2-10: the customer portal's schedules library. Creates go through the bot's own
 // validation (validateScheduleInput) plus the portal's two opt-in checks; status changes go through
@@ -64,7 +65,7 @@ const form = (o: Record<string, string>) => {
   return f;
 };
 const good = (rid: string, o: Record<string, string> = {}) =>
-  parseScheduleForm(form({ rid, amount: '150', frequency: 'monthly', dayOfMonth: '5', ...o }));
+  parseScheduleForm(form({ rid, amount: '150', frequency: 'monthly', dayOfMonth: '5', purpose: 'family_support', ...o }));
 const audits = async () =>
   ((await db.execute(sql`SELECT action, partner_id, subject_id, meta FROM audit_events WHERE action LIKE 'schedule.%' ORDER BY id`)) as unknown as {
     rows: Array<{ action: string; partner_id: string; subject_id: string; meta: Record<string, unknown> }>;
@@ -97,15 +98,24 @@ describe('getOwnedSchedule (repo)', () => {
 describe('parseScheduleForm', () => {
   it('reads a monthly and a weekly form; refuses bad input field by field', () => {
     const rid = recipientRid('pa', PHONE, A_RP);
-    expect(good(rid)).toEqual({ ok: true, value: { rid, amount: 150, frequency: 'monthly', dayOfMonth: 5, dayOfWeek: undefined, endDate: undefined } });
+    expect(good(rid)).toEqual({ ok: true, value: { rid, amount: 150, frequency: 'monthly', dayOfMonth: 5, dayOfWeek: undefined, endDate: undefined, purpose: 'family_support' } });
     expect(good(rid, { frequency: 'weekly', dayOfWeek: '0', dayOfMonth: '' })).toEqual({
-      ok: true, value: { rid, amount: 150, frequency: 'weekly', dayOfMonth: undefined, dayOfWeek: 0, endDate: undefined },
+      ok: true, value: { rid, amount: 150, frequency: 'weekly', dayOfMonth: undefined, dayOfWeek: 0, endDate: undefined, purpose: 'family_support' },
     });
-    const bad = parseScheduleForm(form({ rid: 'x', amount: '1e3', frequency: 'daily', dayOfMonth: '31', endDate: 'soon' }));
+    const bad = parseScheduleForm(form({ rid: 'x', amount: '1e3', frequency: 'daily', dayOfMonth: '31', endDate: 'soon', purpose: 'P1301' }));
     expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(Object.keys(bad.errors).sort()).toEqual(['amount', 'day', 'endDate', 'frequency', 'recipient']);
+    if (!bad.ok) expect(Object.keys(bad.errors).sort()).toEqual(['amount', 'day', 'endDate', 'frequency', 'purpose', 'recipient']);
     const past = parseScheduleForm(form({ rid, amount: '20', frequency: 'monthly', dayOfMonth: '3', endDate: '2001-01-01' }));
     expect(past.ok).toBe(false);
+  });
+
+  it('required purpose: missing or unknown ⇒ "Choose why you are sending this money."', () => {
+    const rid = recipientRid('pa', PHONE, A_RP);
+    for (const purpose of ['', 'Medical', 'P1301']) {
+      expect(good(rid, { purpose }), purpose).toEqual({ ok: false, errors: { purpose: 'portal.schedules.purpose_invalid' } });
+    }
+    expect(parseScheduleForm(form({ rid, amount: '150', frequency: 'monthly', dayOfMonth: '5' }))).toEqual({ ok: false, errors: { purpose: 'portal.schedules.purpose_invalid' } });
+    expect(t('portal.schedules.purpose_invalid')).toBe('Choose why you are sending this money.');
   });
 
   it('accepts a future end date as YYYY-MM-DD', () => {
@@ -126,7 +136,7 @@ describe('createPortalSchedule', () => {
     expect(s).toMatchObject({
       partnerId: 'pa', phone: PHONE, recipientPhone: A_RP, recipientName: 'Recipient PA', payoutMethod: 'bank',
       payoutDestination: '000011112222|HDFC0001111', amountSource: 150, sourceCurrency: 'USD', frequency: 'monthly', dayOfMonth: 5, status: 'active',
-      fundingMethod: 'bank_transfer',
+      fundingMethod: 'bank_transfer', purpose: 'family_support',
     });
     const a = await audits();
     expect(a).toHaveLength(1);
@@ -169,13 +179,22 @@ describe('createPortalSchedule', () => {
     if (!ok.ok) throw new Error('form');
     expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, ok.value)).toEqual({ ok: false, code: 'sender_name' });
   });
+
+  it('required purpose: a value without one (a forged or stale caller) is refused with code purpose; nothing written', async () => {
+    const parsed = good(recipientRid('pa', PHONE, A_RP));
+    if (!parsed.ok) throw new Error('form');
+    const before = await count();
+    const noPurpose = { ...parsed.value, purpose: undefined as never };
+    expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, noPurpose)).toEqual({ ok: false, code: 'purpose' });
+    expect(await count()).toBe(before);
+  });
 });
 
 describe('bot parity', () => {
   it('the portal saves the SAME schedule row the bot saves for the same recipient, amount and day', async () => {
     const bot = await executeTool('create_schedule', {
       amount_source: 150, funding_method: 'bank_transfer', recipient_name: 'Recipient PA', recipient_phone: A_RP,
-      frequency: 'monthly', day_of_month: 5,
+      frequency: 'monthly', day_of_month: 5, purpose: 'family_support',
     }, { ...ctxFor('pa'), channel: 'whatsapp' });
     expect(bot.error).toBeUndefined();
     const parsed = good(recipientRid('pa', PHONE, A_RP));

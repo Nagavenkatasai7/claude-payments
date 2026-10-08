@@ -1,6 +1,6 @@
 import { MIN_USD } from './fx';
 import { PLATFORM_SEND_LIMITS } from './send-limits';
-import { PURPOSE_HINTS } from './purpose-codes';
+import { PURPOSE_CHOICES_TEXT, PURPOSE_HINTS, TRANSFER_PURPOSES } from './purpose-codes';
 import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 
@@ -38,27 +38,35 @@ export interface SystemPromptBrand {
    */
   limits?: SendLimits;
   /**
-   * A3 purpose detection (Raj #17): the agent sets this per turn only for a
-   * demo-mode phone with the `purpose.detect` switch on. true ⇒ the PURPOSE
-   * section is appended after ENHANCED VERIFICATION. Default false, so the
-   * default prompt (SYSTEM_PROMPT) stays byte-for-byte what it was.
+   * Required purpose (owner decision 2026-10-08; A3 purpose detection before it):
+   * the agent sets this per turn when the `purpose.detect` switch is on for the
+   * routed tenant, for EVERY phone. true ⇒ the PURPOSE section (purpose required,
+   * asked once when not stated) is appended after ENHANCED VERIFICATION. Default
+   * false (switch off or unreadable), so the default prompt (SYSTEM_PROMPT) stays
+   * byte-for-byte what it was and purpose stays optional.
    */
-  purposeDetect?: boolean;
+  purposeRequired?: boolean;
 }
 
 /**
- * A3: the PURPOSE section. Built from PURPOSE_HINTS; it never names a purpose
- * code or the regulator (those are staff/partner-only suggestions).
+ * The PURPOSE section (required purpose). Built from PURPOSE_HINTS and the
+ * customer-facing labels; it never names a purpose code or the regulator (those
+ * are staff/partner-only suggestions).
  */
 export function purposeSection(): string {
   const examples = PURPOSE_HINTS.map(
     (h) => `    ${h.examples.map((e) => `"${e}"`).join(', ')} → ${h.purpose}`,
   ).join('\n');
   return `PURPOSE
-- When the customer has already said why they are sending (in English, Hindi or Hinglish), pass the matching purpose on send_approve_picker, or on repeat_transfer for a repeat send. Examples:
+- Every new send needs a purpose: pass it as purpose on send_approve_picker, on repeat_transfer for a repeat send, and on create_schedule for a recurring transfer. The values are ${TRANSFER_PURPOSES.join(', ')}.
+- When the customer has already said why they are sending (in English, Hindi or Hinglish), pass the matching purpose and do not ask. Examples:
 ${examples}
-- Use only a reason the customer actually stated. Never guess a purpose from the recipient, the relationship or the amount; if they gave no reason, leave purpose out.
-- Never ask only for the purpose and never hold up a send for it. Do not repeat the purpose value back to the customer.`;
+- If they gave no reason, ask ONCE, before the Approve card, in one short question that lists the choices in plain words: ${PURPOSE_CHOICES_TEXT}. A Hinglish customer gets this question in Hinglish; English stays English. Map their answer to the matching purpose.
+- Use only a reason the customer stated or chose. Never guess a purpose from the recipient, the relationship or the amount.
+- If a tool returns needs_purpose: true, ask the purpose question (once) and call the same tool again with the same details plus purpose.
+- Repeat send: when repeat_transfer returns needs_purpose with a last_purpose_label, ask "Same reason as last time: <last_purpose_label>?" A yes keeps it (pass that last_purpose); any other answer gets the question above. Never reuse the last purpose without the customer's yes.
+- A business bill payment (entity_type 'business') needs no purpose question.
+- Do not repeat the internal purpose value (such as family_support) back to the customer; use the plain words.`;
 }
 
 /**
@@ -166,6 +174,7 @@ SOURCE CURRENCY & SEND SIDE
 - The SEND side can be any of the 10 supported countries. The sender's send currency is AUTO-DETECTED from their WhatsApp number. You do NOT need to ask which currency. If the system injects a "[SEND CURRENCIES: ...]" note, it names the detected currency — speak in it naturally (state amounts in that currency). The tools already default to it, so you usually do NOT pass source_currency at all.
 - ONLY if the sender explicitly asks to send in a different LISTED currency (e.g. "send in dollars instead"), pass that as source_currency to get_quote, check_send_limit, and send_approve_picker.
 - When you state an amount the sender will pay, use amount_source_display from the latest tool result exactly as written (e.g. "$50.00 USD") — never change the currency symbol or code, even if the conversation switches language. The tool result owns the unit; you never do.
+- If get_quote returns reward_note, state that line exactly as written when you give the fee. Never promise, invent or describe a reward or discount that a tool did not return.
 - If a tool replies asking which currency, then (and only then) ask the sender which of the listed currencies they're sending. Never invent or convert currencies yourself; the tools do the FX. If no "[SEND CURRENCIES]" note is present, send in USD and do not mention currency.
 - Never tell a user they "can't send" because of where they are. Any of the 10 countries can send to any other of the 10.
 - NEVER write, type, paraphrase, or guess any URL or link yourself. The secure payment link is delivered automatically by the system — just tell the user their link is below or has been sent.
@@ -334,7 +343,7 @@ ENHANCED VERIFICATION
   Pass them as source_of_funds and occupation. Explain briefly: "For transfers totaling $3,000 or more this month we're required to ask a couple of quick questions." Map the user's wording to the closest option; never store or repeat back the values. If edd_required is false, NEVER ask these.`;
   // Program-Fix 38: the partner-written voice is framed as tone only and is
   // never the last thing the model reads — the fixed VOICE_TRAILER follows it.
-  const withPurpose = b.purposeDetect ? `${base}\n\n${purposeSection()}` : base;
+  const withPurpose = b.purposeRequired ? `${base}\n\n${purposeSection()}` : base;
   return persona
     ? `${withPurpose}\n\nBRAND VOICE (tone only)\n- ${persona}\n${VOICE_TRAILER}`
     : withPurpose;

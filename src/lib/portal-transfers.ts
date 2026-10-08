@@ -5,6 +5,9 @@ import { formatMoney } from './ui/money';
 import { transferStatusView } from './ui/transfer-status';
 import { payoutMethodLabel } from './payout-format';
 import { isPartnerPulled } from './funding-method';
+import { rewardReceiptLine } from './rewards/engine';
+import { usdToSource } from './rewards/customer';
+import type { QuotedReward } from './rewards/types';
 import type { EntityType, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from './types';
 
 /**
@@ -236,9 +239,13 @@ export interface ReceiptView {
   destCurrency: string;
   fxRate: number;
   statusKey: MessageKey;
+  /** Batch B1: the payout partner's confirmation (e.g. a UTR), shown only once delivered. */
+  payoutReference?: string;
+  /** B3 rewards v1: the reward the transfer carried, e.g. "Reward: first transfer free (saved $1.99)." */
+  rewardLine?: string;
 }
 
-export function receiptView(t: Transfer): ReceiptView {
+export function receiptView(t: Transfer, reward?: Pick<QuotedReward, 'kind' | 'discountUsd' | 'detail'> | null): ReceiptView {
   return {
     id: t.id,
     createdAt: t.createdAt,
@@ -253,6 +260,8 @@ export function receiptView(t: Transfer): ReceiptView {
     destCurrency: t.destinationCurrency ?? 'INR',
     fxRate: t.fxRate,
     statusKey: transferStatusView(t).labelKey,
+    ...(t.status === 'delivered' && t.payoutReference ? { payoutReference: t.payoutReference } : {}),
+    ...(reward ? { rewardLine: rewardReceiptLine(reward, (usd) => formatMoney(usdToSource(usd, t.sourceCurrency ?? 'USD', t.amountSource, t.amountUsd), t.sourceCurrency ?? 'USD')) } : {}),
   };
 }
 
@@ -271,9 +280,11 @@ export function renderReceiptText(v: ReceiptView, brand: string): string {
     `${t('portal.receipt.destination')}: ${payoutMethodLabel(v.payoutMethod)} ${v.maskedDestination}`,
     `${t('portal.receipt.youSend')}: ${formatMoney(v.amount, v.currency)}`,
     `${t('portal.receipt.fee')}: ${formatMoney(v.fee, v.currency)}`,
+    ...(v.rewardLine ? [v.rewardLine] : []),
     `${t('portal.receipt.total')}: ${formatMoney(v.total, v.currency)}`,
     `${t('portal.receipt.rate')}: 1 ${v.currency} = ${v.fxRate} ${v.destCurrency}`,
     `${t('portal.receipt.theyGet')}: ${formatMoney(v.amountDest, v.destCurrency)}`,
+    ...(v.payoutReference ? [`${t('portal.receipt.payoutReference')}: ${v.payoutReference}`] : []),
     '',
     t('portal.receipt.textFoot', { brand }),
   ].join('\n');

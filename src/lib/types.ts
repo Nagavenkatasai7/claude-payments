@@ -134,6 +134,9 @@ export interface Transfer {
   fxProvider?: string;          // e.g. FX_PROVIDER_ID (rate.ts); 'partner' for a partner rate
   fxExpiresAt?: string;         // ISO expiry of the partner PUSH that priced fxRate; the pay-time
                                 // check (minted-rate.ts) ends the lock here. Absent ⇒ no push.
+  // ── Batch B1: order references. WRITE-ONCE, both optional (absent on older rows).
+  clientReference?: string;     // the partner's own order number (Partner API client_reference)
+  payoutReference?: string;     // the payout partner's confirmation (e.g. a UTR), from a signed callback
 }
 
 /**
@@ -277,6 +280,11 @@ export interface Schedule {
   partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
   sourceCurrency: CurrencyCode;   // NEW (P4)
   amountSource: number;           // NEW (P4)
+  /**
+   * Required purpose (owner decision 2026-10-08): the reason every run's transfer carries. Absent
+   * on a schedule made before the requirement: it keeps running and its transfers show "Not stated".
+   */
+  purpose?: TransferPurpose;
 }
 
 // 'support' (NEW): tickets-only staff — answers customer queries, escalates to
@@ -471,6 +479,10 @@ export interface Draft {
   // when its rate won the corridor at quote time (default-tenant only).
   // Internal — never shown to the customer. Absent ⇒ platform default.
   settlementPartnerId?: PartnerId;
+  // B3 rewards v1: the reward the quote carries (its fee is already lowered in
+  // `quote`). The mint re-checks it under the sender lock and records it; a
+  // reward that ended meanwhile refuses the mint and the draft is kept.
+  reward?: import('./rewards/types').QuotedReward;
   // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
   // Carried on the draft so the approve-tap mint threads the same discriminators,
   // business names, and linked invoice into createTransfer that the card showed.

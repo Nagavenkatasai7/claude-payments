@@ -37,7 +37,7 @@ vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable }),
+  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer: async () => false }),
 }));
 vi.mock('@/db/repos/aux-repos', () => ({ createIdempotencyRepo: () => ({ find }) }));
 

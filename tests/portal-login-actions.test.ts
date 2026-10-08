@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
-import { auditEvents, customers, outbox, tickets } from '@/db/schema';
-import { freshDb, seedPartner } from './helpers-db';
+import { auditEvents, customers, outbox, referralAttributions, tickets } from '@/db/schema';
+import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 
@@ -127,6 +127,8 @@ import { consentAction, portalLoginAction, requestCodeAction, requestMfaRecovery
 import { createPortalOtpStore, PORTAL_OTP_IP_LIMIT } from '@/lib/portal-otp-store';
 import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-session-store';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createReferralRepo } from '@/db/repos/referral-repo';
+import { REFERRAL_COOKIE } from '@/lib/referral-code';
 
 const KNOWN = '14155550101';
 const UNKNOWN = '14155560101';
@@ -765,5 +767,71 @@ describe('resendCodeAction', () => {
   });
   it('an unknown token → expired', async () => {
     expect(await resendCodeAction(null, fd({ pending: 'b'.repeat(64) }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
+  });
+});
+
+describe('Batch B4: the portal referral cookie', () => {
+  beforeEach(async () => {
+    const r = createReferralRepo(db);
+    await r.insertPartner({ id: 'rp_tana', name: 'TANA', contact: 'events@tana.org', commissionCents: 100, createdBy: 'admin' });
+    await r.insertCode({ code: 'REF-TANA01', referralPartnerId: 'rp_tana', createdBy: 'admin' });
+  });
+  const links = () => db.select().from(referralAttributions);
+
+  it('a new customer completing consent is linked under the HOST partner (channel portal); the cookie is spent', async () => {
+    h.jar.set(REFERRAL_COOKIE, 'REF-TANA01');
+    const { verify } = await codeStep(UNKNOWN);
+    const s = await verify();
+    expect(await links()).toEqual([]); // nothing before full authentication and consent
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes' })), '/portal');
+    const rows = await links();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partnerId: 'pa', phone: UNKNOWN, referralPartnerId: 'rp_tana', code: 'REF-TANA01', channel: 'portal' });
+    expect(h.jar.has(REFERRAL_COOKIE)).toBe(false);
+  });
+
+  it('an existing customer without a delivered transfer is linked at sign-in; one with a delivered transfer is not', async () => {
+    h.jar.set(REFERRAL_COOKIE, 'REF-TANA01');
+    await expectRedirect((await codeStep(KNOWN)).verify(), '/portal');
+    expect((await links()).map((r) => r.phone)).toEqual([KNOWN]);
+
+    const DELIVERED = '14155590101';
+    await repo().upsertOnFirstInbound('pa', DELIVERED);
+    await seedLedgerSpend(db, { partnerId: 'pa', phone: DELIVERED, amountUsd: 10, status: 'delivered' });
+    h.jar.set(REFERRAL_COOKIE, 'REF-TANA01');
+    await expectRedirect((await codeStep(DELIVERED)).verify(), '/portal');
+    expect((await links()).map((r) => r.phone)).toEqual([KNOWN]);
+  });
+
+  it('a malformed or unknown code links nothing and never blocks the sign-in', async () => {
+    h.jar.set(REFERRAL_COOKIE, '<script>');
+    await expectRedirect((await codeStep(KNOWN)).verify(), '/portal');
+    h.jar.set(REFERRAL_COOKIE, 'REF-NOPE00');
+    const { verify } = await codeStep(UNKNOWN);
+    const s = await verify();
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes' })), '/portal');
+    expect(await links()).toEqual([]);
+  });
+
+  it('a database error only logs: the sign-in still completes', async () => {
+    h.jar.set(REFERRAL_COOKIE, 'REF-TANA01');
+    await db.execute(sql`CREATE OR REPLACE FUNCTION b4_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'boom'; END $$`);
+    await db.execute(sql`CREATE TRIGGER b4_fail BEFORE INSERT ON referral_attributions FOR EACH ROW EXECUTE FUNCTION b4_fail()`);
+    try {
+      const { verify } = await codeStep(UNKNOWN);
+      const s = await verify();
+      await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes' })), '/portal');
+      expect((await repo().getCustomer('pa', UNKNOWN))?.optInAt).toBeTruthy();
+      expect(await links()).toEqual([]);
+    } finally {
+      await db.execute(sql`DROP TRIGGER b4_fail ON referral_attributions`);
+    }
+  });
+
+  it('no cookie: no referral query, nothing written', async () => {
+    const { verify } = await codeStep(UNKNOWN);
+    const s = await verify();
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes' })), '/portal');
+    expect(await links()).toEqual([]);
   });
 });

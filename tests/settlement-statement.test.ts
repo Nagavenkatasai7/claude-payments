@@ -194,7 +194,19 @@ describe('statementRow', () => {
       paid_at: '2026-09-22T10:00:00.123Z',
       delivered_at: '2026-09-22T10:00:05.000Z',
       refunded_at: null,
+      client_reference: null,
+      payout_reference: null,
     });
+  });
+
+  it('Batch B1: client_reference and payout_reference are the LAST two columns', () => {
+    expect(STATEMENT_COLUMNS.slice(-2)).toEqual(['client_reference', 'payout_reference']);
+    expect(STATEMENT_COLUMNS.indexOf('refunded_at')).toBe(STATEMENT_COLUMNS.length - 3);
+    const r = statementRow(settled({ clientReference: 'PO-77', payoutReference: 'SIMPAY-tr_1' }));
+    expect(r.client_reference).toBe('PO-77');
+    expect(r.payout_reference).toBe('SIMPAY-tr_1');
+    const csv = toCsv([r]).split('\r\n');
+    expect(csv[1].endsWith(',"PO-77","SIMPAY-tr_1"')).toBe(true);
   });
 
   it('never carries the settlement partner, a payout destination or recipient identity', () => {
@@ -255,7 +267,7 @@ describe('toCsv', () => {
     expect(lines[0]).toBe(STATEMENT_COLUMNS.join(','));
     expect(lines[1]).toBe(
       '"tr_1","delivered","cleared","none",200,"USD",1.99,201.99,85.2,17040,"INR","IN","bank","sim-tr_1",,,' +
-        '"2026-09-22T09:59:00.000Z","2026-09-22T10:00:00.123Z","2026-09-22T10:00:05.000Z",',
+        '"2026-09-22T09:59:00.000Z","2026-09-22T10:00:00.123Z","2026-09-22T10:00:05.000Z",,,',
     );
     expect(csv.endsWith('\r\n')).toBe(true);
   });
