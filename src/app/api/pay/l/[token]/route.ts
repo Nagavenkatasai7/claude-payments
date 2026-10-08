@@ -29,7 +29,8 @@ import type { PartnerId } from '@/lib/types';
 // Batch B2: the customer's payment of a payment link (/pay/l/[token]).
 //
 //   {action:'request_otp'}                → a WhatsApp code to the link's phone
-//   {otp, fundingMethod, disclosureVersion} → verify, mint ONE transfer
+//   {otp, fundingMethod, disclosureVersion, quoteLockedAt}
+//                                         → verify, mint ONE transfer
 //                                            (finalizeLinkPayment, claim-first),
 //                                            then the SAME capture + settle-or-hold
 //                                            as the hosted pay page (pay-process.ts)
@@ -73,7 +74,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
   if (limited) return limited;
 
   try {
-    let body: { action?: unknown; otp?: unknown; fundingMethod?: unknown; disclosureVersion?: unknown } = {};
+    let body: {
+      action?: unknown;
+      otp?: unknown;
+      fundingMethod?: unknown;
+      disclosureVersion?: unknown;
+      quoteLockedAt?: unknown; // the identity of the rate lock the page showed
+    } = {};
     try {
       body = (await req.json()) as typeof body;
     } catch {
@@ -140,10 +147,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       return NextResponse.json({ ok: false, error: 'Choose how you want to pay.' }, { status: 400 });
     }
     // What-you-see-is-what-you-pay: the rate the page locked, never a re-quote.
+    // The page posts back the lock it rendered; a lapsed lock, or a newer one a
+    // later visit made at another rate, is refused so an old tab never pays
+    // figures its disclosure did not show. (A resume pays the minted figures.)
     const rate = await getLinkQuoteStore().get(link.id);
-    if (!rate && !payable.transfer) {
+    if (!payable.transfer && (!rate || body.quoteLockedAt !== rate.lockedAt)) {
       return NextResponse.json(
-        { ok: false, reason: 'quote_expired', error: 'The rate updated. Please review the new total.' },
+        { ok: false, reason: 'quote_expired', error: 'The rate changed. Check the new amount.' },
         { status: 409 },
       );
     }

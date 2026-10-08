@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, type FormEvent, type ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
 import { payErrorMessage } from '@/lib/pay-outcome';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
@@ -8,7 +9,8 @@ import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 // Batch B2: the payment-link form. Pick how to pay (bank $1.99 / debit card
 // $2.99), read the disclosure for that choice, get a WhatsApp code, pay, then
 // the receipt. Every figure comes from the server render; the POST carries only
-// the method, the code and the acknowledged disclosure version.
+// the method, the code, the acknowledged disclosure version and the identity of
+// the rate lock the figures came from (the route refuses any other lock).
 
 export type LinkPayMethod = 'bank_transfer' | 'debit_card';
 
@@ -27,6 +29,7 @@ interface Receipt {
 }
 
 const INACTIVE_COPY = 'This payment link is no longer active.';
+const RATE_CHANGED_COPY = 'The rate changed. Check the new amount.';
 
 const otpInputClasses =
   'mt-1 w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-center text-[22px] tracking-[0.5em] text-[#e9edef] tabular-nums';
@@ -66,14 +69,18 @@ export function LinkPayForm({
   options,
   disclosures,
   disclosureVersion,
+  quoteLockedAt,
   receipt,
 }: {
   token: string;
   options: LinkPayOption[];
   disclosures: Partial<Record<LinkPayMethod, ReactNode>>;
   disclosureVersion: string | null;
+  /** The rate lock these figures come from; null when a minted transfer's fixed figures are shown. */
+  quoteLockedAt: string | null;
   receipt: Receipt;
 }) {
+  const router = useRouter();
   const [method, setMethod] = useState<LinkPayMethod>(options[0]?.method ?? 'bank_transfer');
   const [acked, setAcked] = useState(false);
   const [sent, setSent] = useState(false);
@@ -126,6 +133,7 @@ export function LinkPayForm({
           otp: code,
           fundingMethod: chosen.method,
           ...(disclosure !== null && disclosureVersion && acked ? { disclosureVersion } : {}),
+          ...(quoteLockedAt ? { quoteLockedAt } : {}),
         }),
       });
       const data = (await res.json().catch(() => null)) as
@@ -145,8 +153,15 @@ export function LinkPayForm({
         return;
       }
       if (data?.reason === 'quote_expired') {
-        // The 15-minute rate lock lapsed: reload for the fresh figures before paying.
-        window.location.reload();
+        // The rate lock these figures came from lapsed or was replaced. Say so,
+        // re-render the server figures (router.refresh keeps this form's state,
+        // node_modules/next/dist/docs/01-app/03-api-reference/04-functions/use-router.md:46)
+        // and ask for a fresh acknowledgement of the new disclosure. The code was
+        // not spent: the route refuses before checking it.
+        setAcked(false);
+        setErrorMessage(RATE_CHANGED_COPY);
+        setStatus('error');
+        router.refresh();
         return;
       }
       if (data?.reason === 'otp') setOtpError('That code is incorrect or expired. Resend and try again.');

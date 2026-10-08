@@ -111,6 +111,9 @@ async function renderPage(token: string): Promise<React.ReactNode> {
   // failed before) shows THAT transfer's fixed figures and its one method.
   let options: LinkPayOption[];
   let fxRate: number;
+  // The identity of the rate lock these figures come from: the form posts it
+  // back and the pay route refuses any other lock (null on a resume).
+  let quoteLockedAt: string | null = null;
   if (transfer) {
     fxRate = transfer.fxRate;
     options = [{
@@ -123,6 +126,7 @@ async function renderPage(token: string): Promise<React.ReactNode> {
   } else {
     const rate = await lockedOrFreshLinkRate(getLinkQuoteStore(), link.id);
     fxRate = rate.toInr;
+    quoteLockedAt = rate.lockedAt;
     try {
       options = LINK_FUNDING_METHODS.map((method) => {
         const q = linkQuote(link.amountInr, rate, method);
@@ -176,6 +180,7 @@ async function renderPage(token: string): Promise<React.ReactNode> {
         options={options}
         disclosures={disclosures}
         disclosureVersion={disclosureVersion}
+        quoteLockedAt={quoteLockedAt}
         receipt={{ payeeName: payee.legalName, reference: link.reference, amountInr: link.amountInr }}
       />
     </Sheet>
