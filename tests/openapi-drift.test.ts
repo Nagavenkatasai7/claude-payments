@@ -68,4 +68,18 @@ describe('openapi.yaml ⇄ src/app/api/partner/v1 drift', () => {
     const tx = loadPartnerOpenApiDocument().schemas.find((s) => s.name === 'Transaction')!;
     expect(tx.fields.find((f) => f.name === 'purpose')).toMatchObject({ type: 'string | null' });
   });
+
+  // Batch B follow-up A3: purpose_detail (required with purpose other) is documented on the request,
+  // the 422 and the Transaction schema, and the service's 422 text matches the documented range.
+  it('purpose_detail: the description, the 422 and the Transaction schema document it', async () => {
+    const { loadPartnerOpenApi, loadPartnerOpenApiDocument } = await import('@/lib/openapi/load-spec');
+    const { PURPOSE_DETAIL_REQUIRED_422 } = await import('@/lib/partner-api-service');
+    const mint = loadPartnerOpenApi().find((o) => key(o) === 'POST /transactions')!;
+    expect(mint.description).toMatch(/purpose_detail is required when\s+purpose is other/);
+    expect(mint.description).toContain('10 to 120 characters');
+    expect(mint.responses[422]).toContain('purpose_detail');
+    expect(PURPOSE_DETAIL_REQUIRED_422).toBe('purpose_detail is required when purpose is other (10 to 120 characters).');
+    const tx = loadPartnerOpenApiDocument().schemas.find((s) => s.name === 'Transaction')!;
+    expect(tx.fields.find((f) => f.name === 'purpose_detail')).toMatchObject({ type: 'string | null' });
+  });
 });

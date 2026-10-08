@@ -47,6 +47,7 @@ import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from '.
 import { logWarn } from './log';
 import { parseClientReference } from './order-references';
 import { parsePurpose, TRANSFER_PURPOSES } from './purpose-codes';
+import { decidePurpose, PURPOSE_DETAIL_MAX, PURPOSE_DETAIL_MIN, type PurposeDetailCode } from './purpose-detail';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -128,7 +129,10 @@ function parsePayoutMethod(v: unknown): PayoutMethod | null | undefined {
 // `senderName` is the customer's DECRYPTED legal name (only present after KYC);
 // pass it in pre-resolved (resolveSenderNames) so the list path stays one query,
 // not an N+1. Absent name ⇒ null (the partner falls back to sender_phone).
-function transferView(t: Transfer, senderName: string | null = null) {
+//
+// Batch B follow-up A3: `purposeDetail` is the customer's own reason (decrypted), passed in
+// pre-resolved for THIS partner's rows only (tenant-scoped reads), null when there is none.
+function transferView(t: Transfer, senderName: string | null = null, purposeDetail: string | null = null) {
   return {
     id: t.id,
     status: t.status,
@@ -154,6 +158,8 @@ function transferView(t: Transfer, senderName: string | null = null) {
     payout_reference: t.payoutReference ?? null,
     // Required purpose (owner decision 2026-10-08); null on a transaction made before it.
     purpose: t.purpose ?? null,
+    // Batch B follow-up A3: the reason given with purpose other (decrypted for the owning partner).
+    purpose_detail: purposeDetail,
   };
 }
 
@@ -163,7 +169,9 @@ function transferView(t: Transfer, senderName: string | null = null) {
 async function transferViewWithName(deps: PartnerApiDeps, t: Transfer) {
   // Tenant-keyed (F50/F52): only the caller's OWN customer row can supply a name.
   const names = await resolveSenderNames(deps.db, [t]);
-  return transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null);
+  // Tenant-scoped: the row must be the caller's (t.partnerId is the key's partner on every caller).
+  const detail = await createTransferRepo(deps.db).getPurposeDetail(t.id, { partnerId: t.partnerId });
+  return transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null, detail);
 }
 
 // The supported destination set + its home currency — derived from the single
@@ -174,6 +182,18 @@ const SUPPORTED_DESTINATIONS = (Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as 
 // Required purpose (owner decision 2026-10-08): the two 422s for POST /transactions.
 export const PURPOSE_REQUIRED_422 = `purpose is required: one of ${TRANSFER_PURPOSES.join(', ')}.`;
 export const PURPOSE_INVALID_422 = `purpose must be one of: ${TRANSFER_PURPOSES.join(', ')}.`;
+
+// Batch B follow-up A3: the purpose_detail 422s. The reason a detail is refused is its shape only
+// (missing, length, no real words); a scam-pattern match is never a refusal and is never named.
+export const PURPOSE_DETAIL_REQUIRED_422 =
+  `purpose_detail is required when purpose is other (${PURPOSE_DETAIL_MIN} to ${PURPOSE_DETAIL_MAX} characters).`;
+export const PURPOSE_DETAIL_TYPE_422 = 'purpose_detail must be a string.';
+export function purposeDetail422(code: PurposeDetailCode): string {
+  if (code === 'too_short') return `purpose_detail is too short: use ${PURPOSE_DETAIL_MIN} to ${PURPOSE_DETAIL_MAX} characters.`;
+  if (code === 'too_long') return `purpose_detail is too long: use ${PURPOSE_DETAIL_MIN} to ${PURPOSE_DETAIL_MAX} characters.`;
+  if (code === 'nonsense') return 'purpose_detail must say in a few words what the money is for.';
+  return PURPOSE_DETAIL_REQUIRED_422;
+}
 
 // Program-Fix 33 (owner decision 2): the 400 for an unknown destination_country.
 const DESTINATION_COUNTRY_400 = `destination_country must be one of: ${destinationListText()}.`;
@@ -484,8 +504,20 @@ export async function createTransaction(
   // A sandbox (test key) mint needs one too.
   const purposeArg = body.purpose;
   if (purposeArg === undefined || purposeArg === null || purposeArg === '') return err(422, PURPOSE_REQUIRED_422);
-  const purpose = parsePurpose(purposeArg);
-  if (!purpose) return err(422, PURPOSE_INVALID_422);
+  const chosenPurpose = parsePurpose(purposeArg);
+  if (!chosenPurpose) return err(422, PURPOSE_INVALID_422);
+  // Batch B follow-up A3: purpose other needs purpose_detail (the customer's reason), checked HERE
+  // with the purpose (before the customer write and the claim). The same rule as every channel: a
+  // reason that names one purpose makes the transfer that purpose (the reason is kept); any other
+  // purpose ignores purpose_detail (nothing stored). A reason that matches a scam pattern is held
+  // for review at the mint, like every channel, and the response never says so beyond
+  // compliance_status.
+  const detailArg = body.purpose_detail;
+  if (detailArg !== undefined && detailArg !== null && typeof detailArg !== 'string') return err(422, PURPOSE_DETAIL_TYPE_422);
+  const decided = decidePurpose(chosenPurpose, detailArg);
+  if (!decided.ok) return err(422, purposeDetail422(decided.code));
+  const purpose = decided.purpose;
+  const purposeDetail = decided.detail;
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
   // later inserts its beneficiary name / destination edge validation ABOVE this
@@ -557,6 +589,7 @@ export async function createTransaction(
       environment, // Program-Fix 44 P2 — from the key, never the body
       clientReference: clientRef.value, // Batch B1
       purpose, // required purpose (validated above)
+      ...(purposeDetail ? { purposeDetail } : {}), // Batch B follow-up A3 (sealed, write-once)
     }));
   } catch (e) {
     // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
@@ -643,8 +676,12 @@ export async function listTransactions(
   });
   // Resolve ALL sender names in ONE query (not N+1 per row), then project.
   const names = await resolveSenderNames(deps.db, page.items);
+  // Batch B follow-up A3: every reason on the page in ONE tenant-scoped query.
+  const details = await createTransferRepo(deps.db).listPurposeDetails(partnerId, page.items.map((t) => t.id));
   return ok(200, {
-    transactions: page.items.map((t) => transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null)),
+    transactions: page.items.map((t) =>
+      transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null, details.get(t.id) ?? null),
+    ),
     next_cursor: page.nextCursor ?? null,
   });
 }

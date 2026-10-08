@@ -284,6 +284,24 @@ export function createTransferRepo(
     },
 
     /**
+     * Batch B follow-up A3: the "Other" reasons of several of ONE partner's transfers in one query
+     * (the Partner API list). Tenant-scoped: an id of another partner is simply absent from the map.
+     */
+    async listPurposeDetails(partnerId: PartnerId, ids: readonly string[]): Promise<Map<string, string>> {
+      const out = new Map<string, string>();
+      if (ids.length === 0) return out;
+      const rows = await db
+        .select({ id: transfers.id, enc: transfers.purposeDetailEnc })
+        .from(transfers)
+        .where(and(eq(transfers.partnerId, partnerId), inArray(transfers.id, [...ids]), isNotNull(transfers.purposeDetailEnc)));
+      for (const r of rows) {
+        const v = openOptional(r.enc, provider, ctx.transfer(r.id, 'purpose_detail_enc'));
+        if (v) out.set(r.id, v);
+      }
+      return out;
+    },
+
+    /**
      * Compat upsert (mirrors the Redis saveTransfer SET semantics) — with a
      * structural guard: DEFAULT reads return a MASKED payout destination
      * (****last4) and omit the decrypt-only recipientLegalName, so a
