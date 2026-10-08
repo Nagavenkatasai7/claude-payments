@@ -9,7 +9,7 @@ import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
 import { SendsPausedError } from './flags';
 import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold, applyPurposeHold } from './aml-hold';
-import { checkPurposeDetail } from './purpose-detail';
+import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
@@ -737,14 +737,16 @@ async function mintLocked(
   }
   // ── Purpose hold (Batch B follow-up A4) ───────────────────────────────────
   // The reason for purpose `other` is re-checked here (the server is the
-  // authority): only a valid one is stored. A scam-pattern reason holds the
+  // authority): only a valid one is stored, or an invalid one that matches a
+  // scam pattern (keptPurposeDetail, security review L2: the bot sends one on
+  // when purpose.detect is off). A scam-pattern reason holds the
   // transfer, cleared → flagged with the generic reason, never a downgrade and
   // never touching blocked (applyPurposeHold). OWNER DECISION 2026-10-08: this
   // hold applies to EVERY partner, the default (demo) tenant and simulator
   // rails included (unlike the optional AML hold above), so the owner can test it.
-  const purposeCheck = input.purposeDetail ? checkPurposeDetail(input.purposeDetail) : null;
-  const purposeDetail = purposeCheck?.ok ? purposeCheck.detail : undefined;
-  const purposeRisk = purposeCheck?.ok ? purposeCheck.risk?.category : undefined;
+  const keptPurpose = input.purposeDetail ? keptPurposeDetail(input.purposeDetail) : undefined;
+  const purposeDetail = keptPurpose?.detail;
+  const purposeRisk = keptPurpose?.risk;
   ({ complianceStatus, complianceReasons } = applyPurposeHold({ complianceStatus, complianceReasons }, purposeRisk));
   const transfer: Transfer = {
     id,

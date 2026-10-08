@@ -20,7 +20,7 @@ import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { PURPOSE_CHOICES_TEXT, PURPOSE_LABELS, PURPOSE_REQUIRED_HINT, TRANSFER_PURPOSES, parsePurpose } from './purpose-codes';
-import { decidePurpose, PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING, validPurposeDetail, type PurposeRiskCategory } from './purpose-detail';
+import { decidePurpose, keptPurposeDetail, PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING, type PurposeRiskCategory } from './purpose-detail';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
 import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
@@ -3741,8 +3741,9 @@ export async function validateScheduleInput(
   // stated purpose is kept whether or not it is required.
   const purpose = parsePurpose(input.purpose);
   if (opts.requirePurpose && !purpose) return { ok: false, code: 'purpose' };
-  // Batch B follow-up A3: the caller already applied decidePurpose; only a valid reason is kept.
-  const purposeDetail = purpose ? validPurposeDetail(input.purposeDetail) : undefined;
+  // Batch B follow-up A3: the caller already applied decidePurpose; only a valid reason is kept
+  // (or an invalid one that matches a scam pattern, security review L2: each run is held).
+  const purposeDetail = purpose ? keptPurposeDetail(input.purposeDetail)?.detail : undefined;
   // M2-10 (portal only): the amount is checked BEFORE resolveSender, so a refusal writes nothing.
   if (opts.amountBounds && !scheduleAmountInBounds(input.amountSource)) return { ok: false, code: 'amount' };
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
@@ -4075,15 +4076,20 @@ type ArgsPurpose =
  * names one purpose turns `other` into it (the reason is kept); any other
  * purpose ignores purpose_detail. The QUESTION follows the purpose.detect switch
  * like the rest of the bot's purpose logic: with ctx.purposeRequired off, `other`
- * without a valid reason goes on as plain `other` (never asked, as before). A
- * business bill payment is always 'business' and never asked.
+ * without a valid reason goes on as plain `other` (never asked, as before),
+ * unless the text still matches a scam pattern (security review L2): then it
+ * is kept, bounded (keptPurposeDetail), so the customer is warned and the mint
+ * holds the transfer. A business bill payment is always 'business' and never asked.
  */
 function purposeFromArgs(args: Record<string, unknown>, ctx: ToolContext): ArgsPurpose {
   const purpose = parsePurpose(args.purpose);
   if (purpose !== 'other' || isB2bArgs(args)) return { ok: true, purpose };
   const d = decidePurpose('other', args.purpose_detail);
   if (d.ok) return { ok: true, purpose: d.purpose, detail: d.detail, risk: d.risk };
-  if (!ctx.purposeRequired) return { ok: true, purpose: 'other' };
+  if (!ctx.purposeRequired) {
+    const kept = keptPurposeDetail(args.purpose_detail);
+    return kept?.risk ? { ok: true, purpose: 'other', detail: kept.detail, risk: kept.risk } : { ok: true, purpose: 'other' };
+  }
   return { ok: false, result: { needs_purpose_detail: true, reply_hint: PURPOSE_DETAIL_HINT } };
 }
 
@@ -4327,6 +4333,8 @@ export async function prepareSendDraft(
       return { kind: 'blocked' };
     }
 
+    // Batch B follow-up A3 / security review L2: the reason the draft keeps (re-checked at the mint).
+    const keptDetail = keptPurposeDetail(input.purposeDetail)?.detail;
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       partnerId: ctx.partnerId,
@@ -4348,9 +4356,7 @@ export async function prepareSendDraft(
       purpose: b2b ? BUSINESS_PURPOSE : parsePurpose(input.purpose),
       // Batch B follow-up A3: the reason rides the draft to the mint (plaintext in
       // Redis like the other draft fields; sealed on the transfer row).
-      ...(!b2b && parsePurpose(input.purpose) && validPurposeDetail(input.purposeDetail)
-        ? { purposeDetail: validPurposeDetail(input.purposeDetail) }
-        : {}),
+      ...(!b2b && parsePurpose(input.purpose) && keptDetail ? { purposeDetail: keptDetail } : {}),
       sourceOfFunds: asEnum(SOURCE_OF_FUNDS, input.sourceOfFunds),
       occupation: asEnum(OCCUPATIONS, input.occupation),
       quote: {

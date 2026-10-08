@@ -177,6 +177,18 @@ function riskOf(lower: string): PurposeRiskCategory | undefined {
   return RISK_MATCHERS.find(([, res]) => res.some((re) => re.test(lower)))?.[0];
 }
 
+/** Where the first scam-pattern keyword starts (UTF-16 index), or -1. */
+function firstRiskIndex(lower: string): number {
+  let first = -1;
+  for (const [, res] of RISK_MATCHERS) {
+    for (const re of res) {
+      const i = lower.search(re);
+      if (i >= 0 && (first < 0 || i < first)) first = i;
+    }
+  }
+  return first;
+}
+
 /**
  * Check the free-text reason for purpose `other`. Normalises (string only,
  * NFKC, control and invisible characters removed, whitespace collapsed,
@@ -232,11 +244,39 @@ export function decidePurpose(purpose: TransferPurpose, rawDetail: unknown): Pur
   return out;
 }
 
-/** The risk category of a STORED reason (staff views and the mint recompute it). Pure. */
+/**
+ * The risk category of a STORED reason (staff views and the portal warning). A stored reason is
+ * valid or, since security review L2, an invalid one kept because it matches a scam pattern
+ * (keptPurposeDetail), so the scam check runs on the text whatever its length. Pure.
+ */
 export function purposeDetailRisk(detail: string | null | undefined): PurposeRiskCategory | undefined {
   if (!detail) return undefined;
-  const r = checkPurposeDetail(detail);
-  return r.ok ? r.risk?.category : undefined;
+  return riskOf(boundUntrustedText(detail, PURPOSE_DETAIL_MAX * 4).toLowerCase());
+}
+
+/**
+ * The reason a send keeps (security review L2). A valid reason comes back normalised, with its
+ * risk. An INVALID one (too short, too long, nonsense) that still matches a scam pattern is kept
+ * too, so the mint can hold it: when the bot's purpose.detect switch is off, `other` with an
+ * invalid reason goes on without asking, and a dropped "lottery" would have gone unchecked. A
+ * kept text is at most PURPOSE_DETAIL_MAX characters: a longer one is cut to the first 120, or,
+ * when the scam words come later, to 120 starting at them (after an ellipsis). Anything else is
+ * undefined. Keeping a kept text again gives the same result (the mint re-checks it). Pure.
+ */
+export function keptPurposeDetail(raw: unknown): { detail: string; risk?: PurposeRiskCategory } | undefined {
+  const r = checkPurposeDetail(raw);
+  if (r.ok) return r.risk ? { detail: r.detail, risk: r.risk.category } : { detail: r.detail };
+  if (r.code === 'missing') return undefined;
+  const text = boundUntrustedText(raw, PURPOSE_DETAIL_MAX * 4);
+  const at = firstRiskIndex(text.toLowerCase());
+  if (at < 0) return undefined;
+  let detail = boundUntrustedText(text, PURPOSE_DETAIL_MAX);
+  let risk = riskOf(detail.toLowerCase());
+  if (!risk) {
+    detail = boundUntrustedText(`…${text.slice(at)}`, PURPOSE_DETAIL_MAX);
+    risk = riskOf(detail.toLowerCase());
+  }
+  return risk ? { detail, risk } : undefined;
 }
 
 /** A valid reason, normalised; anything else (absent, invalid) is undefined. Pure. */

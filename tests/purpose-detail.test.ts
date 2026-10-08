@@ -9,6 +9,8 @@ import {
   PURPOSE_RISK_LABELS,
   PURPOSE_SUGGEST_KEYWORDS,
   PURPOSE_SCAM_WARNING,
+  keptPurposeDetail,
+  purposeDetailRisk,
   validPurposeDetail,
   type PurposeDetailResult,
 } from '@/lib/purpose-detail';
@@ -213,5 +215,46 @@ describe('validPurposeDetail and the warning copy', () => {
       'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. ' +
         'SmartRemit staff check this transfer before the money goes.',
     );
+  });
+});
+
+describe('keptPurposeDetail (security review L2: an invalid reason that matches a scam pattern is kept)', () => {
+  it('keeps a valid reason, normalised, with its risk', () => {
+    expect(keptPurposeDetail('  school fees ')).toEqual({ detail: 'school fees' });
+    expect(keptPurposeDetail('to claim my lottery prize')).toEqual({ detail: 'to claim my lottery prize', risk: 'prize' });
+  });
+
+  it('drops an absent or invalid reason with no scam pattern', () => {
+    for (const raw of [undefined, null, 42, '', '   ', 'short', 'send money', ofLength(121)]) {
+      expect(keptPurposeDetail(raw), String(raw)).toBeUndefined();
+    }
+  });
+
+  it('keeps a too-short reason that matches a scam pattern, as written', () => {
+    expect(keptPurposeDetail(' lottery ')).toEqual({ detail: 'lottery', risk: 'prize' });
+    expect(keptPurposeDetail('bitcoins')).toEqual({ detail: 'bitcoins', risk: 'investment' });
+  });
+
+  it('cuts a too-long risky reason to 120 characters and keeps the matched words', () => {
+    const head = `${'we are helping my uncle with the roof repairs at home '.repeat(4)}`;
+    const raw = `${head}and he said there is a lottery prize to claim`;
+    expect([...raw].length).toBeGreaterThan(PURPOSE_DETAIL_MAX);
+    const kept = keptPurposeDetail(raw);
+    expect(kept?.risk).toBe('prize');
+    expect([...(kept?.detail ?? '')].length).toBeLessThanOrEqual(PURPOSE_DETAIL_MAX);
+    expect(kept?.detail).toContain('lottery');
+    // Kept text is stable: keeping it again gives the same result (the mint re-checks it).
+    expect(keptPurposeDetail(kept?.detail)).toEqual(kept);
+
+    const early = `lottery prize ${ofLength(200)}`;
+    const keptEarly = keptPurposeDetail(early);
+    expect(keptEarly?.detail.startsWith('lottery prize')).toBe(true);
+    expect([...(keptEarly?.detail ?? '')].length).toBeLessThanOrEqual(PURPOSE_DETAIL_MAX);
+  });
+
+  it('purposeDetailRisk names the risk of a kept short reason too (staff views)', () => {
+    expect(purposeDetailRisk('lottery')).toBe('prize');
+    expect(purposeDetailRisk('short')).toBeUndefined();
+    expect(purposeDetailRisk(undefined)).toBeUndefined();
   });
 });

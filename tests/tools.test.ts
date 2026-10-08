@@ -7060,6 +7060,52 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
     expect(d?.purposeDetail).toBeUndefined();
   });
 
+  it('requirement off ⇒ an invalid reason with no scam pattern goes on as plain other (unchanged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'short' }), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.scam_warning).toBeUndefined();
+    const d = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(d?.purpose).toBe('other');
+    expect(d?.purposeDetail).toBeUndefined();
+  });
+
+  it('requirement off ⇒ an invalid reason that matches a scam pattern still warns and holds (security review L2)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const bodies = stubWhatsApp();
+    // Too short.
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'lottery' }), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    expect(JSON.stringify(r)).not.toMatch(/category|lottery/);
+    expect(cardText(bodies[0]).startsWith(`${PURPOSE_SCAM_WARNING}\n\n`)).toBe(true);
+    const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
+    const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+    const t = await createTransferRepo(db).getTransfer(String(minted.transfer_id), { decrypt: true });
+    expect(t).toMatchObject({ purpose: 'other', purposeDetail: 'lottery', complianceStatus: 'flagged' });
+
+    // Too long: kept cut to 120 characters, the scam words included.
+    const long = `${'we are helping my uncle with the roof repairs at home '.repeat(4)}and he said there is a lottery prize to claim`;
+    const r2 = await executeTool('send_approve_picker', picker({ amount_source: 250, purpose: 'other', purpose_detail: long }), ctx);
+    expect(r2.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    const d2 = await ctx.draftStore.consumeDraft(r2.draft_id as string);
+    expect([...(d2?.purposeDetail ?? '')].length).toBeLessThanOrEqual(120);
+    expect(d2?.purposeDetail).toContain('lottery');
+  });
+
+  it('requirement off ⇒ create_transfer (explicit args) holds an invalid risky reason too', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
+    });
+    const ok = await runLegacyCreateTransferForTests({
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other', purpose_detail: 'bitcoins',
+    }, ctx);
+    const t = await createTransferRepo(db).getTransfer(String(ok.transfer_id), { decrypt: true });
+    expect(t).toMatchObject({ purpose: 'other', purposeDetail: 'bitcoins', complianceStatus: 'flagged' });
+  });
+
   it('the approve tap mints the draft with its reason (sealed, held when it matches a scam pattern)', async () => {
     const ctx = await required();
     stubWhatsApp();

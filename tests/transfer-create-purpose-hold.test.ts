@@ -131,10 +131,20 @@ describe('purpose hold', { retry: 0 }, () => {
     expect((await alerts(db)).map((x) => x.dedupe_key)).toEqual([`purposeflag:${t.id}`]);
   });
 
-  it('an invalid reason that reaches the mint is not stored and holds nothing', async () => {
+  it('an invalid reason with no scam pattern that reaches the mint is not stored and holds nothing', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', purposeDetail: 'lottery' });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', purposeDetail: 'roof fix' });
     expect(t.complianceStatus).toBe('cleared');
     expect((await createTransferRepo(db).getTransfer(t.id, { decrypt: true }))?.purposeDetail).toBeUndefined();
+    expect(await purposeAudits(db)).toEqual([]);
+  });
+
+  it('an invalid reason that matches a scam pattern is still held, stored and audited (security review L2)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', purposeDetail: 'lottery' });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual([AML_HOLD_REASON]);
+    expect((await createTransferRepo(db).getTransfer(t.id, { decrypt: true }))?.purposeDetail).toBe('lottery');
+    expect((await purposeAudits(db))[0].meta).toEqual({ category: 'prize' });
   });
 });
