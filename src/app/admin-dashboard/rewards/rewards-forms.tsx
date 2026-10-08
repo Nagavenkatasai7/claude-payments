@@ -4,6 +4,7 @@ import { useActionState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { adminFestivalNamesField } from '@/lib/rewards/settings';
 import type { CatalogEntry, PartnerRewardTerms } from '@/lib/rewards/types';
 import { saveCatalogAction, saveTermsAction, type RewardsAdminResult } from './actions';
 
@@ -34,6 +35,7 @@ function NumberField({ id, name, label, defaultValue, step = '1', min, max }: {
 export function CatalogForm({ entry }: { entry: CatalogEntry }) {
   const [state, action, pending] = useActionState(saveCatalogAction, null);
   const p = `cat-${entry.kind}`;
+  const names = adminFestivalNamesField(entry.festivalNames);
   return (
     <form action={action} className="space-y-4" data-testid={`rewards-catalog-${entry.kind}`}>
       <input type="hidden" name="kind" value={entry.kind} />
@@ -61,8 +63,14 @@ export function CatalogForm({ entry }: { entry: CatalogEntry }) {
       {entry.kind === 'festival' ? (
         <div className="space-y-1.5">
           <Label htmlFor={`${p}-names`}>Festival names partners may choose (one per line)</Label>
-          <textarea id={`${p}-names`} name="festivalNames" rows={4} defaultValue={entry.festivalNames.join('\n')}
+          <textarea id={`${p}-names`} name="festivalNames" rows={6} defaultValue={names.text}
+            aria-describedby={names.suggested ? `${p}-names-hint` : undefined}
             className="w-full rounded-md border border-input bg-card px-3 py-2 text-sm" />
+          {names.suggested ? (
+            <p id={`${p}-names-hint`} className="text-xs text-muted-foreground" data-testid="festival-names-suggested">
+              Suggested list. Click Save to offer these festivals.
+            </p>
+          ) : null}
         </div>
       ) : (
         <input type="hidden" name="festivalNames" value="" />

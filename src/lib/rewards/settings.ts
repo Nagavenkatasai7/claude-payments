@@ -6,6 +6,16 @@ import type { Catalog, CatalogEntry, FundedRewardKind, PartnerRewardSetting, Par
 // saved values against the CURRENT catalog at every quote and mint, so a
 // tightened admin limit applies at once without rewriting partner rows.
 
+/**
+ * The festivals SmartRemit suggests (owner list, 2026-10-08). The admin page prefills its textarea
+ * with these while the saved list is empty; partners only ever pick from the saved list and never
+ * type their own festival name (owner decision).
+ */
+export const DEFAULT_FESTIVAL_NAMES: readonly string[] = Object.freeze([
+  'Diwali', 'Holi', 'Raksha Bandhan', 'Navratri', 'Durga Puja', 'Dussehra', 'Ganesh Chaturthi', 'Onam',
+  'Pongal', 'Makar Sankranti', 'Ugadi', 'Baisakhi', 'Eid al-Fitr', 'Eid al-Adha', 'Christmas', 'New Year',
+]);
+
 /** No catalog row ⇒ the reward is not available (all dark). */
 export const DEFAULT_CATALOG: Catalog = {
   nth_transfer: {
@@ -14,7 +24,7 @@ export const DEFAULT_CATALOG: Catalog = {
   },
   festival: {
     kind: 'festival', available: false, nthMin: 3, nthMax: 10, maxDays: 14,
-    maxDiscountUsd: 2.99, customerMonthlyCap: 1, festivalNames: [],
+    maxDiscountUsd: 2.99, customerMonthlyCap: 1, festivalNames: [...DEFAULT_FESTIVAL_NAMES],
   },
 };
 
@@ -65,6 +75,27 @@ export function parseFestivalNames(raw: string): string[] | null {
   if (names.length > FESTIVAL_NAMES_MAX) return null;
   if (names.some((n) => n.length > FESTIVAL_NAME_MAX || !/^[\p{L}\p{N}][\p{L}\p{N} '&-]*$/u.test(n))) return null;
   return names;
+}
+
+/**
+ * The admin festival-names textarea: the saved list, or (when the saved list is empty) the
+ * suggested defaults with `suggested` set so the page can say they are not saved yet.
+ */
+export function adminFestivalNamesField(saved: readonly string[]): { text: string; suggested: boolean } {
+  return saved.length === 0
+    ? { text: DEFAULT_FESTIVAL_NAMES.join('\n'), suggested: true }
+    : { text: saved.join('\n'), suggested: false };
+}
+
+/**
+ * What the partner's festival card shows: 'unavailable' (SmartRemit has not made the reward
+ * available and the partner has no offer on), 'no_festivals' (the saved list is empty, so there is
+ * nothing to pick and no Save), or 'form'. An empty list wins over an offer that is on: such an
+ * offer is already inert (settingWithinLimits needs a listed name).
+ */
+export function festivalFormState(c: CatalogEntry, s: PartnerRewardSetting | undefined): 'unavailable' | 'no_festivals' | 'form' {
+  if (!c.available && !s?.enabled) return 'unavailable';
+  return c.festivalNames.length === 0 ? 'no_festivals' : 'form';
 }
 
 /** The admin catalog form for one funded reward. */
