@@ -7,7 +7,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
-import { expireUnpaidLinks } from '@/lib/stale-money';
+import { expireUnpaidLinks, expirePaymentLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
@@ -140,6 +140,13 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     logError('cron.expire-links', err);
   }
+  // Batch B2: open payment links past their 7 days become 'expired' (fail-soft).
+  let paymentLinksExpired: number | null = null;
+  try {
+    paymentLinksExpired = await expirePaymentLinks(getDb());
+  } catch (err) {
+    logError('cron.expire-payment-links', err);
+  }
 
   // Program-Fix 37 (ctx-03): empty the payload of 'done' outbox rows older
   // than 7 days (rows and dedupe keys stay; see src/lib/outbox-retention.ts).
@@ -170,7 +177,7 @@ export async function GET(req: NextRequest) {
       actor: 'system',
       actorType: 'system',
       action: 'cron.run',
-      meta: { fired: result.fired, failed: result.failed, expired, scrubbed },
+      meta: { fired: result.fired, failed: result.failed, expired, scrubbed, paymentLinksExpired },
     });
   } catch (err) {
     logError('cron.audit', err);

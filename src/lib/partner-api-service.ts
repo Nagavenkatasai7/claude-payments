@@ -383,8 +383,10 @@ export async function createTransaction(
   // Program-Fix 44 P2: 'test:' is the sandbox claim namespace (a test key's
   // key K is claimed as 'test:K'), so no client key may start with it — the
   // live and sandbox namespaces can then never collide.
-  if (/^(draft|b2binvoice|sched|test):/.test(idempotencyKey)) {
-    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:', 'sched:' or 'test:' (reserved).");
+  // Batch B2: 'paylink:' is the payment-link claim (payment-link-finalize.ts); a
+  // partner key using it could bind a link's namespace to its own transfer.
+  if (/^(draft|b2binvoice|sched|test|paylink):/.test(idempotencyKey)) {
+    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:', 'sched:', 'test:' or 'paylink:' (reserved).");
   }
 
   // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):

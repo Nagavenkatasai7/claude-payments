@@ -56,12 +56,17 @@ export const PARTNER_ROUTES = Object.freeze({
   reviews: { href: '/partner/reviews', labelKey: 'partner.nav.reviews', policy: PARTNER_OPS, nav: true },
   // Lost-features A6: void or reissue a business invoice (admin only; linked from Transfers, not in the nav).
   invoices: { href: '/partner/invoices', labelKey: 'partner.nav.invoices', policy: PARTNER_ADMIN, nav: false },
+  // Batch B2: payment links for each customer (admin only), and the companies they pay (admin only;
+  // linked from Payment links, not in the nav). Both pages and every action stay PARTNER_ADMIN.
+  paymentLinks: { href: '/partner/payment-links', labelKey: 'partner.nav.paymentLinks', policy: PARTNER_ADMIN, nav: true },
+  payees: { href: '/partner/payees', labelKey: 'partner.nav.payees', policy: PARTNER_ADMIN, nav: false },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
-// The final order (UI M5): home, onboarding, transfers, refunds, schedules, customers, reviews, reports,
-// analytics, support, staff, audit, integrations, branding, rewards (B3), settings, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'refunds', 'schedules', 'customers', 'reviews', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'rewards', 'settings', 'security'];
+// The final order (UI M5): home, onboarding, transfers, refunds, schedules, customers, reviews,
+// payment links (Batch B2), reports, analytics, support, staff, audit, integrations, branding,
+// rewards (B3), settings, security.
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'refunds', 'schedules', 'customers', 'reviews', 'paymentLinks', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'rewards', 'settings', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

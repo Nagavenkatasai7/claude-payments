@@ -15,7 +15,8 @@ process.env.CRON_SECRET = SECRET;
 const runDueSchedules = vi.hoisted(() => vi.fn(async () => ({ fired: 2, failed: 1 })));
 vi.mock('@/lib/cron-run', () => ({ runDueSchedules }));
 const expireUnpaidLinks = vi.hoisted(() => vi.fn(async () => 4));
-vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
+const expirePaymentLinks = vi.hoisted(() => vi.fn(async () => 3));
+vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks, expirePaymentLinks }));
 const scrubOldOutboxPayloads = vi.hoisted(() => vi.fn(async () => 7));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads }));
 const dbRef = vi.hoisted(() => ({ current: null as unknown }));
@@ -52,7 +53,7 @@ describe('/api/cron audit row (Program-Fix 27, vercel-09)', () => {
         actor_type: 'system',
         action: 'cron.run',
         subject_id: null,
-        meta: { fired: 2, failed: 1, expired: 4, scrubbed: 7 },
+        meta: { fired: 2, failed: 1, expired: 4, scrubbed: 7, paymentLinksExpired: 3 },
       },
     ]);
 
@@ -61,14 +62,14 @@ describe('/api/cron audit row (Program-Fix 27, vercel-09)', () => {
     await GET(req({ authorization: `Bearer ${SECRET}` }));
     const rows = await cronRows();
     expect(rows).toHaveLength(2);
-    expect(rows[1].meta).toEqual({ fired: 0, failed: 0, expired: 4, scrubbed: 7 });
+    expect(rows[1].meta).toEqual({ fired: 0, failed: 0, expired: 4, scrubbed: 7, paymentLinksExpired: 3 });
   });
 
   it('a failed sweep is recorded as null, not dropped', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     expireUnpaidLinks.mockRejectedValueOnce(new Error('db down'));
     await GET(req({ authorization: `Bearer ${SECRET}` }));
-    expect((await cronRows())[0].meta).toEqual({ fired: 2, failed: 1, expired: null, scrubbed: 7 });
+    expect((await cronRows())[0].meta).toEqual({ fired: 2, failed: 1, expired: null, scrubbed: 7, paymentLinksExpired: 3 });
     err.mockRestore();
   });
 

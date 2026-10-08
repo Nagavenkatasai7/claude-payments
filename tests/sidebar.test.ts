@@ -44,7 +44,7 @@ describe('visibleNavGroups (Stage 5b IA)', () => {
     expect(groups[0].items).toEqual(['overview', 'ops']);
     expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Support', 'Insights', 'Platform']);
     const platform = groups.find((g) => g.label === 'Platform')!;
-    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'b2b', 'partner-requests', 'waitlist', 'team', 'api-keys', 'switches', 'referrals', 'rewards']);
+    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'b2b', 'partner-requests', 'waitlist', 'team', 'api-keys', 'switches', 'referrals', 'rewards', 'payees']);
     const supportGroup = groups.find((g) => g.label === 'Support')!;
     expect(supportGroup.items).toEqual(['tickets', 'my-queue', 'employee-questions']);
   });

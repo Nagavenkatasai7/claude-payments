@@ -1226,3 +1226,80 @@ export const platformFeeLedger = pgTable(
     index('platform_fee_ledger_partner_month').on(t.partnerId, t.month),
   ],
 );
+
+// ── Batch B2: payment links for each customer ───────────────────────────────
+// A partner adds a company in India it works with (a school, a supplier): the
+// PAYEE. SmartRemit platform admins approve it (/admin-dashboard/payees) before
+// any link can pay it. The partner then makes one PAYMENT LINK per customer: the
+// customer opens /pay/l/<token> and pays the payee an exact rupee amount. NEW
+// tables only. Written only by src/db/repos/payee-repo.ts and
+// payment-link-repo.ts (every partner-facing query takes partner_id).
+//
+// Bank details are sealed (field-crypto v2, ctx.payee) and never edited: a change
+// needs a new payee. legal_name is the company's legal name in clear (a business
+// name, shown to the customer and screened), never a person's.
+export const payees = pgTable(
+  'payees',
+  {
+    id: text('id').primaryKey(), // 'pye_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    legalName: text('legal_name').notNull(),
+    accountHolderEnc: text('account_holder_enc').notNull(),
+    // The composed IN payout destination ("<IFSC> <account>", payout-format.ts).
+    payoutDestinationEnc: text('payout_destination_enc').notNull(),
+    payoutLast4: text('payout_last4').notNull(),
+    country: text('country').notNull().default('IN'),
+    status: text('status').notNull().default('pending'),
+    // The latest sanctions screen of BOTH names: 'clear' | 'review' (a possible
+    // match, or the list could not load). A full match is never saved.
+    screening: text('screening').notNull(),
+    createdBy: text('created_by').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('payees_status', sql`${t.status} IN ('pending','approved','rejected','suspended')`),
+    check('payees_screening', sql`${t.screening} IN ('clear','review')`),
+    index('payees_partner_created').on(t.partnerId, t.createdAt.desc()),
+    index('payees_status_created').on(t.status, t.createdAt.desc()),
+  ],
+);
+
+// One payment per link: open → used (in the SAME transaction as the
+// `paylink:<id>` idempotency claim), or open → cancelled / expired. The token
+// is the 128-bit capability in the URL (no personal data). The reference is the
+// partner's own order number, unique per partner, so uploading the same file
+// twice never makes a second link; it becomes the paid transfer's
+// client_reference, and `purpose` its purpose.
+export const paymentLinks = pgTable(
+  'payment_links',
+  {
+    id: text('id').primaryKey(), // 'pl_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    payeeId: text('payee_id').notNull().references(() => payees.id),
+    token: text('token').notNull(),
+    reference: text('reference').notNull(),
+    customerNameEnc: text('customer_name_enc').notNull(),
+    customerPhone: text('customer_phone').notNull(), // digits only (a lookup key, like transfers.phone)
+    amountInr: numeric('amount_inr', { precision: 14, scale: 2 }).notNull(),
+    purpose: text('purpose').notNull(),
+    status: text('status').notNull().default('open'),
+    transferId: text('transfer_id'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdBy: text('created_by').notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    cancelledBy: text('cancelled_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('payment_links_status', sql`${t.status} IN ('open','used','cancelled','expired')`),
+    check('payment_links_amount', sql`${t.amountInr} > 0`),
+    uniqueIndex('payment_links_token').on(t.token),
+    uniqueIndex('payment_links_partner_reference').on(t.partnerId, t.reference),
+    index('payment_links_partner_created').on(t.partnerId, t.createdAt.desc()),
+    index('payment_links_status_expires').on(t.status, t.expiresAt),
+  ],
+);

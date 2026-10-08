@@ -25,6 +25,47 @@ CREATE TABLE "partner_rewards" (
 	CONSTRAINT "partner_rewards_kind" CHECK ("partner_rewards"."kind" IN ('nth_transfer','festival'))
 );
 --> statement-breakpoint
+CREATE TABLE "payees" (
+	"id" text PRIMARY KEY NOT NULL,
+	"partner_id" text NOT NULL,
+	"legal_name" text NOT NULL,
+	"account_holder_enc" text NOT NULL,
+	"payout_destination_enc" text NOT NULL,
+	"payout_last4" text NOT NULL,
+	"country" text DEFAULT 'IN' NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"screening" text NOT NULL,
+	"created_by" text NOT NULL,
+	"decided_by" text,
+	"decided_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "payees_status" CHECK ("payees"."status" IN ('pending','approved','rejected','suspended')),
+	CONSTRAINT "payees_screening" CHECK ("payees"."screening" IN ('clear','review'))
+);
+--> statement-breakpoint
+CREATE TABLE "payment_links" (
+	"id" text PRIMARY KEY NOT NULL,
+	"partner_id" text NOT NULL,
+	"payee_id" text NOT NULL,
+	"token" text NOT NULL,
+	"reference" text NOT NULL,
+	"customer_name_enc" text NOT NULL,
+	"customer_phone" text NOT NULL,
+	"amount_inr" numeric(14, 2) NOT NULL,
+	"purpose" text NOT NULL,
+	"status" text DEFAULT 'open' NOT NULL,
+	"transfer_id" text,
+	"expires_at" timestamp with time zone NOT NULL,
+	"created_by" text NOT NULL,
+	"used_at" timestamp with time zone,
+	"cancelled_at" timestamp with time zone,
+	"cancelled_by" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "payment_links_status" CHECK ("payment_links"."status" IN ('open','used','cancelled','expired')),
+	CONSTRAINT "payment_links_amount" CHECK ("payment_links"."amount_inr" > 0)
+);
+--> statement-breakpoint
 CREATE TABLE "platform_fee_ledger" (
 	"transfer_id" text PRIMARY KEY NOT NULL,
 	"partner_id" text NOT NULL,
@@ -113,12 +154,21 @@ ALTER TABLE "transfers" ADD COLUMN "client_reference" text;--> statement-breakpo
 ALTER TABLE "transfers" ADD COLUMN "payout_reference" text;--> statement-breakpoint
 ALTER TABLE "partner_reward_terms" ADD CONSTRAINT "partner_reward_terms_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "partner_rewards" ADD CONSTRAINT "partner_rewards_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "payees" ADD CONSTRAINT "payees_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "payment_links" ADD CONSTRAINT "payment_links_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "payment_links" ADD CONSTRAINT "payment_links_payee_id_payees_id_fk" FOREIGN KEY ("payee_id") REFERENCES "public"."payees"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "platform_fee_ledger" ADD CONSTRAINT "platform_fee_ledger_transfer_id_transfers_id_fk" FOREIGN KEY ("transfer_id") REFERENCES "public"."transfers"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "platform_fee_ledger" ADD CONSTRAINT "platform_fee_ledger_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "referral_attributions" ADD CONSTRAINT "referral_attributions_referral_partner_id_referral_partners_id_fk" FOREIGN KEY ("referral_partner_id") REFERENCES "public"."referral_partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "referral_codes" ADD CONSTRAINT "referral_codes_referral_partner_id_referral_partners_id_fk" FOREIGN KEY ("referral_partner_id") REFERENCES "public"."referral_partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reward_redemptions" ADD CONSTRAINT "reward_redemptions_transfer_id_transfers_id_fk" FOREIGN KEY ("transfer_id") REFERENCES "public"."transfers"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reward_redemptions" ADD CONSTRAINT "reward_redemptions_partner_id_partners_id_fk" FOREIGN KEY ("partner_id") REFERENCES "public"."partners"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "payees_partner_created" ON "payees" USING btree ("partner_id","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "payees_status_created" ON "payees" USING btree ("status","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE UNIQUE INDEX "payment_links_token" ON "payment_links" USING btree ("token");--> statement-breakpoint
+CREATE UNIQUE INDEX "payment_links_partner_reference" ON "payment_links" USING btree ("partner_id","reference");--> statement-breakpoint
+CREATE INDEX "payment_links_partner_created" ON "payment_links" USING btree ("partner_id","created_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "payment_links_status_expires" ON "payment_links" USING btree ("status","expires_at");--> statement-breakpoint
 CREATE INDEX "platform_fee_ledger_partner_month" ON "platform_fee_ledger" USING btree ("partner_id","month");--> statement-breakpoint
 CREATE INDEX "referral_attributions_partner" ON "referral_attributions" USING btree ("referral_partner_id");--> statement-breakpoint
 CREATE INDEX "referral_codes_partner" ON "referral_codes" USING btree ("referral_partner_id");--> statement-breakpoint

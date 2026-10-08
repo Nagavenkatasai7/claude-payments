@@ -27,7 +27,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled' | 'paylinks.enabled';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -104,6 +104,20 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'Off (or unreadable): new quotes show the normal fee; quotes already approved with a reward get "This offer has ended". ' +
       'First transfer free works either way.',
     bannerText: 'Customer rewards are on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // Batch B2 payment links: partners make a link per customer to pay an approved
+  // company in India. Also needs the customer among the demo-mode phones
+  // (DEMO_PHONES, demo-mode.ts). FAILS CLOSED: isFlagOn answers false on a read
+  // failure, and for this switch false means every link page and payment refuses.
+  'paylinks.enabled': {
+    key: 'paylinks.enabled',
+    label: 'Payment links',
+    description:
+      'Partners can add companies (approved on the Payees page) and send customers a payment link to pay that company an exact rupee amount. ' +
+      'Only demo-mode phones (DEMO_PHONES) can pay. Off: every link shows "no longer active" and nothing can be paid; partners can still see their links.',
+    bannerText: 'Payment links are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

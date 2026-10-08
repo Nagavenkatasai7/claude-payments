@@ -36,7 +36,7 @@ export const FACTS = {
   /** src/lib/stale-money.ts UNPAID_LINK_EXPIRY_DAYS. */
   unpaidExpiryDays: 7,
   /** src/lib/partner-api-service.ts: the reserved-prefix 400 message, in order. */
-  reservedIdempotencyPrefixes: ['draft:', 'b2binvoice:', 'sched:', 'test:'],
+  reservedIdempotencyPrefixes: ['draft:', 'b2binvoice:', 'sched:', 'test:', 'paylink:'],
 } as const;
 
 export type FactName = keyof typeof FACTS;

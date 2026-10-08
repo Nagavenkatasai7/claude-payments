@@ -11,7 +11,7 @@ const runDueSchedules = vi.hoisted(() => vi.fn(async () => ({ fired: 0, failed: 
 vi.mock('@/lib/cron-run', () => ({ runDueSchedules }));
 // Program-Fix 32: the daily cron also expires unpaid links after the schedules.
 const expireUnpaidLinks = vi.hoisted(() => vi.fn(async () => 2));
-vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
+vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks, expirePaymentLinks: vi.fn(async () => 0) }));
 // Program-Fix 37: the daily payload-retention sweep runs after the expiry.
 const scrubOldOutboxPayloads = vi.hoisted(() => vi.fn(async () => 3));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads }));
@@ -62,7 +62,7 @@ describe('/api/cron Bearer gate', () => {
       actor: 'system',
       actorType: 'system',
       action: 'cron.run',
-      meta: { fired: 0, failed: 0, expired: 2, scrubbed: 3 },
+      meta: { fired: 0, failed: 0, expired: 2, scrubbed: 3, paymentLinksExpired: 0 },
     });
   });
 

@@ -48,6 +48,9 @@ export type IntegrationEncColumn =
 
 export type WaitlistEncColumn = 'full_name_enc' | 'email_enc' | 'phone_enc' | 'location_enc';
 
+/** Batch B2: the sealed columns of a payee row. */
+export type PayeeEncColumn = 'account_holder_enc' | 'payout_destination_enc';
+
 /**
  * Purpose contexts: values that live outside a table row. `customer_ref` is a
  * short-lived URL token; `outbox.apply_link` is the sealed invite link in an
@@ -109,6 +112,16 @@ export const ctx = {
    */
   partnerReport: (partnerId: PartnerId, jobId: string): CryptoContext =>
     make('partner_report_jobs', 'content_enc', [partnerId, jobId]),
+  /**
+   * Batch B2: a payee's sealed bank details (`payees.account_holder_enc`,
+   * `payees.payout_destination_enc`), keyed by the tenant and the payee id, so a
+   * blob copied to another payee or tenant does not open.
+   */
+  payee: (partnerId: PartnerId, id: string, column: PayeeEncColumn): CryptoContext =>
+    make('payees', column, [partnerId, id]),
+  /** Batch B2: `payment_links.customer_name_enc`, keyed by the tenant and the link id. */
+  paymentLinkCustomerName: (partnerId: PartnerId, id: string): CryptoContext =>
+    make('payment_links', 'customer_name_enc', [partnerId, id]),
   /** For fix 17b (staff MFA secrets in Redis). Permanently v1-exempt. */
   staffMfa: (username: string): CryptoContext => make('staff_mfa', 'secret', [username], true),
   purpose: (purpose: CryptoPurpose): CryptoContext =>

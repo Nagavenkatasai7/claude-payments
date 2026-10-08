@@ -88,6 +88,8 @@ const ALL_TABLES = [
   'staff',
   'funding_events',
   'feature_flags', // Release safety part A (0029)
+  'payment_links', // Batch B2: FK child of payees and partners
+  'payees',
   'referral_attributions', // Batch B4: FK children of referral_partners
   'referral_codes',
   'referral_partners',
