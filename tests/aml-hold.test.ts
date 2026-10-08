@@ -5,6 +5,7 @@ import {
   amlHoldRailEligible,
   amlHoldHit,
   applyAmlHold,
+  applyPurposeHold,
 } from '@/lib/aml-hold';
 import { AML_DEFAULTS, type SenderAmlStats } from '@/lib/aml-rules';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -105,5 +106,24 @@ describe('applyAmlHold (cleared → flagged is the ONLY change)', { retry: 0 }, 
     const blocked = { complianceStatus: 'blocked' as const, complianceReasons: ['Recipient matched watchlist.'] };
     expect(applyAmlHold(flagged, hit)).toBe(flagged);
     expect(applyAmlHold(blocked, hit)).toBe(blocked);
+  });
+});
+
+// Batch B follow-up A4: the purpose hold takes the same verdict path (no gate: owner decision 2026-10-08).
+describe('applyPurposeHold', { retry: 0 }, () => {
+  it('a risk category flags a cleared verdict with the generic reason only', () => {
+    expect(applyPurposeHold({ complianceStatus: 'cleared', complianceReasons: [] }, 'prize')).toEqual({
+      complianceStatus: 'flagged',
+      complianceReasons: [AML_HOLD_REASON],
+    });
+  });
+
+  it('no risk ⇒ unchanged; flagged or blocked are never touched', () => {
+    const v = { complianceStatus: 'cleared' as const, complianceReasons: [] as string[] };
+    const flagged = { complianceStatus: 'flagged' as const, complianceReasons: ['Large transfer amount.'] };
+    const blocked = { complianceStatus: 'blocked' as const, complianceReasons: ['Recipient matched watchlist.'] };
+    expect(applyPurposeHold(v, undefined)).toBe(v);
+    expect(applyPurposeHold(flagged, 'prize')).toBe(flagged);
+    expect(applyPurposeHold(blocked, 'prize')).toBe(blocked);
   });
 });

@@ -65,6 +65,8 @@ ${examples}
 - Use only a reason the customer stated or chose. Never guess a purpose from the recipient, the relationship or the amount.
 - If a tool returns needs_purpose: true, ask the purpose question (once) and call the same tool again with the same details plus purpose.
 - Repeat send: when repeat_transfer returns needs_purpose with a last_purpose_label, ask "Same reason as last time: <last_purpose_label>?" A yes keeps it (pass that last_purpose); any other answer gets the question above. Never reuse the last purpose without the customer's yes.
+- Other: when the customer's reason fits none of the choices (or they pick Other), ask ONCE "What is it for?" (in Hinglish for a Hinglish customer: "Yeh paise kis liye hain?") unless they already said it. Pass purpose 'other' with their own words as purpose_detail (10 to 120 characters); never write the reason yourself. If a tool returns needs_purpose_detail: true, ask that question (once) and call the same tool again with the same details plus purpose_detail.
+- If a tool returns scam_warning, the customer must read it word for word before the Approve card (the card already starts with it; in a text reply put it first). Never shorten or soften it, and never say which words caused it.
 - A business bill payment (entity_type 'business') needs no purpose question.
 - Do not repeat the internal purpose value (such as family_support) back to the customer; use the plain words.`;
 }

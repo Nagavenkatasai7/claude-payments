@@ -116,6 +116,17 @@ export async function getPortalTransfer(owner: PortalOwner, id: unknown, db: DbO
   return t;
 }
 
+/**
+ * Batch B follow-up A3: the "Other" reason the customer gave on one of THEIR OWN live transfers
+ * (decrypted, for the Send again prefill), or null. Same scope as getPortalTransfer: host partner
+ * AND session phone in the WHERE, live rows only. The customer's own words go back only to them.
+ */
+export async function getPortalTransferPurposeDetail(owner: PortalOwner, id: unknown, db: DbOrTx = getDb()): Promise<string | null> {
+  const t = await getPortalTransfer(owner, id, db);
+  if (!t) return null;
+  return createTransferRepo(db).getPurposeDetail(t.id, { partnerId: owner.partnerId, phone: owner.phone });
+}
+
 // ── Business (B2B) parties ─────────────────────────────────────────────────────────────────────
 
 /**

@@ -113,6 +113,8 @@ export function transferToRow(
     recipientLegalNameEnc: sealOptional(t.recipientLegalName, provider, ctx.transfer(id, 'recipient_legal_name_enc')) ?? null,
     relationship: t.relationship ?? null,
     purpose: t.purpose ?? null,
+    // Batch B follow-up A2: write-once (saveTransfer strips it from its conflict-update).
+    purposeDetailEnc: sealOptional(t.purposeDetail, provider, ctx.transfer(id, 'purpose_detail_enc')) ?? null,
     eddRequired: t.eddRequired ?? null,
     // ── B2B — business names encrypted at rest + ****last4 sibling (like the
     // recipient legal name); discriminators default to the consumer shape. ──
@@ -214,6 +216,9 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (opts.decrypt) {
     const legal = openOptional(row.recipientLegalNameEnc, provider, ctx.transfer(row.id, 'recipient_legal_name_enc'));
     if (legal) t.recipientLegalName = legal;
+    // Batch B follow-up A2: the customer's reason, only on an explicit decrypted read.
+    const detail = openOptional(row.purposeDetailEnc, provider, ctx.transfer(row.id, 'purpose_detail_enc'));
+    if (detail) t.purposeDetail = detail;
   }
   if (row.relationship) t.relationship = row.relationship as SenderRecipientRelationship;
   if (row.purpose) t.purpose = row.purpose as TransferPurpose;

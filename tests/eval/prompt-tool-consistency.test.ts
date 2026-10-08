@@ -99,10 +99,10 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
 });
 
 describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the app', () => {
-  it('is the 15 audit cases, the 3 A2 language cases and the 3 required-purpose cases, ids 1..21', () => {
-    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 21 }, (_, i) => i + 1));
-    // Required purpose: 19-21 run with the purpose.detect switch on; 1-18 keep it off.
-    expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21]);
+  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases and the 3 "Other" reason cases, ids 1..24', () => {
+    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 keep it off.
+    expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24]);
   });
 
   it('the server notes it replays are still what agent.ts injects', () => {

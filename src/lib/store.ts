@@ -77,6 +77,11 @@ export interface SenderLedgerOps {
   rewardBudgetUsed(month: string): Promise<number>;
   /** B3: the redemption row, in the SAME transaction as the transfer insert (one per transfer: the PK). */
   insertRedemption(w: Omit<RedemptionWrite, 'partnerId' | 'phone'>): Promise<void>;
+  /**
+   * Batch B follow-up A4: ONE ops.alert deduped `purposeflag:<transferId>`, in the
+   * SAME transaction as the held transfer's insert. Ids and the category only.
+   */
+  enqueuePurposeFlagAlert(transferId: string, category: string): Promise<void>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -477,6 +482,21 @@ export function createStore(redis: RedisLike, db: Db) {
                 return rewards.budgetUsed(partnerId, month);
               },
               insertRedemption: (w) => createRewardRepo(tx).insertRedemption({ ...w, partnerId, phone }),
+              enqueuePurposeFlagAlert: async (transferId, category) => {
+                // Inline literal payload (tests/outbox-payload-secrets.test.ts). Ids and the
+                // category only: never the customer's words, a phone, a name or an amount.
+                await createOutboxRepo(tx).enqueue(
+                  'ops.alert',
+                  {
+                    message:
+                      `⚠️ SmartRemit ops: transfer ${transferId} (partner ${partnerId}) is held for review: ` +
+                      `the reason the customer gave matches the "${category}" scam pattern. Check it on the compliance page.`,
+                  },
+                  { dedupeKey: `purposeflag:${transferId}` },
+                );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
               scheduleMintCheck: async (scheduleId, recipientPhone) => {
                 const s = await createScheduleRepo(tx).lockForMint(scheduleId, partnerId, phone);
                 if (!s || s.status !== 'active') return 'inactive';

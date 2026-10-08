@@ -30,8 +30,11 @@ import {
   validateSendForm,
   webFormTurn,
   PORTAL_FUNDING_METHODS,
+  needsScamAck,
+  showsScamWarning,
   type SendFormValue,
 } from '@/lib/portal-send';
+import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 import { TRANSFER_PURPOSES } from '@/lib/purpose-codes';
 import { t } from '@/lib/i18n';
 import { fakeRedis, type FakeRedis } from './helpers';
@@ -207,6 +210,12 @@ describe('toPrepareSendInput — consumer only', () => {
     expect(toPrepareSendInput({ ...base, recipientName: 'Mom', fundingMethod: 'ach_pull' as never })).toBeNull();
   });
 
+  it('Batch B follow-up: carries a valid reason, drops an invalid one', () => {
+    const base = { recipientPhone: '919876543210', recipientName: 'Mom', amountSource: 1, sourceCurrency: 'USD' as const, destinationCountry: 'IN' as const, fundingMethod: 'bank_transfer' as const, purpose: 'other' as const };
+    expect(toPrepareSendInput({ ...base, purposeDetail: 'helping a neighbour repair the roof' })?.purposeDetail).toBe('helping a neighbour repair the roof');
+    expect(toPrepareSendInput({ ...base, purposeDetail: 'xx' })?.purposeDetail).toBeUndefined();
+  });
+
   it('required purpose: refuses a missing or unknown purpose (defense in depth behind the form)', () => {
     const base = { recipientPhone: '919876543210', recipientName: 'Mom', amountSource: 1, sourceCurrency: 'USD' as const, destinationCountry: 'IN' as const, fundingMethod: 'bank_transfer' as const };
     expect(toPrepareSendInput({ ...base, purpose: undefined as never })).toBeNull();
@@ -240,10 +249,65 @@ describe('edge validation', () => {
     expect(t('portal.send.purpose_invalid')).toBe('Choose why you are sending this money.');
   });
 
-  it('each of the 8 purposes is accepted', () => {
+  it('each of the 8 purposes is accepted (Other with a reason)', () => {
     for (const purpose of TRANSFER_PURPOSES) {
-      expect(validateSendForm(form({ ...good, purpose }), { allowedCurrencies: ['USD'] })).toMatchObject({ ok: true, value: { purpose } });
+      const detail: Record<string, string> = purpose === 'other' ? { purpose_detail: 'helping a neighbour repair the roof' } : {};
+      expect(validateSendForm(form({ ...good, purpose, ...detail }), { allowedCurrencies: ['USD'] })).toMatchObject({ ok: true, value: { purpose } });
     }
+  });
+
+  // Batch B follow-up A3: Other needs the customer's reason (the server is the authority).
+  describe('the "Other" reason', () => {
+    const other = (purpose_detail?: string) =>
+      validateSendForm(form({ ...good, purpose: 'other', ...(purpose_detail === undefined ? {} : { purpose_detail }) }), { allowedCurrencies: ['USD'] });
+
+    it('missing, too short or nonsense ⇒ "Tell us the reason in a few words."', () => {
+      for (const d of [undefined, '', '   ', 'rent', 'send money', 'asdfasdf', '1234567890']) {
+        expect(other(d), String(d)).toEqual({ ok: false, errors: { purposeDetail: 'portal.send.purpose_detail_invalid' } });
+      }
+      expect(t('portal.send.purpose_detail_invalid')).toBe('Tell us the reason in a few words.');
+    });
+
+    it('too long ⇒ "Keep the reason under 120 characters."', () => {
+      expect(other('helping my uncle with roof repairs '.repeat(4))).toEqual({ ok: false, errors: { purposeDetail: 'portal.send.purpose_detail_too_long' } });
+      expect(t('portal.send.purpose_detail_too_long')).toBe('Keep the reason under 120 characters.');
+    });
+
+    it('a reason that names a purpose becomes that purpose; the normalised reason is kept', () => {
+      expect(other('  school   fees for my son ')).toMatchObject({ ok: true, value: { purpose: 'education', purposeDetail: 'school fees for my son' } });
+    });
+
+    it('a plain reason stays Other with the reason', () => {
+      expect(other('helping a neighbour repair the roof')).toMatchObject({
+        ok: true, value: { purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' },
+      });
+    });
+
+    it('any other purpose ignores a posted reason', () => {
+      const r = validateSendForm(form({ ...good, purpose: 'gift', purpose_detail: 'to claim my lottery prize' }), { allowedCurrencies: ['USD'] });
+      expect(r.ok && r.value.purposeDetail).toBeUndefined();
+    });
+
+    // A4: a scam-pattern reason needs the "I have read this warning" tick before the money goes.
+    it('needsScamAck: only a scam-pattern reason without the tick', () => {
+      const ack = new FormData();
+      ack.set('scam_ack', 'on');
+      expect(needsScamAck('to claim my lottery prize', new FormData())).toBe(true);
+      expect(needsScamAck('to claim my lottery prize', ack)).toBe(false);
+      expect(needsScamAck('helping a neighbour repair the roof', new FormData())).toBe(false);
+      expect(needsScamAck(undefined, new FormData())).toBe(false);
+      expect(showsScamWarning('customs charge for a parcel')).toBe(true);
+      expect(showsScamWarning('school fees for my son')).toBe(false);
+    });
+
+    it('the portal warning is the exact SmartRemit text, and the form strings are pinned', () => {
+      expect(t('portal.send.scamWarning')).toBe(PURPOSE_SCAM_WARNING);
+      expect(t('portal.send.scamAck')).toBe('I have read this warning');
+      expect(t('portal.send.purposeDetailLabel')).toBe('Tell us the reason');
+      expect(t('portal.send.purpose_detail_invalid')).toBe('Tell us the reason in a few words.');
+      expect(t('portal.send.purpose_detail_too_long')).toBe('Keep the reason under 120 characters.');
+      expect(t('portal.send.purposeFromWords', { purpose: 'Education', detail: 'school fees' })).toBe('Education (from your words: "school fees")');
+    });
   });
 
   it('refuses ach_pull (it would make the send B2B) and any non-consumer funding', () => {
@@ -328,6 +392,16 @@ describe('the review slot', () => {
     await redis.set(k, JSON.stringify({ id: 'x', amountSource: 1 }));
     expect(await loadSendReview(redis, owner)).toBeNull();
     await redis.set(k, 'not json');
+    expect(await loadSendReview(redis, owner)).toBeNull();
+  });
+
+  it('Batch B follow-up: the slot carries the reason; a stored invalid reason reads as none', async () => {
+    const withDetail: SendFormValue = { ...v, purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' };
+    const id = await saveSendReview(redis, owner, withDetail);
+    expect(await loadSendReview(redis, owner)).toEqual({ ...withDetail, id });
+    const [k] = [...redis.dump.keys()].filter((x) => x.startsWith('psend:'));
+    const stored = JSON.parse(String(await redis.get(k))) as Record<string, unknown>;
+    await redis.set(k, JSON.stringify({ ...stored, purposeDetail: 'xx' }));
     expect(await loadSendReview(redis, owner)).toBeNull();
   });
 

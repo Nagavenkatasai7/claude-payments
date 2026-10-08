@@ -290,6 +290,7 @@ export async function finalizeDraftPayment(
       recipientLegalName: draft.recipientLegalName,
       relationship: draft.relationship,
       purpose: draft.purpose,
+      purposeDetail: draft.purposeDetail, // Batch B follow-up A3 (re-checked at the mint)
       sourceOfFunds: draft.sourceOfFunds,
       occupation: draft.occupation,
       // For B2B, screen the PAYER business name (else the individual sender name).

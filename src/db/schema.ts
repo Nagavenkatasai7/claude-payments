@@ -98,6 +98,11 @@ export const transfers = pgTable(
     recipientLegalNameEnc: text('recipient_legal_name_enc'), // ENCRYPTED
     relationship: text('relationship'),
     purpose: text('purpose'),
+    // Batch B follow-up A2: the customer's own words for purpose `other` (or the
+    // words that turned `other` into a named purpose). ENCRYPTED under
+    // ctx.transfer(id, 'purpose_detail_enc'); write-once (saveTransfer never
+    // updates it); opened only on an explicit decrypted read.
+    purposeDetailEnc: text('purpose_detail_enc'),
     eddRequired: boolean('edd_required'),
     // ── B2B (business-to-business) — every column defaults to the consumer
     // shape so the b2c path is byte-identical. `transfer_type` discriminates;
@@ -474,6 +479,9 @@ export const schedules = pgTable(
     // Required purpose (owner decision Oct 8): the reason each scheduled send carries
     // onto its transfers. Nullable: schedules made before it read as "Not stated".
     purpose: text('purpose'),
+    // Batch B follow-up A2: the reason for purpose `other`, carried onto every run.
+    // ENCRYPTED under ctx.schedule(id, 'purpose_detail_enc').
+    purposeDetailEnc: text('purpose_detail_enc'),
   },
   (t) => [index('schedules_status').on(t.status, t.frequency)],
 );

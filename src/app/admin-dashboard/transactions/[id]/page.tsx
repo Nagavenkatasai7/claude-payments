@@ -15,6 +15,7 @@ import { SenderCell, FundingRefs } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import { purposeView } from '@/lib/purpose-codes';
+import { readPurposeDetailsForStaff } from '@/lib/purpose-detail-staff';
 import type { RefundStatus } from '@/lib/types';
 
 // /admin-dashboard/transactions/[id] — read-only single-transfer detail. Surfaces
@@ -24,7 +25,9 @@ import type { RefundStatus } from '@/lib/types';
 // sender account), which partner WON the best-rate routing and settled the
 // transfer (settlementPartnerId), and the refund lifecycle. The ONLY mutation
 // here is the admin "Issue refund" action, scope- and role-guarded server-side.
-// Masked reads only — the audited reveal path is never invoked here.
+// Masked reads only — the audited reveal path is never invoked here. The one decrypted read is the
+// customer's "Other" reason (Batch B follow-up A4): read for a transfer in the viewer's scope and
+// audited as `pii.view` (purpose-detail-staff.ts), with the staff name of any scam pattern it matched.
 
 const REFUND_BADGE: Record<Exclude<RefundStatus, 'none'>, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
   requested: { label: 'Refund requested', variant: 'secondary' },
@@ -75,6 +78,10 @@ export default async function TransactionDetailPage({
   const refundAmount = money(t.totalChargeSource ?? t.totalChargeUsd, t.sourceCurrency ?? 'USD');
   // A3: the stated purpose; the RBI code is an UNCONFIRMED suggestion (staff only, never the customer).
   const purpose = purposeView(t.purpose);
+  // Batch B follow-up A4: the reason the customer gave (decrypted, audited) and its risk category.
+  const reason = (
+    await readPurposeDetailsForStaff(getDb(), viewer, [t], { tenant: scoped.scope.kind === 'partner' ? scoped.scope.partnerId : null })
+  ).get(t.id);
 
   return (
     <>
@@ -130,6 +137,16 @@ export default async function TransactionDetailPage({
                   <span className="text-muted-foreground">Not stated</span>
                 )}
               </Field>
+              {reason && (
+                <Field label="Reason given">
+                  <span className="break-words">&ldquo;{reason.detail}&rdquo;</span>
+                  {reason.riskLabel && (
+                    <span className="mt-1 block">
+                      <Badge variant="destructive">Risk: {reason.riskLabel}</Badge>
+                    </span>
+                  )}
+                </Field>
+              )}
               <Field label="Payout destination">
                 <span className="font-mono text-xs">{t.payoutDestination}</span>
               </Field>

@@ -2,7 +2,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } 
 import { auditEvents, customers, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
-import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import { last4, openOptional, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -264,6 +264,48 @@ export function createTransferRepo(
     },
 
     /**
+     * Batch B follow-up A3: the customer's "Other" reason ONLY (one column, decrypted). This is a
+     * decrypted read: the caller audits it when staff read it. With `partnerId` the read is
+     * tenant-scoped, and with `phone` it is also the sender's own (portal Send again); null for
+     * missing, out-of-scope or no reason (404-never-403).
+     */
+    async getPurposeDetail(id: string, scope: { partnerId?: PartnerId; phone?: string } = {}): Promise<string | null> {
+      const conds = [eq(transfers.id, id)];
+      if (scope.partnerId !== undefined) conds.push(eq(transfers.partnerId, scope.partnerId));
+      if (scope.phone !== undefined) conds.push(eq(transfers.phone, scope.phone));
+      const rows = await db
+        .select({ id: transfers.id, enc: transfers.purposeDetailEnc })
+        .from(transfers)
+        .where(and(...conds))
+        .limit(1);
+      const r = rows[0];
+      if (!r?.enc) return null;
+      return openOptional(r.enc, provider, ctx.transfer(r.id, 'purpose_detail_enc')) ?? null;
+    },
+
+    /**
+     * Batch B follow-up A3: the "Other" reasons of several transfers in one query (the Partner API
+     * list, the staff compliance queue). Tenant-scoped with a partner id: an id of another partner is
+     * simply absent from the map. `null` (explicit) is the platform read, for ids the caller has
+     * already scope-checked (platform staff).
+     */
+    async listPurposeDetails(partnerId: PartnerId | null, ids: readonly string[]): Promise<Map<string, string>> {
+      const out = new Map<string, string>();
+      if (ids.length === 0) return out;
+      const conds = [inArray(transfers.id, [...ids]), isNotNull(transfers.purposeDetailEnc)];
+      if (partnerId !== null) conds.push(eq(transfers.partnerId, partnerId));
+      const rows = await db
+        .select({ id: transfers.id, enc: transfers.purposeDetailEnc })
+        .from(transfers)
+        .where(and(...conds));
+      for (const r of rows) {
+        const v = openOptional(r.enc, provider, ctx.transfer(r.id, 'purpose_detail_enc'));
+        if (v) out.set(r.id, v);
+      }
+      return out;
+    },
+
+    /**
      * Compat upsert (mirrors the Redis saveTransfer SET semantics) — with a
      * structural guard: DEFAULT reads return a MASKED payout destination
      * (****last4) and omit the decrypt-only recipientLegalName, so a
@@ -288,12 +330,16 @@ export function createTransferRepo(
       // Step 0 FX-7: the rate provenance columns are write-once the same way.
       // Batch B1: client_reference and payout_reference are write-once too (the
       // payout reference is set only by setPayoutReference, from a signed callback).
+      // Batch B follow-up A2: purpose_detail_enc is write-once as well (a masked read
+      // never carries the reason, so re-saving one must not erase it).
       const {
         environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
         fxExpiresAt: _fxExp, clientReference: _clientRef, payoutReference: _payoutRef,
+        purposeDetailEnc: _purposeDetail,
         ...updatable
       } = row;
       void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp; void _clientRef; void _payoutRef;
+      void _purposeDetail;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {

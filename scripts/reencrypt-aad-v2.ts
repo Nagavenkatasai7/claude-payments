@@ -30,6 +30,7 @@ import {
   ctx,
   type CustomerEncColumn,
   type IntegrationEncColumn,
+  type ScheduleEncColumn,
   type TransferEncColumn,
   type WaitlistEncColumn,
 } from '@/lib/crypto-context';
@@ -53,7 +54,11 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
   {
     table: 'transfers',
     key: ['id'],
-    columns: ['payout_destination_enc', 'recipient_legal_name_enc', 'sender_business_name_enc', 'recipient_business_name_enc'],
+    // purpose_detail_enc: Batch B follow-up A2 (born v2; registered for key-ring rotation).
+    columns: [
+      'payout_destination_enc', 'recipient_legal_name_enc', 'sender_business_name_enc', 'recipient_business_name_enc',
+      'purpose_detail_enc',
+    ],
     ctxFor: ([id], column) => ctx.transfer(id, column as TransferEncColumn),
   },
   {
@@ -84,8 +89,9 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
   {
     table: 'schedules',
     key: ['id'],
-    columns: ['payout_destination_enc'],
-    ctxFor: ([id]) => ctx.schedule(id),
+    // purpose_detail_enc: Batch B follow-up A2 (born v2; registered for key-ring rotation).
+    columns: ['payout_destination_enc', 'purpose_detail_enc'],
+    ctxFor: ([id], column) => ctx.schedule(id, column as ScheduleEncColumn),
   },
   {
     table: 'partner_integrations',

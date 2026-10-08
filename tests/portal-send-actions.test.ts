@@ -220,6 +220,25 @@ describe('continueToPayAction — the draft', () => {
     expect((await createDraftStore(redis).getDraft(draftId))?.purpose).toBe('education');
   });
 
+  it('A3/A4: the reason rides the draft; a scam-pattern reason needs "I have read this warning" first', async () => {
+    const rv = await review('pa', { ...newRecipient, purpose: 'other', purposeDetail: 'to claim my lottery prize' });
+    const refused = await continueToPayAction({ requestKey: '' }, fd({ rv }));
+    expect(refused.error).toBe('portal.send.scam_ack_required');
+    expect(JSON.stringify(refused)).not.toMatch(/lottery|prize"|category/);
+    expect(drafts()).toHaveLength(0);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv, scam_ack: 'on' })));
+    const draftId = drafts()[0].slice('recipient_draft:'.length);
+    expect(await createDraftStore(redis).getDraft(draftId)).toMatchObject({ purpose: 'other', purposeDetail: 'to claim my lottery prize' });
+  });
+
+  it('A3: a plain reason needs no tick and rides the draft', async () => {
+    const rv = await review('pa', { ...newRecipient, purpose: 'education', purposeDetail: 'school fees for my son' });
+    await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv })));
+    const draftId = drafts()[0].slice('recipient_draft:'.length);
+    expect(await createDraftStore(redis).getDraft(draftId)).toMatchObject({ purpose: 'education', purposeDetail: 'school fees for my son' });
+  });
+
   it('(1) double submit (concurrent, same request key) → ONE draft, both go to the same pay link, ONE audit row', async () => {
     const rv = await review('pa');
     const f1 = fd({ rv });
@@ -443,6 +462,23 @@ describe('startSendReviewAction', () => {
     h.site = null;
     await expect(startSendReviewAction({}, form())).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
   });
+
+  // Batch B follow-up A3: Other needs the customer's reason.
+  it('Other with no or a nonsense reason ⇒ the reason error, nothing stored, the words echoed back', async () => {
+    for (const purpose_detail of ['', 'send money', 'asdfgh qwerty']) {
+      const r = await startSendReviewAction({}, form({ purpose: 'other', purpose_detail }));
+      expect(r.errors?.purposeDetail, purpose_detail).toBe('portal.send.purpose_detail_invalid');
+      expect(r.values?.purpose_detail).toBe(purpose_detail);
+    }
+    const long = await startSendReviewAction({}, form({ purpose: 'other', purpose_detail: 'helping my uncle with roof repairs '.repeat(4) }));
+    expect(long.errors?.purposeDetail).toBe('portal.send.purpose_detail_too_long');
+    expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toBeNull();
+  });
+
+  it('Other with a reason that names a purpose ⇒ that purpose on the review, with the words', async () => {
+    await redirectOf(startSendReviewAction({}, form({ purpose: 'other', purpose_detail: 'school fees for my son' })));
+    expect(await loadSendReview(redis, { partnerId: 'pa', phone })).toMatchObject({ purpose: 'education', purposeDetail: 'school fees for my son' });
+  });
 });
 
 describe('setSenderNameAction', () => {
@@ -519,6 +555,33 @@ describe('sendAgainAction (Task 9.4)', () => {
     expect(rows.map((r) => r.meta)).toEqual([{ draftId, via: 'send_again' }]);
     // the purpose the customer confirmed for THIS send rides the draft
     expect((await ds.getDraft(draftId))?.purpose).toBe('gift');
+  });
+
+  it('A3: Other with no or a nonsense reason ⇒ the reason error with the choice kept; nothing drafted', async () => {
+    for (const purpose_detail of ['', 'send money']) {
+      const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd({ purpose: 'other', purpose_detail }));
+      expect(r.error).toBe('portal.send.purpose_detail_invalid');
+      expect(r.values).toEqual({ purpose: 'other', purpose_detail });
+      expect(r.scamWarning).toBeUndefined();
+    }
+    expect(drafts()).toHaveLength(0);
+  });
+
+  it('A3: a reason that names a purpose ⇒ that purpose on the draft, with the words', async () => {
+    await redirectOf(sendAgainAction(A.transferIds[0], { requestKey: '' }, fd({ purpose: 'other', purpose_detail: 'school fees for my son' })));
+    const draftId = drafts()[0].slice('recipient_draft:'.length);
+    expect(await createDraftStore(redis).getDraft(draftId)).toMatchObject({ purpose: 'education', purposeDetail: 'school fees for my son' });
+  });
+
+  it('A4: a scam-pattern reason ⇒ the warning and the tick first (no rule named), then the draft with the reason', async () => {
+    const f = { purpose: 'other', purpose_detail: 'customs charge for a parcel' };
+    const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd(f));
+    expect(r).toMatchObject({ error: 'portal.send.scam_ack_required', scamWarning: true, values: f });
+    expect(JSON.stringify(r)).not.toMatch(/delivery|category/);
+    expect(drafts()).toHaveLength(0);
+    await redirectOf(sendAgainAction(A.transferIds[0], { requestKey: '' }, fd({ ...f, scam_ack: 'on' })));
+    const draftId = drafts()[0].slice('recipient_draft:'.length);
+    expect(await createDraftStore(redis).getDraft(draftId)).toMatchObject({ purpose: 'other', purposeDetail: 'customs charge for a parcel' });
   });
 
   it('a business bill payment is never repeated as a consumer send → not found', async () => {

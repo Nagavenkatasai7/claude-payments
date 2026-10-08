@@ -30,6 +30,9 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['recipient', ctx.recipient('acme', '15550001111', '919800000000'), 'v2|k0|recipients|payout_destination_enc|acme|15550001111|919800000000'],
     ['beneficiary', ctx.beneficiary('ben_1'), 'v2|k0|beneficiaries|payout_destination_enc|ben_1'],
     ['schedule', ctx.schedule('sch_1'), 'v2|k0|schedules|payout_destination_enc|sch_1'],
+    // Batch B follow-up A2: the reason for purpose `other`, on a transfer and on a schedule.
+    ['transfer purpose detail', ctx.transfer('tx_1', 'purpose_detail_enc'), 'v2|k0|transfers|purpose_detail_enc|tx_1'],
+    ['schedule purpose detail', ctx.schedule('sch_1', 'purpose_detail_enc'), 'v2|k0|schedules|purpose_detail_enc|sch_1'],
     ['integration', ctx.integration('acme', 'wa_app_secret_enc'), 'v2|k0|partner_integrations|wa_app_secret_enc|acme'],
     ['integration creds', ctx.integration('acme', 'payment_credentials_enc'), 'v2|k0|partner_integrations|payment_credentials_enc|acme'],
     ['waitlist', ctx.waitlist('wl_1', 'email_enc'), 'v2|k0|waitlist_signups|email_enc|wl_1'],

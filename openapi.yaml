@@ -92,7 +92,10 @@ components:
         purpose:
           type: [string, 'null']
           enum: [family_support, gift, education, medical, savings, bills, business, other, null]
-          description: Why the money is sent, exactly as given on create. Null only on a transaction made before purpose was required.
+          description: Why the money is sent, as given on create. When you sent other with a purpose_detail that names one of the other purposes (for example school fees), this is that purpose. Null only on a transaction made before purpose was required.
+        purpose_detail:
+          type: [string, 'null']
+          description: The sender's reason in their own words, sent with purpose other (10 to 120 characters, spaces tidied). Returned only to the partner that owns the transaction. Null when none was given.
   responses:
     Unauthorized:
       description: Missing, malformed, unknown or revoked API key.
@@ -256,7 +259,14 @@ paths:
         business or other (exactly these lower-case values). A missing or unknown
         purpose is 422 before the Idempotency-Key is bound, so a corrected retry with
         the same key succeeds. The purpose is saved, comes back in every answer and is
-        in the settlement instruction's compliance block.
+        in the settlement instruction's compliance block. purpose_detail is required when
+        purpose is other: the sender's reason in their own words, 10 to 120 characters
+        that say what the money is for. A missing, too short, too long or meaningless
+        purpose_detail is 422 before the Idempotency-Key is bound. When the reason names
+        one of the other purposes (for example school fees), the transaction takes that
+        purpose and keeps the reason. With any other purpose, purpose_detail is ignored.
+        SmartRemit checks every reason, and some transactions are held for review
+        (compliance_status flagged).
       tags: [Transactions]
       x-smartremit-scope: transactions:write
       x-smartremit-sandbox: true
@@ -298,7 +308,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
         '404': { description: The beneficiary_id was not found for this partner. }
         '409': { description: Idempotency-Key conflict. Retry with a new key. }
-        '422': { description: 'Refused: purpose is missing or is not one of family_support, gift, education, medical, savings, bills, business or other (checked before the Idempotency-Key is bound; a corrected retry with the same key succeeds), the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
+        '422': { description: 'Refused: purpose is missing or is not one of family_support, gift, education, medical, savings, bills, business or other, or purpose is other and purpose_detail is missing, not a string, not 10 to 120 characters or does not say what the money is for (all checked before the Idempotency-Key is bound; a corrected retry with the same key succeeds), the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
         '503':
           description: 'Live FX is temporarily unavailable, another transfer for this sender is in progress, or new transfers are paused (code sends_paused, with a Retry-After header in seconds). Nothing was minted; a retry may reuse the same Idempotency-Key.'
