@@ -190,6 +190,9 @@ export async function runDueSchedules(
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
         // M2-10 (#398 review L2): re-check this schedule inside the mint transaction.
         scheduleId: schedule.id,
+        // Required purpose (Q2): the schedule's purpose rides every run. A schedule made
+        // before the requirement has none: it keeps running and its transfers show "Not stated".
+        purpose: schedule.purpose,
       });
       // Program fix 16: a busy per-sender lock wrote nothing — retry the mint
       // once in-process before counting the schedule as failed (the next
