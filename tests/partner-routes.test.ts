@@ -30,7 +30,7 @@ describe('PARTNER_ROUTES', () => {
     expect(PARTNER_ROUTES.integrationsWebhooks.nav).toBe(false);
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/refunds', '/partner/schedules', '/partner/customers', '/partner/reviews', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/settings', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/refunds', '/partner/schedules', '/partner/customers', '/partner/reviews', '/partner/payment-links', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/settings', '/partner/security']);
     expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/branding');
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
@@ -48,6 +48,15 @@ describe('PARTNER_ROUTES', () => {
       for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows(key, role), `${key}/${role}`).toBe(role === 'admin');
       for (const role of KNOWN_PARTNER_ROLES) expect(partnerNav(role).map((r) => r.href)).not.toContain(PARTNER_ROUTES[key].href);
     }
+  });
+  it('Batch B2: Payment links (in the nav, after Reviews) and Companies (out of the nav) are admin-only', () => {
+    expect(PARTNER_ROUTES.paymentLinks).toMatchObject({ href: '/partner/payment-links', labelKey: 'partner.nav.paymentLinks', nav: true });
+    expect(PARTNER_ROUTES.payees).toMatchObject({ href: '/partner/payees', labelKey: 'partner.nav.payees', nav: false });
+    for (const key of ['paymentLinks', 'payees'] as const) {
+      for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows(key, role), `${key}/${role}`).toBe(role === 'admin');
+    }
+    for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/payment-links');
+    for (const role of KNOWN_PARTNER_ROLES) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/payees');
   });
   it('lost-features A8: the conversation log is admin-only and out of the nav', () => {
     expect(PARTNER_ROUTES.customerConversation).toMatchObject({ href: '/partner/customers/conversation', nav: false });

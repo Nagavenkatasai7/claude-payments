@@ -1,5 +1,6 @@
-import { CSV_MAX_ROWS, parseCsv, type CsvError } from './csv-parse';
-import { parseLinkInput, type LinkField, type LinkInput } from './payment-links';
+import { CSV_MAX_ROWS, parseCsv, toCsv, type CsvError } from './csv-parse';
+import { LINK_STATUS_LABELS, linkDisplayStatus, parseLinkInput, type LinkField, type LinkInput, type LinkStatus } from './payment-links';
+import type { TransferStatus } from './types';
 
 // payment-link-bulk — Batch B2. The row-by-row check of a CSV upload (columns:
 // name, phone, amount, reference, purpose). Pure: the action passes in the
@@ -99,4 +100,49 @@ export function buildBulkReport(
     invalid: rows.filter((r) => !r.ok).length,
     warned: rows.filter((r) => r.ok && r.warnings.length > 0).length,
   };
+}
+
+/** One row of the partner's link export (the repo's list row, narrowed to what the file shows). */
+export interface ExportLink {
+  reference: string;
+  customerName: string;
+  customerPhone: string;
+  amountInr: number;
+  purpose: string;
+  payeeName: string;
+  status: LinkStatus;
+  expiresAt: Date;
+  token: string;
+  transferId: string | null;
+  transferStatus: TransferStatus | null;
+}
+
+export const EXPORT_COLUMNS = [
+  'reference', 'customer_name', 'customer_phone', 'amount_inr', 'purpose', 'company', 'status', 'expires_at', 'link', 'transfer_id',
+] as const;
+
+/**
+ * The "Download all links" CSV. Every cell goes through csvCell (formula cells neutralised, so a
+ * name typed by hand that starts with = + - @ never runs in the partner's spreadsheet). The link
+ * column is filled only while the link can still be paid.
+ */
+export function linksExportCsv(links: readonly ExportLink[], urlFor: (token: string) => string, now: Date = new Date()): string {
+  return toCsv([
+    [...EXPORT_COLUMNS],
+    ...links.map((l) => {
+      const status = linkDisplayStatus(l, l.transferStatus, now);
+      return [
+        l.reference,
+        l.customerName,
+        l.customerPhone,
+        l.amountInr.toFixed(2),
+        l.purpose,
+        l.payeeName,
+        LINK_STATUS_LABELS[status],
+        l.expiresAt.toISOString(),
+        status === 'open' ? urlFor(l.token) : '',
+        l.transferId ?? '',
+      ];
+    }),
+  ]);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildBulkReport, BULK_TEMPLATE_CSV } from '@/lib/payment-link-bulk';
+import { buildBulkReport, BULK_TEMPLATE_CSV, linksExportCsv, type ExportLink } from '@/lib/payment-link-bulk';
 import { csvCell, toCsv } from '@/lib/csv-parse';
 
 // Batch B2: the CSV bulk upload is checked row by row BEFORE anything is saved.
@@ -95,5 +95,27 @@ describe('CSV writing (download)', () => {
 
   it('toCsv joins rows with CRLF', () => {
     expect(toCsv([['a', 'b'], ['1', '2']])).toBe('a,b\r\n1,2\r\n');
+  });
+});
+
+describe('linksExportCsv', () => {
+  const base: ExportLink = {
+    reference: 'INV-1', customerName: 'Asha Patel', customerPhone: '14155550100', amountInr: 25000, purpose: 'education',
+    payeeName: 'Sunrise Public School', status: 'open', expiresAt: new Date('2099-01-01T00:00:00Z'), token: 'tok1',
+    transferId: null, transferStatus: null,
+  };
+  it('one row per link; the link only while open; formula cells neutralised', () => {
+    const csv = linksExportCsv(
+      [
+        base,
+        { ...base, reference: 'INV-2', status: 'used', token: 'tok2', transferId: 'tr_1', transferStatus: 'paid', customerName: '@SUM(A1)' },
+      ],
+      (tok) => `https://smartremit.test/pay/l/${tok}`,
+      new Date('2026-10-08T00:00:00Z'),
+    );
+    const lines = csv.trimEnd().split('\r\n');
+    expect(lines[0]).toBe('reference,customer_name,customer_phone,amount_inr,purpose,company,status,expires_at,link,transfer_id');
+    expect(lines[1]).toBe('INV-1,Asha Patel,14155550100,25000.00,education,Sunrise Public School,Open,2099-01-01T00:00:00.000Z,https://smartremit.test/pay/l/tok1,');
+    expect(lines[2]).toBe("INV-2,'@SUM(A1),14155550100,25000.00,education,Sunrise Public School,Paid,2099-01-01T00:00:00.000Z,,tr_1");
   });
 });
