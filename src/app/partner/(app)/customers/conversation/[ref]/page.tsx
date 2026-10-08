@@ -99,7 +99,7 @@ export default async function PartnerCustomerConversationPage({ params }: { para
               >
                 <div className="mb-1 text-[12.5px] text-ds-ink-muted tabular-nums">
                   {m.direction === 'in' ? t('partner.customers.conversation.customer') : t('partner.customers.conversation.bot')} ·{' '}
-                  {m.channel === 'web' ? t('partner.customers.conversation.channel.web') : t('partner.customers.conversation.channel.wa')} ·{' '}
+                  {m.channel === 'web' ? t('partner.customers.conversation.channel.web') : m.channel === 'tg' ? t('partner.customers.conversation.channel.tg') : t('partner.customers.conversation.channel.wa')} ·{' '}
                   {when(m.createdAt)}
                 </div>
                 <div className={`whitespace-pre-wrap break-words ${m.unreadable ? 'italic text-ds-ink-muted' : 'text-ds-ink'}`}>

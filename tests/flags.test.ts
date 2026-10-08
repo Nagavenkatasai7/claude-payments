@@ -42,7 +42,7 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'telegram.bot', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);

@@ -24,12 +24,13 @@ import type { PartnerId } from '@/lib/types';
 //    row. A foreign or missing thread is simply [].
 //  • No plaintext phone is stored: thread_key is the raw auditSubjectId HMAC.
 
-export type ConversationChannel = 'wa' | 'web';
+// 'tg' = the Telegram test channel (2026-10-08). No migration: the column is a plain smallint.
+export type ConversationChannel = 'wa' | 'web' | 'tg';
 export type ConversationDirection = 'in' | 'out';
 
-const CHANNEL_CODE: Record<ConversationChannel, number> = { wa: 1, web: 2 };
+const CHANNEL_CODE: Record<ConversationChannel, number> = { wa: 1, web: 2, tg: 3 };
 const DIRECTION_CODE: Record<ConversationDirection, number> = { in: 1, out: 2 };
-const CHANNEL_OF: Record<number, ConversationChannel> = { 1: 'wa', 2: 'web' };
+const CHANNEL_OF: Record<number, ConversationChannel> = { 1: 'wa', 2: 'web', 3: 'tg' };
 const DIRECTION_OF: Record<number, ConversationDirection> = { 1: 'in', 2: 'out' };
 
 /** Shown in place of a body that does not open (tampered or moved row). */
