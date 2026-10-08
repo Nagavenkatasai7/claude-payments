@@ -511,9 +511,12 @@ export async function createTransaction(
   // reason that names one purpose makes the transfer that purpose (the reason is kept); any other
   // purpose ignores purpose_detail (nothing stored). A reason that matches a scam pattern is held
   // for review at the mint, like every channel, and the response never says so beyond
-  // compliance_status.
+  // compliance_status. The type check applies only to purpose other: with any other purpose,
+  // purpose_detail is ignored whatever its type, as the docs say (security review L4).
   const detailArg = body.purpose_detail;
-  if (detailArg !== undefined && detailArg !== null && typeof detailArg !== 'string') return err(422, PURPOSE_DETAIL_TYPE_422);
+  if (chosenPurpose === 'other' && detailArg !== undefined && detailArg !== null && typeof detailArg !== 'string') {
+    return err(422, PURPOSE_DETAIL_TYPE_422);
+  }
   const decided = decidePurpose(chosenPurpose, detailArg);
   if (!decided.ok) return err(422, purposeDetail422(decided.code));
   const purpose = decided.purpose;

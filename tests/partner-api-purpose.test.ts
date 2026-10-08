@@ -228,6 +228,17 @@ describe('POST /transactions purpose_detail (required with purpose other)', () =
     expect((await createTransferRepo(db).getTransfer(String(view(r).id), { decrypt: true }))?.purposeDetail).toBeUndefined();
   });
 
+  it('any other purpose ignores a NON-STRING purpose_detail too, as documented (security review L4)', async () => {
+    const { deps } = await harness();
+    for (const [i, detail] of [42, ['school fees'], { a: 1 }, true].entries()) {
+      const r = await createTransaction(deps, ACME, 'pk_1', `idem-pd-ign-${i}`, txBody({
+        purpose: 'gift', purpose_detail: detail, sender: { phone: `1555000600${i}`, name: 'S' },
+      }));
+      expect(r, JSON.stringify(detail)).toMatchObject({ ok: true, status: 201 });
+      expect(view(r)).toMatchObject({ purpose: 'gift', purpose_detail: null });
+    }
+  });
+
   it('a matching reason is held for review with the generic reason only; the answer names no rule', async () => {
     const { deps, store } = await harness();
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-pd-hold', txBody({ purpose: 'other', purpose_detail: 'to claim my lottery prize' }));
