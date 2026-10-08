@@ -1031,3 +1031,77 @@ export const featureFlags = pgTable(
     check('feature_flags_global_scope_id', sql`${t.scopeType} <> 'global' OR ${t.scopeId} = ''`),
   ],
 );
+
+// ── Batch B4: referral partners and commissions (Xoxoday Plum) ──────────────
+// Outside affiliates (accountants, travel agents, associations) who send customers
+// to SmartRemit. They are NOT licensed partners: no tenant, no dashboard. NEW
+// tables only. Written only by src/db/repos/referral-repo.ts: the admin page
+// (/admin-dashboard/referrals, platform admin, audited) and the best-effort
+// attribution from a WhatsApp message or the portal sign-in.
+export const referralPartners = pgTable(
+  'referral_partners',
+  {
+    id: text('id').primaryKey(), // 'rp_' + random
+    name: text('name').notNull(),
+    contact: text('contact').notNull().default(''), // the referral partner's own business contact
+    // A fixed USD amount per delivered, not refunded transfer of a referred customer,
+    // for 12 months after that customer's first delivered transfer.
+    commissionCents: integer('commission_cents').notNull().default(0),
+    status: text('status').notNull().default('active'),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('referral_partners_status', sql`${t.status} IN ('active','inactive')`),
+    check('referral_partners_commission', sql`${t.commissionCents} >= 0`),
+  ],
+);
+
+export const referralCodes = pgTable(
+  'referral_codes',
+  {
+    code: text('code').primaryKey(), // REF-XXXXXX (src/lib/referrals.ts REFERRAL_CODE_RE)
+    referralPartnerId: text('referral_partner_id').notNull().references(() => referralPartners.id),
+    active: boolean('active').notNull().default(true),
+    createdBy: text('created_by').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('referral_codes_format', sql`${t.code} ~ '^REF-[A-Z0-9]{6}$'`),
+    index('referral_codes_partner').on(t.referralPartnerId),
+  ],
+);
+
+// One attribution per customer (tenant, phone): first referral wins. The customer's
+// licensed partner (partner_id) never changes because of a code. No FK to customers:
+// an attribution never blocks a customer erasure.
+export const referralAttributions = pgTable(
+  'referral_attributions',
+  {
+    partnerId: text('partner_id').notNull(),
+    phone: text('phone').notNull(),
+    referralPartnerId: text('referral_partner_id').notNull().references(() => referralPartners.id),
+    code: text('code').notNull(),
+    channel: text('channel').notNull(), // 'whatsapp' | 'portal'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.phone] }),
+    check('referral_attributions_channel', sql`${t.channel} IN ('whatsapp','portal')`),
+    index('referral_attributions_partner').on(t.referralPartnerId),
+  ],
+);
+
+// The program's one admin-set setting: the "Referral rewards" Plum portal address
+// (https only; the public link is hidden while it is empty). One row, id 'global'.
+export const referralProgramSettings = pgTable(
+  'referral_program_settings',
+  {
+    id: text('id').primaryKey().default('global'),
+    plumPortalUrl: text('plum_portal_url'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check('referral_program_settings_singleton', sql`${t.id} = 'global'`)],
+);
