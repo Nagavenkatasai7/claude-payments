@@ -25,6 +25,20 @@ export async function recordReferral(
   }
 }
 
+/**
+ * "Referred by <name>" for a customer page: the referral partner's name for (tenant, phone), or
+ * null. Keyed by the caller's tenant (a partner page passes its SESSION tenant). A read error only
+ * logs (tenant id only) and shows nothing: a referral line never breaks a customer page.
+ */
+export async function referredByName(db: () => DbOrTx, partnerId: PartnerId, phone: string): Promise<string | null> {
+  try {
+    return (await createReferralRepo(db()).getAttribution(partnerId, phone))?.referralPartnerName ?? null;
+  } catch (err) {
+    logWarn('referral.referred_by', err, { partnerId });
+    return null;
+  }
+}
+
 /** The WhatsApp seam: only a text that carries a code costs a database call. */
 export async function recordWhatsAppReferral(db: DbOrTx, partnerId: PartnerId, phone: string, text: string): Promise<boolean> {
   const code = findReferralCodeInText(text);

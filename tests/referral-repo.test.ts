@@ -144,10 +144,13 @@ describe('admin writes and settings', () => {
     expect(await repo.getPlumPortalUrl()).toBeNull();
   });
 
-  it('a duplicate code is refused by the primary key', async () => {
+  it('a duplicate code is refused by the primary key: insertCode answers false and keeps the first owner', async () => {
     await seedReferralPartner('rp_a', 'REF-AAAAAA');
+    await seedReferralPartner('rp_b', 'REF-BBBBBB');
     const repo = createReferralRepo(db);
-    await expect(repo.insertCode({ code: 'REF-AAAAAA', referralPartnerId: 'rp_a', createdBy: 'admin' })).rejects.toThrow();
+    expect(await repo.insertCode({ code: 'REF-AAAAAA', referralPartnerId: 'rp_b', createdBy: 'admin' })).toBe(false);
+    expect((await repo.getCode('REF-AAAAAA'))?.referralPartnerId).toBe('rp_a');
+    expect(await repo.insertCode({ code: 'REF-AAAAA9', referralPartnerId: 'rp_b', createdBy: 'admin' })).toBe(true);
   });
 
   it('transfers are untouched by attribution (the tenant never changes)', async () => {
@@ -155,5 +158,24 @@ describe('admin writes and settings', () => {
     const id = await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 10, status: 'paid' });
     await createReferralRepo(db).recordAttribution({ partnerId: 'acme', phone: PHONE, code: 'REF-AAAAAA', channel: 'portal' });
     expect((await createTransferRepo(db).getTransfer(id))!.partnerId).toBe('acme');
+  });
+});
+
+describe('referredByName (customer pages)', () => {
+  it("the referral partner's name for (tenant, phone); another tenant's row of the same phone is never read", async () => {
+    const { referredByName } = await import('@/lib/referral-attribution');
+    await seedReferralPartner('rp_a', 'REF-AAAAAA');
+    await createReferralRepo(db).recordAttribution({ partnerId: 'acme', phone: '15550002222', code: 'REF-AAAAAA', channel: 'portal' });
+    expect(await referredByName(() => db, 'acme', '15550002222')).toBe('Partner rp_a');
+    expect(await referredByName(() => db, 'default', '15550002222')).toBeNull();
+    expect(await referredByName(() => db, 'acme', '15550009999')).toBeNull();
+  });
+
+  it('a read error shows nothing (never throws)', async () => {
+    const { referredByName } = await import('@/lib/referral-attribution');
+    const broken = () => {
+      throw new Error('db down');
+    };
+    expect(await referredByName(broken as never, 'acme', '15550002222')).toBeNull();
   });
 });

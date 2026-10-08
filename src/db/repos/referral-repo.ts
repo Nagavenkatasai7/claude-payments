@@ -59,8 +59,10 @@ export function createReferralRepo(db: DbOrTx) {
       await db.insert(referralPartners).values(p);
     },
 
-    async insertCode(c: { code: string; referralPartnerId: string; createdBy: string }): Promise<void> {
-      await db.insert(referralCodes).values(c);
+    /** False when the code already exists (any referral partner): the first owner keeps it. */
+    async insertCode(c: { code: string; referralPartnerId: string; createdBy: string }): Promise<boolean> {
+      const rows = await db.insert(referralCodes).values(c).onConflictDoNothing({ target: referralCodes.code }).returning({ code: referralCodes.code });
+      return rows.length > 0;
     },
 
     async getPartner(id: string): Promise<ReferralPartnerRow | null> {
