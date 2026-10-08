@@ -45,6 +45,7 @@ import { finalizeDraftPayment } from '@/lib/pay-finalize';
 import { cancelWithinWindow } from '@/lib/sender-cancel';
 import { beginHold, beginSettlement } from '@/lib/settlement';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
+import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 
 // One customer portal (Oct 2): list_recent_transfers asks customerHistoryUrl for the "all
 // transfers" link. Unset (null) ⇒ the real helper (flag off in tests ⇒ /account/history).
@@ -6958,6 +6959,161 @@ describe('Required purpose: the send tools refuse a send without one', () => {
       expect((await ctx.scheduleStore.getSchedule(none.schedule_id as string))?.purpose).toBeUndefined();
       const stated = await executeTool('create_schedule', sched({ purpose: 'bills', day_of_month: 11 }), ctx);
       expect((await ctx.scheduleStore.getSchedule(stated.schedule_id as string))?.purpose).toBe('bills');
+    });
+  });
+});
+
+// ── Batch B follow-up A3/A4: the "Other" reason on the send tools ────────────
+// Purpose 'other' needs the customer's own words (purpose_detail). While the
+// requirement is on, a missing or invalid reason is refused with
+// needs_purpose_detail (the bot asks once); off, 'other' goes on as before. A
+// reason that names one purpose becomes that purpose (the reason is kept). A
+// scam-pattern reason adds scam_warning and the WhatsApp card starts with it.
+describe('Purpose detail: the send tools and the "Other" reason', () => {
+  const IN_MOM = '919876543210';
+  const required = async () => ({ ...(await buildCtx(fakeRedis())), purposeRequired: true as const });
+  const stubWhatsApp = () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { body?: unknown }) => {
+      if (String(url).includes('graph.facebook.com')) bodies.push(String(init?.body ?? ''));
+      return { ok: true, text: async () => '', json: async () => ({ rates: { INR: MOCK_RATE } }) };
+    }));
+    return bodies;
+  };
+  const picker = (over: Record<string, unknown> = {}) => ({
+    amount_source: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, destination_country: 'IN', ...over,
+  });
+  const cardText = (body: string) => String((JSON.parse(body) as { interactive?: { body?: { text?: string } } }).interactive?.body?.text ?? '');
+
+  it('schemas: purpose_detail is offered (never required) on the four send tools', () => {
+    for (const tools of [toolSchemas, toolSchemasForChannel('whatsapp', { purposeRequired: true })]) {
+      for (const name of ['send_approve_picker', 'create_transfer', 'create_schedule', 'repeat_transfer']) {
+        const params = tools.find((t) => t.function.name === name)?.function.parameters as
+          | { properties: Record<string, { type?: string }>; required?: string[] }
+          | undefined;
+        if (!params) continue; // create_transfer is hidden on WhatsApp
+        expect(params.properties.purpose_detail?.type, name).toBe('string');
+        expect(params.required ?? [], name).not.toContain('purpose_detail');
+      }
+    }
+  });
+
+  it('other with no reason ⇒ needs_purpose_detail and the ask-once hint; no draft, no card', async () => {
+    const ctx = await required();
+    const bodies = stubWhatsApp();
+    for (const purpose_detail of [undefined, 'send money', 'short']) {
+      const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail }), ctx);
+      expect(r.needs_purpose_detail, String(purpose_detail)).toBe(true);
+      expect(String(r.reply_hint)).toContain('What is it for?');
+      expect(r.draft_id).toBeUndefined();
+    }
+    expect(bodies).toEqual([]);
+  });
+
+  it('a reason that names one purpose ⇒ that purpose on the draft, with the reason', async () => {
+    const ctx = await required();
+    stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: '  school fees for my brother ' }), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.scam_warning).toBeUndefined();
+    const d = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(d).toMatchObject({ purpose: 'education', purposeDetail: 'school fees for my brother' });
+  });
+
+  it('a plain reason keeps purpose other with the reason', async () => {
+    const ctx = await required();
+    stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'helping a neighbour repair the roof' }), ctx);
+    const d = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(d).toMatchObject({ purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' });
+  });
+
+  it('a scam-pattern reason ⇒ scam_warning, and the WhatsApp card body starts with it', async () => {
+    const ctx = await required();
+    const bodies = stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'to claim my lottery prize' }), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    expect(JSON.stringify(r)).not.toMatch(/category|lottery/);
+    expect(bodies).toHaveLength(1);
+    expect(cardText(bodies[0]).startsWith(`${PURPOSE_SCAM_WARNING}\n\n`)).toBe(true);
+  });
+
+  it('another purpose ignores a reason (nothing stored, no warning)', async () => {
+    const ctx = await required();
+    const bodies = stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'gift', purpose_detail: 'to claim my lottery prize' }), ctx);
+    expect(r.scam_warning).toBeUndefined();
+    expect(cardText(bodies[0])).not.toContain('Stop and check');
+    const d = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(d?.purpose).toBe('gift');
+    expect(d?.purposeDetail).toBeUndefined();
+  });
+
+  it('requirement off ⇒ other with no reason still sends the card (never asked)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other' }), ctx);
+    expect(r.sent).toBe(true);
+    const d = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(d?.purpose).toBe('other');
+    expect(d?.purposeDetail).toBeUndefined();
+  });
+
+  it('the approve tap mints the draft with its reason (sealed, held when it matches a scam pattern)', async () => {
+    const ctx = await required();
+    stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'to claim my lottery prize' }), ctx);
+    const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
+    const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+    const t = await createTransferRepo(db).getTransfer(String(minted.transfer_id), { decrypt: true });
+    expect(t).toMatchObject({ purpose: 'other', purposeDetail: 'to claim my lottery prize', complianceStatus: 'flagged' });
+  });
+
+  it('create_transfer (explicit args) applies the same rule', async () => {
+    const ctx = await required();
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
+    });
+    const refused = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other' }, ctx);
+    expect(refused.needs_purpose_detail).toBe(true);
+    const ok = await runLegacyCreateTransferForTests({
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other', purpose_detail: 'maa ki dawai ke liye',
+    }, ctx);
+    const t = await createTransferRepo(db).getTransfer(String(ok.transfer_id), { decrypt: true });
+    expect(t).toMatchObject({ purpose: 'medical', purposeDetail: 'maa ki dawai ke liye' });
+  });
+
+  describe('repeat_transfer', () => {
+    const seedPast = async (ctx: Awaited<ReturnType<typeof buildCtx>>) => {
+      await ctx.store.upsertRecipient('default', ctx.phone, {
+        name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
+      });
+      await runLegacyCreateTransferForTests({
+        amount_usd: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, funding_method: 'bank_transfer', purpose: 'gift',
+      }, { ...ctx, purposeRequired: false });
+    };
+
+    it('other with no reason ⇒ needs_purpose_detail before any read', async () => {
+      const ctx = await required();
+      await seedPast(ctx);
+      const r = await executeTool('repeat_transfer', { recipient_phone: IN_MOM, purpose: 'other' }, ctx);
+      expect(r.needs_purpose_detail).toBe(true);
+      expect(r.draft_id).toBeUndefined();
+    });
+
+    it('on the web channel (portal Send again) a scam-pattern reason rides the draft and returns scam_warning', async () => {
+      const ctx = await required();
+      await seedPast(ctx);
+      const [last] = await ctx.store.listTransfersByPhone('default', ctx.phone, 1);
+      const webCtx = { ...ctx, channel: 'web' as const };
+      const r = await executeTool('repeat_transfer', { transfer_id: last.id, purpose: 'other', purpose_detail: 'customs charge for a parcel' }, webCtx);
+      expect(typeof r.pay_url).toBe('string');
+      expect(r.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+      expect(String(r.reply_hint)).toMatch(/^start your reply with the scam_warning/);
+      expect(await ctx.draftStore.consumeDraft(r.draft_id as string)).toMatchObject({
+        purpose: 'other', purposeDetail: 'customs charge for a parcel',
+      });
     });
   });
 });

@@ -50,6 +50,11 @@ export interface ScheduleInput {
   endDate?: unknown;
   /** parsePurpose: one of the 8 purposes, else absent (refused when requirePurpose). */
   purpose?: unknown;
+  /**
+   * Batch B follow-up A3: the reason for purpose `other`, ALREADY decided by the caller
+   * (purpose-detail.ts decidePurpose). Kept only when valid and a purpose is set.
+   */
+  purposeDetail?: unknown;
 }
 
 export interface ScheduleValidateOptions {

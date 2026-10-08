@@ -204,3 +204,25 @@ export function purposeDetailRisk(detail: string | null | undefined): PurposeRis
   const r = checkPurposeDetail(detail);
   return r.ok ? r.risk?.category : undefined;
 }
+
+/** A valid reason, normalised; anything else (absent, invalid) is undefined. Pure. */
+export function validPurposeDetail(raw: unknown): string | undefined {
+  const r = checkPurposeDetail(raw);
+  return r.ok ? r.detail : undefined;
+}
+
+/**
+ * The customer-facing scam warning (portal review, Send again, schedules and the
+ * bot). Deliberately names no rule and no category: the customer is never told
+ * which words matched.
+ */
+export const PURPOSE_SCAM_WARNING =
+  'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. ' +
+  'SmartRemit staff check this transfer before the money goes.';
+
+/** What a send tool tells the model when purpose `other` has no valid reason (never shown to the customer as is). */
+export const PURPOSE_DETAIL_HINT =
+  'The customer chose Other. Ask them ONCE, in a few words, what the money is for: "What is it for?" ' +
+  '(in Hinglish for a Hinglish customer: "Yeh paise kis liye hain?"). Then call the same tool again with the same ' +
+  "details, purpose 'other' and purpose_detail set to their own words (10 to 120 characters). Never write the reason " +
+  'yourself. If they already answered and this came back again, their answer was too short or unclear: ask them to say a little more.';

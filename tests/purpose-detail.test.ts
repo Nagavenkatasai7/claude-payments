@@ -8,6 +8,8 @@ import {
   PURPOSE_RISK_KEYWORDS,
   PURPOSE_RISK_LABELS,
   PURPOSE_SUGGEST_KEYWORDS,
+  PURPOSE_SCAM_WARNING,
+  validPurposeDetail,
   type PurposeDetailResult,
 } from '@/lib/purpose-detail';
 import { TRANSFER_PURPOSES } from '@/lib/purpose-codes';
@@ -174,5 +176,20 @@ describe('exported lists', () => {
       if (p === 'other') expect(PURPOSE_SUGGEST_KEYWORDS[p]).toBeUndefined();
       else expect(PURPOSE_SUGGEST_KEYWORDS[p]?.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('validPurposeDetail and the warning copy', () => {
+  it('keeps a valid reason, drops anything else', () => {
+    expect(validPurposeDetail('  school fees ')).toBe('school fees');
+    expect(validPurposeDetail('send money')).toBeUndefined();
+    expect(validPurposeDetail(42)).toBeUndefined();
+  });
+
+  it('the warning is the owner-approved text (it names no matched rule)', () => {
+    expect(PURPOSE_SCAM_WARNING).toBe(
+      'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. ' +
+        'SmartRemit staff check this transfer before the money goes.',
+    );
   });
 });
