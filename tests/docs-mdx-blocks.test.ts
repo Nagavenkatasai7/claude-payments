@@ -25,7 +25,7 @@ describe('<Fact>', () => {
     const out = html(createElement(Fact, { name: 'reservedIdempotencyPrefixes' }));
     const items = [...out.matchAll(/<code[^>]*>([^<]+)<\/code>/g)].map((m) => m[1]);
     expect(items).toEqual([...FACTS.reservedIdempotencyPrefixes]);
-    expect(out.replace(/<[^>]+>/g, '')).toBe('draft:, b2binvoice:, sched:, test:');
+    expect(out.replace(/<[^>]+>/g, '')).toBe('draft:, b2binvoice:, sched:, test:, paylink:');
   });
   it('throws for an unknown fact (fails the build, never prints "undefined")', async () => {
     const { Fact } = await import('@/components/docs/mdx-blocks');
