@@ -11,3 +11,8 @@ import { env } from './env';
 export function payUrlFor(draftOrTransferId: string): string {
   return `${env.appBaseUrl}/pay/${draftOrTransferId}`;
 }
+
+/** Batch B2: the customer's page for one payment link (the partner copies or downloads it). */
+export function paymentLinkUrl(token: string): string {
+  return `${env.appBaseUrl}/pay/l/${token}`;
+}
