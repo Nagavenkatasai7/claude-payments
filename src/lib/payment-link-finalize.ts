@@ -119,7 +119,7 @@ class ClaimLostError extends Error {
 
 export async function finalizeLinkPayment(
   stores: LinkFinalizeStores,
-  input: { token: string; fundingMethod: LinkFundingMethod; rate: LockedLinkRate; now?: Date },
+  input: { token: string; fundingMethod: LinkFundingMethod; rate: LockedLinkRate | null; now?: Date },
 ): Promise<LinkFinalizeResult> {
   const { store, customerStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
   const now = input.now ?? new Date();
@@ -128,27 +128,6 @@ export async function finalizeLinkPayment(
   if (!payable) return { ok: false, error: 'inactive' };
   const { link, payee } = payable;
   const partnerId = link.partnerId;
-
-  // A claim whose transfer already exists (the charge failed before): the pay
-  // route resumes THAT transfer; nothing is re-priced or re-minted here.
-  if (payable.transfer) return { ok: true, transferId: payable.transfer.id };
-
-  // sends.paused BEFORE anything is written (createTransfer re-checks under the
-  // claim; that refusal is the resumable bound-but-unminted shape).
-  if (await store.isFlagOn('sends.paused', { partnerId: [partnerId], corridor: 'IN' })) {
-    return { ok: false, error: 'sends_paused' };
-  }
-
-  // The figures the customer saw: the LOCKED rate, the link's exact rupees.
-  let quote: ReturnType<typeof linkQuote>;
-  try {
-    quote = linkQuote(link.amountInr, { toInr: input.rate.toInr }, input.fundingMethod);
-    assertQuoteOverrideFresh({ fxFetchedAt: input.rate.fetchedAt }, now.getTime());
-  } catch (err) {
-    if (err instanceof RateUnavailableError) return { ok: false, error: 'fx_unavailable' };
-    if (err instanceof QuoteError) return { ok: false, error: 'quote_error' };
-    throw err;
-  }
 
   const partner = await partnerStore.getPartner(partnerId);
   if (!partner) return { ok: false, error: 'inactive' };
@@ -166,6 +145,30 @@ export async function finalizeLinkPayment(
   if (screen.verdict !== 'clear') {
     if (screen.verdict === 'review') await createPayeeRepo(db).setScreening(payee.id, 'review');
     return { ok: false, error: screen.verdict === 'match' ? 'blocked' : 'payee_unavailable' };
+  }
+
+  // A claim whose transfer already exists (the charge failed before): the pay
+  // route resumes THAT transfer (after the payee screen above, which runs at
+  // every payment attempt); nothing is re-priced or re-minted here.
+  if (payable.transfer) return { ok: true, transferId: payable.transfer.id };
+
+  // sends.paused BEFORE anything is written (createTransfer re-checks under the
+  // claim; that refusal is the resumable bound-but-unminted shape).
+  if (await store.isFlagOn('sends.paused', { partnerId: [partnerId], corridor: 'IN' })) {
+    return { ok: false, error: 'sends_paused' };
+  }
+
+  // The figures the customer saw: the LOCKED rate, the link's exact rupees. No
+  // lock (it lapsed) ⇒ fx_unavailable: the page reloads with a fresh rate.
+  if (!input.rate) return { ok: false, error: 'fx_unavailable' };
+  let quote: ReturnType<typeof linkQuote>;
+  try {
+    quote = linkQuote(link.amountInr, { toInr: input.rate.toInr }, input.fundingMethod);
+    assertQuoteOverrideFresh({ fxFetchedAt: input.rate.fetchedAt }, now.getTime());
+  } catch (err) {
+    if (err instanceof RateUnavailableError) return { ok: false, error: 'fx_unavailable' };
+    if (err instanceof QuoteError) return { ok: false, error: 'quote_error' };
+    throw err;
   }
 
   // ── The customer: resolve-or-create WITHOUT WhatsApp consent ──────────────

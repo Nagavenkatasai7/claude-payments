@@ -15,6 +15,9 @@ import type { TransferPurpose, TransferStatus } from './types';
 // No I/O here except the token's randomness.
 
 /** Owner decision: a link expires 7 days after it is made. */
+/** The ONE answer for every unpayable link (page, code request, payment): never which check refused. */
+export const LINK_INACTIVE_MESSAGE = 'This payment link is no longer active.';
+
 export const LINK_TTL_DAYS = 7;
 const DAY_MS = 86_400_000;
 /** A sanity bound on one link (₹1 crore); the USD band below is the real limit. */
