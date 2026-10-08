@@ -1500,6 +1500,16 @@ export const en = {
   'portal.send.purposeLabel': 'Why you are sending',
   'portal.send.purposePlaceholder': 'Choose a reason',
   'portal.send.purpose_invalid': 'Choose why you are sending this money.',
+  // Batch B follow-up A3/A4: the "Other" reason and the scam warning.
+  'portal.send.purposeDetailLabel': 'Tell us the reason',
+  'portal.send.purposeDetailHint': 'A few words, 10 to 120 characters.',
+  'portal.send.purpose_detail_invalid': 'Tell us the reason in a few words.',
+  'portal.send.purpose_detail_too_long': 'Keep the reason under 120 characters.',
+  'portal.send.purposeFromWords': '{purpose} (from your words: "{detail}")',
+  'portal.send.scamWarning':
+    'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. SmartRemit staff check this transfer before the money goes.',
+  'portal.send.scamAck': 'I have read this warning',
+  'portal.send.scam_ack_required': 'Read the warning and tick "I have read this warning" to continue.',
   'portal.send.recipient_invalid': 'Choose a recipient.',
   'portal.send.name_invalid': 'Enter a name of 1 to 80 characters, without special control characters.',
   'portal.send.phone_invalid': 'Enter a valid mobile number with its country code.',

@@ -2,7 +2,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } 
 import { auditEvents, customers, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
-import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import { last4, openOptional, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -261,6 +261,26 @@ export function createTransferRepo(
         .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId)))
         .limit(1);
       return rows[0] ? toDomain(rows[0], opts?.decrypt ?? false) : null;
+    },
+
+    /**
+     * Batch B follow-up A3: the customer's "Other" reason ONLY (one column, decrypted). This is a
+     * decrypted read: the caller audits it when staff read it. With `partnerId` the read is
+     * tenant-scoped, and with `phone` it is also the sender's own (portal Send again); null for
+     * missing, out-of-scope or no reason (404-never-403).
+     */
+    async getPurposeDetail(id: string, scope: { partnerId?: PartnerId; phone?: string } = {}): Promise<string | null> {
+      const conds = [eq(transfers.id, id)];
+      if (scope.partnerId !== undefined) conds.push(eq(transfers.partnerId, scope.partnerId));
+      if (scope.phone !== undefined) conds.push(eq(transfers.phone, scope.phone));
+      const rows = await db
+        .select({ id: transfers.id, enc: transfers.purposeDetailEnc })
+        .from(transfers)
+        .where(and(...conds))
+        .limit(1);
+      const r = rows[0];
+      if (!r?.enc) return null;
+      return openOptional(r.enc, provider, ctx.transfer(r.id, 'purpose_detail_enc')) ?? null;
     },
 
     /**

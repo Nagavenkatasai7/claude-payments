@@ -24,6 +24,7 @@ import type { MessageKey } from './i18n';
 import type { PortalOwner } from './portal-transfers';
 import type { CountryCode, CurrencyCode, Customer, Partner, TransferPurpose, TurnContext } from './types';
 import { parsePurpose } from './purpose-codes';
+import { checkPurposeDetail, decidePurpose, purposeDetailRisk, validPurposeDetail, type PurposeDetailCode } from './purpose-detail';
 
 /**
  * portal-send — the customer portal's Send adapter (UI redesign M2-9). Server only.
@@ -191,6 +192,8 @@ export interface PortalSendInput {
   fundingMethod: PortalFundingMethod;
   /** Required purpose (owner decision 2026-10-08): one of the 8, chosen on the Send form. */
   purpose: TransferPurpose;
+  /** Batch B follow-up A3: the customer's reason (already decided on the form; kept only when valid). */
+  purposeDetail?: string;
 }
 
 /**
@@ -205,6 +208,7 @@ export function toPrepareSendInput(i: PortalSendInput): PrepareSendInput | null 
   if (!isPortalFunding(i.fundingMethod)) return null;
   const purpose = parsePurpose(i.purpose);
   if (!purpose) return null;
+  const purposeDetail = validPurposeDetail(i.purposeDetail);
   return {
     recipientPhone: i.recipientPhone,
     recipientName,
@@ -213,6 +217,7 @@ export function toPrepareSendInput(i: PortalSendInput): PrepareSendInput | null 
     destinationCountry: i.destinationCountry,
     fundingMethod: i.fundingMethod,
     purpose,
+    ...(purposeDetail ? { purposeDetail } : {}),
   };
 }
 
@@ -239,15 +244,39 @@ export interface SendFormValue {
   recipient: SendRecipientChoice;
   /** Required purpose (owner decision 2026-10-08). */
   purpose: TransferPurpose;
+  /**
+   * Batch B follow-up A3: the customer's own words when they chose Other (normalised). When the
+   * words named a purpose, `purpose` is that one and the words are kept here too.
+   */
+  purposeDetail?: string;
 }
 
-export type SendFormField = 'amount' | 'currency' | 'destination' | 'funding' | 'recipient' | 'name' | 'phone' | 'purpose';
+export type SendFormField = 'amount' | 'currency' | 'destination' | 'funding' | 'recipient' | 'name' | 'phone' | 'purpose' | 'purposeDetail';
 export type SendFormErrors = Partial<Record<SendFormField, MessageKey>>;
 
 const str = (fd: FormData, k: string) => {
   const v = fd.get(k);
   return typeof v === 'string' ? v : '';
 };
+
+/** Batch B follow-up A3: the form error for a refused "Other" reason (shared by Send, Send again and schedules). */
+export function purposeDetailError(code: PurposeDetailCode): 'portal.send.purpose_detail_too_long' | 'portal.send.purpose_detail_invalid' {
+  return code === 'too_long' ? 'portal.send.purpose_detail_too_long' : 'portal.send.purpose_detail_invalid';
+}
+
+/**
+ * Batch B follow-up A4: true when the reason matches a scam pattern and the customer has NOT ticked
+ * "I have read this warning" (the form's `scam_ack` checkbox). The caller refuses with
+ * 'portal.send.scam_ack_required' and shows the warning; it never says which words matched.
+ */
+export function needsScamAck(purposeDetail: string | undefined, fd: FormData): boolean {
+  return purposeDetailRisk(purposeDetail) !== undefined && fd.get('scam_ack') !== 'on';
+}
+
+/** True when a reason matches a scam pattern (the pages show the warning; no category leaves the server). */
+export function showsScamWarning(purposeDetail: string | undefined): boolean {
+  return purposeDetailRisk(purposeDetail) !== undefined;
+}
 
 /**
  * Validate the Send form. The currency must be one the partner sends in, the destination a supported
@@ -284,13 +313,18 @@ export function validateSendForm(
     errors.recipient = 'portal.send.recipient_invalid';
   }
   // Required purpose: one of the 8 values exactly (the select's option values); anything else is refused.
-  const purpose = parsePurpose(str(fd, 'purpose'));
-  if (!purpose) errors.purpose = 'portal.send.purpose_invalid';
+  const chosen = parsePurpose(str(fd, 'purpose'));
+  if (!chosen) errors.purpose = 'portal.send.purpose_invalid';
+  // Batch B follow-up A3: Other needs the customer's reason; a reason that names a purpose becomes it.
+  const decided = chosen ? decidePurpose(chosen, str(fd, 'purpose_detail')) : null;
+  if (decided && !decided.ok) errors.purposeDetail = purposeDetailError(decided.code);
 
-  if (Object.keys(errors).length > 0 || amountSource === null || !sourceCurrency || !destinationCountry || !isPortalFunding(fundingRaw) || !recipient || !purpose) {
+  if (Object.keys(errors).length > 0 || amountSource === null || !sourceCurrency || !destinationCountry || !isPortalFunding(fundingRaw) || !recipient || !decided?.ok) {
     return { ok: false, errors };
   }
-  return { ok: true, value: { amountSource, sourceCurrency, destinationCountry, fundingMethod: fundingRaw, recipient, purpose } };
+  const value: SendFormValue = { amountSource, sourceCurrency, destinationCountry, fundingMethod: fundingRaw, recipient, purpose: decided.purpose };
+  if (decided.detail) value.purposeDetail = decided.detail;
+  return { ok: true, value };
 }
 
 /**
@@ -379,6 +413,12 @@ function parseReview(raw: unknown): PortalSendReview | null {
     recipient: choice,
     purpose,
   };
+  // Batch B follow-up A3: a stored reason must still be a valid one (else back to the form).
+  if (v.purposeDetail !== undefined) {
+    const d = checkPurposeDetail(v.purposeDetail);
+    if (!d.ok) return null;
+    out.purposeDetail = d.detail;
+  }
   if (typeof draftId === 'string' && DRAFT_ID_RE.test(draftId)) out.draftId = draftId;
   return out;
 }

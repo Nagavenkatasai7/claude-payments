@@ -125,6 +125,19 @@ describe('repo AAD v2 round trips (every table, v2 is the default writer)', { re
     expect(none.purpose_detail_enc).toBeNull();
   });
 
+  it('getPurposeDetail: the one column, scoped by partner and phone (null out of scope or with no reason)', async () => {
+    const repo = createTransferRepo(db, provider);
+    await repo.saveTransfer(transferFixture({ purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' }));
+    await repo.saveTransfer(transferFixture({ id: 'tr_aad2' }));
+    const own = transferFixture();
+    expect(await repo.getPurposeDetail('tr_aad1')).toBe('helping a neighbour repair the roof');
+    expect(await repo.getPurposeDetail('tr_aad1', { partnerId: 'default', phone: own.phone })).toBe('helping a neighbour repair the roof');
+    expect(await repo.getPurposeDetail('tr_aad1', { partnerId: 'acme' })).toBeNull();
+    expect(await repo.getPurposeDetail('tr_aad1', { partnerId: 'default', phone: '15550009999' })).toBeNull();
+    expect(await repo.getPurposeDetail('tr_aad2')).toBeNull();
+    expect(await repo.getPurposeDetail('tr_missing')).toBeNull();
+  });
+
   it('ctx-mismatched transfers.purpose_detail_enc → the decrypted read throws', async () => {
     const repo = createTransferRepo(db, provider);
     await repo.saveTransfer(transferFixture({ purposeDetail: 'helping a neighbour repair the roof' }));

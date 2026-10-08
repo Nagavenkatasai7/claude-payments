@@ -13,6 +13,8 @@ import { t, type MessageKey } from './i18n';
 import type { ToolContext } from './tools';
 import type { PartnerId, Schedule, ScheduleStatus, TransferPurpose } from './types';
 import { parsePurpose } from './purpose-codes';
+import { decidePurpose } from './purpose-detail';
+import { purposeDetailError } from './portal-send';
 
 /**
  * portal-schedules — the customer portal's recurring payments (UI redesign M2-10). Server only.
@@ -70,6 +72,8 @@ export interface ScheduleFormErrors {
   day?: MessageKey;
   endDate?: MessageKey;
   purpose?: MessageKey;
+  /** Batch B follow-up A3: the "Other" reason (the Send form's messages). */
+  purposeDetail?: MessageKey;
 }
 
 export interface ScheduleFormValue {
@@ -81,6 +85,11 @@ export interface ScheduleFormValue {
   endDate: string | undefined;
   /** Required purpose (owner decision 2026-10-08): one of the 8. */
   purpose: TransferPurpose;
+  /**
+   * Batch B follow-up A3: the customer's reason when they chose Other (normalised). A reason that
+   * named a purpose made `purpose` that one, and the words are kept here too.
+   */
+  purposeDetail?: string;
 }
 
 const str = (fd: FormData, k: string) => {
@@ -126,10 +135,17 @@ export function parseScheduleForm(fd: FormData, now: number = Date.now()): { ok:
     }
   }
   // Required purpose: one of the 8 values exactly (the select's option values).
-  const purpose = parsePurpose(str(fd, 'purpose'));
-  if (!purpose) errors.purpose = 'portal.schedules.purpose_invalid';
-  if (Object.keys(errors).length > 0 || !frequency || !purpose) return { ok: false, errors };
-  return { ok: true, value: { rid, amount, frequency, dayOfMonth, dayOfWeek, endDate, purpose } };
+  const chosen = parsePurpose(str(fd, 'purpose'));
+  if (!chosen) errors.purpose = 'portal.schedules.purpose_invalid';
+  // Batch B follow-up A3: Other needs the customer's reason (the same rule as Send). The reason is
+  // read whole (the 40-character `str` cap is for the short fields); the rule bounds it.
+  const rawDetail = fd.get('purpose_detail');
+  const decided = chosen ? decidePurpose(chosen, typeof rawDetail === 'string' ? rawDetail.slice(0, 480) : '') : null;
+  if (decided && !decided.ok) errors.purposeDetail = purposeDetailError(decided.code);
+  if (Object.keys(errors).length > 0 || !frequency || !decided?.ok) return { ok: false, errors };
+  const value: ScheduleFormValue = { rid, amount, frequency, dayOfMonth, dayOfWeek, endDate, purpose: decided.purpose };
+  if (decided.detail) value.purposeDetail = decided.detail;
+  return { ok: true, value };
 }
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
@@ -201,6 +217,8 @@ export async function createPortalSchedule(
       destinationCountry: undefined,
       endDate: value.endDate,
       purpose: value.purpose,
+      // Batch B follow-up A3: the reason, already decided by parseScheduleForm (sealed on the row).
+      purposeDetail: value.purposeDetail,
     },
     // Required purpose: the portal always requires one (no switch).
     { amountBounds: true, requirePayout: true, requirePurpose: true },
