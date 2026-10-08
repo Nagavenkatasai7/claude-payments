@@ -244,8 +244,10 @@ paths:
         is recorded as blocked. A transaction created without sender.name is held for
         manual review. client_reference is optional: your own order number, 1 to 64
         letters, digits and . _ : / # - characters. It is saved once and comes back in
-        every answer, in the settlements statement and in the settlement instruction to
-        your rail.
+        every answer and in the settlements statement. It is also in the settlement
+        instruction when your own rail pays the transaction out (never when another
+        payout partner does). A status callback may send payout_reference (for example a
+        bank UTR) with paid_out; it is saved once.
       tags: [Transactions]
       x-smartremit-scope: transactions:write
       x-smartremit-sandbox: true

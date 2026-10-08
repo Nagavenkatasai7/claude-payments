@@ -85,6 +85,11 @@ describe('recordAttribution', () => {
   });
 });
 
+/** Backdate every attribution (a referral made before the seeded deliveries). */
+async function attributedAt(at: Date) {
+  await db.execute(sql`UPDATE referral_attributions SET created_at = ${at.toISOString()}::timestamptz`);
+}
+
 describe('monthlyStatement', () => {
   const SEP = new Date('2026-09-01T00:00:00Z');
   const OCT = new Date('2026-10-01T00:00:00Z');
@@ -95,6 +100,7 @@ describe('monthlyStatement', () => {
     const repo = createReferralRepo(db);
     await repo.recordAttribution({ partnerId: 'default', phone: PHONE, code: 'REF-AAAAAA', channel: 'whatsapp' });
     await repo.recordAttribution({ partnerId: 'acme', phone: '15559990000', code: 'REF-AAAAAA', channel: 'portal' });
+    await attributedAt(new Date('2026-08-01T00:00:00Z'));
     await deliver('t1', PHONE, new Date('2026-09-03T10:00:00Z'));
     await deliver('t2', PHONE, new Date('2026-09-20T10:00:00Z'));
     await deliver('t3', '15559990000', new Date('2026-09-21T10:00:00Z'), 'acme');
@@ -113,11 +119,23 @@ describe('monthlyStatement', () => {
     await seedReferralPartner('rp_a', 'REF-AAAAAA', { commissionCents: 100 });
     const repo = createReferralRepo(db);
     await repo.recordAttribution({ partnerId: 'default', phone: PHONE, code: 'REF-AAAAAA', channel: 'whatsapp' });
+    await attributedAt(new Date('2025-09-01T00:00:00Z'));
     await deliver('first', PHONE, new Date('2025-09-10T00:00:00Z'));
     await deliver('inside', PHONE, new Date('2026-09-09T23:59:00Z'));
     await deliver('outside', PHONE, new Date('2026-09-10T00:00:01Z'));
     await deliver('sandbox', PHONE, new Date('2026-09-05T00:00:00Z'));
     await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id = 'sandbox'`);
+    const rows = await repo.monthlyStatement(SEP, OCT);
+    expect(rows.find((r) => r.referralPartnerId === 'rp_a')!.deliveredCount).toBe(1);
+  });
+
+  it('a transfer delivered BEFORE the referral was made earns no commission (one in flight at sign-up)', async () => {
+    await seedReferralPartner('rp_a', 'REF-AAAAAA', { commissionCents: 100 });
+    const repo = createReferralRepo(db);
+    await repo.recordAttribution({ partnerId: 'default', phone: PHONE, code: 'REF-AAAAAA', channel: 'whatsapp' });
+    await attributedAt(new Date('2026-09-10T00:00:00Z'));
+    await deliver('before', PHONE, new Date('2026-09-03T10:00:00Z'));
+    await deliver('after', PHONE, new Date('2026-09-20T10:00:00Z'));
     const rows = await repo.monthlyStatement(SEP, OCT);
     expect(rows.find((r) => r.referralPartnerId === 'rp_a')!.deliveredCount).toBe(1);
   });

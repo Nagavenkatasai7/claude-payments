@@ -1,7 +1,7 @@
 ## 2026-10
 
 - **New documentation preview.** These guides and an API reference generated from the Partner API's OpenAPI description.
-- **Order references.** Send your own order number as `client_reference` when you create a transaction. It comes back in every answer, in the settlements statement and in the settlement instruction. A status callback may send `payout_reference` (for example a bank UTR); it is saved once and returned as `payout_reference`.
+- **Order references.** Send your own order number as `client_reference` when you create a transaction. It comes back in every answer and in the settlements statement, and it is in the settlement instruction when your own rail pays the transaction out. A `paid_out` status callback may send `payout_reference` (for example a bank UTR); it is saved once and returned as `payout_reference`.
 
 ## 2026-09
 

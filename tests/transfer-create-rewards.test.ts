@@ -199,6 +199,17 @@ describe('createTransfer with a reward (B3)', () => {
       .rejects.toBeInstanceOf(RewardEndedError);
   });
 
+  it('the admin lowered the catalog maximum discount after the quote ⇒ "offer ended" (no stale discount or give-back)', async () => {
+    const s = await setup();
+    const phone = '15559990012';
+    await delivered(s.db, phone, 4);
+    await s.rewards.upsertCatalog({ ...DEFAULT_CATALOG.nth_transfer, available: true, maxDiscountUsd: 0.5 }, 'admin');
+    await expect(createTransfer(s.store, s.partnerStore, s.mvs, { ...base, phone, id: 'tr_rw_cut', quote: FREE_QUOTE, reward: NTH }))
+      .rejects.toBeInstanceOf(RewardEndedError);
+    expect(await s.store.getTransfer('tr_rw_cut')).toBeNull();
+    expect(await redemptionCount(s.db)).toBe(0);
+  });
+
   it('a demo-mode list without this phone ⇒ "offer ended"', async () => {
     const s = await setup();
     const phone = '15559990012';

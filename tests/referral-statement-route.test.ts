@@ -97,6 +97,7 @@ beforeEach(async () => {
   await repo.recordAttribution({ partnerId: 'acme', phone: PHONE, code: 'REF-TANA01', channel: 'portal' });
   await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 40, status: 'delivered', id: 'tr_ref1' });
   await db.execute(sql`UPDATE transfers SET delivered_at = '2026-09-03T10:00:00Z' WHERE id = 'tr_ref1'`);
+  await db.execute(sql`UPDATE referral_attributions SET created_at = '2026-08-01T00:00:00Z'`);
 });
 
 describe('POST /admin-dashboard/referrals/statement', () => {
@@ -130,6 +131,17 @@ describe('POST /admin-dashboard/referrals/statement', () => {
 
   it('anonymous → /login', async () => {
     await expect(POST(postReq('2026-09'))).rejects.toThrow('REDIRECT:/login');
+  });
+
+  it('STAFF_MFA_REQUIRED: an unenrolled platform admin gets a 404 and nothing is audited (same rule as requirePlatformAdmin)', async () => {
+    process.env.STAFF_MFA_REQUIRED = 'true';
+    try {
+      await signIn(staff({ username: 'raj' }));
+      expect((await POST(postReq('2026-09'))).status).toBe(404);
+      expect(await exportAudits()).toEqual([]);
+    } finally {
+      delete process.env.STAFF_MFA_REQUIRED;
+    }
   });
 });
 

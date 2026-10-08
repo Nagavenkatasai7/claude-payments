@@ -138,6 +138,7 @@ describe('buildReferralStatement', () => {
     const a = await createReferralPartner(ADMIN, { name: 'A', contact: 'a@x.org', commissionUsd: '1.25' }, db);
     await createReferralPartner(ADMIN, { name: 'B', contact: '', commissionUsd: '0' }, db);
     await createReferralRepo(db).recordAttribution({ partnerId: 'default', phone: '15550001111', code: a.code, channel: 'whatsapp' });
+    await db.execute(sql`UPDATE referral_attributions SET created_at = '2026-08-01T00:00:00Z'`); // referred before the deliveries
     for (const id of ['t1', 't2']) {
       await seedLedgerSpend(db, { partnerId: 'default', phone: '15550001111', amountUsd: 50, status: 'delivered', id });
       await db.execute(sql`UPDATE transfers SET delivered_at = '2026-09-10T12:00:00Z' WHERE id = ${id}`);

@@ -20,6 +20,6 @@ export async function recordPortalReferral(partnerId: PartnerId, phone: string):
     jar.delete(REFERRAL_COOKIE);
     await recordReferral(getDb(), { partnerId, phone, code: raw, channel: 'portal' });
   } catch (err) {
-    logWarn('referral.portal', err, { partnerId });
+    logWarn('referral.portal', err instanceof Error ? err.name : 'error', { partnerId });
   }
 }

@@ -20,7 +20,7 @@ export async function recordReferral(
   try {
     return await createReferralRepo(db).recordAttribution({ partnerId: input.partnerId, phone: input.phone, code, channel: input.channel });
   } catch (err) {
-    logWarn('referral.attribution', err, { partnerId: input.partnerId, channel: input.channel });
+    logWarn('referral.attribution', err instanceof Error ? err.name : 'error', { partnerId: input.partnerId, channel: input.channel });
     return false;
   }
 }
@@ -34,7 +34,7 @@ export async function referredByName(db: () => DbOrTx, partnerId: PartnerId, pho
   try {
     return (await createReferralRepo(db()).getAttribution(partnerId, phone))?.referralPartnerName ?? null;
   } catch (err) {
-    logWarn('referral.referred_by', err, { partnerId });
+    logWarn('referral.referred_by', err instanceof Error ? err.name : 'error', { partnerId });
     return null;
   }
 }

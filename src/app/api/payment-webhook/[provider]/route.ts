@@ -121,12 +121,6 @@ async function handleVerified(
   if (!result) {
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }
-  // Batch B1: the payout partner's confirmation (e.g. a UTR), on EVERY status, saved
-  // write-once BELOW the signature gate and BEFORE the status update (so the delivered
-  // receipt can show it). A bad value is ignored; a save error is logged. Neither ever
-  // stops the status from applying.
-  await savePayoutReference(result.transferId, body);
-
   // partner-demo R4: every branch below may commit outbox rows (rail-failure
   // refund + notice + alert, amount hold, refused-delivery / on-hold alerts).
   // after() runs post-response, i.e. after they committed.
@@ -176,6 +170,13 @@ async function handleVerified(
       }
     }
   }
+
+  // Batch B1: the payout partner's confirmation (e.g. a UTR), saved write-once BELOW the
+  // signature gate, ONLY on a paid_out that passed the hold and amount checks above (an early
+  // status or a held callback never takes the slot of the real UTR), and BEFORE the status
+  // update (so the delivered receipt can show it). A bad value is ignored; a save error is
+  // logged. Neither ever stops the status from applying.
+  if (result.status === 'delivered') await savePayoutReference(result.transferId, body);
 
   const updated = await store.updateTransferFromWebhook(result.transferId, result.status);
   // fix 8: a REFUSED paid_out on a cancelled row, or on a paid row with a refund
@@ -268,7 +269,7 @@ async function savePayoutReference(transferId: string, body: unknown): Promise<v
   try {
     await createTransferRepo(getDb()).setPayoutReference(transferId, ref);
   } catch (err) {
-    logWarn('payment-webhook.payout_reference', err, { transferId });
+    logWarn('payment-webhook.payout_reference', err instanceof Error ? err.name : 'error', { transferId });
   }
 }
 

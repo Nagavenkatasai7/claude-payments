@@ -14,7 +14,7 @@ import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
 import { feeTierCount, isFirstTransferFree } from './fee-tier';
 import { easternMonth, easternMonthStart } from './dates';
-import { budgetAllows, giveBackFor, qualifies } from './rewards/engine';
+import { budgetAllows, discountFor, giveBackFor, qualifies } from './rewards/engine';
 import { rewardsActive } from './rewards/resolver';
 import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendCapError } from './send-limits';
@@ -580,7 +580,11 @@ async function lockedReward(
   const { catalog, settings, terms } = plan.facts;
   const usage = await ops.rewardUsage(month, easternMonthStart(now));
   const standardFeeUsd = wouldBeFeeUsd(q.amountUsd, p.input.fundingMethod) ?? 0;
-  if (!qualifies(reward.kind, { now, amountUsd: q.amountUsd, standardFeeUsd, catalog, settings, usage })) return null;
+  const facts = { now, amountUsd: q.amountUsd, standardFeeUsd, catalog, settings, usage };
+  if (!qualifies(reward.kind, facts)) return null;
+  // The quoted discount must still fit today's catalog: an admin who lowers the maximum stops
+  // the old, larger discount (and its give-back) at once. Compared in cents.
+  if (Math.round(reward.discountUsd * 100) > Math.round(discountFor(reward.kind, facts) * 100)) return null;
   if (complianceStatus === 'flagged') return { month, reward, giveBackUsd: 0, giveBackWithheld: true };
   const giveBackUsd = giveBackFor(reward.discountUsd, terms.giveBackPct);
   const used = await ops.rewardBudgetUsed(month);

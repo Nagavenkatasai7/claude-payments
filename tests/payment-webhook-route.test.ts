@@ -726,7 +726,8 @@ describe('POST /api/payment-webhook — payout reference (Batch B1)', { retry: 0
     expect(order).toEqual(['ref', 'status']);
   });
 
-  it('on every status: a funded callback and a signed failure save it too', async () => {
+  it('only a paid_out that will be applied saves it: a funded callback and a signed failure save nothing', async () => {
+    // the reference is write-once, so an early status must never take the slot of the real UTR
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
     updateTransferFromWebhook.mockResolvedValue(null);
     const funded = withRef('UTR-1', 'funded');
@@ -734,7 +735,7 @@ describe('POST /api/payment-webhook — payout reference (Batch B1)', { retry: 0
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
     const failed = withRef('UTR-2', 'failed');
     expect((await post('uniteller', failed, sig(failed))).status).toBe(200);
-    expect(setPayoutReference.mock.calls).toEqual([['wh_1', 'UTR-1'], ['wh_1', 'UTR-2']]);
+    expect(setPayoutReference).not.toHaveBeenCalled();
   });
 
   it('a callback WITHOUT a valid signature never saves a payout reference', async () => {

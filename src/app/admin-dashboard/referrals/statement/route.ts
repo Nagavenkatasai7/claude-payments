@@ -7,6 +7,8 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { buildReferralStatement } from '@/lib/referral-admin';
 import { referralStatementCsv } from '@/lib/referrals';
 import { isSameOrigin } from '@/lib/same-origin';
+import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 
 // POST /admin-dashboard/referrals/statement (Batch B4): the monthly referral-commission CSV that
 // is loaded into Plum by hand. It writes an audit row, so it is a POST and never a GET (a GET is
@@ -24,6 +26,9 @@ export async function GET(): Promise<Response> {
 export async function POST(req: NextRequest): Promise<Response> {
   const staff = await requireStaff(); // anonymous ⇒ redirect('/login')
   if (staff.role !== 'admin' || staff.partnerId !== undefined) return NOT_FOUND();
+  // requirePlatformAdmin's MFA rule (src/lib/auth.ts): an unenrolled admin is sent to enrol
+  // there; a download route answers 404 instead of a redirect.
+  if (mfaEnrolmentRequired(staff) && !(await getStaffMfaStore().isEnrolled(staff.username))) return NOT_FOUND();
   if (!isSameOrigin(req.headers)) {
     return new Response('Forbidden', { status: 403, headers: { 'cache-control': 'no-store' } });
   }

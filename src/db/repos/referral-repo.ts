@@ -166,18 +166,19 @@ export function createReferralRepo(db: DbOrTx) {
     /**
      * The monthly statement, one row per referral partner (zero rows included): the number of
      * DELIVERED, LIVE transfers of its referred customers with delivered_at in [from, to), not
-     * refunded (refund_status pending or completed is excluded), and only within
+     * refunded (refund_status pending or completed is excluded), delivered AFTER the referral was
+     * made (a transfer already in flight at sign-up earns nothing), and only within
      * COMMISSION_WINDOW_MONTHS of that customer's FIRST delivered live transfer. The commission
      * is the referral partner's CURRENT fixed amount per transfer.
      */
     async monthlyStatement(from: Date, to: Date): Promise<ReferralStatementRow[]> {
       const res = await db.execute(sql`
         WITH firsts AS (
-          SELECT a.referral_partner_id, a.partner_id, a.phone, min(t.delivered_at) AS first_at
+          SELECT a.referral_partner_id, a.partner_id, a.phone, a.created_at AS attributed_at, min(t.delivered_at) AS first_at
           FROM ${referralAttributions} a
           JOIN ${transfers} t ON t.partner_id = a.partner_id AND t.phone = a.phone
           WHERE t.status = 'delivered' AND t.environment = 'live' AND t.delivered_at IS NOT NULL
-          GROUP BY a.referral_partner_id, a.partner_id, a.phone
+          GROUP BY a.referral_partner_id, a.partner_id, a.phone, a.created_at
         ),
         counted AS (
           SELECT f.referral_partner_id, count(t.id)::int AS n
@@ -187,6 +188,7 @@ export function createReferralRepo(db: DbOrTx) {
             AND t.refund_status NOT IN ('pending', 'completed')
             AND t.delivered_at >= ${from.toISOString()}::timestamptz
             AND t.delivered_at < ${to.toISOString()}::timestamptz
+            AND t.delivered_at >= f.attributed_at
             AND t.delivered_at < f.first_at + make_interval(months => ${COMMISSION_WINDOW_MONTHS})
           GROUP BY f.referral_partner_id
         )
