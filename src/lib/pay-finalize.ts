@@ -1,4 +1,4 @@
-import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from './transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft, RewardEndedError } from './transfer-create';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { assertLegsUsable } from './fx';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
@@ -61,9 +61,12 @@ export type FinalizeResult =
       // 'sends_paused' (Release safety part A): the sends.paused kill switch
       // refused the mint. Nothing was minted or consumed; the route answers 503
       // and the SAME link works once the switch is off.
+      // 'reward_ended' (B3): the reward on the approved quote ended before the
+      // mint. Nothing was minted; the draft is KEPT (owner rule) and the route
+      // answers "This offer has ended. Ask for a new quote."
       error:
         | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
-        | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused';
+        | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused' | 'reward_ended';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -299,6 +302,7 @@ export async function finalizeDraftPayment(
       // above re-quotes at mid, so it must drop the route too (never a
       // partner-routed transfer at a platform rate).
       settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+      reward: quoteOverride ? draft.reward : undefined, // B3: re-checked under the sender lock
       // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
       transferType: draft.transferType,
       senderEntityType: draft.senderEntityType,
@@ -316,6 +320,7 @@ export async function finalizeDraftPayment(
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
+    if (err instanceof RewardEndedError) return { ok: false, error: 'reward_ended' };
     throw err;
   }
 

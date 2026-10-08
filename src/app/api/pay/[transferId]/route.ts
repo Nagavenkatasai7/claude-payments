@@ -42,6 +42,7 @@ import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identi
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
 import { QuoteError } from '@/lib/fx';
 import { transferMintedFromDraft } from '@/lib/pay-link';
@@ -945,6 +946,15 @@ export async function POST(
         return NextResponse.json(
           { ok: false, error: SENDS_PAUSED_MESSAGE, reason: 'sends_paused' },
           { status: 503 },
+        );
+      }
+      if (result.error === 'reward_ended') {
+        // B3 rewards v1: the reward on this approved quote ended before the
+        // mint. Nothing was minted or charged; the draft is kept. The customer
+        // asks for a new quote (the approved price is never changed silently).
+        return NextResponse.json(
+          { ok: false, error: REWARD_ENDED_MESSAGE, reason: 'reward_ended' },
+          { status: 409 },
         );
       }
       if (result.error === 'busy') {

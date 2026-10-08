@@ -1005,3 +1005,10 @@ describe('A2: Hinglish replies (all customers, every variant)', () => {
     }
   });
 });
+
+describe('B3 rewards v1: reward_note', () => {
+  it('the model restates reward_note verbatim and never invents a reward', () => {
+    expect(SYSTEM_PROMPT).toContain('If get_quote returns reward_note, state that line exactly as written');
+    expect(SYSTEM_PROMPT).toContain('Never promise, invent or describe a reward or discount that a tool did not return.');
+  });
+});
