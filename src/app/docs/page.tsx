@@ -227,7 +227,7 @@ export default function DocsPage() {
               <Endpoint method="POST" path="/quote" desc="Price a transfer (amount_source, source_currency). Pass sender.phone to price a first transfer at no fee (first_transfer_free; needs a key with transactions:write); without it the standard fee is shown. Not binding: the transaction's fee is final" />
               <Endpoint method="POST" path="/beneficiaries/validate" desc="Validate payout fields for a country" />
               <Endpoint method="POST" path="/beneficiaries" desc="Store a beneficiary (payout details encrypted at rest)" />
-              <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header REQUIRED" />
+              <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header and purpose REQUIRED" />
               <Endpoint method="GET" path="/transactions" desc="List your transfers (keyset: ?limit=&cursor=)" />
               <Endpoint method="GET" path="/transactions/:id" desc="Fetch one transfer (404 outside your scope)" />
               <Endpoint method="GET" path="/settlements" desc="Settlements statement for reconciliation (?from=&to=&limit=&cursor=&format=json|csv)" />
@@ -245,6 +245,7 @@ curl -X POST $BASE/transactions \\
     "amount_source": 200,
     "source_currency": "USD",
     "client_reference": "INV-2026-0042",
+    "purpose": "family_support",
     "sender":      { "phone": "15551230000", "name": "Maria Lopez", "kyc_status": "verified" },
     "beneficiary": { "name": "Anita Sharma", "phone": "919876543210",
                      "payout_method": "bank", "payout_destination": "123456789012|HDFC0001234" }
@@ -255,6 +256,7 @@ curl -X POST $BASE/transactions \\
           </p>
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+            <code>purpose</code> is required: why the money is sent, exactly one of <code>family_support</code>, <code>gift</code>, <code>education</code>, <code>medical</code>, <code>savings</code>, <code>bills</code>, <code>business</code> or <code>other</code> (lower case). A missing or unknown purpose is refused with 422 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. It is saved, comes back as <code>purpose</code> in every answer and is in the settlement instruction&apos;s <code>compliance</code> object.
             <code>client_reference</code> is optional: your own order number, 1–64 letters, digits and <code>{'. _ : / # -'}</code> characters. A value that does not fit is refused with 400 before the Idempotency-Key is bound. It is saved once (a later request with the same Idempotency-Key returns the first value) and comes back as <code>client_reference</code> in every answer, in the settlements statement and in the settlement instruction to your rail. <code>payout_reference</code> is the payout partner&apos;s confirmation (for example a bank UTR), set once from its signed status callback; it is <code>null</code> until then.
             <code>sender.name</code> is optional today but strongly recommended: a transaction created without it is held for manual review (it is created with <code>compliance_status</code> <code>flagged</code>, and confirming it returns <code>in_review</code> until compliance staff release it). <code>sender.name</code> will become required in a future version.
           </p>

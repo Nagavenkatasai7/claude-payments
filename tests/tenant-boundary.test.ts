@@ -123,6 +123,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
       amount_source: 200,
       sender: { phone: PHONE, kyc_status: 'not_started' },
       beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: 'PLANTED-9999' },
+      purpose: 'family_support',
     });
     expect(r).toMatchObject({ ok: true, status: 201 });
     expect((await store.listRecipients('default', PHONE, 5))[0].payoutDestination).toBe('REAL-0001');
@@ -139,6 +140,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-ctx', {
       amount_source: 100, sender: { phone: PHONE, kyc_status: 'not_started' },
       beneficiary: { name: 'Acme Planted', phone: '919811112222', payout_method: 'bank', payout_destination: '999988887777' },
+      purpose: 'family_support',
     });
     expect(r).toMatchObject({ ok: true, status: 201 });
     const seen: ChatMessage[][] = [];
@@ -172,6 +174,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-2', {
       amount_source: 100, sender: { phone: PHONE, kyc_status: 'not_started' },
       beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+      purpose: 'family_support',
     });
     if (!r.ok) throw new Error('unexpected');
     expect((r.data as { sender_name: string | null }).sender_name).toBeNull();

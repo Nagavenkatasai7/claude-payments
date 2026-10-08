@@ -89,6 +89,10 @@ components:
         payout_reference:
           type: [string, 'null']
           description: The payout partner's confirmation (for example a bank UTR), from its signed status callback. Set once; null until reported.
+        purpose:
+          type: [string, 'null']
+          enum: [family_support, gift, education, medical, savings, bills, business, other, null]
+          description: Why the money is sent, exactly as given on create. Null only on a transaction made before purpose was required.
   responses:
     Unauthorized:
       description: Missing, malformed, unknown or revoked API key.
@@ -247,7 +251,12 @@ paths:
         every answer and in the settlements statement. It is also in the settlement
         instruction when your own rail pays the transaction out (never when another
         payout partner does). A status callback may send payout_reference (for example a
-        bank UTR) with paid_out; it is saved once.
+        bank UTR) with paid_out; it is saved once. purpose is required: why the money
+        is sent, one of family_support, gift, education, medical, savings, bills,
+        business or other (exactly these lower-case values). A missing or unknown
+        purpose is 422 before the Idempotency-Key is bound, so a corrected retry with
+        the same key succeeds. The purpose is saved, comes back in every answer and is
+        in the settlement instruction's compliance block.
       tags: [Transactions]
       x-smartremit-scope: transactions:write
       x-smartremit-sandbox: true
@@ -267,6 +276,7 @@ paths:
               amount_source: 200
               source_currency: USD
               client_reference: INV-2026-0042
+              purpose: family_support
               sender: { phone: '+12025550142', name: Jane Doe, kyc_status: verified }
               beneficiary:
                 name: Ravi Example
@@ -288,7 +298,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
         '404': { description: The beneficiary_id was not found for this partner. }
         '409': { description: Idempotency-Key conflict. Retry with a new key. }
-        '422': { description: 'Refused: the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
+        '422': { description: 'Refused: purpose is missing or is not one of family_support, gift, education, medical, savings, bills, business or other (checked before the Idempotency-Key is bound; a corrected retry with the same key succeeds), the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
         '503':
           description: 'Live FX is temporarily unavailable, another transfer for this sender is in progress, or new transfers are paused (code sends_paused, with a Retry-After header in seconds). Nothing was minted; a retry may reuse the same Idempotency-Key.'
