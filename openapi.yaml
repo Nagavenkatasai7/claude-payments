@@ -83,6 +83,12 @@ components:
         refund_ref: { type: [string, 'null'] }
         created_at: { type: string, format: date-time }
         partner_id: { type: string }
+        client_reference:
+          type: [string, 'null']
+          description: Your own order number, exactly as you sent it on create. Write-once.
+        payout_reference:
+          type: [string, 'null']
+          description: The payout partner's confirmation (for example a bank UTR), from its signed status callback. Set once; null until reported.
   responses:
     Unauthorized:
       description: Missing, malformed, unknown or revoked API key.
@@ -236,7 +242,10 @@ paths:
         transaction with its current state (the body is validated but not compared).
         Sanctions screening runs on every mint in every mode; a hit is 422 and the attempt
         is recorded as blocked. A transaction created without sender.name is held for
-        manual review.
+        manual review. client_reference is optional: your own order number, 1 to 64
+        letters, digits and . _ : / # - characters. It is saved once and comes back in
+        every answer, in the settlements statement and in the settlement instruction to
+        your rail.
       tags: [Transactions]
       x-smartremit-scope: transactions:write
       x-smartremit-sandbox: true
@@ -255,6 +264,7 @@ paths:
             example:
               amount_source: 200
               source_currency: USD
+              client_reference: INV-2026-0042
               sender: { phone: '+12025550142', name: Jane Doe, kyc_status: verified }
               beneficiary:
                 name: Ravi Example
@@ -271,7 +281,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
-        '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
+        '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; a client_reference that is not 1 to 64 letters, digits and . _ : / # -; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
         '404': { description: The beneficiary_id was not found for this partner. }
@@ -413,6 +423,7 @@ paths:
         The instruction ledger for reconciliation: every live transfer of yours that was paid
         and sent for settlement in a half-open [from, to) window on paid_at, in UTC. Oldest
         first. Totals cover the returned page only. Any partner_id parameter is ignored.
+        Each row ends with client_reference and payout_reference (the last two CSV columns).
       tags: [Settlements]
       x-smartremit-scope: settlements:read
       x-smartremit-sandbox: false

@@ -236,6 +236,8 @@ export interface ReceiptView {
   destCurrency: string;
   fxRate: number;
   statusKey: MessageKey;
+  /** Batch B1: the payout partner's confirmation (e.g. a UTR), shown only once delivered. */
+  payoutReference?: string;
 }
 
 export function receiptView(t: Transfer): ReceiptView {
@@ -253,6 +255,7 @@ export function receiptView(t: Transfer): ReceiptView {
     destCurrency: t.destinationCurrency ?? 'INR',
     fxRate: t.fxRate,
     statusKey: transferStatusView(t).labelKey,
+    ...(t.status === 'delivered' && t.payoutReference ? { payoutReference: t.payoutReference } : {}),
   };
 }
 
@@ -274,6 +277,7 @@ export function renderReceiptText(v: ReceiptView, brand: string): string {
     `${t('portal.receipt.total')}: ${formatMoney(v.total, v.currency)}`,
     `${t('portal.receipt.rate')}: 1 ${v.currency} = ${v.fxRate} ${v.destCurrency}`,
     `${t('portal.receipt.theyGet')}: ${formatMoney(v.amountDest, v.destCurrency)}`,
+    ...(v.payoutReference ? [`${t('portal.receipt.payoutReference')}: ${v.payoutReference}`] : []),
     '',
     t('portal.receipt.textFoot', { brand }),
   ].join('\n');

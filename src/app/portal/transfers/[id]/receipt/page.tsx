@@ -109,6 +109,12 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             <Row label={t('portal.receipt.theyGet')} strong>
               <Money amount={v.amountDest} currency={v.destCurrency} />
             </Row>
+            {/* Batch B1: set only once the transfer is delivered (receiptView). */}
+            {v.payoutReference ? (
+              <Row label={t('portal.receipt.payoutReference')}>
+                <span className="font-mono">{v.payoutReference}</span>
+              </Row>
+            ) : null}
           </dl>
         </section>
         {parties ? (

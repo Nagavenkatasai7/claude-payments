@@ -134,6 +134,9 @@ export interface Transfer {
   fxProvider?: string;          // e.g. FX_PROVIDER_ID (rate.ts); 'partner' for a partner rate
   fxExpiresAt?: string;         // ISO expiry of the partner PUSH that priced fxRate; the pay-time
                                 // check (minted-rate.ts) ends the lock here. Absent ⇒ no push.
+  // ── Batch B1: order references. WRITE-ONCE, both optional (absent on older rows).
+  clientReference?: string;     // the partner's own order number (Partner API client_reference)
+  payoutReference?: string;     // the payout partner's confirmation (e.g. a UTR), from a signed callback
 }
 
 /**

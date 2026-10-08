@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { scopeOf } from '@/lib/staff-scope';
 import { logWarn } from '@/lib/log';
 import { getDb } from '@/db/client';
+import { referredByName } from '@/lib/referral-attribution';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
@@ -68,7 +69,7 @@ export default async function CustomerDetailPage({
   const conversation = await viewConversation(getDb(), staff, customer);
   const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
-  const [mine, todayUsedCents, partner, legacyKycAudit, durableKycAudit, lastLimitChange] = await Promise.all([
+  const [mine, todayUsedCents, partner, legacyKycAudit, durableKycAudit, lastLimitChange, referredBy] = await Promise.all([
     // Indexed WHERE partner_id = $1 AND phone = $2 (newest-first) — the F44 read sink is tenant-keyed.
     getStore().listTransfersByPhone(customer.partnerId, phone, 50),
     dailyVolumeStore.getTodayCents(customer.partnerId, phone),
@@ -93,6 +94,8 @@ export default async function CustomerDetailPage({
         logWarn('admin.send_limits.last_change', err, { scope: 'customer', partnerId: customer.partnerId });
         return null;
       }),
+    // Batch B4: the referral partner, keyed by the resolved (tenant, phone). Best effort.
+    referredByName(getDb, customer.partnerId, customer.senderPhone),
   ]);
   // Program-Fix 28: durable rows + the legacy Redis entries not tagged durable.
   const kycAudit = mergeKycTrail(durableKycAudit, legacyKycAudit);
@@ -146,6 +149,12 @@ export default async function CustomerDetailPage({
               <dt>Verified at</dt><dd>{customer.kycVerifiedAt ?? '—'}</dd>
               <dt>Country</dt><dd>{customer.senderCountry}</dd>
               <dt>Partner</dt><dd>{partner ? partner.name : customer.partnerId}</dd>
+              {referredBy && (
+                <>
+                  <dt>Referred by</dt>
+                  <dd>{referredBy}</dd>
+                </>
+              )}
               <dt>Provider ref</dt><dd>{customer.kycProviderRef ?? '—'}</dd>
               <dt>Review state</dt><dd>{customer.kycReviewState ?? 'none'}</dd>
               <dt>Inquiry</dt><dd>{customer.kycInquiryId ?? '—'}</dd>

@@ -4,6 +4,7 @@ import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
+import { referredByName } from '@/lib/referral-attribution';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -123,11 +124,12 @@ export default async function PartnerCustomerDetailPage({
   // senderTotals is the daily-volume store's ledger read (ET day; blocked and cancelled excluded).
   // Lost-features p2 A9: the KYC decision history from this tenant's durable audit rows only
   // (partner-kyc-trail decides whose reason may show; SmartRemit's decisions show the outcome only).
-  const [totals, txPage, trailRows, allStaff] = await Promise.all([
+  const [totals, txPage, trailRows, allStaff, referredBy] = await Promise.all([
     getStore().senderTotals(ctx.partnerId, customer.senderPhone),
     listPartnerCustomerTransfers(getDb(), ctx.partnerId, customer.senderPhone, { limit: CUSTOMER_TRANSFERS_PAGE, cursor: txCursor }),
     listTenantAuditForSubject(getDb(), ctx.partnerId, auditSubjectId(ctx.partnerId, customer.senderPhone), KYC_TRAIL_ACTIONS, KYC_TRAIL_LIMIT),
     getAuthStore().listStaff(),
+    referredByName(getDb, ctx.partnerId, customer.senderPhone), // Batch B4: this tenant's row only
   ]);
   const tenantUsernames = new Set(listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, allStaff).map((m) => m.username));
   const trail = partnerKycTrail(trailRows, tenantUsernames, customer.kycSubmittedAt);
@@ -190,6 +192,7 @@ export default async function PartnerCustomerDetailPage({
             <Row label={t('partner.customers.tier')}>{t(view.tierKey)}</Row>
             <Row label={t('partner.customers.verifiedAt')}>{when(view.kycVerifiedAt)}</Row>
             <Row label={t('partner.customers.firstSeen')}>{when(view.firstSeenAt)}</Row>
+            {referredBy ? <Row label={t('partner.customers.referredBy')}>{referredBy}</Row> : null}
           </dl>
           <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-trail">
             <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.customers.trail.title')}</h3>

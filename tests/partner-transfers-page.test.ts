@@ -376,3 +376,24 @@ describe('/partner/transfers/[id]: A3 purpose row', () => {
     await expect(detail('tr_B_purpose')).rejects.toThrow('NOT_FOUND');
   });
 });
+
+describe('/partner/transfers/[id]: B1 order references', () => {
+  it('shows the client reference and the payout reference', async () => {
+    await seedPartnerTransfer(db, {
+      id: 'tr_A_refs', partnerId: 'pa', phone: PHONE, status: 'delivered',
+      clientReference: 'INV-2026/10#7', payoutReference: 'SIMPAY-tr_A_refs',
+    });
+    await asAgent();
+    const html = await detail('tr_A_refs');
+    expect(html).toContain('Your order reference');
+    expect(html).toContain('INV-2026/10#7');
+    expect(html).toContain('Payout reference');
+    expect(html).toContain('SIMPAY-tr_A_refs');
+  });
+  it('no references: both rows say None', async () => {
+    await asAdmin();
+    const html = await detail('tr_A_done');
+    expect(html).toMatch(/>Your order reference</);
+    expect(html).toMatch(/>Payout reference</);
+  });
+});

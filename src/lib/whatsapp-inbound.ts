@@ -37,6 +37,7 @@ import {
   VOICE_UNSUPPORTED_REPLY,
 } from '@/lib/voice-notes';
 import { isOggOpusMime } from '@/lib/voice-transcribe';
+import { recordWhatsAppReferral } from '@/lib/referral-attribution';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
@@ -475,6 +476,11 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   if (!customer.optInAt) {
     await customerStore.setOptedIn(tenantId, incoming.from);
   }
+
+  // Batch B4: a referral code (REF-XXXXXX) in a text links the customer to a referral
+  // partner under THIS tenant (never re-homed). Best effort: never throws. A redelivery
+  // repeats it harmlessly (first referral wins, ON CONFLICT DO NOTHING).
+  if (incoming.kind === 'text') await recordWhatsAppReferral(getDb(), tenantId, incoming.from, incoming.text);
 
   const now = new Date();
   const tier = deriveTier(customer, now);

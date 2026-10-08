@@ -5,6 +5,7 @@ import { parseSiteHost, stripSiteHeaders, SITE_HEADERS } from '@/lib/site-host';
 import { classifySitePath, type SitePathClass } from '@/lib/site-routes';
 import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-session-cookie';
 import { continuePath, legacyDeepLink } from '@/lib/legacy-deep-link';
+import { REFERRAL_COOKIE, referralCodeToStore, referralCookieOptions } from '@/lib/referral-code';
 
 // Edge gate for the two signed-in surfaces (Stage 3 expanded to /account).
 // This is defense-in-depth ONLY — every page still runs its own require* and
@@ -112,6 +113,7 @@ async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> 
     ? NextResponse.rewrite(new URL(route.rewriteTo, req.url), { request: { headers } })
     : NextResponse.next({ request: { headers } });
   refreshPortalCookie(req, res);
+  rememberReferralCode(req, res);
   return res;
 }
 
@@ -140,6 +142,21 @@ function refreshPortalCookie(req: NextRequest, res: NextResponse): void {
   const token = req.cookies.get(PORTAL_SESSION_COOKIE)?.value;
   if (!token || !PORTAL_TOKEN_RE.test(token)) return;
   res.cookies.set(PORTAL_SESSION_COOKIE, token, portalSessionCookieOptions());
+}
+
+/**
+ * Batch B4: /portal/login?ref=REF-XXXXXX keeps the format-checked code in a 30-day cookie, so the
+ * sign-in that creates the customer can link them to the referral partner (portal/login/actions.ts).
+ * GET/HEAD of the sign-in page only, and never over a code already stored (first touch wins).
+ */
+function rememberReferralCode(req: NextRequest, res: NextResponse): void {
+  const code = referralCodeToStore({
+    method: req.method,
+    pathname: req.nextUrl.pathname,
+    ref: req.nextUrl.searchParams.get('ref'),
+    existing: req.cookies.get(REFERRAL_COOKIE)?.value,
+  });
+  if (code) res.cookies.set(REFERRAL_COOKIE, code, referralCookieOptions());
 }
 
 export const config = {

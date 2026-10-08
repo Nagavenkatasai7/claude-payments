@@ -120,6 +120,9 @@ export interface CreateTransferInput {
   // ScheduleMintRefusedError with nothing written. Its address-book refresh never clears a
   // tombstone. Absent ⇒ unchanged for every other caller.
   scheduleId?: string;
+  // Batch B1: the partner's own order number (Partner API client_reference, checked at
+  // the edge). Stored write-once on the row. Absent ⇒ unchanged for every other caller.
+  clientReference?: string;
 }
 
 /**
@@ -651,6 +654,7 @@ async function mintLocked(
     invoiceId: input.invoiceId,
     environment: input.environment ?? 'live',        // Program-Fix 44 P2
     ...p.provenance,                                 // Step 0 FX-7 (write-once)
+    ...(input.clientReference ? { clientReference: input.clientReference } : {}), // Batch B1
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the

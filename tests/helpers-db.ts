@@ -82,6 +82,10 @@ const ALL_TABLES = [
   'staff',
   'funding_events',
   'feature_flags', // Release safety part A (0029)
+  'referral_attributions', // Batch B4: FK children of referral_partners
+  'referral_codes',
+  'referral_partners',
+  'referral_program_settings',
   'conversation_messages', // Partner-Demo R3b (also reached by CASCADE via partners; explicit for clarity)
 ].join(', ');
 

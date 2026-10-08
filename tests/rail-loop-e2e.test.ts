@@ -73,6 +73,7 @@ function transferFixture(): Transfer {
     createdAt: new Date(Date.now() - 60_000).toISOString(), paidAt: new Date().toISOString(), partnerId: 'acme',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 200, feeSource: 5, totalChargeSource: 205,
+    clientReference: 'PO-E2E-1', // Batch B1
   } as Transfer;
 }
 
@@ -152,6 +153,19 @@ describe('rail loop end to end (fix 29)', () => {
     expect((await keys()).some((k) => k.startsWith('railamount:'))).toBe(false);
     await Promise.all(afterPending.splice(0));
     expect(sendText).toHaveBeenCalled(); // the stage-2 "delivered" message
+  });
+
+  it('Batch B1: the instruction carries client_reference; the simulator reports SIMPAY-<ref>, saved once on delivery', async () => {
+    await drainOnce(deps(), 'w1');
+    expect((JSON.parse(calls[0].body) as { client_reference?: string }).client_reference).toBe('PO-E2E-1');
+    await releaseDelayedCallback();
+    await drainOnce(deps(), 'w2');
+    const cb = calls.find((c) => c.url === HOOK_URL)!;
+    expect((JSON.parse(cb.body) as { payout_reference?: string }).payout_reference).toBe('SIMPAY-e2e_t1');
+    const t = (await createStore(redis, db).getTransfer('e2e_t1'))!;
+    expect(t.status).toBe('delivered');
+    expect(t.payoutReference).toBe('SIMPAY-e2e_t1');
+    expect(t.clientReference).toBe('PO-E2E-1');
   });
 
   it('a tampered callback amount → stays paid, ONE railamount: alert, and a later re-instruct makes NO rail POST', async () => {
