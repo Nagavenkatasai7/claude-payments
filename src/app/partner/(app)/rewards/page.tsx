@@ -3,6 +3,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { createRewardRepo } from '@/db/repos/reward-repo';
 import { computeStatement, statementMonth, type Statement } from '@/lib/rewards/statement';
+import { festivalFormState } from '@/lib/rewards/settings';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { formatMoney } from '@/lib/ui/money';
@@ -62,6 +63,7 @@ export default async function PartnerRewardsPage() {
   }
   const nth = settings.nth_transfer;
   const fest = settings.festival;
+  const festState = festivalFormState(catalog.festival, fest);
 
   return (
     <>
@@ -106,7 +108,7 @@ export default async function PartnerRewardsPage() {
           <p className={INTRO}>
             {t('partner.rewards.festival.intro', { days: catalog.festival.maxDays, max: usd(catalog.festival.maxDiscountUsd) })}
           </p>
-          {catalog.festival.available || fest?.enabled ? (
+          {festState === 'form' ? (
             <FestivalRewardForm
               names={catalog.festival.festivalNames}
               current={{
@@ -117,6 +119,8 @@ export default async function PartnerRewardsPage() {
                 minAmountUsd: fest?.minAmountUsd !== null && fest?.minAmountUsd !== undefined ? fest.minAmountUsd.toFixed(2) : '0',
               }}
             />
+          ) : festState === 'no_festivals' ? (
+            <p className="text-[14px] text-ds-ink-muted" data-testid="rewards-festival-none">{t('partner.rewards.festival.none')}</p>
           ) : (
             <p className="text-[14px] text-ds-ink-muted">{t('partner.rewards.unavailable')}</p>
           )}

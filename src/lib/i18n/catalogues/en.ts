@@ -2231,6 +2231,7 @@ export const en = {
   'partner.rewards.festival.intro': 'No fee on transfers of at least the minimum amount between the two dates (Eastern time, at most {days} days), up to {max} off.',
   'partner.rewards.festival.name': 'Festival',
   'partner.rewards.festival.choose': 'Choose a festival',
+  'partner.rewards.festival.none': 'SmartRemit has not added festivals yet.',
   'partner.rewards.festival.starts': 'First day',
   'partner.rewards.festival.ends': 'Last day',
   'partner.rewards.festival.min': 'Minimum amount (USD)',
