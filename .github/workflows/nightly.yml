@@ -36,7 +36,7 @@ jobs:
       # never fails the nightly (continue-on-error) and never gates a merge.
       - name: Bot eval (real model, optional)
         continue-on-error: true
-        # Bounded inside the job's 20 min: 18 calls x 25 s = 7.5 min worst case.
+        # Bounded inside the job's 20 min: 21 calls x 25 s = 8.75 min worst case.
         timeout-minutes: 9
         env:
           EVAL_OLLAMA_API_KEY: ${{ secrets.EVAL_OLLAMA_API_KEY }}
