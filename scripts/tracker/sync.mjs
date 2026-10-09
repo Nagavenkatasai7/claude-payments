@@ -1,34 +1,42 @@
 #!/usr/bin/env node
-// Program Ledger auto-sync engine (CLI). Reads GitHub (read-only, via curl) and a dump of the
-// ledger database, and writes the ArtifactData batches that bring the ledger up to date.
+// Program Ledger auto-sync engine (CLI). Reads GitHub (read-only, via curl; github.mjs) and a dump
+// of the ledger database, and writes the ArtifactData batches that bring the ledger up to date.
 // Append-only: every write is a `set` of a NEW doc with a deterministic id, except meta/state,
 // which is pinned with --state-version. Pure logic lives in sync-core.mjs (unit-tested).
 //
 //   node scripts/tracker/sync.mjs --db <dump dir> --state-version <n> --by <cloud|session> --out <dir>
-//        [--journal <file>] [--journal-from <byteOffset>]
+//        [--project <dir>] [--journal <file>] [--journal-from <byteOffset>] [--lease check]
+//   node scripts/tracker/sync.mjs --db <dump dir> --lease check
 //
 //   --db             ArtifactData list/get output (out_dir): <db>/<collection>/<id>.json for
-//                    prs, prstate, fixstate, events, fixes, and meta/state.json
+//                    prs, prstate, fixstate, releases, feed-<this month>, feed-<previous month>
+//                    (and fixes when present), plus meta/state.json and, when present, meta/sync.json
+//                    (its cutoverAt limits the feed rows; its runningSince is the lease)
 //   --state-version  meta/state's current version (0 = the doc does not exist yet)
 //   --by             cloud → syncedBy "cloud routine"; session → "session"
 //   --out            gets batch-N.json (ArtifactData batch `writes`), the doc files and summary.json;
 //                    stale batch/doc files from an earlier run are removed first
-//   --journal        journal.ndjson; --journal-from defaults to the `flushed` marker beside it
+//   --project        a hearthbot snapshot dir; its prs.json (list_project_prs) sets
+//                    meta/state.programPrsFromThreads (null without it)
+//   --journal        journal.ndjson (the owner's Mac); its rows become feed-YYYY-MM/j-* rows, agent
+//                    rows dropped; --journal-from defaults to the `flushed` marker beside it
+//   --lease check    refuse (exit 3, {"skipped":"run in progress"}) when meta/sync.runningSince in
+//                    the dump is less than 20 min old. Alone with --db it only prints the lease
+//                    status ({"lease":"free"}, exit 0); with the other flags the sync runs after it.
 //
-// GitHub auth: the auth header goes to curl through stdin (-K -), never argv or output. A token
-// is used only when `gh auth token` gives one (locally). In the cloud routine `gh` is missing, so
-// no header is sent and the egress proxy authenticates curl. LEDGER_GH_AUTH=none|gh forces a mode.
-// Runs are read with event=push: a workflow_dispatch Smoke's head_sha is the dispatching branch's
-// head, not the commit under test, so only push runs prove what production serves.
+// Feed rows are planned only for `at` on or after the first day of the previous UTC month and on
+// or after cutoverAt: older months are not dumped, so their ids could not be checked. Without
+// meta/sync.cutoverAt (before the v2 seed) no feed row is planned and newOffset stays put.
 //
 // Prints one JSON line: {mainSha, ci, smoke, prodServes, newDocs, batches, warnings, newOffset}.
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { REPO, batchWrites, planSync, sliceJournal } from './sync-core.mjs';
+import { fetchGitHub } from './github.mjs';
+import { batchWrites, feedMonths, leaseStatus, planSync, sliceJournal } from './sync-core.mjs';
 
-const USAGE = 'usage: sync.mjs --db <dump dir> --state-version <n> --by <cloud|session> --out <dir> [--journal <file>] [--journal-from <byteOffset>]';
-const COLLECTIONS = ['prs', 'prstate', 'fixstate', 'events', 'fixes'];
+const USAGE = 'usage: sync.mjs --db <dump dir> --state-version <n> --by <cloud|session> --out <dir> [--project <dir>] [--journal <file>] [--journal-from <byteOffset>] [--lease check]';
+/** The collections the engine reads from the dump (events is no longer dumped: ledger v2). */
+const collectionsFor = (now) => ['prs', 'prstate', 'fixstate', 'releases', ...feedMonths(now), 'fixes'];
 
 function fail(msg, code = 2) {
   console.error(JSON.stringify({ error: msg }));
@@ -40,69 +48,20 @@ function arg(name) {
   return i > 0 ? process.argv[i + 1] : undefined;
 }
 
-// ---------- GitHub over curl ----------
-function ghToken() {
-  const mode = process.env.LEDGER_GH_AUTH || 'auto';
-  if (mode === 'none') return null;
-  const r = spawnSync('gh', ['auth', 'token'], { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore'] });
-  const token = !r.error && r.status === 0 ? r.stdout.trim() : '';
-  if (token) return token;
-  if (mode === 'gh') fail('LEDGER_GH_AUTH=gh but `gh auth token` returned no token');
-  return null;
-}
-
-function ghGet(path, token) {
-  const args = [
-    '-sS', '--max-time', '30', '--retry', '2',
-    '-H', 'Accept: application/vnd.github+json',
-    '-H', 'X-GitHub-Api-Version: 2022-11-28',
-    '-H', 'User-Agent: smartremit-ledger-sync',
-    '-w', '\n%{http_code}',
-  ];
-  if (token) args.push('-K', '-'); // the Authorization header arrives on stdin, never in argv
-  args.push(`https://api.github.com${path}`);
-  const r = spawnSync('curl', args, {
-    encoding: 'utf8',
-    input: token ? `header = "Authorization: Bearer ${token}"\n` : '',
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 120_000,
-  });
-  if (r.error) throw new Error(`curl could not run for GET ${path}: ${r.error.code || 'error'}`);
-  const out = r.stdout || '';
-  const nl = out.lastIndexOf('\n');
-  const status = Number(out.slice(nl + 1));
-  const body = nl >= 0 ? out.slice(0, nl) : '';
-  if (r.status !== 0 || !(status >= 200 && status < 300)) {
-    let message = '';
-    try { message = String(JSON.parse(body).message || ''); } catch { /* not JSON */ }
-    throw new Error(`GitHub GET ${path} failed: HTTP ${status || 'none'}${message ? ` (${message.slice(0, 120)})` : ''}${r.status ? `, curl exit ${r.status}` : ''}`);
-  }
-  return JSON.parse(body);
-}
-
-function fetchGitHub() {
-  const token = ghToken();
-  const get = (p) => ghGet(p, token);
-  const head = get(`/repos/${REPO}/branches/main`).commit?.sha;
-  if (!/^[0-9a-f]{40}$/.test(head || '')) throw new Error('GitHub returned no sha for main');
-  return {
-    auth: token ? 'gh' : 'none',
-    mainSha: head.slice(0, 7),
-    prs: get(`/repos/${REPO}/pulls?state=all&sort=updated&direction=desc&per_page=60`),
-    openPrs: get(`/repos/${REPO}/pulls?state=open&per_page=100`),
-    ciRuns: get(`/repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=20`).workflow_runs ?? [],
-    smokeRuns: get(`/repos/${REPO}/actions/workflows/smoke.yml/runs?branch=main&event=push&per_page=30`).workflow_runs ?? [],
-  };
-}
-
 // ---------- ledger dump ----------
 // ArtifactData saves each doc's data only; tolerate a {data, version} wrapper just in case.
 const unwrap = (d) => (d && typeof d === 'object' && d.data && typeof d.data === 'object' && 'version' in d ? d.data : d);
 
-function readDump(db, warnings) {
+function readMeta(db, id, warnings) {
+  const path = join(db, 'meta', `${id}.json`);
+  if (!existsSync(path)) return undefined;
+  try { return unwrap(JSON.parse(readFileSync(path, 'utf8'))); } catch { warnings.push(`unreadable meta/${id}.json`); return null; }
+}
+
+function readDump(db, now, warnings) {
   if (!existsSync(db)) fail(`--db ${db} does not exist`);
-  const dump = { ids: new Set(), fixstate: [], fixes: [], events: [], prevState: null };
-  for (const c of COLLECTIONS) {
+  const dump = { ids: new Set(), fixstate: [], fixes: [], events: [], prevState: null, cutoverAt: null };
+  for (const c of collectionsFor(now)) {
     const dir = join(db, c);
     if (!existsSync(dir)) { warnings.push(`dump has no ${c}/ (treated as empty)`); continue; }
     for (const f of readdirSync(dir).filter((x) => x.endsWith('.json'))) {
@@ -112,37 +71,58 @@ function readDump(db, warnings) {
       dump.ids.add(`${c}/${id}`);
       if (c === 'fixstate' && data) dump.fixstate.push(data);
       if (c === 'fixes' && data) dump.fixes.push(data);
-      if (c === 'events') dump.events.push({ id, data: data ?? {} });
     }
   }
-  const statePath = join(db, 'meta', 'state.json');
-  if (existsSync(statePath)) {
-    try { dump.prevState = unwrap(JSON.parse(readFileSync(statePath, 'utf8'))); } catch { warnings.push('unreadable meta/state.json'); }
-  } else {
-    warnings.push('dump has no meta/state.json: keys outside the engine\'s set will not be kept');
+  const prevState = readMeta(db, 'state', warnings);
+  if (prevState === undefined) warnings.push('dump has no meta/state.json: keys outside the engine\'s set will not be kept');
+  else dump.prevState = prevState;
+  const sync = readMeta(db, 'sync', warnings);
+  if (typeof sync?.cutoverAt === 'string') {
+    if (Number.isNaN(Date.parse(sync.cutoverAt))) warnings.push('meta/sync.cutoverAt is not a date (ignored)');
+    else dump.cutoverAt = sync.cutoverAt;
   }
   return dump;
 }
 
+function readProject(dir, warnings) {
+  if (!dir) return null;
+  const path = join(resolve(dir), 'prs.json');
+  if (!existsSync(path)) { warnings.push(`--project ${dir} has no prs.json (programPrsFromThreads stays null)`); return null; }
+  try { return JSON.parse(readFileSync(path, 'utf8')); } catch { warnings.push(`unreadable ${path} (programPrsFromThreads stays null)`); return null; }
+}
+
+// ---------- lease ----------
+// Exits 3 when the lease is held; returns when it is free.
+function checkLease(db, now) {
+  const dbDir = resolve(db);
+  if (!existsSync(dbDir)) fail(`--db ${db} does not exist`);
+  const status = leaseStatus(readMeta(dbDir, 'sync', []) ?? null, now);
+  if (status.held) {
+    console.log(JSON.stringify({ skipped: 'run in progress', runningSince: status.runningSince }));
+    process.exit(3);
+  }
+  return status;
+}
+
 // ---------- journal ----------
 function readJournal(file, fromArg, warnings) {
-  if (!file) return { lines: [], newOffset: null };
+  if (!file) return { lines: [], newOffset: null, from: null };
   let from = fromArg === undefined ? undefined : Number(fromArg);
   if (from === undefined) {
     try { from = Number(readFileSync(join(dirname(file), 'flushed'), 'utf8').trim()) || 0; } catch { from = 0; }
   }
   if (!Number.isInteger(from) || from < 0) fail('--journal-from must be a non-negative integer');
-  if (!existsSync(file)) { warnings.push(`journal ${file} not found (nothing to flush)`); return { lines: [], newOffset: from }; }
+  if (!existsSync(file)) { warnings.push(`journal ${file} not found (nothing to flush)`); return { lines: [], newOffset: from, from }; }
   const slice = sliceJournal(readFileSync(file), from);
   warnings.push(...slice.warnings);
-  return { lines: slice.lines, newOffset: slice.newOffset };
+  return { lines: slice.lines, newOffset: slice.newOffset, from };
 }
 
 // ---------- output ----------
 function cleanOut(out) {
   mkdirSync(out, { recursive: true });
   for (const f of readdirSync(out)) {
-    if (/^batch-\d+\.json$/.test(f) || /^[a-z]+__.+\.json$/.test(f) || f === 'summary.json') rmSync(join(out, f));
+    if (/^batch-\d+\.json$/.test(f) || /^[a-z0-9-]+__.+\.json$/.test(f) || f === 'summary.json') rmSync(join(out, f));
   }
 }
 
@@ -151,19 +131,34 @@ function main() {
   const out = arg('--out');
   const by = arg('--by');
   const sv = arg('--state-version');
+  const lease = arg('--lease');
+  const now = new Date().toISOString();
+  if (lease !== undefined) {
+    if (lease !== 'check') fail('--lease takes only: check');
+    if (!db) fail(USAGE);
+    const status = checkLease(db, now);
+    if (!out && !by && sv === undefined) {
+      console.log(JSON.stringify({ lease: 'free', runningSince: status.runningSince }));
+      return;
+    }
+  }
   if (!db || !out || !by || sv === undefined) fail(USAGE);
   if (by !== 'cloud' && by !== 'session') fail('--by must be cloud or session');
   const stateVersion = Number(sv);
   if (!Number.isInteger(stateVersion) || stateVersion < 0) fail('--state-version must be a non-negative integer (0 = meta/state does not exist yet)');
 
   const warnings = [];
-  const dump = readDump(resolve(db), warnings);
+  const dump = readDump(resolve(db), now, warnings);
+  const projectPrs = readProject(arg('--project'), warnings);
   const journal = readJournal(arg('--journal'), arg('--journal-from'), warnings);
   let gh;
-  try { gh = fetchGitHub(); } catch (e) { fail(e instanceof Error ? e.message : 'GitHub read failed', 1); }
+  try { gh = fetchGitHub(); } catch (e) { fail(e instanceof Error ? e.message : 'GitHub read failed', e?.exitCode ?? 1); }
 
-  const plan = planSync({ gh, dump, journalLines: journal.lines, now: new Date().toISOString(), by });
+  const plan = planSync({ gh, dump, journalLines: journal.lines, now, by, projectPrs });
   warnings.push(...plan.warnings);
+  // No cutoverAt: planSync wrote no feed rows, so the journal lines were not flushed. Keep the
+  // offset where it was, so the next run after the seed flushes them.
+  const newOffset = dump.cutoverAt || !journal.lines.length ? journal.newOffset : journal.from;
 
   const outDir = resolve(out);
   cleanOut(outDir);
@@ -186,7 +181,7 @@ function main() {
     newDocs: sized.length - 1,
     batches: batches.map((b) => b.length),
     warnings,
-    newOffset: journal.newOffset,
+    newOffset,
   };
   writeFileSync(join(outDir, 'summary.json'), JSON.stringify({ ...summary, auth: gh.auth, out: outDir }, null, 1));
   console.log(JSON.stringify(summary));
