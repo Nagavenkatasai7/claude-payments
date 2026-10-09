@@ -21,7 +21,30 @@ export const RECIPIENT_TEMPLATE_LANG = 'en';
 import type { InboundMedia, IncomingMessage, UnsupportedMediaType } from './types';
 import { isMetaAccountField } from './meta-account-events';
 import { isOptOutKeyword, isResumeKeyword } from './consent';
+import { telegramConfigured, tgSendButtons, tgSendText, tgSendUrlButton, TELEGRAM_TEXT_MAX } from './telegram';
 export type { IncomingMessage }; // re-export for any caller using @/lib/whatsapp
+
+/**
+ * Telegram test channel (2026-10-08): the Telegram chat that a send to `to`
+ * goes to instead of WhatsApp, or null. Always null (and nothing is read) while
+ * TELEGRAM_BOT_TOKEN / TELEGRAM_WEBHOOK_SECRET are not set; otherwise only the
+ * shared number's customers who wrote on Telegram last, with the `telegram.bot`
+ * switch on (telegram-link.ts). Loaded lazily so the WhatsApp module graph does
+ * not change while Telegram is off.
+ */
+async function telegramChat(to: string, creds?: WaCreds): Promise<string | null> {
+  if (!telegramConfigured()) return null;
+  const { telegramChatFor } = await import('./telegram-link');
+  return telegramChatFor(to, creds?.phoneNumberId);
+}
+
+/** Telegram has no Meta templates: the callers' own text fallback sends the message there. */
+export class TelegramNoTemplateError extends Error {
+  constructor() {
+    super('Telegram chat: templates are not sent; use the text fallback');
+    this.name = 'TelegramNoTemplateError';
+  }
+}
 
 /**
  * WL2 per-partner WhatsApp credentials. Every send function accepts an optional
@@ -500,6 +523,11 @@ export function splitWhatsAppText(text: string, max: number = WA_TEXT_CHUNK_MAX)
 }
 
 export async function sendText(to: string, text: string, creds?: WaCreds): Promise<void> {
+  const tg = await telegramChat(to, creds);
+  if (tg) {
+    for (const part of splitWhatsAppText(text, TELEGRAM_TEXT_MAX)) await tgSendText(tg, part);
+    return;
+  }
   // One POST for every normal reply (byte-for-byte as before). An over-long body
   // goes out as ordered parts; if a later part fails, the outbox retry re-sends
   // the whole body, so the customer may see an earlier part twice (rare, and
@@ -525,6 +553,7 @@ export async function sendTemplate(
   bodyParams: string[],
   creds?: WaCreds,
 ): Promise<void> {
+  if (await telegramChat(to, creds)) throw new TelegramNoTemplateError();
   return postWithBackoff(
     GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
@@ -562,6 +591,7 @@ export async function sendTemplateWithButton(
   buttonToken: string,
   creds?: WaCreds,
 ): Promise<void> {
+  if (await telegramChat(to, creds)) throw new TelegramNoTemplateError();
   return postWithBackoff(
     GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
@@ -604,6 +634,14 @@ export async function sendAuthTemplate(
   components: AuthenticationTemplateComponent[],
   creds?: WaCreds,
 ): Promise<void> {
+  // Telegram: the code (the body's one parameter) goes as the plain code text.
+  const tg = await telegramChat(to, creds);
+  if (tg) {
+    const code = components.find((c) => c.type === 'body')?.parameters[0]?.text;
+    if (!code) throw new TelegramNoTemplateError();
+    await tgSendText(tg, otpMessage(code));
+    return;
+  }
   return postWithBackoff(
     GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
@@ -771,6 +809,11 @@ export async function sendInteractive(
       `sendInteractive: WhatsApp accepts 1-3 buttons (got ${buttons.length}).`,
     );
   }
+  const tg = await telegramChat(to, creds);
+  if (tg) {
+    await tgSendButtons(tg, bodyText, buttons);
+    return;
+  }
   const numbered = buttons
     .map((b, i) => `${i + 1}. ${b.title}`)
     .join('\n');
@@ -831,6 +874,11 @@ export async function sendCtaUrl(
   if (!button.url.startsWith('https://')) throw new Error('sendCtaUrl: URL must be https://');
   if (button.displayText.length > 20) throw new Error('sendCtaUrl: displayText must be <= 20 chars');
   const fallbackText = `${bodyText}\n\n${button.displayText}\n${button.url}`;
+  const tg = await telegramChat(to, creds);
+  if (tg) {
+    await tgSendUrlButton(tg, [headerText, bodyText, footerText].filter(Boolean).join('\n\n'), button.displayText, button.url);
+    return;
+  }
 
   const res = await graphFetch(
     GRAPH_MESSAGES_URL(creds),
