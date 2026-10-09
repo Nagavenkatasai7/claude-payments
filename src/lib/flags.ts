@@ -27,7 +27,7 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled' | 'paylinks.enabled';
+export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled' | 'paylinks.enabled' | 'telegram.bot';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -123,6 +123,22 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'Partners can add companies (approved on the Payees page) and send customers a payment link to pay that company an exact rupee amount. ' +
       'Only demo-mode phones (DEMO_PHONES) can pay. Off: every link shows "no longer active" and nothing can be paid; partners can still see their links.',
     bannerText: 'Payment links are on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // Telegram test channel (owner request 2026-10-08): the shared SmartRemit bot
+  // in Telegram, for demo-mode phones (DEMO_PHONES) only. Also needs
+  // TELEGRAM_BOT_TOKEN + TELEGRAM_WEBHOOK_SECRET. FAILS CLOSED: off or
+  // unreadable ⇒ the webhook ignores every update and every reply goes to
+  // WhatsApp. Only the default partner is read (global or partner 'default').
+  'telegram.bot': {
+    key: 'telegram.bot',
+    label: 'Telegram bot (test)',
+    description:
+      'Demo-mode phones (DEMO_PHONES) can chat with the SmartRemit bot in Telegram after they share their phone number there. ' +
+      'Replies, pay links, codes and notices go to the channel the customer wrote on last. Test and demo data only: Telegram is not a US-hosted vendor. ' +
+      'Off: Telegram messages are ignored and everything goes to WhatsApp. Needs TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET in Vercel.',
+    bannerText: 'The Telegram test bot is on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

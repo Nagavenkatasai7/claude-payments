@@ -36,7 +36,7 @@ import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { llmDownAlertFor } from '@/lib/llm-alert';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
-import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
+import { CARD_MARKER, conversationMessageId, createConversationLogRepo, type ConversationChannel } from '@/db/repos/conversation-log-repo';
 import { suppressForOptOut } from '@/lib/consent-gate';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
@@ -1036,6 +1036,9 @@ async function handle(
         routedPartnerId = requested;
       }
       const tenant: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
+      // Telegram test channel: a Telegram message is logged as 'tg'. The reply
+      // itself still goes through whatsapp.text; the send routes it (telegram-link.ts).
+      const logChannel: ConversationChannel = p.channel === 'tg' ? 'tg' : 'wa';
       // Step 1: a voice row carries the Meta media id (validated: digits only).
       // Its payload text is a placeholder, so the log gets a marker instead and
       // the transcript is logged as its own entry once it exists.
@@ -1050,7 +1053,7 @@ async function handle(
         id: conversationMessageId('in', row.id),
         partnerId: tenant,
         phone,
-        channel: 'wa',
+        channel: logChannel,
         direction: 'in',
         text: voiceRef ? VOICE_LOG_MARKER : str(p.messageText),
       });
@@ -1087,7 +1090,7 @@ async function handle(
             { dedupeKey: `reply:${row.id}` },
           );
           await createConversationLogRepo(tx).append({
-            id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out', text: FALLBACK_REPLY,
+            id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out', text: FALLBACK_REPLY,
           });
         });
         await outbox.enqueue(
@@ -1121,7 +1124,7 @@ async function handle(
                 { dedupeKey: `reply:${row.id}` },
               );
               await createConversationLogRepo(tx).append({
-                id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out', text: body,
+                id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out', text: body,
               });
             });
             if (heard.kind === 'off') {
@@ -1143,7 +1146,7 @@ async function handle(
             id: conversationMessageId('in', `${row.id}:t`),
             partnerId: tenant,
             phone,
-            channel: 'wa',
+            channel: logChannel,
             direction: 'in',
             text: VOICE_TRANSCRIPT_PREFIX + heard.transcript,
           });
@@ -1173,7 +1176,7 @@ async function handle(
         // log insert fails, the reply row rolls back and the whole turn retries
         // (model + any card sends), exactly as a failed reply enqueue does today.
         // A card-only turn ('') logs the CARD_MARKER instead of a text.
-        const outLog = { id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out' } as const;
+        const outLog = { id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out' } as const;
         if (reply.trim()) {
           await deps.db.transaction(async (tx) => {
             await createOutboxRepo(tx).enqueue(

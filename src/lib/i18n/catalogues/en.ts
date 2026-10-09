@@ -1993,6 +1993,7 @@ export const en = {
   'partner.customers.conversation.bot': 'Your assistant',
   'partner.customers.conversation.channel.wa': 'WhatsApp',
   'partner.customers.conversation.channel.web': 'Web chat',
+  'partner.customers.conversation.channel.tg': 'Telegram',
   'partner.customers.conversation.unreadable': 'This message could not be opened.',
   'partner.customers.conversation.busy': 'Too many details were opened in a short time. Try again in a few minutes.',
   'partner.customers.conversation.back': 'Back to customer',

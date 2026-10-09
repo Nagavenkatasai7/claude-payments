@@ -104,6 +104,14 @@ describe('createConversationLogRepo', () => {
     expect((await log.listThread('acme', PHONE, { channel: 'web' })).map((m) => m.text)).toEqual(['web hi']);
   });
 
+  it('Telegram rows (channel 3) round-trip as tg and open under their own seal', async () => {
+    const log = createConversationLogRepo(db);
+    await log.append({ id: conversationMessageId('in', 7), partnerId: 'acme', phone: PHONE, channel: 'tg', direction: 'in', text: 'tg hi' });
+    expect(await rows(sql`SELECT channel FROM conversation_messages`)).toEqual([{ channel: 3 }]);
+    expect((await log.listThread('acme', PHONE)).map((m) => [m.channel, m.text])).toEqual([['tg', 'tg hi']]);
+    expect((await log.listThread('acme', PHONE, { channel: 'tg' })).map((m) => m.text)).toEqual(['tg hi']);
+  });
+
   describe('tenant isolation (cross-tenant reads)', () => {
     it("the SAME phone under partner B sees none of partner A's messages", async () => {
       const log = createConversationLogRepo(db);

@@ -10,7 +10,8 @@ import { isFlagChangeMessage, scopeLabel } from '@/lib/flag-switch';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { STAFF_REASON_MIN, STAFF_REASON_MAX } from '@/lib/send-limits';
 import { Sidebar } from '../sidebar';
-import { changeFlagAction } from './actions';
+import { changeFlagAction, connectTelegramWebhookAction } from './actions';
+import { telegramConfigured, telegramWebhookUrl } from '@/lib/telegram';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -48,7 +49,7 @@ function ReasonField({ id }: { id: string }) {
 export default async function SwitchesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ ok?: string; error?: string }>;
+  searchParams: Promise<{ ok?: string; error?: string; telegram?: string }>;
 }) {
   await requirePlatformAdmin();
   const params = await searchParams;
@@ -186,6 +187,31 @@ export default async function SwitchesPage({
             </Card>
           );
         })}
+
+        <Card className="mb-5" data-testid="telegram-webhook">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              Telegram webhook (test)
+              {telegramConfigured() ? <Badge variant="secondary">token set</Badge> : <Badge variant="secondary">not set up</Badge>}
+            </CardTitle>
+            <CardDescription>
+              Connects the Telegram test bot to {telegramWebhookUrl()}. Press it once after TELEGRAM_BOT_TOKEN and
+              TELEGRAM_WEBHOOK_SECRET are set in Vercel and deployed, and again if either changes. The &quot;Telegram bot (test)&quot; switch above turns the bot on and off.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {params.telegram === 'ok' && <p className="text-sm" role="status">Telegram webhook connected.</p>}
+            {params.telegram === 'unset' && (
+              <p className="text-sm text-destructive" role="alert">TELEGRAM_BOT_TOKEN or TELEGRAM_WEBHOOK_SECRET is missing or invalid in this deployment.</p>
+            )}
+            {params.telegram === 'error' && (
+              <p className="text-sm text-destructive" role="alert">Telegram refused the webhook. Check the bot token, then try again. The server log has the reason.</p>
+            )}
+            <form action={connectTelegramWebhookAction}>
+              <Button type="submit" variant="outline">Connect Telegram webhook</Button>
+            </form>
+          </CardContent>
+        </Card>
       </main>
     </>
   );
