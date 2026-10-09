@@ -86,6 +86,12 @@ export interface PrepareSendInput {
   recipientLegalName?: unknown;
   relationship?: unknown;
   purpose?: unknown;
+  /**
+   * Batch B follow-up A3: the customer's reason for purpose `other`, ALREADY
+   * decided by the caller (purpose-detail.ts decidePurpose). Kept on the draft
+   * only when it is a valid reason; never on a business bill payment.
+   */
+  purposeDetail?: unknown;
   sourceOfFunds?: unknown;
   occupation?: unknown;
 }

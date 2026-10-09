@@ -4,12 +4,15 @@ import { useActionState, useState } from 'react';
 import Link from 'next/link';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, Field, Input, Select } from '@/components/ds';
-import { PURPOSE_LABELS, TRANSFER_PURPOSES } from '@/lib/purpose-codes';
 import type { ScheduleFormState } from './actions';
+import { PurposeFields } from '../send/purpose-fields';
+import { ScamWarning } from '../send/scam-warning';
 
 // The new-schedule form (UI redesign M2-10). The recipient is picked by its opaque rid; the server
 // re-resolves it and takes the number, name and account from the stored row. Nothing typed here is
-// a secret, so the inputs are echoed back after an error.
+// a secret, so the inputs are echoed back after an error. Batch B follow-up A3/A4: Other asks for the
+// customer's reason (their own words, echoed back to them only), and a reason that matches a scam
+// pattern brings back the warning with the required "I have read this warning" tick.
 
 const WEEKDAYS: MessageKey[] = [
   'portal.schedules.weekday0',
@@ -32,11 +35,12 @@ export function ScheduleForm(props: {
   const [frequency, setFrequency] = useState<'monthly' | 'weekly'>(v.frequency === 'weekly' ? 'weekly' : 'monthly');
   const e = state.errors ?? {};
   const msg = (k: MessageKey | undefined) => (k ? t(k, props.limits) : undefined);
+  const ackError = state.error === 'portal.send.scam_ack_required' ? t(state.error) : undefined;
 
   return (
     <form action={action} className="flex flex-col gap-5" noValidate>
       <input type="hidden" name="requestKey" value={state.requestKey} />
-      {state.error ? (
+      {state.error && !ackError ? (
         <p role="alert" className="rounded-ds-inner border border-ds-danger-ink/30 bg-ds-danger-bg px-4 py-3 text-[14px] font-semibold text-ds-danger-ink">
           {msg(state.error)}
         </p>
@@ -51,16 +55,9 @@ export function ScheduleForm(props: {
         )}
       </Field>
       {/* Required purpose (owner decision 2026-10-08): one of the 8, none chosen up front. */}
-      <Field name="purpose" label={t('portal.schedules.purposeLabel')} error={msg(e.purpose)} required>
-        {({ id, describedBy, invalid }) => (
-          <Select id={id} name="purpose" key={`purpose-${state.requestKey}`} defaultValue={v.purpose ?? ''} required aria-describedby={describedBy} invalid={invalid}>
-            <option value="" disabled>{t('portal.schedules.purposePlaceholder')}</option>
-            {TRANSFER_PURPOSES.map((p) => (
-              <option key={p} value={p}>{PURPOSE_LABELS[p]}</option>
-            ))}
-          </Select>
-        )}
-      </Field>
+      <PurposeFields key={`purpose-${state.requestKey}`} purpose={v.purpose} purposeDetail={v.purpose_detail}
+        purposeError={msg(e.purpose)} detailError={msg(e.purposeDetail)}
+        label={t('portal.schedules.purposeLabel')} placeholder={t('portal.schedules.purposePlaceholder')} />
       <Field name="amount" label={t('portal.schedules.amountLabel')} hint={t('portal.schedules.amountHint', props.limits)} error={msg(e.amount)} required>
         {({ id, describedBy, invalid }) => (
           <Input id={id} name="amount" key={`amount-${state.requestKey}`} inputMode="decimal" autoComplete="off" maxLength={9}
@@ -102,6 +99,7 @@ export function ScheduleForm(props: {
           <Input id={id} name="endDate" key={`end-${state.requestKey}`} type="date" defaultValue={v.endDate ?? ''} aria-describedby={describedBy} invalid={invalid} />
         )}
       </Field>
+      {state.scamWarning ? <ScamWarning key={`ack-${state.requestKey}`} error={ackError} /> : null}
       <div className="flex flex-wrap items-center gap-3">
         <Button type="submit" disabled={busy}>
           {busy ? t('portal.schedules.saving') : t('portal.schedules.save')}

@@ -118,6 +118,25 @@ describe('parseScheduleForm', () => {
     expect(t('portal.schedules.purpose_invalid')).toBe('Choose why you are sending this money.');
   });
 
+  // Batch B follow-up A3: the same "Other" rule as Send.
+  it('Other needs a reason; a reason that names a purpose becomes it; other purposes ignore one', () => {
+    const rid = recipientRid('pa', PHONE, A_RP);
+    for (const purpose_detail of ['', 'send money', 'asdf qwer']) {
+      expect(good(rid, { purpose: 'other', purpose_detail }), purpose_detail).toEqual({ ok: false, errors: { purposeDetail: 'portal.send.purpose_detail_invalid' } });
+    }
+    expect(good(rid, { purpose: 'other', purpose_detail: 'helping my uncle with roof repairs '.repeat(4) })).toEqual({
+      ok: false, errors: { purposeDetail: 'portal.send.purpose_detail_too_long' },
+    });
+    // Read whole (not cut at 40 like the short fields).
+    const words = 'helping a neighbour repair the roof after the storm last week';
+    expect(good(rid, { purpose: 'other', purpose_detail: words })).toMatchObject({ ok: true, value: { purpose: 'other', purposeDetail: words } });
+    expect(good(rid, { purpose: 'other', purpose_detail: 'school fees for my son' })).toMatchObject({
+      ok: true, value: { purpose: 'education', purposeDetail: 'school fees for my son' },
+    });
+    const gift = good(rid, { purpose: 'gift', purpose_detail: 'to claim my lottery prize' });
+    expect(gift.ok && gift.value.purposeDetail).toBeUndefined();
+  });
+
   it('accepts a future end date as YYYY-MM-DD', () => {
     const d = new Date(Date.now() + 90 * 86_400_000).toISOString().slice(0, 10);
     const r = good(recipientRid('pa', PHONE, A_RP), { endDate: d });
@@ -178,6 +197,18 @@ describe('createPortalSchedule', () => {
     const ok = good(recipientRid('pa', PHONE, A_RP));
     if (!ok.ok) throw new Error('form');
     expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, ok.value)).toEqual({ ok: false, code: 'sender_name' });
+  });
+
+  it('A3: the reason is sealed on the schedule (the owner reads it back decrypted)', async () => {
+    const parsed = good(recipientRid('pa', PHONE, A_RP), { purpose: 'other', purpose_detail: 'helping a neighbour repair the roof' });
+    if (!parsed.ok) throw new Error('form');
+    const r = await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, parsed.value);
+    if (!r.ok) throw new Error(r.code);
+    const [row] = (await db.execute(sql`SELECT purpose_detail_enc FROM schedules WHERE id = ${r.scheduleId}`)).rows as Array<{ purpose_detail_enc: string }>;
+    expect(row.purpose_detail_enc).toMatch(/^v2\./);
+    expect(await createScheduleRepo(db).getOwnedSchedule('pa', PHONE, r.scheduleId)).toMatchObject({
+      purpose: 'other', purposeDetail: 'helping a neighbour repair the roof',
+    });
   });
 
   it('required purpose: a value without one (a forged or stale caller) is refused with code purpose; nothing written', async () => {

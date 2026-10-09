@@ -8,7 +8,8 @@ import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
 import { SendsPausedError } from './flags';
-import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold } from './aml-hold';
+import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold, applyPurposeHold } from './aml-hold';
+import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
@@ -54,6 +55,10 @@ export interface CreateTransferInput {
   recipientLegalName?: string;
   relationship?: SenderRecipientRelationship;
   purpose?: TransferPurpose;
+  // Batch B follow-up A2/A4: the customer's reason for purpose `other` (the caller
+  // applied decidePurpose). Re-checked here: only a valid reason is stored, and a
+  // scam-pattern reason holds the transfer (applyPurposeHold).
+  purposeDetail?: string;
   sourceOfFunds?: SourceOfFunds;
   occupation?: Occupation;
   senderName?: string;          // sender legal name for sanctions screening (from customer.fullName)
@@ -134,6 +139,9 @@ export interface CreateTransferInput {
   // quote throws RewardEndedError with nothing written. Absent ⇒ unchanged.
   reward?: QuotedReward;
 }
+
+/** Batch B follow-up A4: the actor of the `purpose.flag` audit row. */
+export const PURPOSE_AUDIT_ACTOR = 'system:purpose-check';
 
 /** B3: what a customer sees when the reward on an approved quote ended before the mint. */
 export { REWARD_ENDED_MESSAGE } from './rewards/copy';
@@ -727,6 +735,19 @@ async function mintLocked(
     complianceStatus = 'flagged';
     complianceReasons = [...complianceReasons, SENDER_IDENTITY_MISSING_REASON];
   }
+  // ── Purpose hold (Batch B follow-up A4) ───────────────────────────────────
+  // The reason for purpose `other` is re-checked here (the server is the
+  // authority): only a valid one is stored, or an invalid one that matches a
+  // scam pattern (keptPurposeDetail, security review L2: the bot sends one on
+  // when purpose.detect is off). A scam-pattern reason holds the
+  // transfer, cleared → flagged with the generic reason, never a downgrade and
+  // never touching blocked (applyPurposeHold). OWNER DECISION 2026-10-08: this
+  // hold applies to EVERY partner, the default (demo) tenant and simulator
+  // rails included (unlike the optional AML hold above), so the owner can test it.
+  const keptPurpose = input.purposeDetail ? keptPurposeDetail(input.purposeDetail) : undefined;
+  const purposeDetail = keptPurpose?.detail;
+  const purposeRisk = keptPurpose?.risk;
+  ({ complianceStatus, complianceReasons } = applyPurposeHold({ complianceStatus, complianceReasons }, purposeRisk));
   const transfer: Transfer = {
     id,
     phone: input.phone,
@@ -756,6 +777,7 @@ async function mintLocked(
     recipientLegalName: input.recipientLegalName,   // NEW (KYC)
     relationship: input.relationship,               // NEW (KYC)
     purpose: input.purpose,                          // NEW (KYC)
+    ...(purposeDetail ? { purposeDetail } : {}),     // Batch B follow-up A2 (encrypted, write-once)
     eddRequired: eddCheck.eddRequired,               // NEW (KYC)
     transferType: input.transferType ?? 'b2c',       // NEW (B2B)
     senderEntityType: input.senderEntityType ?? 'individual',
@@ -825,6 +847,22 @@ async function mintLocked(
   await ops.insertTransfer(transfer, { screening: compliance.evidence });
   // One reward per transfer (the PK), committed with the transfer or not at all.
   if (rewardWrite) await ops.insertRedemption({ transferId: transfer.id, ...rewardWrite });
+  // Batch B follow-up A4: a scam-pattern reason is audited (category and id, no
+  // free text) and raises one deduped ops alert, committed with the row. Also
+  // when another rule already flagged it: staff should know the category. A
+  // sandbox (test-environment) mint is held and audited but pages no one
+  // (security review L3).
+  if (purposeRisk) {
+    await ops.recordAudit({
+      partnerId: input.partnerId,
+      actor: PURPOSE_AUDIT_ACTOR,
+      actorType: 'system',
+      action: 'purpose.flag',
+      subjectId: transfer.id,
+      meta: { category: purposeRisk },
+    });
+    if (transfer.environment !== 'test') await ops.enqueuePurposeFlagAlert(transfer.id, purposeRisk);
+  }
   return { transfer, replayed: false };
 }
 

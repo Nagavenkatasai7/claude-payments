@@ -22,6 +22,7 @@ import {
   quoteForPortal,
   reviewDraftState,
   sendLimitsForPortal,
+  showsScamWarning,
   type SendCopy,
 } from '@/lib/portal-send';
 import { t, type MessageKey } from '@/lib/i18n';
@@ -202,10 +203,15 @@ export default async function PortalSendReviewPage() {
           </Row>
           <Row label={t('portal.send.delivery')}>{quote.deliveryEstimate}</Row>
           <Row label={t('portal.send.payingWith')}>{t(FUNDING_LABEL[review.fundingMethod] ?? 'portal.send.funding.bank_transfer')}</Row>
-          <Row label={t('portal.send.purposeLabel')}>{PURPOSE_LABELS[review.purpose]}</Row>
+          <Row label={t('portal.send.purposeLabel')}>
+            {/* Batch B follow-up A3: the customer's own words, shown back to them. */}
+            {review.purposeDetail
+              ? t('portal.send.purposeFromWords', { purpose: PURPOSE_LABELS[review.purpose], detail: review.purposeDetail })
+              : PURPOSE_LABELS[review.purpose]}
+          </Row>
         </dl>
         <p className="text-[13.5px] text-ds-ink-muted">{t('portal.send.payNote', { brand: site.brand })}</p>
-        <ContinueForm rv={review.id} requestKey={newRequestKey()} />
+        <ContinueForm rv={review.id} requestKey={newRequestKey()} scamWarning={showsScamWarning(review.purposeDetail)} />
         <p>{changeLink}</p>
       </Card>
     </>,

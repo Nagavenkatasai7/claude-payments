@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
   const ctx = await loadAmlExplainContext(db, transfer, transfer.partnerId, now);
   if (!ctx.eligible) return NextResponse.json({ ok: false }, { status: 404 });
 
-  const facts = buildAmlExplainBundle(transfer, ctx.alerts, ctx.cfg, 'platform', now.getTime(), ctx.recomputed);
+  const facts = buildAmlExplainBundle(transfer, ctx.alerts, ctx.cfg, 'platform', now.getTime(), ctx.recomputed, ctx.purposeHold);
   let source: 'ai' | 'fallback' = 'fallback';
   let explanation: AmlExplanation = amlExplainFallback(facts);
   if (withinBudget) {

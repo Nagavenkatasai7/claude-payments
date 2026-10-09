@@ -112,6 +112,12 @@ export interface Transfer {
   recipientLegalName?: string;            // legal name distinct from display recipientName
   relationship?: SenderRecipientRelationship;
   purpose?: TransferPurpose;
+  /**
+   * Batch B follow-up A2: the customer's own words for purpose `other` (10 to 120
+   * characters, purpose-detail.ts). Encrypted at rest; present ONLY on an explicit
+   * decrypted read (like recipientLegalName), never on a default masked read.
+   */
+  purposeDetail?: string;
   // ── KYC Tier 4 EDD snapshot at send time ──
   eddRequired?: boolean;                  // true when this send crossed the $3k cumulative trigger
   // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
@@ -285,6 +291,8 @@ export interface Schedule {
    * on a schedule made before the requirement: it keeps running and its transfers show "Not stated".
    */
   purpose?: TransferPurpose;
+  /** Batch B follow-up A2: the reason for purpose `other`, carried onto every run (encrypted at rest). */
+  purposeDetail?: string;
 }
 
 // 'support' (NEW): tickets-only staff — answers customer queries, escalates to
@@ -449,6 +457,8 @@ export interface Draft {
   recipientLegalName?: string;
   relationship?: SenderRecipientRelationship;
   purpose?: TransferPurpose;
+  /** Batch B follow-up A2: the reason for purpose `other` (plaintext in Redis, like the other draft fields). */
+  purposeDetail?: string;
   sourceOfFunds?: SourceOfFunds;
   occupation?: Occupation;
   quote: {

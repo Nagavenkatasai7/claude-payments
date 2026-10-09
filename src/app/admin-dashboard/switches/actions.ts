@@ -8,6 +8,9 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { applyFlagChange, FlagChangeError } from '@/lib/flag-switch';
 import { pokeWorker } from '@/lib/outbox';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { telegramConfigured, tgSetWebhook } from '@/lib/telegram';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { logWarn } from '@/lib/log';
 
 // /admin-dashboard/switches — the ONE server action that writes a switch. A
 // public POST endpoint: it self-gates (requirePlatformAdmin) and passes the raw
@@ -50,4 +53,32 @@ export async function changeFlagAction(formData: FormData): Promise<void> {
   }
   // redirect() throws, so it stays outside the try.
   redirect(error === null ? `${PAGE}?ok=1` : `${PAGE}?error=${encodeURIComponent(error)}`);
+}
+
+/**
+ * Telegram test channel: register this deployment's webhook with Telegram
+ * (setWebhook with TELEGRAM_WEBHOOK_SECRET). Platform admin only; one audit row
+ * either way (never the token or the secret).
+ */
+export async function connectTelegramWebhookAction(): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  let result: 'ok' | 'error' | 'unset' = 'ok';
+  if (!telegramConfigured()) {
+    result = 'unset';
+  } else {
+    try {
+      await tgSetWebhook();
+    } catch (e) {
+      result = 'error';
+      logWarn('telegram.webhook', e);
+    }
+  }
+  await createAuditRepo(getDb()).record({
+    actor: staff.username,
+    actorType: 'staff',
+    action: 'telegram.webhook_set',
+    meta: { result },
+  });
+  redirect(`${PAGE}?telegram=${result}`);
 }

@@ -176,6 +176,27 @@ describe('buildAmlExplainBundle (pure)', () => {
     ]);
   });
 
+  it('a purpose hold (security review L1): the generic hold reason reads purpose_hold; only platform staff get the category', () => {
+    const platform = buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW, null, { category: 'prize' });
+    expect(platform.holdReasons).toEqual(['purpose_hold']);
+    expect(platform.purposeRisk).toEqual({ category: 'prize', label: 'Prize or lottery' });
+    expect(JSON.stringify(amlExplainPrompt(platform))).toContain('Prize or lottery');
+    expect(amlExplainFallback(platform).summary).toContain('Prize or lottery');
+
+    const partner = buildAmlExplainBundle(makeTransfer(), [], CFG, 'partner', NOW, null, { category: 'prize' });
+    expect(partner.holdReasons).toEqual(['purpose_hold']);
+    expect(partner.purposeRisk).toBeUndefined();
+    for (const s of [JSON.stringify(partner), JSON.stringify(amlExplainPrompt(partner)), JSON.stringify(amlExplainFallback(partner))]) {
+      expect(s).not.toMatch(/prize|lottery/i);
+    }
+    // A flag row with an unknown category still reads purpose_hold, with no category.
+    const unknown = buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW, null, { category: null });
+    expect(unknown.holdReasons).toEqual(['purpose_hold']);
+    expect(unknown.purposeRisk).toBeUndefined();
+    // No purpose flag: unchanged.
+    expect(buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW).holdReasons).toEqual(['aml_hold']);
+  });
+
   it('a row that is not on hold has no hold age; b2b and usdc are carried as closed classes', () => {
     const b = buildAmlExplainBundle(
       makeTransfer({ status: 'delivered', complianceStatus: 'cleared', complianceReasons: [], transferType: 'b2b', payoutMethod: 'usdc', eddRequired: true }),

@@ -67,6 +67,7 @@ export function FactsTable({ facts }: { facts: AmlExplainFacts }) {
         <FactRow label="Corridor">{facts.sourceCountry} → {facts.destinationCountry} · {facts.payoutMethodClass} · {facts.transferType}</FactRow>
         <FactRow label="On hold">{facts.onHold ? `Yes, ${facts.holdAgeHours ?? 0}h` : 'No'}</FactRow>
         <FactRow label="Hold reasons">{facts.holdReasons.length ? facts.holdReasons.join(', ') : '—'}</FactRow>
+        {facts.purposeRisk ? <FactRow label="Purpose pattern">{facts.purposeRisk.label}</FactRow> : null}
         <FactRow label="EDD required">{facts.eddRequired ? 'Yes' : 'No'}</FactRow>
       </tbody>
     </table>

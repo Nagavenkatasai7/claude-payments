@@ -508,6 +508,21 @@ export function createAuditRepo(db: DbOrTx) {
       });
     },
 
+    /** Several events in ONE insert (one statement, all or nothing). No events ⇒ no statement. */
+    async recordMany(events: readonly AuditEvent[]): Promise<void> {
+      if (events.length === 0) return;
+      await db.insert(auditEvents).values(
+        events.map((e) => ({
+          partnerId: e.partnerId ?? null,
+          actor: e.actor,
+          actorType: e.actorType,
+          action: e.action,
+          subjectId: e.subjectId ?? null,
+          meta: e.meta ?? null,
+        })),
+      );
+    },
+
     async listByPartner(partnerId: PartnerId, limit = 50) {
       return db
         .select()

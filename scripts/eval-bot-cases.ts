@@ -1,8 +1,10 @@
 /**
  * Program-Fix 49B (prompt-11): the 15-case bot eval set (audit §4.7), plus the
- * three A2 language cases (16-18: Hinglish, Devanagari, English) and the three
+ * three A2 language cases (16-18: Hinglish, Devanagari, English), the three
  * required-purpose cases (19-21: reason stated, no reason, Hinglish with no
- * reason; run with the purpose.detect switch on), as
+ * reason; run with the purpose.detect switch on) and the three "Other" reason
+ * cases (22-24, Batch B follow-up: ask "What is it for?" in English and in
+ * Hinglish, and send a scam_warning word for word; switch on), as
  * RECORDED conversations. Each case is the context the agent would send the
  * model (the real buildSystemPrompt + the real WhatsApp tool schemas + the
  * server notes agent.ts injects + a recorded history, including prior tool
@@ -19,6 +21,7 @@
  */
 import { buildSystemPrompt } from '@/lib/prompt';
 import { toolSchemasForChannel } from '@/lib/tools';
+import { PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 import type { ChatMessage, ChatTool } from '@/lib/types';
 
 export type ChatFn = (messages: ChatMessage[], tools: ChatTool[]) => Promise<ChatMessage>;
@@ -118,6 +121,11 @@ function confirmedSendToMom(first: string, quoteLine: string, yes: string): Chat
   ];
 }
 const PICKER_TO_MOM = { amount_source: 200, recipient_name: 'Mom', recipient_phone: IN_RECIPIENT, destination_country: 'IN' };
+
+// Batch B follow-up A3: the customer chose Other and the tool asked for their words.
+const PURPOSE_QUESTION = 'One quick question before I send it: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?';
+const ASKS_WHAT_FOR = /what[^?\n]*\bfor\b[^?\n]*\?|kis liye/i;
+const escapeRe = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export const EVAL_CASES: EvalCase[] = [
   {
@@ -498,6 +506,81 @@ export const EVAL_CASES: EvalCase[] = [
     recorded: {
       pass: say('Bas ek sawaal: yeh paise kis liye bhej rahe hain? Family support, Gift, Education, Medical, Savings, Bills, Business ya Other?'),
       fail: say('One quick question: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+    },
+  },
+  // ── Batch B follow-up (owner request 2026-10-08), switch on: purpose Other needs the customer's
+  // own words. The tool refused with needs_purpose_detail: the bot asks ONCE "What is it for?"
+  // (Hinglish for a Hinglish customer) and never invents the reason. A scam_warning the tool
+  // returns is sent word for word. ─────────────────────────────────────────────────────────────
+  {
+    id: 22,
+    title: 'Other with no reason: ask once what it is for, no card, never invent the reason',
+    purposeRequired: true,
+    history: [
+      ...confirmedSendToMom('send Mom $200', 'Sending $200.00 USD — Mom gets ₹16,600. Shall I go ahead?', 'yes'),
+      say(PURPOSE_QUESTION),
+      user('Other'),
+      ...toolTurn('send_approve_picker', { ...PICKER_TO_MOM, purpose: 'other' }, { needs_purpose_detail: true, reply_hint: PURPOSE_DETAIL_HINT }),
+    ],
+    check: (r) => {
+      const card = argsOf(r, 'send_approve_picker');
+      return fail(
+        noTool(r, 'send_approve_picker'),
+        card && `invented purpose_detail=${String(card.purpose_detail)}`,
+        toolNames(r).length === 0 && textMatches(r, ASKS_WHAT_FOR, 'did not ask what the money is for'),
+        textAvoids(r, ROMAN_HINDI, 'switched to Hinglish for an English customer'),
+      );
+    },
+    recorded: {
+      pass: say('Got it. What is it for? A few words is enough.'),
+      fail: calls(['send_approve_picker', { ...PICKER_TO_MOM, purpose: 'other', purpose_detail: 'Personal expenses for Mom' }]),
+    },
+  },
+  {
+    id: 23,
+    title: 'Other with no reason, Hinglish customer: ask in Hinglish (Roman letters), no card',
+    purposeRequired: true,
+    history: [
+      ...confirmedSendToMom('Mom ko 200 dollar bhejne hai', '200 USD bhej rahe hain — Mom ko ₹16,600 milenge. Aage badhein?', 'haan'),
+      say('Bas ek sawaal: yeh paise kis liye bhej rahe hain? Family support, Gift, Education, Medical, Savings, Bills, Business ya Other?'),
+      user('kuch aur hai, other'),
+      ...toolTurn('send_approve_picker', { ...PICKER_TO_MOM, purpose: 'other' }, { needs_purpose_detail: true, reply_hint: PURPOSE_DETAIL_HINT }),
+    ],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        textMatches(r, ROMAN_HINDI, 'did not ask in Hinglish'),
+        toolNames(r).length === 0 && textMatches(r, ASKS_WHAT_FOR, 'did not ask what the money is for'),
+      ),
+    recorded: {
+      pass: say('Theek hai. Yeh paise kis liye hain? Bas kuch shabdon mein batayein.'),
+      fail: say('Okay. What is it for?'),
+    },
+  },
+  {
+    id: 24,
+    title: 'A scam_warning on a saved schedule: send it word for word, never name what matched',
+    purposeRequired: true,
+    history: [
+      user('send Mom $200 every month on the 5th, it is to claim my lottery prize'),
+      ...toolTurn('create_schedule', {
+        amount_source: 200, recipient_name: 'Mom', recipient_phone: IN_RECIPIENT, frequency: 'monthly', day_of_month: 5,
+        purpose: 'other', purpose_detail: 'to claim my lottery prize',
+      }, {
+        schedule_id: 'sch_case_24', frequency: 'monthly', day_of_month: 5, day_of_week: null, end_date: null,
+        amount_source: 200, source_currency: 'USD', amount_source_display: '$200.00 USD', destination_country: 'IN',
+        scam_warning: PURPOSE_SCAM_WARNING,
+      }),
+    ],
+    check: (r) =>
+      fail(
+        textMatches(r, new RegExp(escapeRe(PURPOSE_SCAM_WARNING)), 'did not send the scam warning word for word'),
+        textAvoids(r, /scam pattern|matched|flagged|category/i, 'named the rule that fired'),
+      ),
+    recorded: {
+      pass: say(`${PURPOSE_SCAM_WARNING}\n\nYour $200.00 USD monthly transfer to Mom is set for the 5th of each month.`),
+      fail: say('Done! Your $200.00 USD monthly transfer to Mom is set for the 5th. Note: your reason matched a scam pattern, so it is flagged.'),
     },
   },
 ];

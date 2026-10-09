@@ -29,6 +29,7 @@ import Link from 'next/link';
 import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
+import { readPurposeDetailsForStaff, type StaffPurposeDetail } from '@/lib/purpose-detail-staff';
 
 const REVIEW_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
@@ -86,7 +87,22 @@ function recipientGets(t: Transfer): string {
   return money(t.amountInr, t.destinationCurrency ?? 'INR');
 }
 
-function transferCells(t: Transfer, senderNames: Map<string, string>) {
+// Batch B follow-up A4: the customer's "Other" reason (decrypted, audited) and the staff name of the
+// scam pattern it matched, under the hold reasons. Staff only.
+function ReasonGiven({ reason }: { reason: StaffPurposeDetail | undefined }) {
+  if (!reason) return null;
+  return (
+    <span className="mt-1 block text-xs">
+      <span className="text-muted-foreground">Reason given: </span>
+      <span className="break-words">&ldquo;{reason.detail}&rdquo;</span>
+      {reason.riskLabel && (
+        <Badge variant="destructive" className="ml-1.5">Risk: {reason.riskLabel}</Badge>
+      )}
+    </span>
+  );
+}
+
+function transferCells(t: Transfer, senderNames: Map<string, string>, reasons: Map<string, StaffPurposeDetail> = new Map()) {
   return [
     <div key="recipient">
       <div className="font-semibold">{t.recipientName}</div>
@@ -103,12 +119,15 @@ function transferCells(t: Transfer, senderNames: Map<string, string>) {
       )}
       <div className="mt-0.5 text-xs text-muted-foreground">{recipientGets(t)}</div>
     </div>,
-    <span key="reasons" className="inline-flex flex-wrap items-center gap-1.5">
-      {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
-        r === 'edd_required'
-          ? <Badge key={r} variant="outline" className="border-warning/50 text-warning">EDD required</Badge>
-          : <span key={r}>{r}</span>,
-      )}
+    <span key="reasons">
+      <span className="inline-flex flex-wrap items-center gap-1.5">
+        {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
+          r === 'edd_required'
+            ? <Badge key={r} variant="outline" className="border-warning/50 text-warning">EDD required</Badge>
+            : <span key={r}>{r}</span>,
+        )}
+      </span>
+      <ReasonGiven reason={reasons.get(t.id)} />
     </span>,
     new Date(t.createdAt).toLocaleString(),
     <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />,
@@ -143,6 +162,10 @@ export default async function CompliancePage() {
     getDb(),
     [...inReview, ...flagged, ...blocked, ...amlTransfers.values()],
   );
+
+  // Batch B follow-up A4: the reasons on the review and flagged queues (one batched, scope-pinned read;
+  // one `pii.view` row per transfer whose reason is shown).
+  const purposeReasons = await readPurposeDetailsForStaff(getDb(), staff, [...inReview, ...flagged], { tenant: tenant ?? null });
 
   const partners = await scoped.listPartners();
   // Mirrors releaseTransferAction's gate (the server action is the authority):
@@ -207,7 +230,7 @@ export default async function CompliancePage() {
                 key: t.id,
                 label: t.recipientName,
                 cells: [
-                  ...transferCells(t, senderNames),
+                  ...transferCells(t, senderNames, purposeReasons),
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
                       {canRelease(t) ? (
@@ -285,7 +308,7 @@ export default async function CompliancePage() {
               rows={flagged.map((t) => ({
                 key: t.id,
                 label: t.recipientName,
-                cells: transferCells(t, senderNames),
+                cells: transferCells(t, senderNames, purposeReasons),
               }))}
             />
           </CardContent>

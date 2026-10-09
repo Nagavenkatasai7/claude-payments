@@ -57,11 +57,27 @@ export function amlHoldHit(prior: SenderAmlStats, amountUsd: number, cfg: AmlRul
   return structuring(prior, amountUsd, cfg) ?? firstTransfer(prior, amountUsd, null, cfg);
 }
 
-/** `cleared → flagged` is the ONLY change; anything else is returned as-is. */
-export function applyAmlHold<V extends { complianceStatus: ComplianceStatus; complianceReasons: string[] }>(
-  v: V,
-  hit: AmlHit | null,
-): V {
-  if (!hit || v.complianceStatus !== 'cleared') return v;
+type Verdict = { complianceStatus: ComplianceStatus; complianceReasons: string[] };
+
+/** The one hold verdict: `cleared → flagged` with the generic reason; anything else is returned as-is. */
+function holdForReview<V extends Verdict>(v: V): V {
+  if (v.complianceStatus !== 'cleared') return v;
   return { ...v, complianceStatus: 'flagged', complianceReasons: [...v.complianceReasons, AML_HOLD_REASON] };
+}
+
+/** `cleared → flagged` is the ONLY change; anything else is returned as-is. */
+export function applyAmlHold<V extends Verdict>(v: V, hit: AmlHit | null): V {
+  return hit ? holdForReview(v) : v;
+}
+
+/**
+ * Batch B follow-up A4: the purpose hold. A reason that matches a scam pattern
+ * (purpose-detail.ts) takes the SAME verdict path as the AML hold: `cleared →
+ * flagged` with the generic AML_HOLD_REASON (no tipping off), never a
+ * downgrade, never touches blocked. Unlike the AML hold it has no gate: OWNER
+ * DECISION 2026-10-08, it applies to EVERY partner, the default (demo) tenant
+ * and simulator rails included, so the owner can test it.
+ */
+export function applyPurposeHold<V extends Verdict>(v: V, risk: string | undefined): V {
+  return risk ? holdForReview(v) : v;
 }

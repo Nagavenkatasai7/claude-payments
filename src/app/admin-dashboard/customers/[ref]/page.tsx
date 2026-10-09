@@ -306,7 +306,7 @@ export default async function CustomerDetailPage({
                       className={`max-w-[85%] rounded-lg border px-3 py-2 ${m.direction === 'out' ? 'ml-auto bg-muted' : ''}`}
                     >
                       <div className="mb-1 text-xs text-muted-foreground tabular-nums">
-                        {m.direction === 'in' ? 'Customer' : 'Bot'} · {m.channel === 'web' ? 'web' : 'WhatsApp'} ·{' '}
+                        {m.direction === 'in' ? 'Customer' : 'Bot'} · {m.channel === 'web' ? 'web' : m.channel === 'tg' ? 'Telegram' : 'WhatsApp'} ·{' '}
                         {new Date(m.createdAt).toLocaleString()}
                       </div>
                       <div className={`whitespace-pre-wrap break-words ${m.unreadable ? 'italic text-muted-foreground' : ''}`}>

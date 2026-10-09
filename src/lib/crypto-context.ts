@@ -24,7 +24,12 @@ export type TransferEncColumn =
   | 'payout_destination_enc'
   | 'recipient_legal_name_enc'
   | 'sender_business_name_enc'
-  | 'recipient_business_name_enc';
+  | 'recipient_business_name_enc'
+  // Batch B follow-up A2: the customer's reason for purpose `other`.
+  | 'purpose_detail_enc';
+
+/** The sealed columns of a schedule row (the default keeps every existing call site's AAD). */
+export type ScheduleEncColumn = 'payout_destination_enc' | 'purpose_detail_enc';
 
 export type CustomerEncColumn =
   | 'full_name_enc'
@@ -80,7 +85,8 @@ export const ctx = {
   recipient: (partnerId: PartnerId, senderPhone: string, recipientPhone: string): CryptoContext =>
     make('recipients', 'payout_destination_enc', [partnerId, senderPhone, recipientPhone]),
   beneficiary: (id: string): CryptoContext => make('beneficiaries', 'payout_destination_enc', [id]),
-  schedule: (id: string): CryptoContext => make('schedules', 'payout_destination_enc', [id]),
+  schedule: (id: string, column: ScheduleEncColumn = 'payout_destination_enc'): CryptoContext =>
+    make('schedules', column, [id]),
   integration: (partnerId: PartnerId, column: IntegrationEncColumn): CryptoContext =>
     make('partner_integrations', column, [partnerId]),
   waitlist: (id: string, column: WaitlistEncColumn): CryptoContext => make('waitlist_signups', column, [id]),

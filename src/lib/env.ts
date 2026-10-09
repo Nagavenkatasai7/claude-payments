@@ -440,6 +440,16 @@ export const env = {
       .map((p) => p.trim())
       .filter((p) => p !== '');
   },
+  // Telegram test channel (optional, never boot-required; src/lib/telegram.ts).
+  // Both empty ⇒ Telegram is off whatever its switch says. The token comes from
+  // @BotFather; the secret (1-256 of A-Z a-z 0-9 _ -) is sent back by Telegram
+  // on every webhook call. Secrets: set with `vercel env add … --value`.
+  get telegramBotToken(): string {
+    return trimmedEnv('TELEGRAM_BOT_TOKEN');
+  },
+  get telegramWebhookSecret(): string {
+    return trimmedEnv('TELEGRAM_WEBHOOK_SECRET');
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

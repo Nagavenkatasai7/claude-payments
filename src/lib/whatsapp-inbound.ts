@@ -38,6 +38,7 @@ import {
 } from '@/lib/voice-notes';
 import { isOggOpusMime } from '@/lib/voice-transcribe';
 import { recordWhatsAppReferral } from '@/lib/referral-attribution';
+import { clearTelegramRoute } from '@/lib/telegram-link';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
@@ -256,6 +257,13 @@ interface MessageDeps {
   outbox: ReturnType<typeof createOutboxRepo>;
   routedPartnerId: PartnerId | null;
   tenantId: PartnerId;
+  /**
+   * Where the message came from. 'tg' = the Telegram test channel (2026-10-08,
+   * processTelegramMessage): same pipeline, but no voice notes, no referral
+   * code, and the agent.turn payload says `channel: 'tg'` for the chat log.
+   * Replies are whatsapp.text rows either way; the send routes them.
+   */
+  channel: 'wa' | 'tg';
 }
 
 /**
@@ -385,6 +393,17 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
     /* fall through to the DB, which is the real dedup */
   }
 
+  // Telegram test channel: a WhatsApp message makes WhatsApp the reply channel
+  // again. No-op (no Redis call) while Telegram is not configured; a failure
+  // only logs (the route then expires on its own).
+  if (deps.channel === 'wa') {
+    try {
+      await clearTelegramRoute(incoming.from);
+    } catch (err) {
+      logWarn('telegram.route', 'route clear failed', { tenant: tenantId, error: err instanceof Error ? err.name : 'error' });
+    }
+  }
+
   const customerStore = getCustomerStore(store);
 
   // STOP / START consent short-circuit (order intentional — see consent.ts).
@@ -443,7 +462,9 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   if (incoming.kind === 'unsupported') {
     const settings = voiceSettingsFromEnv();
     const voiceOn =
-      voiceSenderEligible({ routedPartnerId, from: incoming.from }, settings) && (await voiceNotesOn(getDb(), settings));
+      deps.channel === 'wa' &&
+      voiceSenderEligible({ routedPartnerId, from: incoming.from }, settings) &&
+      (await voiceNotesOn(getDb(), settings));
     if (voiceOn && incoming.mediaType === 'audio') {
       if (!incoming.media) {
         logWarn('whatsapp.voice_note', 'audio without a usable media id', { tenant: tenantId });
@@ -480,7 +501,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   // Batch B4: a referral code (REF-XXXXXX) in a text links the customer to a referral
   // partner under THIS tenant (never re-homed). Best effort: never throws. A redelivery
   // repeats it harmlessly (first referral wins, ON CONFLICT DO NOTHING).
-  if (incoming.kind === 'text') await recordWhatsAppReferral(getDb(), tenantId, incoming.from, incoming.text);
+  if (incoming.kind === 'text' && deps.channel === 'wa') await recordWhatsAppReferral(getDb(), tenantId, incoming.from, incoming.text);
 
   const now = new Date();
   const tier = deriveTier(customer, now);
@@ -531,6 +552,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
       turn,
       routedPartnerId,
       ...(voice ? { media: { id: voice.id, mimeType: voice.mimeType } } : {}),
+      ...(deps.channel === 'tg' ? { channel: 'tg' } : {}),
     },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
@@ -568,27 +590,13 @@ export async function processInboundWebhook(
   // row and does not poke. R1 holds: a newly queued row always pokes.
   // (The pass-through calls a bound reference, not `.enqueue(`: the fix-11
   // static payload scan keeps checking the real call sites in this file.)
-  const repo = createOutboxRepo(getDb());
-  const insertRow = repo.enqueue.bind(repo);
-  let inserted = false;
-  const outbox: MessageDeps['outbox'] = {
-    ...repo,
-    enqueue: async (...args: Parameters<typeof insertRow>) => {
-      try {
-        const created = await insertRow(...args);
-        if (created) inserted = true;
-        return created;
-      } catch (err) {
-        inserted = true;
-        throw err;
-      }
-    },
-  };
+  const { outbox, inserted } = pokingOutbox();
   const deps: MessageDeps = {
     store: getStore(),
     outbox,
     routedPartnerId,
     tenantId,
+    channel: 'wa',
   };
 
   try {
@@ -638,7 +646,63 @@ export async function processInboundWebhook(
   } finally {
     // Fast path — the gated cron only drains what is marked due (or at its
     // backstop). In a finally so rows queued before a later throw still poke.
-    if (inserted) pokeWorker();
+    if (inserted()) pokeWorker();
+  }
+  return { ok: true };
+}
+
+/**
+ * The outbox repo for one webhook request, with a flag that flips when an
+ * enqueue created a NEW row or threw (see processInboundWebhook: only those
+ * poke the worker).
+ */
+function pokingOutbox(): { outbox: MessageDeps['outbox']; inserted: () => boolean } {
+  const repo = createOutboxRepo(getDb());
+  const insertRow = repo.enqueue.bind(repo);
+  let inserted = false;
+  const outbox: MessageDeps['outbox'] = {
+    ...repo,
+    enqueue: async (...args: Parameters<typeof insertRow>) => {
+      try {
+        const created = await insertRow(...args);
+        if (created) inserted = true;
+        return created;
+      } catch (err) {
+        inserted = true;
+        throw err;
+      }
+    },
+  };
+  return { outbox, inserted: () => inserted };
+}
+
+/**
+ * Telegram test channel (2026-10-08): ONE message from a Telegram chat whose
+ * phone is verified and linked (telegram-inbound.ts). It runs the SAME pipeline
+ * as a WhatsApp message on the shared number (default tenant): consent, the
+ * opted-out gate, the throttle, the customer upsert and exactly one durable
+ * outbox row keyed `wamid:<messageId>` (messageId `tg:<chat id>:<message ref>`,
+ * telegram.ts).
+ * Same error contract as processInboundWebhook: an infrastructure error throws
+ * (the route answers 500 and Telegram redelivers); any other failure is
+ * acknowledged and audited.
+ */
+export async function processTelegramMessage(incoming: IncomingMessage): Promise<{ ok: boolean }> {
+  const tenantId: PartnerId = DEFAULT_PARTNER_ID;
+  const { outbox, inserted } = pokingOutbox();
+  const deps: MessageDeps = { store: getStore(), outbox, routedPartnerId: null, tenantId, channel: 'tg' };
+  try {
+    let durable: boolean;
+    try {
+      durable = await processMessage(deps, incoming);
+    } catch (err) {
+      if (isInfraError(err)) throw err;
+      await recordDropped(incoming.messageId, tenantId, err);
+      return { ok: true };
+    }
+    if (durable) await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
+  } finally {
+    if (inserted()) pokeWorker();
   }
   return { ok: true };
 }

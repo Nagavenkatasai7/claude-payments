@@ -193,6 +193,9 @@ export async function runDueSchedules(
         // Required purpose (Q2): the schedule's purpose rides every run. A schedule made
         // before the requirement has none: it keeps running and its transfers show "Not stated".
         purpose: schedule.purpose,
+        // Batch B follow-up A3: the schedule's reason rides every run (the mint re-checks it, and a
+        // scam-pattern reason holds each run for review).
+        purposeDetail: schedule.purposeDetail,
       });
       // Program fix 16: a busy per-sender lock wrote nothing — retry the mint
       // once in-process before counting the schedule as failed (the next

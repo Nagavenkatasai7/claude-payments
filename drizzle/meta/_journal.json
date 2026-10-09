@@ -225,6 +225,13 @@
       "when": 1791469741174,
       "tag": "0031_batch_b",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791498686917,
+      "tag": "0032_purpose_detail",
+      "breakpoints": true
     }
   ]
 }
