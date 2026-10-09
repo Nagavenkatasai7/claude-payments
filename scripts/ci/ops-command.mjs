@@ -18,11 +18,18 @@
  * 20-digit id is beyond Number precision). Only validated values reach
  * $GITHUB_OUTPUT, so the workflow's shell never sees the raw body.
  *
- *   node scripts/ci/ops-command.mjs
+ * `cancel` refuses runs of the workflows that guard production (CANCEL_DENY):
+ * a prompt-injected thread must not be able to cancel the smoke run whose
+ * rollback job protects production, or the pre-release check. Re-runs stay
+ * allowed for every workflow.
  *
- * Env: COMMENT_BODY, GITHUB_OUTPUT. Writes `cmd=`, `run_id=`, `sha=` lines.
- * Exit 0 (a command, or "no command"), 1 when a command parsed but there is
- * no GITHUB_OUTPUT to write it to.
+ *   node scripts/ci/ops-command.mjs
+ *     Env: COMMENT_BODY, GITHUB_OUTPUT. Writes `cmd=`, `run_id=`, `sha=` lines.
+ *     Exit 0 (a command, or "no command"), 1 when a command parsed but there
+ *     is no GITHUB_OUTPUT to write it to.
+ *   node scripts/ci/ops-command.mjs cancel-allowed
+ *     Env: RUN_PATH (the run's `path` from GET actions/runs/{id}).
+ *     Exit 0 when the run may be cancelled, 1 when it may not (or is unknown).
  */
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -49,6 +56,35 @@ export function parseOpsCommand(body) {
   const smoke = SMOKE_CMD.exec(line);
   if (smoke) return smoke[1] ? { cmd: 'smoke', sha: smoke[1].toLowerCase() } : { cmd: 'smoke' };
   return null;
+}
+
+/** Workflow files whose runs `/ops cancel` refuses: they guard production. */
+export const CANCEL_DENY = Object.freeze(['.github/workflows/smoke.yml', '.github/workflows/release-check.yml']);
+
+/**
+ * Whether `/ops cancel` may cancel a run of the workflow at `path` (the
+ * workflow run's `path` field). Fails closed on a missing path. The match
+ * ignores case, a leading `./` and an `@<ref>` suffix.
+ * @param {unknown} path
+ */
+export function cancelAllowed(path) {
+  if (typeof path !== 'string') return false;
+  const p = path.trim().replace(/^\.\//, '').replace(/@.*$/, '').toLowerCase();
+  if (p === '') return false;
+  return !CANCEL_DENY.includes(p);
+}
+
+/**
+ * @param {{env: Record<string, string | undefined>, log?: (line: string) => void}} deps
+ * @returns {number} exit code: 0 allowed, 1 refused
+ */
+export function runCancelCheck({ env, log = (l) => console.log(l) }) {
+  if (cancelAllowed(env.RUN_PATH)) {
+    log('cancel allowed');
+    return 0;
+  }
+  log(`cancel refused: runs of ${CANCEL_DENY.join(' and ')} guard production (or the run's workflow is unknown)`);
+  return 1;
 }
 
 /**
@@ -86,5 +122,5 @@ export function runCli({ env, appendFile = (p, t) => appendFileSync(p, t), log =
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  process.exit(runCli({ env: process.env }));
+  process.exit(process.argv[2] === 'cancel-allowed' ? runCancelCheck({ env: process.env }) : runCli({ env: process.env }));
 }

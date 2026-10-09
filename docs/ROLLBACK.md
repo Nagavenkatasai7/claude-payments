@@ -56,7 +56,7 @@ Thread agents act on GitHub as the owner through an App token that cannot re-run
 
 - `/ops rerun <run id>`: re-run the failed jobs of a run
 - `/ops rerun-all <run id>`: re-run every job of a run
-- `/ops cancel <run id>`: cancel a run
+- `/ops cancel <run id>`: cancel a run. Runs of smoke.yml and release-check.yml are refused, because they guard production (smoke's rollback job, the pre-release check); the workflow looks the run up first and replies with the refusal
 - `/ops smoke` or `/ops smoke <40-hex sha>`: dispatch smoke.yml on main, for the head of main or for that commit (a dispatched smoke never rolls back)
 
-`.github/workflows/ops-commands.yml` reacts with eyes, runs the command with its own `GITHUB_TOKEN` (`actions: write`) and replies with a link to the run, or with the HTTP status if GitHub refused. Anything else on the first line gets a usage reply. The parser is `scripts/ci/ops-command.mjs`. Only comments by `Nagavenkatasai7` with OWNER association, on an issue (not a pull request) labelled `ops`, are acted on.
+`.github/workflows/ops-commands.yml` reacts with eyes, runs the command with its own `GITHUB_TOKEN` (`actions: write`) and replies with a link to the run, or with the HTTP status if GitHub refused. Anything else on the first line gets a usage reply. The parser is `scripts/ci/ops-command.mjs`. Only comments by `Nagavenkatasai7` with OWNER association, on an open issue (not a pull request) labelled `ops`, are acted on; comments on a closed issue are ignored.

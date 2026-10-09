@@ -12,14 +12,14 @@ import {
   planMigrations,
   redact,
   run,
-  skipReason,
+  buildGate,
 } from '../scripts/migrate-on-build.mjs';
 
 // scripts/migrate-on-build.mjs runs in the Vercel production build
 // (package.json "vercel-build"): it applies the pending drizzle migrations
 // before `next build`, so a build never goes live ahead of its migration.
 
-const PROD = { VERCEL_ENV: 'production', VERCEL_GIT_COMMIT_REF: 'main' };
+const PROD = { VERCEL_ENV: 'production', VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_COMMIT_REF: 'main' };
 const URL_ = 'postgresql://owner:pw-s3cret@ep-x-direct.us-east-2.aws.neon.tech/db?sslmode=require';
 
 // Vercel's Next.js builder runs `vercel-build` instead of `build` when it
@@ -35,14 +35,47 @@ describe('wiring', () => {
   });
 });
 
-describe('skipReason', () => {
-  it('runs only for a production build of main', () => {
-    expect(skipReason(PROD)).toBeNull();
-    expect(skipReason({ VERCEL_ENV: 'preview', VERCEL_GIT_COMMIT_REF: 'main' })).toMatch(/preview/);
-    expect(skipReason({ VERCEL_ENV: 'production', VERCEL_GIT_COMMIT_REF: 'feat/x' })).toMatch(/feat\/x/);
-    expect(skipReason({ VERCEL_ENV: 'production' })).toMatch(/branch/);
-    expect(skipReason({})).toMatch(/not a Vercel production build/);
-    expect(skipReason({ VERCEL_ENV: 'development', VERCEL_GIT_COMMIT_REF: 'main' })).toMatch(/development/);
+describe('buildGate', () => {
+  it('runs for a production build of main from GitHub', () => {
+    expect(buildGate(PROD)).toEqual({ action: 'run' });
+  });
+
+  it('skips anything that is not a production build', () => {
+    expect(buildGate({ VERCEL_ENV: 'preview', VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_COMMIT_REF: 'main' })).toEqual({ action: 'skip', reason: expect.stringMatching(/preview/) });
+    expect(buildGate({ VERCEL_ENV: 'development' })).toEqual({ action: 'skip', reason: expect.stringMatching(/development/) });
+    expect(buildGate({})).toEqual({ action: 'skip', reason: expect.stringMatching(/not a Vercel production build/) });
+  });
+
+  // On Vercel (VERCEL=1) a missing VERCEL_ENV means system variables are not
+  // exposed to the build; skipping would let a production build go live unmigrated.
+  it('fails a Vercel build that cannot see VERCEL_ENV', () => {
+    const g = buildGate({ VERCEL: '1' });
+    expect(g.action).toBe('fail');
+    expect('reason' in g ? g.reason : '').toMatch(/System Environment Variables/);
+    expect(buildGate({ VERCEL: '1', MIGRATE_ON_BUILD_SKIP: '1' }).action).toBe('override');
+  });
+
+  // A production build that is not main from GitHub (CLI `vercel deploy --prod`,
+  // a promoted CLI preview) could go live without its migration: fail it.
+  it.each([
+    [{ VERCEL_ENV: 'production', VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_COMMIT_REF: 'feat/x' }, /feat\/x/],
+    [{ VERCEL_ENV: 'production', VERCEL_GIT_PROVIDER: 'github' }, /VERCEL_GIT_COMMIT_REF/],
+    [{ VERCEL_ENV: 'production', VERCEL_GIT_COMMIT_REF: 'main' }, /VERCEL_GIT_PROVIDER/],
+    [{ VERCEL_ENV: 'production', VERCEL_GIT_PROVIDER: 'gitlab', VERCEL_GIT_COMMIT_REF: 'main' }, /gitlab/],
+  ])('fails a production build that is not main from GitHub: %o', (env, why) => {
+    const g = buildGate(env);
+    expect(g.action).toBe('fail');
+    const reason = 'reason' in g ? g.reason : '';
+    expect(reason).toMatch(why);
+    expect(reason).toMatch(/MIGRATE_ON_BUILD_SKIP=1/);
+  });
+
+  it('MIGRATE_ON_BUILD_SKIP=1 overrides only that failure', () => {
+    const cli = { VERCEL_ENV: 'production', MIGRATE_ON_BUILD_SKIP: '1' };
+    expect(buildGate(cli)).toEqual({ action: 'override', reason: expect.stringMatching(/VERCEL_GIT_PROVIDER/) });
+    expect(buildGate({ ...cli, MIGRATE_ON_BUILD_SKIP: 'true' }).action).toBe('fail');
+    // A normal production build of main still migrates.
+    expect(buildGate({ ...PROD, MIGRATE_ON_BUILD_SKIP: '1' })).toEqual({ action: 'run' });
   });
 });
 
@@ -243,14 +276,31 @@ describe('run', () => {
   afterEach(() => rmSync(cwd, { recursive: true, force: true }));
 
   it.each([
-    [{ VERCEL_ENV: 'preview', VERCEL_GIT_COMMIT_REF: 'main', DATABASE_URL_UNPOOLED: URL_ }],
-    [{ VERCEL_ENV: 'production', VERCEL_GIT_COMMIT_REF: 'fix/x', DATABASE_URL_UNPOOLED: URL_ }],
+    [{ VERCEL_ENV: 'preview', VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_COMMIT_REF: 'main', DATABASE_URL_UNPOOLED: URL_ }],
+    [{ VERCEL_ENV: 'development', DATABASE_URL_UNPOOLED: URL_ }],
     [{}],
-  ])('skips (exit 0, one line, no connection) outside a production build of main: %o', async (env) => {
+  ])('skips (exit 0, one line, no connection) outside a production build: %o', async (env) => {
     const db = fakeDb([1000]);
     expect(await go(env, db)).toBe(0);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^migrate-on-build: skipped \(.+\)$/);
+    expect(db.openedWith).toEqual([]);
+  });
+
+  it.each([
+    [{ VERCEL_ENV: 'production', VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_COMMIT_REF: 'fix/x', DATABASE_URL_UNPOOLED: URL_ }],
+    [{ VERCEL_ENV: 'production', DATABASE_URL_UNPOOLED: URL_ }],
+  ])('fails (exit 1, no connection) a production build that is not main from GitHub: %o', async (env) => {
+    const db = fakeDb([1000]);
+    expect(await go(env, db)).toBe(1);
+    expect(lines.join('\n')).toMatch(/^migrate-on-build: error: .*MIGRATE_ON_BUILD_SKIP=1/m);
+    expect(db.openedWith).toEqual([]);
+  });
+
+  it('MIGRATE_ON_BUILD_SKIP=1 lets such a build through with a loud warning (exit 0, no connection)', async () => {
+    const db = fakeDb([1000]);
+    expect(await go({ VERCEL_ENV: 'production', DATABASE_URL_UNPOOLED: URL_, MIGRATE_ON_BUILD_SKIP: '1' }, db)).toBe(0);
+    expect(lines.join('\n')).toMatch(/^migrate-on-build: WARNING: .*MIGRATE_ON_BUILD_SKIP=1.*NOT/m);
     expect(db.openedWith).toEqual([]);
   });
 
@@ -279,6 +329,9 @@ describe('run', () => {
     expect(at(new RegExp(`pg_advisory_lock\\(${LOCK_KEY}\\)`))).toBeGreaterThanOrEqual(0);
     expect(at(/statement_timeout = '120s'/)).toBeLessThan(at(/pg_advisory_lock/));
     expect(at(/pg_advisory_lock/)).toBeLessThan(at(/lock_timeout = '10s'/));
+    // 120 s only bounds the wait for the lock; the migration itself gets 30 s per statement.
+    expect(at(/pg_advisory_lock/)).toBeLessThan(at(/statement_timeout = '30s'/));
+    expect(at(/statement_timeout = '30s'/)).toBeLessThan(at(/^MIGRATE$/));
     expect(at(/lock_timeout = '10s'/)).toBeLessThan(at(/FROM drizzle\.__drizzle_migrations/));
     expect(at(/FROM drizzle\.__drizzle_migrations/)).toBeLessThan(at(/^MIGRATE$/));
     expect(at(/^MIGRATE$/)).toBeLessThan(at(new RegExp(`pg_advisory_unlock\\(${LOCK_KEY}\\)`)));
@@ -386,10 +439,21 @@ describe('run', () => {
     expect(lines.join('\n')).toMatch(/0001_b/);
   });
 
-  it('warns about a gap entry the migrator will never apply', async () => {
+  it('fails (exit 1) on a gap entry the migrator will never apply, naming each tag, and migrates nothing', async () => {
+    sql('0002_c', ADDITIVE);
+    sql('0003_d', ADDITIVE);
+    journal([['0000_a', 1000], ['0001_b', 2000], ['0002_c', 3000], ['0003_d', 4000]]);
     const db = fakeDb([2000]);
-    expect(await go(prodEnv, db)).toBe(0);
-    expect(lines.join('\n')).toMatch(/warning[^\n]*0000_a/);
+    expect(await go(prodEnv, db)).toBe(1);
+    const text = lines.join('\n');
+    expect(text).toMatch(/error[^\n]*0000_a/);
+    expect(db.migratedFolders).toEqual([]);
+    expect(db.log).toContainEqual(expect.stringMatching(/pg_advisory_unlock/));
+    const db2 = fakeDb([1000, 3000]);
+    lines = [];
+    expect(await go(prodEnv, db2)).toBe(1);
+    expect(lines.join('\n')).toMatch(/error[^\n]*0001_b/);
+    expect(lines.join('\n')).not.toMatch(/0000_a/);
   });
 });
 

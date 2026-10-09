@@ -7,7 +7,8 @@ name: Ops commands
 # Usage: on an open issue labelled `ops`, the owner comments one of
 #   /ops rerun <run id>        re-run the failed jobs of a run
 #   /ops rerun-all <run id>    re-run every job of a run
-#   /ops cancel <run id>       cancel a run
+#   /ops cancel <run id>       cancel a run (refused for smoke.yml and
+#                              release-check.yml runs: they guard production)
 #   /ops smoke [<40-hex sha>]  dispatch smoke.yml on main (optionally for a commit)
 # Only the first line counts and it must match exactly
 # (scripts/ci/ops-command.mjs). The workflow reacts with eyes when it picks the
@@ -32,6 +33,7 @@ jobs:
     name: Run an /ops command
     if: >-
       !github.event.issue.pull_request &&
+      github.event.issue.state == 'open' &&
       contains(github.event.issue.labels.*.name, 'ops') &&
       github.event.comment.user.login == 'Nagavenkatasai7' &&
       github.event.comment.author_association == 'OWNER' &&
@@ -90,6 +92,16 @@ jobs:
             gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="$1" > /dev/null \
               || echo "::warning::could not post the reply"
           }
+          # Reply with the HTTP status of a failed gh call and fail the job.
+          # gh prints "(HTTP 403)" on stderr; only the status code is passed on.
+          fail_http() {
+            local status
+            status="$(grep -oE 'HTTP [0-9]{3}' "$err" | head -n 1 || true)"
+            status="${status:-no HTTP status (gh exit $1)}"
+            reply "\`/ops $CMD\` failed: $status. Log: $repo_url/actions/runs/$GITHUB_RUN_ID"
+            echo "::error::/ops $CMD failed: $status"
+            exit 1
+          }
           # Defence in depth: the parser already allows only these shapes.
           case "$CMD" in
             rerun|rerun-all|cancel) [[ "$RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "::error::bad run id"; exit 1; } ;;
@@ -104,6 +116,22 @@ jobs:
             smoke) path="actions/workflows/smoke.yml/dispatches" ;;
           esac
 
+          # Runs that guard production (smoke, release-check) are never
+          # cancelled: look the run's workflow up first (deny list in
+          # scripts/ci/ops-command.mjs cancelAllowed). Re-runs stay allowed.
+          if [[ "$CMD" == cancel ]]; then
+            set +e
+            run_path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .path 2> "$err")"
+            rc=$?
+            set -e
+            [[ $rc -eq 0 ]] || fail_http "$rc"
+            if ! RUN_PATH="$run_path" node scripts/ci/ops-command.mjs cancel-allowed; then
+              reply "\`/ops cancel\` refused: run $RUN_ID belongs to smoke.yml or release-check.yml, which guard production (or its workflow is unknown). Log: $repo_url/actions/runs/$GITHUB_RUN_ID"
+              echo "::error::/ops cancel refused for run $RUN_ID"
+              exit 1
+            fi
+          fi
+
           set +e
           if [[ "$CMD" == smoke ]]; then
             args=(-f ref=main -F return_run_details=true)
@@ -115,14 +143,7 @@ jobs:
           rc=$?
           set -e
 
-          if [[ $rc -ne 0 ]]; then
-            # gh prints "(HTTP 403)" on stderr; only the status code is passed on.
-            status="$(grep -oE 'HTTP [0-9]{3}' "$err" | head -n 1 || true)"
-            status="${status:-no HTTP status (gh exit $rc)}"
-            reply "\`/ops $CMD\` failed: $status. Log: $repo_url/actions/runs/$GITHUB_RUN_ID"
-            echo "::error::/ops $CMD failed: $status"
-            exit 1
-          fi
+          [[ $rc -eq 0 ]] || fail_http "$rc"
 
           if [[ "$CMD" == smoke ]]; then
             run_id="$(node -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const id = String(r.workflow_run_id ?? ""); process.stdout.write(/^[1-9][0-9]{0,19}$/.test(id) ? id : ""); } catch {}' "$out")"

@@ -11,10 +11,14 @@
  * Applying here means the deploy cannot go live without its migration: a
  * failed apply fails the build and the previous build keeps serving.
  *
- * Runs only when VERCEL_ENV=production and VERCEL_GIT_COMMIT_REF=main (both
- * available at build time: vercel.com/docs/environment-variables/system-environment-variables).
- * Everything else prints "skipped" and exits 0; local `npm run build` never
- * calls this script.
+ * Gate (VERCEL_ENV, VERCEL_GIT_PROVIDER, VERCEL_GIT_COMMIT_REF are available
+ * at build time: vercel.com/docs/environment-variables/system-environment-variables):
+ *   - not a production build (preview, development, no VERCEL_ENV): "skipped", exit 0;
+ *   - a production build of main from GitHub: migrate;
+ *   - any other production build (CLI `vercel deploy --prod`, a promoted CLI
+ *     preview, another branch) could go live without its migration: exit 1,
+ *     unless MIGRATE_ON_BUILD_SKIP=1 (emergency only: loud warning, exit 0).
+ * Local `npm run build` never calls this script.
  *
  * What is applied: the journal entries newer than the newest applied row of
  * drizzle.__drizzle_migrations, which is exactly what drizzle's migrator
@@ -27,16 +31,20 @@
  *     for a manual apply (warning); one followed by any other pending entry
  *     fails the build, because that later entry could not be applied.
  *
- * How: one dedicated connection, statement_timeout 120 s, a session-level
- * pg_advisory_lock (so two builds never migrate at once), lock_timeout 10 s
- * for the DDL, pending re-read UNDER the lock, then drizzle's own migrator on
+ * An unapplied journal entry OLDER than the newest applied row (a gap the
+ * migrator never fills) fails the build too: its code would go live without it.
+ *
+ * How: one dedicated connection, statement_timeout 120 s while waiting for a
+ * session-level pg_advisory_lock (so two builds never migrate at once), then
+ * lock_timeout 10 s and statement_timeout 30 s for the DDL, pending re-read UNDER the lock, then drizzle's own migrator on
  * that same connection: all pending migrations run in one transaction
  * (dialect.js:60 session.transaction; on a PoolClient the neon-serverless
  * session runs it on that client, neon-serverless/session.js:178-193).
  * Never retried. The URL is never printed (host only).
  *
- * Env: VERCEL_ENV, VERCEL_GIT_COMMIT_REF, DATABASE_URL_UNPOOLED (fallback
- * DATABASE_URL, as drizzle.config.ts). Exit 0 done or skipped, 1 failed.
+ * Env: VERCEL_ENV, VERCEL_GIT_PROVIDER, VERCEL_GIT_COMMIT_REF, DATABASE_URL_UNPOOLED (fallback
+ * DATABASE_URL, as drizzle.config.ts), MIGRATE_ON_BUILD_SKIP. Exit 0 done or
+ * skipped, 1 failed.
  */
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -59,18 +67,35 @@ const P = 'migrate-on-build:';
  */
 
 /**
- * Why this build does not migrate, or null when it must.
+ * Whether this build migrates: run, skip (not production), fail (a
+ * production build that is not main from GitHub), or override (that failure,
+ * waived by MIGRATE_ON_BUILD_SKIP=1).
  * @param {Record<string, string | undefined>} env
- * @returns {string | null}
+ * @returns {{action: 'run'} | {action: 'skip' | 'fail' | 'override', reason: string}}
  */
-export function skipReason(env) {
+export function buildGate(env) {
   const target = env.VERCEL_ENV ?? '';
+  if (!target && env.VERCEL === '1') {
+    // On Vercel but blind to VERCEL_ENV: "Automatically expose System Environment
+    // Variables" is off, so a production build cannot be told apart. Fail closed.
+    const why = 'VERCEL_ENV is unset on a Vercel build (turn on "Automatically expose System Environment Variables" in the project settings)';
+    if (env.MIGRATE_ON_BUILD_SKIP === '1') return { action: 'override', reason: why };
+    return { action: 'fail', reason: `${why}. Emergency only: set MIGRATE_ON_BUILD_SKIP=1 to build without migrating.` };
+  }
+  if (!target) return { action: 'skip', reason: 'not a Vercel production build: VERCEL_ENV is unset' };
+  if (target !== 'production') return { action: 'skip', reason: `VERCEL_ENV is ${target}, not production` };
+  const provider = env.VERCEL_GIT_PROVIDER ?? '';
   const ref = env.VERCEL_GIT_COMMIT_REF ?? '';
-  if (!target) return 'not a Vercel production build: VERCEL_ENV is unset';
-  if (target !== 'production') return `VERCEL_ENV is ${target}, not production`;
-  if (!ref) return 'production build without a git branch (VERCEL_GIT_COMMIT_REF is unset)';
-  if (ref !== 'main') return `branch ${ref} is not main`;
-  return null;
+  let why = '';
+  if (provider !== 'github') why = provider ? `VERCEL_GIT_PROVIDER is ${provider}, not github` : 'VERCEL_GIT_PROVIDER is unset (not a GitHub deployment, e.g. vercel deploy --prod)';
+  else if (!ref) why = 'VERCEL_GIT_COMMIT_REF is unset';
+  else if (ref !== 'main') why = `branch ${ref} is not main`;
+  if (!why) return { action: 'run' };
+  if (env.MIGRATE_ON_BUILD_SKIP === '1') return { action: 'override', reason: why };
+  return {
+    action: 'fail',
+    reason: `this production build is not main from GitHub (${why}), so it could go live without applying its migrations. Deploy production by merging to main. Emergency only: set MIGRATE_ON_BUILD_SKIP=1 to build without migrating.`,
+  };
 }
 
 /** @param {Record<string, string | undefined>} env */
@@ -241,9 +266,17 @@ async function neonOpenDb(url) {
  * @returns {Promise<0 | 1>}
  */
 export async function run({ env, cwd = process.cwd(), out = console.log, openDb = neonOpenDb }) {
-  const reason = skipReason(env);
-  if (reason) {
-    out(`${P} skipped (${reason})`);
+  const gate = buildGate(env);
+  if (gate.action === 'skip') {
+    out(`${P} skipped (${gate.reason})`);
+    return 0;
+  }
+  if (gate.action === 'fail') {
+    out(`${P} error: ${gate.reason}`);
+    return 1;
+  }
+  if (gate.action === 'override') {
+    out(`${P} WARNING: MIGRATE_ON_BUILD_SKIP=1 is set, so this production build (${gate.reason}) did NOT apply any migration. If it goes live with a pending migration, every query on the altered table breaks: apply it with /migrate-prod now.`);
     return 0;
   }
   const url = databaseUrl(env);
@@ -274,10 +307,14 @@ export async function run({ env, cwd = process.cwd(), out = console.log, openDb 
     await db.query(`SELECT pg_advisory_lock(${LOCK_KEY})`);
     locked = true;
     await db.query(`SET lock_timeout = '10s'`);
+    await db.query(`SET statement_timeout = '30s'`);
 
     const { pending, skipped } = pendingEntries(entries, await readApplied(db));
-    for (const e of skipped) {
-      out(`${P} warning: ${e.tag} is not applied but is older than the newest applied migration; the migrator will never apply it.`);
+    if (skipped.length > 0) {
+      for (const e of skipped) {
+        out(`${P} error: ${e.tag} is not applied but is older than the newest applied migration, so the migrator will never apply it and this build would go live without it. drizzle-kit migrate (/migrate-prod) skips it for the same reason, so apply its reviewed SQL by hand and record it, then redeploy.`);
+      }
+      return 1;
     }
     const plan = planMigrations(pending, (tag) => readFileSync(join(drizzleDir, `${tag}.sql`), 'utf8'));
     if (plan.errors.length > 0) {

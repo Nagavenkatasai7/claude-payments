@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { formatOutputs, parseOpsCommand, runCli } from '../scripts/ci/ops-command.mjs';
+import { CANCEL_DENY, cancelAllowed, formatOutputs, parseOpsCommand, runCancelCheck, runCli } from '../scripts/ci/ops-command.mjs';
 
 // scripts/ci/ops-command.mjs: the parser behind .github/workflows/ops-commands.yml.
 // The owner comments `/ops <command>` on an issue labelled `ops`; the workflow's
@@ -145,6 +145,60 @@ describe('runCli', () => {
   });
 });
 
+describe('cancelAllowed: runs that guard production cannot be cancelled', () => {
+  // A prompt-injected thread could post `/ops cancel <id>` on the smoke run whose
+  // rollback job protects production; re-runs stay allowed for every workflow.
+  it('lists smoke.yml and release-check.yml', () => {
+    expect([...CANCEL_DENY].sort()).toEqual(['.github/workflows/release-check.yml', '.github/workflows/smoke.yml']);
+  });
+
+  it.each([
+    ['.github/workflows/smoke.yml'],
+    ['.github/workflows/release-check.yml'],
+    ['./.github/workflows/smoke.yml'],
+    ['.github/workflows/smoke.yml@refs/heads/main'],
+    ['.github/workflows/SMOKE.yml'],
+    ['  .github/workflows/release-check.yml\n'],
+  ])('refuses %s', (path) => {
+    expect(cancelAllowed(path)).toBe(false);
+  });
+
+  it.each([[''], ['   '], [undefined], [null], [42]])('refuses an unknown path %s (fail closed)', (path) => {
+    expect(cancelAllowed(path as unknown as string)).toBe(false);
+  });
+
+  it.each([
+    ['.github/workflows/ci.yml'],
+    ['.github/workflows/nightly.yml'],
+    ['.github/workflows/preview-smoke.yml'],
+    ['.github/workflows/smoke.yml.bak'],
+    ['dynamic/dependabot/dependabot-updates'],
+  ])('allows %s', (path) => {
+    expect(cancelAllowed(path)).toBe(true);
+  });
+});
+
+describe('runCancelCheck (CLI: node scripts/ci/ops-command.mjs cancel-allowed)', () => {
+  const check = (env: Record<string, string | undefined>) => {
+    const logs: string[] = [];
+    const code = runCancelCheck({ env, log: (l: string) => logs.push(l) });
+    return { code, logs };
+  };
+
+  it('exits 0 for an allowed run path', () => {
+    expect(check({ RUN_PATH: '.github/workflows/ci.yml' }).code).toBe(0);
+  });
+
+  it('exits 1 for a protected or missing run path, without echoing it', () => {
+    const smoke = check({ RUN_PATH: '.github/workflows/smoke.yml' });
+    expect(smoke.code).toBe(1);
+    expect(check({}).code).toBe(1);
+    const odd = check({ RUN_PATH: '$(id)' });
+    expect(odd.code).toBe(0);
+    expect(odd.logs.join('\n')).not.toContain('$(id)');
+  });
+});
+
 describe('.github/workflows/ops-commands.yml', () => {
   // Text assertions, as in tests/ci-workflow-hardening.test.ts (no YAML parser dependency).
   const wf = readFileSync(join(__dirname, '..', '.github/workflows/ops-commands.yml'), 'utf8');
@@ -156,6 +210,7 @@ describe('.github/workflows/ops-commands.yml', () => {
 
   it('gates the job on an owner comment starting with /ops on an ops-labelled issue (not a PR)', () => {
     expect(wf).toContain('!github.event.issue.pull_request');
+    expect(wf).toContain("github.event.issue.state == 'open'");
     expect(wf).toContain("contains(github.event.issue.labels.*.name, 'ops')");
     expect(wf).toContain("github.event.comment.user.login == 'Nagavenkatasai7'");
     expect(wf).toContain("github.event.comment.author_association == 'OWNER'");
@@ -188,5 +243,16 @@ describe('.github/workflows/ops-commands.yml', () => {
     expect(wf).toContain('actions/workflows/smoke.yml/dispatches');
     expect(wf).toContain('issues/comments/$COMMENT_ID/reactions');
     expect(wf).toContain('GH_TOKEN: ${{ github.token }}');
+  });
+
+  it('looks the run up and checks its workflow path before a cancel', () => {
+    const lookup = wf.indexOf('"repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .path');
+    const check = wf.indexOf('RUN_PATH="$run_path" node scripts/ci/ops-command.mjs cancel-allowed');
+    const cancel = wf.indexOf('path="actions/runs/$RUN_ID/cancel"');
+    const call = wf.indexOf('gh api -X POST "repos/$GITHUB_REPOSITORY/$path" >');
+    expect(lookup).toBeGreaterThan(0);
+    expect(check).toBeGreaterThan(lookup);
+    expect(cancel).toBeGreaterThan(0);
+    expect(call).toBeGreaterThan(check);
   });
 });
