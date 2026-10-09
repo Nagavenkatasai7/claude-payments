@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAgent, sanitizeReply, replyAllowHosts, FALLBACK_REPLY } from '@/lib/agent';
+import { createAgent, sanitizeReply, replyAllowHosts, FALLBACK_REPLY, TELEGRAM_CHANNEL_NOTE } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -836,6 +836,61 @@ describe('createAgent — TurnContext', () => {
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
     expect(seen[0].some((m) => m.content === VOICE_INPUT_NOTE)).toBe(false);
+  });
+
+  // Telegram test channel: the customer wording says Telegram, not WhatsApp, on
+  // every round of a Telegram turn; a WhatsApp turn never sees the note.
+  it('a Telegram turn carries TELEGRAM_CHANNEL_NOTE on round 0 AND on the round after a tool call', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async (messages) => {
+        seen.push(messages);
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'validate_phone', arguments: JSON.stringify({ phone: '15550000002' }) } }],
+          };
+        }
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn('15551234567', 'send money to my brother', { isNewConversation: false, surface: 'telegram' });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const msgs of seen.slice(0, 2)) {
+      expect(msgs.filter((m) => m.role === 'system').map((m) => m.content)).toContain(TELEGRAM_CHANNEL_NOTE);
+    }
+    expect(JSON.stringify(await store.getConversation('default', '15551234567'))).not.toContain('[TELEGRAM]');
+  });
+
+  it('a WhatsApp turn has no TELEGRAM_CHANNEL_NOTE', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
+    expect(seen[0].some((m) => m.content === TELEGRAM_CHANNEL_NOTE)).toBe(false);
+  });
+
+  it('TELEGRAM_CHANNEL_NOTE tells the model to say Telegram and keeps the recipient WhatsApp number', () => {
+    expect(TELEGRAM_CHANNEL_NOTE).toContain('never "WhatsApp"');
+    expect(TELEGRAM_CHANNEL_NOTE).toContain("recipient's WhatsApp number");
   });
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {

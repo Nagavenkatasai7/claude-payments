@@ -12,6 +12,10 @@ import {
   connectTelegramWebhook,
   telegramErrorText,
   TelegramApiError,
+  NOT_AVAILABLE_REPLY,
+  PHONE_LINKED_REPLY,
+  SHARE_OWN_PHONE_PROMPT,
+  SHARE_PHONE_PROMPT,
 } from '@/lib/telegram';
 
 // Telegram test channel (2026-10-08): the pure update reader, the Bot API
@@ -71,6 +75,12 @@ describe('parseTelegramUpdate', () => {
 });
 
 describe('payloads', () => {
+  it('the bot texts a Telegram customer sees do not mention WhatsApp', () => {
+    for (const text of [SHARE_PHONE_PROMPT, SHARE_OWN_PHONE_PROMPT, PHONE_LINKED_REPLY, NOT_AVAILABLE_REPLY]) {
+      expect(text).not.toMatch(/whatsapp/i);
+    }
+  });
+
   it('/start (with a deep-link payload) reads as a greeting; other text is unchanged', () => {
     expect(telegramTextForAgent('/start')).toBe('Hi');
     expect(telegramTextForAgent('/start REF-TANA01')).toBe('Hi');

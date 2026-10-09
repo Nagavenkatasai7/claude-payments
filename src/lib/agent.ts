@@ -72,6 +72,17 @@ export interface AgentDeps {
 export const WEB_CHANNEL_NOTE =
   "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, look up the customer's recent transfers — optionally filtered to a recipient they name like 'Mom' — with list_recent_transfers, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer (if it asks for the customer's full legal name, save their answer with set_sender_name, then call repeat_transfer again) — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When the customer asks about their past transfers or history — including 'my recent transactions' or 'what did I send to Mom' — call list_recent_transfers (pass the recipient name to filter) and summarise what it returns: recipient, amount, date, and status for each. NEVER tell the customer you have no way to pull up their history — you do; their full history and receipts link is appended below your reply automatically. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
 
+// Telegram test channel: injected on EVERY round of a turn whose customer wrote
+// on Telegram (TurnContext.surface). The system prompt is written for WhatsApp;
+// this note keeps the customer-facing wording on Telegram. Recipients still get
+// their notices on WhatsApp, so the recipient's WhatsApp number stays required.
+export const TELEGRAM_CHANNEL_NOTE =
+  '[TELEGRAM] This conversation happens in Telegram, not WhatsApp. Every message from us to this customer (replies, payment links, ' +
+  'reminders, confirmations, transfer updates, onboarding and pay links) arrives here in this Telegram chat. When you refer to this ' +
+  'chat or to where the customer gets our messages, say "this chat" or "Telegram", never "WhatsApp". Call the customer\'s own ' +
+  'number "your phone number", never "your WhatsApp number". Do not call this a WhatsApp conversation. The RECIPIENT still gets ' +
+  'their notices on WhatsApp, so still ask for the recipient\'s WhatsApp number with country code, exactly as usual.';
+
 /**
  * R6b (A7L-2): the hosts a model reply may still name as bare text: the app's
  * own host, plus the tenant brand when the brand itself is a host ("Acme.co"),
@@ -298,6 +309,10 @@ export function createAgent(deps: AgentDeps) {
       // knows the channel's limits after tool results arrive. Never persisted.
       if (channel === 'web') {
         messages.push({ role: 'system', content: WEB_CHANNEL_NOTE });
+      }
+      // Telegram test channel: also every round, for the same reason. Never persisted.
+      if (turn.surface === 'telegram') {
+        messages.push({ role: 'system', content: TELEGRAM_CHANNEL_NOTE });
       }
       // Step 1: a transcribed voice note. The read-back rule rides EVERY round
       // (after a tool result the model must still read back before acting).

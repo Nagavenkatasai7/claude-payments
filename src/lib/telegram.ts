@@ -136,7 +136,7 @@ export const SHARE_PHONE_PROMPT =
   'This Telegram bot is a test version.';
 export const SHARE_OWN_PHONE_PROMPT = 'Please share your own phone number with the button below.';
 export const PHONE_LINKED_REPLY = 'Thank you. Your number is linked. Now type your message, for example: Send $100 to Mom.';
-export const NOT_AVAILABLE_REPLY = 'The SmartRemit Telegram bot is not available for this phone number yet. Please use WhatsApp.';
+export const NOT_AVAILABLE_REPLY = 'The SmartRemit Telegram bot is a test version. It is not available for this phone number yet.';
 
 /** The webhook-answer form of sendMessage with the one-time "Share my phone number" keyboard. Pure. */
 export function askPhonePayload(chatId: string, text: string = SHARE_PHONE_PROMPT): Obj {
