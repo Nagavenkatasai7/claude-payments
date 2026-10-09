@@ -128,7 +128,13 @@ describe('a linked chat runs the WhatsApp pipeline', () => {
       {
         kind: 'agent.turn',
         dedupe_key: `wamid:tg:${CHAT}:m5`,
-        payload: expect.objectContaining({ phone: PHONE, messageText: 'send 100 to mom', routedPartnerId: null, channel: 'tg' }),
+        payload: expect.objectContaining({
+          phone: PHONE,
+          messageText: 'send 100 to mom',
+          routedPartnerId: null,
+          channel: 'tg',
+          turn: expect.objectContaining({ surface: 'telegram' }),
+        }),
       },
     ]);
     expect(redis.dump.get(`tg:route:${PHONE}`)).toBe(String(CHAT));
