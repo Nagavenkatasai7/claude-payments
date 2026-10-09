@@ -8,7 +8,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { applyFlagChange, FlagChangeError } from '@/lib/flag-switch';
 import { pokeWorker } from '@/lib/outbox';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
-import { telegramConfigured, tgSetWebhook } from '@/lib/telegram';
+import { connectTelegramWebhook } from '@/lib/telegram';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { logWarn } from '@/lib/log';
 
@@ -63,22 +63,14 @@ export async function changeFlagAction(formData: FormData): Promise<void> {
 export async function connectTelegramWebhookAction(): Promise<void> {
   await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
-  let result: 'ok' | 'error' | 'unset' = 'ok';
-  if (!telegramConfigured()) {
-    result = 'unset';
-  } else {
-    try {
-      await tgSetWebhook();
-    } catch (e) {
-      result = 'error';
-      logWarn('telegram.webhook', e);
-    }
-  }
+  const outcome = await connectTelegramWebhook();
+  if (outcome.result === 'error') logWarn('telegram.webhook', outcome.cause);
+  const code = outcome.result === 'error' ? outcome.code : undefined;
   await createAuditRepo(getDb()).record({
     actor: staff.username,
     actorType: 'staff',
     action: 'telegram.webhook_set',
-    meta: { result },
+    meta: { result: outcome.result, ...(code !== undefined ? { code } : {}) },
   });
-  redirect(`${PAGE}?telegram=${result}`);
+  redirect(`${PAGE}?telegram=${outcome.result}${code !== undefined ? `&code=${code}` : ''}`);
 }
