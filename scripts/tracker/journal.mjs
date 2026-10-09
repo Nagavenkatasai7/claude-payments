@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Program Ledger journal: session-only capture of chat work (agent runs, merge/close commands,
 // owner decisions and approvals). One JSON object per line in ~/.smartremit-ledger/journal.ndjson.
-// sync.mjs turns new lines into events/j-<sha1> docs; `mark-flushed` records how far it got.
+// sync.mjs --journal turns new lines into feed-YYYY-MM/j-<sha1> rows (agent rows dropped; owner's
+// Mac only, ledger v2); `mark-flushed` records how far it got.
 //
 //   node scripts/tracker/journal.mjs add --kind decision --title "…" --detail "…" [--actor owner]
 //        [--model "Opus 5"] [--result ok] [--refs '{"fix":[13],"pr":[261],"plan":"p1-w2"}'] [--at <iso>]

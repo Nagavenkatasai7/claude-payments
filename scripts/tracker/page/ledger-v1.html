@@ -1,0 +1,926 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>SmartRemit Program Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+:root{
+  --ground:#F2F4F6; --surface:#FFFFFF; --sunken:#E8ECF0; --rule:#D5DBE2; --rule-strong:#AEB8C3;
+  --ink:#172230; --ink-2:#4A5767; --ink-3:#6F7C8B;
+  --accent:#2C4FC4; --accent-ink:#FFFFFF; --accent-soft:#E3E9FB;
+  --good:#1D7F55; --good-soft:#DDF1E7; --warn:#A8690F; --warn-soft:#F8EBD3; --crit:#B8322A; --crit-soft:#F8DEDB; --info:#5A6B80; --info-soft:#E4E8EE;
+  --shadow:0 1px 2px rgba(23,34,48,.06),0 4px 16px rgba(23,34,48,.05);
+  --display:"IBM Plex Sans Condensed","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E131A; --surface:#151C26; --sunken:#1B2431; --rule:#2A3544; --rule-strong:#3D4B5E;
+    --ink:#E4E9EF; --ink-2:#AAB5C2; --ink-3:#7F8C9B;
+    --accent:#7F9CFF; --accent-ink:#0E131A; --accent-soft:#1E2A4A;
+    --good:#4CC28C; --good-soft:#15332A; --warn:#E3A546; --warn-soft:#3A2B12; --crit:#F0766B; --crit-soft:#3C1C1A; --info:#9AA8B8; --info-soft:#222C38;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E131A; --surface:#151C26; --sunken:#1B2431; --rule:#2A3544; --rule-strong:#3D4B5E;
+  --ink:#E4E9EF; --ink-2:#AAB5C2; --ink-3:#7F8C9B;
+  --accent:#7F9CFF; --accent-ink:#0E131A; --accent-soft:#1E2A4A;
+  --good:#4CC28C; --good-soft:#15332A; --warn:#E3A546; --warn-soft:#3A2B12; --crit:#F0766B; --crit-soft:#3C1C1A; --info:#9AA8B8; --info-soft:#222C38;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.25);
+}
+*{box-sizing:border-box}
+html,body{background:var(--ground)}
+body{color:var(--ink);font-family:var(--body);font-size:14px;line-height:1.5;padding-inline:clamp(16px,3vw,36px);padding-block:0 48px}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--ink-3)}
+a{color:var(--accent)}
+
+/* status strip */
+.strip{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--ground);border-bottom:1px solid var(--rule);display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding-block:10px;margin-inline:calc(-1*clamp(16px,3vw,36px));padding-inline:clamp(16px,3vw,36px);font-size:12.5px}
+.brand{font-family:var(--display);font-weight:700;font-size:15px;letter-spacing:.01em;margin-right:auto;display:flex;gap:8px;align-items:baseline}
+.brand small{font-family:var(--mono);font-weight:400;font-size:11px;color:var(--ink-3)}
+.sig{display:inline-flex;gap:6px;align-items:center;color:var(--ink-2)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--info);flex:none}
+.dot.good{background:var(--good)} .dot.warn{background:var(--warn)} .dot.crit{background:var(--crit)}
+
+/* header */
+.head{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:28px;padding-block:28px 22px;align-items:end}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+h1{font-family:var(--display);font-weight:700;font-size:clamp(28px,4vw,40px);line-height:1.05;margin:6px 0 10px;text-wrap:balance;letter-spacing:-.01em}
+.lede{color:var(--ink-2);max-width:62ch;margin:0}
+.totals{display:grid;gap:14px}
+.meter-label{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:6px}
+.meter-label b{font-family:var(--display);font-weight:600;font-size:15px}
+.big{font-family:var(--mono);font-size:22px;font-weight:600}
+.big span{font-size:13px;color:var(--ink-3);font-weight:400}
+.bar{display:flex;height:12px;border-radius:3px;overflow:hidden;background:var(--sunken);box-shadow:inset 0 0 0 1px var(--rule)}
+.bar i{display:block;height:100%}
+.bar .seg-done{background:var(--good)} .bar .seg-work{background:var(--accent)} .bar .seg-plan{background:repeating-linear-gradient(135deg,var(--accent-soft) 0 5px,transparent 5px 9px);box-shadow:inset 0 0 0 1px var(--accent)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--ink-2);margin-top:6px}
+.legend span{display:inline-flex;gap:6px;align-items:center}
+.sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+
+/* layout */
+.layout{display:block}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--rule);margin-bottom:18px;overflow-x:auto}
+.tab{background:none;border:0;padding:9px 12px;cursor:pointer;color:var(--ink-2);font-weight:500;border-bottom:2px solid transparent;white-space:nowrap}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab .n{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-left:4px}
+h2{font-family:var(--display);font-weight:600;font-size:18px;margin:0 0 10px;text-wrap:balance}
+h3{font-family:var(--display);font-weight:600;font-size:15px;margin:0 0 8px}
+section+section{margin-top:28px}
+
+/* phases */
+.phases{display:grid;border-top:1px solid var(--rule)}
+.phase{display:grid;grid-template-columns:44px minmax(0,1fr) 150px;gap:14px;align-items:center;padding-block:12px;border-bottom:1px solid var(--rule)}
+.phase .pn{font-family:var(--mono);font-size:12px;color:var(--ink-3)}
+.phase .pt{font-weight:600}
+.phase .pnote{font-size:12.5px;color:var(--ink-2);margin-top:2px}
+.phase .pbar{display:grid;gap:4px;text-align:right}
+.phase .pbar .bar{height:8px}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:500;padding:1px 8px;border-radius:999px;white-space:nowrap;background:var(--info-soft);color:var(--info)}
+.pill.done,.pill.good,.pill.merged{background:var(--good-soft);color:var(--good)}
+.pill.planning,.pill.planned,.pill.in_progress,.pill.in_review,.pill.open-pr{background:var(--accent-soft);color:var(--accent)}
+.pill.critical,.pill.incident,.pill.failure{background:var(--crit-soft);color:var(--crit)}
+.pill.high,.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.sev{font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.sev.critical{color:var(--crit)} .sev.high{color:var(--warn)} .sev.medium{color:var(--ink-2)} .sev.low{color:var(--ink-3)}
+
+/* severity matrix */
+.sevgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.sevcell{background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:10px 12px}
+.sevcell .bar{height:6px;margin-top:6px}
+
+/* attention list */
+.attn{display:grid;gap:0;border-top:1px solid var(--rule)}
+.attn-row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;padding-block:9px;border-bottom:1px solid var(--rule);align-items:start}
+
+/* tables */
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.filters input,.filters select{background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:6px 9px;min-width:0}
+.filters input{flex:1 1 200px}
+.tablewrap{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);text-align:left;font-weight:500;padding:8px 10px;border-bottom:1px solid var(--rule);background:var(--sunken);position:sticky;top:0}
+td{padding:9px 10px;border-bottom:1px solid var(--rule);vertical-align:top}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--sunken)}
+tr.detail td{background:var(--sunken);padding:12px 14px}
+.kv{display:grid;grid-template-columns:110px minmax(0,1fr);gap:4px 12px;font-size:12.5px}
+.kv dt{color:var(--ink-3)} .kv dd{margin:0;overflow-wrap:anywhere}
+.idchip{font-family:var(--mono);font-size:11px;background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:0 5px;margin:0 3px 3px 0;display:inline-block}
+
+/* timeline */
+.tl{display:grid;border-left:2px solid var(--rule);margin-left:6px}
+.tl-item{position:relative;padding:0 0 16px 18px}
+.tl-item::before{content:"";position:absolute;left:-7px;top:5px;width:12px;height:12px;border-radius:50%;background:var(--surface);border:2px solid var(--rule-strong)}
+.tl-item.merge::before,.tl-item.verify::before{border-color:var(--good)}
+.tl-item.incident::before,.tl-item.security::before{border-color:var(--crit)}
+.tl-item.plan::before,.tl-item.review::before{border-color:var(--accent)}
+.tl-when{font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
+
+/* activity journal */
+.tl-item.decision::before,.tl-item.approval::before{border-color:var(--warn);background:var(--warn-soft)}
+.tl-item.agent::before{border-color:var(--info);border-style:dashed}
+.tl-item.owner-step::before,.tl-item.migration::before,.tl-item.deploy::before{border-color:var(--warn)}
+.tl-meta{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-top:4px}
+.chip{font-family:var(--mono);font-size:10.5px;border:1px solid var(--rule);border-radius:3px;padding:0 5px;color:var(--ink-2);background:var(--surface);white-space:nowrap}
+button.chip{cursor:pointer}
+.chip.actor-owner{border-color:var(--warn);color:var(--warn)}
+.chip.actor-agent,.chip.actor-claude{border-color:var(--info);color:var(--info)}
+.chip.res-blocked,.chip.res-failed{border-color:var(--crit);color:var(--crit)}
+.chip.res-ok{border-color:var(--good);color:var(--good)}
+.chip.res-running{border-color:var(--accent);color:var(--accent)}
+.seg{display:inline-flex;flex-wrap:wrap;gap:4px;margin-bottom:12px}
+.seg button{background:var(--surface);border:1px solid var(--rule);border-radius:999px;padding:3px 11px;font-size:12px;cursor:pointer;color:var(--ink-2)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--ground);border-color:var(--ink)}
+
+/* plans */
+.pmap-wrap{overflow-x:auto;margin-bottom:22px}
+.pmap{display:grid;grid-template-columns:repeat(var(--pcols,5),minmax(168px,1fr));gap:0;border:1px solid var(--rule);border-radius:8px;background:var(--surface);min-width:max-content}
+.pcol{padding:12px 12px 14px;border-right:1px solid var(--rule);display:flex;flex-direction:column;gap:8px;position:relative}
+.pcol:last-child{border-right:0}
+.pcol.current{background:linear-gradient(var(--accent-soft),transparent 70%)}
+.pcol .ph{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.pcol .pname{font-family:var(--display);font-weight:600;font-size:14.5px;line-height:1.2;min-height:2.4em}
+.pcol .bar{height:6px}
+.pcol .pcount{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.pbtn{display:flex;justify-content:space-between;gap:8px;align-items:center;text-align:left;background:var(--ground);border:1px solid var(--rule);border-radius:6px;padding:6px 8px;cursor:pointer;font-size:12.5px;color:var(--ink)}
+.pbtn:hover{border-color:var(--rule-strong)}
+.pbtn[aria-current="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--surface)}
+.sdot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--rule-strong)}
+.sdot.done{background:var(--good)} .sdot.awaiting_approval{background:var(--warn)} .sdot.approved,.sdot.building{background:var(--accent)} .sdot.outline,.sdot.not_started{background:transparent;box-shadow:inset 0 0 0 2px var(--rule-strong)}
+.pill.awaiting_approval{background:var(--warn-soft);color:var(--warn)} .pill.approved,.pill.building{background:var(--accent-soft);color:var(--accent)} .pill.outline,.pill.not_started{background:var(--info-soft);color:var(--info)}
+.plan-head{display:grid;gap:8px;max-width:78ch;margin-bottom:18px}
+.plan-head .meta{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:12.5px;color:var(--ink-2)}
+.plan-head h2{font-size:clamp(22px,3vw,28px);margin:0;line-height:1.1}
+.headline{font-size:17px;line-height:1.45;margin:0;color:var(--ink);max-width:62ch}
+.plain{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:14px 16px;max-width:72ch}
+.plain .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:4px}
+.plain p{margin:0;font-size:15px;line-height:1.6}
+.why{color:var(--ink-2);max-width:72ch;margin:0}
+.flowbox{overflow-x:auto;padding-block:4px}
+.flowcap{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px;color:var(--ink-3)}
+.flowcap.bad{color:var(--crit)} .flowcap.new{color:var(--good)}
+.flow{display:flex;align-items:stretch;gap:0;min-width:max-content}
+.step{width:148px;border:1.5px solid var(--rule-strong);border-radius:7px;padding:8px 10px;background:var(--surface);display:flex;flex-direction:column;gap:3px}
+.step .sl{font-weight:600;font-size:13px;line-height:1.25;display:flex;gap:6px;align-items:flex-start}
+.step .sn{font-size:11.5px;color:var(--ink-2);line-height:1.35}
+.step .tag{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+.step.bad{border-color:var(--crit);background:var(--crit-soft)} .step.bad .tag{color:var(--crit)}
+.step.new{border-color:var(--good);background:var(--good-soft)} .step.new .tag{color:var(--good)}
+.step.neutral{border-color:var(--rule);background:var(--sunken)}
+.step.done{border-color:var(--good)} .step.done .tag{color:var(--good)}
+.step.next{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)} .step.next .tag{color:var(--accent)}
+.step.todo{border-style:dashed;border-color:var(--rule-strong)} .step.todo .tag{color:var(--ink-3)}
+.step.gate{border-color:var(--warn);background:var(--warn-soft)} .step.gate .tag{color:var(--warn)}
+.arrow{flex:none;width:26px;display:grid;place-items:center;color:var(--ink-3)}
+.arrow svg{width:16px;height:16px}
+.items{display:grid;gap:18px;margin-top:8px}
+.item{border:1px solid var(--rule);border-radius:10px;background:var(--surface);padding:16px 18px;display:grid;gap:14px;scroll-margin-top:60px}
+.item.target{box-shadow:0 0 0 2px var(--accent)}
+.item-head{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline}
+.item-head h3{margin:0;font-size:17px}
+.item .story{margin:0;font-size:14.5px;line-height:1.6;max-width:70ch}
+.ba{display:grid;gap:12px;background:var(--ground);border-radius:8px;padding:12px}
+.lists{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.lists h4{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:0 0 4px;font-weight:500}
+.lists ul{margin:0;padding-left:17px;font-size:13px;display:grid;gap:3px}
+.lists .you h4{color:var(--warn)}
+details.tech{border-top:1px solid var(--rule);padding-top:10px}
+details.tech summary{cursor:pointer;font-size:12.5px;color:var(--ink-2);font-weight:500}
+details.tech .kv{margin-top:10px}
+.gloss{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.gloss div{background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:8px 10px;font-size:13px}
+.gloss b{font-family:var(--display);display:block}
+.jump{display:flex;flex-wrap:wrap;gap:6px}
+.jump button{background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;color:var(--ink-2)}
+.planlink{background:none;border:1px solid var(--accent);color:var(--accent);border-radius:5px;padding:1px 8px;font-size:12px;cursor:pointer}
+
+/* library */
+.doclist{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-bottom:14px}
+.docbtn{text-align:left;background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:8px 10px;cursor:pointer}
+.docbtn[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.hit{border-bottom:1px solid var(--rule);padding-block:10px}
+.hit .h{font-size:12px;color:var(--ink-3)}
+.passage{white-space:pre-wrap;font-size:13px;overflow-wrap:anywhere;max-height:320px;overflow:auto;background:var(--surface);border:1px solid var(--rule);border-radius:5px;padding:10px 12px;margin-top:6px}
+
+/* ask tab */
+.askwrap{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;align-items:start}
+.chats{background:var(--surface);border:1px solid var(--rule);border-radius:8px;display:flex;flex-direction:column;max-height:calc(100vh - 170px)}
+.chats-head{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--rule)}
+.chat-list{overflow-y:auto;padding:6px}
+.chat-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;border-radius:6px;padding:7px 8px;cursor:pointer}
+.chat-item:hover{background:var(--sunken)}
+.chat-item[aria-current="true"]{background:var(--accent-soft)}
+.chat-item .ct{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-item .cw{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.chat-item .del{background:none;border:0;color:var(--ink-3);cursor:pointer;padding:2px 4px;border-radius:4px}
+.chat-item .del:hover{color:var(--crit);background:var(--crit-soft)}
+.ask{background:var(--surface);border:1px solid var(--rule);border-radius:8px;box-shadow:var(--shadow);display:flex;flex-direction:column;height:calc(100vh - 170px);min-height:420px}
+.ask-head{padding:12px 14px;border-bottom:1px solid var(--rule)}
+.ask-head p{margin:2px 0 0;font-size:12.5px;color:var(--ink-2)}
+.thread{padding:14px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;flex:1;min-height:180px}
+.msg.bot{max-width:75ch}
+.msg{font-size:13.5px;overflow-wrap:anywhere}
+.msg.user{align-self:flex-end;background:var(--accent-soft);color:var(--ink);padding:7px 10px;border-radius:8px 8px 2px 8px;max-width:90%}
+.msg.bot p{margin:0 0 8px} .msg.bot ul{margin:0 0 8px;padding-left:18px} .msg.bot h4{font-family:var(--display);margin:8px 0 4px;font-size:14px}
+.msg.bot code{font-family:var(--mono);font-size:12px;background:var(--sunken);padding:0 4px;border-radius:3px}
+.cite{font-family:var(--mono);font-size:11px;background:var(--accent-soft);color:var(--accent);border:0;border-radius:3px;padding:0 5px;cursor:pointer;margin:0 1px}
+.trace{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.suggest{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}
+.suggest button{background:var(--sunken);border:1px solid var(--rule);border-radius:999px;padding:3px 10px;font-size:12px;cursor:pointer;color:var(--ink-2)}
+.composer{border-top:1px solid var(--rule);padding:10px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px}
+.composer textarea{resize:none;border:1px solid var(--rule);border-radius:6px;padding:8px 10px;background:var(--ground);min-height:42px;max-height:120px}
+.btn{background:var(--accent);color:var(--accent-ink);border:0;border-radius:6px;padding:0 14px;font-weight:600;cursor:pointer}
+.btn.ghost{background:var(--sunken);color:var(--ink)}
+.btn:disabled{opacity:.5;cursor:default}
+.notice{background:var(--warn-soft);color:var(--ink);border:1px solid var(--rule);border-radius:6px;padding:10px 12px;font-size:13px}
+
+/* drawer */
+.drawer{position:fixed;inset:auto 0 0 auto;top:0;width:min(560px,100%);background:var(--surface);border-left:1px solid var(--rule);box-shadow:var(--shadow);z-index:40;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.drawer header{display:flex;gap:8px;align-items:start;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--rule)}
+.drawer .body{padding:14px 16px;overflow:auto;white-space:pre-wrap;font-size:13px;overflow-wrap:anywhere}
+.loading{padding:40px 0;color:var(--ink-3)}
+
+@media (max-width: 980px){
+  .layout{grid-template-columns:minmax(0,1fr)}
+  .askwrap{grid-template-columns:minmax(0,1fr)}
+  .chats{max-height:220px}
+  .ask{height:auto;min-height:480px}
+  .head{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width: 560px){
+  .phase{grid-template-columns:34px minmax(0,1fr)}
+  .phase .pbar{grid-column:2;text-align:left}
+  .sevgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .attn-row{grid-template-columns:minmax(0,1fr)}
+  .lists{grid-template-columns:minmax(0,1fr)}
+  .flow{flex-direction:column;min-width:0}
+  .step{width:100%}
+  .arrow{width:100%;height:20px}
+  .arrow svg{transform:rotate(90deg)}
+  .item{padding:14px}
+}
+@media (prefers-reduced-motion: no-preference){ .bar i{transition:width .5s ease} }
+</style>
+
+<div class="strip" role="status" aria-live="polite">
+  <div class="brand">SmartRemit Program Ledger <small id="s-program">upgrade program 2026-09</small></div>
+  <span class="sig"><i class="dot" id="d-main"></i>main <b class="mono" id="s-main">—</b></span>
+  <span class="sig"><i class="dot" id="d-ci"></i>CI <b id="s-ci">—</b></span>
+  <span class="sig"><i class="dot" id="d-smoke"></i>Smoke <b id="s-smoke">—</b></span>
+  <span class="sig"><i class="dot" id="d-prod"></i>Prod <b class="mono" id="s-prod">—</b></span>
+  <span class="sig muted">Synced <b class="mono" id="s-synced">—</b> <span id="s-by"></span></span>
+</div>
+
+<header class="head">
+  <div>
+    <div class="eyebrow" id="h-eyebrow">Ground-truth audit 2026-09-14 · 5 phases · 49 fixes</div>
+    <h1 id="h-title">What is fixed, what is left, and the proof behind each</h1>
+    <p class="lede" id="h-lede">A fix counts as done only when its PR is merged, the post-deploy smoke is green and the finding is verified on production. Ask the assistant anything about the audit, the security scan, the plans or the architecture; every answer cites the passage it came from.</p>
+  </div>
+  <div class="totals">
+    <div id="m-demo" hidden>
+      <div class="meter-label"><b>Demo readiness</b><span class="big" id="t-demo">—</span></div>
+      <div class="bar" id="b-demo" aria-hidden="true"></div>
+      <div class="legend"><span><i class="sw" style="background:var(--good)"></i>Done</span><span><i class="sw" style="background:var(--accent)"></i>In progress</span><span><i class="sw" style="background:var(--sunken);box-shadow:inset 0 0 0 1px var(--rule)"></i>Not started</span></div>
+    </div>
+    <div>
+      <div class="meter-label"><b id="l-fixes">Fixes verified</b><span class="big" id="t-fixes">—</span></div>
+      <div class="bar" id="b-fixes" aria-hidden="true"></div>
+      <div class="legend"><span><i class="sw" style="background:var(--good)"></i>Verified</span><span><i class="sw" style="background:var(--accent)"></i>In progress</span><span><i class="sw" style="box-shadow:inset 0 0 0 1px var(--accent);background:var(--accent-soft)"></i>Planned</span><span><i class="sw" style="background:var(--sunken);box-shadow:inset 0 0 0 1px var(--rule)"></i>Not started</span></div>
+    </div>
+    <div id="m-findings">
+      <div class="meter-label"><b>Findings closed</b><span class="big" id="t-findings">—</span></div>
+      <div class="bar" id="b-findings" aria-hidden="true"></div>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <main>
+    <div class="tabs" role="tablist" aria-label="Views">
+      <button class="tab" role="tab" id="tab-overview" aria-selected="true" data-view="overview">Overview</button>
+      <button class="tab" role="tab" id="tab-plans" aria-selected="false" data-view="plans">Plans<span class="n" id="n-plans"></span></button>
+      <button class="tab" role="tab" id="tab-fixes" aria-selected="false" data-view="fixes"><span id="tl-fixes">Fixes</span><span class="n" id="n-fixes"></span></button>
+      <button class="tab" role="tab" id="tab-findings" aria-selected="false" data-view="findings"><span id="tl-findings">Findings</span><span class="n" id="n-findings"></span></button>
+      <button class="tab" role="tab" id="tab-timeline" aria-selected="false" data-view="timeline">Activity<span class="n" id="n-events"></span></button>
+      <button class="tab" role="tab" id="tab-library" aria-selected="false" data-view="library">Library<span class="n" id="n-chunks"></span></button>
+      <button class="tab" role="tab" id="tab-ask" aria-selected="false" data-view="ask">Ask the ledger<span class="n" id="n-chats"></span></button>
+    </div>
+    <div id="view"><div class="loading">Loading the ledger…</div></div>
+    <div id="askView" hidden>
+      <div class="askwrap">
+        <nav class="chats" aria-label="Chat history">
+          <div class="chats-head"><b style="font-family:var(--display)">History</b><button class="btn" type="button" id="new-chat" style="padding:5px 10px">New chat</button></div>
+          <div class="chat-list" id="chat-list"><p class="muted" style="padding:8px;margin:0;font-size:12.5px">No saved chats yet.</p></div>
+        </nav>
+      <section class="ask" aria-label="Ask the program assistant">
+        <div class="ask-head">
+          <h2 style="margin:0" id="chat-title">New chat</h2>
+          <p>Answers come only from the audit, scan, plans, activity journal, blueprint, merged-PR notes and the live tracker, with citations. Uses your Claude usage. <span id="chat-note"></span></p>
+        </div>
+        <div class="thread" id="thread"></div>
+        <div class="suggest" id="suggest">
+          <button type="button">Where does the partner demo program stand?</button>
+          <button type="button">What is left before the Oct 6 demo?</button>
+          <button type="button">How does a WhatsApp message become a transfer?</button>
+          <button type="button">What did the upgrade program finish?</button>
+          <button type="button">What did the agents do today?</button>
+        </div>
+        <form class="composer" id="composer">
+          <label for="q" class="muted" style="position:absolute;left:-9999px">Question</label>
+          <textarea id="q" rows="2" placeholder="Ask about any fix, finding, plan or component"></textarea>
+          <div style="display:grid;gap:6px">
+            <button class="btn" id="send" type="submit">Ask</button>
+            <button class="btn ghost" id="stop" type="button" hidden>Stop</button>
+          </div>
+        </form>
+      </section>
+      </div>
+    </div>
+  </main>
+
+
+</div>
+
+<div class="drawer" id="drawer" hidden role="dialog" aria-modal="false" aria-labelledby="dr-title">
+  <header><div><div class="eyebrow" id="dr-eyebrow"></div><h3 id="dr-title" style="margin:2px 0 0"></h3></div><button class="btn ghost" id="dr-close" type="button" style="padding:6px 10px">Close</button></header>
+  <div class="body" id="dr-body"></div>
+</div>
+
+<script>
+(() => {
+const S = { meta:null, docs:null, fixes:[], phases:[], stages:[], program:null, prs:[], events:[], backlog:[], findings:[], plans:[], rawFixes:[], rawPrs:[], prstate:[], fixstate:[], chunks:[], corpusChunks:[], planChunks:[], chunkById:new Map(), index:null, view:'overview', open:new Set(), docFilter:null, corpusSig:'', plan:null, planItem:null, actFilter:'all' };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const SEVS = ['critical','high','medium','low'];
+const STATUS_LABEL = {done:'Verified', merged:'Merged, verifying', in_review:'In review', in_progress:'In progress', planned:'Planned', open:'Not started', planning:'Planning', not_started:'Not started'};
+const PLAN_LABEL = {done:'Done', awaiting_approval:'Awaiting your approval', approved:'Approved', building:'Building', outline:'Outline', not_started:'Not started', merged:'Merged, verifying', in_review:'In review', planned:'Planned'};
+const fmtTime = (iso) => { if(!iso) return '—'; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); };
+
+/* ---------- retrieval ---------- */
+const STOP = new Set('the a an and or of to in on for is are was were be by with as at it this that from not no but if then than into its their our your we you they he she them has have had do does did can will would should could which who what when where why how all any each more most other some such only own same so too very just also about over under after before between during out up down off again further once here there both few nor'.split(' '));
+function tokens(s){
+  const out = []; const low = String(s).toLowerCase();
+  for (const m of low.matchAll(/[a-z0-9]+(?:[-_./#][a-z0-9]+)*/g)) {
+    const w = m[0]; if (w.length > 1 && !STOP.has(w)) out.push(w);
+    if (/[-_./#]/.test(w)) for (const p of w.split(/[-_./#]/)) if (p.length > 1 && !STOP.has(p)) out.push(p);
+  }
+  return out;
+}
+function buildIndex(chunks){
+  const df = new Map(), docs = []; let total = 0;
+  for (const c of chunks) {
+    const tf = new Map(); const toks = tokens(c.h + ' ' + c.h + ' ' + c.t);
+    for (const t of toks) tf.set(t, (tf.get(t)||0)+1);
+    for (const t of tf.keys()) df.set(t, (df.get(t)||0)+1);
+    docs.push({c, tf, len:toks.length}); total += toks.length;
+  }
+  return {df, docs, avg: total / Math.max(1, docs.length), N: docs.length};
+}
+function search(query, {limit=6, doc=null}={}){
+  if (!S.index) return [];
+  const q = [...new Set(tokens(query))]; if (!q.length) return [];
+  const {df, docs, avg, N} = S.index; const k1 = 1.3, b = 0.72; const scored = [];
+  for (const d of docs) {
+    if (doc && d.c.doc !== doc) continue;
+    let s = 0;
+    for (const t of q) { const f = d.tf.get(t); if (!f) continue; const idf = Math.log(1 + (N - df.get(t) + .5)/(df.get(t) + .5)); s += idf * (f*(k1+1))/(f + k1*(1 - b + b*d.len/avg)); }
+    if (s > 0) scored.push([s, d.c]);
+  }
+  scored.sort((a,b) => b[0]-a[0]);
+  return scored.slice(0, limit).map(([s,c]) => ({score:+s.toFixed(2), ...c}));
+}
+const docLabel = (key) => key === 'plans' ? 'Plans (live)' : ((S.docs?.docs || []).find(d => d.key === key)?.label || key);
+
+/* ---------- derived numbers ---------- */
+function fixDone(f){ return f.status === 'done'; }
+function progress(){
+  const byStatus = {done:0, work:0, plan:0, open:0};
+  for (const f of S.fixes) { if (fixDone(f)) byStatus.done++; else if (['merged','in_review','in_progress'].includes(f.status)) byStatus.work++; else if (f.status === 'planned') byStatus.plan++; else byStatus.open++; }
+  const doneFix = new Set(S.fixes.filter(fixDone).map(f => f.fix));
+  const fnd = S.findings.map(x => ({...x, closed: (x.fixes||[]).length > 0 && x.fixes.some(n => doneFix.has(n))}));
+  const sev = Object.fromEntries(SEVS.map(s => { const all = fnd.filter(x => x.severity === s); return [s, {total: all.length, closed: all.filter(x => x.closed).length}]; }));
+  return {byStatus, total: S.fixes.length, findings: fnd, fClosed: fnd.filter(x => x.closed).length, sev};
+}
+function barHTML(parts, total){ return parts.map(([cls, n]) => n ? `<i class="${cls}" style="width:${(100*n/Math.max(1,total)).toFixed(2)}%"></i>` : '').join(''); }
+
+const RUNNING = new Set(['pending','queued','in_progress','waiting','requested']);
+const STALE_HOURS = 1.5;
+function checkTone(v){ if (!v) return ''; if (v === 'success') return 'good'; if (RUNNING.has(v)) return 'warn'; if (v === 'unknown' || v === 'skipped') return ''; return 'crit'; }
+function checkLabel(v){ return !v ? '—' : RUNNING.has(v) ? 'running' : v.replace(/_/g, ' '); }
+function syncAgeHours(m){ const d = new Date(m?.syncedAt); return isNaN(d) ? Infinity : (Date.now() - d.getTime()) / 3.6e6; }
+/* ---------- render ---------- */
+function renderStrip(){
+  const m = S.meta || {};
+  $('s-main').textContent = m.mainSha || '—';
+  $('s-ci').textContent = checkLabel(m.ciMain); $('d-ci').className = 'dot ' + checkTone(m.ciMain);
+  $('s-smoke').textContent = checkLabel(m.smokeMain); $('d-smoke').className = 'dot ' + checkTone(m.smokeMain);
+  $('d-main').className = 'dot ' + (syncAgeHours(m) > STALE_HOURS ? 'warn' : 'good');
+  $('s-synced').textContent = fmtTime(m.syncedAt);
+  $('s-by').textContent = m.syncedBy ? '· ' + m.syncedBy : '';
+  $('s-prod').textContent = m.prodServes || '—'; $('d-prod').className = 'dot ' + (m.prodServes && m.prodServes === m.mainSha ? 'good' : m.prodServes ? 'warn' : '');
+  if (m.program) $('s-program').textContent = m.program.replace('SmartRemit ','');
+  const pg = S.program;
+  if (pg) {
+    $('s-program').textContent = pg.short || pg.name;
+    $('h-eyebrow').textContent = pg.eyebrow || '';
+    $('h-title').textContent = pg.title || pg.name;
+    $('h-lede').textContent = pg.lede || '';
+    $('tl-fixes').textContent = 'Upgrade fixes'; $('tl-findings').textContent = 'Audit findings';
+    $('l-fixes').textContent = 'Upgrade program fixes verified (archived)';
+  }
+}
+function stageItems(st){ return st.items || []; }
+function demoProgress(){
+  const st = [...S.stages].sort((a,b) => a.stage - b.stage);
+  const done = st.filter(x => x.status === 'done').length, work = st.filter(x => ['in_progress','building','in_review'].includes(x.status)).length;
+  return {st, done, work, total: st.length};
+}
+function renderDemoTotals(){
+  const on = S.stages.length > 0;
+  $('m-demo').hidden = !on; $('m-findings').hidden = on;
+  if (!on) return;
+  const d = demoProgress();
+  $('t-demo').innerHTML = `${d.done}<span> / ${d.total} stages</span>`;
+  $('b-demo').innerHTML = barHTML([['seg-done',d.done],['seg-work',d.work]], d.total);
+}
+function viewDemo(){
+  const d = demoProgress(); if (!d.total) return '';
+  const pg = S.program || {};
+  const rows = d.st.map(s => {
+    const its = stageItems(s); const di = its.filter(i => i.status === 'done').length;
+    const wi = its.filter(i => ['in_progress','building','in_review'].includes(i.status)).length;
+    const open = S.open.has('stage-' + s.stage);
+    const list = open && its.length ? `<ul style="margin:8px 0 0;padding-left:18px;font-size:13px;display:grid;gap:4px">${its.map(i => `<li>${esc(i.title)} ${statusPill(i.status)}${i.note ? `<div class="muted" style="font-size:12px">${esc(i.note)}</div>` : ''}</li>`).join('')}</ul>` : '';
+    return `<div class="phase" data-stage="${+s.stage}" style="cursor:${its.length ? 'pointer' : 'default'}" tabindex="0" aria-expanded="${open}"><div class="pn">S${+s.stage}</div><div><div class="pt">${esc(s.name)} ${statusPill(s.status)}</div>${s.note ? `<div class="pnote">${esc(s.note)}</div>` : ''}${list}</div>
+      <div class="pbar"><span class="mono">${its.length ? `${di}/${its.length} items` : (s.due ? 'due ' + esc(s.due) : '')}</span>${its.length ? `<div class="bar">${barHTML([['seg-done',di],['seg-work',wi]], its.length)}</div>` : ''}</div></div>`;
+  }).join('');
+  return `<section><h2>${esc(pg.name || 'Current program')}${pg.due ? ` <span class="muted mono" style="font-size:12px;font-weight:400">due ${esc(pg.due)}</span>` : ''}</h2>${pg.goal ? `<p class="muted" style="margin:0 0 10px;max-width:78ch">${esc(pg.goal)}</p>` : ''}<div class="phases">${rows}</div><p class="muted" style="font-size:12px;margin:6px 0 0">Click a stage to see its items.</p></section>`;
+}
+function renderTotals(){
+  renderDemoTotals();
+  const p = progress();
+  $('t-fixes').innerHTML = `${p.byStatus.done}<span> / ${p.total}</span>`;
+  $('b-fixes').innerHTML = barHTML([['seg-done',p.byStatus.done],['seg-work',p.byStatus.work],['seg-plan',p.byStatus.plan]], p.total);
+  $('t-findings').innerHTML = `${p.fClosed}<span> / ${p.findings.length}</span>`;
+  $('b-findings').innerHTML = barHTML([['seg-done',p.fClosed]], p.findings.length);
+  $('n-fixes').textContent = p.total || ''; $('n-findings').textContent = p.findings.length || '';
+  $('n-events').textContent = S.events.length || ''; $('n-chunks').textContent = S.chunks.length || ''; $('n-plans').textContent = S.plans.length || '';
+  return p;
+}
+function statusPill(s){ return `<span class="pill ${esc(s)}">${esc(STATUS_LABEL[s] || s)}</span>`; }
+
+function viewOverview(p){
+  const phases = [...S.phases].sort((a,b) => a.phase - b.phase).map(ph => {
+    const fx = S.fixes.filter(f => f.phase === ph.phase); const d = fx.filter(fixDone).length;
+    const w = fx.filter(f => ['merged','in_review','in_progress'].includes(f.status)).length; const pl = fx.filter(f => f.status === 'planned').length;
+    return `<div class="phase"><div class="pn">P${ph.phase}</div><div><div class="pt">${esc(ph.name)} ${statusPill(ph.status)}</div>${ph.note ? `<div class="pnote">${esc(ph.note)}</div>` : ''}</div>
+      <div class="pbar"><span class="mono">${d}/${fx.length} verified</span><div class="bar">${barHTML([['seg-done',d],['seg-work',w],['seg-plan',pl]], fx.length)}</div></div></div>`;
+  }).join('');
+  const sev = SEVS.map(s => { const v = p.sev[s]; return `<div class="sevcell"><div class="sev ${s}">${s}</div><div class="mono" style="font-size:18px;font-weight:600">${v.closed}<span class="muted" style="font-size:12px;font-weight:400"> / ${v.total} closed</span></div><div class="bar">${barHTML([['seg-done',v.closed]], v.total)}</div></div>`; }).join('');
+  const m = S.meta || {};
+  const attn = [];
+  if (checkTone(m.smokeMain) === 'crit') attn.push(['incident', `Post-deploy smoke is ${esc(checkLabel(m.smokeMain))} on main`, esc(m.smokeNote || '')]);
+  else if (checkTone(m.smokeMain) === 'warn') attn.push(['running', `Post-deploy smoke still running on ${esc(m.mainSha || 'main')}`, 'Not a failure. The next sync records the result.']);
+  if (checkTone(m.ciMain) === 'crit') attn.push(['incident', `CI is ${esc(checkLabel(m.ciMain))} on main`, '']);
+  if (syncAgeHours(m) > STALE_HOURS) attn.push(['stale', `Ledger sync is late: last synced ${esc(fmtTime(m.syncedAt))}`, 'The automatic sync runs hourly and on every GitHub event. If this stays, check the ledger-sync routine.']);
+  if (m.prodServes && m.mainSha && m.prodServes !== m.mainSha && checkTone(m.smokeMain) !== 'warn') attn.push(['incident', `Production serves ${esc(m.prodServes)}, main is ${esc(m.mainSha)}`, 'The latest main commit has not been verified live by the post-deploy smoke yet.']);
+  for (const pl of S.plans.filter(x => x.status === 'awaiting_approval')) attn.push(['approval', `Plan waiting for your approval: ${esc(pl.title)}`, `<button class="planlink" type="button" data-plan="${esc(pl.id)}">Open the plan</button>${pl.source?.pr ? ` · PR #${+pl.source.pr}` : ''}`]);
+  for (const pr of S.prs.filter(x => x.state === 'open')) attn.push(['open-pr', `PR #${pr.number} waiting to merge`, `<a href="${esc(pr.url)}" target="_blank" rel="noopener">${esc(pr.title)}</a>`]);
+  const sevRank = {critical:0, high:1, medium:2, low:3};
+  for (const b of [...S.backlog].filter(x => x.status !== 'done').sort((a,b) => sevRank[a.severity]-sevRank[b.severity])) attn.push([b.severity, esc(b.title), `From ${esc(b.source)}`]);
+  const recent = [...S.events].sort((a,b) => b.at.localeCompare(a.at)).slice(0,4).map(tlItem).join('');
+  const oldProgram = `<section><h2>Phases</h2><div class="phases">${phases}</div></section>
+    <section><h2>Findings closed by severity</h2><div class="sevgrid">${sev}</div></section>`;
+  const archive = S.stages.length ? `<section><details class="tech" ${S.archiveOpen ? 'open' : ''} id="archive"><summary style="font-size:14px">Completed: ${esc((S.program && S.program.archivedName) || 'Upgrade program 2026-09')} · ${p.byStatus.done}/${p.total} fixes verified — archived, click to expand</summary><div style="margin-top:14px">${oldProgram}</div></details></section>` : oldProgram;
+  return `${viewDemo()}${archive}
+    <section><h2>Needs attention <span class="muted mono" style="font-size:12px;font-weight:400">${attn.length}</span></h2><div class="attn">${attn.map(([k,t,d]) => `<div class="attn-row"><div>${k === 'incident' ? '<span class="pill incident">Incident</span>' : k === 'running' ? '<span class="pill warn">Running</span>' : k === 'stale' ? '<span class="pill warn">Stale</span>' : k === 'open-pr' ? '<span class="pill open-pr">Open PR</span>' : k === 'approval' ? '<span class="pill awaiting_approval">Approve</span>' : `<span class="sev ${esc(k)}">${esc(k)}</span>`}</div><div><div>${t}</div><div class="muted" style="font-size:12.5px">${d}</div></div></div>`).join('')}</div></section>
+    <section><h2>Latest</h2><div class="tl">${recent}</div></section>`;
+}
+
+function viewFixes(){
+  const f = S.fixFilter || (S.fixFilter = {q:'', phase:'', status:'', sev:''});
+  const rows = S.fixes.filter(x => (!f.phase || String(x.phase) === f.phase) && (!f.status || x.status === f.status) && (!f.sev || x.severity === f.sev) && (!f.q || (x.title + ' ' + x.area + ' ' + (x.findingIds||[]).join(' ') + ' ' + x.fix).toLowerCase().includes(f.q.toLowerCase())))
+    .sort((a,b) => a.phase - b.phase || a.fix - b.fix);
+  const opt = (vals, cur, lbl) => `<option value="">${lbl}</option>` + vals.map(([v,t]) => `<option value="${esc(v)}" ${cur === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  const body = rows.map(x => {
+    const open = S.open.has('fix-' + x.fix);
+    const findings = S.findings.filter(fd => (fd.fixes||[]).includes(x.fix));
+    const det = open ? `<tr class="detail"><td colspan="5"><dl class="kv">
+        <dt>Findings</dt><dd>${(x.findingIds||[]).map(i => `<span class="idchip">${esc(i)}</span>`).join('')}${findings.length ? `<div style="margin-top:4px">${findings.map(fd => `<div><span class="sev ${esc(fd.severity)}">${esc(fd.severity)}</span> ${esc(fd.title)}</div>`).join('')}</div>` : ''}</dd>
+        <dt>Files</dt><dd class="mono" style="font-size:11.5px">${esc(x.files)}</dd>
+        <dt>Evidence</dt><dd>${x.evidence ? esc(x.evidence) : '<span class="muted">None yet</span>'}</dd>
+        <dt>PRs</dt><dd>${(x.prs||[]).length ? x.prs.map(n => `<a href="https://github.com/Nagavenkatasai7/claude-payments/pull/${+n}" target="_blank" rel="noopener">#${+n}</a>`).join(', ') : '<span class="muted">None</span>'}${x.mergeSha ? ` · <span class="mono">${esc(x.mergeSha)}</span>` : ''}</dd>
+        <dt>Effort</dt><dd>${esc(x.effort || '—')}${x.planTask ? ` · Phase 1 plan task ${+x.planTask}` : ''}</dd>
+        ${(() => { const hit = planForFix(x.fix); return hit ? `<dt>Plan</dt><dd><button class="planlink" type="button" data-plan="${esc(hit.plan.id)}" data-item="${esc(hit.item.key)}">${esc(hit.plan.title)} → explained</button></dd>` : ''; })()}
+        ${x.note ? `<dt>Note</dt><dd>${esc(x.note)}</dd>` : ''}${x.ownerGated ? `<dt>Owner-gated</dt><dd>${esc(x.ownerGated)}</dd>` : ''}
+      </dl></td></tr>` : '';
+    return `<tr class="row" data-open="fix-${x.fix}" tabindex="0" aria-expanded="${open}"><td class="mono">${x.fix}</td><td class="mono">P${x.phase}</td><td><span class="sev ${esc(x.severity)}">${esc(x.severity)}</span></td><td>${esc(x.title)}<div class="muted" style="font-size:12px">${esc(x.area)}</div></td><td>${statusPill(x.status)}</td></tr>${det}`;
+  }).join('');
+  return `<div class="filters">
+      <input id="ff-q" type="search" placeholder="Filter by title, area or finding id" value="${esc(f.q)}">
+      <select id="ff-phase">${opt([0,1,2,3,4].map(n => [n,'Phase '+n]), f.phase, 'All phases')}</select>
+      <select id="ff-status">${opt(['done','merged','in_review','in_progress','planned','open'].map(s => [s, STATUS_LABEL[s]]), f.status, 'Any status')}</select>
+      <select id="ff-sev">${opt(SEVS.map(s => [s,s]), f.sev, 'Any severity')}</select>
+    </div>
+    <div class="tablewrap"><table><thead><tr><th>#</th><th>Phase</th><th>Sev</th><th>Fix</th><th>Status</th></tr></thead><tbody>${body || '<tr><td colspan="5" class="muted">No fixes match.</td></tr>'}</tbody></table></div>`;
+}
+
+function viewFindings(p){
+  const f = S.fdFilter || (S.fdFilter = {q:'', sev:'', state:'open', src:''});
+  const rows = p.findings.filter(x => (!f.sev || x.severity === f.sev) && (!f.src || x.source === f.src) && (f.state === '' || (f.state === 'open' ? !x.closed : x.closed)) && (!f.q || (x.title + ' ' + x.ids.join(' ') + ' ' + x.area + ' ' + x.summary).toLowerCase().includes(f.q.toLowerCase())))
+    .sort((a,b) => SEVS.indexOf(a.severity) - SEVS.indexOf(b.severity));
+  const body = rows.slice(0, 400).map((x, i) => {
+    const key = 'fd-' + x.source + '-' + (x.ids[0] || i) + '-' + i; const open = S.open.has(key);
+    return `<tr class="row" data-open="${esc(key)}" tabindex="0" aria-expanded="${open}"><td><span class="sev ${esc(x.severity)}">${esc(x.severity)}</span></td><td>${esc(x.title)}<div>${x.ids.map(id => `<span class="idchip">${esc(id)}</span>`).join('')}</div></td><td>${x.closed ? '<span class="pill done">Closed</span>' : (x.fixes||[]).length ? `<span class="pill">Fix ${x.fixes.join(', ')}</span>` : '<span class="pill">Unassigned</span>'}</td></tr>
+      ${open ? `<tr class="detail"><td colspan="3"><dl class="kv"><dt>Summary</dt><dd>${esc(x.summary || '—')}</dd><dt>Section</dt><dd>${esc(x.section)} · ${esc(x.state)}</dd><dt>Verdict</dt><dd>${esc(x.verdict)}</dd>${x.file ? `<dt>Location</dt><dd class="mono">${esc(x.file)}${x.line ? ':' + +x.line : ''}</dd>` : ''}</dl></td></tr>` : ''}`;
+  }).join('');
+  const opt = (vals, cur, lbl) => `<option value="">${lbl}</option>` + vals.map(([v,t]) => `<option value="${esc(v)}" ${cur === v ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  return `<div class="filters">
+      <input id="fd-q" type="search" placeholder="Filter by title, id or area" value="${esc(f.q)}">
+      <select id="fd-state">${opt([['open','Open'],['closed','Closed']], f.state, 'Open and closed')}</select>
+      <select id="fd-sev">${opt(SEVS.map(s => [s,s]), f.sev, 'Any severity')}</select>
+      <select id="fd-src">${opt([['audit','Audit'],['security-scan','Security scan']], f.src, 'Both sources')}</select>
+    </div>
+    <p class="muted" style="margin:0 0 8px;font-size:12.5px">${rows.length} findings${rows.length > 400 ? ', first 400 shown' : ''}. A finding closes when a fix it maps to is verified.</p>
+    <div class="tablewrap"><table><thead><tr><th>Sev</th><th>Finding</th><th>Status</th></tr></thead><tbody>${body || '<tr><td colspan="3" class="muted">No findings match.</td></tr>'}</tbody></table></div>`;
+}
+
+const KIND_LABEL = {merge:'merge', verify:'verified', plan:'plan', review:'review', incident:'incident', security:'security', milestone:'milestone', agent:'agent run', decision:'decision', approval:'approval', 'owner-step':'your step', deploy:'deploy', migration:'migration', pr:'PR'};
+const ACT_GROUPS = [['all','Everything',null],['decisions','Decisions & approvals',['decision','approval']],['agents','Agent runs',['agent']],['plans','Plans & reviews',['plan','review']],['code','Code & releases',['merge','pr','deploy','migration','owner-step']],['proof','Verification',['verify','milestone']],['problems','Incidents & security',['incident','security']]];
+function refChips(r){
+  if (!r) return '';
+  const out = [];
+  for (const n of [].concat(r.fix || [])) out.push(`<button class="chip" type="button" data-cite="fix ${+n}">fix ${+n}</button>`);
+  for (const n of [].concat(r.pr || [])) out.push(`<a class="chip" href="https://github.com/Nagavenkatasai7/claude-payments/pull/${+n}" target="_blank" rel="noopener">PR #${+n}</a>`);
+  if (r.plan) out.push(`<button class="chip" type="button" data-plan="${esc(r.plan)}">plan ${esc(r.plan)}</button>`);
+  if (r.sha) out.push(`<span class="chip">${esc(r.sha)}</span>`);
+  return out.join('');
+}
+function tlItem(e){
+  const meta = [e.actor ? `<span class="chip actor-${esc(e.actor)}">${esc(e.actor === 'owner' ? 'you' : e.actor)}</span>` : '', e.model ? `<span class="chip">${esc(e.model)}</span>` : '', e.result ? `<span class="chip res-${esc(e.result)}">${esc(e.result)}</span>` : '', refChips(e.refs)].join('');
+  return `<div class="tl-item ${esc(e.kind)}"><div class="tl-when">${esc(fmtTime(e.at))} · ${esc(KIND_LABEL[e.kind] || e.kind)}</div><div style="font-weight:600">${esc(e.title)}</div><div class="muted" style="font-size:13px">${esc(e.detail)}</div>${meta.trim() ? `<div class="tl-meta">${meta}</div>` : ''}</div>`;
+}
+function viewTimeline(){
+  const g = ACT_GROUPS.find(x => x[0] === S.actFilter) || ACT_GROUPS[0];
+  const list = [...S.events].filter(e => !g[2] || g[2].includes(e.kind)).sort((a,b) => b.at.localeCompare(a.at));
+  const count = (kinds) => kinds ? S.events.filter(e => kinds.includes(e.kind)).length : S.events.length;
+  return `<p class="muted" style="margin:0 0 10px;max-width:72ch">The program's journal: every decision, approval, agent run, plan change, merge, deploy, migration, verification and incident, newest first.</p>
+    <div class="seg" role="group" aria-label="Filter activity">${ACT_GROUPS.map(([k,l,kinds]) => `<button type="button" data-act="${k}" aria-pressed="${k === g[0]}">${esc(l)} <span class="mono" style="font-size:10.5px;opacity:.7">${count(kinds)}</span></button>`).join('')}</div>
+    <div class="tl">${list.map(tlItem).join('') || '<p class="muted">Nothing recorded here yet.</p>'}</div>`;
+}
+
+/* ---------- plans ---------- */
+const ARROW = '<span class="arrow" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h11M9 4l4 4-4 4"/></svg></span>';
+const TONE_TAG = {bad:'Problem', new:'New check', done:'Done', next:'Next', todo:'To do', gate:'Your step', ok:'', neutral:''};
+function flowHTML(f, capTone){
+  if (!f || !(f.steps || []).length) return '';
+  const steps = f.steps.map(st => { const t = ['bad','new','done','next','todo','gate','ok','neutral'].includes(st.tone) ? st.tone : 'ok'; const tag = TONE_TAG[t]; return `<div class="step ${t}">${tag ? `<span class="tag">${tag}</span>` : ''}<span class="sl">${esc(st.label)}</span>${st.note ? `<span class="sn">${esc(st.note)}</span>` : ''}</div>`; }).join(ARROW);
+  return `<div>${f.caption ? `<div class="flowcap ${capTone || ''}">${esc(f.caption)}</div>` : ''}<div class="flowbox"><div class="flow" role="list">${steps}</div></div></div>`;
+}
+const planSort = (a,b) => (a.order ?? 0) - (b.order ?? 0);
+function planForFix(n){
+  for (const p of [...S.plans].sort((a,b) => (a.kind === 'wave' ? 0 : 1) - (b.kind === 'wave' ? 0 : 1))) { const it = (p.items || []).find(i => i.fix === n); if (it) return {plan:p, item:it}; }
+  return null;
+}
+function goPlan(id, item){
+  S.plan = id; S.planItem = item || null; S.view = 'plans';
+  try { localStorage.setItem('ledger.plan', id); localStorage.setItem('ledger.view', 'plans'); } catch {}
+  document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', String(x.dataset.view === 'plans')));
+  $('drawer').hidden = true; render();
+  requestAnimationFrame(() => { const el = item ? document.getElementById('item-' + item) : null; if (el) el.scrollIntoView({behavior:'smooth', block:'start'}); else $('view').scrollIntoView({block:'start'}); });
+}
+function listHTML(title, arr, cls){ return `<div class="${cls || ''}"><h4>${esc(title)}</h4>${(arr || []).length ? `<ul>${arr.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p class="muted" style="margin:0;font-size:13px">Nothing.</p>'}</div>`; }
+function techHTML(t){
+  if (!t) return '';
+  const row = (k, v) => v && (!Array.isArray(v) || v.length) ? `<dt>${k}</dt><dd>${Array.isArray(v) ? v.map(x => `<span class="idchip">${esc(x)}</span>`).join('') : esc(v)}</dd>` : '';
+  return `<details class="tech"><summary>Technical detail</summary><dl class="kv">${row('Branch', t.branch)}${row('Component', t.component)}${row('Migration', t.migration)}${row('Findings', t.findings)}${row('Files', t.files)}${row('Tests', t.tests)}${t.steps?.length ? `<dt>Steps</dt><dd><ol style="margin:0;padding-left:18px">${t.steps.map(x => `<li>${esc(x)}</li>`).join('')}</ol></dd>` : ''}${row('Evidence', t.evidence)}</dl></details>`;
+}
+function itemHTML(it){
+  const fix = S.fixes.find(f => f.fix === it.fix);
+  const live = fix ? fix.status : null;
+  return `<article class="item ${S.planItem === it.key ? 'target' : ''}" id="item-${esc(it.key)}">
+    <div class="item-head"><h3>${esc(it.title)}</h3>${it.fix ? `<button class="chip" type="button" data-cite="fix ${+it.fix}">fix ${+it.fix}</button>` : ''}${it.planTask ? `<span class="chip">plan task ${+it.planTask}</span>` : ''}<span class="pill ${esc(it.status)}">${esc(PLAN_LABEL[it.status] || it.status)}</span>${live && live !== 'open' ? `<span class="muted" style="font-size:12px">tracker: ${esc(STATUS_LABEL[live] || live)}</span>` : ''}</div>
+    <p class="story">${esc(it.story)}</p>
+    <div class="ba">${flowHTML(it.before, 'bad')}${flowHTML(it.after, 'new')}</div>
+    <div class="lists">${listHTML('What changes', it.changes)}${listHTML('How we will know it works', it.proof)}${listHTML('What you do', it.youDo, 'you')}</div>
+    ${(it.leftover || []).length ? `<div class="lists" style="grid-template-columns:minmax(0,1fr)">${listHTML('Left for later', it.leftover)}</div>` : ''}
+    ${techHTML(it.tech)}
+  </article>`;
+}
+function viewPlans(){
+  if (!S.plans.length) return '<p class="muted">No plans in the ledger yet.</p>';
+  const plans = [...S.plans].sort(planSort);
+  if (!S.plan || !plans.some(p => p.id === S.plan)) S.plan = (plans.find(p => p.phase >= 5 && p.status !== 'done') || plans.find(p => p.status === 'awaiting_approval') || plans.find(p => p.status !== 'done') || plans[0]).id;
+  const cur = plans.find(p => p.id === S.plan);
+  const phaseNums = [...new Set([0,1,2,3,4, ...plans.map(p => +p.phase).filter(n => Number.isFinite(n))])].sort((a,b) => a - b);
+  const liveStage = [...phaseNums].reverse().find(n => n >= 5 && plans.some(p => p.phase === n && p.status !== 'done'));
+  const nowCol = liveStage !== undefined ? liveStage : S.meta?.currentPhase;
+  const colLabel = (n) => n >= 5 ? 'Stage ' + n : 'Phase ' + n;
+  const cols = phaseNums.map(n => {
+    const pls = plans.filter(p => p.phase === n);
+    const st = S.stages.find(x => x.stage === n);
+    const ph = S.phases.find(x => x.phase === n) || {phase:n, name: n >= 5 ? (st?.name || pls[0]?.title || 'Stage ' + n) : 'Phase ' + n};
+    const fx = n >= 5 ? [] : S.fixes.filter(f => f.phase === n); const d = fx.filter(fixDone).length;
+    const w = fx.filter(f => ['merged','in_review','in_progress'].includes(f.status)).length;
+    const sits = st ? (st.items || []) : []; const sd = sits.filter(i => i.status === 'done').length; const sw = sits.filter(i => ['in_progress','building','in_review'].includes(i.status)).length;
+    const meter = n >= 5
+      ? (sits.length ? `<div class="bar">${barHTML([['seg-done',sd],['seg-work',sw]], sits.length)}</div><div class="pcount">${sd}/${sits.length} items done · current program</div>` : '<div class="pcount">Current program</div>')
+      : `<div class="bar">${barHTML([['seg-done',d],['seg-work',w]], fx.length)}</div><div class="pcount">${d}/${fx.length} fixes verified${S.stages.length ? ' · archived' : ''}</div>`;
+    return `<div class="pcol ${nowCol === n ? 'current' : ''}"><div class="ph">${colLabel(n)}${nowCol === n ? ' · now' : ''}</div><div class="pname">${esc(ph.name)}</div>
+      ${meter}
+      ${pls.map(p => `<button class="pbtn" type="button" data-plan="${esc(p.id)}" aria-current="${p.id === S.plan}"><span>${esc(p.wave ? 'Wave ' + p.wave : p.kind === 'phase-summary' ? 'Summary' : n >= 5 ? 'Loop plan' : 'Outline plan')}</span><span style="display:inline-flex;gap:6px;align-items:center;font-size:11px;color:var(--ink-3)">${esc(PLAN_LABEL[p.status] || p.status)}<i class="sdot ${esc(p.status)}"></i></span></button>`).join('') || '<span class="muted" style="font-size:12px">No plan yet</span>'}
+    </div>`;
+  }).join('');
+  const ap = cur.approval || {};
+  const approval = ap.state === 'approved' ? `<span class="pill done">Approved${ap.at ? ' ' + esc(fmtTime(ap.at)) : ''}</span>` : ap.state === 'pending' && cur.status === 'awaiting_approval' ? '<span class="pill awaiting_approval">Waiting for your approval — reply “approve” in the Claude Code session</span>' : '';
+  const src = cur.source || {};
+  return `<div class="pmap-wrap"><div class="pmap" role="navigation" aria-label="All plans by phase" style="--pcols:${phaseNums.length}">${cols}</div></div>
+    <div class="plan-head">
+      <div class="eyebrow">${+cur.phase >= 5 ? 'Stage ' : 'Phase '}${+cur.phase}${cur.wave ? ' · Wave ' + +cur.wave : ''} · plan v${+cur.planVersion || 0} · updated ${esc(fmtTime(cur.updatedAt))}</div>
+      <h2>${esc(cur.title)}</h2>
+      <div class="meta"><span class="pill ${esc(cur.status)}">${esc(PLAN_LABEL[cur.status] || cur.status)}</span>${approval}${src.pr ? `<a href="https://github.com/Nagavenkatasai7/claude-payments/pull/${+src.pr}" target="_blank" rel="noopener">PR #${+src.pr}</a>` : ''}${src.doc ? `<span class="mono" style="font-size:11.5px">${esc(src.doc)}</span>` : ''}${src.baseSha ? `<span class="chip">base ${esc(src.baseSha)}</span>` : ''}</div>
+      ${cur.headline ? `<p class="headline">${esc(cur.headline)}</p>` : ''}
+    </div>
+    <section><div class="plain"><div class="lbl">In plain words</div><p>${esc(cur.story)}</p></div>${cur.whyNow ? `<p class="why" style="margin-top:10px"><b>Why now:</b> ${esc(cur.whyNow)}</p>` : ''}</section>
+    ${cur.flow ? `<section><h2>The order we do it in</h2>${flowHTML(cur.flow)}</section>` : ''}
+    ${(cur.ownerSteps || []).length ? `<section><h2>What you need to do</h2><ul style="margin:0;padding-left:18px;max-width:72ch">${cur.ownerSteps.map(x => `<li>${esc(x)}</li>`).join('')}</ul></section>` : ''}
+    <section><h2>${+cur.phase >= 5 ? 'Each milestone, explained' : 'Each fix, explained'} <span class="muted mono" style="font-size:12px;font-weight:400">${(cur.items || []).length}</span></h2>
+      <div class="jump">${(cur.items || []).map(it => `<button type="button" data-plan="${esc(cur.id)}" data-item="${esc(it.key)}">${it.fix ? 'Fix ' + +it.fix + ' · ' : ''}${esc(it.title)}</button>`).join('')}</div>
+      <div class="items">${(cur.items || []).map(itemHTML).join('')}</div></section>
+    ${(cur.reviews || []).length ? `<section><h2>Reviews of this plan</h2><div class="tl">${cur.reviews.map(r => `<div class="tl-item review"><div class="tl-when">${r.at ? esc(fmtTime(r.at)) + ' · ' : ''}${esc(r.by || '')}</div><div style="font-weight:600">${esc(r.name)} — found ${+r.found || 0}, fixed ${+r.fixed || 0}</div><div class="muted" style="font-size:13px">${esc(r.summary)}</div></div>`).join('')}</div></section>` : ''}
+    ${(cur.glossary || []).length ? `<section><h2>Words used here</h2><div class="gloss">${cur.glossary.map(g => `<div><b>${esc(g.term)}</b>${esc(g.plain)}</div>`).join('')}</div></section>` : ''}`;
+}
+function planChunksFrom(plans){
+  const out = []; let k = 0;
+  for (const p of [...plans].sort(planSort)) {
+    out.push({id:`plans#${++k}`, doc:'plans', plan:p.id, item:null, h:`${p.title} (${PLAN_LABEL[p.status] || p.status})`, t:[p.headline, p.story, p.whyNow, (p.flow?.steps || []).map(s => s.label + ': ' + (s.note || '') + ' [' + s.tone + ']').join('; '), (p.ownerSteps || []).join(' '), (p.reviews || []).map(r => `${r.name} (${r.by}, ${r.at}): found ${r.found}, fixed ${r.fixed}. ${r.summary}`).join(' ')].filter(Boolean).join('\n\n')});
+    for (const it of p.items || []) out.push({id:`plans#${++k}`, doc:'plans', plan:p.id, item:it.key, h:`${p.title} › ${it.fix ? 'fix ' + it.fix + ' · ' : ''}${it.title}`, t:[it.story, 'Status: ' + it.status, 'Today: ' + (it.before?.steps || []).map(s => s.label + (s.tone === 'bad' ? ' (problem)' : '')).join(' → '), 'After: ' + (it.after?.steps || []).map(s => s.label + (s.tone === 'new' ? ' (new check)' : '')).join(' → '), 'What changes: ' + (it.changes || []).join('; '), 'Proof: ' + (it.proof || []).join('; '), 'Owner steps: ' + ((it.youDo || []).join('; ') || 'none'), 'Left for later: ' + ((it.leftover || []).join('; ') || 'none'), it.tech ? 'Technical: ' + [it.tech.branch, it.tech.component, it.tech.migration && 'migration ' + it.tech.migration, (it.tech.findings || []).join(' '), (it.tech.files || []).join(' '), it.tech.tests, (it.tech.steps || []).join('; '), it.tech.evidence].filter(Boolean).join(' | ') : ''].join('\n')});
+  }
+  return out;
+}
+function rebuildIndex(){
+  S.chunks = [...S.corpusChunks, ...S.planChunks];
+  S.chunkById = new Map(S.chunks.map(c => [c.id, c])); S.index = buildIndex(S.chunks);
+  $('n-chunks').textContent = S.chunks.length || '';
+}
+
+function viewLibrary(){
+  const docs = [...(S.docs?.docs || []), ...(S.planChunks.length ? [{key:'plans', label:'Plans (live)', chunks:S.planChunks.length}] : [])];
+  const q = S.libQuery || '';
+  const hits = q ? search(q, {limit: 20, doc: S.docFilter}) : [];
+  return `<div class="doclist">${docs.map(d => `<button class="docbtn" type="button" data-doc="${esc(d.key)}" aria-pressed="${S.docFilter === d.key}"><div style="font-weight:600;font-size:13px">${esc(d.label)}</div><div class="muted mono" style="font-size:11px">${d.chunks} passages</div></button>`).join('')}</div>
+    <div class="filters"><input id="lib-q" type="search" placeholder="${S.docFilter ? 'Search ' + esc(docLabel(S.docFilter)) : 'Search every document'}" value="${esc(q)}"></div>
+    ${q ? (hits.length ? hits.map(h => `<div class="hit"><div class="h"><button class="cite" type="button" data-cite="${esc(h.id)}">${esc(h.id)}</button> ${esc(docLabel(h.doc))} › ${esc(h.h)}</div><div class="passage">${esc(h.t.slice(0, 700))}${h.t.length > 700 ? '…' : ''}</div></div>`).join('') : '<p class="muted">No passages match.</p>') : '<p class="muted">Pick a document or type a search. This is the same retrieval the assistant uses.</p>'}`;
+}
+
+function render(){
+  if (!S.meta && !S.fixes.length) return;
+  renderStrip(); const p = renderTotals();
+  const v = S.view; const el = $('view');
+  $('askView').hidden = v !== 'ask'; el.hidden = v === 'ask';
+  if (v === 'ask') return;
+  const active = document.activeElement?.id; const selStart = document.activeElement?.selectionStart;
+  el.innerHTML = v === 'overview' ? viewOverview(p) : v === 'plans' ? viewPlans() : v === 'fixes' ? viewFixes() : v === 'findings' ? viewFindings(p) : v === 'timeline' ? viewTimeline() : viewLibrary();
+  if (active && $(active) && 'value' in $(active)) { $(active).focus(); try { $(active).setSelectionRange(selStart, selStart); } catch {} }
+}
+
+/* ---------- events ---------- */
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', String(x === t)));
+  S.view = t.dataset.view; try { localStorage.setItem('ledger.view', S.view); } catch {} render();
+}));
+$('view').addEventListener('click', (e) => {
+  const cite = e.target.closest('[data-cite]'); if (cite) { openPassage(cite.dataset.cite); return; }
+  const pl = e.target.closest('[data-plan]'); if (pl) { goPlan(pl.dataset.plan, pl.dataset.item || null); return; }
+  const act = e.target.closest('[data-act]'); if (act) { S.actFilter = act.dataset.act; render(); return; }
+  const doc = e.target.closest('[data-doc]'); if (doc) { S.docFilter = S.docFilter === doc.dataset.doc ? null : doc.dataset.doc; render(); return; }
+  if (e.target.closest('a') || e.target.closest('summary')) return;
+  const stg = e.target.closest('[data-stage]'); if (stg) { const k = 'stage-' + stg.dataset.stage; S.open.has(k) ? S.open.delete(k) : S.open.add(k); render(); return; }
+  const row = e.target.closest('tr.row'); if (row) { const k = row.dataset.open; S.open.has(k) ? S.open.delete(k) : S.open.add(k); render(); }
+});
+$('view').addEventListener('toggle', (e) => { if (e.target.id === 'archive') S.archiveOpen = e.target.open; }, true);
+$('view').addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr.row, [data-stage]')) { e.preventDefault(); e.target.click(); } });
+$('view').addEventListener('input', (e) => {
+  const id = e.target.id; const v = e.target.value;
+  if (id === 'ff-q') S.fixFilter.q = v; else if (id === 'ff-phase') S.fixFilter.phase = v; else if (id === 'ff-status') S.fixFilter.status = v; else if (id === 'ff-sev') S.fixFilter.sev = v;
+  else if (id === 'fd-q') S.fdFilter.q = v; else if (id === 'fd-sev') S.fdFilter.sev = v; else if (id === 'fd-state') S.fdFilter.state = v; else if (id === 'fd-src') S.fdFilter.src = v;
+  else if (id === 'lib-q') S.libQuery = v; else return;
+  render();
+});
+
+function openPassage(id){
+  const planM = /^plan[ :]([a-z0-9-]+)(?:\/([a-z0-9-]+))?$/i.exec(id);
+  if (planM) { goPlan(planM[1].toLowerCase(), planM[2] ? planM[2].toLowerCase() : null); return; }
+  const c = S.chunkById.get(id);
+  if (c && c.doc === 'plans') { goPlan(c.plan, c.item); return; }
+  const fixM = /^fix[ -]?(\d+)$/i.exec(id);
+  if (fixM) { S.view = 'fixes'; S.open.add('fix-' + +fixM[1]); document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', String(x.dataset.view === 'fixes'))); render(); return; }
+  $('dr-eyebrow').textContent = c ? `${docLabel(c.doc)} · ${c.id}` : id;
+  $('dr-title').textContent = c ? c.h : 'Passage not found';
+  $('dr-body').textContent = c ? c.t : 'This citation does not match a stored passage. The library may have been re-synced since the answer was written.';
+  $('drawer').hidden = false; $('dr-close').focus();
+}
+$('dr-close').addEventListener('click', () => { $('drawer').hidden = true; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('drawer').hidden = true; });
+
+/* ---------- assistant ---------- */
+let turns = []; let ctl = null; let DB = null; let chatId = null; let chatCreated = null;
+const newChatId = () => 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function chatNote(msg){ $('chat-note').textContent = msg || ''; }
+function renderThread(){
+  $('thread').innerHTML = '';
+  for (const t of turns) {
+    if (t.role === 'user') addMsg('user', esc(t.content));
+    else { const b = addMsg('bot', md(t.content)); if (t.trace) { const tr = document.createElement('div'); tr.className = 'trace'; tr.textContent = t.trace; b.after(tr); } }
+  }
+  $('suggest').hidden = turns.length > 0;
+  $('chat-title').textContent = turns.find(t => t.role === 'user')?.content.slice(0, 80) || 'New chat';
+}
+function renderChatList(){
+  const list = S.chats || [];
+  $('n-chats').textContent = list.length || '';
+  $('chat-list').innerHTML = list.length ? list.map(c => `<div class="chat-item" role="button" tabindex="0" data-chat="${esc(c.id)}" aria-current="${c.id === chatId}"><div style="min-width:0"><div class="ct">${esc(c.title || 'Chat')}</div><div class="cw">${esc(fmtTime(c.updatedAt))} · ${Math.ceil((c.turns?.length || 0) / 2)} Q</div></div><button class="del" type="button" data-del="${esc(c.id)}" aria-label="Delete chat">✕</button></div>`).join('')
+    : '<p class="muted" style="padding:8px;margin:0;font-size:12.5px">No saved chats yet.</p>';
+}
+async function saveChat(){
+  if (!DB || !chatId || !turns.length) return;
+  let keep = turns.slice(-80).map(t => ({...t, content: String(t.content).slice(0, 12000)}));
+  while (JSON.stringify(keep).length > 200000 && keep.length > 2) keep = keep.slice(2);
+  const now = new Date().toISOString(); chatCreated = chatCreated || now;
+  try { await DB.doc('chats/' + chatId).set({ title: (turns.find(t => t.role === 'user')?.content || 'Chat').slice(0, 80), createdAt: chatCreated, updatedAt: now, turns: keep }); chatNote(''); }
+  catch (e) { chatNote('This chat could not be saved (' + (e && e.code || 'error') + ').'); }
+}
+function openChat(id){
+  const c = (S.chats || []).find(x => x.id === id); if (!c || ctl) return;
+  chatId = c.id; chatCreated = c.createdAt; turns = (c.turns || []).map(t => ({...t})); renderThread(); renderChatList();
+}
+function startNewChat(){ if (ctl) return; chatId = null; chatCreated = null; turns = []; renderThread(); renderChatList(); $('q').focus(); }
+function md(text){
+  let h = esc(text);
+  h = h.replace(/```([\s\S]*?)```/g, (_, c) => `<pre class="passage mono" style="max-height:220px">${c}</pre>`);
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  h = h.replace(/\[([a-z][a-z0-9-]*#\d+)\]/g, '<button class="cite" type="button" data-cite="$1">$1</button>');
+  h = h.replace(/\[(fix[ -]?\d+)\]/gi, '<button class="cite" type="button" data-cite="$1">$1</button>');
+  h = h.replace(/\[(plan [a-z0-9-]+(?:\/[a-z0-9-]+)?)\]/gi, '<button class="cite" type="button" data-cite="$1">$1</button>');
+  h = h.replace(/(^|[\s(])PR #(\d{2,4})\b/g, '$1<a href="https://github.com/Nagavenkatasai7/claude-payments/pull/$2" target="_blank" rel="noopener">PR #$2</a>');
+  const blocks = h.split(/\n{2,}/).map(b => {
+    if (/^#{2,4}\s/.test(b)) return `<h4>${b.replace(/^#{2,4}\s/, '')}</h4>`;
+    const lines = b.split('\n');
+    if (lines.every(l => /^\s*([-*]|\d+\.)\s/.test(l))) return `<ul>${lines.map(l => `<li>${l.replace(/^\s*([-*]|\d+\.)\s/, '')}</li>`).join('')}</ul>`;
+    return b.startsWith('<pre') ? b : `<p>${b.replace(/\n/g, '<br>')}</p>`;
+  });
+  return blocks.join('');
+}
+function addMsg(role, html){ const d = document.createElement('div'); d.className = 'msg ' + role; d.innerHTML = html; $('thread').appendChild(d); $('thread').scrollTop = $('thread').scrollHeight; return d; }
+$('thread').addEventListener('click', (e) => { const c = e.target.closest('[data-cite]'); if (c) openPassage(c.dataset.cite); });
+document.getElementById('dr-body').addEventListener('click', (e) => { const c = e.target.closest('[data-cite]'); if (c) openPassage(c.dataset.cite); });
+
+const compact = (f) => ({fix:f.fix, phase:f.phase, title:f.title, severity:f.severity, status:f.status, prs:f.prs, mergeSha:f.mergeSha, planTask:f.planTask});
+const TOOLS = [
+  { name:'search_library', description:'Keyword search over every stored document (audit, security scan, upgrade spec, phase plans, verification records, component map, architecture docs, blueprint). Returns up to 8 passages with id, document, heading and text. Use several specific queries (file names, finding ids, feature words).',
+    inputSchema:{type:'object', properties:{query:{type:'string'}, doc:{type:'string', description:'Optional document key: audit, security, spec, plan-p0, plan-p1 (approved Wave 1 plan), plan-p1-w2 (approved Wave 2 plan), plan-x2 (older Phase 1 draft), prs (merged PR descriptions), verify-p0, review-p0, components, architecture, bot, agentic, overview, roadmap, blueprint, plans (live plans)'}, limit:{type:'integer'}}, required:['query']},
+    execute:(i) => { const r = search(String(i.query||''), {limit: Math.min(8, Math.max(1, Number(i.limit)||6)), doc: i.doc ? String(i.doc) : null}); trace(`search “${String(i.query).slice(0,40)}” → ${r.length}`); return r.map(x => ({id:x.id, document:docLabel(x.doc), heading:x.h, text:x.t.slice(0,1500)})); } },
+  { name:'read_passage', description:'Read one passage in full by id (for example audit#412), plus the passages immediately before and after it.',
+    inputSchema:{type:'object', properties:{id:{type:'string'}}, required:['id']},
+    execute:(i) => { const id = String(i.id); const c = S.chunkById.get(id); if (!c) throw new Error('No passage with id ' + id); const [doc, n] = id.split('#'); const around = [-1,0,1].map(k => S.chunkById.get(`${doc}#${+n+k}`)).filter(Boolean); trace(`read ${id}`); return around.map(x => ({id:x.id, heading:x.h, text:x.t})); } },
+  { name:'get_progress', description:'Live program status: main SHA, CI and smoke state, sync time, fix counts by status, findings closed by severity, phase statuses, open PRs and open backlog items.',
+    execute:() => { const p = progress(); trace('progress'); return {state:S.meta, fixes:{total:p.total, ...p.byStatus}, findings:{total:p.findings.length, closed:p.fClosed, bySeverity:p.sev}, phases:S.phases.map(ph => ({phase:ph.phase, name:ph.name, status:ph.status, note:ph.note, fixes:ph.fixes})), openPrs:S.prs.filter(x => x.state === 'open'), backlog:S.backlog.filter(b => b.status !== 'done')}; } },
+  { name:'get_demo_program', description:'The CURRENT program (partner integration for the Oct 6 demo): goal, due date, and every stage with its status, note and items. Use this first for any "where are we / what is next / what is left" question. The 49-fix upgrade program is archived.',
+    execute:() => { trace('demo program'); return {program:S.program, stages:[...S.stages].sort((a,b) => a.stage - b.stage)}; } },
+  { name:'list_fixes', description:'List fixes (compact) filtered by phase number, status (done, merged, in_review, in_progress, planned, open) and severity.',
+    inputSchema:{type:'object', properties:{phase:{type:'integer'}, status:{type:'string'}, severity:{type:'string'}}},
+    execute:(i) => { trace('list fixes'); return S.fixes.filter(f => (i.phase === undefined || i.phase === null || f.phase === Number(i.phase)) && (!i.status || f.status === String(i.status)) && (!i.severity || f.severity === String(i.severity))).sort((a,b) => a.phase-b.phase || a.fix-b.fix).map(compact); } },
+  { name:'get_fix', description:'Everything about one fix by number: title, phase, status, evidence, PRs, files, finding ids with their titles, Phase 1 plan task number.',
+    inputSchema:{type:'object', properties:{fix:{type:'integer'}}, required:['fix']},
+    execute:(i) => { const f = S.fixes.find(x => x.fix === Number(i.fix)); if (!f) throw new Error('No fix ' + i.fix); trace(`fix ${f.fix}`); return {...f, findings: S.findings.filter(fd => (fd.fixes||[]).includes(f.fix)).map(fd => ({ids:fd.ids, severity:fd.severity, title:fd.title}))}; } },
+  { name:'search_findings', description:'Search audit and security-scan findings by words or ids; filter by severity and open/closed. Returns id, severity, title, summary, mapped fixes and closed flag.',
+    inputSchema:{type:'object', properties:{query:{type:'string'}, severity:{type:'string'}, state:{type:'string', description:'open or closed'}}},
+    execute:(i) => { const p = progress(); const q = tokens(String(i.query||'')); trace(`findings “${String(i.query||'').slice(0,30)}”`);
+      return p.findings.filter(f => (!i.severity || f.severity === String(i.severity)) && (!i.state || (String(i.state) === 'open' ? !f.closed : f.closed)))
+        .map(f => [q.length ? q.filter(t => (f.title + ' ' + f.ids.join(' ') + ' ' + f.summary + ' ' + f.area).toLowerCase().includes(t)).length : 1, f]).filter(([s]) => s > 0).sort((a,b) => b[0]-a[0]).slice(0, 25)
+        .map(([,f]) => ({ids:f.ids, severity:f.severity, title:f.title, summary:f.summary.slice(0,300), source:f.source, fixes:f.fixes, closed:f.closed})); } },
+  { name:'get_activity', description:'The program journal, newest first: decisions, approvals, agent runs (what each agent did and found), plan changes, reviews, PRs, merges, deploys, migrations, owner steps, verifications, incidents. Filter by kind, actor (owner, claude, agent, github), fix number or plan id, and a since date (ISO).',
+    inputSchema:{type:'object', properties:{kind:{type:'string', description:'decision, approval, agent, plan, review, pr, merge, deploy, migration, owner-step, verify, milestone, incident, security'}, actor:{type:'string'}, fix:{type:'integer'}, plan:{type:'string'}, since:{type:'string'}, limit:{type:'integer'}}},
+    execute:(i) => { trace('activity' + (i.kind ? ' ' + i.kind : '')); return [...S.events].filter(e => (!i.kind || e.kind === String(i.kind)) && (!i.actor || e.actor === String(i.actor)) && (!i.fix || [].concat(e.refs?.fix || []).includes(Number(i.fix))) && (!i.plan || e.refs?.plan === String(i.plan)) && (!i.since || String(e.at) >= String(i.since))).sort((a,b) => b.at.localeCompare(a.at)).slice(0, Math.min(60, Number(i.limit)||20)); } },
+  { name:'list_plans', description:'Every plan in the ledger (phase summaries, wave plans, outline plans for later phases) with status, approval state, version, headline and the fixes each covers.',
+    execute:() => { trace('plans'); return [...S.plans].sort(planSort).map(p => ({id:p.id, phase:p.phase, wave:p.wave, kind:p.kind, title:p.title, status:p.status, approval:p.approval, planVersion:p.planVersion, updatedAt:p.updatedAt, source:p.source, headline:p.headline, items:(p.items || []).map(it => ({key:it.key, fix:it.fix, title:it.title, status:it.status}))})); } },
+  { name:'get_plan', description:'One plan in full: plain-language story, build order, owner steps, reviews, and every fix with its story, before/after steps, changes, proof, owner steps, leftovers and technical detail. Pass a plan id (e.g. p1-w2) or a fix number to get just that fix inside its plan.',
+    inputSchema:{type:'object', properties:{id:{type:'string'}, fix:{type:'integer'}}},
+    execute:(i) => {
+      if (i.fix !== undefined && i.fix !== null) { const hit = planForFix(Number(i.fix)); if (!hit) throw new Error('No plan covers fix ' + i.fix); trace(`plan for fix ${i.fix}`); const {items, ...head} = hit.plan; return {plan:{id:head.id, title:head.title, status:head.status, approval:head.approval, planVersion:head.planVersion, source:head.source}, item:hit.item}; }
+      const p = S.plans.find(x => x.id === String(i.id)); if (!p) throw new Error('No plan ' + i.id + '. Call list_plans for ids.'); trace(`plan ${p.id}`); return p; } },
+];
+let traceEl = null;
+function trace(t){ if (traceEl) { traceEl.textContent = (traceEl.textContent ? traceEl.textContent + ' · ' : 'Looked up: ') + t; } }
+const RULES = `You are the SmartRemit program assistant inside the owner's program ledger. SmartRemit is a white-label WhatsApp remittance platform in development (no real money yet). You answer ONLY from the page tools: the stored documents (search_library, read_passage), the live plans (list_plans, get_plan), the activity journal (get_activity) and the live tracker (get_progress, list_fixes, get_fix, search_findings).
+Rules:
+- Always call tools before answering. For status questions call get_progress or list_fixes; for "how/why" questions search the library with two or three specific queries and read the best passages.
+- Cite every factual claim: passages as [audit#123] (the exact id), fixes as [fix 7], PRs as "PR #244". Never invent ids.
+- If the tools do not contain the answer, say it is not in the record and suggest what to check. Never fill gaps from general knowledge about SmartRemit.
+- Status truth: a fix is verified only when its status is "done". Statuses in_review and merged are set automatically from GitHub by the ledger-sync engine; done is set only with written verification evidence. meta/state.prodServes is the commit production is proven to serve (post-deploy smoke). "planned" means a written plan exists, not code. Mention the sync time when giving status.
+- Plans: list_plans/get_plan hold the live plan for every phase and wave, written for a newcomer (story, before/after, proof, owner steps) plus technical detail. Prefer them for "what is the plan / explain the plan" questions and cite them as [plan p1-w2] or [plan p1-w2/task-9]. A plan's status and approval field are the truth: "awaiting_approval" means nothing is being built yet; "outline" means no detailed plan exists yet.
+- In the library, plan-p1 is the committed Wave 1 plan (fixes 11, 4, 6: merged and verified); plan-p1-w2 is the approved Wave 2 plan (fixes 13, 10, 9, 18; approved 2026-09-21). plan-x2 is the older full Phase 1 draft, superseded for Waves 2-4 by the live plans; say so if you use it.
+- The activity journal (get_activity) records every decision, approval, agent run, review, merge, deploy, migration, owner step and verification. Use it for "who decided / what happened / what did the agents do" questions.
+- When asked to explain simply, use plain words and one everyday analogy, as the plans do.
+- prs holds the description of every merged program PR (what changed, review findings, proof); use it for "what changed" questions.
+- Current work: the 49-fix upgrade program (Phases 0-4) is ARCHIVED as completed history. The live program is the partner-integration program for the Oct 6 demo; call get_demo_program for its stages and items, and answer "what's next / what's left" from it. Use the fix/plan tools only for questions about the archived upgrade program.
+- Be concise: lead with the answer, short paragraphs or bullets, no filler.`;
+
+let sample = null;
+async function ask(question){
+  if (!sample || ctl) return;
+  if (!S.index) { addMsg('bot', '<p class="muted">The library is still loading. Try again in a moment.</p>'); return; }
+  $('suggest').hidden = true;
+  if (!chatId) { chatId = newChatId(); chatCreated = null; }
+  addMsg('user', esc(question));
+  $('chat-title').textContent = turns.find(t => t.role === 'user')?.content.slice(0, 80) || question.slice(0, 80);
+  const bot = addMsg('bot', '<p class="muted">Thinking…</p>');
+  traceEl = document.createElement('div'); traceEl.className = 'trace'; bot.after(traceEl);
+  turns.push({role:'user', content:question});
+  ctl = new AbortController(); $('send').disabled = true; $('stop').hidden = false;
+  let history = turns.slice(-8); while (history.length && history[0].role !== 'user') history = history.slice(1);
+  history = history.map((t, i) => i === 0 ? {role:'user', content: RULES + '\n\nQuestion: ' + t.content} : t);
+  try {
+    const {text, truncated} = await sample(history, {
+      tools: TOOLS, modelTier:'default', cache:false, signal: ctl.signal,
+      onText: ({text}) => { bot.innerHTML = md(text); $('thread').scrollTop = $('thread').scrollHeight; }
+    });
+    bot.innerHTML = md(text) + (truncated ? '<p class="muted">The answer was cut short. Ask a narrower question.</p>' : '');
+    turns.push({role:'assistant', content:text, trace: traceEl?.textContent || ''});
+    saveChat();
+  } catch (e) {
+    turns.pop();
+    const keep = e && e.text ? md(e.text) : '';
+    const why = {cancelled:'Stopped.', not_granted:'The assistant needs your permission to use Claude. Reload and allow it to ask again.', rate_limited:'Too many questions at once. Wait a minute, then ask again.', prompt_too_large:'That conversation is too long. Reload the page to start fresh.', sampling_disabled:'Asking Claude is turned off for this account.', session_expired:'Your session expired. Reload the page.'}[e && e.code] || `The assistant could not answer (${esc(e && e.code || 'error')}).`;
+    bot.innerHTML = keep + `<p class="muted">${esc(why)}</p>`;
+    if (e && (e.code === 'not_granted' || e.code === 'sampling_disabled')) disableAsk(why);
+  } finally { ctl = null; $('send').disabled = false; $('stop').hidden = true; traceEl = null; }
+}
+function disableAsk(msg){ $('composer').hidden = true; $('suggest').hidden = true; if (!$('thread').children.length) addMsg('bot', `<div class="notice">${esc(msg)}</div>`); }
+$('composer').addEventListener('submit', (e) => { e.preventDefault(); const v = $('q').value.trim(); if (!v) return; $('q').value = ''; ask(v); });
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } });
+$('stop').addEventListener('click', () => ctl?.abort());
+$('suggest').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) ask(b.textContent); });
+$('new-chat').addEventListener('click', startNewChat);
+$('chat-list').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-del]');
+  if (del) { e.stopPropagation(); if (!DB || !confirm('Delete this chat?')) return; try { await DB.doc('chats/' + del.dataset.del).delete(); if (del.dataset.del === chatId) startNewChat(); } catch (err) { chatNote('Could not delete (' + (err && err.code || 'error') + ').'); } return; }
+  const item = e.target.closest('[data-chat]'); if (item) openChat(item.dataset.chat);
+});
+$('chat-list').addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[data-chat]')) { e.preventDefault(); openChat(e.target.dataset.chat); } });
+
+/* ---------- data ---------- */
+async function loadCorpus(db, meta){
+  const sig = `${meta?.corpusParts}:${meta?.chunkCount}`; if (sig === S.corpusSig) return; S.corpusSig = sig;
+  const snap = await db.collection('corpus').get();
+  const chunks = snap.docs.map(d => d.data()).sort((a,b) => a.part - b.part).flatMap(d => d.chunks || []);
+  S.corpusChunks = chunks; rebuildIndex();
+  const fsnap = await db.collection('findings').get();
+  S.findings = fsnap.docs.map(d => d.data()).sort((a,b) => a.part - b.part).flatMap(d => d.items || []);
+  render();
+}
+async function boot(){
+  try { const pv = localStorage.getItem('ledger.plan'); if (pv) S.plan = pv; } catch {}
+  try { const v = localStorage.getItem('ledger.view'); if (v) { S.view = v; document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', String(x.dataset.view === v))); } } catch {}
+  $('askView').hidden = S.view !== 'ask'; $('view').hidden = S.view === 'ask';
+  const [db, smp] = await Promise.all([claude.use('db'), claude.use('sample')]);
+  sample = smp;
+  if (!sample) disableAsk('The assistant is available when this page is opened inside Claude.');
+  if (!db) { $('view').innerHTML = '<div class="notice">Open this page inside Claude to load the live ledger. The tracker data lives in the artifact’s database.</div>'; return; }
+  DB = db;
+  db.collection('chats').onSnapshot((q) => { S.chats = q.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))); renderChatList(); }, () => chatNote('Chat history is unavailable.'));
+  const onErr = (e) => { $('view').insertAdjacentHTML('afterbegin', `<div class="notice">Could not load live data (${esc(e && e.code || 'error')}). Reload to try again.</div>`); };
+  db.doc('meta/state').onSnapshot((d) => { S.meta = d.exists ? d.data() : null; render(); }, onErr);
+  db.doc('meta/docs').onSnapshot((d) => { S.docs = d.exists ? d.data() : null; if (S.docs) loadCorpus(db, S.docs).catch(onErr); }, onErr);
+  const live = (coll, key, sortFn) => db.collection(coll).onSnapshot((q) => { S[key] = q.docs.map(d => d.data()); if (sortFn) S[key].sort(sortFn); render(); }, onErr);
+  db.collection('plans').onSnapshot((q) => { S.plans = q.docs.map(d => d.data()); S.planChunks = planChunksFrom(S.plans); if (S.corpusChunks.length) rebuildIndex(); render(); }, onErr);
+  const RANK = {open:0, not_started:0, planned:1, in_progress:2, in_review:3, merged:4, done:5};
+  const overlay = () => {
+    const latestPr = new Map();
+    for (const x of S.prstate) { const cur = latestPr.get(x.number); if (!cur || String(x.at) > String(cur.at)) latestPr.set(x.number, x); }
+    S.prs = S.rawPrs.map(pr => { const st = latestPr.get(pr.number); return st ? {...pr, state: st.state, mergeSha: st.mergeSha ?? pr.mergeSha} : pr; });
+    for (const [n, st] of latestPr) if (!S.prs.some(p => p.number === n)) S.prs.push({number:n, title:'PR #' + n, state:st.state, url:`https://github.com/Nagavenkatasai7/claude-payments/pull/${n}`, mergeSha:st.mergeSha, fix:st.fix});
+    S.prs.sort((a,b) => a.number - b.number);
+    const latestFix = new Map();
+    for (const x of S.fixstate) { const cur = latestFix.get(x.fix); if (!cur || String(x.at) > String(cur.at) || (String(x.at) === String(cur.at) && (RANK[x.status]||0) > (RANK[cur.status]||0))) latestFix.set(x.fix, x); }
+    S.fixes = S.rawFixes.map(f => { const st = latestFix.get(f.fix); if (!st || (RANK[st.status]||0) < (RANK[f.status]||0)) return f; return {...f, status: st.status, prs: [...new Set([...(f.prs||[]), ...(st.prs||[])])].sort((a,b)=>a-b), mergeSha: st.mergeSha || f.mergeSha, evidence: st.evidence || f.evidence, statusSource: st.source}; });
+  };
+  const liveO = (coll, key, sortFn) => db.collection(coll).onSnapshot((q) => { S[key] = q.docs.map(d => d.data()); if (sortFn) S[key].sort(sortFn); overlay(); render(); }, onErr);
+  liveO('fixes', 'rawFixes', (a,b) => a.fix - b.fix); liveO('fixstate', 'fixstate'); liveO('prs', 'rawPrs', (a,b) => a.number - b.number); liveO('prstate', 'prstate');
+  live('phases', 'phases'); live('events', 'events'); live('backlog', 'backlog');
+  live('stages', 'stages', (a,b) => a.stage - b.stage);
+  db.doc('meta/program').onSnapshot((d) => { S.program = d.exists ? d.data() : null; render(); }, onErr);
+}
+boot();
+})();
+</script>
+
+</body></html>

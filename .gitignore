@@ -12,6 +12,8 @@ coverage
 !.claude/settings.json
 !.claude/hooks/
 !.claude/skills/
+# Project agents (the Program Ledger curator, .claude/agents/ledger-curator.md) are checked in.
+!.claude/agents/
 playwright-report
 test-results
 /playwright/.cache
