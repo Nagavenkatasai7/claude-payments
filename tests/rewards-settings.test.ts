@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_CATALOG,
+  DEFAULT_FESTIVAL_NAMES,
+  adminFestivalNamesField,
   daySpan,
+  festivalFormState,
   isCalendarDay,
   parseCatalogForm,
   parseFestivalNames,
@@ -69,5 +72,38 @@ describe('partner form: values only inside the admin limits', () => {
     expect(daySpan('2026-11-01', '2026-11-01')).toBe(1);
     expect(daySpan('2026-11-01', '2026-11-14')).toBe(14);
     expect(settingWithinLimits({ kind: 'nth_transfer', enabled: false }, NTH)).toBe(true);
+  });
+});
+
+describe('festival names list (follow-up Part B)', () => {
+  it('the default list is the owner’s 16 festivals, in order, and the catalog default uses it', () => {
+    expect(DEFAULT_FESTIVAL_NAMES).toEqual([
+      'Diwali', 'Holi', 'Raksha Bandhan', 'Navratri', 'Durga Puja', 'Dussehra', 'Ganesh Chaturthi', 'Onam',
+      'Pongal', 'Makar Sankranti', 'Ugadi', 'Baisakhi', 'Eid al-Fitr', 'Eid al-Adha', 'Christmas', 'New Year',
+    ]);
+    expect(DEFAULT_CATALOG.festival.festivalNames).toEqual([...DEFAULT_FESTIVAL_NAMES]);
+    expect(DEFAULT_CATALOG.festival.available).toBe(false); // still dark until an admin saves it
+    expect(DEFAULT_CATALOG.nth_transfer.festivalNames).toEqual([]);
+    expect(Object.isFrozen(DEFAULT_FESTIVAL_NAMES)).toBe(true);
+  });
+
+  it('the default list passes the admin form rules unchanged (Save on the prefilled textarea works)', () => {
+    expect(parseFestivalNames(DEFAULT_FESTIVAL_NAMES.join('\n'))).toEqual([...DEFAULT_FESTIVAL_NAMES]);
+  });
+
+  it('admin textarea: an empty saved list is prefilled with the defaults and flagged as a suggestion', () => {
+    expect(adminFestivalNamesField([])).toEqual({ text: DEFAULT_FESTIVAL_NAMES.join('\n'), suggested: true });
+    expect(adminFestivalNamesField(['Diwali', 'Holi'])).toEqual({ text: 'Diwali\nHoli', suggested: false });
+  });
+
+  it('partner festival card: unavailable, no festivals yet, or the form', () => {
+    const on = { kind: 'festival' as const, enabled: true, festivalName: 'Diwali' };
+    expect(festivalFormState({ ...FEST, available: false }, undefined)).toBe('unavailable');
+    expect(festivalFormState({ ...FEST, available: false, festivalNames: [] }, undefined)).toBe('unavailable');
+    expect(festivalFormState({ ...FEST, festivalNames: [] }, undefined)).toBe('no_festivals');
+    expect(festivalFormState({ ...FEST, festivalNames: [] }, on)).toBe('no_festivals');
+    expect(festivalFormState(FEST, undefined)).toBe('form');
+    // an offer already on stays editable when SmartRemit later turns the reward off (it can be switched off)
+    expect(festivalFormState({ ...FEST, available: false }, on)).toBe('form');
   });
 });

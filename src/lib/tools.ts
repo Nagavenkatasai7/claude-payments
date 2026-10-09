@@ -20,6 +20,7 @@ import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { PURPOSE_CHOICES_TEXT, PURPOSE_LABELS, PURPOSE_REQUIRED_HINT, TRANSFER_PURPOSES, parsePurpose } from './purpose-codes';
+import { decidePurpose, keptPurposeDetail, PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING, type PurposeRiskCategory } from './purpose-detail';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
 import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
@@ -572,6 +573,12 @@ const DESTINATION_COUNTRY_DESCRIPTION =
 const PURPOSE_ARG_DESCRIPTION =
   "Why the customer is sending this money. Use the reason they stated or chose; never guess it from the recipient, the relationship or the amount.";
 
+/** Batch B follow-up A3: the purpose_detail argument (send_approve_picker, create_transfer, repeat_transfer, create_schedule). */
+const PURPOSE_DETAIL_ARG_DESCRIPTION =
+  "Only with purpose 'other': the customer's own words for what the money is for (10 to 120 characters). Never write it yourself.";
+
+const PURPOSE_DETAIL_ARG = { type: 'string', description: PURPOSE_DETAIL_ARG_DESCRIPTION } as const;
+
 export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
@@ -745,6 +752,7 @@ export const toolSchemas: ChatTool[] = [
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
           purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
+          purpose_detail: PURPOSE_DETAIL_ARG,
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           destination_country: {
@@ -938,6 +946,7 @@ export const toolSchemas: ChatTool[] = [
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
           purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
+          purpose_detail: PURPOSE_DETAIL_ARG,
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
@@ -1031,6 +1040,7 @@ export const toolSchemas: ChatTool[] = [
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
           purpose: { type: 'string', enum: [...TRANSFER_PURPOSES], description: PURPOSE_ARG_DESCRIPTION },
+          purpose_detail: PURPOSE_DETAIL_ARG,
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
@@ -1132,6 +1142,7 @@ export const toolSchemas: ChatTool[] = [
             enum: [...TRANSFER_PURPOSES],
             description: 'The reason the customer stated or confirmed for THIS send. Never copy it from the past transfer without their yes.',
           },
+          purpose_detail: PURPOSE_DETAIL_ARG,
         },
         // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
         required: [],
@@ -1893,6 +1904,7 @@ async function createTransferTool(
         recipientLegalName: draft.recipientLegalName,
         relationship: draft.relationship,
         purpose: draft.purpose,
+        purposeDetail: draft.purposeDetail, // Batch B follow-up A3 (re-checked at the mint)
         sourceOfFunds: draft.sourceOfFunds,
         occupation: draft.occupation,
         // For B2B, screen the PAYER business name (else the individual sender name).
@@ -1972,6 +1984,9 @@ async function createTransferTool(
   // send_approve_picker, which already required it (and an in-flight draft from
   // before the requirement still mints).
   if (ctx.purposeRequired && !isB2bArgs(args) && !parsePurpose(args.purpose)) return purposeRequiredResult();
+  // Batch B follow-up A3: purpose 'other' needs the customer's reason.
+  const legacyPurpose = purposeFromArgs(args, ctx);
+  if (!legacyPurpose.ok) return legacyPurpose.result;
   const recipientPhone = normalizePhone(args.recipient_phone);
   if (!isValidPhone(recipientPhone)) {
     return {
@@ -2052,7 +2067,8 @@ async function createTransferTool(
       // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
       relationship: asEnum(RELATIONSHIPS, args.relationship),
-      purpose: legacyB2b ? BUSINESS_PURPOSE : parsePurpose(args.purpose),
+      purpose: legacyB2b ? BUSINESS_PURPOSE : legacyPurpose.purpose,
+      purposeDetail: legacyB2b ? undefined : legacyPurpose.detail,
       sourceOfFunds: legacySof,
       occupation: legacyOcc,
       // For B2B, screen the PAYER business name (else the individual sender name).
@@ -3725,6 +3741,9 @@ export async function validateScheduleInput(
   // stated purpose is kept whether or not it is required.
   const purpose = parsePurpose(input.purpose);
   if (opts.requirePurpose && !purpose) return { ok: false, code: 'purpose' };
+  // Batch B follow-up A3: the caller already applied decidePurpose; only a valid reason is kept
+  // (or an invalid one that matches a scam pattern, security review L2: each run is held).
+  const purposeDetail = purpose ? keptPurposeDetail(input.purposeDetail)?.detail : undefined;
   // M2-10 (portal only): the amount is checked BEFORE resolveSender, so a refusal writes nothing.
   if (opts.amountBounds && !scheduleAmountInBounds(input.amountSource)) return { ok: false, code: 'amount' };
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
@@ -3769,6 +3788,7 @@ export async function validateScheduleInput(
       sourceCurrency,
       amountSource,
       ...(purpose ? { purpose } : {}),
+      ...(purposeDetail ? { purposeDetail } : {}),
     },
   };
 }
@@ -3784,6 +3804,9 @@ async function createScheduleTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // Batch B follow-up A3: purpose 'other' needs the customer's reason (asked once).
+  const pd = purposeFromArgs(args, ctx);
+  if (!pd.ok) return pd.result;
   const v = await validateScheduleInput(ctx, {
     recipientPhone: args.recipient_phone,
     recipientName: args.recipient_name,
@@ -3795,7 +3818,8 @@ async function createScheduleTool(
     destinationCountry: args.destination_country,
     sourceCurrency: args.source_currency,
     endDate: args.end_date,
-    purpose: args.purpose,
+    purpose: pd.purpose,
+    purposeDetail: pd.detail,
   }, { requirePurpose: ctx.purposeRequired === true });
   if (!v.ok) return scheduleRefusalToolResult(v);
   const schedule: Schedule = {
@@ -3817,6 +3841,8 @@ async function createScheduleTool(
     source_currency: schedule.sourceCurrency,
     amount_source_display: sourceAmountDisplay(schedule.amountSource, schedule.sourceCurrency),
     destination_country: DEFAULT_DESTINATION_COUNTRY,
+    // Batch B follow-up A4: each run of this schedule is held for review; the agent shows the warning.
+    ...scamWarningFields(pd.risk),
   };
 }
 
@@ -4038,6 +4064,45 @@ function repeatPurposeRequiredResult(last: TransferPurpose | null): ToolResult {
 
 /** Every business bill payment's purpose: the customer is never asked. */
 const BUSINESS_PURPOSE: TransferPurpose = 'business';
+
+/** Batch B follow-up A3: the purpose and reason a send tool goes on with, or its refusal. */
+type ArgsPurpose =
+  | { ok: true; purpose?: TransferPurpose; detail?: string; risk?: PurposeRiskCategory }
+  | { ok: false; result: ToolResult };
+
+/**
+ * Batch B follow-up A3: the "Other" reason rule on a send tool's args
+ * (decidePurpose). Purpose `other` needs a valid purpose_detail; a reason that
+ * names one purpose turns `other` into it (the reason is kept); any other
+ * purpose ignores purpose_detail. The QUESTION follows the purpose.detect switch
+ * like the rest of the bot's purpose logic: with ctx.purposeRequired off, `other`
+ * without a valid reason goes on as plain `other` (never asked, as before),
+ * unless the text still matches a scam pattern (security review L2): then it
+ * is kept, bounded (keptPurposeDetail), so the customer is warned and the mint
+ * holds the transfer. A business bill payment is always 'business' and never asked.
+ */
+function purposeFromArgs(args: Record<string, unknown>, ctx: ToolContext): ArgsPurpose {
+  const purpose = parsePurpose(args.purpose);
+  if (purpose !== 'other' || isB2bArgs(args)) return { ok: true, purpose };
+  const d = decidePurpose('other', args.purpose_detail);
+  if (d.ok) return { ok: true, purpose: d.purpose, detail: d.detail, risk: d.risk };
+  if (!ctx.purposeRequired) {
+    const kept = keptPurposeDetail(args.purpose_detail);
+    return kept?.risk ? { ok: true, purpose: 'other', detail: kept.detail, risk: kept.risk } : { ok: true, purpose: 'other' };
+  }
+  return { ok: false, result: { needs_purpose_detail: true, reply_hint: PURPOSE_DETAIL_HINT } };
+}
+
+/**
+ * Batch B follow-up A4: what a send tool adds when the reason matches a scam
+ * pattern. The customer must see the warning BEFORE the Approve card: on
+ * WhatsApp the card body starts with it (the card is the turn's reply); on the
+ * web channel and for a schedule the agent puts it at the top of the reply
+ * (agent.ts). The category is never returned (no tipping off, even to the model).
+ */
+function scamWarningFields(risk: PurposeRiskCategory | undefined): ToolResult {
+  return risk ? { scam_warning: PURPOSE_SCAM_WARNING } : {};
+}
 
 function senderNameRequired(): ToolResult {
   return { needs_sender_name: true, reply_to_customer: SENDER_NAME_QUESTION };
@@ -4268,6 +4333,8 @@ export async function prepareSendDraft(
       return { kind: 'blocked' };
     }
 
+    // Batch B follow-up A3 / security review L2: the reason the draft keeps (re-checked at the mint).
+    const keptDetail = keptPurposeDetail(input.purposeDetail)?.detail;
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       partnerId: ctx.partnerId,
@@ -4287,6 +4354,9 @@ export async function prepareSendDraft(
       recipientLegalName: typeof input.recipientLegalName === 'string' ? input.recipientLegalName : undefined,
       relationship: asEnum(RELATIONSHIPS, input.relationship),
       purpose: b2b ? BUSINESS_PURPOSE : parsePurpose(input.purpose),
+      // Batch B follow-up A3: the reason rides the draft to the mint (plaintext in
+      // Redis like the other draft fields; sealed on the transfer row).
+      ...(!b2b && parsePurpose(input.purpose) && keptDetail ? { purposeDetail: keptDetail } : {}),
       sourceOfFunds: asEnum(SOURCE_OF_FUNDS, input.sourceOfFunds),
       occupation: asEnum(OCCUPATIONS, input.occupation),
       quote: {
@@ -4404,6 +4474,9 @@ async function sendApprovePickerTool(
   // before anything is quoted or drafted. A business bill payment is excluded
   // (its draft is always 'business').
   if (ctx.purposeRequired && !isB2bArgs(args) && !parsePurpose(args.purpose)) return purposeRequiredResult();
+  // Batch B follow-up A3: purpose 'other' needs the customer's reason (asked once).
+  const pd = purposeFromArgs(args, ctx);
+  if (!pd.ok) return pd.result;
   // UI redesign M2-4: the gates, screen and draft are prepareSendDraft; this
   // tool keeps only the channel tail. Raw model args pass through uncoerced
   // (each parser sees what it saw before); payout_* is never read.
@@ -4422,7 +4495,8 @@ async function sendApprovePickerTool(
       invoiceId: args.invoice_id,
       recipientLegalName: args.recipient_legal_name,
       relationship: args.relationship,
-      purpose: args.purpose,
+      purpose: pd.purpose,
+      purposeDetail: pd.detail,
       sourceOfFunds: args.source_of_funds,
       occupation: args.occupation,
     },
@@ -4444,8 +4518,9 @@ async function sendApprovePickerTool(
       draft_id: draftId,
       summary,
       pay_url: payUrl,
+      ...scamWarningFields(pd.risk),
       reply_hint:
-        `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+        `${pd.risk ? 'start your reply with the scam_warning text word for word, then ' : ''}show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
           lockMinutes < 2
             ? 'the rate is valid only for a moment, so they should tap soon'
             : `the rate is locked for ${lockMinutes} minutes`
@@ -4477,7 +4552,8 @@ async function sendApprovePickerTool(
   try {
     await sendCtaUrl(
       ctx.phone,
-      `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+      // Batch B follow-up A4: a scam-pattern reason puts the warning at the top of the card.
+      `${pd.risk ? `${PURPOSE_SCAM_WARNING}\n\n` : ''}${summary}\n\nTap to pay securely, or reply cancel to stop.`,
       { displayText: 'Approve & Pay', url: payUrl },
       undefined,
       undefined,
@@ -4490,7 +4566,7 @@ async function sendApprovePickerTool(
     await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
     throw sendErr;
   }
-  return { sent: true, draft_id: draftId };
+  return { sent: true, draft_id: draftId, ...scamWarningFields(pd.risk) };
 }
 
 async function repeatTransferTool(
@@ -4514,6 +4590,11 @@ async function repeatTransferTool(
   // A3: the purpose the customer stated (or confirmed) for THIS send, never the
   // past row's; an unknown value is dropped, like on send_approve_picker.
   const purpose = parsePurpose(args.purpose);
+  // Batch B follow-up A3: purpose 'other' needs the customer's reason, checked
+  // before any read (send_approve_picker below decides it again from the same args).
+  const pd = purposeFromArgs(args, ctx);
+  if (!pd.ok) return pd.result;
+  const purposeDetailArg = pd.detail ? { purpose_detail: args.purpose_detail } : {};
 
   // Hydrate from the customer's OWN transfers (own tenant + phone, newest-first).
   // Stage 4: indexed per-phone page, then a small in-JS filter. By id: an id that
@@ -4593,6 +4674,7 @@ async function repeatTransferTool(
       payout_destination: stored ? maskAccount(stored.payoutMethod, stored.payoutDestination) : '',
       destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
       ...(purpose ? { purpose } : {}),
+      ...(pd.detail ? { purpose_detail: pd.detail } : {}),
     };
   }
 
@@ -4608,6 +4690,7 @@ async function repeatTransferTool(
       destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
       source_currency: last.sourceCurrency,
       ...(purpose ? { purpose } : {}),
+      ...purposeDetailArg,
     },
     ctx,
   );

@@ -19,6 +19,7 @@ import type { ChatMessage, ChatTool, TurnContext } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
+import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 
 // Best-rate routing (B2): the agent wires the LIVE route selector into the
 // tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
@@ -2123,5 +2124,98 @@ describe('Required purpose: the purpose.detect switch applies to every phone', (
     expect(prompts.length).toBeGreaterThanOrEqual(2);
     for (const p of prompts) expect(p).not.toContain('\nPURPOSE\n');
     expect(toolResult).not.toContain('needs_purpose');
+  });
+});
+
+// Batch B follow-up A3/A4: the "Other" reason. The QUESTION follows the
+// purpose.detect switch (needs_purpose_detail only while it is on); a reason
+// that matches a scam pattern returns scam_warning, and the agent puts the
+// warning at the top of a text reply even when the model leaves it out.
+describe('Purpose detail: the "Other" reason and the scam warning in a bot turn', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function purposeSwitch(on: boolean) {
+    await createFeatureFlagRepo(db).upsert({ key: 'purpose.detect', scopeType: 'global', scopeId: '', enabled: on, reason: 'purpose detail test', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+  }
+
+  async function scheduleTurn(args: Record<string, unknown>, modelReply = 'Your monthly transfer is set up.') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedNamedSender(deps.customerStore);
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...deps,
+      chat: async (messages) => {
+        seen.push(messages);
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'c1', type: 'function', function: { name: 'create_schedule', arguments: JSON.stringify({
+              amount_source: 50, recipient_name: 'Mom', recipient_phone: '919876543210', frequency: 'monthly', day_of_month: 5, ...args,
+            }) } }],
+          };
+        }
+        return { role: 'assistant', content: modelReply };
+      },
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send 50 every month', { isNewConversation: false });
+    const toolResult = JSON.parse(String(seen[1]?.find((m) => m.role === 'tool')?.content ?? '{}')) as Record<string, unknown>;
+    return { reply, toolResult };
+  }
+
+  it('switch on: purpose other with no reason ⇒ needs_purpose_detail, nothing saved', async () => {
+    await purposeSwitch(true);
+    const { toolResult } = await scheduleTurn({ purpose: 'other' });
+    expect(toolResult).toMatchObject({ needs_purpose_detail: true });
+    expect(String(toolResult.reply_hint)).toContain('What is it for?');
+    expect(toolResult.schedule_id).toBeUndefined();
+  });
+
+  it('switch on: a nonsense reason ⇒ needs_purpose_detail', async () => {
+    await purposeSwitch(true);
+    const { toolResult } = await scheduleTurn({ purpose: 'other', purpose_detail: 'send money' });
+    expect(toolResult).toMatchObject({ needs_purpose_detail: true });
+  });
+
+  it('switch off: purpose other with no reason is not asked (the schedule is saved)', async () => {
+    await purposeSwitch(false);
+    const { toolResult } = await scheduleTurn({ purpose: 'other' });
+    expect(toolResult.needs_purpose_detail).toBeUndefined();
+    expect(typeof toolResult.schedule_id).toBe('string');
+  });
+
+  it('a reason that names a purpose saves that purpose with the reason', async () => {
+    await purposeSwitch(true);
+    const { toolResult } = await scheduleTurn({ purpose: 'other', purpose_detail: 'school fees for my brother' });
+    const saved = await freshScheduleStore().getSchedule(String(toolResult.schedule_id));
+    expect(saved).toMatchObject({ purpose: 'education', purposeDetail: 'school fees for my brother' });
+    expect(toolResult.scam_warning).toBeUndefined();
+  });
+
+  it('a scam-pattern reason returns scam_warning (no category) and the reply starts with the warning', async () => {
+    await purposeSwitch(true);
+    const { toolResult, reply } = await scheduleTurn({ purpose: 'other', purpose_detail: 'to claim my lottery prize' });
+    expect(toolResult.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    expect(JSON.stringify(toolResult)).not.toMatch(/prize"|category|lottery/);
+    expect(reply.startsWith(PURPOSE_SCAM_WARNING)).toBe(true);
+    expect(reply).toContain('Your monthly transfer is set up.');
+  });
+
+  it('the warning is not doubled when the model already sent it', async () => {
+    await purposeSwitch(true);
+    const { reply } = await scheduleTurn(
+      { purpose: 'other', purpose_detail: 'to claim my lottery prize' },
+      `${PURPOSE_SCAM_WARNING}\n\nYour monthly transfer is set up.`,
+    );
+    expect(reply.split(PURPOSE_SCAM_WARNING).length).toBe(2);
   });
 });

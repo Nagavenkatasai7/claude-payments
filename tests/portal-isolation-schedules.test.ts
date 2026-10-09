@@ -250,6 +250,28 @@ describe('create', () => {
     expect(s.errors?.day).toBe('portal.schedules.day_invalid');
   });
 
+  it('A3: Other with no reason ⇒ the reason error with the words echoed; nothing saved', async () => {
+    await signIn('pa');
+    const before = (await schedulesOf('pa')).length;
+    const s = await createScheduleAction(init(), createForm({ purpose: 'other', purpose_detail: 'send money' }));
+    expect(s.errors?.purposeDetail).toBe('portal.send.purpose_detail_invalid');
+    expect(s.values).toMatchObject({ purpose: 'other', purpose_detail: 'send money' });
+    expect(s.scamWarning).toBeUndefined();
+    expect(await schedulesOf('pa')).toHaveLength(before);
+  });
+
+  it('A4: a scam-pattern reason ⇒ the warning and the tick first (no rule named), then the schedule is saved', async () => {
+    await signIn('pa');
+    const before = (await schedulesOf('pa')).length;
+    const words = { purpose: 'other', purpose_detail: 'to claim my lottery prize' };
+    const s = await createScheduleAction(init(), createForm(words));
+    expect(s).toMatchObject({ error: 'portal.send.scam_ack_required', scamWarning: true, values: words });
+    expect(JSON.stringify(s)).not.toMatch(/category/);
+    expect(await schedulesOf('pa')).toHaveLength(before);
+    await expectRedirect(createScheduleAction(s, createForm({ ...words, scam_ack: 'on', requestKey: s.requestKey })), '/portal/schedules?done=created');
+    expect(await schedulesOf('pa')).toHaveLength(before + 1);
+  });
+
   it('required purpose: none chosen ⇒ the purpose field error, the choice echoed, nothing saved', async () => {
     await signIn('pa');
     const before = (await schedulesOf('pa')).length;

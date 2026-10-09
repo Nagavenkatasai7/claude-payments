@@ -21,6 +21,8 @@ import type { ToolContextDeps } from '@/lib/tool-context';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedSender } from './helpers-db';
 import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-partner';
+import { defaultProvider, encryptField } from '@/lib/field-crypto';
+import { ctx as cryptoCtx } from '@/lib/crypto-context';
 
 // UI redesign M2-9, Task 9.2: the Send and Review PAGES (GET). No provider writes on GET: a gated or
 // T0 customer's renders never start a verification inquiry; the price is always re-quoted.
@@ -319,6 +321,25 @@ describe('the Review page (GET)', () => {
     expect(html).not.toContain('medical<');
   });
 
+  // Batch B follow-up A3/A4: the customer's words shown back; a scam-pattern reason shows the warning.
+  it('a reason from the customer\'s words: "Education (from your words: ...)", no warning', async () => {
+    await review('pa', { ...newRecipient, purpose: 'education', purposeDetail: 'school fees for my son' });
+    const html = await reviewHtml();
+    expect(html).toContain('Education (from your words: &quot;school fees for my son&quot;)');
+    expect(html).not.toContain('data-scam-warning');
+    expect(html).not.toContain('name="scam_ack"');
+  });
+
+  it('a scam-pattern reason: the warning and a required "I have read this warning" tick inside the Continue form', async () => {
+    await review('pa', { ...newRecipient, purpose: 'other', purposeDetail: 'to claim my lottery prize' });
+    const html = await reviewHtml();
+    expect(html).toContain('data-scam-warning');
+    expect(html).toContain('Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. SmartRemit staff check this transfer before the money goes.');
+    expect(html).toMatch(/<input required="" type="checkbox"[^>]*name="scam_ack"/);
+    expect(html).toContain('I have read this warning');
+    expect(html.indexOf('name="scam_ack"')).toBeGreaterThan(html.indexOf('name="rv"'));
+  });
+
   it('EDD → the WhatsApp copy and no Continue', async () => {
     await raiseDaily();
     await seedLedgerSpend(db, { partnerId: 'pa', phone, amountUsd: 2850, status: 'paid' });
@@ -377,5 +398,18 @@ describe('the transfer detail', () => {
     await db.execute(sql`UPDATE transfers SET purpose = 'medical' WHERE id = ${A.transferIds[0]}`);
     const withLast = renderToStaticMarkup(await TransferDetailPage({ params: Promise.resolve({ id: A.transferIds[0] }) }));
     expect(withLast).toMatch(/<option value="medical" selected="">Medical<\/option>/);
+    expect(withLast).not.toContain('name="purpose_detail"');
+  });
+
+  it('A3: the last transfer\'s own reason ⇒ Send again starts on Other with the customer\'s words', async () => {
+    const id = A.transferIds[0];
+    const enc = encryptField('helping a neighbour repair the roof', defaultProvider(), cryptoCtx.transfer(id, 'purpose_detail_enc'));
+    await db.execute(sql`UPDATE transfers SET purpose = 'other', purpose_detail_enc = ${enc} WHERE id = ${id}`);
+    const html = renderToStaticMarkup(await TransferDetailPage({ params: Promise.resolve({ id }) }));
+    expect(html).toMatch(/<option value="other" selected="">Other<\/option>/);
+    expect(html).toMatch(/<textarea[^>]*name="purpose_detail"[^>]*maxLength="120"[^>]*>helping a neighbour repair the roof<\/textarea>/);
+    // Another customer never sees it (their page is a 404).
+    signIn('pa', '14155550177');
+    await expect(TransferDetailPage({ params: Promise.resolve({ id }) })).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
   });
 });

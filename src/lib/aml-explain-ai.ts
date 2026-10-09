@@ -10,6 +10,7 @@ import {
   SENDER_WATCHLIST_REASON,
   VELOCITY_REASON,
 } from '@/lib/compliance-config';
+import { PURPOSE_RISK_LABELS, type PurposeRiskCategory } from '@/lib/purpose-detail';
 import type { ChatMessage, CountryCode, Transfer } from '@/lib/types';
 
 // aml-explain-ai — the AML "Explain" copilot (A4, Raj #6). Strictly rung-1 and
@@ -48,6 +49,7 @@ export type HoldReasonCode =
   | 'large_amount'
   | 'velocity'
   | 'aml_hold'
+  | 'purpose_hold'
   | 'edd_required'
   | 'other';
 
@@ -88,6 +90,15 @@ export interface AmlExplainThresholds {
   clusterSenders: number;
 }
 
+/**
+ * Security review L1: the purpose hold reuses AML_HOLD_REASON (no tipping off), so the caller says
+ * when the transfer has a `purpose.flag` audit row. `category` is that row's category, or null when
+ * the row carries none the code knows.
+ */
+export interface PurposeHoldFact {
+  category: PurposeRiskCategory | null;
+}
+
 /** The FACTS bundle: the only thing the model (and the UI facts table) ever sees. */
 export interface AmlExplainFacts {
   audience: AmlExplainAudience;
@@ -102,6 +113,8 @@ export interface AmlExplainFacts {
   holdAgeHours: number | null;
   holdReasons: HoldReasonCode[];
   eddRequired: boolean;
+  /** Platform only: the scam pattern the customer's stated reason matched (a closed code and its staff label). */
+  purposeRisk?: { category: PurposeRiskCategory; label: string };
 }
 
 export interface AmlExplanation {
@@ -122,10 +135,12 @@ const MAX_CHECK = 300;
 const finite = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function holdReasonCodes(reasons: readonly string[] | undefined): HoldReasonCode[] {
+function holdReasonCodes(reasons: readonly string[] | undefined, purposeHold: boolean): HoldReasonCode[] {
   const out: HoldReasonCode[] = [];
   for (const r of reasons ?? []) {
-    const code = typeof r === 'string' && Object.hasOwn(HOLD_REASON_CODES, r) ? HOLD_REASON_CODES[r] : 'other';
+    let code = typeof r === 'string' && Object.hasOwn(HOLD_REASON_CODES, r) ? HOLD_REASON_CODES[r] : 'other';
+    // The purpose hold adds the same generic reason as the AML hold (aml-hold.ts applyPurposeHold).
+    if (code === 'aml_hold' && purposeHold) code = 'purpose_hold';
     if (!out.includes(code)) out.push(code);
   }
   return out;
@@ -157,7 +172,10 @@ function ruleFact(
  * Build the facts bundle (PURE). `alerts` are the transfer's aml.alert rows
  * (malformed rows are dropped, one fact per rule). When there is none, the
  * caller may pass `recomputed` — the in-mint rules re-run on the sender's
- * ledger (senderAmlStats → amlHoldHit) — marked "recomputed".
+ * ledger (senderAmlStats → amlHoldHit) — marked "recomputed". `purposeHold`
+ * (the transfer has a purpose.flag row) turns the generic hold reason into
+ * `purpose_hold`; its category reaches the PLATFORM audience only (the partner
+ * transfer page never names it either).
  */
 export function buildAmlExplainBundle(
   t: Transfer,
@@ -166,6 +184,7 @@ export function buildAmlExplainBundle(
   audience: AmlExplainAudience,
   now: number,
   recomputed?: AmlHit | null,
+  purposeHold?: PurposeHoldFact | null,
 ): AmlExplainFacts {
   const rules: AmlExplainRuleFact[] = [];
   for (const a of alerts) {
@@ -189,9 +208,13 @@ export function buildAmlExplainBundle(
     transferType: t.transferType === 'b2b' ? 'b2b' : 'b2c',
     onHold,
     holdAgeHours,
-    holdReasons: onHold || t.complianceStatus === 'flagged' ? holdReasonCodes(t.complianceReasons) : [],
+    holdReasons: onHold || t.complianceStatus === 'flagged' ? holdReasonCodes(t.complianceReasons, !!purposeHold) : [],
     eddRequired: t.eddRequired === true,
   };
+  const category = purposeHold?.category;
+  if (audience === 'platform' && category) {
+    facts.purposeRisk = { category, label: PURPOSE_RISK_LABELS[category] };
+  }
   if (audience === 'platform') {
     facts.thresholds = {
       largeAmountUsd: cfg.largeAmountUsd,
@@ -247,6 +270,7 @@ function factsText(f: AmlExplainFacts): string {
       : 'On hold for review: no.',
   );
   lines.push(`Hold reasons: ${f.holdReasons.length ? f.holdReasons.join(', ') : 'none'}.`);
+  if (f.purposeRisk) lines.push(`The reason the customer gave for the transfer matches a scam pattern: ${f.purposeRisk.label}.`);
   lines.push(`Enhanced due diligence required: ${f.eddRequired ? 'yes' : 'no'}.`);
   lines.push(f.audience === 'partner' ? 'The reader is the partner\'s compliance staff.' : 'The reader is SmartRemit compliance staff.');
   return lines.join('\n');
@@ -351,9 +375,12 @@ const HOLD_TEXT: Readonly<Record<HoldReasonCode, string>> = Object.freeze({
   large_amount: 'a large amount',
   velocity: 'high transfer velocity',
   aml_hold: 'an AML review hold',
+  purpose_hold: 'a scam-pattern check of the reason the customer gave',
   edd_required: 'enhanced due diligence',
   other: 'another review reason',
 });
+
+const PURPOSE_CHECK = 'Read the reason the customer gave and check whether it fits a known scam pattern.';
 
 const GENERIC_CHECKS = [
   "Review the sender's transfer history.",
@@ -377,9 +404,11 @@ export function amlExplainFallback(f: AmlExplainFacts): AmlExplanation {
     const why = f.holdReasons.length ? f.holdReasons.map((c) => HOLD_TEXT[c]).join(', ') : 'review';
     sentences.push(`It is on hold for ${why}.`);
   }
+  if (f.purposeRisk) sentences.push(`The reason the customer gave matches a scam pattern: ${f.purposeRisk.label}.`);
   if (sentences.length === 0) sentences.push('No behavioural AML rule is recorded for this transfer.');
   const checks: string[] = [];
   for (const r of f.rules) for (const c of RULE_CHECKS[r.rule]) if (!checks.includes(c)) checks.push(c);
+  if (f.holdReasons.includes('purpose_hold')) checks.push(PURPOSE_CHECK);
   for (const c of GENERIC_CHECKS) if (!checks.includes(c)) checks.push(c);
   const first = f.rules[0];
   return {

@@ -17,6 +17,7 @@ import {
   type ScheduleFormErrors,
 } from '@/lib/portal-schedules';
 import type { ScheduleAction } from '@/lib/schedule-control';
+import { needsScamAck, showsScamWarning } from '@/lib/portal-send';
 import { logWarn } from '@/lib/log';
 import type { MessageKey } from '@/lib/i18n';
 import type { PartnerId } from '@/lib/types';
@@ -36,8 +37,16 @@ export interface ScheduleFormState {
   requestKey: string;
   error?: MessageKey;
   errors?: ScheduleFormErrors;
-  /** Echo of the inputs (none is secret: an opaque rid, an amount and a day). */
-  values?: { rid?: string; amount?: string; frequency?: string; dayOfMonth?: string; dayOfWeek?: string; endDate?: string; purpose?: string };
+  /**
+   * Echo of the inputs (an opaque rid, an amount, a day, and the customer's own "Other" reason,
+   * returned only to the customer who typed it).
+   */
+  values?: { rid?: string; amount?: string; frequency?: string; dayOfMonth?: string; dayOfWeek?: string; endDate?: string; purpose?: string; purpose_detail?: string };
+  /**
+   * Batch B follow-up A4: the reason matches a scam pattern, so the form shows the warning and the
+   * required "I have read this warning" tick (never which words matched).
+   */
+  scamWarning?: boolean;
 }
 
 const text = (fd: FormData, k: string) => {
@@ -52,6 +61,10 @@ const echo = (fd: FormData): ScheduleFormState['values'] => ({
   dayOfWeek: text(fd, 'dayOfWeek'),
   endDate: text(fd, 'endDate'),
   purpose: text(fd, 'purpose'),
+  purpose_detail: (() => {
+    const v = fd.get('purpose_detail');
+    return typeof v === 'string' ? v.slice(0, 480) : '';
+  })(),
 });
 const refuse = (fd: FormData, e: Omit<ScheduleFormState, 'requestKey' | 'values'>): ScheduleFormState => ({
   requestKey: newRequestKey(),
@@ -98,6 +111,9 @@ export async function createScheduleAction(_prev: ScheduleFormState, formData: F
   const parsed = parseScheduleForm(formData);
   if (!parsed.ok) return refuse(formData, { errors: parsed.errors });
   const value = parsed.value;
+  // Batch B follow-up A4: a scam-pattern reason shows the warning; the tick is required to save.
+  const scam = showsScamWarning(value.purposeDetail) ? { scamWarning: true } : {};
+  if (needsScamAck(value.purposeDetail, formData)) return refuse(formData, { error: 'portal.send.scam_ack_required', ...scam });
   let out: { kind: string };
   try {
     out = (
@@ -108,11 +124,11 @@ export async function createScheduleAction(_prev: ScheduleFormState, formData: F
       })
     ).value;
   } catch (err) {
-    if (err instanceof RequestInFlightError) return refuse(formData, { error: 'portal.schedules.busy' });
+    if (err instanceof RequestInFlightError) return refuse(formData, { error: 'portal.schedules.busy', ...scam });
     logWarn('portal.schedules.create', 'create failed');
-    return refuse(formData, { error: 'portal.schedules.failed' });
+    return refuse(formData, { error: 'portal.schedules.failed', ...scam });
   }
-  if (out.kind !== 'done') return refuse(formData, { error: CREATE_REFUSAL[out.kind] ?? 'portal.schedules.failed' });
+  if (out.kind !== 'done') return refuse(formData, { error: CREATE_REFUSAL[out.kind] ?? 'portal.schedules.failed', ...scam });
   redirect('/portal/schedules?done=created');
 }
 

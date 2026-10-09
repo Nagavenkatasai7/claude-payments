@@ -6,7 +6,7 @@ import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
 import { verifiedReceiptEmail } from '@/lib/portal-prefs';
 import { requirePortalCustomer } from '@/lib/portal-auth';
-import { getPortalB2bParties, getPortalTransfer, portalOwner, transferTimeline, type TimelineState } from '@/lib/portal-transfers';
+import { getPortalB2bParties, getPortalTransfer, getPortalTransferPurposeDetail, portalOwner, transferTimeline, type TimelineState } from '@/lib/portal-transfers';
 import { refundDisposition } from '@/lib/refund-policy';
 import { payoutMethodLabel } from '@/lib/payout-format';
 import { newRequestKey } from '@/lib/portal-request-key';
@@ -80,6 +80,9 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
   const currency = transfer.sourceCurrency ?? 'USD';
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const key = () => newRequestKey();
+  // Batch B follow-up A3: Send again starts with the customer's own last reason (their words, for them only).
+  const canSendAgain = transfer.status !== 'blocked' && transfer.transferType !== 'b2b';
+  const lastPurposeDetail = canSendAgain ? ((await getPortalTransferPurposeDetail(owner, transfer.id)) ?? undefined) : undefined;
 
   return (
     <>
@@ -203,11 +206,12 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
           </Card>
         ) : null}
 
-        {transfer.status !== 'blocked' && transfer.transferType !== 'b2b' ? (
+        {canSendAgain ? (
           <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
             <h2 data-send-again className="text-[17px] font-bold text-ds-ink">{t('portal.send.sendAgainTitle')}</h2>
             <p className="text-[14px] text-ds-ink-muted">{t('portal.send.sendAgainBody')}</p>
-            <SendAgainForm action={sendAgainAction.bind(null, transfer.id)} requestKey={key()} lastPurpose={transfer.purpose} />
+            <SendAgainForm action={sendAgainAction.bind(null, transfer.id)} requestKey={key()} lastPurpose={transfer.purpose}
+              lastPurposeDetail={lastPurposeDetail} />
           </Card>
         ) : null}
 

@@ -63,7 +63,7 @@ export async function explainAmlAction(formData: FormData): Promise<AmlExplainAc
     } catch {
       /* fail-open */
     }
-    const facts = buildAmlExplainBundle(transfer, loaded.alerts, loaded.cfg, 'partner', now.getTime(), loaded.recomputed);
+    const facts = buildAmlExplainBundle(transfer, loaded.alerts, loaded.cfg, 'partner', now.getTime(), loaded.recomputed, loaded.purposeHold);
     let source: 'ai' | 'fallback' = 'fallback';
     let explanation = amlExplainFallback(facts);
     if (withinBudget) {

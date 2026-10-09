@@ -377,6 +377,40 @@ describe('/partner/transfers/[id]: A3 purpose row', () => {
   });
 });
 
+// Batch B follow-up A4: the customer's "Other" reason, for the owning tenant's staff, audited as
+// pii.view (actorScope partner). The staff-only scam-pattern name never shows here.
+describe('/partner/transfers/[id]: the reason given', () => {
+  it('shows the reason to the owning tenant and writes ONE pii.view row (names only, no words)', async () => {
+    await seedPartnerTransfer(db, {
+      id: 'tr_A_reason', partnerId: 'pa', phone: PHONE, status: 'in_review', complianceStatus: 'flagged',
+      purpose: 'other', purposeDetail: 'to claim my lottery prize',
+    });
+    await asAgent();
+    const html = await detail('tr_A_reason');
+    expect(html).toContain('Reason given');
+    expect(html).toContain('to claim my lottery prize');
+    expect(html).not.toMatch(/Risk:|Prize or lottery/);
+    const rows = await db.select().from(auditEvents).where(eq(auditEvents.action, 'pii.view'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partnerId: 'pa', actor: 'pa-agent', actorType: 'staff' });
+    expect(rows[0].meta).toEqual({ fields: ['purpose_detail'], transferId: 'tr_A_reason', actorScope: 'partner' });
+    expect(JSON.stringify(rows[0])).not.toContain('lottery');
+    expect(rows[0].subjectId).not.toContain(PHONE);
+  });
+  it('no reason ⇒ no row and no audit', async () => {
+    await asAdmin();
+    const html = await detail('tr_A_done');
+    expect(html).not.toContain('Reason given');
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.action, 'pii.view'))).toHaveLength(0);
+  });
+  it("another tenant's transfer with a reason is NOT_FOUND, with no audit row", async () => {
+    await seedPartnerTransfer(db, { id: 'tr_B_reason', partnerId: 'pb', phone: PHONE, status: 'paid', purpose: 'other', purposeDetail: 'helping a neighbour repair the roof' });
+    await asAdmin();
+    await expect(detail('tr_B_reason')).rejects.toThrow('NOT_FOUND');
+    expect(await db.select().from(auditEvents).where(eq(auditEvents.action, 'pii.view'))).toHaveLength(0);
+  });
+});
+
 describe('/partner/transfers/[id]: B1 order references', () => {
   it('shows the client reference and the payout reference', async () => {
     await seedPartnerTransfer(db, {

@@ -18,19 +18,19 @@ describe('eval-bot main()', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('with a key it runs all 21 cases against the endpoint and never prints the key', async () => {
+  it('with a key it runs all 24 cases against the endpoint and never prints the key', async () => {
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       json: async () => ({ choices: [{ message: { role: 'assistant', content: '' } }] }),
     }));
     const lines: string[] = [];
     const code = await main({ EVAL_OLLAMA_API_KEY: 'test-key-not-real' }, fetchSpy as unknown as typeof fetch, (l) => lines.push(l));
-    expect(fetchSpy).toHaveBeenCalledTimes(21);
+    expect(fetchSpy).toHaveBeenCalledTimes(24);
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`${EVAL_DEFAULT_BASE_URL}/chat/completions`);
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-key-not-real');
     expect(lines.join('\n')).not.toContain('test-key-not-real');
-    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/21 passed$/);
+    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/24 passed$/);
     expect(code).toBe(1); // an empty reply fails at least one case
   });
 

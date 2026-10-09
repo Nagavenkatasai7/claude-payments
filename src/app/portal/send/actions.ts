@@ -16,6 +16,7 @@ import { prepareSendDraft, portalPayUrl, type PrepareSendResult } from '@/lib/se
 import { allowedSendCurrencies } from '@/lib/partner-currency';
 import { normalizeSenderName } from '@/lib/sender-identity';
 import { parsePurpose } from '@/lib/purpose-codes';
+import { decidePurpose } from '@/lib/purpose-detail';
 import { logWarn } from '@/lib/log';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import {
@@ -26,6 +27,8 @@ import {
   limitsCopy,
   loadSendReview,
   markReviewDrafted,
+  needsScamAck,
+  purposeDetailError,
   portalKycGate,
   portalToolContext,
   prepareResultCopy,
@@ -68,6 +71,13 @@ export interface ContinueState {
   error?: MessageKey;
   vars?: Record<string, string>;
   kyc?: 'verify' | 'contact';
+  /**
+   * Batch B follow-up A4: the reason matches a scam pattern, so the form shows the warning and the
+   * "I have read this warning" tick (never which words matched). Send again only.
+   */
+  scamWarning?: boolean;
+  /** Send again: the purpose and reason the customer posted, so the form keeps them after a refusal. */
+  values?: { purpose: string; purpose_detail: string };
 }
 
 export interface NameFormState {
@@ -80,7 +90,8 @@ const text = (fd: FormData, k: string, max = 200) => {
 };
 
 const ECHO = ['amount', 'currency', 'destination', 'funding', 'recipient', 'name', 'phone', 'purpose'] as const;
-const echo = (fd: FormData) => Object.fromEntries(ECHO.map((k) => [k, text(fd, k, 80)]));
+/** Batch B follow-up A3: the "Other" reason echoes too (longer: up to 120 characters plus spaces). */
+const echo = (fd: FormData) => ({ ...Object.fromEntries(ECHO.map((k) => [k, text(fd, k, 80)])), purpose_detail: text(fd, 'purpose_detail', 480) });
 
 const ownerOf = (ctx: PortalCustomerContext): PortalOwner => ({ partnerId: ctx.site.partnerId, phone: ctx.session.phone });
 
@@ -232,6 +243,8 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   const kycRoute = (c: SendCopy) => routeKycCopy(c, canVerifyInProfile(partner, customer), site.brand);
   const limitRefusal = limitsCopy(limits, site.brand);
   if (limitRefusal) return refuse(kycRoute(limitRefusal));
+  // Batch B follow-up A4: a reason that matches a scam pattern needs the warning ticked first.
+  if (needsScamAck(review.purposeDetail, formData)) return refuse({ error: 'portal.send.scam_ack_required' });
 
   const input = toPrepareSendInput({
     recipientPhone,
@@ -242,6 +255,8 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
     fundingMethod: review.fundingMethod,
     // Required purpose: the review's (validated on the form and again when the slot is read).
     purpose: review.purpose,
+    // Batch B follow-up A3: the customer's reason (re-checked when the slot was read and at the mint).
+    purposeDetail: review.purposeDetail,
   });
   if (!input) return refuse({ error: 'portal.send.recipient_not_found' });
 
@@ -294,6 +309,7 @@ function narrowRepeat(r: Record<string, unknown>, brand: string): { kind: 'draft
   if (isDraftId(r.draft_id) && typeof r.pay_url === 'string') return { kind: 'draft', draftId: r.draft_id };
   // Required purpose (defense in depth: the action checks the posted purpose first).
   if (r.needs_purpose === true) return { kind: 'copy', copy: { error: 'portal.send.purpose_invalid' } };
+  if (r.needs_purpose_detail === true) return { kind: 'copy', copy: { error: 'portal.send.purpose_detail_invalid' } };
   if (r.needs_edd === true) return { kind: 'copy', copy: { error: 'portal.send.edd_whatsapp' } };
   if (r.needs_sender_name === true) return { kind: 'copy', copy: { error: 'portal.send.name_needed' } };
   if (r.kyc_required === true) return { kind: 'copy', copy: { error: 'portal.send.kycBody', kyc: 'verify' } };
@@ -340,13 +356,24 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
   // Required purpose (Q1): the customer confirms the reason for THIS send on the form (it starts on
   // the last transfer's purpose, visible, never copied silently). Missing or unknown ⇒ the form error.
   const purpose = parsePurpose(text(formData, 'purpose', 40));
+  const rawDetail = text(formData, 'purpose_detail', 480);
+  // Kept on every refusal below, so the customer's choice and words stay on the form.
+  const values = { purpose: purpose ?? '', purpose_detail: purpose === 'other' ? rawDetail : '' };
   if (!purpose) return refuse({ error: 'portal.send.purpose_invalid' });
+  // Batch B follow-up A3: Other needs the customer's reason (a reason that names a purpose becomes it);
+  // A4: a scam-pattern reason shows the warning and needs the tick before the draft.
+  const decided = decidePurpose(purpose, rawDetail);
+  if (!decided.ok) return { ...refuse({ error: purposeDetailError(decided.code) }), values };
+  if (needsScamAck(decided.detail, formData)) return { ...refuse({ error: 'portal.send.scam_ack_required' }), scamWarning: true, values };
+  const withWarning = (st: ContinueState): ContinueState => ({ ...st, values, ...(decided.risk ? { scamWarning: true } : {}) });
 
   let outcome: { kind: string; draftId?: string };
   let copy: SendCopy | undefined;
   try {
     ({ value: outcome } = await runOnce(getRedis(), 'portal-send-again', owner.partnerId, owner.phone, text(formData, 'requestKey', 64), async () => {
-      const r = narrowRepeat(await executeTool('repeat_transfer', { transfer_id: t.id, purpose }, portalToolContext(owner)), site.brand);
+      // The posted choice and words go to the tool, which applies the same rule (so the reason is kept).
+      const args = { transfer_id: t.id, purpose, ...(decided.detail ? { purpose_detail: decided.detail } : {}) };
+      const r = narrowRepeat(await executeTool('repeat_transfer', args, portalToolContext(owner)), site.brand);
       if (r.kind === 'copy') {
         copy = r.copy;
         return { kind: 'refused' };
@@ -355,11 +382,11 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
       return { kind: 'draft', draftId: r.draftId };
     }));
   } catch (err) {
-    if (err instanceof RequestInFlightError) return refuse({ error: 'portal.send.busy' });
+    if (err instanceof RequestInFlightError) return withWarning(refuse({ error: 'portal.send.busy' }));
     if (!(err instanceof BadRequestKeyError)) logWarn('portal.send.again', 'repeat failed');
-    return refuse({ error: 'portal.send.failed' });
+    return withWarning(refuse({ error: 'portal.send.failed' }));
   }
   if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) redirect(portalPayUrl(outcome.draftId));
   // M2-14 (PR 413 L1): a dead-end 'verify' card becomes the contact card.
-  return refuse(copy ? routeKycCopy(copy, canVerifyInProfile(partner, customer), site.brand) : { error: 'portal.send.cannot_complete' });
+  return withWarning(refuse(copy ? routeKycCopy(copy, canVerifyInProfile(partner, customer), site.brand) : { error: 'portal.send.cannot_complete' }));
 }

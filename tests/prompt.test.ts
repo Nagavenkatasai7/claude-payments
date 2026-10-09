@@ -985,6 +985,18 @@ describe('Required purpose: the PURPOSE section (purpose.detect on ⇒ every pho
   it('is present in the gate-off variant too', () => {
     expect(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false, purposeRequired: true })).toContain('\nPURPOSE\n');
   });
+  // Batch B follow-up A3/A4: the "Other" reason and the scam warning.
+  it('Other ⇒ ask ONCE "What is it for?" (Hinglish for a Hinglish customer) and pass their words as purpose_detail', () => {
+    expect(section).toMatch(/Other[^\n]*ask ONCE[^\n]*"What is it for\?"/);
+    expect(section).toMatch(/purpose_detail/);
+    expect(section).toMatch(/needs_purpose_detail: true/);
+    expect(section).toMatch(/What is it for\?[^\n]*Hinglish/);
+  });
+
+  it('a scam_warning is sent word for word before the Approve card and never explained', () => {
+    expect(section).toMatch(/scam_warning[^\n]*word for word[^\n]*before the Approve card/);
+    expect(section).toMatch(/scam_warning[^\n]*never say which words/i);
+  });
 });
 
 describe('A2: Hinglish replies (all customers, every variant)', () => {

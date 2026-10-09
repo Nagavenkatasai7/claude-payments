@@ -24,6 +24,7 @@ import {
 import { maskPhoneLast4 } from '@/lib/mask';
 import { payoutMethodLabel } from '@/lib/payout-format';
 import { purposeView } from '@/lib/purpose-codes';
+import { readPurposeDetailsForStaff } from '@/lib/purpose-detail-staff';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { logWarn } from '@/lib/log';
 import { t } from '@/lib/i18n';
@@ -113,8 +114,10 @@ async function mfaEnrolled(username: string): Promise<boolean> {
  * Lost-features restore p1 B3: the sender name and phone, the recipient name and phone and the
  * payout account each have a click-to-reveal for the viewers the ONE reveal rule allows
  * (partner-reveal-policy; the Show control depends on the viewer only, never on the transfer).
- * Nothing is decrypted on render, so the page writes no audit row; each reveal writes `pii.reveal`.
- * The settling partner is shown by class only, never named.
+ * Each reveal writes `pii.reveal`. The one decrypting read on render is the customer's "Other"
+ * reason (Batch B follow-up A4), read inside the session tenant and audited as `pii.view` (actorScope
+ * 'partner'); the staff-only scam-pattern name is never shown here. The settling partner is shown by
+ * class only, never named.
  */
 export default async function PartnerTransferDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.transfers.policy);
@@ -145,6 +148,10 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const destination = transfer.payoutDestination.startsWith('****') ? transfer.payoutDestination : '****';
   // A3: the stated purpose and, where one exists, the UNCONFIRMED suggested RBI code (staff/partner only).
   const purpose = purposeView(transfer.purpose);
+  // Batch B follow-up A4: the reason the customer gave (this tenant's transfer only; audited).
+  const reasonGiven = (
+    await readPurposeDetailsForStaff(getDb(), ctx, [transfer], { tenant: ctx.partnerId, actorScope: 'partner' })
+  ).get(transfer.id)?.detail;
   const ops = PARTNER_OPS.roles.includes(ctx.role);
   const caps = ops ? revealCapabilities(revealViewer(ctx, await mfaEnrolled(ctx.username))) : { identity: false, destination: false };
   // An existing customer row in THIS tenant (admin and agent only): the sender-name reveal and the
@@ -244,6 +251,11 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 <span className="text-ds-ink-muted">{t('partner.transfers.purposeNotStated')}</span>
               )}
             </Row>
+            {reasonGiven ? (
+              <Row label={t('partner.transfers.reasonGiven')}>
+                <span className="break-words">&ldquo;{reasonGiven}&rdquo;</span>
+              </Row>
+            ) : null}
             {/* Batch B1: the partner's own order number and the payout partner's confirmation. */}
             <Row label={t('partner.transfers.clientReference')}>
               {transfer.clientReference ? (
