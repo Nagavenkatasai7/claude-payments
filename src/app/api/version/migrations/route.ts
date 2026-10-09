@@ -13,9 +13,9 @@ import { logError } from '@/lib/log';
 // Kept off /api/version on purpose: the rollout wait polls that route hundreds
 // of times per deploy and pins its body to { sha }.
 //
-// Bearer CRON_SECRET or Bearer MIGRATIONS_READ_TOKEN (Release safety part C: the
-// read-only token CI's migration safety job uses, so pull request runs never
-// hold CRON_SECRET). FAIL-CLOSED: 401 when neither is set too (unlike
+// Bearer CRON_SECRET or Bearer MIGRATIONS_READ_TOKEN (Release safety part C: a
+// read-only token for callers that must not hold CRON_SECRET; CI's migration
+// safety job no longer calls this route). FAIL-CLOSED: 401 when neither is set too (unlike
 // /api/cron), so it is never an anonymous DB hit. An empty token never matches. A database error answers
 // 503 { error: 'unreadable' } without the driver's message.
 

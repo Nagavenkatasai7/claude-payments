@@ -17,7 +17,7 @@ Encodes the CLAUDE.md rule "check the smoke.yml run on main after every merge" a
 ```
 git fetch -q origin; git diff --name-only <sha>~1..<sha> -- drizzle/ src/db/schema.ts
 ```
-Non-empty → the PR's `migration safety` CI job should have confirmed before the merge that production already applied each new migration (CLAUDE.md "Migrations are MANUAL, applied BEFORE the merge"). Check it: the smoke's migration step below fails if prod is behind. A migration marked `-- migration-guard: allow-destructive after-deploy` is the exception: tell the user to run `/migrate-prod` NOW (it is user-invoked) and wait for it.
+Non-empty → the production build of this merge applies each new migration before it goes live (CLAUDE.md "Migrations apply in the production build"); its Vercel build log shows `migrate-on-build: applied <tag>`, and a failed apply fails the build. Check it: the smoke's migration step below fails if prod is behind. A migration marked `-- migration-guard: allow-destructive after-deploy` is the exception: tell the user to run `/migrate-prod` NOW (it is user-invoked) and wait for it.
 
 ## 3. Find the smoke run for that SHA
 The push to main creates the run **immediately** (within seconds of the merge), so look it up straight away:

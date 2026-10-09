@@ -2,10 +2,13 @@
 /**
  * Migration safety gate for pull requests (ci.yml `migrations` job).
  *
- * Production migrations are applied by hand (/migrate-prod), and drizzle
- * selects explicit column lists, so a build that reaches production before its
- * migration breaks every query on the altered table (2026-06-11 outage). This
- * gate moves the apply to BEFORE the merge and makes that safe:
+ * Production applies additive migrations in the Vercel production build
+ * (scripts/migrate-on-build.mjs, package.json "vercel-build"), before
+ * `next build`, so a build never goes live ahead of its migration. drizzle
+ * selects explicit column lists, so a build that reaches production before
+ * its migration breaks every query on the altered table (2026-06-11 outage).
+ * That build-time apply is safe only for migrations the build that is still
+ * serving can live with, which this gate enforces:
  *
  * 1. Expand only. Every drizzle/*.sql the PR adds must be additive, so it can
  *    run while the old build still serves. A destructive (contract) statement
@@ -13,18 +16,13 @@
  *    without DEFAULT, TRUNCATE, DELETE, UPDATE) fails the PR unless the file
  *    carries a comment line
  *        -- migration-guard: allow-destructive [after-deploy] <reason>
- *    Without `after-deploy` the reviewed statement must still be live before
- *    the merge (e.g. widening a CHECK, as 0028 did: the new build writes the
- *    new values). With it, the step is applied AFTER the deploy (e.g. dropping
- *    a column the new build no longer selects), so it is not required to be
- *    live before the merge; the post-deploy smoke checks it.
- * 2. Applied before merge. Each journal entry the PR adds (except an
- *    `after-deploy` step) must already be in production: GET
- *    /api/version/migrations (Bearer MIGRATIONS_READ_TOKEN) lists it in unknownApplied,
- *    because drizzle.__drizzle_migrations has its `when` while the served
- *    build's journal does not know it yet. Until then the job stays red; after
- *    /migrate-prod, re-run the failed job.
- * 3. Journal sanity. A new entry must be newer than every entry the base has
+ *    Without `after-deploy` the reviewed statement is applied by the
+ *    production build like an additive one (e.g. widening a CHECK, as 0028
+ *    did: the new build writes the new values), so check the live build works
+ *    with it. With it, the build never applies the step: it is applied by
+ *    hand AFTER the deploy (e.g. dropping a column the new build no longer
+ *    selects); the post-deploy smoke checks it.
+ * 2. Journal sanity. A new entry must be newer than every entry the base has
  *    (the drizzle migrator applies only `when` > the newest applied row,
  *    node_modules/drizzle-orm/pg-core/dialect.js:62, so an older one would be
  *    skipped forever); every new .sql has a journal entry and vice versa; an
@@ -34,17 +32,12 @@
  *   node scripts/ci/migration-guard.mjs
  *
  * Env: EVENT_NAME (pull_request | merge_group; anything else skips),
- * PR_BASE_SHA/PR_HEAD_SHA or MG_BASE_SHA/MG_HEAD_SHA, MIGRATIONS_READ_TOKEN,
- * MIGRATIONS_URL. Exit 0 pass, 1 a finding, 2 the check could not run
- * (fail-closed). The secret only ever goes in the Authorization header.
+ * PR_BASE_SHA/PR_HEAD_SHA or MG_BASE_SHA/MG_HEAD_SHA. Exit 0 pass, 1 a
+ * finding, 2 the check could not run (fail-closed). It reads only git; it
+ * never calls production.
  */
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-
-/**
- * The slice of fetch these scripts use (tests pass a fake).
- * @typedef {(url: string, init: {method?: string, headers: Record<string, string>, body?: string, signal?: AbortSignal}) => Promise<Response>} FetchLike
- */
 
 const MARKER = /^[ \t]*--[ \t]*migration-guard:[ \t]*allow-destructive\b(.*)$/im;
 const MIN_REASON = 10;
@@ -211,22 +204,6 @@ export function orderingProblems(base, entries) {
   return entries.filter((e) => Number(e.when) <= newest);
 }
 
-/**
- * Which new entries production has applied, from a GET /api/version/migrations body.
- * @param {Entry[]} entries
- * @param {{unknownApplied?: unknown, [k: string]: unknown}} body
- */
-export function appliedCheck(entries, body) {
-  if (!body || !Array.isArray(body.unknownApplied)) {
-    throw new Error('migration status has no unknownApplied list');
-  }
-  const applied = new Set(body.unknownApplied.map((v) => Number(v)));
-  return {
-    applied: entries.filter((e) => applied.has(Number(e.when))).map((e) => e.tag),
-    missing: entries.filter((e) => !applied.has(Number(e.when))).map((e) => e.tag),
-  };
-}
-
 // GitHub workflow-command escaping (data and properties).
 const esc = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 const escProp = (s) => esc(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
@@ -239,13 +216,11 @@ const annotate = (level, msg, { file, line, title } = {}) => {
  * @param {{
  *   env: Record<string, string | undefined>,
  *   cwd?: string,
- *   fetchImpl?: FetchLike,
  *   out?: (line: string) => void,
- *   retryDelayMs?: number,
  * }} opts
  * @returns {Promise<0 | 1 | 2>}
  */
-export async function runGuard({ env, cwd = process.cwd(), fetchImpl = fetch, out = console.log, retryDelayMs = 5000 }) {
+export async function runGuard({ env, cwd = process.cwd(), out = console.log }) {
   const event = env.EVENT_NAME ?? '';
   let baseRef;
   let headRef;
@@ -340,17 +315,15 @@ export async function runGuard({ env, cwd = process.cwd(), fetchImpl = fetch, ou
     );
   }
 
-  const afterDeploy = new Set();
   for (const path of [...addedSql].sort()) {
     const sql = readFileSafe(git, headRef, path);
     const findings = findDestructive(sql);
     if (findings.length === 0) continue;
     const marker = parseOverride(sql);
     if (marker && marker.reason.length >= MIN_REASON) {
-      if (marker.afterDeploy) afterDeploy.add(tagOf(path));
       const when = marker.afterDeploy
-        ? 'Apply it with /migrate-prod AFTER this change is deployed, once no live build uses what it changes.'
-        : 'It must still be applied with /migrate-prod BEFORE the merge, so check the live build works with it.';
+        ? 'The production build will NOT apply it: apply it with /migrate-prod AFTER this change is deployed, once no live build uses what it changes.'
+        : 'The production build applies it before the new code goes live, while the current build still serves, so check the current build works with it.';
       for (const f of findings) {
         out(
           annotate('warning', `Reviewed destructive statement (${marker.reason}): ${f.text}. ${when}`, {
@@ -364,7 +337,7 @@ export async function runGuard({ env, cwd = process.cwd(), fetchImpl = fetch, ou
     }
     for (const f of findings) {
       fail(
-        `This statement ${f.why}: ${f.text}. New migrations must be additive so they can be applied before the merge while the current build still serves. Split it: add now, remove in a later PR. A deliberate, reviewed step needs a comment line "-- migration-guard: allow-destructive [after-deploy] <reason>" (reason at least ${MIN_REASON} characters).`,
+        `This statement ${f.why}: ${f.text}. New migrations must be additive so the production build can apply them while the current build still serves. Split it: add now, remove in a later PR. A deliberate, reviewed step needs a comment line "-- migration-guard: allow-destructive [after-deploy] <reason>" (reason at least ${MIN_REASON} characters).`,
         { file: path, line: f.line, title: `Destructive migration (${f.rule})` },
       );
     }
@@ -373,52 +346,7 @@ export async function runGuard({ env, cwd = process.cwd(), fetchImpl = fetch, ou
     }
   }
 
-  const mustBeLive = added.filter((e) => !afterDeploy.has(e.tag));
-  if (mustBeLive.length === 0) {
-    if (added.length === 0 && changes.length === 0) out('No migration changes in this pull request.');
-    return failed ? 1 : 0;
-  }
-
-  // Release safety part C: the read-only token (never CRON_SECRET) in pull request runs.
-  const secret = env.MIGRATIONS_READ_TOKEN ?? '';
-  const url = env.MIGRATIONS_URL ?? '';
-  if (!secret) {
-    return cannot(
-      `This change adds ${mustBeLive.map((e) => e.tag).join(', ')}, but the MIGRATIONS_READ_TOKEN secret is not available to this run (a fork or Dependabot pull request), so production was NOT checked.`,
-    );
-  }
-  if (!/^https:\/\//.test(url)) return cannot('MIGRATIONS_URL is not an https URL.');
-
-  let body;
-  let last = 'no answer';
-  for (let attempt = 0; attempt < 3 && body === undefined; attempt++) {
-    if (attempt > 0 && retryDelayMs > 0) await new Promise((r) => setTimeout(r, retryDelayMs));
-    try {
-      const res = await fetchImpl(`${url}?cb=${Date.now()}-${attempt}`, {
-        headers: { Authorization: `Bearer ${secret}`, 'Cache-Control': 'no-cache' },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (res.status === 200) body = await res.json();
-      else last = `HTTP ${res.status}`;
-    } catch (e) {
-      last = e instanceof Error ? e.name : 'network error';
-    }
-  }
-  if (body === undefined) return cannot(`${url} did not answer (${last}); production's migrations were NOT checked. Re-run this job.`);
-
-  let verdict;
-  try {
-    verdict = appliedCheck(mustBeLive, body);
-  } catch {
-    return cannot(`${url} answered without an unknownApplied list; production's migrations were NOT checked.`);
-  }
-  for (const tag of verdict.applied) out(`Production has applied ${tag}.`);
-  if (verdict.missing.length > 0) {
-    fail(
-      `Production has not applied ${verdict.missing.join(', ')} yet. Apply it with /migrate-prod from this branch BEFORE merging (it is additive, so the live build is unaffected), then re-run this job. If /migrate-prod finds nothing to apply, production already has a newer migration: merge the current main and regenerate this one.`,
-      { title: 'Migration not applied in production' },
-    );
-  }
+  if (added.length === 0 && changes.length === 0) out('No migration changes in this pull request.');
   return failed ? 1 : 0;
 }
 

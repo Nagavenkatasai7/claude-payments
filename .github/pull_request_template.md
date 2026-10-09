@@ -20,8 +20,8 @@ phone numbers or customer data here: the repository is public.
 
 <!--
 None, additive, or destructive with a reviewed `-- migration-guard: allow-destructive [after-deploy] <reason>` line.
-Additive or destructive without after-deploy: confirm /migrate-prod ran FROM THIS BRANCH and the `migration safety` job was re-run.
-after-deploy: say when the step is applied after the deploy.
+Additive or destructive without after-deploy: the production build applies it (scripts/migrate-on-build.mjs); confirm the current build works with it.
+after-deploy: the build does not apply it; say when /migrate-prod runs after the deploy.
 -->
 
 ## Risk

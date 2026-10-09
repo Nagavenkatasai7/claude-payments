@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  appliedCheck,
   findDestructive,
   maskSql,
   newJournalEntries,
@@ -14,12 +13,11 @@ import {
 } from '../scripts/ci/migration-guard.mjs';
 
 // scripts/ci/migration-guard.mjs, the `migration safety` job in ci.yml.
-// (1) A PR's NEW drizzle/*.sql must be additive (expand), so it can be applied
-//     to production BEFORE the merge while the old build still serves; a
-//     destructive (contract) step needs an explicit marker with a reason.
-// (2) A PR that adds a journal entry stays red until production has applied it
-//     (GET /api/version/migrations lists it in unknownApplied: the served build
-//     does not know it yet, but drizzle.__drizzle_migrations has it).
+// A PR's NEW drizzle/*.sql must be additive (expand), so the production build
+// (scripts/migrate-on-build.mjs) can apply it while the old build still
+// serves; a destructive (contract) step needs an explicit marker with a
+// reason. The journal must stay consistent and ordered. The guard reads git
+// only; it never calls production.
 
 const root = join(__dirname, '..');
 
@@ -140,20 +138,6 @@ describe('journal helpers', () => {
     expect(orderingProblems(base, [{ idx: 2, when: 30, tag: '0002_c' }])).toEqual([]);
     expect(orderingProblems(base, [{ idx: 2, when: 15, tag: '0002_c' }])).toEqual([{ idx: 2, when: 15, tag: '0002_c' }]);
   });
-
-  it('appliedCheck: applied means the when is in the served build\'s unknownApplied', () => {
-    const entries = [
-      { idx: 29, when: 100, tag: '0029_x' },
-      { idx: 30, when: 200, tag: '0030_y' },
-    ];
-    expect(appliedCheck(entries, { ok: true, unknownApplied: [100] })).toEqual({
-      applied: ['0029_x'],
-      missing: ['0030_y'],
-    });
-    // Neon returns bigint created_at; the route serialises numbers, strings tolerated.
-    expect(appliedCheck(entries, { ok: true, unknownApplied: ['100', 200] }).missing).toEqual([]);
-    expect(() => appliedCheck(entries, { ok: false, error: 'unreadable' })).toThrow(/unknownApplied/);
-  });
 });
 
 // End to end over a throwaway git repo: the PR's diff is merge-base..head.
@@ -175,25 +159,23 @@ describe('runGuard', () => {
       JSON.stringify({ version: '7', dialect: 'postgresql', entries: entries.map(([tag, when], idx) => ({ idx, version: '7', when, tag, breakpoints: true })) }, null, 2),
     );
   const sql = (tag: string, body: string) => writeFileSync(join(repo, 'drizzle', `${tag}.sql`), body);
-  const okFetch = (unknownApplied: number[]) => {
-    const calls: Array<{ url: string; auth: string | null }> = [];
-    const impl = async (url: string, init: { headers: Record<string, string> }) => {
-      calls.push({ url, auth: init.headers.Authorization ?? null });
-      return new Response(JSON.stringify({ sha: 'abc1234', ok: true, expected: 1, applied: 1, pending: [], unknownApplied }), { status: 200 });
-    };
-    return { impl, calls };
-  };
   const env = (head: string, extra: Record<string, string> = {}) => ({
     EVENT_NAME: 'pull_request',
     PR_BASE_SHA: base,
     PR_HEAD_SHA: head,
-    MIGRATIONS_READ_TOKEN: 's3cret-test-value',
-    MIGRATIONS_URL: 'https://example.invalid/api/version/migrations',
     ...extra,
   });
+  // The guard must never reach the network: any fetch fails the test.
+  let fetchCalls: string[];
+  const realFetch = globalThis.fetch;
 
   beforeEach(() => {
     lines = [];
+    fetchCalls = [];
+    globalThis.fetch = (async (url: string) => {
+      fetchCalls.push(String(url));
+      throw new Error('the guard must not call the network');
+    }) as typeof fetch;
     repo = mkdtempSync(join(tmpdir(), 'mguard-'));
     git('init', '-q');
     mkdirSync(join(repo, 'drizzle/meta'), { recursive: true });
@@ -201,122 +183,94 @@ describe('runGuard', () => {
     journal([['0000_a', 1000]]);
     base = commitAll('base');
   });
-  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    expect(fetchCalls).toEqual([]);
+    rmSync(repo, { recursive: true, force: true });
+  });
 
-  it('passes a PR without migration changes and never calls the endpoint', async () => {
+  it('passes a PR without migration changes', async () => {
     writeFileSync(join(repo, 'README.md'), 'x');
     const head = commitAll('docs');
-    const f = okFetch([]);
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: f.impl, out })).toBe(0);
-    expect(f.calls).toEqual([]);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(0);
+    expect(lines.join('\n')).toMatch(/No migration changes/);
   });
 
   it('skips (exit 0) on push and other events', async () => {
-    expect(await runGuard({ env: { EVENT_NAME: 'push' }, cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(0);
+    expect(await runGuard({ env: { EVENT_NAME: 'push' }, cwd: repo, out })).toBe(0);
     expect(lines.join('\n')).toMatch(/::notice/);
   });
 
   it('fails closed (exit 2) when a range end is missing from the clone', async () => {
-    const code = await runGuard({ env: env('1234567890abcdef1234567890abcdef12345678'), cwd: repo, fetchImpl: okFetch([]).impl, out });
+    const code = await runGuard({ env: env('1234567890abcdef1234567890abcdef12345678'), cwd: repo, out });
     expect(code).toBe(2);
   });
 
-  it('passes an additive migration that production has applied, sending the secret only as a Bearer header', async () => {
+  it('passes an additive migration without asking production (the production build applies it)', async () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('add 0001');
-    const f = okFetch([2000]);
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: f.impl, out })).toBe(0);
-    expect(f.calls).toHaveLength(1);
-    expect(f.calls[0].auth).toBe('Bearer s3cret-test-value');
-    expect(f.calls[0].url).not.toContain('s3cret');
-    expect(lines.join('\n')).not.toContain('s3cret');
-  });
-
-  it('fails (exit 1) while production has not applied the new migration, naming the tag', async () => {
-    sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
-    journal([['0000_a', 1000], ['0001_b', 2000]]);
-    const head = commitAll('add 0001');
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(1);
-    expect(lines.join('\n')).toMatch(/::error[^\n]*0001_b/);
-  });
-
-  it('fails (exit 2) when the secret is missing and a migration needs checking', async () => {
-    sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
-    journal([['0000_a', 1000], ['0001_b', 2000]]);
-    const head = commitAll('add 0001');
-    expect(await runGuard({ env: env(head, { MIGRATIONS_READ_TOKEN: '' }), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(2);
-  });
-
-  it('fails (exit 2) when the endpoint does not answer 200', async () => {
-    sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
-    journal([['0000_a', 1000], ['0001_b', 2000]]);
-    const head = commitAll('add 0001');
-    const impl = async () => new Response('{"error":"unauthorized"}', { status: 401 });
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: impl, out, retryDelayMs: 0 })).toBe(2);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(0);
+    expect(lines.join('\n')).not.toMatch(/::error/);
   });
 
   it('fails (exit 1) on a destructive new migration without a marker, with a file:line annotation', async () => {
     sql('0001_b', 'ALTER TABLE "t"\n  DROP COLUMN "id";');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('drop');
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(1);
     expect(lines.join('\n')).toMatch(/::error file=drizzle\/0001_b\.sql,line=2,/);
   });
 
-  it('a marked step still has to be live before the merge', async () => {
+  it('a marked before-deploy step passes with a warning that the production build applies it', async () => {
     sql('0001_b', '-- migration-guard: allow-destructive widen the check to a superset of roles\nALTER TABLE "t" DROP CONSTRAINT "k";');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('check swap');
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(1);
-    expect(lines.join('\n')).toMatch(/::warning[^\n]*0001_b/);
-    lines = [];
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(0);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(0);
+    expect(lines.join('\n')).toMatch(/::warning[^\n]*0001_b[^\n]*production build applies it/);
   });
 
-  it('an after-deploy step passes without being applied, and the endpoint is not called', async () => {
+  it('an after-deploy step passes with a warning that it needs a manual apply after the deploy', async () => {
     sql('0001_b', '-- migration-guard: allow-destructive after-deploy code stopped selecting "id" in this PR\nALTER TABLE "t" DROP COLUMN "id";');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('contract');
-    const f = okFetch([]);
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: f.impl, out })).toBe(0);
-    expect(f.calls).toEqual([]);
-    expect(lines.join('\n')).toMatch(/::warning[^\n]*AFTER this change is deployed/);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(0);
+    expect(lines.join('\n')).toMatch(/::warning[^\n]*will NOT apply it[^\n]*AFTER this change is deployed/);
   });
 
   it('rejects a marker without a reason', async () => {
     sql('0001_b', '-- migration-guard: allow-destructive\nDROP TABLE "t";');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('contract');
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(1);
   });
 
   it('fails a new journal entry older than the base\'s newest (the migrator would skip it)', async () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     journal([['0000_a', 1000], ['0001_b', 500]]);
     const head = commitAll('old when');
-    expect(await runGuard({ env: env(head), cwd: repo, fetchImpl: okFetch([500]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head), cwd: repo, out })).toBe(1);
     expect(lines.join('\n')).toMatch(/::error[^\n]*0001_b/);
   });
 
   it('fails a new .sql the journal does not list, and a journal entry with no .sql', async () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     const head1 = commitAll('orphan sql');
-    expect(await runGuard({ env: env(head1), cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head1), cwd: repo, out })).toBe(1);
     rmSync(join(repo, 'drizzle/0001_b.sql'));
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head2 = commitAll('entry without sql');
-    expect(await runGuard({ env: env(head2), cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head2), cwd: repo, out })).toBe(1);
   });
 
   it('fails a deleted migration and warns on an edited one', async () => {
     sql('0000_a', 'CREATE TABLE "t" ("id" text PRIMARY KEY NOT NULL, "n" text);');
     const edited = commitAll('edit');
-    expect(await runGuard({ env: env(edited), cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(0);
+    expect(await runGuard({ env: env(edited), cwd: repo, out })).toBe(0);
     expect(lines.join('\n')).toMatch(/::warning file=drizzle\/0000_a\.sql/);
     rmSync(join(repo, 'drizzle/0000_a.sql'));
     const deleted = commitAll('delete');
-    expect(await runGuard({ env: env(deleted), cwd: repo, fetchImpl: okFetch([]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(deleted), cwd: repo, out })).toBe(1);
   });
 
   it('uses merge-base..head, so main moving ahead does not count as this PR\'s change', async () => {
@@ -327,9 +281,7 @@ describe('runGuard', () => {
     sql('0001_main', 'ALTER TABLE "t" DROP COLUMN "id";');
     journal([['0000_a', 1000], ['0001_main', 3000]]);
     const mainTip = commitAll('main moved');
-    const f = okFetch([]);
-    expect(await runGuard({ env: env(head, { PR_BASE_SHA: mainTip }), cwd: repo, fetchImpl: f.impl, out })).toBe(0);
-    expect(f.calls).toEqual([]);
+    expect(await runGuard({ env: env(head, { PR_BASE_SHA: mainTip }), cwd: repo, out })).toBe(0);
   });
 
   it('fails a new entry older than a migration merged to main after the branch was cut', async () => {
@@ -341,7 +293,7 @@ describe('runGuard', () => {
     sql('0001_main', 'ALTER TABLE "t" ADD COLUMN "d" text;');
     journal([['0000_a', 1000], ['0001_main', 3000]]);
     const mainTip = commitAll('main migration');
-    expect(await runGuard({ env: env(head, { PR_BASE_SHA: mainTip }), cwd: repo, fetchImpl: okFetch([2000, 3000]).impl, out })).toBe(1);
+    expect(await runGuard({ env: env(head, { PR_BASE_SHA: mainTip }), cwd: repo, out })).toBe(1);
     expect(lines.join('\n')).toMatch(/::error[^\n]*0001_b[^\n]*not newer/);
   });
 
@@ -349,7 +301,7 @@ describe('runGuard', () => {
     sql('0001_b', 'ALTER TABLE "t" ADD COLUMN "c" text;');
     journal([['0000_a', 1000], ['0001_b', 2000]]);
     const head = commitAll('add 0001');
-    const e = { EVENT_NAME: 'merge_group', MG_BASE_SHA: base, MG_HEAD_SHA: head, MIGRATIONS_READ_TOKEN: 'x', MIGRATIONS_URL: 'https://example.invalid/m' };
-    expect(await runGuard({ env: e, cwd: repo, fetchImpl: okFetch([2000]).impl, out })).toBe(0);
+    const e = { EVENT_NAME: 'merge_group', MG_BASE_SHA: base, MG_HEAD_SHA: head };
+    expect(await runGuard({ env: e, cwd: repo, out })).toBe(0);
   });
 });

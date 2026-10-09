@@ -10,13 +10,13 @@ Roll back first and debug after when a merge broke something customers or staff 
 - pay page, WhatsApp replies, sign-in or the worker (`GET /api/health` 503) broke right after a deploy;
 - errors in Sentry or the ops alerts jumped right after a deploy.
 
-Don't roll back for a red smoke whose only failure is "Production did not serve this commit" (the new build never went live, so there is nothing to undo) or "Prod migrations behind" (apply the migration with `/migrate-prod` instead).
+Don't roll back for a red smoke whose only failure is "Production did not serve this commit" (the new build never went live, so there is nothing to undo) or "Prod migrations behind" (the production build applies migrations, `scripts/migrate-on-build.mjs`: read that deploy's Vercel build log for its `migrate-on-build:` lines. An `after-deploy` step is never applied by the build, and a failed apply fails the build, so the old build keeps serving. Apply what is missing with `/migrate-prod` as the fallback, then re-run the smoke).
 
 ## Before you roll back: the database
 
 A rollback swaps code, never the database. The older build must work with every migration applied since it was live.
 
-- **Additive migrations** (new tables, new nullable or defaulted columns, new indexes) are safe: the older build does not select what it does not know. CI's `migration safety` job only lets additive SQL through unless a file carries a reviewed `-- migration-guard: allow-destructive` marker.
+- **Additive migrations** (new tables, new nullable or defaulted columns, new indexes) are safe: the older build does not select what it does not know. CI's `migration safety` job only lets additive SQL through unless a file carries a reviewed `-- migration-guard: allow-destructive` marker, and the production build applies them before the new code goes live.
 - **A destructive migration since then** (look for that marker in `drizzle/*.sql` newer than the target build): stop. The older build may select a column that no longer exists. Roll forward with a fix instead, or restore the data first (see "Data" below).
 
 Check quickly: `git log --oneline <target-sha>..origin/main -- drizzle/` lists every migration added since the target build.
@@ -49,3 +49,14 @@ These run without a person. They do not replace the steps above.
 - **Kill switches** (`/admin-dashboard/switches`, platform admins). `Pause new sends` and `Pause settlement` stop money movement in 15 seconds without a deploy. Use them while you decide on a rollback.
 
 GitHub settings the automatic controls read: secrets `E2E_SANDBOX_API_KEY`, `VERCEL_AUTOMATION_BYPASS_SECRET`, `VERCEL_ROLLBACK_TOKEN`, `CRON_SECRET`; variables `VERCEL_PROJECT_ID`, `VERCEL_TEAM_ID`.
+
+## Ops commands (no Mac needed)
+
+Thread agents act on GitHub as the owner through an App token that cannot re-run, cancel or dispatch workflows (403). Instead, comment on an open issue labelled `ops`, as the owner account, with exactly one of these as the first line:
+
+- `/ops rerun <run id>`: re-run the failed jobs of a run
+- `/ops rerun-all <run id>`: re-run every job of a run
+- `/ops cancel <run id>`: cancel a run
+- `/ops smoke` or `/ops smoke <40-hex sha>`: dispatch smoke.yml on main, for the head of main or for that commit (a dispatched smoke never rolls back)
+
+`.github/workflows/ops-commands.yml` reacts with eyes, runs the command with its own `GITHUB_TOKEN` (`actions: write`) and replies with a link to the run, or with the HTTP status if GitHub refused. Anything else on the first line gets a usage reply. The parser is `scripts/ci/ops-command.mjs`. Only comments by `Nagavenkatasai7` with OWNER association, on an issue (not a pull request) labelled `ops`, are acted on.

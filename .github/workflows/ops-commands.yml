@@ -1,0 +1,139 @@
+name: Ops commands
+# `/ops` comment commands: re-run, cancel or dispatch workflow runs from an
+# issue comment. Thread agents write to GitHub as the owner through an App
+# token that lacks Actions write (403 on re-run, cancel and dispatch); this
+# workflow's GITHUB_TOKEN has `actions: write`, so a comment can do it.
+#
+# Usage: on an open issue labelled `ops`, the owner comments one of
+#   /ops rerun <run id>        re-run the failed jobs of a run
+#   /ops rerun-all <run id>    re-run every job of a run
+#   /ops cancel <run id>       cancel a run
+#   /ops smoke [<40-hex sha>]  dispatch smoke.yml on main (optionally for a commit)
+# Only the first line counts and it must match exactly
+# (scripts/ci/ops-command.mjs). The workflow reacts with eyes when it picks the
+# comment up and replies with the result.
+#
+# Security: issue_comment runs the workflow file from the default branch.
+# The job runs only for comments by the owner's account (login and
+# author_association OWNER) on an issue (not a PR) labelled `ops`. The comment
+# body reaches the parser through env only; the shell sees only validated
+# values (digits, a hex sha, a fixed command word). GITHUB_TOKEN events do not
+# start new workflow runs, except workflow_dispatch (used by `smoke`); re-runs
+# and cancels act on existing runs.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  ops:
+    name: Run an /ops command
+    if: >-
+      !github.event.issue.pull_request &&
+      contains(github.event.issue.labels.*.name, 'ops') &&
+      github.event.comment.user.login == 'Nagavenkatasai7' &&
+      github.event.comment.author_association == 'OWNER' &&
+      startsWith(github.event.comment.body, '/ops ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: React to the comment
+        # Best effort: a failed reaction must not stop the command.
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
+            -f content=eyes > /dev/null || echo "::warning::could not add the eyes reaction"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Parse the command
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: node scripts/ci/ops-command.mjs
+
+      - name: Reply to an unrecognised command
+        if: steps.parse.outputs.cmd == ''
+        run: |
+          # shellcheck disable=SC2016 # the backticks are Markdown, not a substitution
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
+            -f body='Not an /ops command. Use one of: `/ops rerun <run id>`, `/ops rerun-all <run id>`, `/ops cancel <run id>`, `/ops smoke [<40-hex sha>]` (first line only).' \
+            > /dev/null
+
+      - name: Run the command
+        if: steps.parse.outputs.cmd != ''
+        env:
+          CMD: ${{ steps.parse.outputs.cmd }}
+          RUN_ID: ${{ steps.parse.outputs.run_id }}
+          SHA: ${{ steps.parse.outputs.sha }}
+        run: |
+          set -u
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          err="$RUNNER_TEMP/ops-err.txt"
+          out="$RUNNER_TEMP/ops-out.json"
+          reply() {
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="$1" > /dev/null \
+              || echo "::warning::could not post the reply"
+          }
+          # Defence in depth: the parser already allows only these shapes.
+          case "$CMD" in
+            rerun|rerun-all|cancel) [[ "$RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || { echo "::error::bad run id"; exit 1; } ;;
+            smoke) [[ -z "$SHA" || "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha"; exit 1; } ;;
+            *) echo "::error::unknown command"; exit 1 ;;
+          esac
+
+          case "$CMD" in
+            rerun) path="actions/runs/$RUN_ID/rerun-failed-jobs"; what="Re-ran the failed jobs of run $RUN_ID" ;;
+            rerun-all) path="actions/runs/$RUN_ID/rerun"; what="Re-ran every job of run $RUN_ID" ;;
+            cancel) path="actions/runs/$RUN_ID/cancel"; what="Cancelled run $RUN_ID" ;;
+            smoke) path="actions/workflows/smoke.yml/dispatches" ;;
+          esac
+
+          set +e
+          if [[ "$CMD" == smoke ]]; then
+            args=(-f ref=main -F return_run_details=true)
+            [[ -n "$SHA" ]] && args+=(-f "inputs[sha]=$SHA")
+            gh api -X POST "repos/$GITHUB_REPOSITORY/$path" "${args[@]}" > "$out" 2> "$err"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/$path" > "$out" 2> "$err"
+          fi
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            # gh prints "(HTTP 403)" on stderr; only the status code is passed on.
+            status="$(grep -oE 'HTTP [0-9]{3}' "$err" | head -n 1 || true)"
+            status="${status:-no HTTP status (gh exit $rc)}"
+            reply "\`/ops $CMD\` failed: $status. Log: $repo_url/actions/runs/$GITHUB_RUN_ID"
+            echo "::error::/ops $CMD failed: $status"
+            exit 1
+          fi
+
+          if [[ "$CMD" == smoke ]]; then
+            run_id="$(node -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); const id = String(r.workflow_run_id ?? ""); process.stdout.write(/^[1-9][0-9]{0,19}$/.test(id) ? id : ""); } catch {}' "$out")"
+            target="${SHA:-the head of main}"
+            if [[ -n "$run_id" ]]; then
+              link="$repo_url/actions/runs/$run_id"
+            else
+              link="$repo_url/actions/workflows/smoke.yml"
+            fi
+            reply "Dispatched Smoke on main for $target: $link"
+          else
+            reply "$what: $repo_url/actions/runs/$RUN_ID"
+          fi
+          echo "/ops $CMD done"
