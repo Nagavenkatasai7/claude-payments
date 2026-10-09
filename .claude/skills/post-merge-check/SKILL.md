@@ -1,6 +1,6 @@
 ---
 name: post-merge-check
-description: After a PR merges to main, gate on pending migrations, then watch the production deploy's post-deploy smoke.yml run for that SHA and report green/red with the failing job. Use right after any merge to main, or when asked "did the deploy go through?". Read-only on GitHub (gh reads); finishes with /tracker-sync.
+description: After a PR merges to main, gate on pending migrations, then watch the production deploy's post-deploy smoke.yml run for that SHA and report green/red with the failing job. Use right after any merge to main, or when asked "did the deploy go through?". Read-only on GitHub (gh reads); finishes with /tracker-sync Part A and a ledger routine fire.
 argument-hint: "[PR number | merge SHA]"
 ---
 # /post-merge-check — verify a merge to main landed safely
@@ -42,7 +42,8 @@ The run starts at merge time. Its step "Wait until production serves this commit
 - failure at any other step → `gh run view <databaseId> --log-failed | tail -80`, name the failing step/spec and the assertion, and stop. Do not merge anything else on top until it is fixed (propose the fix as a new PR).
 
 ## 5. Update the Program Ledger
-Run `/tracker-sync` (green or red): the merge, the smoke result and any fix-status change go to the ledger artifact. A red smoke is recorded as an `incident` event.
+Green or red, run `/tracker-sync` **Part A** (the engine): the merge, the release row (`releases/rel-*`, with the smoke result) and `meta/state` (what production serves) go to the ledger. A red smoke becomes an `incident` feed row by itself. If Part A reports `skipped: run in progress`, the running routine covers this merge.
+Then fire the ledger routine (`fire_trigger` on `trig_01XtG5Fv5LVFv3J2mFdHpkx7`) so the curator maps the merge to its workstream within minutes, not at the next hourly run. If firing is not available, the hourly run picks it up. No journal step.
 
 ## 6. Report
-SHA · migration gate result · smoke run URL + conclusion · failing spec (if red) · ledger synced.
+SHA · migration gate result · smoke run URL + conclusion · failing spec (if red) · ledger engine summary line · routine fired (or not available).

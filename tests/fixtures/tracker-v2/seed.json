@@ -1,0 +1,160 @@
+{
+  "format": "ledger-seed/1",
+  "asOf": "2026-01-15T12:00:00Z",
+  "cutoverAt": "2026-01-15T12:00:00Z",
+  "routineThreadId": "cmsg_FixtureRoutine01",
+  "backfillFrom": "2026-01-01T00:00:00Z",
+  "archiveNote": "Frozen 2026-01-15; the current state is on the Today tab",
+  "archive": {
+    "name": "Fixture program 2026-01",
+    "startedAt": "2026-01-01T00:00:00Z",
+    "finishedAt": "2026-01-14T00:00:00Z",
+    "fixesDone": 3,
+    "fixesTotal": 4,
+    "waiting": [{ "fix": 4, "why": "Waits for the first real export." }],
+    "demoProgram": { "name": "Fixture demo", "cancelledAt": "2026-01-08T00:00:00Z" },
+    "note": "Synthetic archive for tests."
+  },
+  "headline": {
+    "text": "The widget is live. Gadget sync waits for the owner to pick a retry policy.",
+    "short": "Widget live; gadget waits",
+    "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "the widget is live in production since the January deploy" }]
+  },
+  "threadMap": {
+    "cmsg_FixtureThreadA1": "widget-launch",
+    "cmsg_FixtureThreadB2": "gadget-sync",
+    "cmsg_FixtureRoutine01": "ledger"
+  },
+  "workstreams": [
+    {
+      "key": "widget-launch",
+      "name": "Widget launch",
+      "status": "live",
+      "summary": "The widget is live in production.",
+      "nextStep": "",
+      "waitingOn": "none",
+      "startedAt": "2026-01-04T09:00:00Z",
+      "prs": [901],
+      "evidence": [{ "kind": "pr", "ref": "901", "quote": "Widget launch: badge, theme and help text" }]
+    },
+    {
+      "key": "gadget-sync",
+      "name": "Gadget sync",
+      "status": "waiting_owner",
+      "summary": "Gadget sync is built. It waits for the owner to pick a retry policy.",
+      "nextStep": "The owner picks three or five tries.",
+      "waitingOn": "owner",
+      "startedAt": "2026-01-11T09:00:00Z",
+      "prs": [902],
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "the gadget sync waits for the owner to pick a retry policy" }]
+    },
+    {
+      "key": "ledger",
+      "name": "Ledger rebuild",
+      "status": "working",
+      "summary": "The ledger rebuild is in progress.",
+      "nextStep": "Finish the build.",
+      "waitingOn": "none",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "the ledger rebuild is in progress in its own thread" }]
+    }
+  ],
+  "todos": [
+    {
+      "id": "gadget-sync-set-api-key",
+      "ws": "gadget-sync",
+      "title": "Set the gadget API key",
+      "why": "The gadget sync cannot call the partner sandbox without it.",
+      "steps": ["Open the hosting settings.", "Add the gadget API key.", "Redeploy."],
+      "where": { "label": "Hosting settings", "url": "https://example.com/settings" },
+      "priority": "now",
+      "threadId": "cmsg_FixtureThreadB2",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "Set the gadget API key in the hosting settings" }]
+    },
+    {
+      "id": "widget-launch-rotate-signing-key",
+      "ws": "widget-launch",
+      "title": "Rotate the widget signing key",
+      "why": "The old key was shared in a test run.",
+      "priority": "soon",
+      "status": "done",
+      "doneAt": "2026-01-13T16:00:00Z",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "The owner rotated the widget signing key" }],
+      "doneEvidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "confirmed the new key works" }]
+    }
+  ],
+  "decisions": [
+    {
+      "id": "gadget-retry-policy",
+      "question": "How many times should gadget sync retry a failed call?",
+      "options": [
+        { "label": "Three tries", "consequence": "Faster failure alerts." },
+        { "label": "Five tries", "consequence": "Fewer false alerts, slower alerts." }
+      ],
+      "recommended": "Three tries",
+      "ws": "gadget-sync",
+      "threadId": "cmsg_FixtureThreadB2",
+      "refs": { "pr": [902] },
+      "askedAt": "2026-01-14T10:00:00Z",
+      "status": "open",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "Approve the retry policy for gadget sync" }]
+    },
+    {
+      "id": "widget-theme",
+      "question": "Which theme should the widget page use?",
+      "options": [
+        { "label": "Blue", "consequence": "Matches the brand." },
+        { "label": "Green", "consequence": "Needs new icons." }
+      ],
+      "recommended": "Blue",
+      "ws": "widget-launch",
+      "askedAt": "2026-01-12T09:30:00Z",
+      "status": "decided",
+      "answer": "Blue",
+      "decidedAt": "2026-01-12T10:05:00Z",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "use the blue theme for the widget page" }],
+      "answerEvidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "The owner said \"blue theme, ship it\"" }]
+    }
+  ],
+  "issues": [
+    {
+      "id": "widget-badge-offset",
+      "title": "The widget badge renders one pixel too low on small phones",
+      "detail": "Seen on small phones only.",
+      "kind": "bug",
+      "severity": "low",
+      "ws": "widget-launch",
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "The widget badge renders one pixel too low on small phones" }]
+    },
+    {
+      "id": "export-silent-failure",
+      "title": "The nightly export job has no alert when it fails silently",
+      "kind": "risk",
+      "severity": "medium",
+      "evidence": [{ "kind": "file", "ref": "reviews/weekly-check-sample.md", "quote": "the nightly export job has no alert when it fails silently" }]
+    },
+    {
+      "id": "stale-alert-noise",
+      "title": "Alert noise from the stale export check",
+      "detail": "Fixed by the new export check.",
+      "kind": "debt",
+      "severity": "low",
+      "status": "resolved",
+      "resolution": "Superseded by the export alert work.",
+      "inferred": true,
+      "evidence": [{ "kind": "feed", "ref": "backlog/stale-alert-noise", "quote": "The stale export check fires every night" }]
+    }
+  ],
+  "docs": [
+    { "id": "art-fixture-guide", "title": "Widget test guide for the owner", "url": "https://claude.ai/artifact/FixtureGuide01", "kind": "guide", "status": "current", "ws": "widget-launch", "updatedAt": "2026-01-12T10:00:00Z" }
+  ],
+  "events": [
+    {
+      "kind": "decision",
+      "title": "Owner chose the blue theme for the widget page",
+      "at": "2026-01-12T10:05:00Z",
+      "key": "widget-theme-blue",
+      "refs": { "decision": "widget-theme" },
+      "evidence": [{ "kind": "mem", "ref": "MEMORY.md", "quote": "use the blue theme for the widget page" }]
+    }
+  ]
+}

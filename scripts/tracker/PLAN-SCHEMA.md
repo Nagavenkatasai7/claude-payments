@@ -1,5 +1,7 @@
 # Ledger plan document schema (collection `plans`, one JSON file per doc)
 
+> **Archive collections only.** This schema covers the frozen v1 `plans` collection (ledger v2 cutover, 2026-10-08). The live v2 collections (ws, todo, decisions, issues, docs, feed-YYYY-MM, meta/*) are in [LEDGER-SCHEMA.md](LEDGER-SCHEMA.md).
+
 Working copies live in `~/dev/program-ledger/plans/<id>.json` (outside the repo); the ledger database is the source of truth. Each doc is valid JSON and under 200 KB. It contains no phone numbers, personal names, emails, secrets, tokens or credential values.
 
 ```jsonc
