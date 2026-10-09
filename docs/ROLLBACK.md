@@ -35,7 +35,7 @@ There is no automatic database rollback. Before a risky migration, create a Neon
 
 ## After
 
-- Record the rollback in the Program Ledger as an `incident` event (`/tracker-sync`).
+- Record the rollback in the Program Ledger as an `incident` note: `node scripts/tracker/note.mjs --kind incident` (`/tracker-sync` Part C). A failed smoke is recorded by the engine on its own.
 - Find the root cause, add the failing test, and ship the fix through the normal PR flow.
 
 ## Automatic controls (Release safety Batch 2)

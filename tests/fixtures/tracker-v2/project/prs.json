@@ -1,0 +1,4 @@
+{ "pull_requests": [
+  { "session_id": "session_KeyA1", "number": 901, "title": "Widget launch: badge, theme and help text", "state": "merged", "url": "https://github.com/example/fixture/pull/901", "head_ref": "claude/widget-launch" },
+  { "session_id": "session_KeyB2", "number": 902, "title": "Gadget sync with retries", "state": "open", "url": "https://github.com/example/fixture/pull/902", "head_ref": "claude/gadget-sync" }
+] }

@@ -4,6 +4,9 @@
 //
 // Design: append-only. Every automated write is a `set` of a NEW doc with a deterministic id;
 // an id that already exists is skipped. The only overwrite is meta/state (pinned by version).
+// Ledger v2: timeline rows go to `feed-YYYY-MM` (the month of their `at`), not `events`; the
+// engine also writes `releases` and the prstate title. Only rows inside emitWindow are planned,
+// so a month that was not dumped is never re-sent.
 import { createHash } from 'node:crypto';
 
 /**
@@ -14,9 +17,8 @@ import { createHash } from 'node:crypto';
  */
 
 export const REPO = 'Nagavenkatasai7/claude-payments';
-export const PROGRAM = 'SmartRemit upgrade program 2026-09';
 export const FIRST_PROGRAM_PR = 237;
-// PRs merged before the `Program-Fix:` convention existed (same map as snapshot.mjs).
+// PRs merged before the `Program-Fix:` convention existed.
 export const LEGACY_FIX_MAP = Object.freeze({ 242: [1], 243: [3], 244: [2], 246: [3], 247: [2], 248: [2] });
 
 const STATUS_ORDER = ['open', 'planned', 'in_progress', 'in_review', 'merged', 'done'];
@@ -24,10 +26,15 @@ const STATUS_ORDER = ['open', 'planned', 'in_progress', 'in_review', 'merged', '
 export const rank = (status) => STATUS_ORDER.indexOf(status);
 
 const FAILED = new Set(['failure', 'timed_out', 'startup_failure']);
-const EVENT_KINDS = new Set(['decision', 'approval', 'agent', 'plan', 'review', 'pr', 'merge', 'deploy', 'migration', 'owner-step', 'verify', 'milestone', 'incident', 'security']);
+// 'change' rows (chg-*) are written by code only (curate.mjs), so the journal CLI does not offer it.
+const JOURNAL_KIND_LIST = ['decision', 'approval', 'agent', 'plan', 'review', 'pr', 'merge', 'deploy', 'migration', 'owner-step', 'verify', 'milestone', 'incident', 'security'];
+const EVENT_KINDS = new Set([...JOURNAL_KIND_LIST, 'change']);
 const ACTORS = new Set(['owner', 'claude', 'agent', 'github', 'ci']);
 const RESULTS = new Set(['ok', 'blocked', 'failed', 'running', 'info']);
-export const JOURNAL_KINDS = [...EVENT_KINDS];
+const FEED_SOURCES = new Set(['github', 'ci', 'curator', 'code', 'note', 'journal']);
+export const FEED_TITLE_MAX = 140;
+export const FEED_DETAIL_MAX = 280;
+export const JOURNAL_KINDS = [...JOURNAL_KIND_LIST];
 export const JOURNAL_ACTORS = [...ACTORS];
 export const JOURNAL_RESULTS = [...RESULTS];
 
@@ -50,12 +57,36 @@ const TOKEN_PATTERNS = [
   /xox[bp]-[A-Za-z0-9-]{20,}/g,
 ];
 // Bare runs of 10+ digits (phone and card numbers without "+"): keep the last 4. Not after a word
-// char, "/", "=", "#", "." or "+" (ids in URLs such as /actions/runs/35671070038, query values,
-// decimals, and +numbers, which the rule above handles); 1555… test numbers are kept.
-const BARE_DIGITS = /(?<![\w/=#.+])(?!1555)(\d{6,})(\d{4})(?!\w)/g;
+// char, "/", "=" or "+" (ids in URLs such as /actions/runs/35671070038, query values, and
+// +numbers, which the rule above handles); 1555… test numbers are kept. A run after "#" or "."
+// is masked too ("ref #98765432101").
+const BARE_DIGITS = /(?<![\w/=+])(?!1555)(\d{6,})(\d{4})(?!\w)/g;
+// Formatted numbers: digit groups joined by a space, "-", "." or parentheses, with an optional
+// leading "+" ("+91 98765 43210", "+1 (703) 555-0123", "703-555-0123", "4111 1111 1111 1111").
+// maskGrouped decides which candidates are phone or card numbers.
+const GROUPED = /(?<![\w/=+.-])(\+?)(\(?\d[\d(). \t-]*\d)(?![\w])/g;
+const ISO_DATE = /\d{4}-\d{2}-\d{2}/;
 /**
- * Mask phone numbers (except +1555 test numbers), bare 10+ digit numbers, non-org emails and
- * token-like strings (API keys, AWS key ids, JWTs, bearer tokens).
+ * One GROUPED candidate -> masked (every digit but the last 4 becomes "•"), or unchanged when it
+ * is not a phone or card number: fewer than 10 digits (8 with "+") or more than 19, a separator
+ * run longer than 2 characters, a last group under 4 digits (dates with times, PR lists, short
+ * numbers), an ISO date, or a 1555… test number.
+ */
+function maskGrouped(match, plus, body) {
+  const digits = body.replace(/\D/g, '');
+  if (!/\D/.test(body)) return match; // unbroken runs: the "+" and bare rules own them
+  if (digits.length < (plus ? 8 : 10) || digits.length > 19) return match;
+  if (/\D{3,}/.test(body) || ISO_DATE.test(body) || digits.startsWith('1555')) return match;
+  const groups = body.split(/\D+/).filter(Boolean);
+  if (groups[groups.length - 1].length < 4) return match;
+  let keep = 4;
+  const masked = [...body].reverse().map((ch) => (/\d/.test(ch) ? (keep-- > 0 ? ch : '•') : ch)).reverse().join('');
+  return `${plus}${masked}`;
+}
+/**
+ * Mask phone numbers (except +1555 test numbers), bare 10+ digit numbers, phone and card numbers
+ * written in groups (spaces, hyphens, dots, parentheses), non-org emails and token-like strings
+ * (API keys, AWS key ids, JWTs, bearer tokens).
  * @param {unknown} text
  * @returns {string}
  */
@@ -71,6 +102,7 @@ export function scrub(text) {
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted-token>');
   // Last, so a digit run inside a token is already gone with the token.
   s = s.replace(BARE_DIGITS, (_, a, b) => `${'•'.repeat(a.length)}${b}`);
+  s = s.replace(GROUPED, maskGrouped);
   return s;
 }
 
@@ -147,6 +179,48 @@ export function normalizeRun(r) {
 }
 const isMainPush = (r) => r.branch === 'main' && r.event === 'push';
 const newestFirst = (runs) => [...runs].sort((a, b) => time(b.createdAt) - time(a.createdAt) || b.id - a.id);
+const runState = (r) => (r ? r.conclusion || r.status : 'pending');
+
+// ---------- open-PR split and the project cross-check ----------
+const isDependabot = (pr) => /dependabot/i.test(pr.author ?? '') || /^dependabot\//.test(pr.head ?? '');
+const OPEN_PROJECT_STATES = new Set(['open', 'draft', 'queued']);
+
+/**
+ * Open PRs in three counts: program (number >= 237, not dependabot, not a loop/ branch), bot
+ * (dependabot author or branch) and older (everything else: pre-program numbers such as #207 and
+ * #222, and loop/ branches). PRs that are not open are ignored.
+ * @param {Pr[]} prs normalized PRs
+ * @returns {{program: number, bot: number, older: number}}
+ */
+export function splitOpenPrs(prs) {
+  const out = { program: 0, bot: 0, older: 0 };
+  for (const pr of prs) {
+    if (pr.state !== 'open') continue;
+    if (isDependabot(pr)) out.bot++;
+    else if (isProgramPr(pr)) out.program++;
+    else out.older++;
+  }
+  return out;
+}
+
+/**
+ * Distinct open program PRs that project threads opened (hearthbot list_project_prs: open, draft
+ * or queued; number >= 237; not a loop/ branch). A cross-check for meta/state.openProgramPrs.
+ * @param {any} snapshot `{pull_requests: [...]}` or the array itself
+ * @returns {number|null} null when the input is not a snapshot
+ */
+export function countOpenProjectPrs(snapshot) {
+  const list = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.pull_requests) ? snapshot.pull_requests : null;
+  if (!list) return null;
+  const open = new Set();
+  for (const p of list) {
+    const n = Number(p?.number);
+    if (!Number.isInteger(n) || !OPEN_PROJECT_STATES.has(p?.state)) continue;
+    if (!isProgramPr({ number: n, author: '', head: String(p?.head_ref ?? '') })) continue;
+    open.add(n);
+  }
+  return open.size;
+}
 
 // ---------- deterministic ids ----------
 export const eventIds = {
@@ -228,7 +302,8 @@ export function deriveFixStates(prs, current = new Map()) {
 const stateAt = (pr) => (pr.state === 'merged' ? pr.mergedAt : pr.state === 'closed' ? pr.closedAt : pr.createdAt);
 
 /**
- * prs/pr-<n> (created once) and prstate/pr-<n>-<state> (the page takes the latest per number).
+ * prs/pr-<n> (created once) and prstate/pr-<n>-<state> (the page takes the latest per number;
+ * each prstate doc keeps the title the PR had when it reached that state).
  * @param {Pr[]} prs
  * @returns {Doc[]}
  */
@@ -237,7 +312,7 @@ export function prDocs(prs) {
   for (const pr of [...prs].sort((a, b) => a.number - b.number)) {
     const fix = fixField(pr.fixes);
     docs.push({ collection: 'prs', id: `pr-${pr.number}`, data: { number: pr.number, title: pr.title, url: pr.url, createdAt: pr.createdAt, fix } });
-    docs.push({ collection: 'prstate', id: `pr-${pr.number}-${pr.state}`, data: { number: pr.number, state: pr.state, at: stateAt(pr), mergeSha: pr.mergeSha, fix } });
+    docs.push({ collection: 'prstate', id: `pr-${pr.number}-${pr.state}`, data: { number: pr.number, state: pr.state, at: stateAt(pr), mergeSha: pr.mergeSha, fix, title: pr.title } });
   }
   return docs;
 }
@@ -303,8 +378,164 @@ export function runEvents(ciRuns, smokeRuns) {
   return out;
 }
 
+// ---------- releases ----------
+const SMOKE_RESULT = (c) => (c === 'success' ? 'success' : FAILED.has(c) ? 'failure' : c === 'cancelled' ? 'cancelled' : null);
+
 /**
- * Keys of events recorded before this engine (hand-written or by snapshot.mjs), so the first run
+ * releases/rel-<sha7>-<smokeRunId>: one per completed push Smoke on main (success, failure or
+ * cancelled; other conclusions are skipped). prs = the PRs whose merge commit is that sha, with
+ * the title they have when the doc is written (append-only, so it keeps the merge-time title).
+ * ciMain = the latest push CI run for that sha (conclusion or status; 'pending' when none).
+ * @param {Pr[]} prs normalized PRs (all of them, dependabot included: they ship too)
+ * @param {Run[]} smokeRuns
+ * @param {Run[]} [ciRuns]
+ * @returns {Doc[]}
+ */
+export function releaseDocs(prs, smokeRuns, ciRuns = []) {
+  const ci = newestFirst(ciRuns.filter(isMainPush));
+  const out = [];
+  for (const r of newestFirst(smokeRuns).reverse()) {
+    if (!isMainPush(r) || r.status !== 'completed' || !r.sha7) continue;
+    const smoke = SMOKE_RESULT(r.conclusion);
+    if (!smoke) continue;
+    const shipped = prs
+      .filter((p) => p.state === 'merged' && p.mergeSha === r.sha7)
+      .sort((a, b) => a.number - b.number)
+      .map((p) => ({ n: p.number, title: p.title }));
+    out.push({
+      collection: 'releases',
+      id: `rel-${r.sha7}-${r.id}`,
+      data: { sha7: r.sha7, at: r.updatedAt || r.createdAt, prs: shipped, ciMain: runState(ci.find((c) => c.sha === r.sha)), smoke, smokeUrl: r.url },
+    });
+  }
+  return out;
+}
+
+// ---------- feed (v2 timeline) ----------
+const monthOf = (t) => { const d = new Date(t); return `feed-${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}`; };
+const prevMonthStart = (t) => { const d = new Date(t); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1); };
+
+/**
+ * The feed collection for a row: 'feed-YYYY-MM' from the UTC month of `at`; null when `at` is not a date.
+ * @param {unknown} at
+ * @returns {string|null}
+ */
+export function feedCollection(at) {
+  const t = Date.parse(typeof at === 'string' ? at : '');
+  return Number.isNaN(t) ? null : monthOf(t);
+}
+
+/**
+ * The feed collections the engine dumps and may write: [this month, previous month] (UTC).
+ * @param {string} now
+ * @returns {string[]}
+ */
+export function feedMonths(now) {
+  const t = Date.parse(now);
+  return [monthOf(t), monthOf(prevMonthStart(t))];
+}
+
+/**
+ * True when the engine may emit a feed row at `at`: on or after the first day of the previous
+ * UTC month (the oldest dumped month) and on or after cutoverAt (older rows live in the frozen
+ * events collection, which is not dumped any more). While cutoverAt is not a date (no meta/sync:
+ * the v2 seed has not run), nothing is emitted: rows written then would duplicate the frozen
+ * events and collide with the ids the seed backfills.
+ * @param {unknown} at
+ * @param {string} now
+ * @param {string|null|undefined} cutoverAt
+ * @returns {boolean}
+ */
+export function emitWindow(at, now, cutoverAt) {
+  const t = Date.parse(typeof at === 'string' ? at : '');
+  if (Number.isNaN(t) || t < prevMonthStart(Date.parse(now))) return false;
+  const cut = Date.parse(typeof cutoverAt === 'string' ? cutoverAt : '');
+  return !Number.isNaN(cut) && t >= cut;
+}
+
+const clampFeed = (data) => ({
+  ...data,
+  title: String(data.title ?? '').slice(0, FEED_TITLE_MAX),
+  ...(data.detail !== undefined ? { detail: String(data.detail).slice(0, FEED_DETAIL_MAX) } : {}),
+});
+const toFeedDoc = (d) => ({ ...d, collection: feedCollection(d.data?.at), data: clampFeed(d.data) });
+
+/**
+ * Event docs → feed docs: each goes to the feed month of its `at`, with title and detail clamped
+ * to the feed caps. Rows outside emitWindow, and rows validateEvent rejects, are dropped
+ * (the latter with a warning). Without a cutoverAt no row is emitted (one warning).
+ * `key` is kept for legacy matching.
+ * @param {Doc[]} events
+ * @param {{now: string, cutoverAt?: string|null}} opts
+ * @returns {{docs: Doc[], warnings: string[]}}
+ */
+export function feedDocs(events, { now, cutoverAt = null }) {
+  const docs = [];
+  const warnings = [];
+  if (Number.isNaN(Date.parse(typeof cutoverAt === 'string' ? cutoverAt : ''))) {
+    if (events.length) warnings.push(`meta/sync.cutoverAt is not set (v2 seed not run?): ${events.length} feed row(s) not written`);
+    return { docs, warnings };
+  }
+  for (const e of events) {
+    if (!emitWindow(e.data?.at, now, cutoverAt)) continue;
+    const d = toFeedDoc(e);
+    const v = validateEvent(d.data);
+    if (!v.ok) { warnings.push(`feed row ${e.id} skipped: ${v.errors.join('; ')}`); continue; }
+    docs.push(d);
+  }
+  return { docs, warnings };
+}
+
+/**
+ * Checks one feed row (the journalToEvents rules, made strict for v2): `at` is a date; kind is a
+ * known kind ('change' included); actor is known; title is non-empty and at most 140 chars;
+ * detail at most 280; result and source, when present, are known; refs, when present, is an
+ * object; title and detail are already scrubbed (scrub() would not change them).
+ * @param {any} e
+ * @returns {{ok: boolean, errors: string[]}}
+ */
+export function validateEvent(e) {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return { ok: false, errors: ['not an object'] };
+  const errors = [];
+  if (typeof e.at !== 'string' || Number.isNaN(Date.parse(e.at))) errors.push('at is not a date');
+  if (!EVENT_KINDS.has(e.kind)) errors.push(`unknown kind ${JSON.stringify(e.kind)}`);
+  if (!ACTORS.has(e.actor)) errors.push(`unknown actor ${JSON.stringify(e.actor)}`);
+  if (typeof e.title !== 'string' || !e.title.trim()) errors.push('title is empty');
+  else if (e.title.length > FEED_TITLE_MAX) errors.push(`title is over ${FEED_TITLE_MAX} chars`);
+  if (e.detail !== undefined && typeof e.detail !== 'string') errors.push('detail is not a string');
+  else if (typeof e.detail === 'string' && e.detail.length > FEED_DETAIL_MAX) errors.push(`detail is over ${FEED_DETAIL_MAX} chars`);
+  if (e.result !== undefined && !RESULTS.has(e.result)) errors.push(`unknown result ${JSON.stringify(e.result)}`);
+  if (e.source !== undefined && !FEED_SOURCES.has(e.source)) errors.push(`unknown source ${JSON.stringify(e.source)}`);
+  if (e.refs !== undefined && (e.refs === null || typeof e.refs !== 'object' || Array.isArray(e.refs))) errors.push('refs is not an object');
+  for (const f of ['title', 'detail']) {
+    if (typeof e[f] === 'string' && scrub(e[f]) !== e[f]) errors.push(`${f} is not scrubbed (phone, email, token or long number)`);
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+// ---------- lease ----------
+/** The soft lease in meta/sync: a run whose runningSince is younger than this is still running. */
+export const LEASE_MS = 20 * 60 * 1000;
+
+/**
+ * Whether meta/sync.runningSince holds the lease at `now`: held when it is a date less than
+ * LEASE_MS old. A value more than LEASE_MS in the future (clock trouble) does not hold it, so a
+ * bad write cannot block the ledger forever.
+ * @param {any} sync meta/sync data (or null)
+ * @param {string} now
+ * @param {number} [leaseMs]
+ * @returns {{held: boolean, runningSince: string|null, ageMs: number|null}}
+ */
+export function leaseStatus(sync, now, leaseMs = LEASE_MS) {
+  const rs = typeof sync?.runningSince === 'string' ? sync.runningSince : null;
+  const t = Date.parse(rs ?? '');
+  if (rs === null || Number.isNaN(t)) return { held: false, runningSince: rs, ageMs: null };
+  const ageMs = time(now) - t;
+  return { held: ageMs < leaseMs && ageMs > -leaseMs, runningSince: rs, ageMs };
+}
+
+/**
+ * Keys of events recorded before this engine (hand-written or by the old snapshot script), so the first run
  * does not duplicate them in the timeline. Engine ids (gh-*, j-*) are matched by id instead.
  * @param {Array<{id: string, data: any}>} [existing]
  * @returns {Set<string>}
@@ -385,10 +616,15 @@ function cleanRefs(refs) {
 
 /**
  * One `events/j-<sha1(line)[0:16]>` per journal line; unknown fields dropped, text scrubbed.
+ * With target 'feed' (ledger v2): agent rows are dropped, and each row goes to
+ * `feed-YYYY-MM/j-…` (the month of its `at`), clamped to the feed caps; a row validateEvent
+ * still rejects (an unknown kind) is skipped with a warning.
  * @param {string[]} lines
+ * @param {{target?: 'events'|'feed'}} [opts]
  * @returns {{events: Doc[], warnings: string[]}}
  */
-export function journalToEvents(lines) {
+export function journalToEvents(lines, { target = 'events' } = {}) {
+  const feed = target === 'feed';
   const events = [];
   const warnings = [];
   for (const line of lines) {
@@ -398,6 +634,7 @@ export function journalToEvents(lines) {
       warnings.push(`journal line skipped (needs at and title): ${eventIds.journal(line)}`);
       continue;
     }
+    if (feed && o.kind === 'agent') continue;
     const kind = typeof o.kind === 'string' && /^[a-z][a-z-]{0,19}$/.test(o.kind) ? o.kind : 'decision';
     const refs = cleanRefs(o.refs);
     const data = {
@@ -411,7 +648,12 @@ export function journalToEvents(lines) {
       ...(RESULTS.has(o.result) ? { result: o.result } : {}),
       source: 'journal',
     };
-    events.push({ collection: 'events', id: eventIds.journal(line), data });
+    const doc = { collection: 'events', id: eventIds.journal(line), data };
+    if (!feed) { events.push(doc); continue; }
+    const f = toFeedDoc(doc);
+    const v = validateEvent(f.data);
+    if (v.ok) events.push(f);
+    else warnings.push(`journal line skipped (${v.errors.join('; ')}): ${doc.id}`);
   }
   return { events, warnings };
 }
@@ -461,17 +703,18 @@ export function batchWrites(sized, opts = { maxWrites: 50, maxBytes: 900_000 }) 
 /**
  * meta/state. prodServes: mainSha when the latest push Smoke for it succeeded (the smoke waits
  * until /api/version reports the commit, so success proves production serves it), else the newest
- * sha with a successful push Smoke.
- * Keeps every other key already in the doc.
- * @param {{prev?: any, mainSha: string, ciRuns?: Run[], smokeRuns?: Run[], openPrs: number, now: string, by: string}} args
+ * sha with a successful push Smoke. prodPrTitles: the PRs merged at the prodServes sha ({n, title}).
+ * openProgramPrs / openBotPrs / openOlderPrs come from openSplit (splitOpenPrs), null when absent;
+ * programPrsFromThreads is the project-snapshot cross-check (null without a snapshot).
+ * Keeps every other key already in the doc, except the v1 keys program and currentPhase.
+ * @param {{prev?: any, mainSha: string, ciRuns?: Run[], smokeRuns?: Run[], openPrs: number, openSplit?: {program: number, bot: number, older: number}|null, prs?: Pr[], programPrsFromThreads?: number|null, now: string, by: string}} args
  * @returns {Record<string, any>}
  */
-export function buildState({ prev, mainSha, ciRuns = [], smokeRuns = [], openPrs, now, by }) {
+export function buildState({ prev, mainSha, ciRuns = [], smokeRuns = [], openPrs, openSplit = null, prs = [], programPrsFromThreads = null, now, by }) {
   const forMain = (runs) => newestFirst(runs).find((r) => r.sha.startsWith(mainSha));
   const ciLatest = forMain(ciRuns.filter(isMainPush));
   const pushSmoke = newestFirst(smokeRuns.filter(isMainPush));
   const smokeLatest = forMain(pushSmoke);
-  const runState = (r) => (r ? r.conclusion || r.status : 'pending');
   const smokeMain = runState(smokeLatest);
   const lastGood = pushSmoke.find((r) => r.conclusion === 'success');
 
@@ -498,20 +741,30 @@ export function buildState({ prev, mainSha, ciRuns = [], smokeRuns = [], openPrs
     else prodDeploy = `${mainSha}: not verified in production yet (smoke ${st})${lastGood ? `; production last verified on ${lastGood.sha7}` : ''}`;
   }
 
+  const kept = { ...(prev && typeof prev === 'object' ? prev : {}) };
+  delete kept.program; // v1 keys, removed from the doc in ledger v2
+  delete kept.currentPhase;
+  const prodPrTitles = prodServes
+    ? prs.filter((p) => p.state === 'merged' && p.mergeSha === prodServes).sort((a, b) => a.number - b.number).map((p) => ({ n: p.number, title: p.title }))
+    : [];
   return {
-    ...(prev && typeof prev === 'object' ? prev : {}),
+    ...kept,
     mainSha,
     ciMain: runState(ciLatest),
     smokeMain,
     smokeNote,
+    smokeUrl: smokeLatest ? smokeLatest.url : null,
     prodServes,
     prodServesNote,
     prodDeploy,
+    prodPrTitles,
     openPrs,
+    openProgramPrs: openSplit ? openSplit.program : null,
+    openBotPrs: openSplit ? openSplit.bot : null,
+    openOlderPrs: openSplit ? openSplit.older : null,
+    programPrsFromThreads: Number.isInteger(programPrsFromThreads) ? programPrsFromThreads : null,
     syncedAt: now,
     syncedBy: by === 'cloud' ? 'cloud routine' : by === 'session' ? 'session' : String(by),
-    program: PROGRAM,
-    currentPhase: Number.isInteger(prev?.currentPhase) ? prev.currentPhase : 1,
   };
 }
 
@@ -519,27 +772,37 @@ export function buildState({ prev, mainSha, ciRuns = [], smokeRuns = [], openPrs
 /**
  * Everything one sync writes, from already-fetched GitHub data and the ledger dump.
  * gh: {mainSha (sha7), prs, openPrs (REST pulls), ciRuns, smokeRuns (REST runs)}
- * dump: {ids: Set<"collection/id">, fixstate: data[], fixes: data[], events: {id,data}[], prevState}
- * Returns docs (new ones, then meta/state last), the state and warnings.
- * @param {{gh: {mainSha: string, prs: any[], openPrs: any[], ciRuns: any[], smokeRuns: any[]}, dump: {ids: Set<string>, fixstate: any[], fixes: any[], events: Array<{id: string, data: any}>, prevState: any}, journalLines?: string[], now: string, by: string}} args
+ * dump: {ids: Set<"collection/id">, fixstate: data[], fixes: data[], events?: {id,data}[],
+ *        prevState, cutoverAt?} (cutoverAt comes from meta/sync; events is legacy and may be empty)
+ * projectPrs: the hearthbot list_project_prs snapshot, or null (then programPrsFromThreads is null).
+ * Writes prs, prstate (with title), fixstate (archive path), releases, feed rows (gh-* and the
+ * journal's j-*, agent rows dropped, only inside emitWindow) and meta/state last.
+ * @param {{gh: {mainSha: string, prs: any[], openPrs: any[], ciRuns: any[], smokeRuns: any[]}, dump: {ids: Set<string>, fixstate: any[], fixes: any[], events?: Array<{id: string, data: any}>, prevState: any, cutoverAt?: string|null}, journalLines?: string[], now: string, by: string, projectPrs?: any}} args
  * @returns {{docs: Doc[], state: Record<string, any>, warnings: string[]}}
  */
-export function planSync({ gh, dump, journalLines = [], now, by }) {
-  const prs = gh.prs.map(normalizePr).filter(isProgramPr);
-  const openPrs = gh.openPrs.map(normalizePr).filter((p) => p.state === 'open' && !isExcludedPr(p)).length;
+export function planSync({ gh, dump, journalLines = [], now, by, projectPrs = null }) {
+  const all = gh.prs.map(normalizePr);
+  const prs = all.filter(isProgramPr);
+  const openList = gh.openPrs.map(normalizePr).filter((p) => p.state === 'open');
+  const openPrs = openList.filter((p) => !isExcludedPr(p)).length;
   const ci = gh.ciRuns.map(normalizeRun);
   const smoke = gh.smokeRuns.map(normalizeRun);
-  const journal = journalToEvents(journalLines);
+  const journal = journalToEvents(journalLines, { target: 'feed' });
+  const feed = feedDocs([...prEvents(prs), ...runEvents(ci, smoke), ...journal.events], { now, cutoverAt: dump.cutoverAt ?? null });
   const docs = [
     ...prDocs(prs),
     ...deriveFixStates(prs, currentFixStatuses(dump.fixstate, dump.fixes)),
-    ...prEvents(prs),
-    ...runEvents(ci, smoke),
-    ...journal.events,
+    ...releaseDocs(all, smoke, ci),
+    ...feed.docs,
   ];
-  const state = buildState({ prev: dump.prevState, mainSha: gh.mainSha, ciRuns: ci, smokeRuns: smoke, openPrs, now, by });
-  const fresh = diffAgainstExisting(docs, dump.ids, legacyEventKeys(dump.events));
-  return { docs: [...fresh, { collection: 'meta', id: 'state', data: state }], state, warnings: journal.warnings };
+  const state = buildState({
+    prev: dump.prevState, mainSha: gh.mainSha, ciRuns: ci, smokeRuns: smoke, openPrs,
+    openSplit: splitOpenPrs(openList), prs: all,
+    programPrsFromThreads: projectPrs == null ? null : countOpenProjectPrs(projectPrs),
+    now, by,
+  });
+  const fresh = diffAgainstExisting(docs, dump.ids, legacyEventKeys(dump.events ?? []));
+  return { docs: [...fresh, { collection: 'meta', id: 'state', data: state }], state, warnings: [...journal.warnings, ...feed.warnings] };
 }
 
 // ---------- hooks ----------

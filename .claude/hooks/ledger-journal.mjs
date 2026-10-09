@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // PostToolUse(Agent), PostToolUse(Bash) and SubagentStop hook: appends journal lines to the
 // Program Ledger journal (~/.smartremit-ledger/journal.ndjson), which the tracker-sync engine
-// turns into events/j-* docs. Logic: hookToJournalEntries() in scripts/tracker/sync-core.mjs.
+// turns into feed-YYYY-MM/j-* rows (agent rows dropped; ledger v2). Logic: hookToJournalEntries()
+// in scripts/tracker/sync-core.mjs.
 // ONE start row and ONE finish row per agent the MAIN thread launches:
 // - Agent (main thread only: input without agent_id): records {agentId, description,
 //   subagent_type, model} under tool_response.agentId in ~/.smartremit-ledger/agents.json and

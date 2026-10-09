@@ -1,20 +1,30 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   FIRST_PROGRAM_PR,
+  JOURNAL_KINDS,
+  LEASE_MS,
   LEGACY_FIX_MAP,
   SYNC_STALE_MS,
   URGENT_JOURNAL_KINDS,
   buildState,
+  countOpenProjectPrs,
   currentFixStatuses,
   deriveFixStates,
   diffAgainstExisting,
+  emitWindow,
   eventIds,
+  feedCollection,
+  feedDocs,
+  feedMonths,
   fixesForPr,
   hookToJournalEntries,
   hookUsesAgents,
   isProgramPr,
   journalToEvents,
+  leaseStatus,
   legacyEventKeys,
   normalizePr,
   normalizeRun,
@@ -24,13 +34,16 @@ import {
   prEvents,
   pruneAgents,
   rank,
+  releaseDocs,
   runEvents,
   scrub,
   sliceJournal,
   splitBatches,
+  splitOpenPrs,
   stopDecision,
   urgentJournalKinds,
   batchWrites,
+  validateEvent,
 } from '../scripts/tracker/sync-core.mjs';
 
 const REPO_URL = 'https://github.com/Nagavenkatasai7/claude-payments';
@@ -110,7 +123,7 @@ describe('parseProgramFix', () => {
 });
 
 describe('fixesForPr and PR scope', () => {
-  it('reuses the legacy map from snapshot.mjs and unions it with the trailer', () => {
+  it('keeps the legacy map for PRs merged before the trailer existed and unions it with the trailer', () => {
     expect(LEGACY_FIX_MAP).toEqual({ 242: [1], 243: [3], 244: [2], 246: [3], 247: [2], 248: [2] });
     expect(fixesForPr(242, '')).toEqual([1]);
     expect(fixesForPr(243, 'Program-Fix: 5')).toEqual([3, 5]);
@@ -289,13 +302,13 @@ describe('deterministic ids and events', () => {
 });
 
 describe('prDocs', () => {
-  it('creates prs/pr-<n> once and a prstate doc for the current state', () => {
+  it('creates prs/pr-<n> once and a prstate doc for the current state, carrying the title at that state', () => {
     const docs = prDocs([merged(256, SHA_A, '2026-09-16T19:33:30Z', 'Program-Fix: 6'), open(261, 'Program-Fix: 13, 9')].map(normalizePr));
     expect(docs).toEqual([
       { collection: 'prs', id: 'pr-256', data: { number: 256, title: 'PR 256 title', url: `${REPO_URL}/pull/256`, createdAt: '2026-09-20T10:00:00Z', fix: 6 } },
-      { collection: 'prstate', id: 'pr-256-merged', data: { number: 256, state: 'merged', at: '2026-09-16T19:33:30Z', mergeSha: 'aaaaaaa', fix: 6 } },
+      { collection: 'prstate', id: 'pr-256-merged', data: { number: 256, state: 'merged', at: '2026-09-16T19:33:30Z', mergeSha: 'aaaaaaa', fix: 6, title: 'PR 256 title' } },
       { collection: 'prs', id: 'pr-261', data: { number: 261, title: 'PR 261 title', url: `${REPO_URL}/pull/261`, createdAt: '2026-09-20T10:00:00Z', fix: [9, 13] } },
-      { collection: 'prstate', id: 'pr-261-open', data: { number: 261, state: 'open', at: '2026-09-20T10:00:00Z', mergeSha: null, fix: [9, 13] } },
+      { collection: 'prstate', id: 'pr-261-open', data: { number: 261, state: 'open', at: '2026-09-20T10:00:00Z', mergeSha: null, fix: [9, 13], title: 'PR 261 title' } },
     ]);
   });
 });
@@ -369,6 +382,21 @@ describe('journal slicing and events', () => {
     expect(s.actor).toBe('claude');
   });
 
+  it('with target feed: drops agent rows, files each row in its feed month and clamps it to the feed caps', () => {
+    const agent = JSON.stringify({ at: '2026-09-22T01:00:00Z', kind: 'agent', actor: 'claude', title: 'Agent started: x' });
+    const long = JSON.stringify({ at: '2026-10-01T00:00:00Z', kind: 'verify', title: 'v'.repeat(300), detail: 'w'.repeat(3000) });
+    const { events, warnings } = journalToEvents([line1, agent, long], { target: 'feed' });
+    expect(events.map((e: { collection: string; id: string }) => `${e.collection}/${e.id}`)).toEqual([
+      `feed-2026-09/${eventIds.journal(line1)}`, `feed-2026-10/${eventIds.journal(long)}`,
+    ]);
+    expect(events[1].data.title).toHaveLength(140);
+    expect(events[1].data.detail).toHaveLength(280);
+    expect(warnings).toEqual([]);
+    for (const e of events) expect(validateEvent(e.data).ok).toBe(true);
+    // The default target keeps the old events rows (and agent rows) for the archive path.
+    expect(journalToEvents([agent]).events.map((e: { collection: string }) => e.collection)).toEqual(['events']);
+  });
+
   it('redacts every secret shape in journal titles and details', () => {
     const all = Object.values(SECRETS).join(' | ');
     const line = JSON.stringify({ at: '2026-09-22T02:00:00Z', kind: 'decision', title: `t ${all}`, detail: `d ${all}` });
@@ -429,7 +457,7 @@ describe('buildState', () => {
       mainSha: 'ccccccc', ciMain: 'success', smokeMain: 'success', smokeNote: `${REPO_URL}/actions/runs/30`,
       prodServes: 'ccccccc', prodDeploy: 'ccccccc: production serves this commit (smoke verified)',
       openPrs: 3, syncedAt: '2026-09-22T01:00:00.000Z', syncedBy: 'cloud routine',
-      program: 'SmartRemit upgrade program 2026-09', currentPhase: 1, customKey: 'kept',
+      smokeUrl: `${REPO_URL}/actions/runs/30`, customKey: 'kept',
     });
     expect(typeof s.prodServesNote).toBe('string');
   });
@@ -454,7 +482,8 @@ describe('buildState', () => {
 
   it('reports pending and no prod sha when there are no runs', () => {
     const s = buildState({ ...base, prev: null, ciRuns: [], smokeRuns: [] });
-    expect(s).toMatchObject({ ciMain: 'pending', smokeMain: 'pending', prodServes: null, currentPhase: 1 });
+    expect(s).toMatchObject({ ciMain: 'pending', smokeMain: 'pending', prodServes: null, smokeUrl: null, prodPrTitles: [] });
+    expect(s).not.toHaveProperty('currentPhase');
     expect(s.smokeNote).toMatch(/No push smoke run/);
   });
 
@@ -465,9 +494,241 @@ describe('buildState', () => {
     expect(s.prodServes).toBe('ccccccc');
     expect(s.prodDeploy).toMatch(/failure/);
   });
+
+  it('drops program and currentPhase, even when prev has them (v2: the page no longer shows a phase)', () => {
+    const s = buildState({ ...base, prev: { ...base.prev, program: 'SmartRemit upgrade program 2026-09', currentPhase: 3 }, ciRuns: ci, smokeRuns: [] });
+    expect(s).not.toHaveProperty('program');
+    expect(s).not.toHaveProperty('currentPhase');
+    expect(s.customKey).toBe('kept');
+  });
+
+  it('records the open-PR split, the production PR titles and the project cross-check', () => {
+    const prs = [
+      merged(483, SHA_C, '2026-10-08T21:30:00Z'),
+      merged(482, SHA_B, '2026-10-08T20:00:00Z'),
+      open(484),
+    ].map(normalizePr);
+    const s = buildState({
+      ...base, ciRuns: ci, smokeRuns: [apiRun(30, SHA_C)].map(normalizeRun), prs,
+      openSplit: { program: 2, bot: 1, older: 2 }, programPrsFromThreads: 2,
+    });
+    expect(s).toMatchObject({ openProgramPrs: 2, openBotPrs: 1, openOlderPrs: 2, programPrsFromThreads: 2 });
+    expect(s.prodPrTitles).toEqual([{ n: 483, title: 'PR 483 title' }]);
+  });
+
+  it('leaves the split and the cross-check null when they are not given', () => {
+    const s = buildState({ ...base, ciRuns: ci, smokeRuns: [] });
+    expect(s).toMatchObject({ openProgramPrs: null, openBotPrs: null, openOlderPrs: null, programPrsFromThreads: null, prodPrTitles: [] });
+  });
+});
+
+describe('splitOpenPrs', () => {
+  it('counts program PRs (>= 237, not dependabot, not loop/), dependabot apart, and the rest (#207, #222, loop/) as older', () => {
+    const list = [
+      open(484),
+      open(237),
+      apiPr(207),
+      apiPr(222),
+      apiPr(300, { head: { ref: 'loop/overnight-3' } }),
+      apiPr(301, { user: { login: 'dependabot[bot]' }, head: { ref: 'dependabot/npm_and_yarn/next-16' } }),
+      apiPr(150, { head: { ref: 'dependabot/github_actions/x' } }),
+      merged(400, SHA_A, '2026-10-01T00:00:00Z'),
+    ].map(normalizePr);
+    expect(splitOpenPrs(list)).toEqual({ program: 2, bot: 2, older: 3 });
+    expect(splitOpenPrs([])).toEqual({ program: 0, bot: 0, older: 0 });
+  });
+});
+
+describe('countOpenProjectPrs (project snapshot cross-check)', () => {
+  it('counts distinct open, draft and queued program PRs from list_project_prs', () => {
+    const snap = {
+      pull_requests: [
+        { number: 483, state: 'merged', head_ref: 'claude/a' },
+        { number: 484, state: 'open', head_ref: 'claude/b' },
+        { number: 484, state: 'open', head_ref: 'claude/b' },
+        { number: 485, state: 'draft', head_ref: 'claude/c' },
+        { number: 486, state: 'queued', head_ref: 'claude/d' },
+        { number: 467, state: 'closed', head_ref: 'claude/e' },
+        { number: 200, state: 'open', head_ref: 'claude/old' },
+        { number: 490, state: 'open', head_ref: 'loop/x' },
+        { number: 491, state: 'unavailable', head_ref: 'claude/f' },
+      ],
+    };
+    expect(countOpenProjectPrs(snap)).toBe(3);
+    expect(countOpenProjectPrs(snap.pull_requests)).toBe(3);
+  });
+  it('returns null for something that is not a snapshot', () => {
+    expect(countOpenProjectPrs(null)).toBeNull();
+    expect(countOpenProjectPrs({})).toBeNull();
+  });
+});
+
+describe('releaseDocs', () => {
+  const prs = [
+    merged(483, SHA_C, '2026-10-08T21:30:00Z'),
+    merged(482, SHA_B, '2026-10-08T20:00:00Z'),
+    apiPr(470, { state: 'closed', merged_at: '2026-10-08T21:31:00Z', closed_at: '2026-10-08T21:31:00Z', merge_commit_sha: SHA_C, title: 'Bump x', user: { login: 'dependabot[bot]' } }),
+    open(484),
+  ].map(normalizePr);
+  const ci = [apiRun(20, SHA_C), apiRun(19, SHA_B, { conclusion: 'failure' })].map(normalizeRun);
+
+  it('writes one releases/rel-<sha7>-<runId> per completed push smoke on main, with the PRs merged at that sha', () => {
+    const smoke = [
+      apiRun(30, SHA_C, { updated_at: '2026-10-08T21:52:00Z' }),
+      apiRun(29, SHA_B, { conclusion: 'failure', updated_at: '2026-10-08T20:20:00Z' }),
+      apiRun(28, SHA_A, { conclusion: 'cancelled' }),
+      apiRun(31, SHA_C, { status: 'in_progress', conclusion: null }),
+      apiRun(32, SHA_C, { event: 'workflow_dispatch' }),
+      apiRun(33, SHA_C, { conclusion: 'skipped' }),
+    ].map(normalizeRun);
+    const docs = releaseDocs(prs, smoke, ci);
+    expect(docs.map((d: { collection: string; id: string }) => `${d.collection}/${d.id}`)).toEqual([
+      'releases/rel-aaaaaaa-28', 'releases/rel-bbbbbbb-29', 'releases/rel-ccccccc-30',
+    ]);
+    const c = docs.find((d: { id: string }) => d.id === 'rel-ccccccc-30');
+    expect(c?.data).toEqual({
+      sha7: 'ccccccc', at: '2026-10-08T21:52:00Z',
+      prs: [{ n: 470, title: 'Bump x' }, { n: 483, title: 'PR 483 title' }],
+      ciMain: 'success', smoke: 'success', smokeUrl: `${REPO_URL}/actions/runs/30`,
+    });
+  });
+
+  it('records a failed or cancelled smoke and the CI result for that sha (pending when CI has no run)', () => {
+    const docs = releaseDocs(prs, [apiRun(29, SHA_B, { conclusion: 'timed_out' }), apiRun(28, SHA_A, { conclusion: 'cancelled' })].map(normalizeRun), ci);
+    expect(docs.find((d: { id: string }) => d.id === 'rel-bbbbbbb-29')?.data).toMatchObject({ smoke: 'failure', ciMain: 'failure', prs: [{ n: 482, title: 'PR 482 title' }] });
+    expect(docs.find((d: { id: string }) => d.id === 'rel-aaaaaaa-28')?.data).toMatchObject({ smoke: 'cancelled', ciMain: 'pending', prs: [] });
+  });
+
+  it('keeps the title from when the doc was written: a later rename does not change the id, so the existing doc is kept', () => {
+    const smoke = [apiRun(30, SHA_C)].map(normalizeRun);
+    const first = releaseDocs(prs, smoke, ci);
+    const renamed = prs.map((p: ReturnType<typeof normalizePr>) => (p.number === 483 ? { ...p, title: 'Renamed later' } : p));
+    const second = releaseDocs(renamed, smoke, ci);
+    expect(second.map((d: { id: string }) => d.id)).toEqual(first.map((d: { id: string }) => d.id));
+    expect(diffAgainstExisting(second, new Set(['releases/rel-ccccccc-30']))).toEqual([]);
+  });
+});
+
+describe('feed months and the emit window', () => {
+  it('names the feed collection by the UTC month of at', () => {
+    expect(feedCollection('2026-10-08T22:40:00Z')).toBe('feed-2026-10');
+    expect(feedCollection('2026-10-01T00:00:00Z')).toBe('feed-2026-10');
+    expect(feedCollection('2026-09-30T23:59:59.999Z')).toBe('feed-2026-09');
+    expect(feedCollection('2026-10-01T01:00:00+02:00')).toBe('feed-2026-09');
+    expect(feedCollection('not a date')).toBeNull();
+    expect(feedCollection(undefined)).toBeNull();
+  });
+
+  it('lists the current and the previous month (across a year boundary too)', () => {
+    expect(feedMonths('2026-10-08T22:40:00Z')).toEqual(['feed-2026-10', 'feed-2026-09']);
+    expect(feedMonths('2027-01-03T00:00:00Z')).toEqual(['feed-2027-01', 'feed-2026-12']);
+  });
+
+  it('emits only from the first day of the previous month (UTC) and from cutoverAt', () => {
+    const now = '2026-10-08T22:40:00Z';
+    const early = '2026-01-01T00:00:00Z';
+    expect(emitWindow('2026-09-01T00:00:00Z', now, early)).toBe(true);
+    expect(emitWindow('2026-08-31T23:59:59Z', now, early)).toBe(false);
+    expect(emitWindow('2026-10-08T21:59:59Z', now, '2026-10-08T22:00:00Z')).toBe(false);
+    expect(emitWindow('2026-10-08T22:00:00Z', now, '2026-10-08T22:00:00Z')).toBe(true);
+    expect(emitWindow('2026-12-02T00:00:00Z', '2027-01-03T00:00:00Z', early)).toBe(true);
+    expect(emitWindow('2026-11-30T23:59:59Z', '2027-01-03T00:00:00Z', early)).toBe(false);
+    expect(emitWindow('garbage', now, early)).toBe(false);
+  });
+
+  it('emits nothing while cutoverAt is not set (before the seed, the frozen events hold the history)', () => {
+    const now = '2026-10-08T22:40:00Z';
+    expect(emitWindow('2026-10-08T22:00:00Z', now, null)).toBe(false);
+    expect(emitWindow('2026-10-08T22:00:00Z', now, undefined)).toBe(false);
+    expect(emitWindow('2026-10-08T22:00:00Z', now, 'not a date')).toBe(false);
+    const ev = [{ collection: 'events', id: 'gh-merge-300', data: { at: '2026-09-03T00:00:00Z', kind: 'merge', actor: 'github', title: 'PR #300 merged', result: 'ok', source: 'github' } }];
+    const out = feedDocs(ev, { now, cutoverAt: null });
+    expect(out.docs).toEqual([]);
+    expect(out.warnings.join(' ')).toMatch(/cutoverAt/);
+    expect(feedDocs([], { now, cutoverAt: null }).warnings).toEqual([]);
+  });
+
+  it('moves events into their feed month, clamps text to the feed caps and drops rows outside the window', () => {
+    const ev = [
+      { collection: 'events', id: 'gh-merge-1', key: 'merge:1', data: { at: '2026-10-08T21:00:00Z', kind: 'merge', actor: 'github', title: 'PR #1 merged', detail: 'd'.repeat(400), result: 'ok', source: 'github' } },
+      { collection: 'events', id: 'gh-merge-2', data: { at: '2026-09-02T00:00:00Z', kind: 'merge', actor: 'github', title: 't'.repeat(200), detail: '', result: 'ok', source: 'github' } },
+      { collection: 'events', id: 'gh-merge-3', data: { at: '2026-08-02T00:00:00Z', kind: 'merge', actor: 'github', title: 'old', detail: '', result: 'ok', source: 'github' } },
+    ];
+    const { docs } = feedDocs(ev, { now: '2026-10-08T22:40:00Z', cutoverAt: '2026-01-01T00:00:00Z' });
+    expect(docs.map((d: { collection: string; id: string }) => `${d.collection}/${d.id}`)).toEqual(['feed-2026-10/gh-merge-1', 'feed-2026-09/gh-merge-2']);
+    expect(docs[0].key).toBe('merge:1');
+    expect(docs[0].data.detail).toHaveLength(280);
+    expect(docs[1].data.title).toHaveLength(140);
+    for (const d of docs) expect(validateEvent(d.data)).toEqual({ ok: true, errors: [] });
+    expect(feedDocs(ev, { now: '2026-10-08T22:40:00Z', cutoverAt: '2026-10-08T00:00:00Z' }).docs.map((d: { id: string }) => d.id)).toEqual(['gh-merge-1']);
+  });
+});
+
+describe("validateEvent and the 'change' kind", () => {
+  const good = { at: '2026-10-08T22:00:00Z', kind: 'change', actor: 'claude', title: 'ws batch-b: working -> live', detail: 'PR #483 merged', refs: { pr: [483], ws: 'batch-b' }, result: 'info', source: 'curator' };
+
+  it("accepts a well-formed feed row, including the new 'change' kind", () => {
+    expect(validateEvent(good)).toEqual({ ok: true, errors: [] });
+    expect(validateEvent({ at: good.at, kind: 'merge', actor: 'github', title: 'PR #1 merged' })).toEqual({ ok: true, errors: [] });
+  });
+
+  it('keeps change out of the journal kinds (only code writes change rows)', () => {
+    expect(JOURNAL_KINDS).not.toContain('change');
+    expect(JOURNAL_KINDS).toContain('decision');
+  });
+
+  it('rejects each broken field with a reason', () => {
+    const bad = (over: Record<string, unknown>) => validateEvent({ ...good, ...over });
+    expect(bad({ at: 'yesterday' }).errors.join(' ')).toMatch(/at/);
+    expect(bad({ kind: 'gossip' }).errors.join(' ')).toMatch(/kind/);
+    expect(bad({ actor: 'someone' }).errors.join(' ')).toMatch(/actor/);
+    expect(bad({ title: '' }).errors.join(' ')).toMatch(/title/);
+    expect(bad({ title: 'x'.repeat(141) }).errors.join(' ')).toMatch(/title/);
+    expect(bad({ detail: 'x'.repeat(281) }).errors.join(' ')).toMatch(/detail/);
+    expect(bad({ result: 'meh' }).errors.join(' ')).toMatch(/result/);
+    expect(bad({ source: 'rumour' }).errors.join(' ')).toMatch(/source/);
+    expect(bad({ refs: 'pr 1' }).errors.join(' ')).toMatch(/refs/);
+    expect(bad({ detail: `call ${SECRETS.barePhone}` }).errors.join(' ')).toMatch(/scrub/);
+    expect(bad({ title: `key ${SECRETS.anthropicKey}`.slice(0, 120) }).ok).toBe(false);
+    expect(validateEvent(null).ok).toBe(false);
+    expect(validateEvent('x').ok).toBe(false);
+  });
+});
+
+describe('leaseStatus (soft lease in meta/sync)', () => {
+  const NOW = '2026-10-08T22:40:00.000Z';
+  const ago = (m: number) => new Date(Date.parse(NOW) - m * 60_000).toISOString();
+  it('is held while runningSince is less than 20 minutes old', () => {
+    expect(LEASE_MS).toBe(20 * 60 * 1000);
+    expect(leaseStatus({ runningSince: ago(5) }, NOW)).toMatchObject({ held: true, runningSince: ago(5) });
+    expect(leaseStatus({ runningSince: ago(19.9) }, NOW).held).toBe(true);
+  });
+  it('is free when runningSince is 20+ minutes old, cleared, missing or unreadable', () => {
+    expect(leaseStatus({ runningSince: ago(20) }, NOW).held).toBe(false);
+    expect(leaseStatus({ runningSince: null }, NOW).held).toBe(false);
+    expect(leaseStatus({}, NOW).held).toBe(false);
+    expect(leaseStatus(null, NOW).held).toBe(false);
+    expect(leaseStatus({ runningSince: 'soon' }, NOW).held).toBe(false);
+  });
+  it('does not let a far-future runningSince hold the lease forever', () => {
+    expect(leaseStatus({ runningSince: ago(-5) }, NOW).held).toBe(true);
+    expect(leaseStatus({ runningSince: ago(-60) }, NOW).held).toBe(false);
+  });
+});
+
+describe('the routine runs the tracker scripts without npm install', () => {
+  it('imports only node: built-ins and sibling files', () => {
+    for (const f of ['sync-core.mjs', 'sync.mjs', 'github.mjs', 'journal.mjs']) {
+      const src = readFileSync(join(__dirname, '..', 'scripts', 'tracker', f), 'utf8');
+      const specs = [...src.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm), ...src.matchAll(/import\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+      expect(specs.length, f).toBeGreaterThan(0);
+      for (const sp of specs) expect(sp.startsWith('node:') || sp.startsWith('./'), `${f}: ${sp}`).toBe(true);
+    }
+  });
 });
 
 describe('planSync (end to end, pure)', () => {
+  const NOW = '2026-09-22T01:00:00.000Z';
   const gh = {
     mainSha: 'ccccccc',
     prs: [
@@ -475,39 +736,83 @@ describe('planSync (end to end, pure)', () => {
       open(261, 'Program-Fix: 13', '2026-09-21T22:14:53Z'),
       apiPr(262, { user: { login: 'dependabot[bot]' } }),
       apiPr(200),
+      // Opened and merged before the previous month: prs/prstate still written, no feed row.
+      apiPr(240, { state: 'closed', created_at: '2026-07-29T00:00:00Z', merged_at: '2026-07-30T00:00:00Z', closed_at: '2026-07-30T00:00:00Z', merge_commit_sha: SHA_B }),
     ],
-    openPrs: [open(261), apiPr(262, { user: { login: 'dependabot[bot]' } }), apiPr(207)],
+    openPrs: [open(261), apiPr(262, { user: { login: 'dependabot[bot]' } }), apiPr(207), apiPr(222)],
     ciRuns: [apiRun(20, SHA_C)],
     smokeRuns: [apiRun(30, SHA_C)],
   };
-  const emptyDump = { ids: new Set<string>(), fixstate: [], fixes: [{ fix: 6, status: 'planned', prs: [] }], events: [], prevState: { currentPhase: 1 } };
+  const emptyDump = { ids: new Set<string>(), fixstate: [], fixes: [{ fix: 6, status: 'planned', prs: [] }], events: [], prevState: { currentPhase: 1, program: 'x' }, cutoverAt: '2026-08-01T00:00:00Z' };
+  const idsOf = (docs: Array<{ collection: string; id: string }>) => docs.map((d) => `${d.collection}/${d.id}`);
 
-  it('plans the new docs plus meta/state last', () => {
-    const plan = planSync({ gh, dump: emptyDump, journalLines: [], now: '2026-09-22T01:00:00.000Z', by: 'session' });
-    const ids = plan.docs.map((d: { collection: string; id: string }) => `${d.collection}/${d.id}`);
+  it('plans the new docs plus meta/state last, with gh rows in the feed month of their time and no events rows', () => {
+    const plan = planSync({ gh, dump: emptyDump, journalLines: [], now: NOW, by: 'session' });
+    const ids = idsOf(plan.docs);
     expect(ids).toContain('prs/pr-256');
     expect(ids).toContain('prstate/pr-261-open');
     expect(ids).toContain('fixstate/fix-06-merged-aaaaaaa');
     expect(ids).toContain('fixstate/fix-13-in_review-pr261');
-    expect(ids).toContain('events/gh-merge-256');
-    expect(ids).toContain('events/gh-smoke-30');
+    expect(ids).toContain('feed-2026-09/gh-merge-256');
+    expect(ids).toContain('feed-2026-09/gh-pr-open-261');
+    expect(ids).toContain('feed-2026-09/gh-smoke-30');
+    expect(ids).toContain('releases/rel-ccccccc-30');
+    expect(ids).toContain('prs/pr-240');
+    expect(ids.some((x: string) => x.includes('gh-merge-240') || x.includes('gh-pr-open-240'))).toBe(false);
+    expect(ids.some((x: string) => x.startsWith('events/'))).toBe(false);
     expect(ids.some((x: string) => x.includes('262') || x.includes('pr-200'))).toBe(false);
     expect(ids[ids.length - 1]).toBe('meta/state');
-    expect(plan.state.openPrs).toBe(2);
+    expect(plan.state).toMatchObject({ openPrs: 3, openProgramPrs: 1, openBotPrs: 1, openOlderPrs: 2, programPrsFromThreads: null });
+    expect(plan.state).not.toHaveProperty('program');
+    expect(plan.state).not.toHaveProperty('currentPhase');
+  });
+
+  it('applies cutoverAt: no feed row before it, while prs, prstate, fixstate and releases are still written', () => {
+    const plan = planSync({ gh, dump: { ...emptyDump, cutoverAt: '2026-09-21T00:00:00Z' }, journalLines: [], now: NOW, by: 'cloud' });
+    const ids = idsOf(plan.docs);
+    expect(ids).not.toContain('feed-2026-09/gh-merge-256');
+    expect(ids).toContain('feed-2026-09/gh-pr-open-261');
+    expect(ids).toContain('prstate/pr-256-merged');
+    expect(ids).toContain('releases/rel-ccccccc-30');
+  });
+
+  it('plans no feed rows without meta/sync (cutoverAt null), while prs, prstate, fixstate and releases are still written', () => {
+    const plan = planSync({ gh, dump: { ...emptyDump, cutoverAt: null }, journalLines: [], now: NOW, by: 'session' });
+    const ids = idsOf(plan.docs);
+    expect(ids.some((x: string) => x.startsWith('feed-'))).toBe(false);
+    expect(ids).toContain('prs/pr-256');
+    expect(ids).toContain('prstate/pr-256-merged');
+    expect(ids).toContain('releases/rel-ccccccc-30');
+    expect(plan.warnings.join(' ')).toMatch(/cutoverAt/);
+  });
+
+  it('routes journal lines to feed rows and drops agent rows', () => {
+    const decision = JSON.stringify({ at: '2026-09-21T23:00:00Z', kind: 'decision', actor: 'owner', title: 'Go for stage C', detail: 'd' });
+    const agent = JSON.stringify({ at: '2026-09-21T23:01:00Z', kind: 'agent', actor: 'claude', title: 'Agent started: x' });
+    const plan = planSync({ gh, dump: emptyDump, journalLines: [decision, agent], now: NOW, by: 'session' });
+    const ids = idsOf(plan.docs);
+    expect(ids).toContain(`feed-2026-09/${eventIds.journal(decision)}`);
+    expect(ids.some((x: string) => x.endsWith(eventIds.journal(agent)))).toBe(false);
+  });
+
+  it('records programPrsFromThreads when a project snapshot is given', () => {
+    const plan = planSync({ gh, dump: emptyDump, journalLines: [], now: NOW, by: 'session', projectPrs: { pull_requests: [{ number: 261, state: 'open', head_ref: 'claude/x' }, { number: 256, state: 'merged', head_ref: 'claude/y' }] } });
+    expect(plan.state.programPrsFromThreads).toBe(1);
   });
 
   it('is idempotent: re-running against a dump holding its output plans only meta/state', () => {
-    const first = planSync({ gh, dump: emptyDump, journalLines: [], now: '2026-09-22T01:00:00.000Z', by: 'session' });
+    const first = planSync({ gh, dump: emptyDump, journalLines: [], now: NOW, by: 'session' });
     const docs = first.docs.filter((d: { collection: string }) => d.collection !== 'meta');
     const dump = {
-      ids: new Set<string>(docs.map((d: { collection: string; id: string }) => `${d.collection}/${d.id}`)),
+      ids: new Set<string>(idsOf(docs)),
       fixstate: docs.filter((d: { collection: string }) => d.collection === 'fixstate').map((d: { data: unknown }) => d.data),
       fixes: emptyDump.fixes,
-      events: docs.filter((d: { collection: string }) => d.collection === 'events'),
+      events: [],
       prevState: first.state,
+      cutoverAt: emptyDump.cutoverAt,
     };
     const second = planSync({ gh, dump, journalLines: [], now: '2026-09-22T02:00:00.000Z', by: 'cloud' });
-    expect(second.docs.map((d: { collection: string; id: string }) => `${d.collection}/${d.id}`)).toEqual(['meta/state']);
+    expect(idsOf(second.docs)).toEqual(['meta/state']);
   });
 });
 
@@ -541,6 +846,34 @@ describe('scrub (port of build-corpus.py)', () => {
     const run = 'https://github.com/o/r/actions/runs/35671070038';
     expect(scrub(`CI failure: ${run}`)).toBe(`CI failure: ${run}`);
     expect(scrub('PR #273, 2527 tests, 179 files, sha 2a23a11, agent a1f4204c6f0012488')).toBe('PR #273, 2527 tests, 179 files, sha 2a23a11, agent a1f4204c6f0012488');
+  });
+  it('masks phone and card numbers written with spaces, hyphens, dots or parentheses, and long numbers after #', () => {
+    expect(scrub('call +91 98765 43210')).toBe('call +•• ••••• •3210');
+    expect(scrub('ring 703-555-0123')).toBe('ring •••-•••-0123');
+    expect(scrub('ring 703.555.0123 now')).toBe('ring •••.•••.0123 now');
+    expect(scrub('+1 (703) 555-0123')).toBe('+• (•••) •••-0123');
+    expect(scrub('(703) 555-0123')).toBe('(•••) •••-0123');
+    expect(scrub('card 4111 1111 1111 1111')).toBe('card •••• •••• •••• 1111');
+    expect(scrub('card 4111-1111-1111-1111.')).toBe('card ••••-••••-••••-1111.');
+    expect(scrub('in 98765 43210')).toBe('in ••••• •3210');
+    expect(scrub('ref #98765432101')).toBe('ref #•••••••2101');
+    // The output is stable (scrub twice = scrub once): validateEvent relies on it.
+    for (const x of ['call +91 98765 43210', '+1 (703) 555-0123', 'card 4111 1111 1111 1111']) expect(scrub(scrub(x))).toBe(scrub(x));
+  });
+  it('keeps formatted +1555 test numbers, dates, times, short numbers and PR lists', () => {
+    for (const keep of [
+      'test +1 555 123 4567',
+      'test +1-555-123-4567',
+      'merged 2026-10-08 22:40 UTC',
+      'at 2026-10-08T22:40:00Z',
+      'from 2025 - 2026',
+      'PRs #483, #484 and #485',
+      'PR #273, 2527 tests, 179 files',
+      'v18.3.1 and 1.2.3',
+      'between 10:00 and 12:00',
+      'call 911 now',
+      'zip 22030-4444',
+    ]) expect(scrub(keep)).toBe(keep);
   });
   it('is safe on non-strings', () => {
     expect(scrub(undefined)).toBe('');

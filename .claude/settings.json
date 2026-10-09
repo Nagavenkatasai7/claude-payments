@@ -118,7 +118,12 @@
       "WebFetch(domain:owasp.org)",
       "WebFetch(domain:cheatsheetseries.owasp.org)",
       "Bash(node scripts/tracker/sync.mjs:*)",
-      "Bash(node scripts/tracker/journal.mjs:*)"
+      "Bash(node scripts/tracker/journal.mjs:*)",
+      "Bash(node scripts/tracker/collect.mjs:*)",
+      "Bash(node scripts/tracker/curate.mjs:*)",
+      "Bash(node scripts/tracker/note.mjs:*)",
+      "Bash(node scripts/tracker/seed-v2.mjs:*)",
+      "Bash(node scripts/tracker/build-page.mjs:*)"
     ],
     "deny": [
       "Read(./.env)",
