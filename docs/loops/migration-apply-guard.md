@@ -1,19 +1,21 @@
 # Migration-apply guard
 
-Before a migration PR merges (from its branch), apply the pending drizzle
-migration to prod Neon and verify the altered table answers — then stop. CI's
-`migration safety` job keeps the PR red until this is done and only lets
-additive SQL through; a step marked `allow-destructive after-deploy` is applied
-right after its merge instead (see `.claude/skills/migrate-prod/SKILL.md`). Closes the gap that caused the
+The Vercel production build applies normal migrations itself
+(`scripts/migrate-on-build.mjs`: additive and reviewed-before-deploy SQL,
+before `next build`; a failed apply fails the build). This loop covers what the
+build does not apply: a step marked `allow-destructive after-deploy`, applied
+right after its merge is live, and a migration the build could not apply (see
+`.claude/skills/migrate-prod/SKILL.md`). Closes the gap that caused the
 2026-06-11 dashboard outage (an unapplied migration → every query on the altered
 table 404s).
 
 **Authority:** writes to the production database — **approval-gated.**
 
 ### Cycle
-1. **Observe** — an open PR adds a file under `drizzle/` and its `migration
-   safety` job says production has not applied it (or a merged PR carries an
-   `after-deploy` step). Read the pending migration SQL.
+1. **Observe** — a merged PR carries an `after-deploy` step (its production
+   build logged `after-deploy migration <tag> waits for a manual apply`), or a
+   production build failed with `migrate-on-build: error`, or the smoke reports
+   "Prod migrations behind". Read the pending migration SQL.
 2. **Choose / gate** — only auto-apply **additive** SQL (`CREATE TABLE`,
    `ADD COLUMN`, `CREATE INDEX`). If it `DROP`s, `RENAME`s, destructively `ALTER`s,
    or backfills data → **stop and ask** (human review).
@@ -32,9 +34,9 @@ table 404s).
 - Cannot run forever: at most **one apply per trigger**, no retry loop.
 
 ### Prompt
-> Trigger: an open PR adds a file under `drizzle/` and its `migration safety`
-> job is red because production has not applied it (or a merged PR carries an
-> `after-deploy` step). Read the pending
+> Trigger: a merged PR carries an `after-deploy` step, or the production
+> build could not apply a migration (`migrate-on-build: error` in its Vercel
+> build log, or the smoke reports "Prod migrations behind"). Read the pending
 > migration SQL first. If it only adds (`CREATE TABLE` / `ADD COLUMN` /
 > `CREATE INDEX`), get approval, then apply **once** with
 > `set -a; source .env.local; set +a; npx drizzle-kit migrate` (idempotent — applies

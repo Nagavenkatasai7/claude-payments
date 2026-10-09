@@ -62,17 +62,14 @@ jobs:
           echo "schema.ts and drizzle/ migrations agree"
 
   # Migration safety (scripts/ci/migration-guard.mjs, tests/ci-migration-guard.test.ts).
-  # Prod migrations are applied by hand, so this job makes the PR wait for
-  # them instead of the deploy: (1) every drizzle/*.sql the PR adds must be
-  # additive (no DROP, RENAME, type change, SET NOT NULL, NOT NULL column
-  # without DEFAULT, TRUNCATE, DELETE, UPDATE) unless the file carries a
-  # reviewed "-- migration-guard: allow-destructive [after-deploy] <reason>"
-  # line; (2) a PR that adds a journal entry stays RED until production has
-  # applied it (GET /api/version/migrations, Bearer MIGRATIONS_READ_TOKEN, a read-only
-  # token: release safety part C keeps CRON_SECRET out of pull request runs). Apply it
-  # with /migrate-prod from the PR branch, then re-run this job. A PR without
-  # migration changes never calls production. Fork and Dependabot PRs get no
-  # secrets, so one of them that adds a migration fails closed here.
+  # Production applies additive migrations in the Vercel production build
+  # (scripts/migrate-on-build.mjs), while the current build still serves, so
+  # every drizzle/*.sql the PR adds must be additive (no DROP, RENAME, type
+  # change, SET NOT NULL, NOT NULL column without DEFAULT, TRUNCATE, DELETE,
+  # UPDATE) unless the file carries a reviewed
+  # "-- migration-guard: allow-destructive [after-deploy] <reason>" line, and
+  # the journal must stay consistent and ordered. Reads git only: no secrets,
+  # no call to production.
   migrations:
     name: migration safety
     runs-on: ubuntu-latest
@@ -88,15 +85,13 @@ jobs:
         with:
           node-version: '24'
 
-      - name: New migrations are additive and already applied in production
+      - name: New migrations are additive and the journal is consistent
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          MIGRATIONS_READ_TOKEN: ${{ secrets.MIGRATIONS_READ_TOKEN }}
-          MIGRATIONS_URL: https://smartremit.ai/api/version/migrations
         run: node scripts/ci/migration-guard.mjs
 
   typecheck:

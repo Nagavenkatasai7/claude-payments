@@ -86,13 +86,14 @@ describe('ci.yml migration safety job', () => {
     expect(job).toMatch(/run: node scripts\/ci\/migration-guard\.mjs/);
     expect(job).toMatch(/PR_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
     expect(job).toMatch(/PR_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
-    expect(job).toMatch(/MIGRATIONS_URL: https:\/\/smartremit\.ai\/api\/version\/migrations/);
   });
 
-  it('is the only place in ci.yml that receives a secret', () => {
+  // The production build applies migrations (scripts/migrate-on-build.mjs), so
+  // the guard no longer asks production: ci.yml (pull request runs) holds no secret.
+  it('never calls production, and ci.yml receives no secret', () => {
+    expect(job).not.toMatch(/MIGRATIONS_URL|MIGRATIONS_READ_TOKEN/);
     const secrets = [...ci.matchAll(/\$\{\{\s*secrets\.(\w+)\s*\}\}/g)].map((m) => m[1]);
-    expect(secrets).toEqual(['MIGRATIONS_READ_TOKEN']);
-    expect(job).toMatch(/MIGRATIONS_READ_TOKEN: \$\{\{ secrets\.MIGRATIONS_READ_TOKEN \}\}/);
+    expect(secrets).toEqual([]);
   });
 });
 
@@ -148,8 +149,8 @@ describe('nightly.yml', () => {
 
 // Release safety Batch 2 part C (build thread): production secrets live in the
 // `prod-secrets` GitHub environment (main only). Every job that reads one
-// declares it; ci.yml (pull request runs) holds only the read-only
-// MIGRATIONS_READ_TOKEN, and the dormant preview-smoke.yml is left as it is.
+// declares it; ci.yml (pull request runs) holds no secret since the production
+// build applies migrations, and the dormant preview-smoke.yml is left as it is.
 describe('release safety part C: the prod-secrets environment', () => {
   const PROD_SECRET = /\$\{\{\s*secrets\.(CRON_SECRET|E2E_[A-Z_]+|VERCEL_[A-Z_]+)\s*\}\}/;
   const files = readdirSync(join(root, '.github/workflows'))
