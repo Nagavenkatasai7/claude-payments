@@ -523,6 +523,10 @@ export interface TurnContext {
   // VOICE_INPUT_NOTE (read back before acting) and executeTool refuses the
   // typed-only tools. A transcript never sets buttonTap.
   inputModality?: 'voice';
+  // Telegram test channel: the customer wrote on Telegram, so replies and
+  // messages from us arrive in that Telegram chat. The agent adds
+  // TELEGRAM_CHANNEL_NOTE so its wording says Telegram, not WhatsApp.
+  surface?: 'telegram';
 }
 
 /**

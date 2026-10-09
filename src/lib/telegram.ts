@@ -136,7 +136,7 @@ export const SHARE_PHONE_PROMPT =
   'This Telegram bot is a test version.';
 export const SHARE_OWN_PHONE_PROMPT = 'Please share your own phone number with the button below.';
 export const PHONE_LINKED_REPLY = 'Thank you. Your number is linked. Now type your message, for example: Send $100 to Mom.';
-export const NOT_AVAILABLE_REPLY = 'The SmartRemit Telegram bot is not available for this phone number yet. Please use WhatsApp.';
+export const NOT_AVAILABLE_REPLY = 'The SmartRemit Telegram bot is a test version. It is not available for this phone number yet.';
 
 /** The webhook-answer form of sendMessage with the one-time "Share my phone number" keyboard. Pure. */
 export function askPhonePayload(chatId: string, text: string = SHARE_PHONE_PROMPT): Obj {
@@ -161,10 +161,13 @@ export function answerCallbackPayload(callbackId: string): Obj {
 /** A failed Bot API call. The message never holds the URL (the token is in it). */
 export class TelegramApiError extends Error {
   readonly errorCode: number | undefined;
-  constructor(method: string, errorCode: number | undefined, description: string) {
+  /** Seconds Telegram asks us to wait (ResponseParameters.retry_after on a 429). */
+  readonly retryAfter: number | undefined;
+  constructor(method: string, errorCode: number | undefined, description: string, retryAfter?: number) {
     super(`Telegram ${method} failed (${errorCode ?? 'no code'}): ${scrub(description).slice(0, 200)}`);
     this.name = 'TelegramApiError';
     this.errorCode = errorCode;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -186,7 +189,9 @@ async function callBotApi(method: string, payload: Obj): Promise<unknown> {
   if (res.ok && isObj(json) && json.ok === true) return json.result;
   const code = isObj(json) && typeof json.error_code === 'number' ? json.error_code : res.status;
   const description = isObj(json) && typeof json.description === 'string' ? json.description : 'no description';
-  throw new TelegramApiError(method, code, description);
+  const params = isObj(json) && isObj(json.parameters) ? json.parameters : null;
+  const retryAfter = params && typeof params.retry_after === 'number' && params.retry_after >= 0 ? params.retry_after : undefined;
+  throw new TelegramApiError(method, code, description, retryAfter);
 }
 
 /** One plain text message. The caller splits a long body at TELEGRAM_TEXT_MAX. */
@@ -207,14 +212,74 @@ export function telegramWebhookUrl(baseUrl: string = env.appBaseUrl): string {
   return `${baseUrl.replace(/\/+$/, '')}/api/telegram`;
 }
 
-/** Register this deployment's webhook with Telegram (admin button on /admin-dashboard/switches). */
+/** setWebhook tries this many times in all when Telegram answers 429. */
+const SET_WEBHOOK_ATTEMPTS = 3;
+/** A 429 that asks for a longer wait than this is not retried inside the request. */
+const MAX_RETRY_AFTER_SEC = 5;
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Register this deployment's webhook with Telegram (admin button on
+ * /admin-dashboard/switches). Telegram can answer setWebhook with 429 "retry
+ * after N" even for a single press (seen in production 2026-10-09), so a short
+ * retry_after is waited out and the call is tried again, up to 3 attempts.
+ */
 export async function tgSetWebhook(url: string = telegramWebhookUrl()): Promise<void> {
   if (!SECRET_RE.test(env.telegramWebhookSecret)) {
     throw new TelegramApiError('setWebhook', undefined, 'TELEGRAM_WEBHOOK_SECRET is missing or has characters Telegram refuses');
   }
-  await callBotApi('setWebhook', {
-    url,
-    secret_token: env.telegramWebhookSecret,
-    allowed_updates: ['message', 'callback_query'],
-  });
+  const payload = { url, secret_token: env.telegramWebhookSecret, allowed_updates: ['message', 'callback_query'] };
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await callBotApi('setWebhook', payload);
+      return;
+    } catch (err) {
+      const retryAfter = err instanceof TelegramApiError && err.errorCode === 429 ? err.retryAfter : undefined;
+      if (attempt >= SET_WEBHOOK_ATTEMPTS || retryAfter === undefined || retryAfter > MAX_RETRY_AFTER_SEC) throw err;
+      await wait(retryAfter * 1000 + 250);
+    }
+  }
+}
+
+/** The URL Telegram currently sends this bot's updates to ('' when none), from getWebhookInfo. */
+export async function tgWebhookUrl(): Promise<string> {
+  const info = await callBotApi('getWebhookInfo', {});
+  return isObj(info) && typeof info.url === 'string' ? info.url : '';
+}
+
+export type TelegramConnectResult =
+  | { result: 'ok' | 'already' | 'unset' }
+  | { result: 'error'; code: number | undefined; cause: unknown };
+
+/**
+ * The "Connect Telegram webhook" button. Never throws. When setWebhook still
+ * fails, getWebhookInfo tells whether Telegram already sends to this
+ * deployment's URL ('already'), so the admin sees the real state; otherwise
+ * 'error' with Telegram's error code for the page message and the cause for the log.
+ */
+export async function connectTelegramWebhook(url: string = telegramWebhookUrl()): Promise<TelegramConnectResult> {
+  if (!telegramConfigured()) return { result: 'unset' };
+  try {
+    await tgSetWebhook(url);
+    return { result: 'ok' };
+  } catch (cause) {
+    try {
+      if ((await tgWebhookUrl()) === url) return { result: 'already' };
+    } catch {
+      // getWebhookInfo failed too; report the setWebhook error.
+    }
+    return { result: 'error', code: cause instanceof TelegramApiError ? cause.errorCode : undefined, cause };
+  }
+}
+
+/** The switches-page message for a failed connect. `code` is the raw ?code= query value. Pure. */
+export function telegramErrorText(code: string | undefined): string {
+  const n = code && /^\d{3}$/.test(code) ? Number(code) : undefined;
+  if (n === 401 || n === 404) {
+    return 'Telegram does not accept the bot token (error ' + n + '). Check TELEGRAM_BOT_TOKEN in Vercel, redeploy, then press the button again.';
+  }
+  if (n === 429) {
+    return 'Telegram is busy (error 429, too many requests). Wait one minute, then press the button once.';
+  }
+  return `Telegram refused the webhook${n ? ` (error ${n})` : ''}. Wait one minute, then press the button once. The server log has the reason.`;
 }

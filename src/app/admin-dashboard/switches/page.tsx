@@ -11,7 +11,7 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { STAFF_REASON_MIN, STAFF_REASON_MAX } from '@/lib/send-limits';
 import { Sidebar } from '../sidebar';
 import { changeFlagAction, connectTelegramWebhookAction } from './actions';
-import { telegramConfigured, telegramWebhookUrl } from '@/lib/telegram';
+import { telegramConfigured, telegramErrorText, telegramWebhookUrl } from '@/lib/telegram';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -49,7 +49,7 @@ function ReasonField({ id }: { id: string }) {
 export default async function SwitchesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ ok?: string; error?: string; telegram?: string }>;
+  searchParams: Promise<{ ok?: string; error?: string; telegram?: string; code?: string }>;
 }) {
   await requirePlatformAdmin();
   const params = await searchParams;
@@ -204,8 +204,11 @@ export default async function SwitchesPage({
             {params.telegram === 'unset' && (
               <p className="text-sm text-destructive" role="alert">TELEGRAM_BOT_TOKEN or TELEGRAM_WEBHOOK_SECRET is missing or invalid in this deployment.</p>
             )}
+            {params.telegram === 'already' && (
+              <p className="text-sm" role="status">Telegram already sends updates to this address. The bot is connected.</p>
+            )}
             {params.telegram === 'error' && (
-              <p className="text-sm text-destructive" role="alert">Telegram refused the webhook. Check the bot token, then try again. The server log has the reason.</p>
+              <p className="text-sm text-destructive" role="alert">{telegramErrorText(params.code)}</p>
             )}
             <form action={connectTelegramWebhookAction}>
               <Button type="submit" variant="outline">Connect Telegram webhook</Button>

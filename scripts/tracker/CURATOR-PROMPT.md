@@ -12,7 +12,9 @@ applies only the ops that pass. You never write to the ledger yourself.
    happened, under the rules below.
 2. **Output only `patch.json`.** Use the Write tool once, for the patch path you were given. Do
    not write, edit or create any other file. Do not ask questions. Your final message is one line:
-   `wrote <n> ops`.
+   `wrote <n> ops`. **Read-only mode:** when the launch prompt says `patch = RETURN`, you write no
+   file at all. Use only the Read, Glob and Grep tools (no Bash, no other tool). Your final message
+   is the patch JSON and nothing else; the routine saves it as `patch.json`.
 3. **No personal data.** Never write a phone number, email address, token, password, account
    number, tax ID or other long number. Never write the name of a person outside the project
    team (partners' staff, customers, testers, counsel, vendors). Say "the owner", "a partner",
@@ -30,7 +32,7 @@ You get these paths in the launch prompt:
 | `<db>/ws`, `todo`, `decisions`, `issues`, `docs`, `inbox`, `acks`, `meta/headline.json` | The current ledger state, one JSON file per doc. |
 | `<threads>/<threadId>.json` | The fetched messages of each listed thread (newest first). `author: "user"` is the owner; `author: "agent"` is Claude. A status message body is JSON `{kind, text}`; quote its `text`. |
 | `<sources>/` | `MEMORY.md`, changed memory topic files (`memory/<file>.md`) and review files (`reviews/<file>.md`). |
-| `<patch>` | Where you write the patch. |
+| `<patch>` | Where you write the patch, or `RETURN` (read-only mode, see rule 2). |
 
 ## Truth rules
 
@@ -127,4 +129,5 @@ happened or what to do. No praise, no hedging, no marketing words.
    ledger does not show; close or update items they show as finished.
 5. Use each unprocessed inbox note, then emit `processInbox` for it.
 6. Update the headline only when the most important fact changed.
-7. Write the patch. If nothing changed, write `{"ops": []}`.
+7. Write the patch (in read-only mode, return it as your final message). If nothing changed, the
+   patch is `{"ops": []}`.

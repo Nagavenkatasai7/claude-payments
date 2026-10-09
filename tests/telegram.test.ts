@@ -9,7 +9,13 @@ import {
   tgSendText,
   tgSetWebhook,
   urlButtonPayload,
+  connectTelegramWebhook,
+  telegramErrorText,
   TelegramApiError,
+  NOT_AVAILABLE_REPLY,
+  PHONE_LINKED_REPLY,
+  SHARE_OWN_PHONE_PROMPT,
+  SHARE_PHONE_PROMPT,
 } from '@/lib/telegram';
 
 // Telegram test channel (2026-10-08): the pure update reader, the Bot API
@@ -69,6 +75,12 @@ describe('parseTelegramUpdate', () => {
 });
 
 describe('payloads', () => {
+  it('the bot texts a Telegram customer sees do not mention WhatsApp', () => {
+    for (const text of [SHARE_PHONE_PROMPT, SHARE_OWN_PHONE_PROMPT, PHONE_LINKED_REPLY, NOT_AVAILABLE_REPLY]) {
+      expect(text).not.toMatch(/whatsapp/i);
+    }
+  });
+
   it('/start (with a deep-link payload) reads as a greeting; other text is unchanged', () => {
     expect(telegramTextForAgent('/start')).toBe('Hi');
     expect(telegramTextForAgent('/start REF-TANA01')).toBe('Hi');
@@ -157,3 +169,78 @@ describe('config and client', () => {
     expect(telegramWebhookUrl('https://smartremit.ai/')).toBe('https://smartremit.ai/api/telegram');
   });
 });
+
+// Production 2026-10-09: setWebhook answered 429 "retry after 1" to a single
+// press, twice, 9 minutes apart. The button now waits out a short retry_after.
+describe('connect webhook', () => {
+  const URL_ = 'https://smartremit.ai/api/telegram';
+  const tooMany = () => new Response(JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 1', parameters: { retry_after: 1 } }), { status: 429 });
+  const ok = (result: unknown = true) => new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+  const methods = (m: ReturnType<typeof vi.fn>) => m.mock.calls.map(([u]) => String(u).split('/').pop());
+
+  afterEach(() => vi.useRealTimers());
+
+  it('a 429 with a short retry_after is waited out and tried again', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const p = connectTelegramWebhook(URL_);
+    await vi.advanceTimersByTimeAsync(1250);
+    await expect(p).resolves.toEqual({ result: 'ok' });
+    expect(methods(fetchMock)).toEqual(['setWebhook', 'setWebhook']);
+  });
+
+  it('the retry_after is read into the error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => tooMany()));
+    const err = (await tgSendText('1', 'x').catch((e: unknown) => e)) as TelegramApiError;
+    expect(err.errorCode).toBe(429);
+    expect(err.retryAfter).toBe(1);
+  });
+
+  it('three 429s: Telegram already sends to this URL, so it reports already', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(tooMany()).mockResolvedValueOnce(tooMany())
+      .mockResolvedValueOnce(ok({ url: URL_, pending_update_count: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const p = connectTelegramWebhook(URL_);
+    await vi.advanceTimersByTimeAsync(5000);
+    await expect(p).resolves.toEqual({ result: 'already' });
+    expect(methods(fetchMock)).toEqual(['setWebhook', 'setWebhook', 'setWebhook', 'getWebhookInfo']);
+  });
+
+  it('a refused token is an error with its code, and no retry', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error_code: 401, description: 'Unauthorized' }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error_code: 401, description: 'Unauthorized' }), { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(connectTelegramWebhook(URL_)).resolves.toMatchObject({ result: 'error', code: 401 });
+    expect(methods(fetchMock)).toEqual(['setWebhook', 'getWebhookInfo']);
+  });
+
+  it('a long retry_after is not waited out in the request', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error_code: 429, description: 'x', parameters: { retry_after: 30 } }), { status: 429 }))
+      .mockResolvedValueOnce(ok({ url: '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(connectTelegramWebhook(URL_)).resolves.toMatchObject({ result: 'error', code: 429 });
+    expect(methods(fetchMock)).toEqual(['setWebhook', 'getWebhookInfo']);
+  });
+
+  it('not configured: unset, no call', async () => {
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', '');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(connectTelegramWebhook(URL_)).resolves.toEqual({ result: 'unset' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('the page message names the token only for 401 and 404', () => {
+    expect(telegramErrorText('401')).toMatch(/does not accept the bot token/);
+    expect(telegramErrorText('404')).toMatch(/does not accept the bot token/);
+    expect(telegramErrorText('429')).toMatch(/busy/);
+    expect(telegramErrorText('429')).not.toMatch(/token/);
+    expect(telegramErrorText(undefined)).toBe('Telegram refused the webhook. Wait one minute, then press the button once. The server log has the reason.');
+    expect(telegramErrorText('<script>')).not.toContain('<script>');
+  });
+});
+

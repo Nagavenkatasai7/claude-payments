@@ -537,6 +537,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
     isNewCustomer: wasCreated,
     tierReminderDayOfWindow,
     ...(voice ? { inputModality: 'voice' as const } : {}),
+    ...(deps.channel === 'tg' ? { surface: 'telegram' as const } : {}),
   };
 
   // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped). The
