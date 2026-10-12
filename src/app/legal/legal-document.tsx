@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { SkipLink } from '@/components/skip-link';
 import { LEGAL_DRAFT_BANNER, LEGAL_DRAFT_VERSION, type LegalDraft } from '@/lib/legal/drafts';
+import { companyFooterLine } from '@/lib/company';
 
 // Program-Fix 15 PR A — the shared renderer for /terms, /privacy and /legal.
 // Not a route (only page.tsx is routable). A plain synchronous server
@@ -107,6 +108,7 @@ export function LegalPageShell({
           <Link href="/about" className="hover:text-foreground">
             About
           </Link>
+          <p className="w-full">{companyFooterLine(new Date().getFullYear())}</p>
         </div>
       </footer>
     </div>

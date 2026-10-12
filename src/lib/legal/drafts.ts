@@ -9,6 +9,8 @@
 //    provider and never holds, receives or disburses customer funds.
 //  - Invent nothing: no entity names, licence numbers, regulators or phone
 //    numbers. Per-partner details come from the partner's own configuration.
+//    SmartRemit's own company name and address are the owner's (2026-10-11) and
+//    come only from src/lib/company.ts.
 //  - Rule references are to 12 CFR Part 1005, Subpart B (Regulation E,
 //    remittance transfers): §1005.30-.36.
 //  - Bump LEGAL_DRAFT_VERSION on any change to the text, so the version shown on
@@ -17,8 +19,9 @@
 //    which the pay page records with the customer's acknowledgement.)
 
 import { DRAFT_TTL_SECONDS } from '../draft-ttl';
+import { COMPANY, COMPANY_NAME_AND_ADDRESS } from '../company';
 
-export const LEGAL_DRAFT_VERSION = 'draft-2026-10-05a' as const;
+export const LEGAL_DRAFT_VERSION = 'draft-2026-10-12a' as const;
 
 /** Program-Fix 49B: the chat quote's lock, derived from the draft lifetime (the
  *  same source as the approve card's "Rate locked for N min."), never a literal. */
@@ -138,7 +141,8 @@ export const TERMS_DRAFT: LegalDraft = {
       id: 'contact',
       heading: 'Contact',
       paragraphs: [
-        'For a question about a transfer, contact the licensed partner named on your receipt. For a question about the SmartRemit technology, write to support@smartremit.ai.',
+        `For a question about a transfer, contact the licensed partner named on your receipt. For a question about the SmartRemit technology, write to ${COMPANY.supportEmail}.`,
+        `SmartRemit is operated by ${COMPANY_NAME_AND_ADDRESS}.`,
       ],
     },
   ],
@@ -157,6 +161,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       paragraphs: [
         PROVIDER_OF_RECORD,
         'The partner decides how your transfer information is used for its financial service. SmartRemit processes that information on the partner’s behalf to run the chat, quotes, screening and pay page, and for no other purpose.',
+        `SmartRemit is operated by ${COMPANY_NAME_AND_ADDRESS}.`,
       ],
     },
     {
@@ -225,7 +230,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       id: 'your-choices',
       heading: 'Your choices',
       paragraphs: [
-        'You can ask for a copy of your information, ask for it to be corrected, or ask for it to be deleted where the law allows. Some records must be kept even after you ask for deletion. To make a request, contact the licensed partner named on your receipt or write to support@smartremit.ai.',
+        `You can ask for a copy of your information, ask for it to be corrected, or ask for it to be deleted where the law allows. Some records must be kept even after you ask for deletion. To make a request, contact the licensed partner named on your receipt, write to ${COMPANY.supportEmail}, or write to ${COMPANY_NAME_AND_ADDRESS}.`,
       ],
     },
     {
@@ -317,6 +322,7 @@ export const LICENSING_DRAFT: LegalDraft = {
       heading: 'What SmartRemit does',
       paragraphs: [
         'SmartRemit is a technology provider. It builds and runs the chat, quoting, screening and pay-page software that licensed partners offer under their own brand. SmartRemit never holds, receives or disburses customer money: funds move only on the partner’s own payment rails.',
+        `SmartRemit is operated by ${COMPANY_NAME_AND_ADDRESS}.`,
       ],
     },
     {

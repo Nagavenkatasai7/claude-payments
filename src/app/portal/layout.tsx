@@ -9,6 +9,7 @@ import { Sidebar, Button } from '@/components/ds';
 import Link from 'next/link';
 import BrandLogo from '@/app/landing/BrandLogo';
 import { signOutAction } from './signout/actions';
+import { APEX_URL, companyFooterLine } from '@/lib/company';
 
 // Site-only (L8): on the apex the whole tree is the root 404, whose head must match any unmatched URL.
 export const generateMetadata = () => portalMetadata(null, { robots: { index: false, follow: false } });
@@ -57,6 +58,24 @@ export default async function PortalLayout({ children }: { children: ReactNode }
               {children}
             </main>
           </div>
+          {/* Owner, 2026-10-11: the company line, Contact us and the legal pages (apex-only routes). */}
+          <footer className="border-t border-ds-border bg-ds-surface px-4 py-5 text-[13px] text-ds-ink-muted sm:px-6 print:hidden">
+            <nav aria-label={t('portal.footer.legal')} className="flex flex-wrap gap-x-5 gap-y-2">
+              <Link href="/portal/contact" className="hover:text-ds-ink">
+                {t('portal.nav.contact')}
+              </Link>
+              <a href={`${APEX_URL}/terms`} className="hover:text-ds-ink">
+                {t('portal.footer.terms')}
+              </a>
+              <a href={`${APEX_URL}/privacy`} className="hover:text-ds-ink">
+                {t('portal.footer.privacy')}
+              </a>
+              <a href={`${APEX_URL}/legal`} className="hover:text-ds-ink">
+                {t('portal.footer.licensing')}
+              </a>
+            </nav>
+            <p className="mt-3">{companyFooterLine(new Date().getFullYear())}</p>
+          </footer>
         </div>
       </div>
     </>

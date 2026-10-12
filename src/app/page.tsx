@@ -17,6 +17,7 @@ import { submitPartnerRequestAction } from './partners-action';
 import WaitlistForm from './landing/WaitlistForm';
 import { PARTNER_CORRIDORS, WAITLIST_DESTINATIONS } from './landing/corridors';
 import { PARTNER_TYPES } from '@/lib/partner-type';
+import { companyFooterLine } from '@/lib/company';
 
 // Self-hosted Inter, scoped to the landing tree only (applied on the landing
 // root div), so it never touches the sh-* dashboard or .payapp themes.
@@ -946,6 +947,7 @@ export default async function LandingPage({
               Licensing &amp; your rights
             </a>
           </nav>
+          <p className="mt-3 text-[12.5px] text-[#52607a]">{companyFooterLine(new Date().getFullYear())}</p>
         </div>
       </footer>
 

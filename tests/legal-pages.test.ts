@@ -43,7 +43,7 @@ async function renderPage(route: 'terms' | 'privacy' | 'legal'): Promise<string>
 describe('src/lib/legal/drafts.ts', () => {
   it('exports the version id and the owner banner verbatim', async () => {
     const d = await drafts();
-    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-10-05a'); // Step 1: voice notes name Microsoft Azure AI Speech (United States)
+    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-10-12a'); // 2026-10-12: the company name and address (SR Technosolutions Inc)
     expect(d.LEGAL_DRAFT_BANNER).toBe(BANNER);
   });
 
@@ -192,6 +192,36 @@ describe('drafts claim only what the product does today', () => {
   });
 });
 
+// Owner, 2026-10-11: SR Technosolutions Inc and its address on the privacy notice and the other docs.
+describe('the company name and address', () => {
+  const NAME_AND_ADDRESS = 'SR Technosolutions Inc, 16514 NW 3rd St, Pembroke Pines, FL 33028, USA';
+  const sectionText = (doc: { sections: readonly { id: string; paragraphs: readonly string[] }[] }, id: string) =>
+    doc.sections.find((s) => s.id === id)!.paragraphs.join(' ');
+
+  it('the terms contact section names the company, its address and the support email', async () => {
+    const d = await drafts();
+    const text = sectionText(d.TERMS_DRAFT, 'contact');
+    expect(text).toContain(NAME_AND_ADDRESS);
+    expect(text).toContain('support@smartremit.ai');
+  });
+
+  it('the privacy notice says who operates SmartRemit and where to write', async () => {
+    const d = await drafts();
+    expect(sectionText(d.PRIVACY_DRAFT, 'who-is-responsible')).toContain(NAME_AND_ADDRESS);
+    expect(sectionText(d.PRIVACY_DRAFT, 'your-choices')).toContain(NAME_AND_ADDRESS);
+  });
+
+  it('the licensing page names the company behind the SmartRemit technology', async () => {
+    const d = await drafts();
+    expect(sectionText(d.LICENSING_DRAFT, 'smartremit-role')).toContain(NAME_AND_ADDRESS);
+  });
+
+  it.each(['terms', 'privacy', 'legal'] as const)('the /%s footer carries the company line', async (route) => {
+    const html = await renderPage(route);
+    expect(html).toMatch(/© \d{4} SR Technosolutions Inc\. 16514 NW 3rd St, Pembroke Pines, FL 33028, USA\./);
+  });
+});
+
 describe.each(['terms', 'privacy', 'legal'] as const)('/%s page', (route) => {
   it('renders the draft banner, the version id, one h1 and a #main target', async () => {
     const d = await drafts();
@@ -241,4 +271,13 @@ describe('footer and /about links (source read: both pages load next/font)', () 
     const footer = src.slice(src.indexOf('<footer'));
     for (const p of ['/terms', '/privacy', '/legal']) expect(footer).toContain(`href="${p}"`);
   });
+
+  it.each(['src/app/page.tsx', 'src/components/site/SiteFooter.tsx', 'src/app/about/page.tsx'])(
+    '%s footer shows the company line from src/lib/company.ts',
+    (rel) => {
+      const src = read(rel);
+      expect(src).toContain("from '@/lib/company'");
+      expect(src.slice(src.indexOf('<footer'))).toContain('companyFooterLine(');
+    },
+  );
 });
