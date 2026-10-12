@@ -58,6 +58,7 @@ import { loadOnboardingFacts } from '@/db/repos/partner-onboarding-facts';
 import { getPortalSettings, type PortalSettings } from '@/db/repos/portal-settings-repo';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
@@ -85,7 +86,8 @@ function configuredBadge(set: boolean) {
   );
 }
 
-const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
+// Every supported country, from the one authority (HK, MX and Europe were missing from the hand list).
+const ALL_COUNTRIES: readonly CountryCode[] = SUPPORTED_DESTINATIONS;
 
 // The supported corridor currencies — derived from the single source of truth.
 const ALL_CURRENCIES: CurrencyCode[] = [...new Set(Object.values(DEFAULT_CURRENCY_FOR_COUNTRY))];

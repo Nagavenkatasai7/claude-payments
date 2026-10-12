@@ -133,6 +133,7 @@ export const FALLBACK_FX_RATES: Record<CurrencyCode, FxRates> = {
   INR: { toInr: 1, toUsd: 0.01044, source: 'fallback' },      // INR→USD 0.01044
   HKD: { toInr: 12.21, toUsd: 0.1275, source: 'fallback' },   // USD→HKD 7.8454 (pegged)
   MXN: { toInr: 5.574, toUsd: 0.05817, source: 'fallback' },  // USD→MXN 17.1917
+  EUR: { toInr: 108.66, toUsd: 1.1269, source: 'fallback' },   // ECB fixing 2026-10-06 (EUR is the ECB base)
 };
 
 /** Illustrative USD→INR for the decorative landing hero ONLY (never priced). */
@@ -378,7 +379,8 @@ function loadEcbFile(now: number, timeoutMs: number): Promise<FetchedEcbFile | F
 const sig6 = (x: number): number => Number(x.toPrecision(6));
 
 function ecbRatesFor(source: CurrencyCode, file: FetchedEcbFile): StampedFxRates | FxUnavailableReason {
-  const perSource = file.perEur.get(source);
+  // EUR is the file's base currency, so it has no <Cube> row: 1 per EUR.
+  const perSource = source === 'EUR' ? 1 : file.perEur.get(source);
   const usd = file.perEur.get('USD');
   const inr = file.perEur.get('INR');
   if (!isPositiveFinite(perSource) || !isPositiveFinite(usd) || !isPositiveFinite(inr)) return 'malformed_rates';

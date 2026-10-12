@@ -149,7 +149,7 @@ describe('sweepFxHealth (Task 9 + R9) — the FX outage alert', () => {
   });
 
   it('probes every fetched currency — never AED (derived from the USD peg)', () => {
-    expect([...FX_PROBE_CURRENCIES].sort()).toEqual(['AUD', 'CAD', 'GBP', 'HKD', 'INR', 'MXN', 'NZD', 'SGD', 'USD']);
+    expect([...FX_PROBE_CURRENCIES].sort()).toEqual(['AUD', 'CAD', 'EUR', 'GBP', 'HKD', 'INR', 'MXN', 'NZD', 'SGD', 'USD']);
   });
 
   it('refusing and degraded (>= 45 min) currencies raise ONE alert per severity, keyed on severity + hour bucket', async () => {

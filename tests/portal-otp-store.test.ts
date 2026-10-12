@@ -139,7 +139,7 @@ describe('portal OTP store: codes (SPEC §2.1)', () => {
     const { store } = mk();
     expect(await store.issue('pa', '+8610000000000', 'login')).toEqual({ ok: false, reason: 'unsupported_geo' });
     expect(await store.issue('pa', '', 'login')).toEqual({ ok: false, reason: 'unsupported_geo' });
-    expect([...PORTAL_OTP_COUNTRIES].sort()).toEqual(['AE', 'AU', 'CA', 'GB', 'IN', 'NZ', 'SG', 'US']);
+    expect([...PORTAL_OTP_COUNTRIES].sort()).toEqual(['AE', 'AT', 'AU', 'BE', 'CA', 'DE', 'ES', 'FR', 'GB', 'IE', 'IN', 'IT', 'NL', 'NZ', 'SG', 'US']);
   });
 
   it('a correct code is consumed atomically: a resend landing mid-verify is never consumed by the old code', async () => {

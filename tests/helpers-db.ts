@@ -103,11 +103,12 @@ export async function freshDb(): Promise<Db> {
   await db.execute(sql.raw(`TRUNCATE ${ALL_TABLES} RESTART IDENTITY CASCADE`));
   await db.execute(
     sql.raw(
-      // Mirror prod post-migration-0006: the default tenant is any-to-any
-      // (serves every unambiguous source country), so resolveSendCurrency
-      // auto-detects the sender's currency instead of collapsing to USD.
+      // Mirror prod post-migrations 0006 + 0033: the default tenant is any-to-any
+      // (serves every unambiguous source country, Hong Kong, Mexico and the euro
+      // countries included), so resolveSendCurrency auto-detects the sender's
+      // currency instead of collapsing to USD.
       `INSERT INTO partners (id, name, status, countries, kyc_mode)
-       VALUES ('default', 'SmartRemit Default', 'active', '["US","GB","AE","SG","AU","NZ","IN"]'::jsonb, 'ours')
+       VALUES ('default', 'SmartRemit Default', 'active', '["US","GB","AE","SG","AU","NZ","IN","HK","MX","DE","FR","NL","IE","IT","ES","AT","BE"]'::jsonb, 'ours')
        ON CONFLICT (id) DO NOTHING`,
     ),
   );

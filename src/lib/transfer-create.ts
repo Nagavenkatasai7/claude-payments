@@ -392,7 +392,7 @@ export async function createTransferWithOutcome(
   // hoists the partner + subject reads above the quote too: the quote ceiling
   // is now the sender's EFFECTIVE per-transfer cap (customer override, else
   // partner default, else platform), never above the $10,000 hard ceiling.
-  const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
+  const sourceCountry = countryForCurrency(input.sourceCurrency, input.phone);   // P4 symbol; EUR: the sender's euro country
   const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
   // The tier subject (firstSeenAt from the customers row / first transfer /
@@ -926,7 +926,7 @@ export async function recordBlockedAttempt(
     complianceReasons: input.reasons,
     status: 'blocked',
     createdAt: new Date().toISOString(),
-    sourceCountry: countryForCurrency(input.sourceCurrency),
+    sourceCountry: countryForCurrency(input.sourceCurrency, input.phone),
     sourceCurrency: input.sourceCurrency,
     destinationCountry: input.destinationCountry,
     destinationCurrency: input.destinationCurrency,

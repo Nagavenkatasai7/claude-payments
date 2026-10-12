@@ -1,4 +1,5 @@
 import type { CorridorRequest, CountryCode, CurrencyCode } from './types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { FxRates } from './rate';
 
 // corridor-demand — PURE, deterministic aggregator (no I/O of its own; the FX
@@ -25,9 +26,8 @@ export type FxRatesFn = (source: CurrencyCode) => Promise<FxRates>;
 // it (uppercase + trim) and only attempt an FX conversion for a code in this
 // set. Off-enum strings ("dollars", "PKR") stay UNPRICED rather than dialing
 // Frankfurter for a currency we can't settle — the lead still counts.
-const KNOWN_CURRENCIES = new Set<CurrencyCode>([
-  'USD', 'CAD', 'GBP', 'AED', 'SGD', 'AUD', 'NZD', 'INR',
-]);
+// Derived from the one currency map, so HKD, MXN and EUR count too.
+const KNOWN_CURRENCIES = new Set<CurrencyCode>(Object.values(DEFAULT_CURRENCY_FOR_COUNTRY));
 
 /** Uppercase + trim a free-text currency to a known CurrencyCode, or null. */
 function normalizeCurrency(raw: string | undefined | null): CurrencyCode | null {
@@ -93,6 +93,16 @@ const SUPPORTED_ALIASES: Record<string, CountryCode> = {
   au: 'AU', australia: 'AU',
   nz: 'NZ', 'new zealand': 'NZ',
   in: 'IN', india: 'IN', bharat: 'IN',
+  hk: 'HK', 'hong kong': 'HK',
+  mx: 'MX', mexico: 'MX',
+  de: 'DE', germany: 'DE', deutschland: 'DE',
+  fr: 'FR', france: 'FR',
+  nl: 'NL', netherlands: 'NL', 'the netherlands': 'NL', holland: 'NL',
+  ie: 'IE', ireland: 'IE',
+  it: 'IT', italy: 'IT', italia: 'IT',
+  es: 'ES', spain: 'ES', españa: 'ES', espana: 'ES',
+  at: 'AT', austria: 'AT', österreich: 'AT', osterreich: 'AT',
+  be: 'BE', belgium: 'BE', belgique: 'BE', belgië: 'BE',
 };
 
 /** Lowercase, collapse internal whitespace, trim. The grouping key for a raw destination. */
@@ -184,8 +194,10 @@ export async function rankCorridorDemand(
     acc.labels.set(rawLabel, (acc.labels.get(rawLabel) ?? 0) + 1);
 
     let usd: number | null = null;
-    if (r.approxAmount != null && r.approxCurrency) {
-      const rate = usdRateByCurrency.get(r.approxCurrency as CurrencyCode);
+    const cur = r.approxAmount != null ? normalizeCurrency(r.approxCurrency) : null;
+    if (r.approxAmount != null && cur) {
+      // Same normalization as step 1 (" gbp " was fetched but never matched before).
+      const rate = usdRateByCurrency.get(cur);
       if (rate != null) usd = r.approxAmount * rate;
     }
     acc.rows.push({ ts: Date.parse(r.capturedAt), sender: r.senderPhone, usd });

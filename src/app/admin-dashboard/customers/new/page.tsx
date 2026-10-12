@@ -8,8 +8,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { createCustomerAction } from '../actions';
 import type { CountryCode } from '@/lib/types';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
-const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
+// Every supported country, from the one authority (HK, MX and Europe were missing from the hand list).
+const ALL_COUNTRIES: readonly CountryCode[] = SUPPORTED_DESTINATIONS;
 
 const SELECT_CLASS = 'h-9 w-full rounded-md border border-input bg-card px-3 text-sm';
 

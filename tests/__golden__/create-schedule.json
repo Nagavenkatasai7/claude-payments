@@ -314,7 +314,7 @@
   "destination.unknown": {
     "result": {
       "ok": {
-        "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+        "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX, DE, FR, NL, IE, IT, ES, AT, BE. Which of these is the money going to?"
       }
     },
     "rows": [],

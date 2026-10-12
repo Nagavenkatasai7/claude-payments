@@ -59,6 +59,7 @@ export const PORTAL_OTP_IP_LIMIT = { scope: 'portalotp', limit: 20, windowSec: 3
 /** Equal to the legacy allow-list (otp-store.ts ALLOWED_COUNTRIES); a test pins it. */
 export const PORTAL_OTP_COUNTRIES: ReadonlySet<CountryCode> = new Set<CountryCode>([
   'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
+  'DE', 'FR', 'NL', 'IE', 'IT', 'ES', 'AT', 'BE',
 ]);
 
 export type PortalIssueResult =

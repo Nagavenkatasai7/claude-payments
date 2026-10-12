@@ -19,9 +19,10 @@ import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { createScopedStore } from '@/lib/scoped-store';
 import { sealCustomerRef, auditSubjectId } from '@/lib/customer-ref';
 import type { CountryCode, KycStatus, PartnerId, Staff } from '@/lib/types';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
-const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
+const VALID_COUNTRIES = new Set<CountryCode>(SUPPORTED_DESTINATIONS);
 
 // Program-Fix 37 (dash-04): the detail route is keyed on a sealed ref, never
 // the phone. Revalidation targets the dynamic route pattern (every ref), per

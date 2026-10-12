@@ -227,10 +227,15 @@ export function listCorridors(partner: Partner) {
     brand: resolvePartnerBranding(partner).brand,
     // Legacy "send → India" corridors. A source whose own country IS the
     // destination (INR → IN) is degenerate, so it is excluded.
+    // A shared currency (EUR) lists each of the partner's countries that use it.
     corridors: currencies
-      .filter((c) => countryForCurrency(c) !== 'IN')
-      .map((c) => ({
-        source_country: countryForCurrency(c),
+      .flatMap((c) => {
+        const own = partner.countries.filter((k) => DEFAULT_CURRENCY_FOR_COUNTRY[k] === c);
+        return (own.length > 0 ? own : [countryForCurrency(c)]).map((country) => ({ country, c }));
+      })
+      .filter(({ country }) => country !== 'IN')
+      .map(({ country, c }) => ({
+        source_country: country,
         source_currency: c,
         destination_country: 'IN' as CountryCode,
         destination_currency: 'INR' as CurrencyCode,

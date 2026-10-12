@@ -25,17 +25,19 @@ describe('landing page corridors (Program-Fix 33)', () => {
     expect(PAGE).toContain('{CORRIDOR_COUNT} corridors');
   });
 
-  it('the derived count is the waitlist destination list (10) and matches the country authority', () => {
-    expect(WAITLIST_DESTINATIONS).toHaveLength(10);
+  it('the derived count is the waitlist destination list (18) and matches the country authority', () => {
+    expect(WAITLIST_DESTINATIONS).toHaveLength(18);
     expect(WAITLIST_DESTINATIONS.map((d) => d.value).sort()).toEqual(Object.keys(DEFAULT_CURRENCY_FOR_COUNTRY).sort());
   });
 
-  it('COUNTRIES lists all ten, including Hong Kong and Mexico', () => {
+  it('COUNTRIES lists all 18, including Hong Kong, Mexico and the euro countries', () => {
     const countries = landingCountries();
-    expect(countries).toHaveLength(10);
+    expect(countries).toHaveLength(18);
     expect(countries.map((c) => c.code.toUpperCase()).sort()).toEqual(Object.keys(DEFAULT_CURRENCY_FOR_COUNTRY).sort());
     expect(countries.map((c) => c.name)).toContain('Hong Kong');
     expect(countries.map((c) => c.name)).toContain('Mexico');
+    expect(countries.map((c) => c.name)).toContain('Germany');
+    expect(countries.map((c) => c.name)).toContain('Belgium');
   });
 
   it('every COUNTRIES code has a flag file in public/flags/', () => {

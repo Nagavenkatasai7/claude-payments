@@ -154,7 +154,7 @@ export async function finalizeCrossBorderBillPayment(
   // receives the LOCKED quote's converted amount (what-you-see-is-what-you-pay
   // governs BOTH sides — never re-derived from live FX here).
   const destinationCurrency = sellerCurrency;
-  const destinationCountry = countryForCurrency(destinationCurrency);
+  const destinationCountry = countryForCurrency(destinationCurrency, sellerMasked.phone);   // EUR: the seller's euro country
   const sellerAmount = isBuyerDenominated ? round2(quote.sellerAmount) : round2(invoice.invoicedAmount);
 
   // ── Buyer (the payer) ─────────────────────────────────────────────────────

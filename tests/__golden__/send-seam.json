@@ -164,7 +164,7 @@
     "calls": [
       {
         "ok": {
-          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX, DE, FR, NL, IE, IT, ES, AT, BE. Which of these is the money going to?"
         }
       }
     ],
@@ -179,7 +179,7 @@
     "calls": [
       {
         "ok": {
-          "error": "destination_country is missing — the recipient number looks like MX. Ask where the money is going, then pass destination_country (one of: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX)."
+          "error": "destination_country is missing — the recipient number looks like MX. Ask where the money is going, then pass destination_country (one of: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX, DE, FR, NL, IE, IT, ES, AT, BE)."
         }
       }
     ],
@@ -979,7 +979,7 @@
       },
       {
         "ok": {
-          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX. Which of these is the money going to?"
+          "error": "We deliver to: US, CA, GB, AE, SG, AU, NZ, IN, HK, MX, DE, FR, NL, IE, IT, ES, AT, BE. Which of these is the money going to?"
         }
       },
       {

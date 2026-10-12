@@ -99,7 +99,7 @@ describe('findDestructive', () => {
     const flagged = files
       .filter((f) => findDestructive(readFileSync(join(root, 'drizzle', f), 'utf8')).length > 0)
       .map((f) => f.slice(0, 4));
-    expect(flagged).toEqual(['0006', '0010', '0014', '0015', '0016', '0028']);
+    expect(flagged).toEqual(['0006', '0010', '0014', '0015', '0016', '0028', '0033']);
   });
 });
 

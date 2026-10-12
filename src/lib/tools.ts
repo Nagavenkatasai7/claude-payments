@@ -15,7 +15,7 @@ import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } f
 import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
-import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
+import { destinationListText, parseDestinationCountry, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
@@ -565,7 +565,7 @@ async function refuseUnlessOwnOpenBill(
 }
 
 // Program-Fix 33: the destination schema copy derives from the ONE authority —
-// the model reads all ten codes, never "Defaults to India".
+// the model reads every supported code, never "Defaults to India".
 const DESTINATION_COUNTRY_DESCRIPTION =
   `Required. ISO country code of where the money is going. One of: ${destinationListText()}. Use the country the recipient's number belongs to unless the sender named another; never guess India.`;
 
@@ -1154,7 +1154,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'capture_corridor_request',
       description:
-        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 10 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong, Mexico). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 10 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
+        `Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the ${SUPPORTED_COUNTRY_COUNT} supported: ${SUPPORTED_COUNTRY_NAMES}). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the ${SUPPORTED_COUNTRY_COUNT} supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.`,
       parameters: {
         type: 'object',
         properties: {

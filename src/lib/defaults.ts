@@ -15,4 +15,8 @@ export const DEFAULT_PARTNER_ID: PartnerId = 'default';   // NEW (P2)
 // unreachable by phone detection. A partner that genuinely serves Canada can
 // still configure 'CA' explicitly. White-label partners scope to their own
 // `countries`.
-export const DEFAULT_PARTNER_COUNTRIES: CountryCode[] = ['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX'];
+// Europe (2026-10-12): the eight euro countries have unambiguous calling codes.
+export const DEFAULT_PARTNER_COUNTRIES: CountryCode[] = [
+  'US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX',
+  'DE', 'FR', 'NL', 'IE', 'IT', 'ES', 'AT', 'BE',
+];

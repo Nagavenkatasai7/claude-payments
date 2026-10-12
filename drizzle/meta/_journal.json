@@ -232,6 +232,13 @@
       "when": 1791498686917,
       "tag": "0032_purpose_detail",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1791833348100,
+      "tag": "0033_default_partner_europe",
+      "breakpoints": true
     }
   ]
 }

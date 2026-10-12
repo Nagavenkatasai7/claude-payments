@@ -34,7 +34,39 @@ export function isSupportedDestination(code: string): code is CountryCode {
   return SUPPORTED_SET.has(code);
 }
 
-/** The ten codes as "US, CA, …" — for schema descriptions and error copy. */
+/** The supported codes as "US, CA, …" — for schema descriptions and error copy. */
 export function destinationListText(): string {
   return SUPPORTED_DESTINATIONS.join(', ');
 }
+
+/** The name the bot uses for each supported country (plain English, short forms the customers use). */
+export const COUNTRY_NAMES: Record<CountryCode, string> = {
+  US: 'US',
+  CA: 'Canada',
+  GB: 'UK',
+  AE: 'UAE',
+  SG: 'Singapore',
+  AU: 'Australia',
+  NZ: 'New Zealand',
+  IN: 'India',
+  HK: 'Hong Kong',
+  MX: 'Mexico',
+  DE: 'Germany',
+  FR: 'France',
+  NL: 'Netherlands',
+  IE: 'Ireland',
+  IT: 'Italy',
+  ES: 'Spain',
+  AT: 'Austria',
+  BE: 'Belgium',
+};
+
+export const SUPPORTED_COUNTRY_COUNT = SUPPORTED_DESTINATIONS.length;
+
+const NAMES = SUPPORTED_DESTINATIONS.map((c) => COUNTRY_NAMES[c]);
+
+/** "US, Canada, UK, …, Belgium" */
+export const SUPPORTED_COUNTRY_NAMES = NAMES.join(', ');
+
+/** "US, Canada, …, Austria, and Belgium" */
+export const SUPPORTED_COUNTRY_NAMES_AND = `${NAMES.slice(0, -1).join(', ')}, and ${NAMES[NAMES.length - 1]}`;
