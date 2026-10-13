@@ -85,6 +85,7 @@ const PAGES: ReadonlyArray<[string, () => Promise<{ generateMetadata?: GenMeta }
   ['notifications/verify/page.tsx', () => import('@/app/portal/notifications/verify/page'), { referrer: 'no-referrer' }],
   ['devices/page.tsx', () => import('@/app/portal/devices/page'), {}],
   ['help/page.tsx', () => import('@/app/portal/help/page'), {}],
+  ['contact/page.tsx', () => import('@/app/portal/contact/page'), {}],
   ['help/tickets/page.tsx', () => import('@/app/portal/help/tickets/page'), {}],
   ['help/tickets/new/page.tsx', () => import('@/app/portal/help/tickets/new/page'), {}],
   ['help/tickets/[id]/page.tsx', () => import('@/app/portal/help/tickets/[id]/page'), {}],

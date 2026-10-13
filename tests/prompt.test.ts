@@ -1050,3 +1050,45 @@ describe('B3 rewards v1: reward_note', () => {
     expect(SYSTEM_PROMPT).toContain('Never promise, invent or describe a reward or discount that a tool did not return.');
   });
 });
+
+// 2026-10-11 thread "three issues": a customer asked for a rate alert and the bot answered
+// "When the rate hits 98, just message me ... I'll need Mom's WhatsApp number ... Want to save
+// it now?". No rate alert, target-rate send or chat-only recipient save exists, so the bot
+// promised features it cannot deliver. The prompt now names them and the honest alternatives.
+describe('SYSTEM_PROMPT — features that do not exist', () => {
+  const section = () => {
+    const start = SYSTEM_PROMPT.indexOf('FEATURES THAT DO NOT EXIST');
+    expect(start).toBeGreaterThan(-1);
+    const end = SYSTEM_PROMPT.indexOf('\n\n', start);
+    return SYSTEM_PROMPT.slice(start, end === -1 ? undefined : end);
+  };
+
+  it('names rate alerts, target-rate sends, forecasts and chat-only recipient saves', () => {
+    const s = section();
+    expect(s).toMatch(/rate alerts/i);
+    expect(s).toMatch(/target rate/i);
+    expect(s).toMatch(/forecast/i);
+    expect(s).toMatch(/saving a recipient/i);
+  });
+
+  it('offers only what works today: get_quote, a send now, an India schedule', () => {
+    const s = section();
+    expect(s).toContain('get_quote');
+    expect(s).toMatch(/send now/i);
+    expect(s).toMatch(/recurring transfer to India/i);
+  });
+
+  it('forbids promising to watch the rate or to message the customer later', () => {
+    const s = section();
+    expect(s).toMatch(/never say you will watch the rate/i);
+    expect(s).toMatch(/message them later/i);
+  });
+
+  it('forbids asking for a recipient number unless a send is going ahead', () => {
+    expect(section()).toMatch(/do not ask for a recipient's number/i);
+  });
+
+  it('appears in every partner prompt, not only the default brand', () => {
+    expect(buildSystemPrompt({ brand: 'Acme Remit' })).toContain('FEATURES THAT DO NOT EXIST');
+  });
+});

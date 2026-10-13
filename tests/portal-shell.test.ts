@@ -78,7 +78,7 @@ describe('portal layout', () => {
     h.customer = { customer: {}, session: {}, site: SITE, token: 'x' };
     const html = await renderLayout();
     expect(html).toMatch(/<aside class="sh-sidebar[^"]*"/);
-    for (const label of ['Home', 'Send', 'Transfers', 'Recipients', 'Schedules', 'Chat', 'Help', 'Profile', 'Notifications', 'Devices']) {
+    for (const label of ['Home', 'Send', 'Transfers', 'Recipients', 'Schedules', 'Chat', 'Help', 'Contact us', 'Profile', 'Notifications', 'Devices']) {
       expect(html).toContain(`>${label}</a>`);
     }
     expect(html).not.toContain('/portal/privacy');
@@ -89,6 +89,18 @@ describe('portal layout', () => {
     h.customer = { customer: {}, session: {}, site: SITE, token: 'x' };
     expect(await renderLayout()).toContain('href="/portal/privacy"');
     expect(portalNavItems(false).some((i) => i.href === '/portal/privacy')).toBe(false);
+  });
+  // Owner, 2026-10-11: the company name and address, the legal pages and "Contact us" on the portal.
+  it.each([
+    ['signed out', null],
+    ['signed in', { customer: {}, session: {}, site: SITE, token: 'x' }],
+  ])('%s: a footer with the company line, Contact us and the apex legal pages', async (_label, customer) => {
+    h.customer = customer;
+    const html = await renderLayout();
+    const footer = html.slice(html.indexOf('<footer'));
+    expect(footer).toMatch(/© \d{4} SR Technosolutions Inc\. 16514 NW 3rd St, Pembroke Pines, FL 33028, USA\./);
+    expect(footer).toContain('href="/portal/contact"');
+    for (const p of ['terms', 'privacy', 'legal']) expect(footer).toContain(`href="https://smartremit.ai/${p}"`);
   });
   it('D5: no language switch while only the en catalogue exists', async () => {
     expect(showLanguageSwitch()).toBe(false);

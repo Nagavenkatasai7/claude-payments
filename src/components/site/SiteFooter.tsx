@@ -2,6 +2,7 @@ import BrandLogo from '@/app/landing/BrandLogo';
 import SocialLinks from '@/app/landing/SocialLinks';
 import { waLink, WA_MESSAGES, WA_PHONE, formatWaPhone } from '@/app/landing/wa';
 import { CONTACT_EMAILS, FOOTER_COLUMNS, LEGAL_LINKS, type FooterLink } from './site-links';
+import { companyFooterLine } from '@/lib/company';
 
 // The landing's footer (src/app/page.tsx <footer>), replicated with ds tokens. Server component.
 const FOOT_HEAD = 'mb-4 block text-[12px] font-bold uppercase tracking-[0.1em] text-ds-ink-muted';
@@ -67,6 +68,7 @@ export function SiteFooter() {
             </a>
           ))}
         </nav>
+        <p className="mt-3 text-[12.5px] text-ds-ink-faint">{companyFooterLine(new Date().getFullYear())}</p>
       </div>
     </footer>
   );

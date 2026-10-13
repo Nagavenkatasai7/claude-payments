@@ -9,6 +9,7 @@ import { SHARE_IMAGE } from '../landing/share-image';
 import { SMARTREMIT_ICONS } from '../brand-icons';
 import { SkipLink } from '@/components/skip-link';
 import { DEMO_NO_PARTNER_NOTE } from '@/lib/legal/drafts';
+import { companyFooterLine } from '@/lib/company';
 
 // Public /about page — the story, how a send works, and the partner platform.
 // Styled with the SAME inline-Tailwind light brand conventions as the landing
@@ -268,6 +269,7 @@ export default function AboutPage() {
               Privacy
             </a>
           </nav>
+          <p className="w-full">{companyFooterLine(new Date().getFullYear())}</p>
         </div>
       </footer>
     </div>

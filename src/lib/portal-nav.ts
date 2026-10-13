@@ -13,6 +13,7 @@ export function portalNavItems(dataRightsEnabled: boolean): SidebarItem[] {
     { href: '/portal/schedules', label: t('portal.nav.schedules') },
     { href: '/portal/chat', label: t('portal.nav.chat') },
     { href: '/portal/help', label: t('portal.nav.help') },
+    { href: '/portal/contact', label: t('portal.nav.contact') },
     { href: '/portal/profile', label: t('portal.nav.profile') },
     { href: '/portal/notifications', label: t('portal.nav.notifications') },
     { href: '/portal/devices', label: t('portal.nav.devices') },
