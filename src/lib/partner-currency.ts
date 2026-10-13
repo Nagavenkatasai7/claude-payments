@@ -57,6 +57,23 @@ export function countryForCurrency(c: CurrencyCode, phone?: string): CountryCode
   return countries[0];
 }
 
+/**
+ * The SOURCE country of a transfer for `partner`. It must be one of the partner's own countries
+ * whenever the partner serves the currency, because the corridor rules (AML holds, thresholds,
+ * extra watchlist) are keyed by a country the partner serves. For a shared currency (EUR): the
+ * phone's country when the partner serves it, else the partner's first country that uses the
+ * currency; never a country outside the partner (security review 2026-10-13). A partner that does
+ * not serve the currency (or no partner) falls back to countryForCurrency.
+ */
+export function sourceCountryFor(partner: Pick<Partner, 'countries'> | null | undefined, c: CurrencyCode, phone?: string): CountryCode {
+  const own = (partner?.countries ?? []).filter((k) => DEFAULT_CURRENCY_FOR_COUNTRY[k] === c);
+  if (own.length > 0) {
+    const fromPhone = phone ? countryForPhone(phone) : undefined;
+    return fromPhone && own.includes(fromPhone) ? fromPhone : own[0];
+  }
+  return countryForCurrency(c, phone);
+}
+
 // Send currencies = the partner's operating countries mapped to home currency,
 // de-duplicated, stable order. ['US'] → ['USD']. Any-to-any: India (INR) is now a
 // valid SOURCE too (a sender in India can send out), so it is NO LONGER excluded.

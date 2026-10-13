@@ -4297,6 +4297,7 @@ export async function prepareSendDraft(
       try {
         await recordBlockedAttempt(ctx.store, {
           phone: ctx.phone,
+          partnerCountries: partner?.countries,
           recipientName: input.recipientName,
           recipientPhone,
           payoutMethod,

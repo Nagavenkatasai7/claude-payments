@@ -3,7 +3,7 @@ import { DEFAULT_CURRENCY_FOR_COUNTRY, type CountryCode } from '@/lib/types';
 import { FALLBACK_FX_RATES } from '@/lib/rate';
 import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields } from '@/lib/payout-format';
 import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
-import { currencyForPhone, countryForPhone, countryForCurrency, allowedSendCurrencies } from '@/lib/partner-currency';
+import { currencyForPhone, countryForPhone, countryForCurrency, allowedSendCurrencies, sourceCountryFor } from '@/lib/partner-currency';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { listCorridors } from '@/lib/partner-api-service';
 import type { Partner } from '@/lib/types';
@@ -84,5 +84,27 @@ describe('Europe / EUR corridors', () => {
     expect(validatePayoutFields('DE', { iban: 'FR1420041010050500013M02606' }).ok).toBe(false);
     expect(validatePayoutFields('FR', { iban: 'FR1420041010050500013M02606' }).ok).toBe(true);
     expect(validatePayoutFields('IE', { iban: 'X' }).ok).toBe(false);
+  });
+});
+
+describe('sourceCountryFor — the source country stays inside the partner (security review, 2026-10-13)', () => {
+  const partner = (countries: CountryCode[]) => ({ id: 'p', name: 'P', countries, status: 'active' as const, createdAt: '', updatedAt: '' });
+
+  it('a FR-only partner: a +1 sender paying EUR is FR (never the DE fallback), so the FR corridor rules apply', () => {
+    expect(sourceCountryFor(partner(['US', 'FR']), 'EUR', '15551234567')).toBe('FR');
+  });
+
+  it('a DE-only partner: a +33 sender paying EUR is DE, the corridor the partner configures', () => {
+    expect(sourceCountryFor(partner(['DE']), 'EUR', '33612345678')).toBe('DE');
+  });
+
+  it('the phone country wins when the partner serves it', () => {
+    expect(sourceCountryFor(partner(['DE', 'FR', 'IT']), 'EUR', '393123456789')).toBe('IT');
+  });
+
+  it('single-country currencies and an unknown partner keep the old answer', () => {
+    expect(sourceCountryFor(partner(['US', 'GB']), 'GBP', '447911123456')).toBe('GB');
+    expect(sourceCountryFor(undefined, 'EUR', '33612345678')).toBe('FR');
+    expect(sourceCountryFor(partner(['US']), 'EUR')).toBe('DE');
   });
 });
