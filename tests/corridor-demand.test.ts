@@ -43,6 +43,15 @@ const fxOk: FxRatesFn = vi.fn(async (cur) => RATES[cur] ?? { toInr: 1, toUsd: 1 
 const SUPPORTED: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
 
 describe('normalizeDestination + supportedCountryFor', () => {
+  it('folds Hong Kong, Mexico and the euro countries to their codes', () => {
+    expect(supportedCountryFor('Germany')).toBe('DE');
+    expect(supportedCountryFor(' the Netherlands ')).toBe('NL');
+    expect(supportedCountryFor('Österreich')).toBe('AT');
+    expect(supportedCountryFor('Hong Kong')).toBe('HK');
+    expect(supportedCountryFor('Mexico')).toBe('MX');
+    expect(supportedCountryFor('Austin')).toBeNull();
+  });
+
   it('lowercases, trims, collapses whitespace', () => {
     expect(normalizeDestination('  Pak  istan ')).toBe('pak istan');
     expect(normalizeDestination('UAE')).toBe('uae');
@@ -125,6 +134,15 @@ describe('rankCorridorDemand — USD normalization across mixed currencies', () 
     expect(pk.total.usdDemand).toBeCloseTo(227, 5); // 100*1 + 100*1.27
     // GBP + USD distinct currencies → exactly 2 fx calls (deduped).
     expect(fx).toHaveBeenCalledTimes(2);
+  });
+
+  it('prices EUR, HKD and MXN leads (the known list follows the currency map)', async () => {
+    const fx = vi.fn(async () => ({ toInr: 1, toUsd: 2 }));
+    const reqs = ['EUR', ' hkd ', 'mxn'].map((c) =>
+      lead({ destinationCountry: 'Pakistan', approxAmount: 10, approxCurrency: c }));
+    const out = await rankCorridorDemand(reqs, SUPPORTED, fx, { now: NOW });
+    expect(out[0].total.pricedLeads).toBe(3);
+    expect(out[0].total.usdDemand).toBeCloseTo(60, 5);
   });
 
   it('an FX outage for one currency leaves that row unpriced but counts the lead', async () => {

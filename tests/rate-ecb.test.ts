@@ -129,6 +129,14 @@ describe('getFxRates — the ECB file is the first source', () => {
     expect(await getFxRates('INR')).toMatchObject({ toInr: 1, toUsd: sig6(1.1269 / 108.6615) });
   });
 
+  // Europe and EUR (2026-10-12): EUR is the ECB file's base, so it has no row. It is 1 per EUR.
+  it('EUR is priced from the ECB file as the base (1 per EUR); Frankfurter is not called', async () => {
+    const fn = route(() => ok(ecbXml()), () => frankfurter({ USD: 9, INR: 9 }));
+    const r = await getFxRates('EUR');
+    expect(r).toMatchObject({ toUsd: 1.1269, toInr: 108.662, source: 'live', asOf: '2026-10-06', provider: ECB_PROVIDER_ID });
+    expect(frCalls(fn)).toHaveLength(0);
+  });
+
   it('AED stays derived from the USD leg (the ECB file has no AED either)', async () => {
     route(() => ok(ecbXml()), () => frankfurter({}));
     const r = await getFxRates('AED');

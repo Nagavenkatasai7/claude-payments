@@ -3,7 +3,7 @@
 // waitlist's destination-country multi-select. Lives outside page.tsx because
 // Next.js forbids extra exports from a page module.
 //
-// Values are the codes the server actions accept (10 supported corridors +
+// Values are the codes the server actions accept (the supported corridors +
 // an "Other" escape hatch); labels are the friendly names shown to prospects.
 export const PARTNER_CORRIDORS = [
   { value: 'US', label: 'United States' },
@@ -16,6 +16,14 @@ export const PARTNER_CORRIDORS = [
   { value: 'IN', label: 'India' },
   { value: 'HK', label: 'Hong Kong' },
   { value: 'MX', label: 'Mexico' },
+  { value: 'DE', label: 'Germany' },
+  { value: 'FR', label: 'France' },
+  { value: 'NL', label: 'Netherlands' },
+  { value: 'IE', label: 'Ireland' },
+  { value: 'IT', label: 'Italy' },
+  { value: 'ES', label: 'Spain' },
+  { value: 'AT', label: 'Austria' },
+  { value: 'BE', label: 'Belgium' },
   { value: 'Other', label: 'Other' },
 ] as const;
 

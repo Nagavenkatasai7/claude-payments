@@ -74,6 +74,7 @@ import type {
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
+import { isSupportedDestination } from '@/lib/destination-country';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -113,7 +114,8 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   // admin may edit any. Generic message — don't disclose out-of-scope partners.
   if (!existing || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');
 
-  const submittedCountries = formData.getAll('countries').map(String) as Partner['countries'];
+  // Only supported codes are kept: a forged POST cannot store a country with no currency.
+  const submittedCountries = formData.getAll('countries').map(String).filter(isSupportedDestination);
   // WL: KYC posture. 'delegated' = the partner runs KYC on their side, so our
   // verify-gate steps aside (sanctions still always run). Absent/anything-else ⇒
   // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend only matters when

@@ -4010,17 +4010,18 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
   it('an UNMAPPED buyer calling code is refused outright — /pay/b2b could never serve that bill (Program-Fix 33)', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedActiveSeller(ctx);
-    // +49 (Germany) is not a supported corridor — the pay page hard-stops on an
+    // +55 (Brazil) is not a supported corridor — the pay page hard-stops on an
     // unmapped buyer country, so the bill is refused BEFORE any claim or insert
-    // (pre-fix: a USD bill was minted that could never be paid).
+    // (pre-fix: a USD bill was minted that could never be paid). Germany was the
+    // example here until Europe launched (2026-10-12).
     const r = await executeTool(
       'create_invoice',
-      { buyer_phone: '4915123456789', amount: 500, currency: 'EUR' },
+      { buyer_phone: '5511912345678', amount: 500, currency: 'BRL' },
       ctx,
     );
     expect(r.created).toBe(false);
     expect(String(r.reply_to_customer)).toMatch(/can't bill that number/i);
-    expect(String(r.reply_to_customer)).not.toContain('EUR');
+    expect(String(r.reply_to_customer)).not.toContain('BRL');
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
 

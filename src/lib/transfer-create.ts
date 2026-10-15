@@ -12,7 +12,7 @@ import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold, applyPurpos
 import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
-import { countryForCurrency } from './partner-currency';
+import { sourceCountryFor } from './partner-currency';
 import { feeTierCount, isFirstTransferFree } from './fee-tier';
 import { easternMonth, easternMonthStart } from './dates';
 import { budgetAllows, discountFor, giveBackFor, qualifies } from './rewards/engine';
@@ -392,8 +392,9 @@ export async function createTransferWithOutcome(
   // hoists the partner + subject reads above the quote too: the quote ceiling
   // is now the sender's EFFECTIVE per-transfer cap (customer override, else
   // partner default, else platform), never above the $10,000 hard ceiling.
-  const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
   const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
+  // P4 symbol. EUR: the sender's euro country, kept inside the partner's own countries so its corridor rules apply.
+  const sourceCountry = sourceCountryFor(partner, input.sourceCurrency, input.phone);
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
   // The tier subject (firstSeenAt from the customers row / first transfer /
   // now; kycStatus = the attestation the backstop above already trusts; the
@@ -868,6 +869,8 @@ async function mintLocked(
 
 export interface BlockedAttemptInput {
   phone: string;
+  /** The partner's countries, so the recorded source country matches createTransfer's (sourceCountryFor). */
+  partnerCountries?: CountryCode[];
   recipientName: string;
   recipientPhone: string;
   payoutMethod: PayoutMethod;
@@ -926,7 +929,7 @@ export async function recordBlockedAttempt(
     complianceReasons: input.reasons,
     status: 'blocked',
     createdAt: new Date().toISOString(),
-    sourceCountry: countryForCurrency(input.sourceCurrency),
+    sourceCountry: sourceCountryFor({ countries: input.partnerCountries ?? [] }, input.sourceCurrency, input.phone),
     sourceCurrency: input.sourceCurrency,
     destinationCountry: input.destinationCountry,
     destinationCurrency: input.destinationCurrency,

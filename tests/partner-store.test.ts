@@ -56,7 +56,7 @@ describe('partner store', () => {
     // Any-to-any: the default tenant serves the supported source countries with
     // unambiguous calling codes (CA excluded — shares +1 with the US; HK = +852,
     // MX = +52).
-    expect(p.countries).toEqual(['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX']);
+    expect(p.countries).toEqual(['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX', 'DE', 'FR', 'NL', 'IE', 'IT', 'ES', 'AT', 'BE']);
     expect(p.status).toBe('active');
     expect(await ps.getPartner('default')).toEqual(p);
   });

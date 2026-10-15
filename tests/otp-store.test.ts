@@ -3,7 +3,7 @@ import { createOtpStore } from '@/lib/otp-store';
 import { fakeRedis } from './helpers';
 
 const US = '+12025550123'; // a US number (geo-allowed)
-const DE = '+4915123456789'; // Germany — outside the 8-country allow-list
+const BR = '+5511912345678'; // Brazil — outside the allow-list
 
 function mk(opts?: { rng?: () => number }) {
   const redis = fakeRedis();
@@ -170,6 +170,6 @@ describe('otp-store throttling', () => {
 describe('otp-store geo allow-list', () => {
   it('refuses to send to a phone outside the 8 supported countries', async () => {
     const { store } = mk();
-    expect(await store.issueOtp(DE, 'login')).toEqual({ ok: false, reason: 'unsupported_geo' });
+    expect(await store.issueOtp(BR, 'login')).toEqual({ ok: false, reason: 'unsupported_geo' });
   });
 });

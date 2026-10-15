@@ -48,7 +48,11 @@ const DAY_BUCKET_TTL_S = 2 * 24 * 60 * 60;
 const COOLDOWN_TTL_S = 60;
 const OTP_TTL_S = 360; // a little past the logical 300s expiry
 
-const ALLOWED_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
+// Europe (2026-10-12): the eight euro countries sign in too (send and receive).
+const ALLOWED_COUNTRIES = new Set<CountryCode>([
+  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
+  'DE', 'FR', 'NL', 'IE', 'IT', 'ES', 'AT', 'BE',
+]);
 
 export interface OtpRecord {
   hash: string; // sha256hex(code)

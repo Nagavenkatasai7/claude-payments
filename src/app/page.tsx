@@ -61,6 +61,14 @@ const COUNTRIES = [
   { name: 'India', short: 'India', code: 'in' },
   { name: 'Hong Kong', short: 'Hong Kong', code: 'hk' },
   { name: 'Mexico', short: 'Mexico', code: 'mx' },
+  { name: 'Germany', short: 'Germany', code: 'de' },
+  { name: 'France', short: 'France', code: 'fr' },
+  { name: 'Netherlands', short: 'Netherlands', code: 'nl' },
+  { name: 'Ireland', short: 'Ireland', code: 'ie' },
+  { name: 'Italy', short: 'Italy', code: 'it' },
+  { name: 'Spain', short: 'Spain', code: 'es' },
+  { name: 'Austria', short: 'Austria', code: 'at' },
+  { name: 'Belgium', short: 'Belgium', code: 'be' },
 ];
 
 // Corridor checkbox options for the "Partner with us" form (and the waitlist's

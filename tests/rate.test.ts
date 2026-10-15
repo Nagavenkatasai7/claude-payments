@@ -243,7 +243,7 @@ describe('FALLBACK_FX_RATES — display-only, structurally unquotable', () => {
 describe('getFxRates — only the typed currency table is ever dialed (Task 9 security review)', () => {
   it('refuses a code outside CurrencyCode without dialing the provider', async () => {
     mockFetch(95.82);
-    await expect(getFxRates('EUR' as CurrencyCode)).rejects.toMatchObject({
+    await expect(getFxRates('BRL' as CurrencyCode)).rejects.toMatchObject({
       name: 'RateUnavailableError', reason: 'unsupported_currency', message: FX_UNAVAILABLE_MESSAGE,
     });
     await expect(getFxRates('USD&to=EUR' as CurrencyCode)).rejects.toBeInstanceOf(RateUnavailableError);

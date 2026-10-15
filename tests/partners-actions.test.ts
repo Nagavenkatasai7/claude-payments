@@ -180,6 +180,18 @@ describe('updatePartnerAction', () => {
     expect(got?.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
   });
 
+  it('keeps the euro countries and drops a code with no currency', async () => {
+    await ps.savePartner({
+      id: 'p1', name: 'Old', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const fd = new FormData();
+    fd.set('id', 'p1');
+    for (const c of ['DE', 'ZZ', 'BE']) fd.append('countries', c);
+    await updatePartnerAction(fd);
+    expect((await ps.getPartner('p1'))?.countries).toEqual(['DE', 'BE']);
+  });
+
   it('WL: persists displayName + delegated KYC mode + requireKycBeforeSend', async () => {
     await ps.savePartner({
       id: 'p2', name: 'Acme', countries: ['US'], status: 'active',

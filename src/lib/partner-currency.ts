@@ -5,6 +5,7 @@ import { QuoteError } from './fx';
 // Calling-code prefix → CountryCode (greedy longest-match: 971 before 9, etc.).
 const CALLING_CODE_TO_COUNTRY: Record<string, CountryCode> = {
   '1': 'US', '44': 'GB', '971': 'AE', '61': 'AU', '64': 'NZ', '65': 'SG', '91': 'IN', '852': 'HK', '52': 'MX',
+  '49': 'DE', '33': 'FR', '31': 'NL', '353': 'IE', '39': 'IT', '34': 'ES', '43': 'AT', '32': 'BE',
 };
 
 /** Best-effort CountryCode from a normalized (digits-only) sender phone. undefined if unknown. */
@@ -32,14 +33,45 @@ export function currencyForPhone(normalizedPhone: string): CurrencyCode | undefi
   return country ? DEFAULT_CURRENCY_FOR_COUNTRY[country] : undefined;
 }
 
-const CURRENCY_TO_COUNTRY = Object.fromEntries(
-  Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY).map(([country, cur]) => [cur, country]),
-) as Record<CurrencyCode, CountryCode>;
+// Every country per currency, in DEFAULT_CURRENCY_FOR_COUNTRY order. EUR has eight; the others one.
+const COUNTRIES_BY_CURRENCY = new Map<CurrencyCode, CountryCode[]>();
+for (const [country, cur] of Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as [CountryCode, CurrencyCode][]) {
+  COUNTRIES_BY_CURRENCY.set(cur, [...(COUNTRIES_BY_CURRENCY.get(cur) ?? []), country]);
+}
 
-export function countryForCurrency(c: CurrencyCode): CountryCode {
-  const country = CURRENCY_TO_COUNTRY[c];
-  if (!country) throw new QuoteError(`Unsupported currency: ${c}.`);
-  return country;
+/**
+ * The country of a currency. For a currency one country uses, that country. For a
+ * currency several countries share (EUR), the country of `phone` when it uses that
+ * currency (a +33 sender of EUR is FR), else the first listed country (DE). Pass the
+ * phone of the party the currency belongs to (the sender for a source currency, the
+ * seller for a payout currency): it decides the corridor rules and the sanctions
+ * jurisdiction.
+ */
+export function countryForCurrency(c: CurrencyCode, phone?: string): CountryCode {
+  const countries = COUNTRIES_BY_CURRENCY.get(c);
+  if (!countries) throw new QuoteError(`Unsupported currency: ${c}.`);
+  if (countries.length > 1 && phone) {
+    const fromPhone = countryForPhone(phone);
+    if (fromPhone && countries.includes(fromPhone)) return fromPhone;
+  }
+  return countries[0];
+}
+
+/**
+ * The SOURCE country of a transfer for `partner`. It must be one of the partner's own countries
+ * whenever the partner serves the currency, because the corridor rules (AML holds, thresholds,
+ * extra watchlist) are keyed by a country the partner serves. For a shared currency (EUR): the
+ * phone's country when the partner serves it, else the partner's first country that uses the
+ * currency; never a country outside the partner (security review 2026-10-13). A partner that does
+ * not serve the currency (or no partner) falls back to countryForCurrency.
+ */
+export function sourceCountryFor(partner: Pick<Partner, 'countries'> | null | undefined, c: CurrencyCode, phone?: string): CountryCode {
+  const own = (partner?.countries ?? []).filter((k) => DEFAULT_CURRENCY_FOR_COUNTRY[k] === c);
+  if (own.length > 0) {
+    const fromPhone = phone ? countryForPhone(phone) : undefined;
+    return fromPhone && own.includes(fromPhone) ? fromPhone : own[0];
+  }
+  return countryForCurrency(c, phone);
 }
 
 // Send currencies = the partner's operating countries mapped to home currency,

@@ -9,9 +9,10 @@ import {
 // Program-Fix 33: ONE country authority. Every valid-code set and every schema
 // list derives from the keys of DEFAULT_CURRENCY_FOR_COUNTRY — never hand-typed.
 describe('destination-country — the single country authority (Program-Fix 33)', () => {
-  it('SUPPORTED_DESTINATIONS is exactly the keys of DEFAULT_CURRENCY_FOR_COUNTRY (10)', () => {
+  it('SUPPORTED_DESTINATIONS is exactly the keys of DEFAULT_CURRENCY_FOR_COUNTRY (18)', () => {
     expect(SUPPORTED_DESTINATIONS).toEqual(Object.keys(DEFAULT_CURRENCY_FOR_COUNTRY));
-    expect(SUPPORTED_DESTINATIONS).toHaveLength(10);
+    expect(SUPPORTED_DESTINATIONS).toHaveLength(18);
+    expect(SUPPORTED_DESTINATIONS).toContain('DE');
     expect(SUPPORTED_DESTINATIONS).toContain('MX');
     expect(SUPPORTED_DESTINATIONS).toContain('HK');
   });
@@ -41,5 +42,16 @@ describe('destination-country — the single country authority (Program-Fix 33)'
     const text = destinationListText();
     for (const code of Object.keys(DEFAULT_CURRENCY_FOR_COUNTRY)) expect(text).toContain(code);
     expect(text).toBe(Object.keys(DEFAULT_CURRENCY_FOR_COUNTRY).join(', '));
+  });
+});
+
+describe('destination-country — country names for the bot (Europe, 2026-10-12)', () => {
+  it('names every supported country, in the authority order', async () => {
+    const { COUNTRY_NAMES, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_COUNTRY_NAMES_AND } = await import('@/lib/destination-country');
+    expect(Object.keys(COUNTRY_NAMES).sort()).toEqual([...SUPPORTED_DESTINATIONS].sort());
+    expect(SUPPORTED_COUNTRY_COUNT).toBe(18);
+    expect(SUPPORTED_COUNTRY_NAMES.startsWith('US, Canada, UK,')).toBe(true);
+    expect(SUPPORTED_COUNTRY_NAMES.endsWith('Austria, Belgium')).toBe(true);
+    expect(SUPPORTED_COUNTRY_NAMES_AND.endsWith('Austria, and Belgium')).toBe(true);
   });
 });

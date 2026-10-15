@@ -737,12 +737,16 @@ export interface EffectiveSendLimits extends SendLimits {
 // Any-to-any: every code below is valid as BOTH a source and a destination
 // (e.g. INR→USD or USD→INR). Don't re-introduce a send-only / payout-only split.
 export type CountryCode =
-  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN' | 'HK' | 'MX';
+  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN' | 'HK' | 'MX'
+  // Europe (owner, 2026-10-12): eight euro countries, send AND receive.
+  | 'DE' | 'FR' | 'NL' | 'IE' | 'IT' | 'ES' | 'AT' | 'BE';
 
 // ISO 4217 currency codes corresponding to the supported countries (any-to-any:
-// each is usable as source or destination).
+// each is usable as source or destination). EUR is the first currency that
+// SEVERAL countries share: never invert DEFAULT_CURRENCY_FOR_COUNTRY to get a
+// country — use countryForCurrency(currency, phone) (src/lib/partner-currency.ts).
 export type CurrencyCode =
-  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR' | 'HKD' | 'MXN';
+  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR' | 'HKD' | 'MXN' | 'EUR';
 
 // Single source of truth for "what's the home currency of country X?"
 // Consumed by the migration + bot defaults.
@@ -757,6 +761,15 @@ export const DEFAULT_CURRENCY_FOR_COUNTRY: Record<CountryCode, CurrencyCode> = {
   IN: 'INR',
   HK: 'HKD',
   MX: 'MXN',
+  // Europe: DE first — countryForCurrency('EUR') falls back to the first euro country.
+  DE: 'EUR',
+  FR: 'EUR',
+  NL: 'EUR',
+  IE: 'EUR',
+  IT: 'EUR',
+  ES: 'EUR',
+  AT: 'EUR',
+  BE: 'EUR',
 };
 
 // ── Partner entity (P2) ───────────────────────────────────────────────

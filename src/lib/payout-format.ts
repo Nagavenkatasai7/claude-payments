@@ -31,6 +31,7 @@ export interface Field {
   patternMessage?: string;// per-field error shown when `pattern` does not match
   minDigits?: number;     // minimum digit count (after stripping non-digits)
   isAccount?: boolean;    // marks the field that holds the recipient's ACCOUNT number
+  compact?: boolean;      // IBAN-style: spaces removed and letters upper-cased before the checks and storage
 }
 
 // Shared format rules (kept module-level so the field defs read cleanly):
@@ -41,6 +42,18 @@ export interface Field {
 // payable Step 2, not to be a full IBAN/IFSC verifier.
 const IFSC_PATTERN = /^[A-Za-z]{4}0[A-Za-z0-9]{6}$/;
 const IBAN_PATTERN = /^[A-Za-z]{2}[0-9]{2}[A-Za-z0-9]{11,30}$/;
+
+/** A euro-country IBAN: the payout country's own 2-letter prefix (an IBAN names its country). */
+function euroIban(country: CountryCode): Field {
+  return {
+    key: 'iban',
+    label: 'IBAN',
+    isAccount: true,
+    compact: true,
+    pattern: new RegExp(`^${country}[0-9]{2}[A-Z0-9]{11,30}$`),
+    patternMessage: `Enter a valid ${country} IBAN (it starts with ${country}, then 2 digits).`,
+  };
+}
 // Free-form account numbers must carry at least this many digits after stripping
 // separators — rejects "12345" / "X" while passing every supported real format.
 const ACCOUNT_MIN_DIGITS = 6;
@@ -113,6 +126,15 @@ export const BANK_FIELDS_BY_COUNTRY: Record<CountryCode, Field[]> = {
     // The standard 18-digit Mexican interbank account number (CLABE).
     { key: 'clabe', label: 'CLABE', digits: 18, isAccount: true },
   ],
+  // Europe (2026-10-12): a SEPA payout needs only the IBAN.
+  DE: [euroIban('DE')],
+  FR: [euroIban('FR')],
+  NL: [euroIban('NL')],
+  IE: [euroIban('IE')],
+  IT: [euroIban('IT')],
+  ES: [euroIban('ES')],
+  AT: [euroIban('AT')],
+  BE: [euroIban('BE')],
 };
 
 export type ValidationResult =
@@ -150,7 +172,8 @@ export function validatePayoutFields(
   const composed: Record<string, string> = {};
 
   for (const def of defs) {
-    const raw = (fields[def.key] ?? '').trim();
+    const typed = (fields[def.key] ?? '').trim();
+    const raw = def.compact ? typed.replace(/\s+/g, '').toUpperCase() : typed;
     if (raw === '') {
       errors[def.key] = `${def.label} is required.`;
       continue;
