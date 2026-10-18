@@ -203,7 +203,12 @@ async function refreshGrant(form: URLSearchParams, client: AgentClientRow, ctx: 
   if (!presented.startsWith(REFRESH_TOKEN_PREFIX) || presented.length > 128) return oauthError('invalid_grant');
   const hash = agentSecretHash(presented, deps.pepper);
   const found = await deps.repo.findGrantByRefreshHash(ctx.partnerId, hash);
-  if (!found) return oauthError('invalid_grant');
+  if (!found) {
+    // Older than the one rotation the grant row remembers: still theft.
+    const retired = await deps.store.retiredRefreshGrant(presented).catch(() => null);
+    if (retired && retired.partnerId === ctx.partnerId) await revokeAndAudit(ctx.partnerId, retired.grantId, 'theft', deps);
+    return oauthError('invalid_grant');
+  }
   const { grant } = found;
   // A rotated token presented again, or a token presented by another client: treat as theft.
   if (found.match === 'previous' || grant.clientId !== client.id) {
@@ -224,6 +229,7 @@ async function refreshGrant(form: URLSearchParams, client: AgentClientRow, ctx: 
   const next = newAgentSecret(REFRESH_TOKEN_PREFIX);
   const rotated = await deps.repo.rotateRefresh(ctx.partnerId, grant.id, hash, agentSecretHash(next, deps.pepper), new Date(now), new Date(now + AGENT_GRANT_TTL_MS));
   if (!rotated) return oauthError('invalid_grant');
+  await deps.store.markRefreshRetired(presented, { partnerId: ctx.partnerId, grantId: grant.id }).catch(() => undefined);
   const access = await deps.store.issueAccess({ grantId: grant.id, partnerId: ctx.partnerId, phone: grant.phone, clientId: client.id, scopes, resource });
   return tokenResponse(access, next, scopes);
 }

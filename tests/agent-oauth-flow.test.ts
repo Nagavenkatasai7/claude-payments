@@ -243,7 +243,10 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect(res.status).toBe(400);
       expect(res.headers.get('location')).toBeNull();
     });
-    it('missing PKCE / wrong resource redirect back with the error, the state and iss', async () => {
+    // RFC 9700 §4.11.2: a dynamically registered redirect_uri is not trusted, so a bad request is never
+    // an automatic redirect (that would make /oauth/authorize an open redirector for any registered
+    // client). The customer sees the error page; error redirects happen only after consent (Deny).
+    it('missing PKCE / wrong resource / bad response_type show the error page and never redirect', async () => {
       const { json } = await register();
       const id = json.client_id as string;
       for (const [over, error] of [
@@ -252,11 +255,15 @@ describe('agent OAuth flow', { retry: 0 }, () => {
         [{ resource: 'https://acme.smartremit.ai/api/mcp' }, 'invalid_target'],
         [{ resource: null }, 'invalid_target'],
         [{ scope: 'transfers:prepare' }, 'invalid_scope'],
+        [{ response_type: 'bogus' }, 'unsupported_response_type'],
+        [{ state: 'bad\u0001state' }, 'invalid_request'],
       ] as const) {
-        const res = await handleAuthorizeGet(new Request(authorizeUrl(id, over)), CTX, deps());
-        expect(res.status).toBe(303);
-        const loc = new URL(res.headers.get('location')!);
-        expect({ error: loc.searchParams.get('error'), state: loc.searchParams.get('state'), iss: loc.searchParams.get('iss') }).toEqual({ error, state: 'st-1', iss: ISS });
+        for (const signedIn of [false, true]) {
+          session = signedIn ? { phone: PHONE, sid: 'sid-1', fresh: true } : null;
+          const res = await handleAuthorizeGet(new Request(authorizeUrl(id, over)), CTX, deps());
+          expect({ error, signedIn, status: res.status, location: res.headers.get('location') }).toEqual({ error, signedIn, status: 400, location: null });
+          expect(await res.text()).toContain('This link does not work');
+        }
       }
     });
     it('flag off → "This is not available", before any sign-in', async () => {
@@ -485,6 +492,25 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect(g.expiresAt.getTime()).toBe(clock + 30 * 24 * 3600 * 1000);
       const r2 = await refresh(t.clientId, r1.json.refresh_token as string);
       expect(r2.res.status).toBe(200);
+    });
+    it('a refresh token retired several rotations ago is theft too (not only the last one)', async () => {
+      const t = await tokens();
+      const r1 = await refresh(t.clientId, t.refresh);
+      const r2 = await refresh(t.clientId, r1.json.refresh_token as string);
+      const r3 = await refresh(t.clientId, r2.json.refresh_token as string);
+      expect(r3.res.status).toBe(200);
+      // t.refresh is 3 rotations old: the grant row no longer holds its hash, Redis does.
+      expect((await refresh(t.clientId, t.refresh)).json.error).toBe('invalid_grant');
+      const [g] = await db.select().from(agentGrants);
+      expect(g.revokedReason).toBe('theft');
+      expect((await refresh(t.clientId, r3.json.refresh_token as string)).json.error).toBe('invalid_grant');
+    });
+    it('an unknown refresh token is a plain invalid_grant and revokes nothing', async () => {
+      const t = await tokens();
+      expect((await refresh(t.clientId, 'srr_' + 'x'.repeat(43))).json.error).toBe('invalid_grant');
+      const [g] = await db.select().from(agentGrants);
+      expect(g.revokedAt).toBeNull();
+      expect((await refresh(t.clientId, t.refresh)).res.status).toBe(200);
     });
     it('a rotated refresh token presented again = theft: the grant is revoked, every token dies', async () => {
       const t = await tokens();

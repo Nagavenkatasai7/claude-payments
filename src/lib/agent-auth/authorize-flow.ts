@@ -85,8 +85,10 @@ export async function handleAuthorizeGet(req: Request, ctx: HostCtx, deps: Autho
   if (!p) return messagePage('badRequest', 400, deps);
   const client = p.clientId !== null && CLIENT_ID_RE.test(p.clientId) ? await deps.repo.getClient(ctx.partnerId, p.clientId) : null;
   const check = checkAuthorizeRequest(p, { client, resource: mcpResourceUrl(ctx.host) });
-  if (!check.ok && check.kind === 'show') return messagePage('badRequest', 400, deps);
-  if (!check.ok) return see(backToApp(check.redirectUri, { error: check.error, state: check.state }, ctx), deps);
+  // Every bad request is shown, never redirected: a dynamically registered redirect_uri is not trusted
+  // (RFC 9700 §4.11.2), so an automatic error redirect would make this an open redirector for any
+  // registered client. Error redirects happen only after the customer has seen consent (Deny).
+  if (!check.ok) return messagePage('badRequest', 400, deps);
 
   const next = encodeURIComponent(nextPathOf(p));
   const session = await deps.session();

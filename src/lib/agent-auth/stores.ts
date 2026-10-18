@@ -1,7 +1,7 @@
 import type { RedisLike } from '@/lib/store';
 import type { PartnerId } from '@/lib/types';
 import { AGENT_SCOPES, type AgentScope } from './contract';
-import { ACCESS_TOKEN_PREFIX, AGENT_ACCESS_TTL_SEC, AGENT_CODE_TTL_SEC, AGENT_CODE_USED_TTL_SEC, AGENT_CONSENT_TTL_SEC } from './config';
+import { ACCESS_TOKEN_PREFIX, AGENT_ACCESS_TTL_SEC, AGENT_CODE_TTL_SEC, AGENT_CODE_USED_TTL_SEC, AGENT_CONSENT_TTL_SEC, AGENT_GRANT_TTL_MS } from './config';
 import { agentSecretHash, newAgentSecret } from './secrets';
 
 // agent token store — the short-lived secrets of the AI-agent sign-in in Redis (Stage C1).
@@ -66,7 +66,7 @@ const has = (r: Record<string, unknown>, keys: readonly string[]) => keys.every(
 export function createAgentTokenStore(redis: RedisLike, opts: { now?: () => number; pepper?: string } = {}) {
   const now = opts.now ?? Date.now;
   const h = (secret: string) => agentSecretHash(secret, opts.pepper);
-  const key = (kind: 'consent' | 'code' | 'codeused' | 'at', secret: string) => `agent:${kind}:${h(secret)}`;
+  const key = (kind: 'consent' | 'code' | 'codeused' | 'at' | 'rtretired', secret: string) => `agent:${kind}:${h(secret)}`;
   const alive = (r: Record<string, unknown>) => typeof r.exp === 'number' && Number.isFinite(r.exp) && r.exp > now();
 
   return {
@@ -102,6 +102,24 @@ export function createAgentTokenStore(redis: RedisLike, opts: { now?: () => numb
     async usedCodeGrant(code: string): Promise<{ partnerId: PartnerId; grantId: string } | null> {
       if (!str(code) || code.length > 128) return null;
       const r = parse(await redis.get(key('codeused', code)));
+      if (!r || !alive(r) || !has(r, ['partnerId', 'grantId'])) return null;
+      return { partnerId: r.partnerId as PartnerId, grantId: r.grantId as string };
+    },
+
+    /**
+     * A refresh token just rotated out. Kept (hash only) for the grant's whole life so a token from ANY
+     * earlier rotation is caught as theft, not only the one the grant row still holds. Best effort:
+     * a lost key only loses detection; the token itself is already dead.
+     */
+    async markRefreshRetired(refreshToken: string, rec: { partnerId: PartnerId; grantId: string }): Promise<void> {
+      const ttlSec = Math.floor(AGENT_GRANT_TTL_MS / 1000);
+      await redis.set(key('rtretired', refreshToken), JSON.stringify({ partnerId: rec.partnerId, grantId: rec.grantId, exp: now() + ttlSec * 1000 }), {
+        ex: ttlSec,
+      });
+    },
+    async retiredRefreshGrant(refreshToken: string): Promise<{ partnerId: PartnerId; grantId: string } | null> {
+      if (!str(refreshToken) || refreshToken.length > 128) return null;
+      const r = parse(await redis.get(key('rtretired', refreshToken)));
       if (!r || !alive(r) || !has(r, ['partnerId', 'grantId'])) return null;
       return { partnerId: r.partnerId as PartnerId, grantId: r.grantId as string };
     },
