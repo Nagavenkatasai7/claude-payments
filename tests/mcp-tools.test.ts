@@ -20,7 +20,7 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { recipientRid } from '@/lib/portal-recipients';
 import { webFormTurn } from '@/lib/portal-send';
 import {
-  CANNOT_SEND,
+  CANNOT_PAY,
   TRANSFER_NOT_FOUND,
   checkSendLimitTool,
   getQuoteTool,
@@ -376,7 +376,7 @@ describe('end to end through the MCP handler (gate on)', () => {
 
   it('every tool description says the AI cannot send money', async () => {
     const c = await client(auth());
-    for (const t of (await c.listTools()).tools) expect(t.description).toContain(CANNOT_SEND);
+    for (const t of (await c.listTools()).tools) expect(t.description).toContain(CANNOT_PAY);
     await c.close();
   });
 });

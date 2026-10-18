@@ -1,4 +1,5 @@
-import { t } from '@/lib/i18n';
+import { t, type MessageKey } from '@/lib/i18n';
+import type { AgentScope } from './contract';
 
 // The /oauth/authorize HTML (Stage C1): the consent screen and the plain message pages. PURE.
 //
@@ -47,7 +48,16 @@ export interface ConsentView {
   ticket: string;
   /** The host the browser returns to (from the validated redirect_uri), shown so the customer can check it. */
   returnHost: string;
+  /** The scopes this consent grants (canonical order); one line each. */
+  scopes: readonly AgentScope[];
 }
+
+const SCOPE_LINE: Record<AgentScope, MessageKey> = {
+  'quotes:read': 'agent.consent.quotes',
+  'recipients:read': 'agent.consent.recipients',
+  'transfers:read': 'agent.consent.transfers',
+  'transfers:prepare': 'agent.consent.prepare',
+};
 
 export function renderConsentPage(v: ConsentView): string {
   const who = v.clientName === '' ? esc(t('agent.consent.unnamed')) : `<span class="name">“${esc(v.clientName)}”</span>`;
@@ -55,11 +65,9 @@ export function renderConsentPage(v: ConsentView): string {
     `<h1>${esc(t('agent.consent.title'))}</h1>` +
     `<p>${t('agent.consent.intro', { app: '\u0000' }).split('\u0000').map(esc).join(who)}</p>` +
     '<ul>' +
-    `<li>${esc(t('agent.consent.quotes'))}</li>` +
-    `<li>${esc(t('agent.consent.recipients'))}</li>` +
-    `<li>${esc(t('agent.consent.transfers'))}</li>` +
+    v.scopes.map((s) => `<li>${esc(t(SCOPE_LINE[s]))}</li>`).join('') +
     '</ul>' +
-    `<p class="no">${esc(t('agent.consent.cannot'))}</p>` +
+    `<p class="no">${esc(t(v.scopes.includes('transfers:prepare') ? 'agent.consent.cannotPay' : 'agent.consent.cannot'))}</p>` +
     `<p class="muted">${esc(t('agent.consent.unverified'))}</p>` +
     `<p class="muted">${esc(t('agent.consent.returnTo', { host: v.returnHost }))}</p>` +
     `<p class="muted">${esc(t('agent.consent.disconnect'))}</p>` +

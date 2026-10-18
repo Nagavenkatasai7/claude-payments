@@ -17,7 +17,7 @@ import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, Draft, EntityType, FundingMethod, FxRateOrigin, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TransferPurpose, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { PURPOSE_CHOICES_TEXT, PURPOSE_LABELS, PURPOSE_REQUIRED_HINT, TRANSFER_PURPOSES, parsePurpose } from './purpose-codes';
 import { decidePurpose, keptPurposeDetail, PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING, type PurposeRiskCategory } from './purpose-detail';
@@ -4161,7 +4161,7 @@ async function setSenderNameTool(
 export async function prepareSendDraft(
   ctx: ToolContext,
   input: PrepareSendInput,
-  opts: { pointer?: DraftPointer } = {},
+  opts: { pointer?: DraftPointer; preparedBy?: Draft['preparedBy'] } = {},
 ): Promise<PrepareSendResult> {
   const pointer: DraftPointer = opts.pointer ?? (isWebChannel(ctx) ? 'web' : 'bot');
   const recipientPhone = normalizePhone(input.recipientPhone);
@@ -4339,6 +4339,8 @@ export async function prepareSendDraft(
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       partnerId: ctx.partnerId,
+      // Stage C2: the AI app that asked for this draft (MCP prepare_transfer only).
+      ...(opts.preparedBy ? { preparedBy: opts.preparedBy } : {}),
       recipient: {
         name: input.recipientName,
         recipientPhone,

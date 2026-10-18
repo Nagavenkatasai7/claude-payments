@@ -1,7 +1,7 @@
 import type { AgentOAuthRepo } from '@/db/repos/agent-oauth-repo';
 import type { RedisLike } from '@/lib/store';
 import type { PartnerId } from '@/lib/types';
-import type { AgentAuth, AgentPrincipal, AgentTokenCheck } from './contract';
+import type { AgentAuth, AgentPrincipal, AgentTokenCheck, AgentToolCallExtra } from './contract';
 import { ACCESS_TOKEN_PREFIX } from './config';
 import type { AgentAuditInput } from './audit';
 import type { AgentTokenStore } from './stores';
@@ -14,7 +14,8 @@ import type { AgentTokenStore } from './stores';
 //    access at once, a token never crosses hosts, and a partner API key (sr_live_ / sr_test_) is
 //    never accepted. Never throws: any error is `invalid`.
 //  - toolsActive: the gate (switch AND demo-mode phone), fail closed.
-//  - recordToolCall: one audit row (tool, client id, outcome; never arguments), best effort.
+//  - recordToolCall: one audit row (tool, client id, outcome, and the draft id a prepare or
+//    cancel touched; never arguments), best effort.
 
 export interface AgentAuthDeps {
   repo: AgentOAuthRepo;
@@ -25,6 +26,9 @@ export interface AgentAuthDeps {
   gateOpen(partnerId: PartnerId, phone: string): Promise<boolean>;
   audit(e: AgentAuditInput): Promise<void>;
 }
+
+/** A draft id (draft-store newTransferId: base64url); anything else is left out of the audit row. */
+const DRAFT_ID = /^[A-Za-z0-9_-]{6,64}$/;
 
 /** last_used_at is written at most once per grant per this window. */
 export const GRANT_TOUCH_THROTTLE_SEC = 300;
@@ -75,14 +79,20 @@ export function createAgentAuth(deps: AgentAuthDeps): AgentAuth {
       }
     },
 
-    async recordToolCall(principal: AgentPrincipal, tool: string, outcome: 'ok' | 'error' | 'refused'): Promise<void> {
+    async recordToolCall(
+      principal: AgentPrincipal,
+      tool: string,
+      outcome: 'ok' | 'error' | 'refused',
+      extra?: AgentToolCallExtra,
+    ): Promise<void> {
       try {
+        const draftId = extra && DRAFT_ID.test(extra.draftId) ? extra.draftId : undefined;
         await deps.audit({
           partnerId: principal.partnerId,
           phone: principal.phone,
           clientId: principal.clientId,
           action: 'agent.tool.called',
-          meta: { tool: String(tool).slice(0, 64), clientId: principal.clientId, outcome },
+          meta: { tool: String(tool).slice(0, 64), clientId: principal.clientId, outcome, ...(draftId ? { draftId } : {}) },
         });
       } catch {
         /* best effort: never throws */

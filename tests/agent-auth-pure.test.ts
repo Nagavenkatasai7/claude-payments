@@ -103,7 +103,7 @@ describe('dynamic client registration (RFC 7591)', () => {
     [{ ...ok, token_endpoint_auth_method: 'private_key_jwt' }, 'invalid_client_metadata'],
     [{ ...ok, grant_types: ['client_credentials'] }, 'invalid_client_metadata'],
     [{ ...ok, response_types: ['token'] }, 'invalid_client_metadata'],
-    [{ ...ok, scope: 'transfers:prepare' }, 'invalid_client_metadata'],
+    [{ ...ok, scope: 'transfers:pay' }, 'invalid_client_metadata'],
     [null, 'invalid_client_metadata'],
     [[ok], 'invalid_client_metadata'],
   ] as const)('refuses %j with %s', (body, error) => {
@@ -123,11 +123,11 @@ describe('dynamic client registration (RFC 7591)', () => {
 describe('the authorize request', () => {
   const check = (p: AuthorizeParams, client: typeof CLIENT | null = CLIENT) => checkAuthorizeRequest(p, { client, resource: RESOURCE });
 
-  it('a good request, default scope = all three', () => {
+  it('a good request, default scope = all four', () => {
     const r = check(params());
     expect(r).toEqual({
       ok: true,
-      req: { clientId: CLIENT.id, redirectUri: CLIENT.redirectUris[0], codeChallenge: CHALLENGE, scopes: ['quotes:read', 'recipients:read', 'transfers:read'], state: 'xyz', resource: RESOURCE },
+      req: { clientId: CLIENT.id, redirectUri: CLIENT.redirectUris[0], codeChallenge: CHALLENGE, scopes: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'], state: 'xyz', resource: RESOURCE },
     });
   });
   it('an unknown client or a redirect_uri mismatch is SHOWN, never redirected (no open redirect)', () => {
@@ -143,7 +143,7 @@ describe('the authorize request', () => {
     [{ codeChallenge: 'short' }, 'invalid_request'],
     [{ codeChallengeMethod: 'plain' }, 'invalid_request'],
     [{ codeChallengeMethod: null }, 'invalid_request'],
-    [{ scope: 'transfers:prepare' }, 'invalid_scope'],
+    [{ scope: 'transfers:pay' }, 'invalid_scope'],
     [{ scope: '' }, 'invalid_scope'],
     [{ resource: null }, 'invalid_target'],
     [{ resource: 'https://acme.smartremit.ai/api/mcp' }, 'invalid_target'],
@@ -208,7 +208,7 @@ describe('the authorize page CSP (form-action trap)', () => {
 
 describe('the consent page', () => {
   it('escapes the unverified client name and never links it', () => {
-    const html = renderConsentPage({ clientName: '<img src=x onerror=alert(1)>"&\'', ticket: 'tkt_123', returnHost: 'claude.ai' });
+    const html = renderConsentPage({ clientName: '<img src=x onerror=alert(1)>"&\'', ticket: 'tkt_123', returnHost: 'claude.ai', scopes: ['quotes:read'] });
     expect(html).not.toContain('<img src=x');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;&quot;&amp;&#39;');
     expect(html).toMatch(/An app that calls itself/);
@@ -221,7 +221,19 @@ describe('the consent page', () => {
     expect(html).toContain('value="deny"');
   });
   it('an empty name reads as an unnamed app', () => {
-    expect(renderConsentPage({ clientName: '', ticket: 't', returnHost: 'claude.ai' })).toContain('an unnamed app');
+    expect(renderConsentPage({ clientName: '', ticket: 't', returnHost: 'claude.ai', scopes: ['quotes:read'] })).toContain('an unnamed app');
+  });
+  it('lists exactly the scopes asked for; with prepare it says only the customer pays, on the pay page', () => {
+    const reads = renderConsentPage({ clientName: 'Claude', ticket: 't', returnHost: 'claude.ai', scopes: ['quotes:read', 'transfers:read'] });
+    expect(reads.match(/<li>/g)).toHaveLength(2);
+    expect(reads).toContain('see quotes and your send limit');
+    expect(reads).not.toContain('saved recipients');
+    expect(reads).toContain('It cannot send or pay.');
+    const all = renderConsentPage({ clientName: 'Claude', ticket: 't', returnHost: 'claude.ai', scopes: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'] });
+    expect(all.match(/<li>/g)).toHaveLength(4);
+    expect(all).toContain('prepare a transfer to a saved recipient, for you to check and pay on the SmartRemit pay page');
+    expect(all).toContain('It cannot pay. Only you can pay, on the SmartRemit pay page, with a code sent to your WhatsApp.');
+    expect(all).not.toContain('It cannot send or pay.');
   });
   it('a message page escapes its text', () => {
     const html = renderMessagePage({ title: 'Not <b>here</b>', body: 'a & b' });
@@ -238,7 +250,7 @@ describe('metadata documents', () => {
       token_endpoint: 'https://send.smartremit.ai/oauth/token',
       registration_endpoint: 'https://send.smartremit.ai/oauth/register',
       revocation_endpoint: 'https://send.smartremit.ai/oauth/revoke',
-      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read', 'offline_access'],
+      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare', 'offline_access'],
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -252,7 +264,7 @@ describe('metadata documents', () => {
     expect(protectedResourceMetadata(HOST)).toEqual({
       resource: RESOURCE,
       authorization_servers: ['https://send.smartremit.ai'],
-      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read'],
+      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'],
       bearer_methods_supported: ['header'],
       resource_name: 'SmartRemit',
     });
@@ -266,14 +278,14 @@ describe('metadata documents', () => {
     expect(protectedResourceMetadata(HOST).scopes_supported).not.toContain('offline_access'));
   it('the issuer is lower-case https', () => expect(issuerFor('Send.SmartRemit.ai')).toBe('https://send.smartremit.ai'));
   it('parseScope', () => {
-    expect(parseScope(null)).toEqual(['quotes:read', 'recipients:read', 'transfers:read']);
+    expect(parseScope(null)).toEqual(['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare']);
     expect(parseScope('recipients:read')).toEqual(['recipients:read']);
     expect(parseScope('recipients:read bogus')).toBeNull();
     expect(parseScope('   ')).toBeNull();
   });
   it('offline_access is accepted and grants nothing (never a resource scope)', () => {
     expect(parseScope('quotes:read offline_access')).toEqual(['quotes:read']);
-    expect(parseScope('offline_access')).toEqual(['quotes:read', 'recipients:read', 'transfers:read']);
+    expect(parseScope('offline_access')).toEqual(['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare']);
     expect(requestedScopes('offline_access')).toEqual([]);
     expect(requestedScopes('offline_access bogus')).toBeNull();
     expect(parseClientRegistration({ redirect_uris: ['https://claude.ai/cb'], scope: 'quotes:read offline_access' }).ok).toBe(true);

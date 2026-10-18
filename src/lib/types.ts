@@ -433,6 +433,12 @@ export interface Draft {
   // under the web active-draft pointer (draft-store.ts). Absent on every bot
   // draft (and on drafts written before the field existed).
   channel?: 'web';
+  // Stage C2: the AI app that prepared this draft through the MCP tool
+  // prepare_transfer. appName is the app's OWN, unverified name (bounded at
+  // registration); the pay page shows it so the customer knows where the draft
+  // came from. Redis only (no ledger column, owner decision 2026-10-18).
+  // Absent on every other draft.
+  preparedBy?: { clientId: string; appName: string };
   // The tenant the draft was created under (fix 1). Optional ONLY so in-flight
   // legacy drafts drain their 30-min TTL; every new draft sets it and readers
   // use `draft.partnerId ?? DEFAULT_PARTNER_ID`.

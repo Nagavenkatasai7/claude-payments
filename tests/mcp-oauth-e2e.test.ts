@@ -180,12 +180,20 @@ describe('sign-in + MCP endpoint, joined', () => {
     vi.unstubAllGlobals();
   });
 
-  it('a token from the real sign-in lists the five tools and reads the customer’s recipients', async () => {
+  it('a token from the real sign-in lists the seven tools and reads the customer’s recipients', async () => {
     const { accessToken } = await signIn();
     expect(accessToken).toMatch(/^sra_/);
     const c = await connect(accessToken);
     const names = (await c.listTools()).tools.map((t) => t.name).sort();
-    expect(names).toEqual(['check_send_limit', 'get_quote', 'get_transfer_status', 'list_recent_transfers', 'list_recipients']);
+    expect(names).toEqual([
+      'cancel_prepared_transfer',
+      'check_send_limit',
+      'get_quote',
+      'get_transfer_status',
+      'list_recent_transfers',
+      'list_recipients',
+      'prepare_transfer',
+    ]);
     const r = await c.callTool({ name: 'list_recipients', arguments: {} });
     const text = (r.content as Array<{ type: string; text: string }>)[0].text;
     expect(JSON.parse(text)).toMatchObject({ recipients: [{ name: 'Asha Kumar', payout_type: 'bank', account_last4: '9012' }] });

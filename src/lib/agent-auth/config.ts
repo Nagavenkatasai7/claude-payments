@@ -68,7 +68,7 @@ export function requestedScopes(raw: string): AgentScope[] | null {
 
 /**
  * A scope parameter → the granted resource scopes in canonical order, or null when it names
- * anything unknown or nothing at all. Absent (null/undefined), or only offline_access = all C1 scopes.
+ * anything unknown or nothing at all. Absent (null/undefined), or only offline_access = every scope.
  */
 export function parseScope(raw: string | null | undefined): AgentScope[] | null {
   if (raw === null || raw === undefined) return [...AGENT_SCOPES];

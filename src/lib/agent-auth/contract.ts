@@ -5,10 +5,13 @@ import type { PartnerId } from '../types';
 // either side can change its internals without touching the other. The tenant and the
 // customer always come from a verified token, never from tool input.
 
-/** The permissions a customer can grant an AI app (C2 adds 'transfers:prepare'). */
-export type AgentScope = 'quotes:read' | 'recipients:read' | 'transfers:read';
+/**
+ * The permissions a customer can grant an AI app. Stage C2 adds 'transfers:prepare': prepare a
+ * transfer (a draft) that the customer pays on the SmartRemit pay page. No scope lets an app pay.
+ */
+export type AgentScope = 'quotes:read' | 'recipients:read' | 'transfers:read' | 'transfers:prepare';
 
-export const AGENT_SCOPES: readonly AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read'];
+export const AGENT_SCOPES: readonly AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'];
 
 /** Who an MCP request acts for, from a verified access token whose grant is live. */
 export interface AgentPrincipal {
@@ -20,6 +23,11 @@ export interface AgentPrincipal {
   /** The app's self-chosen name, unverified: show it only as "an app that calls itself …". */
   clientName: string;
   scopes: readonly AgentScope[];
+}
+
+/** The only extra a tool-call audit row may carry: the id of the draft the call prepared or cancelled. */
+export interface AgentToolCallExtra {
+  draftId: string;
 }
 
 export type AgentTokenCheck =
@@ -39,8 +47,11 @@ export interface AgentAuth {
    * tenant AND demo mode for the phone)? FAILS CLOSED: any error is false.
    */
   toolsActive(partnerId: PartnerId, phone: string): Promise<boolean>;
-  /** Record one tool call (audit row; never tool arguments). Best effort: never throws. */
-  recordToolCall(principal: AgentPrincipal, tool: string, outcome: 'ok' | 'error' | 'refused'): Promise<void>;
+  /**
+   * Record one tool call (audit row; never tool arguments). `extra.draftId` names the draft a
+   * prepare or cancel touched (Stage C2). Best effort: never throws.
+   */
+  recordToolCall(principal: AgentPrincipal, tool: string, outcome: 'ok' | 'error' | 'refused', extra?: AgentToolCallExtra): Promise<void>;
 }
 
 /** The canonical MCP resource URL for a host ("https://<host>/api/mcp", lower-case host, no slash). */

@@ -99,4 +99,13 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.agentCodeTtlSec).toBe(cfg.AGENT_CODE_TTL_SEC);
     expect(FACTS.agentAccessTokenMinutes).toBe(cfg.AGENT_ACCESS_TTL_SEC / 60);
   });
+
+  it('AI apps (MCP) prepare: the retry window and the shared hourly send budget', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    const { PREPARE_REPLAY_TTL_S } = await import('@/lib/mcp/prepare');
+    const { PORTAL_SEND_LIMIT } = await import('@/lib/portal-send');
+    expect(FACTS.mcpPrepareReplaySec).toBe(PREPARE_REPLAY_TTL_S);
+    expect(FACTS.portalSendPerHour).toBe(PORTAL_SEND_LIMIT.limit);
+    expect(PORTAL_SEND_LIMIT.windowSec).toBe(3600);
+  });
 });
