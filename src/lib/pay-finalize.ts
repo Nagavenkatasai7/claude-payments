@@ -82,6 +82,15 @@ function fxRefused(err: RateUnavailableError): FinalizeResult {
 }
 
 /**
+ * Stage C2: true once a payment of this draft has claimed `draft:<draftId>` (below), minted or
+ * not. cancel_prepared_transfer reads it AFTER consuming the draft; finalizeDraftPayment re-reads
+ * an app-prepared draft AFTER its claim. Read-only.
+ */
+export async function draftPaymentStarted(db: DbOrTx, draftId: string): Promise<boolean> {
+  return (await createIdempotencyRepo(db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`)) !== null;
+}
+
+/**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
  * Transfer at the moment of payment (create-at-pay). Mirrors the createTransferTool
  * button-tap parity: peek → kyc → payout destination (fix 6) → FX (Task 9) → cap →
@@ -157,8 +166,11 @@ export async function finalizeDraftPayment(
   //          '' ("the pay page must collect it") is refused except on a B2B
   //          ach_pull draft, whose pay form collects only the payer's debit
   //          mandate (the licensed partner pays the payee on its own records).
-  const bodyDestination =
-    draft.transferType === 'b2b' ? '' : (bankDetails?.payoutDestination ?? '').trim();
+  //   An AI-app-prepared draft (Stage C2, Draft.preparedBy) also ignores the body: it pays
+  //   ONLY the saved recipient's stored account, so an app that learns the code can never
+  //   send the money to an account it chose.
+  const bodyLocked = draft.transferType === 'b2b' || draft.preparedBy !== undefined;
+  const bodyDestination = bodyLocked ? '' : (bankDetails?.payoutDestination ?? '').trim();
   const payoutDestination =
     bodyDestination !== '' ? bodyDestination : (draft.recipient.payoutDestination ?? '').trim();
   const b2bAchPull = draft.transferType === 'b2b' && draft.fundingMethod === 'ach_pull';
@@ -246,6 +258,17 @@ export async function finalizeDraftPayment(
         ? { ok: false, error: 'blocked', transferId: existing.id }
         : { ok: true, transferId: existing.id };
     }
+  }
+
+  // Stage C2: cancel_prepared_transfer consumes the draft and THEN looks for this claim; this
+  // side claims and THEN re-reads the draft. One of the two always sees the other, so a cancel
+  // that lands mid-payment either stops this mint or is told the transfer is being paid.
+  if (draft.preparedBy !== undefined && !(await draftStore.getDraft(draftId))) {
+    const minted = await store.getTransfer(reservedId); // a concurrent pay of the same link won
+    if (!minted) return { ok: false, error: 'expired_or_used' };
+    return minted.status === 'blocked'
+      ? { ok: false, error: 'blocked', transferId: minted.id }
+      : { ok: true, transferId: minted.id };
   }
 
   // U7 (audit): mint with the DRAFT's stored quote — the exact figures the

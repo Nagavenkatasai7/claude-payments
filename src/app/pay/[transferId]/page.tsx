@@ -23,6 +23,7 @@ import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
 import { transferRewardOrNull } from '@/lib/rewards/read';
 import { rewardPayNote } from '@/lib/rewards/engine';
 import { usdToSource } from '@/lib/rewards/customer';
+import { bankDetailsLocked, preparedByLine } from '@/lib/pay-prepared-by';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -184,6 +185,9 @@ async function renderPayPage(transferId: string) {
     // B3 rewards v1: the reward the price carries (the draft's quote, or the minted
     // transfer's redemption row), shown above the legal disclosure. Null: none.
     rewardNote: string | null;
+    // Stage C2: "Prepared in <app>" for a draft an AI app prepared (MCP). Null: none.
+    preparedByNote: string | null;
+    bankDetailsLocked: boolean; // true ⇒ no "Edit bank details" (Stage C2)
   };
 
   let view: View | null = null;
@@ -242,6 +246,9 @@ async function renderPayPage(transferId: string) {
             formatMoney(usdToSource(usd, sourceCurrency, transfer.amountSource, transfer.amountUsd), sourceCurrency),
           )
         : null,
+      // A minted transfer has no draft marker (no ledger column, owner decision 2026-10-18).
+      preparedByNote: null,
+      bankDetailsLocked: false,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -275,11 +282,13 @@ async function renderPayPage(transferId: string) {
       awaitingPayment: true, // a draft is always awaiting payment
       needsBankDetails: !hasStoredDest,
       savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
+      bankDetailsLocked: bankDetailsLocked(draft), // Stage C2: an app-prepared draft pays only its stored account
       rewardNote: draft.reward
         ? rewardPayNote(draft.reward, (usd) =>
             formatMoney(usdToSource(usd, sourceCurrency, draft.amountSource, draft.amountUsd), sourceCurrency),
           )
         : null,
+      preparedByNote: preparedByLine(draft.preparedBy),
     };
   }
 
@@ -305,6 +314,11 @@ async function renderPayPage(transferId: string) {
       <div className={sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>Secure payment</h1>
+        {view.awaitingPayment && view.preparedByNote && (
+          <p data-prepared-by className="mb-4 rounded-xl border border-[#2a3942] p-3.5 text-sm leading-normal text-[#e9edef]">
+            {view.preparedByNote}
+          </p>
+        )}
         <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
           <Row label="Recipient" value={view.recipientName} />
           <Row
@@ -339,6 +353,7 @@ async function renderPayPage(transferId: string) {
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
             savedAccountLabel={view.savedAccountLabel}
+            bankDetailsLocked={view.bankDetailsLocked}
             recipientName={view.recipientName}
             fundingMethod={view.fundingMethod}
             summary={{

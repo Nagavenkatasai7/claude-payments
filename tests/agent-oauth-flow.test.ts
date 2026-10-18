@@ -83,8 +83,8 @@ function authorizeUrl(clientId: string, over: Record<string, string | null> = {}
 }
 
 /** GET the consent screen and return its ticket (asserts it rendered). */
-async function consentTicket(clientId: string): Promise<{ ticket: string; res: Response }> {
-  const res = await handleAuthorizeGet(new Request(authorizeUrl(clientId)), CTX, deps());
+async function consentTicket(clientId: string, over: Record<string, string | null> = {}): Promise<{ ticket: string; res: Response }> {
+  const res = await handleAuthorizeGet(new Request(authorizeUrl(clientId, over)), CTX, deps());
   expect(res.status).toBe(200);
   const html = await res.clone().text();
   const ticket = /name="ticket" value="([^"]+)"/.exec(html)?.[1];
@@ -105,10 +105,10 @@ async function decide(ticket: string, decision: 'allow' | 'deny', origin = ISS) 
 }
 
 /** Register, consent, and return the authorization code. */
-async function getCode(): Promise<{ clientId: string; code: string }> {
+async function getCode(over: Record<string, string | null> = {}): Promise<{ clientId: string; code: string }> {
   const { json } = await register();
   const clientId = json.client_id as string;
-  const { ticket } = await consentTicket(clientId);
+  const { ticket } = await consentTicket(clientId, over);
   const res = await decide(ticket, 'allow');
   expect(res.status).toBe(303);
   const loc = new URL(res.headers.get('location')!);
@@ -254,7 +254,7 @@ describe('agent OAuth flow', { retry: 0 }, () => {
         [{ code_challenge_method: 'plain' }, 'invalid_request'],
         [{ resource: 'https://acme.smartremit.ai/api/mcp' }, 'invalid_target'],
         [{ resource: null }, 'invalid_target'],
-        [{ scope: 'transfers:prepare' }, 'invalid_scope'],
+        [{ scope: 'transfers:pay' }, 'invalid_scope'],
         [{ response_type: 'bogus' }, 'unsupported_response_type'],
         [{ state: 'bad\u0001state' }, 'invalid_request'],
       ] as const) {
@@ -324,7 +324,7 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       const { clientId, code } = await getCode();
       const { res, json } = await exchange(clientId, code);
       expect(res.status).toBe(200);
-      expect(json).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'quotes:read recipients:read transfers:read' });
+      expect(json).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'quotes:read recipients:read transfers:read transfers:prepare' });
       expect(json.access_token).toMatch(/^sra_/);
       expect(json.refresh_token).toMatch(/^srr_/);
       expect(res.headers.get('cache-control')).toBe('no-store');
@@ -477,8 +477,8 @@ describe('agent OAuth flow', { retry: 0 }, () => {
   });
 
   describe('refresh', () => {
-    async function tokens() {
-      const { clientId, code } = await getCode();
+    async function tokens(over: Record<string, string | null> = {}) {
+      const { clientId, code } = await getCode(over);
       const { json } = await exchange(clientId, code);
       return { clientId, access: json.access_token as string, refresh: json.refresh_token as string };
     }
@@ -531,7 +531,8 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect((await refresh(other, t.refresh)).json.error).toBe('invalid_grant');
     });
     it('a narrower scope on refresh is honoured; a wider one is invalid_scope', async () => {
-      const t = await tokens();
+      // A grant without transfers:prepare (the customer allowed only the read scopes the app asked for).
+      const t = await tokens({ scope: 'quotes:read transfers:read' });
       const narrow = await refresh(t.clientId, t.refresh, { scope: 'quotes:read' });
       expect(narrow.json.scope).toBe('quotes:read');
       expect((await refresh(t.clientId, narrow.json.refresh_token as string, { scope: 'quotes:read transfers:prepare' })).json.error).toBe('invalid_scope');
@@ -590,7 +591,7 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       const r = await auth().verifyAccessToken(t.access, RESOURCE);
       expect(r).toEqual({
         ok: true,
-        principal: { grantId: expect.stringMatching(/^agg_/), partnerId: 'default', phone: PHONE, clientId: t.clientId, clientName: 'Claude', scopes: ['quotes:read', 'recipients:read', 'transfers:read'] },
+        principal: { grantId: expect.stringMatching(/^agg_/), partnerId: 'default', phone: PHONE, clientId: t.clientId, clientName: 'Claude', scopes: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'] },
       });
     });
     it('missing / garbage / a partner API key', async () => {
@@ -653,6 +654,19 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect(rows[0].meta).toEqual({ tool: 'get_quote', clientId: t.clientId, outcome: 'ok' });
       const throwing = createAgentAuth({ repo: createAgentOAuthRepo(db), store: createAgentTokenStore(redis), now: () => clock, redis, gateOpen: async () => true, audit: async () => { throw new Error('db down'); } });
       await expect(throwing.recordToolCall(r.principal, 'get_quote', 'error')).resolves.toBeUndefined();
+    });
+    it('recordToolCall adds the draft id a prepare touched, and drops a malformed one', async () => {
+      const t = await tokens();
+      const a = createAgentAuth({ repo: createAgentOAuthRepo(db), store: createAgentTokenStore(redis, { now: () => clock, pepper: PEPPER }), now: () => clock, redis, gateOpen: async () => true, audit: (e) => recordAgentEvent(db, e) });
+      const r = await a.verifyAccessToken(t.access, RESOURCE);
+      if (!r.ok) throw new Error('expected ok');
+      await a.recordToolCall(r.principal, 'prepare_transfer', 'ok', { draftId: 'Abc123_-xyz' });
+      await a.recordToolCall(r.principal, 'prepare_transfer', 'ok', { draftId: 'not a draft id!' });
+      const rows = await agentRows('agent.tool.called');
+      expect(rows.map((x) => x.meta)).toEqual([
+        { tool: 'prepare_transfer', clientId: t.clientId, outcome: 'ok', draftId: 'Abc123_-xyz' },
+        { tool: 'prepare_transfer', clientId: t.clientId, outcome: 'ok' },
+      ]);
     });
   });
 });

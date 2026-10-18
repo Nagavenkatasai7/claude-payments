@@ -39,6 +39,8 @@ import {
 import { isOggOpusMime } from '@/lib/voice-transcribe';
 import { recordWhatsAppReferral } from '@/lib/referral-attribution';
 import { clearTelegramRoute } from '@/lib/telegram-link';
+import { agentPortal } from '@/lib/agent-auth/portal-wiring';
+import { DISCONNECT_APPS_FAILED_REPLY, disconnectAllAgentApps, disconnectAppsReply, isDisconnectAppsCommand } from '@/lib/agent-auth/bot-disconnect';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
@@ -448,6 +450,22 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
       return true;
     }
     return false;
+  }
+
+  // Stage C2: "disconnect apps" ends every AI-app connection (the chat side of the portal's
+  // Connected AI apps page). Whole-message match only; no agent turn. AFTER the throttle, so it
+  // cannot be used to hammer the database. A redelivery is silent (the wamid dedupe key).
+  if (incoming.kind === 'text' && isDisconnectAppsCommand(incoming.text)) {
+    let reply: string;
+    try {
+      reply = disconnectAppsReply(await disconnectAllAgentApps(agentPortal(), tenantId, incoming.from));
+    } catch (err) {
+      if (isInfraError(err)) throw err; // the webhook answers 500 and Meta redelivers
+      logWarn('agent.disconnect', 'disconnect apps failed', { tenant: tenantId, error: err instanceof Error ? err.name : 'error' });
+      reply = DISCONNECT_APPS_FAILED_REPLY;
+    }
+    await enqueueReply(deps, incoming, reply);
+    return true;
   }
 
   // Program-Fix 49A (whatsapp-08): media the bot cannot read gets ONE honest

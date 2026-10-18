@@ -19,7 +19,7 @@ export const GUIDES: readonly Guide[] = [
   { slug: 'kyc-delegation', title: 'KYC delegation', summary: 'Attesting sender verification when you run KYC.', status: 'published' },
   { slug: 'funding', title: 'Funding', summary: 'Collecting sender funds on your own account.', status: 'coming-soon' },
   { slug: 'go-live', title: 'Go-live checklist', summary: 'Everything to finish before live keys are issued.', status: 'published' },
-  { slug: 'ai-apps', title: 'AI apps (MCP)', summary: 'Connect Claude, ChatGPT or Perplexity to a SmartRemit account. Look-up only: the AI never pays.', status: 'published' },
+  { slug: 'ai-apps', title: 'AI apps (MCP)', summary: 'Connect Claude, ChatGPT or Perplexity to a SmartRemit account. The AI can look up and prepare a transfer; only the customer pays.', status: 'published' },
   { slug: 'errors', title: 'Errors', summary: 'Status codes per endpoint and how to handle them.', status: 'published' },
   { slug: 'rate-limits', title: 'Rate limits', summary: 'Per-partner and per-key budgets.', status: 'published' },
   { slug: 'idempotency', title: 'Idempotency', summary: 'Safe retries with Idempotency-Key.', status: 'published' },

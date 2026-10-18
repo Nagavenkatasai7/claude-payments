@@ -81,6 +81,7 @@ export function PayForm({
   fundingMethod,
   summary,
   savedAccountLabel = null,
+  bankDetailsLocked = false,
   disclosureVersion = null,
 }: {
   transferId: string;
@@ -90,6 +91,8 @@ export function PayForm({
   fundingMethod: string;
   summary: PaySummary;
   savedAccountLabel?: string | null;
+  /** Stage C2: an AI-app-prepared draft pays only its saved account, so no "Edit bank details". */
+  bankDetailsLocked?: boolean;
   /** Program-Fix 15 PR B: non-null ⇒ the page shows the Reg E disclosure and "Pay now" needs the acknowledgement. */
   disclosureVersion?: string | null;
 }) {
@@ -117,7 +120,7 @@ export function PayForm({
         transferId={transferId}
         disclosureVersion={disclosureVersion}
         savedAccountLabel={savedAccountLabel}
-        onEditBankDetails={savedAccountLabel ? () => setEditBankDetails(true) : undefined}
+        onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
     );
   }

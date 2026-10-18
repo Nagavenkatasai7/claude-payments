@@ -2,7 +2,7 @@
 
 SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "how much can I still send today?" or "did yesterday's transfer arrive?".
 
-The rule that shapes everything below: **the AI app never sends or pays.** Every tool only looks things up. To send money, the customer uses SmartRemit on WhatsApp or the SmartRemit portal, and pays on the SmartRemit pay page with a code sent to their WhatsApp.
+The rule that shapes everything below: **the AI app never pays.** It can look things up, and it can prepare a transfer to one of the customer's saved recipients. Preparing a transfer gives a pay link. Only the customer pays, on the SmartRemit pay page, with a code sent to their WhatsApp. Nothing moves until they do.
 
 This is a test program. It is open to invited testers only, and SmartRemit has to switch it on for your account first. SmartRemit is not listed in any app's public connector directory.
 
@@ -18,7 +18,7 @@ This is a test program. It is open to invited testers only, and SmartRemit has t
 | MCP server URL | `https://send.smartremit.ai/api/mcp` |
 | Transport | Streamable HTTP, stateless (no `Mcp-Session-Id`) |
 | Sign-in | OAuth 2.1 with PKCE (S256), dynamic client registration |
-| Scopes | `quotes:read`, `recipients:read`, `transfers:read` (all three by default) |
+| Scopes | `quotes:read`, `recipients:read`, `transfers:read`, `transfers:prepare` (all four by default) |
 
 Use this address exactly. The host decides which SmartRemit service you sign in to, and a token issued for one host does not work on another.
 
@@ -60,14 +60,16 @@ Perplexity documents custom remote connectors for Pro and Enterprise plans (on E
 1. The app finds SmartRemit's sign-in server from the server URL (see [For client developers](#for-client-developers)).
 2. A SmartRemit page opens in your browser. If you are not signed in to the SmartRemit portal, it asks for your phone number and sends a code to your WhatsApp.
 3. If your last code is older than <Fact name="agentStepUpMinutes" /> minutes, it asks for a fresh code, even when you are signed in.
-4. A consent page shows what the app asks for. The app's name on that page is the name the app gave itself; SmartRemit does not check it.
+4. A consent page lists what the app asks for, one line for each scope. The app's name on that page is the name the app gave itself; SmartRemit does not check it.
 5. **Allow** sends you back to the app, connected. **Deny** sends you back with nothing shared.
 
 The connection lasts <Fact name="agentGrantDays" /> days from the last time the app uses it. Each use extends it.
 
 ## Disconnect
 
-Open the SmartRemit portal, go to **Connected AI apps**, and select **Disconnect** next to the app. The app loses access at once: its next request is refused, even if it still holds a token. Removing the connector inside the AI app does not, by itself, end SmartRemit's side; disconnect in the portal too.
+Open the SmartRemit portal, go to **Connected AI apps**, and select **Disconnect** next to the app. Or send `disconnect apps` to SmartRemit on WhatsApp or Telegram: that disconnects every AI app at once. The app loses access at once: its next request is refused, even if it still holds a token. Removing the connector inside the AI app does not, by itself, end SmartRemit's side; disconnect in SmartRemit too.
+
+A transfer that an app prepared and that is not paid yet stays open until its link expires. To stop it sooner, ask the app to cancel it, or let the link expire.
 
 ## Tools
 
@@ -118,10 +120,39 @@ One of the customer's own transfers. Scope `transfers:read`.
 
 Returns `transfer_id`, `status`, `date`, `amount` and `recipient_name`. A transfer that does not exist, or belongs to someone else, gives the same answer: "Transfer not found."
 
+### prepare_transfer
+
+Prepares a transfer to one of the customer's saved recipients and returns the pay link. Scope `transfers:prepare`. Nothing is paid: the customer opens the link and pays on the SmartRemit pay page with a code sent to their WhatsApp. The pay page says which app prepared the transfer. It pays only the account saved for that recipient: the pay page does not let anyone change the account. The recipient needs a saved account for the destination country.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `recipient_id` | string, required | From `list_recipients`. An app cannot add a recipient or give an account number. |
+| `amount` | number, required | The amount to send, in the sender's currency. |
+| `purpose` | string, required | One of `family_support`, `gift`, `education`, `medical`, `savings`, `bills`, `business`, `other`. |
+| `purpose_detail` | string | Required when `purpose` is `other`: the customer's own reason, 10 to 120 characters. |
+| `currency` | string | ISO 4217. Default: the customer's own currency. |
+| `destination_country` | string | ISO 3166 alpha-2. Default: the country of the recipient's phone number, else `IN`. |
+| `funding_method` | string | Default `bank_transfer`. |
+
+Returns `prepared: true` with `prepared_transfer_id`, `pay_url`, `recipient_name`, `payout_type`, `account_last4`, `send_amount`, `send_currency`, `fee`, `total_to_pay`, `exchange_rate`, `recipient_gets`, `recipient_currency`, `destination_country`, `purpose`, `rate_locked_minutes`, `expires_at` and a `next_step`. The link and its rate stay open for up to <Fact name="rateLockMinutes" /> minutes. After the customer pays, `get_transfer_status` with the same id shows the transfer.
+
+The same limits, purpose rules and checks apply as on WhatsApp. A refusal is a tool error that says why, for example a limit, identity verification, or a missing purpose reason. A reason that needs the customer to read a safety warning is refused here; the customer can send that transfer in the SmartRemit portal. The same call repeated within <Fact name="mcpPrepareReplaySec" /> seconds returns the same prepared transfer, not a second one.
+
+### cancel_prepared_transfer
+
+Cancels a transfer that this app prepared, while it is not paid. Scope `transfers:prepare`. Its pay link stops working.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `prepared_transfer_id` | string, required | From `prepare_transfer`. |
+
+Returns `cancelled: true`. A paid, expired or unknown id, or one another app prepared, gives the same answer: "Prepared transfer not found." A paid transfer cannot be cancelled or refunded here.
+
 ## Limits
 
 - <Fact name="mcpGrantCallsPerMin" /> tool calls a minute and <Fact name="mcpGrantCallsPerHour" /> an hour per connection. Over the limit, the tool answers "Too many requests from this app. Wait a minute, then try again."
 - A request body is at most <Fact name="mcpMaxBodyKb" /> KB.
+- `prepare_transfer`: at most <Fact name="mcpPreparePerHour" /> prepared transfers an hour per customer, all apps together. This budget is separate from the SmartRemit portal's, so an app never blocks the customer's own sends.
 - The send limits themselves are the customer's normal SmartRemit limits; an AI app never raises them.
 
 ## Errors
@@ -133,6 +164,11 @@ Returns `transfer_id`, `status`, `date`, `amount` and `recipient_name`. A transf
 | Tool error "SmartRemit AI tools are switched off." | The test is not switched on for this account, or SmartRemit switched it off. | Ask SmartRemit. |
 | Tool error "Too many requests from this app…" | A rate limit above. | Wait a minute. |
 | Tool error "Transfer not found." | Unknown id, or not this customer's transfer. | Check the id with `list_recent_transfers`. |
+| Tool error "Recipient not found…" | The `recipient_id` is not one of this customer's saved recipients. | Get the id with `list_recipients`. |
+| Tool error "This recipient has no saved account for that country…" | The recipient has no saved account the pay page can pay, for that country. | The customer sends to them in SmartRemit on WhatsApp or the portal. |
+| Tool error "This prepared transfer is being paid now…" | The customer is paying it at this moment, so it cannot be cancelled. | Check `get_transfer_status`. |
+| Tool error "Prepared transfer not found…" | The prepared transfer is paid, cancelled or expired, or another app prepared it. | Check `get_transfer_status`. |
+| HTTP `403` `insufficient_scope` on `prepare_transfer` | The connection was made before SmartRemit added `transfers:prepare`, or without it. | Disconnect and connect again, allowing all permissions. |
 | Tool error "Something went wrong on our side…" | A temporary SmartRemit problem. | Try again later. |
 | Sign-in page "This is not available" | The test is not switched on for this account. | Ask SmartRemit. |
 | The app cannot add the connector (registration answers `403` `access_denied`) | The test is switched off for this SmartRemit service. | Ask SmartRemit. |

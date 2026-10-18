@@ -10,7 +10,8 @@ import type { RedisLike } from '@/lib/store';
 //     like every other limiter in the app: the gate below and the token check still hold;
 //  2. the gate (agent.tools on for the tenant AND demo mode for the phone). It FAILS CLOSED: an
 //     error is "off";
-//  3. the tool itself; then one audit record (recordToolCall), best effort.
+//  3. the tool itself; then one audit record (recordToolCall, with the draft id a prepare or
+//     cancel touched), best effort.
 // Scope checks happen earlier, in the SDK's per-tool scope challenge (an HTTP 403 before dispatch).
 
 export const TOOLS_OFF_MESSAGE = 'SmartRemit AI tools are switched off.';
@@ -38,8 +39,11 @@ export async function underGrantLimits(redis: RedisLike, grantId: string, now: n
   }
 }
 
-/** What a tool body returns: the JSON data for the AI, or a customer-safe message for a tool error. */
-export type ToolOutcome = { ok: true; data: Record<string, unknown> } | { ok: false; message: string };
+/**
+ * What a tool body returns: the JSON data for the AI, or a customer-safe message for a tool error.
+ * `draftId` (Stage C2) names the draft a prepare or cancel touched; it goes to the audit row only.
+ */
+export type ToolOutcome = { ok: true; data: Record<string, unknown>; draftId?: string } | { ok: false; message: string };
 
 export interface GuardDeps {
   auth: AgentAuth;
@@ -68,6 +72,7 @@ export async function runGuardedTool(
 ): Promise<CallToolResult> {
   let outcome: 'ok' | 'error' | 'refused';
   let result: CallToolResult;
+  let draftId: string | undefined;
   if (!(await underGrantLimits(deps.redis, principal.grantId, deps.now?.()))) {
     outcome = 'refused';
     result = errorResult(RATE_LIMITED_MESSAGE);
@@ -79,6 +84,7 @@ export async function runGuardedTool(
       const r = await body();
       outcome = r.ok ? 'ok' : 'error';
       result = r.ok ? jsonResult(r.data) : errorResult(r.message);
+      if (r.ok) draftId = r.draftId;
     } catch (err) {
       logWarn('mcp.tool', 'tool failed', { tool, err: err instanceof Error ? err.name : 'error' });
       outcome = 'error';
@@ -86,7 +92,7 @@ export async function runGuardedTool(
     }
   }
   try {
-    await deps.auth.recordToolCall(principal, tool, outcome);
+    await deps.auth.recordToolCall(principal, tool, outcome, draftId ? { draftId } : undefined);
   } catch {
     // best effort by contract; a throwing implementation must not break the call
   }

@@ -109,7 +109,7 @@ export async function handleAuthorizeGet(req: Request, ctx: HostCtx, deps: Autho
     state: ok.state,
   });
   const origin = redirectOriginOf(ok.redirectUri);
-  const page = renderConsentPage({ clientName: client!.name, ticket, returnHost: new URL(ok.redirectUri).host });
+  const page = renderConsentPage({ clientName: client!.name, ticket, returnHost: new URL(ok.redirectUri).host, scopes: ok.scopes });
   return html(page, 200, authorizeCsp(origin, deps.isDev));
 }
 

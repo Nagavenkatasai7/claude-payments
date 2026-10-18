@@ -57,6 +57,10 @@ export const FACTS = {
   agentCodeTtlSec: 300,
   /** src/lib/agent-auth/config.ts AGENT_ACCESS_TTL_SEC / 60. */
   agentAccessTokenMinutes: 60,
+  /** src/lib/mcp/prepare.ts PREPARE_REPLAY_TTL_S (a repeated prepare_transfer returns the same draft). */
+  mcpPrepareReplaySec: 120,
+  /** src/lib/mcp/prepare.ts MCP_PREPARE_LIMIT.limit (AI-app prepares, all apps together, per customer per hour). */
+  mcpPreparePerHour: 10,
 } as const;
 
 export type FactName = keyof typeof FACTS;
