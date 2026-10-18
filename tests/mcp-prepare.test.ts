@@ -18,7 +18,12 @@ import { recipientRid } from '@/lib/portal-recipients';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { PORTAL_SEND_LIMIT } from '@/lib/portal-send';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import {
+  MCP_PREPARE_LIMIT,
+  NO_SAVED_ACCOUNT,
+  PREPARED_BEING_PAID,
   PREPARED_NOT_FOUND,
   PREPARE_TOO_MANY,
   RECIPIENT_NOT_FOUND,
@@ -207,11 +212,35 @@ describe('prepare_transfer', () => {
     expect(drafts()).toEqual([]);
   });
 
-  it("shares the portal's per-customer send budget (20 an hour)", async () => {
+  it("has its own per-customer budget (10 an hour): AI apps never use up the portal's", async () => {
     for (let i = 0; i < PORTAL_SEND_LIMIT.limit; i++) {
       await checkIpRateLimit(redis, PORTAL_SEND_LIMIT.scope, auditSubjectId('pa', PHONE), { limit: PORTAL_SEND_LIMIT.limit, windowSec: PORTAL_SEND_LIMIT.windowSec });
     }
-    expect(await prepareTransferTool(principal(), args(), deps)).toEqual({ ok: false, message: PREPARE_TOO_MANY });
+    expect((await prepareTransferTool(principal(), args(), deps)).ok).toBe(true);
+
+    expect(MCP_PREPARE_LIMIT).toEqual({ scope: 'mcp-prepare-hour', limit: 10, windowSec: 3600 });
+    for (let i = 1; i < MCP_PREPARE_LIMIT.limit; i++) {
+      await checkIpRateLimit(redis, MCP_PREPARE_LIMIT.scope, auditSubjectId('pa', PHONE), { limit: MCP_PREPARE_LIMIT.limit, windowSec: MCP_PREPARE_LIMIT.windowSec });
+    }
+    const before = drafts().length;
+    expect(await prepareTransferTool(principal(), args({ amount: 201 }), deps)).toEqual({ ok: false, message: PREPARE_TOO_MANY });
+    expect(drafts().length).toBe(before);
+    // The portal's budget is untouched by the app's prepares.
+    const portal = await checkIpRateLimit(redis, PORTAL_SEND_LIMIT.scope, auditSubjectId('pb', PHONE), { limit: PORTAL_SEND_LIMIT.limit, windowSec: PORTAL_SEND_LIMIT.windowSec });
+    expect(portal.allowed).toBe(true);
+  });
+
+  it('a recipient with no payable saved account is refused, and no draft stays', async () => {
+    // A saved recipient whose account on file is only a mask (never a payable account).
+    await store.upsertRecipient('pa', PHONE, {
+      name: 'Ravi Kumar',
+      recipientPhone: '919800000002',
+      payoutMethod: 'bank',
+      payoutDestination: '****1234',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await prepareTransferTool(principal(), args({ recipient_id: recipientRid('pa', PHONE, '919800000002') }), deps);
+    expect(r).toEqual({ ok: false, message: NO_SAVED_ACCOUNT });
     expect(drafts()).toEqual([]);
   });
 });
@@ -254,6 +283,13 @@ describe('cancel_prepared_transfer', () => {
       { pointer: 'web' },
     );
     expect(await cancelPreparedTransferTool(principal(), { prepared_transfer_id: id }, deps)).toEqual({ ok: false, message: PREPARED_NOT_FOUND });
+    expect(await createDraftStore(redis).getDraft(id)).not.toBeNull();
+  });
+
+  it('a cancel while the payment is under way: "being paid", and the draft stays for the payment', async () => {
+    const id = await prepared();
+    await createIdempotencyRepo(db).claim(DEFAULT_PARTNER_ID, `draft:${id}`, 'tx_paying');
+    expect(await cancelPreparedTransferTool(principal(), { prepared_transfer_id: id }, deps)).toEqual({ ok: false, message: PREPARED_BEING_PAID });
     expect(await createDraftStore(redis).getDraft(id)).not.toBeNull();
   });
 

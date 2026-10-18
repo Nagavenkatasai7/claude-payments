@@ -100,12 +100,11 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.agentAccessTokenMinutes).toBe(cfg.AGENT_ACCESS_TTL_SEC / 60);
   });
 
-  it('AI apps (MCP) prepare: the retry window and the shared hourly send budget', async () => {
+  it('AI apps (MCP) prepare: the retry window and the hourly prepare budget', async () => {
     const { FACTS } = await import('@/content/docs/facts');
-    const { PREPARE_REPLAY_TTL_S } = await import('@/lib/mcp/prepare');
-    const { PORTAL_SEND_LIMIT } = await import('@/lib/portal-send');
+    const { MCP_PREPARE_LIMIT, PREPARE_REPLAY_TTL_S } = await import('@/lib/mcp/prepare');
     expect(FACTS.mcpPrepareReplaySec).toBe(PREPARE_REPLAY_TTL_S);
-    expect(FACTS.portalSendPerHour).toBe(PORTAL_SEND_LIMIT.limit);
-    expect(PORTAL_SEND_LIMIT.windowSec).toBe(3600);
+    expect(FACTS.mcpPreparePerHour).toBe(MCP_PREPARE_LIMIT.limit);
+    expect(MCP_PREPARE_LIMIT.windowSec).toBe(3600);
   });
 });

@@ -1,3 +1,4 @@
+import type { TxOtpBudgetKind } from './transaction-otp';
 import type { Draft } from './types';
 import { boundUntrustedText, NAME_MAX } from './untrusted-text';
 
@@ -12,3 +13,22 @@ export function preparedByLine(preparedBy: Draft['preparedBy']): string | null {
   const where = name ? `“${name}”, an AI app you connected` : 'an AI app you connected';
   return `Prepared in ${where}. Check every detail before you pay.`;
 }
+
+type MaybePrepared = Pick<Draft, 'preparedBy'> | null | undefined;
+
+/**
+ * Stage C2 security review: an app-prepared draft pays ONLY the saved recipient's stored account.
+ * The pay page offers no "Edit bank details" for it and the pay route refuses bank details in the
+ * body (pay-finalize.ts ignores them too), so an app that learns the code cannot pick the account.
+ */
+export function bankDetailsLocked(draft: MaybePrepared): boolean {
+  return draft?.preparedBy !== undefined && draft?.preparedBy !== null;
+}
+
+/** The per-phone daily code budget a pay-page code draws from (transaction-otp.ts). */
+export function payOtpBudgetKind(draft: MaybePrepared): Extract<TxOtpBudgetKind, 'pay' | 'agent'> {
+  return bankDetailsLocked(draft) ? 'agent' : 'pay';
+}
+
+export const BANK_DETAILS_LOCKED_ERROR =
+  'This transfer pays the saved account shown here. To pay a different account, start a new transfer in SmartRemit on WhatsApp or the portal.';

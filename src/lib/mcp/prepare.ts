@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import * as z from 'zod';
 import type { AgentPrincipal } from '@/lib/agent-auth';
 import { getDb } from '@/db/client';
+import { draftPaymentStarted } from '@/lib/pay-finalize';
+import { isMaskedDestination } from '@/lib/payout-format';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { DEFAULT_BRAND } from '@/lib/partner-config';
 import { destinationCountryForRecipientPhone } from '@/lib/partner-currency';
@@ -20,7 +22,6 @@ import {
   portalToolContext,
   prepareResultCopy,
   PORTAL_FUNDING_METHODS,
-  PORTAL_SEND_LIMIT,
   type SendCopy,
 } from '@/lib/portal-send';
 import { TRANSFER_PURPOSES } from '@/lib/purpose-codes';
@@ -56,6 +57,16 @@ export const PREPARED_NOT_FOUND =
   'Prepared transfer not found. It may be paid, cancelled or expired. A paid transfer cannot be cancelled here; use get_transfer_status.';
 export const PREPARE_TOO_MANY = 'Too many transfers were prepared in the last hour. Try again later.';
 export const PREPARE_FAILED = 'This transfer could not be prepared right now. Please try again later.';
+export const NO_SAVED_ACCOUNT =
+  'This recipient has no saved account for that country. The customer can send to them in SmartRemit on WhatsApp or the SmartRemit portal.';
+export const PREPARED_BEING_PAID =
+  'This prepared transfer is being paid now, so it cannot be cancelled. Use get_transfer_status with prepared_transfer_id.';
+
+/**
+ * Per customer, all apps together. Its OWN budget (security review): an app that uses it up never
+ * blocks the customer's own portal sends (PORTAL_SEND_LIMIT).
+ */
+export const MCP_PREPARE_LIMIT = { scope: 'mcp-prepare-hour', limit: 10, windowSec: 3600 } as const;
 
 export const PAY_STEP =
   'Give the customer pay_url. They check the details and pay on the SmartRemit pay page, with a code sent to their WhatsApp. ' +
@@ -192,12 +203,12 @@ export function prepareRequestKey(grantId: string, a: PrepareTransferArgs): stri
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
 }
 
-/** Per customer, shared with the portal's Send (20 an hour). Fails OPEN on a limiter error. */
+/** MCP_PREPARE_LIMIT. Fails OPEN on a limiter error. */
 async function withinSendLimit(redis: RedisLike, partnerId: string, phone: string, now: number): Promise<boolean> {
   try {
-    const r = await checkIpRateLimit(redis, PORTAL_SEND_LIMIT.scope, auditSubjectId(partnerId, phone), {
-      limit: PORTAL_SEND_LIMIT.limit,
-      windowSec: PORTAL_SEND_LIMIT.windowSec,
+    const r = await checkIpRateLimit(redis, MCP_PREPARE_LIMIT.scope, auditSubjectId(partnerId, phone), {
+      limit: MCP_PREPARE_LIMIT.limit,
+      windowSec: MCP_PREPARE_LIMIT.windowSec,
       now,
     });
     return r.allowed;
@@ -282,6 +293,14 @@ export async function prepareTransferTool(principal: AgentPrincipal, args: Prepa
           preparedBy: { clientId: principal.clientId, appName: boundUntrustedText(principal.clientName, NAME_MAX) },
         });
         if (r.kind !== 'draft') throw new Refused(refusalMessage(prepareResultCopy(r, DEFAULT_BRAND)));
+        // An app-prepared draft pays ONLY a stored account (the pay page never takes bank details
+        // for it, pay-finalize.ts). With none on file, the draft could never be paid: remove it.
+        const made = await ctx.draftStore.getDraft(r.draftId);
+        const dest = (made?.recipient.payoutDestination ?? '').trim();
+        if (!made || dest === '' || isMaskedDestination(dest)) {
+          await ctx.draftStore.consumeDraft(r.draftId);
+          throw new Refused(NO_SAVED_ACCOUNT);
+        }
         return { draftId: r.draftId };
       },
       PREPARE_REPLAY_TTL_S,
@@ -344,6 +363,12 @@ export async function cancelPreparedTransferTool(
   if (!ownDraft(taken, principal)) {
     await store.restoreDraft(taken, id);
     return { ok: false, message: PREPARED_NOT_FOUND };
+  }
+  // A payment under way has claimed the draft (pay-finalize.ts, which re-reads the draft after
+  // its claim). Consume first, then look: one side always sees the other. Give the draft back.
+  if (await draftPaymentStarted(deps.db ?? getDb(), id)) {
+    await store.restoreDraft(taken, id);
+    return { ok: false, message: PREPARED_BEING_PAID };
   }
   return {
     ok: true,

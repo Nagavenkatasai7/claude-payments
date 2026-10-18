@@ -43,6 +43,7 @@ import { QuoteError } from '@/lib/fx';
 import { transferMintedFromDraft } from '@/lib/pay-link';
 import { pokeWorker } from '@/lib/outbox';
 import { processTransferPayment, refuseUnlessAwaiting } from '@/lib/pay-process';
+import { BANK_DETAILS_LOCKED_ERROR, bankDetailsLocked, payOtpBudgetKind } from '@/lib/pay-prepared-by';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -399,7 +400,7 @@ export async function POST(
         if (!otpTemplate && !(await isInServiceWindow(store, otpPartnerId, otpPhone))) return otpSendFailed();
       }
       const otpStore = getTransactionOtpStore();
-      const issued = await otpStore.issue(payId, otpPhone, { kind: 'pay', partnerId: otpPartnerId });
+      const issued = await otpStore.issue(payId, otpPhone, { kind: payOtpBudgetKind(otpDraft), partnerId: otpPartnerId });
       // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
       // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
       if (!issued.ok && issued.reason === 'locked') {
@@ -459,6 +460,11 @@ export async function POST(
         const v = rawFields[f.key];
         return typeof v === 'string' && v.trim() !== '';
       });
+
+    // Stage C2: a draft an AI app prepared pays only its stored account (400 before any charge).
+    if (hasSubmittedFields && bankDetailsLocked(otpDraft)) {
+      return NextResponse.json({ ok: false, error: BANK_DETAILS_LOCKED_ERROR }, { status: 400 });
+    }
 
     let bankDetails: BankDetails | undefined;
     if (hasSubmittedFields) {

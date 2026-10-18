@@ -237,6 +237,14 @@ describe('transaction-otp — issue caps (fix 45)', () => {
     expect((await store.issue('seller_1', PHONE, { kind: 'seller', partnerId: 'default' })).ok).toBe(true);
   });
 
+  it('Stage C2: codes for AI-app-prepared drafts use their own budget: an app at its cap never blocks the pay-page code', async () => {
+    for (let i = 0; i < 20; i++) {
+      expect((await store.issue(`draft_${i}`, PHONE, { kind: 'agent', partnerId: 'default' })).ok).toBe(true);
+    }
+    expect(await store.issue('draft_20', PHONE, { kind: 'agent', partnerId: 'default' })).toEqual({ ok: false, reason: 'locked' });
+    expect((await store.issue('transfer_1', PHONE, { kind: 'pay', partnerId: 'default' })).ok).toBe(true);
+  });
+
   it('the per-phone budget is scoped by partner: one partner at its cap never blocks another', async () => {
     for (let i = 0; i < 20; i++) await store.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'p_a' });
     expect((await store.issue('inv_20', PHONE, { kind: 'b2b', partnerId: 'p_a' })).ok).toBe(false);

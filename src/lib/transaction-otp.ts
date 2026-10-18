@@ -65,7 +65,9 @@ const issuedKey = (txId: string) => `txotp:issued:${sha(txId)}`;
  * never block a phone's codes in another. The default is the remittance pay
  * page of the default partner, so no caller is ever left unscoped.
  */
-export type TxOtpBudgetKind = 'pay' | 'b2b' | 'seller';
+// 'agent' (Stage C2): pay codes for a draft an AI app prepared, so an app that keeps asking for
+// codes never uses up the customer's own 'pay' budget.
+export type TxOtpBudgetKind = 'pay' | 'b2b' | 'seller' | 'agent';
 export interface TxOtpBudget {
   kind: TxOtpBudgetKind;
   partnerId: string;

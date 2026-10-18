@@ -59,8 +59,8 @@ export const FACTS = {
   agentAccessTokenMinutes: 60,
   /** src/lib/mcp/prepare.ts PREPARE_REPLAY_TTL_S (a repeated prepare_transfer returns the same draft). */
   mcpPrepareReplaySec: 120,
-  /** src/lib/portal-send.ts PORTAL_SEND_LIMIT.limit (portal Send + AI-app prepares, per customer per hour). */
-  portalSendPerHour: 20,
+  /** src/lib/mcp/prepare.ts MCP_PREPARE_LIMIT.limit (AI-app prepares, all apps together, per customer per hour). */
+  mcpPreparePerHour: 10,
 } as const;
 
 export type FactName = keyof typeof FACTS;
