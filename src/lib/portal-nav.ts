@@ -3,8 +3,12 @@ import type { SidebarItem } from '@/components/ds';
 
 // The customer portal's navigation (UI redesign M2-5). Pure: the layout renders it, tests pin it.
 
-/** The portal nav. Hiding an item is never the guard: every page gates itself. */
-export function portalNavItems(dataRightsEnabled: boolean): SidebarItem[] {
+/**
+ * The portal nav. Hiding an item is never the guard: every page gates itself. `agentApps` (Stage C1):
+ * the "Connected AI apps" item, shown while the AI-agent gate is open or the customer has a live
+ * grant (src/lib/agent-auth/portal-apps.ts visible()).
+ */
+export function portalNavItems(dataRightsEnabled: boolean, opts: { agentApps?: boolean } = {}): SidebarItem[] {
   const items: SidebarItem[] = [
     { href: '/portal', label: t('portal.nav.home') },
     { href: '/portal/send', label: t('portal.nav.send') },
@@ -18,6 +22,7 @@ export function portalNavItems(dataRightsEnabled: boolean): SidebarItem[] {
     { href: '/portal/notifications', label: t('portal.nav.notifications') },
     { href: '/portal/devices', label: t('portal.nav.devices') },
   ];
+  if (opts.agentApps) items.push({ href: '/portal/ai-apps', label: t('portal.nav.agentApps') });
   if (dataRightsEnabled) items.push({ href: '/portal/privacy', label: t('portal.nav.privacy') });
   return items;
 }

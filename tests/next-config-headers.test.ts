@@ -24,8 +24,8 @@ describe('next.config after the MDX wrap', () => {
     const cfg = await loadConfig();
     const { buildCsp } = await import('@/lib/csp');
     const headers = await cfg.headers!();
-    expect(headers).toHaveLength(1);
-    expect(headers[0].source).toBe('/:path*');
+    expect(headers).toHaveLength(2);
+    expect(headers[0].source).toBe('/:path((?!oauth/authorize$).*)');
     expect(headers[0].headers.map((h) => h.key)).toEqual([
       'Strict-Transport-Security',
       'X-Content-Type-Options',
@@ -36,6 +36,34 @@ describe('next.config after the MDX wrap', () => {
     ]);
     const csp = headers[0].headers.find((h) => h.key === 'Content-Security-Policy');
     expect(csp?.value).toBe(buildCsp({ isDev: false }));
+  });
+
+  // Stage C1: /oauth/authorize sends its own CSP (src/lib/agent-auth/authorize-csp.ts: the site
+  // policy plus the validated redirect origin in form-action). Two CSP headers would both be
+  // enforced, so EXACTLY that path is left out of the site CSP; it keeps every other header.
+  it('exactly /oauth/authorize is left out of the site CSP header and keeps the others', async () => {
+    const cfg = await loadConfig();
+    const headers = await cfg.headers!();
+    expect(headers[1]).toEqual({ source: '/oauth/authorize', headers: headers[0].headers.filter((h) => h.key !== 'Content-Security-Policy') });
+    // Next's own matcher, with the options it builds header routes with
+    // (node_modules/next/dist/server/lib/router-utils/filesystem.js:99-110; caseSensitiveRoutes off).
+    const { getPathMatch } = await import('next/dist/shared/lib/router/utils/path-match');
+    const site = getPathMatch(headers[0].source, { strict: true, removeUnnamedParams: true, sensitive: false });
+    const authz = getPathMatch(headers[1].source, { strict: true, removeUnnamedParams: true, sensitive: false });
+    for (const p of ['/', '/portal', '/portal/login', '/oauth/token', '/oauth/register', '/oauth/authorize/x', '/oauth/authorizex', '/api/mcp',
+      '/.well-known/oauth-authorization-server', '/pay/abc', '/admin-dashboard', '/x/oauth/authorize']) {
+      expect({ p, csp: site(p) !== false, authz: authz(p) !== false }).toEqual({ p, csp: true, authz: false });
+    }
+    expect({ csp: site('/oauth/authorize') !== false, authz: authz('/oauth/authorize') !== false }).toEqual({ csp: false, authz: true });
+  });
+
+  it('the authorize route sends a CSP on every response (its own 404 included)', () => {
+    const src = readFileSync('src/app/oauth/authorize/route.ts', 'utf8');
+    expect(src).toMatch(/'Content-Security-Policy': buildCsp\(/);
+    const flow = readFileSync('src/lib/agent-auth/authorize-flow.ts', 'utf8');
+    // Every Response the flow builds goes through html() or see(), and both set the CSP.
+    expect(flow.match(/new Response\(/g)).toHaveLength(2);
+    expect(flow.match(/'Content-Security-Policy':/g)).toHaveLength(2);
   });
 
   it('keeps the redirects and the other settings', async () => {
