@@ -27,6 +27,7 @@ import {
   getTransferStatusTool,
   listRecentTransfersTool,
   listRecipientsTool,
+  MCP_RECIPIENTS_MAX,
   type McpDataDeps,
 } from '@/lib/mcp/tools';
 import { handleMcpRequest } from '@/lib/mcp/http';
@@ -118,6 +119,26 @@ describe('list_recipients', () => {
         { recipient_id: recipientRid('pa', PHONE, UPI_PHONE), name: 'Ravi', payout_type: 'upi', account_last4: null },
       ],
     });
+  });
+
+  it('the whole address book, not only the 2 the WhatsApp assistant shows (up to 50)', async () => {
+    for (let i = 0; i < 55; i++) {
+      await store.upsertRecipient('pa', PHONE, {
+        name: `Extra ${i}`,
+        recipientPhone: `9197000${String(i).padStart(5, '0')}`,
+        payoutMethod: 'bank',
+        payoutDestination: `${IFSC} 4444${String(i).padStart(8, '0')}`,
+        lastUsedAt: new Date(Date.now() - 120_000 - i * 1000).toISOString(),
+      });
+    }
+    const r = await listRecipientsTool(owner, data());
+    if (!r.ok) throw new Error('expected ok');
+    const list = r.data.recipients as Array<{ name: string; account_last4: string | null }>;
+    expect(list).toHaveLength(MCP_RECIPIENTS_MAX);
+    expect(list.slice(0, 3).map((x) => x.name)).toEqual(['Asha Kumar', 'Ravi', 'Extra 0']);
+    expect(list[2].account_last4).toBe('0000');
+    assertNoSecrets(r.data);
+    expect(JSON.stringify(r.data)).not.toContain('444400000000');
   });
 
   it("never another tenant's recipients for the same phone", async () => {
@@ -373,7 +394,9 @@ describe('no money path in the MCP server (DoD grep)', () => {
   it("the bot tools it runs are only read tools, on the portal's non-minting context", () => {
     const src = read('src/lib/mcp/tools.ts');
     const named = [...src.matchAll(/executeTool\(\s*'([a-z_]+)'/g)].map((m) => m[1]).sort();
-    expect(named).toEqual(['get_quote', 'list_recent_transfers', 'list_saved_recipients']);
+    expect(named).toEqual(['get_quote', 'list_recent_transfers']);
+    // list_recipients reads the store directly (the whole book); its only store call is a read.
+    expect([...src.matchAll(/ctx\.store\.(\w+)\(/g)].map((m) => m[1])).toEqual(['listRecipients']);
     // check_send_limit runs through the portal's own wrapper (portal-send.ts sendLimitsForPortal).
     expect(src).toContain('sendLimitsForPortal(');
     expect(src).not.toMatch(/buildToolContext\(/);
