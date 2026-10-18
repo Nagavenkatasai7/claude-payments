@@ -15,17 +15,19 @@
  * tests/web-analytics-url.test.ts fails when a page folder is missing here.
  */
 export const STATIC_PAGE_SEGMENTS: ReadonlySet<string> = new Set([
-  'about', 'account', 'admin-dashboard', 'analytics', 'api-keys', 'apply', 'audit', 'b2b',
+  '.well-known', 'about', 'account', 'admin-dashboard', 'ai-apps', 'analytics', 'api-keys', 'apply',
+  'audit', 'authorize', 'b2b',
   'branding', 'chat', 'compliance', 'contact', 'continue', 'conversation', 'corridors',
   'customers', 'delete', 'devices', 'docs', 'docs-next', 'documents', 'download', 'edit',
   'employee-questions', 'export', 'help', 'history', 'integrations', 'invite', 'invoices', 'kyc',
-  'l', 'landing', 'legal', 'live', 'login', 'mfa', 'my-queue', 'new', 'notifications', 'onboard',
+  'l', 'landing', 'legal', 'live', 'login', 'mfa', 'my-queue', 'new', 'notifications', 'oauth',
+  'oauth-authorization-server', 'oauth-protected-resource', 'onboard',
   'onboarding', 'ops', 'partner', 'partner-requests', 'partners', 'pay', 'payees',
   'payment-links', 'portal', 'privacy', 'profile', 'rates', 'receipt', 'recipients',
   'referral-rewards', 'referrals', 'refunds', 'register', 'reports', 'reset', 'review',
-  'reviews', 'rewards', 'schedules', 'security', 'seller', 'send', 'settings', 'signout',
+  'reviews', 'revoke', 'rewards', 'schedules', 'security', 'seller', 'send', 'settings', 'signout',
   'site-inactive', 'staff', 'statement', 'support', 'switches', 'team', 'terms', 'tickets',
-  'transactions', 'transfers', 'trust', 'verify', 'waitlist', 'webhooks', 'whatsapp',
+  'token', 'transactions', 'transfers', 'trust', 'verify', 'waitlist', 'webhooks', 'whatsapp',
 ]);
 
 const REDACTED = '[id]';
