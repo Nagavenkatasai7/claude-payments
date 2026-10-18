@@ -439,6 +439,36 @@ describe('agent OAuth flow', { retry: 0 }, () => {
     });
   });
 
+  describe('offline_access (ChatGPT asks for it to keep the connection)', () => {
+    it('authorize + token with scope "quotes:read offline_access": a refresh token, and no offline_access in any stored scope', async () => {
+      const { json: reg } = await register();
+      const clientId = reg.client_id as string;
+      const res = await handleAuthorizeGet(new Request(authorizeUrl(clientId, { scope: 'quotes:read offline_access' })), CTX, deps());
+      expect(res.status).toBe(200);
+      const ticket = /name="ticket" value="([^"]+)"/.exec(await res.text())![1];
+      const code = new URL((await decide(ticket, 'allow')).headers.get('location')!).searchParams.get('code')!;
+      const { res: tokRes, json } = await exchange(clientId, code);
+      expect(tokRes.status).toBe(200);
+      expect(json.refresh_token).toMatch(/^srr_/);
+      expect(json.scope).toBe('quotes:read');
+      const [g] = await db.select().from(agentGrants);
+      expect(g.scopes).toEqual(['quotes:read']);
+      const auth = createAgentAuth({ repo: createAgentOAuthRepo(db), store: createAgentTokenStore(redis, { now: () => clock, pepper: PEPPER }), now: () => clock, redis, gateOpen: async () => true, audit: async () => {} });
+      const v = await auth.verifyAccessToken(json.access_token as string, RESOURCE);
+      expect(v.ok && v.principal.scopes).toEqual(['quotes:read']);
+      // A refresh that names offline_access (alone or with a scope it holds) keeps working.
+      const r1 = await refresh(clientId, json.refresh_token as string, { scope: 'offline_access' });
+      expect(r1.json.scope).toBe('quotes:read');
+      const r2 = await refresh(clientId, r1.json.refresh_token as string, { scope: 'quotes:read offline_access' });
+      expect(r2.res.status).toBe(200);
+      expect((await refresh(clientId, r2.json.refresh_token as string, { scope: 'offline_access bogus' })).json.error).toBe('invalid_scope');
+    });
+    it('a client that never asks for offline_access still gets a refresh token', async () => {
+      const { clientId, code } = await getCode();
+      expect((await exchange(clientId, code)).json.refresh_token).toMatch(/^srr_/);
+    });
+  });
+
   describe('refresh', () => {
     async function tokens() {
       const { clientId, code } = await getCode();

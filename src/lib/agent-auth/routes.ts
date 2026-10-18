@@ -67,3 +67,4 @@ async function portalSession(): Promise<AgentSession | null> {
 export function authorizeDeps(): AuthorizeDeps {
   return { ...agentServerDeps(), session: portalSession, isDev: process.env.NODE_ENV === 'development' };
 }
+

@@ -13,7 +13,7 @@ import {
 } from '@/lib/agent-auth/authorize-request';
 import { authorizeCsp } from '@/lib/agent-auth/authorize-csp';
 import { renderConsentPage, renderMessagePage } from '@/lib/agent-auth/consent-page';
-import { authorizationServerMetadata, protectedResourceMetadata, issuerFor, parseScope } from '@/lib/agent-auth/config';
+import { authorizationServerMetadata, protectedResourceMetadata, issuerFor, parseScope, requestedScopes } from '@/lib/agent-auth/config';
 import { agentSecretHash } from '@/lib/agent-auth/secrets';
 
 // Stage C1 (agent sign-in): the pure helpers of the OAuth 2.1 authorization server. Each is a
@@ -238,7 +238,7 @@ describe('metadata documents', () => {
       token_endpoint: 'https://send.smartremit.ai/oauth/token',
       registration_endpoint: 'https://send.smartremit.ai/oauth/register',
       revocation_endpoint: 'https://send.smartremit.ai/oauth/revoke',
-      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read'],
+      scopes_supported: ['quotes:read', 'recipients:read', 'transfers:read', 'offline_access'],
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -257,12 +257,26 @@ describe('metadata documents', () => {
       resource_name: 'SmartRemit',
     });
   });
+  it('dynamic registration only: no Client ID Metadata Document support is advertised', () => {
+    const m = authorizationServerMetadata(HOST) as Record<string, unknown>;
+    expect(m.registration_endpoint).toBe('https://send.smartremit.ai/oauth/register');
+    expect('client_id_metadata_document_supported' in m).toBe(false);
+  });
+  it('the protected resource lists only the resource scopes', () =>
+    expect(protectedResourceMetadata(HOST).scopes_supported).not.toContain('offline_access'));
   it('the issuer is lower-case https', () => expect(issuerFor('Send.SmartRemit.ai')).toBe('https://send.smartremit.ai'));
   it('parseScope', () => {
     expect(parseScope(null)).toEqual(['quotes:read', 'recipients:read', 'transfers:read']);
     expect(parseScope('recipients:read')).toEqual(['recipients:read']);
     expect(parseScope('recipients:read bogus')).toBeNull();
     expect(parseScope('   ')).toBeNull();
+  });
+  it('offline_access is accepted and grants nothing (never a resource scope)', () => {
+    expect(parseScope('quotes:read offline_access')).toEqual(['quotes:read']);
+    expect(parseScope('offline_access')).toEqual(['quotes:read', 'recipients:read', 'transfers:read']);
+    expect(requestedScopes('offline_access')).toEqual([]);
+    expect(requestedScopes('offline_access bogus')).toBeNull();
+    expect(parseClientRegistration({ redirect_uris: ['https://claude.ai/cb'], scope: 'quotes:read offline_access' }).ok).toBe(true);
   });
 });
 

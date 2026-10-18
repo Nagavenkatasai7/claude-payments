@@ -46,17 +46,35 @@ export const siteHostFor = (slug: string) => `${slug.toLowerCase()}.smartremit.a
 export const issuerFor = (host: string) => `https://${host.toLowerCase()}`;
 
 /**
- * A scope parameter → the granted scopes in canonical order, or null when it names anything
- * unknown or nothing at all. Absent (null/undefined) = all C1 scopes.
+ * `offline_access` (ChatGPT keeps a connection past its first token only when it can ask for this
+ * scope and the metadata lists it, https://help.openai.com/en/articles/12584461). It is ACCEPTED in
+ * a scope parameter and grants nothing: a refresh token is issued on every authorization_code
+ * grant whether or not it was asked for, and it is never stored or put in an access token.
  */
-export function parseScope(raw: string | null | undefined): AgentScope[] | null {
-  if (raw === null || raw === undefined) return [...AGENT_SCOPES];
+export const OFFLINE_ACCESS = 'offline_access';
+
+/**
+ * The resource scopes a scope parameter names, in canonical order, without offline_access.
+ * null when it names anything unknown or nothing at all; [] when it names only offline_access.
+ */
+export function requestedScopes(raw: string): AgentScope[] | null {
   const parts = raw.split(' ').filter((p) => p !== '');
   if (parts.length === 0) return null;
-  const known = new Set<string>(AGENT_SCOPES);
+  const known = new Set<string>([...AGENT_SCOPES, OFFLINE_ACCESS]);
   if (!parts.every((p) => known.has(p))) return null;
   const want = new Set(parts);
   return AGENT_SCOPES.filter((s) => want.has(s));
+}
+
+/**
+ * A scope parameter → the granted resource scopes in canonical order, or null when it names
+ * anything unknown or nothing at all. Absent (null/undefined), or only offline_access = all C1 scopes.
+ */
+export function parseScope(raw: string | null | undefined): AgentScope[] | null {
+  if (raw === null || raw === undefined) return [...AGENT_SCOPES];
+  const r = requestedScopes(raw);
+  if (r === null) return null;
+  return r.length > 0 ? r : [...AGENT_SCOPES];
 }
 
 /** RFC 8414 authorization server metadata for this host. Not OIDC: no openid-configuration. */
@@ -68,7 +86,10 @@ export function authorizationServerMetadata(host: string) {
     token_endpoint: `${iss}/oauth/token`,
     registration_endpoint: `${iss}/oauth/register`,
     revocation_endpoint: `${iss}/oauth/revoke`,
-    scopes_supported: [...AGENT_SCOPES],
+    // offline_access is accepted (and grants nothing: see OFFLINE_ACCESS). Client ID Metadata
+    // Documents are NOT supported in C1 (SSRF review pending): dynamic registration only, so there
+    // is deliberately no client_id_metadata_document_supported here.
+    scopes_supported: [...AGENT_SCOPES, OFFLINE_ACCESS],
     response_types_supported: ['code'],
     response_modes_supported: ['query'],
     grant_types_supported: ['authorization_code', 'refresh_token'],

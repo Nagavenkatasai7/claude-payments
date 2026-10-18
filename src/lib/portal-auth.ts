@@ -74,7 +74,7 @@ export async function requirePortalCustomer(returnTo?: string): Promise<PortalCu
  * server at every use: a `next` from a query string or a hidden field is never trusted as is.
  */
 const NEXT_RE =
-  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers|transfers\/[A-Za-z0-9_-]{6,64}|transfers\/[A-Za-z0-9_-]{6,64}\/receipt|help|help\/tickets|help\/tickets\/new|help\/tickets\/tk_[A-Za-z0-9_-]{1,64}|chat|profile|notifications|devices|privacy|privacy\/(?:export|delete)))?$/;
+  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers|transfers\/[A-Za-z0-9_-]{6,64}|transfers\/[A-Za-z0-9_-]{6,64}\/receipt|help|help\/tickets|help\/tickets\/new|help\/tickets\/tk_[A-Za-z0-9_-]{1,64}|chat|profile|notifications|devices|ai-apps|privacy|privacy\/(?:export|delete)))?$/;
 
 export function safePortalNext(next: unknown): string {
   if (typeof next === 'string' && NEXT_RE.test(next)) return next;

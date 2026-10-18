@@ -55,7 +55,7 @@ export function parseClientRegistration(body: unknown): RegistrationCheck {
     if (!ok) return bad('invalid_client_metadata', 'response_types may list only code.');
   }
   if (b.scope !== undefined && (typeof b.scope !== 'string' || parseScope(b.scope) === null)) {
-    return bad('invalid_client_metadata', 'scope may list only quotes:read, recipients:read and transfers:read.');
+    return bad('invalid_client_metadata', 'scope may list only quotes:read, recipients:read, transfers:read and offline_access.');
   }
 
   return { ok: true, value: { name, redirectUris: unique, authMethod: method as AgentAuthMethod } };

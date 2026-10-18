@@ -8,7 +8,7 @@ import {
   CLIENT_SECRET_PREFIX,
   REFRESH_TOKEN_PREFIX,
   ACCESS_TOKEN_PREFIX,
-  parseScope,
+  requestedScopes,
 } from './config';
 import type { AgentAuditInput } from './audit';
 import { oauthError, oauthJson, readCapped, readForm } from './http';
@@ -216,9 +216,10 @@ async function refreshGrant(form: URLSearchParams, client: AgentClientRow, ctx: 
   let scopes: AgentScope[] = grant.scopes;
   const asked = form.get('scope');
   if (asked !== null) {
-    const want = parseScope(asked);
+    // offline_access alone keeps the grant's scopes; a resource scope may only narrow them.
+    const want = requestedScopes(asked);
     if (!want || !want.every((s) => grant.scopes.includes(s))) return oauthError('invalid_scope');
-    scopes = want;
+    if (want.length > 0) scopes = want;
   }
   const next = newAgentSecret(REFRESH_TOKEN_PREFIX);
   const rotated = await deps.repo.rotateRefresh(ctx.partnerId, grant.id, hash, agentSecretHash(next, deps.pepper), new Date(now), new Date(now + AGENT_GRANT_TTL_MS));

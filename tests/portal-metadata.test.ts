@@ -84,6 +84,7 @@ const PAGES: ReadonlyArray<[string, () => Promise<{ generateMetadata?: GenMeta }
   ['notifications/page.tsx', () => import('@/app/portal/notifications/page'), { referrer: 'no-referrer' }],
   ['notifications/verify/page.tsx', () => import('@/app/portal/notifications/verify/page'), { referrer: 'no-referrer' }],
   ['devices/page.tsx', () => import('@/app/portal/devices/page'), {}],
+  ['ai-apps/page.tsx', () => import('@/app/portal/ai-apps/page'), {}], // Stage C1: Connected AI apps
   ['help/page.tsx', () => import('@/app/portal/help/page'), {}],
   ['contact/page.tsx', () => import('@/app/portal/contact/page'), {}],
   ['help/tickets/page.tsx', () => import('@/app/portal/help/tickets/page'), {}],

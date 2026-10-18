@@ -5,6 +5,7 @@ import { getPortalCustomer } from '@/lib/portal-auth';
 import { env } from '@/lib/env';
 import { t } from '@/lib/i18n';
 import { portalNavItems } from '@/lib/portal-nav';
+import { agentPortal } from '@/lib/agent-auth/portal-wiring';
 import { Sidebar, Button } from '@/components/ds';
 import Link from 'next/link';
 import BrandLogo from '@/app/landing/BrandLogo';
@@ -26,6 +27,9 @@ export const dynamic = 'force-dynamic';
 export default async function PortalLayout({ children }: { children: ReactNode }) {
   const site = await requirePortalSite();
   const customer = await getPortalCustomer();
+  // Stage C1: "Connected AI apps" shows while the gate is open or the customer has a live grant
+  // (fails closed and time-bounded; the page gates itself as well).
+  const agentApps = customer ? await agentPortal().visible(site.partnerId, customer.session.phone) : false;
   return (
     <>
       <div className="ds-site" lang="en">
@@ -51,7 +55,7 @@ export default async function PortalLayout({ children }: { children: ReactNode }
           <div className={customer ? 'md:grid md:grid-cols-[240px_1fr] print:block' : undefined}>
             {customer ? (
               <div className="print:hidden">
-                <Sidebar label={t('portal.nav.label')} items={portalNavItems(env.customerDataRightsEnabled)} />
+                <Sidebar label={t('portal.nav.label')} items={portalNavItems(env.customerDataRightsEnabled, { agentApps })} />
               </div>
             ) : null}
             <main id="main" className="sh-main mx-auto w-full max-w-3xl bg-transparent px-4 py-8 sm:px-6">

@@ -320,6 +320,7 @@ describe('5. safePortalNext', () => {
     '/oauth/authorize?response_type=code&client_id=agc_AAAAAAAAAAAAAAAAAAAAAA&redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb' +
     '&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=s1&resource=https%3A%2F%2Fsend.smartremit.ai%2Fapi%2Fmcp';
   it('agent sign-in: a well-formed authorize request is kept', () => expect(safePortalNext(AUTHZ)).toBe(AUTHZ));
+  it('the Connected AI apps page is a return path', () => expect(safePortalNext('/portal/ai-apps')).toBe('/portal/ai-apps'));
   it.each([
     `https://evil.example${AUTHZ}`,
     `//evil.example${AUTHZ}`,
