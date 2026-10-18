@@ -11,6 +11,7 @@ import { getCustomerMfaStore } from './customer-mfa';
 import { deviceLabel } from './portal-device-label';
 import { recordPortalAuthEventSafe } from './portal-auth-audit';
 import { logWarn } from './log';
+import { safeAuthorizeNext } from './agent-auth/authorize-request';
 import type { Customer, PartnerId } from './types';
 
 /**
@@ -76,7 +77,11 @@ const NEXT_RE =
   /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers|transfers\/[A-Za-z0-9_-]{6,64}|transfers\/[A-Za-z0-9_-]{6,64}\/receipt|help|help\/tickets|help\/tickets\/new|help\/tickets\/tk_[A-Za-z0-9_-]{1,64}|chat|profile|notifications|devices|privacy|privacy\/(?:export|delete)))?$/;
 
 export function safePortalNext(next: unknown): string {
-  return typeof next === 'string' && NEXT_RE.test(next) ? next : '/portal';
+  if (typeof next === 'string' && NEXT_RE.test(next)) return next;
+  // Stage C1: the AI-agent sign-in (/oauth/authorize, same host) returns here after sign-in or
+  // step-up. Only a well-formed authorize request, re-serialized canonically; /oauth/authorize
+  // validates the client and every parameter again when the customer lands on it.
+  return safeAuthorizeNext(next) ?? '/portal';
 }
 
 /**

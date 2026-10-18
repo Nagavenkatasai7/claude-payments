@@ -27,7 +27,15 @@ import { logWarn } from './log';
 
 export const FLAG_CACHE_TTL_MS = 15_000;
 
-export type FlagKey = 'sends.paused' | 'settlement.paused' | 'voice.notes' | 'purpose.detect' | 'rewards.enabled' | 'paylinks.enabled' | 'telegram.bot';
+export type FlagKey =
+  | 'sends.paused'
+  | 'settlement.paused'
+  | 'voice.notes'
+  | 'purpose.detect'
+  | 'rewards.enabled'
+  | 'paylinks.enabled'
+  | 'telegram.bot'
+  | 'agent.tools';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -139,6 +147,24 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'Replies, pay links, codes and notices go to the channel the customer wrote on last. Test and demo data only: Telegram is not a US-hosted vendor. ' +
       'Off: Telegram messages are ignored and everything goes to WhatsApp. Needs TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET in Vercel.',
     bannerText: 'The Telegram test bot is on',
+    scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // Stage C1 AI agent tools (owner go 2026-10-18): customers connect an AI app
+  // (Claude, ChatGPT, …) to their portal account over OAuth and MCP, read-only
+  // (quotes, send limit, masked recipients, transfers). Also needs the customer
+  // among the demo-mode phones (DEMO_PHONES). FAILS CLOSED: off or unreadable ⇒
+  // /oauth/authorize shows "This is not available", /oauth/token issues no new
+  // grant and every MCP tool call answers "switched off" (src/lib/agent-auth/gate.ts).
+  // Read for the HOST's tenant (global or that partner).
+  'agent.tools': {
+    key: 'agent.tools',
+    label: 'AI agent tools (test)',
+    description:
+      'Demo-mode phones (DEMO_PHONES) can connect an AI app to their customer-portal account and let it read quotes, their send limit, ' +
+      'their saved recipients (masked) and their transfers. The app can never send or pay. ' +
+      'Off: no new connection, and connected apps get "SmartRemit AI tools are switched off." Customers can still disconnect apps in the portal.',
+    bannerText: 'AI agent tools (test) are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
   },

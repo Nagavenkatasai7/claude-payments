@@ -314,6 +314,22 @@ describe('5. safePortalNext', () => {
     'https://evil.example/portal',
     ' /portal/help',
   ])('C1: %s → /portal', (v) => expect(safePortalNext(v)).toBe('/portal'));
+
+  // Stage C1 (AI agent sign-in): ONLY a well-formed same-host /oauth/authorize request comes back.
+  const AUTHZ =
+    '/oauth/authorize?response_type=code&client_id=agc_AAAAAAAAAAAAAAAAAAAAAA&redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb' +
+    '&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=s1&resource=https%3A%2F%2Fsend.smartremit.ai%2Fapi%2Fmcp';
+  it('agent sign-in: a well-formed authorize request is kept', () => expect(safePortalNext(AUTHZ)).toBe(AUTHZ));
+  it.each([
+    `https://evil.example${AUTHZ}`,
+    `//evil.example${AUTHZ}`,
+    AUTHZ.replace('code_challenge_method=S256', 'code_challenge_method=plain'),
+    AUTHZ.replace('redirect_uri=https%3A%2F%2Fclaude.ai%2Fcb', 'redirect_uri=http%3A%2F%2Fevil.example%2Fcb'),
+    `${AUTHZ}&next=//evil.example`,
+    `${AUTHZ}#x`,
+    '/oauth/authorize',
+    '/oauth/token?grant_type=refresh_token',
+  ])('agent sign-in: %s → /portal', (v) => expect(safePortalNext(v)).toBe('/portal'));
 });
 
 describe('step-up', () => {
