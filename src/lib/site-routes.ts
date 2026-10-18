@@ -2,7 +2,8 @@
 //
 // M1 shipped it EMPTY (plan conflict C4): /pay/** and /api/pay/** wait for the host-tenant check (H2).
 // M2 adds EXACTLY the customer portal: '/' (rewritten to /portal), /portal/** and /api/portal/**
-// (tests/site-routes-portal.test.ts). Apex-only surfaces (the docs-next and trust pages, the docs try-it
+// (tests/site-routes-portal.test.ts). Stage C1 adds the AI-agent sign-in and MCP paths, exact only
+// (AGENT_SITE_ROUTES). Apex-only surfaces (the docs-next and trust pages, the docs try-it
 // API, /admin-dashboard, /login, /account, /terms, /privacy, other /api/*) must NEVER be listed here.
 // Dark by default: src/proxy.ts consults this table only when CUSTOMER_PORTAL_ENABLED=1, and every
 // portal page/action also calls requirePortalSite() (src/lib/portal-site.ts).
@@ -17,10 +18,27 @@ export interface SiteRoute {
   rewriteTo?: string;
 }
 
+/**
+ * Stage C1: the AI-agent sign-in and the MCP endpoint, EXACT paths only (no sub-paths). Every one is
+ * a route handler (never a page, so no server-action id is ever dispatched on them) that also
+ * resolves getPortalSite() itself and answers 404 off a live portal host (src/lib/agent-auth/routes.ts).
+ */
+export const AGENT_SITE_ROUTES: ReadonlyArray<SiteRoute> = [
+  { prefix: '/oauth/authorize', exact: true },
+  { prefix: '/oauth/token', exact: true },
+  { prefix: '/oauth/register', exact: true },
+  { prefix: '/oauth/revoke', exact: true },
+  { prefix: '/.well-known/oauth-authorization-server', exact: true },
+  { prefix: '/.well-known/oauth-protected-resource', exact: true },
+  { prefix: '/.well-known/oauth-protected-resource/api/mcp', exact: true },
+  { prefix: '/api/mcp', exact: true },
+];
+
 export const SITE_ROUTES: ReadonlyArray<SiteRoute> = [
   { prefix: '/', exact: true, rewriteTo: '/portal' },
   { prefix: '/portal' },
   { prefix: '/api/portal' },
+  ...AGENT_SITE_ROUTES,
 ];
 
 export type SitePathClass = { kind: 'allow'; rewriteTo?: string } | { kind: 'deny' };

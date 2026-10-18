@@ -20,6 +20,10 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/app/portal',
   // Batch B4: the public "Referral rewards" page (a link to the admin-set rewards portal).
   'src/app/referral-rewards',
+  // Stage C1: the AI-agent sign-in route handlers (no page.tsx: the consent HTML is rendered by
+  // src/lib/agent-auth/consent-page.ts so the route owns its CSP) and the OAuth metadata routes.
+  'src/app/oauth',
+  'src/app/.well-known',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */

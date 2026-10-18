@@ -27,6 +27,11 @@ const securityHeaders = [
   },
 ];
 
+// Every path except exactly /oauth/authorize (the documented negative-lookahead form,
+// node_modules/next/dist/docs/01-app/03-api-reference/05-config/01-next-config-js/redirects.md:151).
+// tests/next-config-headers.test.ts runs it through Next's own matcher.
+const SITE_CSP_SOURCE = '/:path((?!oauth/authorize$).*)';
+
 const nextConfig: NextConfig = {
   // No `x-powered-by: Next.js` on any response: it only advertises the stack
   // (node_modules/next/dist/docs/01-app/03-api-reference/05-config/
@@ -37,7 +42,15 @@ const nextConfig: NextConfig = {
   // imported server-side, in src/lib/email.ts → the /api/worker route).
   serverExternalPackages: ['nodemailer'],
   async headers() {
-    return [{ source: '/:path*', headers: securityHeaders }];
+    return [
+      // Every path but one gets the full set, CSP included.
+      { source: SITE_CSP_SOURCE, headers: securityHeaders },
+      // Stage C1: /oauth/authorize sends its OWN Content-Security-Policy (the site policy plus the
+      // validated redirect origin in form-action, src/lib/agent-auth/authorize-csp.ts), so the
+      // consent form's hand-back to the AI app is not blocked. A second CSP header here would be
+      // enforced too and block it, so this exact path gets every other header but not the CSP.
+      { source: '/oauth/authorize', headers: securityHeaders.filter((h) => h.key !== 'Content-Security-Policy') },
+    ];
   },
   async redirects() {
     // The staff dashboard moved from /dashboard to /admin-dashboard so that `/`
