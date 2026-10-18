@@ -7,6 +7,7 @@ import { Inter } from 'next/font/google';
 // Speed Insights is enabled on the Vercel project
 // (node_modules/@vercel/speed-insights/dist/next/index.d.mts:39).
 import { SpeedInsights } from '@vercel/speed-insights/next';
+import { WebAnalytics } from '@/components/web-analytics';
 
 // Self-hosted Inter for the login + admin-dashboard (sh-* theme). Exposed as a CSS
 // variable that --sh-font-sans consumes (globals.css). The landing (.lp) and pay
@@ -46,6 +47,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         {children}
         <SpeedInsights />
+        <WebAnalytics />
       </body>
     </html>
   );
