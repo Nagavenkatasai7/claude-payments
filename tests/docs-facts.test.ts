@@ -89,4 +89,14 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.mcpRecipientsMax).toBe(MCP_RECIPIENTS_MAX);
     expect(FACTS.mcpRecentTransfersMax).toBe(num(extract('src/lib/mcp/tools.ts', /limit: z\.number\(\)\.int\(\)\.min\(1\)\.max\((\d+)\)/)));
   });
+
+  it('AI apps (MCP) sign-in: step-up window, connection lifetime, code and access-token lifetimes', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    const { PORTAL_SESSION_POLICY } = await import('@/lib/portal-session-cookie');
+    const cfg = await import('@/lib/agent-auth/config');
+    expect(FACTS.agentStepUpMinutes).toBe(PORTAL_SESSION_POLICY.stepUpFreshMs / 60_000);
+    expect(FACTS.agentGrantDays).toBe(cfg.AGENT_GRANT_TTL_MS / 86_400_000);
+    expect(FACTS.agentCodeTtlSec).toBe(cfg.AGENT_CODE_TTL_SEC);
+    expect(FACTS.agentAccessTokenMinutes).toBe(cfg.AGENT_ACCESS_TTL_SEC / 60);
+  });
 });

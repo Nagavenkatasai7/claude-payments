@@ -49,13 +49,13 @@ export const FACTS = {
   mcpRecipientsMax: 50,
   /** src/lib/mcp/tools.ts listRecentTransfersInput limit max. */
   mcpRecentTransfersMax: 10,
-  /** Stage C1 AI-app sign-in: a code older than this asks for a fresh WhatsApp code before consent. */
+  /** src/lib/portal-session-cookie.ts PORTAL_SESSION_POLICY.stepUpFreshMs in minutes (AI-app consent step-up). */
   agentStepUpMinutes: 15,
-  /** Stage C1: a connection lasts this many days from its last use (sliding). */
+  /** src/lib/agent-auth/config.ts AGENT_GRANT_TTL_MS in days (sliding on each refresh). */
   agentGrantDays: 30,
-  /** Stage C1: authorization code lifetime (single use). */
+  /** src/lib/agent-auth/config.ts AGENT_CODE_TTL_SEC (single use). */
   agentCodeTtlSec: 300,
-  /** Stage C1: access token lifetime. */
+  /** src/lib/agent-auth/config.ts AGENT_ACCESS_TTL_SEC / 60. */
   agentAccessTokenMinutes: 60,
 } as const;
 
