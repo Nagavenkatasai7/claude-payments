@@ -5,11 +5,19 @@ import { classifySitePath, SITE_ROUTES } from '@/lib/site-routes';
 // every M1 apex-only surface stays denied (the list below is M1's, minus '/').
 
 describe('SITE_ROUTES (customer portal)', () => {
-  it('has exactly the three portal entries', () => {
+  it('has exactly the three portal entries, then the exact Stage C1 agent paths', () => {
     expect(SITE_ROUTES).toEqual([
       { prefix: '/', exact: true, rewriteTo: '/portal' },
       { prefix: '/portal' },
       { prefix: '/api/portal' },
+      { prefix: '/oauth/authorize', exact: true },
+      { prefix: '/oauth/token', exact: true },
+      { prefix: '/oauth/register', exact: true },
+      { prefix: '/oauth/revoke', exact: true },
+      { prefix: '/.well-known/oauth-authorization-server', exact: true },
+      { prefix: '/.well-known/oauth-protected-resource', exact: true },
+      { prefix: '/.well-known/oauth-protected-resource/api/mcp', exact: true },
+      { prefix: '/api/mcp', exact: true },
     ]);
   });
   it('/ rewrites to /portal', () => expect(classifySitePath('/')).toEqual({ kind: 'allow', rewriteTo: '/portal' }));

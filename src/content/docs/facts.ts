@@ -37,6 +37,26 @@ export const FACTS = {
   unpaidExpiryDays: 7,
   /** src/lib/partner-api-service.ts: the reserved-prefix 400 message, in order. */
   reservedIdempotencyPrefixes: ['draft:', 'b2binvoice:', 'sched:', 'test:', 'paylink:'],
+  /** src/lib/tools.ts RATE_LOCK_MINUTES (the quote lock once a send starts). */
+  rateLockMinutes: 30,
+  /** src/lib/mcp/guard.ts MCP_GRANT_LIMITS 'mcp-grant-min'. */
+  mcpGrantCallsPerMin: 60,
+  /** src/lib/mcp/guard.ts MCP_GRANT_LIMITS 'mcp-grant-hour'. */
+  mcpGrantCallsPerHour: 600,
+  /** src/lib/mcp/http.ts MCP_MAX_BODY_BYTES / 1024. */
+  mcpMaxBodyKb: 64,
+  /** src/lib/mcp/tools.ts MCP_RECIPIENTS_MAX. */
+  mcpRecipientsMax: 50,
+  /** src/lib/mcp/tools.ts listRecentTransfersInput limit max. */
+  mcpRecentTransfersMax: 10,
+  /** src/lib/portal-session-cookie.ts PORTAL_SESSION_POLICY.stepUpFreshMs in minutes (AI-app consent step-up). */
+  agentStepUpMinutes: 15,
+  /** src/lib/agent-auth/config.ts AGENT_GRANT_TTL_MS in days (sliding on each refresh). */
+  agentGrantDays: 30,
+  /** src/lib/agent-auth/config.ts AGENT_CODE_TTL_SEC (single use). */
+  agentCodeTtlSec: 300,
+  /** src/lib/agent-auth/config.ts AGENT_ACCESS_TTL_SEC / 60. */
+  agentAccessTokenMinutes: 60,
 } as const;
 
 export type FactName = keyof typeof FACTS;

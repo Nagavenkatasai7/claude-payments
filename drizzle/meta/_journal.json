@@ -239,6 +239,13 @@
       "when": 1791833348100,
       "tag": "0033_default_partner_europe",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1792356942791,
+      "tag": "0034_agent_oauth",
+      "breakpoints": true
     }
   ]
 }

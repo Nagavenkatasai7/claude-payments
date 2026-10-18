@@ -83,10 +83,14 @@ describe('next.config.ts headers', () => {
     const { default: config } = await import('../next.config');
     expect(config.poweredByHeader).toBe(false);
     const routes = await config.headers!();
-    expect(routes).toHaveLength(1);
-    expect(routes[0].source).toBe('/:path*');
+    // Stage C1: two entries. Every path but exactly /oauth/authorize gets this CSP; that one route
+    // sends its own (the same policy plus one validated form-action origin, tests/next-config-headers).
+    expect(routes).toHaveLength(2);
+    expect(routes[0].source).toBe('/:path((?!oauth/authorize$).*)');
     const csp = routes[0].headers.find((h) => h.key === 'Content-Security-Policy');
     expect(csp?.value).toBe(PINNED_CSP);
+    expect(routes[1].source).toBe('/oauth/authorize');
+    expect(routes[1].headers.some((h) => h.key === 'Content-Security-Policy')).toBe(false);
   });
 
   // Program-Fix 47 PR2: next.config reads NODE_ENV once, at load. A production

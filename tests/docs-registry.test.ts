@@ -12,11 +12,11 @@ describe('docs registry ⇄ src/content/docs/*.mdx', () => {
     expect(GUIDES.map((g) => g.slug).sort()).toEqual(files);
   });
 
-  it('slugs are unique, lowercase-kebab, and the 11 spec guides are present in order', async () => {
+  it('slugs are unique, lowercase-kebab, and the spec guides are present in order', async () => {
     const { GUIDES } = await import('@/content/docs/registry');
     expect(GUIDES.map((g) => g.slug)).toEqual([
       'getting-started', 'sandbox', 'whatsapp-setup', 'webhooks', 'kyc-delegation', 'funding',
-      'go-live', 'errors', 'rate-limits', 'idempotency', 'changelog',
+      'go-live', 'ai-apps', 'errors', 'rate-limits', 'idempotency', 'changelog',
     ]);
     expect(new Set(GUIDES.map((g) => g.slug)).size).toBe(GUIDES.length);
     for (const g of GUIDES) {

@@ -51,6 +51,9 @@ async function initOnce() {
 }
 
 const ALL_TABLES = [
+  // Stage C1 (0034): agent grants are FK children of agent_clients, both of partners.
+  'agent_grants',
+  'agent_clients',
   // Batch B rewards (B3): FK children of transfers / partners, truncated first.
   'reward_redemptions',
   'platform_fee_ledger',

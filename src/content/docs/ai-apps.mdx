@@ -1,0 +1,161 @@
+## What this is
+
+SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "how much can I still send today?" or "did yesterday's transfer arrive?".
+
+The rule that shapes everything below: **the AI app never sends or pays.** Every tool only looks things up. To send money, the customer uses SmartRemit on WhatsApp or the SmartRemit portal, and pays on the SmartRemit pay page with a code sent to their WhatsApp.
+
+This is a test program. It is open to invited testers only, and SmartRemit has to switch it on for your account first. SmartRemit is not listed in any app's public connector directory.
+
+## Before you start
+
+- A SmartRemit account (the phone number you use with SmartRemit on WhatsApp), invited to the AI apps test. Ask SmartRemit to switch it on; until then the sign-in page says "This is not available".
+- An AI app that can add a remote MCP server ("custom connector"). The plans that allow this are set by each app, not by SmartRemit, and they change; the sections below say what each app documented when this guide was written.
+
+## The server address
+
+| What | Value |
+| --- | --- |
+| MCP server URL | `https://send.smartremit.ai/api/mcp` |
+| Transport | Streamable HTTP, stateless (no `Mcp-Session-Id`) |
+| Sign-in | OAuth 2.1 with PKCE (S256), dynamic client registration |
+| Scopes | `quotes:read`, `recipients:read`, `transfers:read` (all three by default) |
+
+Use this address exactly. The host decides which SmartRemit service you sign in to, and a token issued for one host does not work on another.
+
+## Connect from Claude
+
+1. Open **Customize > Connectors** (on Team and Enterprise plans, an owner first adds it under **Organization settings > Connectors**).
+2. Select **Add custom connector**.
+3. **Name**: `SmartRemit`. **MCP server URL**: `https://send.smartremit.ai/api/mcp`.
+4. If the dialog asks how Claude identifies itself (**OAuth client**), choose **Register automatically**. SmartRemit does not support "Use Claude's published identity" yet. Leave client ID and secret empty.
+5. Select **Add**, then **Connect**. A SmartRemit page opens: sign in with the code sent to your WhatsApp, then select **Allow**.
+6. In a chat, open the **+** menu, then **Connectors**, and make sure SmartRemit is on.
+
+Claude's own steps: [Third party connectors with remote MCP](https://claude.com/docs/connectors/custom/remote-mcp).
+
+## Connect from ChatGPT
+
+ChatGPT adds remote MCP servers in **developer mode**. OpenAI documents developer mode for Business, Enterprise and Edu workspaces on ChatGPT web, and read-only use for Pro.
+
+1. Turn on developer mode: **Settings > Apps > Advanced settings** (a workspace admin may have to allow it first).
+2. Go to **Settings > Apps** and select **Create**.
+3. **Name**: `SmartRemit`. **MCP server URL**: `https://send.smartremit.ai/api/mcp`. **Authentication**: OAuth.
+4. Select **Scan Tools**. The SmartRemit sign-in page opens: sign in with the WhatsApp code, then select **Allow**. Then select **Create**.
+5. In a new chat, pick SmartRemit from the tools menu, or name it in your message.
+
+ChatGPT keeps the connection when the server offers refresh tokens and the `offline_access` scope, which SmartRemit does. OpenAI's steps: [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta).
+
+## Connect from Perplexity
+
+Perplexity documents custom remote connectors for Pro and Enterprise plans (on Enterprise, an admin must allow members to add them).
+
+1. Open **Account settings**, then **All settings**, and select **+ Custom connector**.
+2. Choose **Remote**.
+3. **Name**: `SmartRemit`. **MCP server URL**: `https://send.smartremit.ai/api/mcp`. **Authentication**: OAuth. Leave client ID and secret empty (Perplexity registers itself).
+4. Select **Add**, then select the SmartRemit card. Sign in with the WhatsApp code and select **Allow**.
+5. In a search, open the **+** menu and tick SmartRemit under **Connectors and sources**.
+
+## What happens when you sign in
+
+1. The app finds SmartRemit's sign-in server from the server URL (see [For client developers](#for-client-developers)).
+2. A SmartRemit page opens in your browser. If you are not signed in to the SmartRemit portal, it asks for your phone number and sends a code to your WhatsApp.
+3. If your last code is older than <Fact name="agentStepUpMinutes" /> minutes, it asks for a fresh code, even when you are signed in.
+4. A consent page shows what the app asks for. The app's name on that page is the name the app gave itself; SmartRemit does not check it.
+5. **Allow** sends you back to the app, connected. **Deny** sends you back with nothing shared.
+
+The connection lasts <Fact name="agentGrantDays" /> days from the last time the app uses it. Each use extends it.
+
+## Disconnect
+
+Open the SmartRemit portal, go to **Connected AI apps**, and select **Disconnect** next to the app. The app loses access at once: its next request is refused, even if it still holds a token. Removing the connector inside the AI app does not, by itself, end SmartRemit's side; disconnect in the portal too.
+
+## Tools
+
+Every tool acts for the one signed-in customer, on their own data. No tool takes a phone number, a customer id or a partner id as input, so an app cannot reach another person's account. Results are JSON text. Text inside results that people typed, such as a recipient's name, is data, never instructions to the AI.
+
+### get_quote
+
+What it would cost to send an amount, and what the recipient would get. Scope `quotes:read`.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `amount` | number, required | The amount to send, in the sender's currency. |
+| `currency` | string | ISO 4217, for example `USD`. Default: the customer's own currency. |
+| `destination_country` | string | ISO 3166 alpha-2. Default `IN` (India). |
+| `funding_method` | string | How the customer would pay. Default `bank_transfer`. |
+
+Returns `quote_available: true` with `send_amount`, `send_currency`, `fee`, `total_to_pay`, `exchange_rate`, `recipient_gets`, `recipient_currency`, `delivery_estimate`, `rate_date`, `rate_locked: false` and a `next_step`. The rate is **not** locked: it locks for <Fact name="rateLockMinutes" /> minutes only once the customer starts the send in WhatsApp or the portal. Over a limit, the answer is `quote_available: false` with the `reason` and the limits; before identity verification it is `reason: "verification_required"`.
+
+### check_send_limit
+
+How much the customer can send now. Scope `quotes:read`. No input.
+
+Returns `can_send_now`, `daily_limit_usd`, `per_transfer_limit_usd`, `remaining_today_usd`, `extra_details_required` and a `next_step`, or `verification_required: true` before identity verification.
+
+### list_recipients
+
+The customer's saved recipients, most recently used first, up to <Fact name="mcpRecipientsMax" />. Scope `recipients:read`. No input.
+
+Each recipient has `recipient_id` (an opaque id, never a phone number), `name`, `payout_type` (`bank`, `upi` or `usdc`) and `account_last4` (the last 4 digits of a bank account, or `null`). No full account number, bank code, UPI id or phone number is ever returned. An AI app cannot add or change a recipient.
+
+### list_recent_transfers
+
+The customer's latest transfers. Scope `transfers:read`.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `limit` | integer | 1 to <Fact name="mcpRecentTransfersMax" />. Default <Fact name="mcpRecentTransfersMax" />. |
+
+Each transfer has `transfer_id`, `date`, `recipient_name`, `amount` and `status`.
+
+### get_transfer_status
+
+One of the customer's own transfers. Scope `transfers:read`.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `transfer_id` | string, required | For example from `list_recent_transfers`. |
+
+Returns `transfer_id`, `status`, `date`, `amount` and `recipient_name`. A transfer that does not exist, or belongs to someone else, gives the same answer: "Transfer not found."
+
+## Limits
+
+- <Fact name="mcpGrantCallsPerMin" /> tool calls a minute and <Fact name="mcpGrantCallsPerHour" /> an hour per connection. Over the limit, the tool answers "Too many requests from this app. Wait a minute, then try again."
+- A request body is at most <Fact name="mcpMaxBodyKb" /> KB.
+- The send limits themselves are the customer's normal SmartRemit limits; an AI app never raises them.
+
+## Errors
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| HTTP `401` with `WWW-Authenticate: Bearer resource_metadata=…` | No token, an expired or revoked token, or a token for another host. | The app signs in again (an expired access token is refreshed automatically). |
+| HTTP `403` `insufficient_scope` | The connection was granted without the scope this tool needs. | Disconnect and connect again, allowing all permissions. |
+| Tool error "SmartRemit AI tools are switched off." | The test is not switched on for this account, or SmartRemit switched it off. | Ask SmartRemit. |
+| Tool error "Too many requests from this app…" | A rate limit above. | Wait a minute. |
+| Tool error "Transfer not found." | Unknown id, or not this customer's transfer. | Check the id with `list_recent_transfers`. |
+| Tool error "Something went wrong on our side…" | A temporary SmartRemit problem. | Try again later. |
+| Sign-in page "This is not available" | The test is not switched on for this account. | Ask SmartRemit. |
+| The app cannot add the connector (registration answers `403` `access_denied`) | The test is switched off for this SmartRemit service. | Ask SmartRemit. |
+
+## For client developers
+
+You only need this section if you are building your own MCP client. SmartRemit follows the MCP authorization specification.
+
+| Endpoint | Path on `https://send.smartremit.ai` |
+| --- | --- |
+| Protected resource metadata (RFC 9728) | `/.well-known/oauth-protected-resource/api/mcp` |
+| Authorization server metadata (RFC 8414) | `/.well-known/oauth-authorization-server` |
+| Dynamic client registration (RFC 7591) | `/oauth/register` |
+| Authorization | `/oauth/authorize` |
+| Token | `/oauth/token` |
+| Revocation (RFC 7009) | `/oauth/revoke` |
+
+- The issuer is `https://send.smartremit.ai`. Authorization responses carry `iss` (RFC 9207).
+- PKCE with `S256` is required. `plain` is refused.
+- Send `resource=https://send.smartremit.ai/api/mcp` (RFC 8707) on both the authorization and the token request; any other value is `invalid_target`.
+- Register at `/oauth/register` with `token_endpoint_auth_method` `none` (a public client, the usual choice) or `client_secret_post` / `client_secret_basic` (the secret is shown once).
+- Register with `redirect_uris` that use `https` (a loopback `http` address is allowed for local tools). The redirect URI must match exactly.
+- Authorization codes last <Fact name="agentCodeTtlSec" /> seconds and work once. Access tokens (`sra_…`) last <Fact name="agentAccessTokenMinutes" /> minutes. Refresh tokens (`srr_…`) rotate on every use; presenting an already-used refresh token ends the whole connection.
+- Send the access token only in the `Authorization: Bearer` header, never in a query string.
+- Partner API keys are never accepted on the MCP server.
+- Protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and `2024-11-05` are served.

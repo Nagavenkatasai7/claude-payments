@@ -11,7 +11,7 @@ const PAGE = 'src/app/docs-next/[slug]/page.tsx';
 describe('/docs-next/[slug] static params', () => {
   it('one param per registered guide, in registry order', () => {
     expect(guideStaticParams()).toEqual(GUIDES.map((g) => ({ slug: g.slug })));
-    expect(guideStaticParams()).toHaveLength(11);
+    expect(guideStaticParams()).toHaveLength(12);
   });
   it('every slug has its .mdx file (a missing one would fail the prerender)', () => {
     for (const { slug } of guideStaticParams()) expect({ slug, file: existsSync(`src/content/docs/${slug}.mdx`) }).toEqual({ slug, file: true });

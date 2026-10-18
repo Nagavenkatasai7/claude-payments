@@ -528,7 +528,7 @@ export const auditEvents = pgTable(
     id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
     partnerId: text('partner_id'),
     actor: text('actor').notNull(),
-    actorType: text('actor_type').notNull(), // 'staff' | 'api_key' | 'system'
+    actorType: text('actor_type').notNull(), // 'staff' | 'api_key' | 'system' | 'agent' (no CHECK)
     action: text('action').notNull(),
     subjectId: text('subject_id'),
     meta: jsonb('meta'),
@@ -1309,5 +1309,50 @@ export const paymentLinks = pgTable(
     uniqueIndex('payment_links_partner_reference').on(t.partnerId, t.reference),
     index('payment_links_partner_created').on(t.partnerId, t.createdAt.desc()),
     index('payment_links_status_expires').on(t.status, t.expiresAt),
+  ],
+);
+
+// ── Stage C1: AI-agent sign-in (OAuth 2.1 on the customer-portal hosts) ──────
+// NEW tables only (0034). Written only by src/db/repos/agent-oauth-repo.ts. A client is an AI
+// app that registered itself (RFC 7591) on ONE partner's portal host: partner_id binds it to
+// that tenant, so every read is tenant-scoped like the rest of the ledger. A grant is one
+// customer's (partner_id, phone) consent to one client. Only hashes are stored: the client
+// secret, the current refresh token and the one it replaced (reuse = theft → revoke).
+// redirect_uris holds the exact strings the app registered (exact match at authorize/token).
+// auth_method and revoked_reason are code-enforced (no CHECK, like transfers.funding_state).
+export const agentClients = pgTable(
+  'agent_clients',
+  {
+    id: text('id').primaryKey(), // 'agc_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    name: text('name').notNull(), // the app's own UNVERIFIED claim, <= 60 printable chars ('' = none)
+    redirectUris: jsonb('redirect_uris').$type<string[]>().notNull(),
+    authMethod: text('auth_method').notNull(), // 'none' | 'client_secret_post' | 'client_secret_basic'
+    secretHash: text('secret_hash'), // NULL for a public client
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('agent_clients_partner').on(t.partnerId)],
+);
+
+export const agentGrants = pgTable(
+  'agent_grants',
+  {
+    id: text('id').primaryKey(), // 'agg_' + random
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(), // digits only (a lookup key, like transfers.phone)
+    clientId: text('client_id').notNull().references(() => agentClients.id),
+    scopes: text('scopes').array().notNull(),
+    refreshHash: text('refresh_hash'),
+    prevRefreshHash: text('prev_refresh_hash'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedReason: text('revoked_reason'), // 'customer' | 'theft' | 'client' | 'code_reuse' | 'admin'
+  },
+  (t) => [
+    index('agent_grants_partner_phone').on(t.partnerId, t.phone),
+    uniqueIndex('agent_grants_refresh_hash').on(t.refreshHash),
+    index('agent_grants_prev_refresh_hash').on(t.prevRefreshHash),
   ],
 );

@@ -487,7 +487,8 @@ export type IdempotencyRepo = ReturnType<typeof createIdempotencyRepo>;
 export interface AuditEvent {
   partnerId?: PartnerId;
   actor: string;
-  actorType: 'staff' | 'api_key' | 'system';
+  /** 'agent' (Stage C1): an AI app acting under a customer's grant (src/lib/agent-auth/audit.ts). */
+  actorType: 'staff' | 'api_key' | 'system' | 'agent';
   action: string;
   subjectId?: string;
   meta?: Record<string, unknown>;
