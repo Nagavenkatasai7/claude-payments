@@ -71,7 +71,7 @@ describe('remark-no-mdx-expressions allows the guides’ data-only syntax', () =
   });
   it('every real guide passes', async () => {
     const files = readdirSync('src/content/docs').filter((f) => f.endsWith('.mdx'));
-    expect(files).toHaveLength(11);
+    expect(files).toHaveLength(12);
     for (const f of files) await build(readFileSync(join('src/content/docs', f), 'utf8'));
   });
 });

@@ -37,6 +37,26 @@ export const FACTS = {
   unpaidExpiryDays: 7,
   /** src/lib/partner-api-service.ts: the reserved-prefix 400 message, in order. */
   reservedIdempotencyPrefixes: ['draft:', 'b2binvoice:', 'sched:', 'test:', 'paylink:'],
+  /** src/lib/tools.ts RATE_LOCK_MINUTES (the quote lock once a send starts). */
+  rateLockMinutes: 30,
+  /** src/lib/mcp/guard.ts MCP_GRANT_LIMITS 'mcp-grant-min'. */
+  mcpGrantCallsPerMin: 60,
+  /** src/lib/mcp/guard.ts MCP_GRANT_LIMITS 'mcp-grant-hour'. */
+  mcpGrantCallsPerHour: 600,
+  /** src/lib/mcp/http.ts MCP_MAX_BODY_BYTES / 1024. */
+  mcpMaxBodyKb: 64,
+  /** src/lib/mcp/tools.ts MCP_RECIPIENTS_MAX. */
+  mcpRecipientsMax: 50,
+  /** src/lib/mcp/tools.ts listRecentTransfersInput limit max. */
+  mcpRecentTransfersMax: 10,
+  /** Stage C1 AI-app sign-in: a code older than this asks for a fresh WhatsApp code before consent. */
+  agentStepUpMinutes: 15,
+  /** Stage C1: a connection lasts this many days from its last use (sliding). */
+  agentGrantDays: 30,
+  /** Stage C1: authorization code lifetime (single use). */
+  agentCodeTtlSec: 300,
+  /** Stage C1: access token lifetime. */
+  agentAccessTokenMinutes: 60,
 } as const;
 
 export type FactName = keyof typeof FACTS;

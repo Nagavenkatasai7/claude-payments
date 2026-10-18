@@ -75,4 +75,18 @@ describe('docs FACTS equal the source constants', () => {
     const inMsg = [...msg.matchAll(/'([^']+)'/g)].map((m) => m[1]);
     expect([...FACTS.reservedIdempotencyPrefixes]).toEqual(inMsg);
   });
+
+  it('AI apps (MCP): quote lock, per-connection limits, body cap, list sizes', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    const { RATE_LOCK_MINUTES } = await import('@/lib/tools');
+    const { MCP_GRANT_LIMITS } = await import('@/lib/mcp/guard');
+    const { MCP_MAX_BODY_BYTES } = await import('@/lib/mcp/http');
+    const { MCP_RECIPIENTS_MAX } = await import('@/lib/mcp/tools');
+    expect(FACTS.rateLockMinutes).toBe(RATE_LOCK_MINUTES);
+    expect(FACTS.mcpGrantCallsPerMin).toBe(MCP_GRANT_LIMITS.find((w) => w.scope === 'mcp-grant-min')?.limit);
+    expect(FACTS.mcpGrantCallsPerHour).toBe(MCP_GRANT_LIMITS.find((w) => w.scope === 'mcp-grant-hour')?.limit);
+    expect(FACTS.mcpMaxBodyKb).toBe(MCP_MAX_BODY_BYTES / 1024);
+    expect(FACTS.mcpRecipientsMax).toBe(MCP_RECIPIENTS_MAX);
+    expect(FACTS.mcpRecentTransfersMax).toBe(num(extract('src/lib/mcp/tools.ts', /limit: z\.number\(\)\.int\(\)\.min\(1\)\.max\((\d+)\)/)));
+  });
 });

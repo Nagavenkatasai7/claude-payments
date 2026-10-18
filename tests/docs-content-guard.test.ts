@@ -14,8 +14,10 @@ const mdx = readdirSync('src/content/docs')
   .map((f) => join('src/content/docs', f));
 const published = [...walk('src/content').filter((f) => /\.(mdx|ts)$/.test(f)), 'openapi.yaml'];
 
+// send.smartremit.ai: the AI apps guide's MCP server (the default customer-portal host).
+// claude.com, help.openai.com, modelcontextprotocol.io: the AI apps guide cites each app's own connector steps.
 // github.com: /trust links the public repository's SECURITY.md (src/content/trust/disclosure.ts).
-const ALLOWED_HOSTS = [/^smartremit\.ai$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/, /^github\.com$/];
+const ALLOWED_HOSTS = [/^smartremit\.ai$/, /^send\.smartremit\.ai$/, /^claude\.com$/, /^help\.openai\.com$/, /^modelcontextprotocol\.io$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/, /^github\.com$/];
 // Exact documented values only. Writers use these, or placeholders like `<unix seconds>`.
 const ALLOWED_DIGIT_RUNS = new Set([
   '000000000000', // the reference rail's documented failure account
@@ -25,8 +27,8 @@ const ALLOWED_DIGIT_RUNS = new Set([
 const FICTIONAL_PHONE = /^1\d{3}55501\d{2}$/; // +1 NXX 555 01XX
 
 describe('the guard has something to scan', () => {
-  it('finds the 11 guides and openapi.yaml', () => {
-    expect(mdx).toHaveLength(11);
+  it('finds the 12 guides and openapi.yaml', () => {
+    expect(mdx).toHaveLength(12);
     expect(published).toContain('openapi.yaml');
   });
 });
