@@ -220,6 +220,11 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect(csp).toBe(buildCsp({ isDev: false }).replace("form-action 'self'", "form-action 'self' https://claude.ai"));
       expect(csp).not.toContain('localhost');
       expect(res.headers.get('content-type')).toContain('text/html');
+      // A form POST from a no-referrer page carries `Origin: null` (MDN Referrer-Policy, "Effect on
+      // the Origin header"), which the consent POST's CSRF check refuses: the page must be same-origin.
+      expect(res.headers.get('referrer-policy')).toBe('same-origin');
+      expect(html).toContain('<meta name="referrer" content="same-origin">');
+      expect(html).not.toContain('no-referrer');
     });
     it('every other authorize response carries the site CSP unchanged (form-action self only)', async () => {
       session = null;
