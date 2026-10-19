@@ -41,10 +41,13 @@ export interface AuthorizeDeps extends AgentServerDeps {
 
 const HTML = 'text/html; charset=utf-8';
 
+// same-origin, not no-referrer: under no-referrer the browser sends `Origin: null` on the consent
+// form's POST, and the CSRF check below refuses it. same-origin still sends no Referer to any other
+// site (https://developer.mozilla.org/docs/Web/HTTP/Headers/Referrer-Policy, "Effect on the Origin header").
 function html(body: string, status: number, csp: string): Response {
   return new Response(body, {
     status,
-    headers: { 'Content-Type': HTML, 'Cache-Control': 'no-store', 'Content-Security-Policy': csp, 'Referrer-Policy': 'no-referrer' },
+    headers: { 'Content-Type': HTML, 'Cache-Control': 'no-store', 'Content-Security-Policy': csp, 'Referrer-Policy': 'same-origin' },
   });
 }
 

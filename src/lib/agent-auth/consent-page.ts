@@ -35,7 +35,7 @@ function page(title: string, body: string): string {
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<meta name="robots" content="noindex, nofollow">' +
-    '<meta name="referrer" content="no-referrer">' +
+    '<meta name="referrer" content="same-origin">' + // no-referrer would send `Origin: null` on the form POST
     `<title>${esc(title)}</title><style>${STYLE}</style></head>` +
     `<body><main id="main"><div class="card"><p class="brand">SmartRemit</p>${body}</div></main></body></html>`
   );

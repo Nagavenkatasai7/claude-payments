@@ -219,6 +219,9 @@ describe('the consent page', () => {
     expect(html).toContain('method="post" action="/oauth/authorize"');
     expect(html).toContain('value="allow"');
     expect(html).toContain('value="deny"');
+    // no-referrer would make the browser send `Origin: null` on the Allow/Deny POST.
+    expect(html).toContain('<meta name="referrer" content="same-origin">');
+    expect(html).not.toContain('no-referrer');
   });
   it('an empty name reads as an unnamed app', () => {
     expect(renderConsentPage({ clientName: '', ticket: 't', returnHost: 'claude.ai', scopes: ['quotes:read'] })).toContain('an unnamed app');

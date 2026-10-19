@@ -171,7 +171,7 @@ Returns `cancelled: true`. A paid, expired or unknown id, or one another app pre
 | HTTP `403` `insufficient_scope` on `prepare_transfer` | The connection was made before SmartRemit added `transfers:prepare`, or without it. | Disconnect and connect again, allowing all permissions. |
 | Tool error "Something went wrong on our side…" | A temporary SmartRemit problem. | Try again later. |
 | Sign-in page "This is not available" | The test is not switched on for this account. | Ask SmartRemit. |
-| The app cannot add the connector (registration answers `403` `access_denied`) | The test is switched off for this SmartRemit service. | Ask SmartRemit. |
+| The app cannot add the connector (registration answers `403` `access_denied`). Claude says "Couldn't register with smartremit's sign-in service" and offers an OAuth Client ID field: leave it empty. | The test is switched off for this SmartRemit service. | Ask SmartRemit. |
 
 ## For client developers
 
