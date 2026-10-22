@@ -39,7 +39,7 @@ export function Fact({ name }: { name: FactName }) {
 export function GuideLink({ slug, children }: { slug: string; children?: ReactNode }) {
   if (!guideBySlug(slug)) throw new Error(`<GuideLink>: unknown guide "${slug}"`);
   return (
-    <Link href={`/docs-next/${slug}`} className="font-semibold text-ds-primary hover:underline">
+    <Link href={`/docs/${slug}`} className="font-semibold text-ds-primary hover:underline">
       {children}
     </Link>
   );

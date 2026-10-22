@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Badge, PageHeader } from '@/components/ds';
-import { GUIDES, guideBySlug, guideStaticParams } from '@/content/docs/registry';
+import { guideBySlug, guidesFor, guideStaticParams } from '@/content/docs/registry';
 
 // One prerendered page per registered guide (node_modules/next/dist/docs/01-app/02-guides/
 // mdx.md "Using dynamic imports"). Any other slug is a 404 (dynamicParams = false), and the
@@ -25,9 +25,11 @@ export default async function GuidePage({ params }: Params) {
   const guide = guideBySlug((await params).slug);
   if (!guide) notFound();
   const { default: Guide } = await import(`@/content/docs/${guide.slug}.mdx`);
-  const i = GUIDES.findIndex((g) => g.slug === guide.slug);
-  const prev = GUIDES[i - 1];
-  const next = GUIDES[i + 1];
+  // Prev / next stay inside the guide's own group (customer or partner).
+  const group = guidesFor(guide.audience);
+  const i = group.findIndex((g) => g.slug === guide.slug);
+  const prev = group[i - 1];
+  const next = group[i + 1];
   return (
     <article className="break-words">
       <PageHeader
@@ -40,16 +42,16 @@ export default async function GuidePage({ params }: Params) {
       </div>
       <nav aria-label="More guides" className="mt-12 flex flex-wrap justify-between gap-4 border-t border-ds-border pt-6 text-[15px]">
         {prev ? (
-          <Link className="font-semibold text-ds-primary hover:underline" href={`/docs-next/${prev.slug}`}>
+          <Link className="font-semibold text-ds-primary hover:underline" href={`/docs/${prev.slug}`}>
             ← {prev.title}
           </Link>
         ) : (
-          <Link className="font-semibold text-ds-primary hover:underline" href="/docs-next">
+          <Link className="font-semibold text-ds-primary hover:underline" href="/docs">
             ← All guides
           </Link>
         )}
         {next ? (
-          <Link className="font-semibold text-ds-primary hover:underline" href={`/docs-next/${next.slug}`}>
+          <Link className="font-semibold text-ds-primary hover:underline" href={`/docs/${next.slug}`}>
             {next.title} →
           </Link>
         ) : null}

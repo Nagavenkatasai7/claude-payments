@@ -7,11 +7,12 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
   // The shared public-site shell (SiteHeader / SiteFooter / SiteShell).
   'src/components/site',
-  // The code-backed MDX blocks the /docs-next guides render (M4 PR-3).
+  // The code-backed MDX blocks the /docs guides render (M4 PR-3).
   'src/components/docs',
   // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
   // "every src/app dir is classified" test stays green whichever change lands first.
-  'src/app/docs-next',
+  // The docs (M4; moved from /docs-next, which replaced the legacy single page).
+  'src/app/docs',
   'src/app/trust',
   'src/app/partner', // the partner app (hex-scanned and state-walked)
   // PR5: the generic inactive-site sheet a partner subdomain shows for an unknown/disabled slug.
@@ -26,9 +27,9 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/app/.well-known',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
-/** Frozen @ 96c8933. Never add to this list. */
+/** Frozen @ 96c8933. Never add to this list ('docs' left it when the new docs replaced the old page). */
 export const LEGACY_APP_DIRS: readonly string[] = [
-  'about', 'account', 'admin-dashboard', 'api', 'docs', 'landing', 'legal', 'login',
+  'about', 'account', 'admin-dashboard', 'api', 'landing', 'legal', 'login',
   'onboard', 'partners', 'pay', 'privacy', 'terms',
 ];
 /** Files allowed to carry hex (each needs a reason). */
@@ -42,9 +43,9 @@ export const STATE_EXEMPT_DIRS: readonly string[] = [
   // Static, prerendered, data-free (a loading boundary hides content without JS and flashes a
   // skeleton): the prerendered HTML would put the page in <div hidden id="S:0"> behind the
   // skeleton until React's inline reveal script runs. error.tsx is still required and present.
-  'src/app/docs-next',
-  'src/app/docs-next/[slug]',
-  'src/app/docs-next/api',
+  'src/app/docs',
+  'src/app/docs/[slug]',
+  'src/app/docs/api',
   // The /trust page: static, prerendered and data-free for the same reason (error.tsx present).
   'src/app/trust',
   // A static, data-free page: nothing to load and nothing that can fail.

@@ -49,7 +49,7 @@ test.describe('at a 390px phone viewport', () => {
 
   test('/docs does not scroll sideways', async ({ page }) => {
     await page.goto('/docs');
-    await expect(page.getByRole('heading', { level: 1, name: 'Partner integration guide' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: 'SmartRemit docs' })).toBeVisible();
     const { scrollWidth, innerWidth } = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       innerWidth: window.innerWidth,

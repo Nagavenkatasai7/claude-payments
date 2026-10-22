@@ -11,10 +11,12 @@ import { LOGIN_HREF, NAV_LINKS, REGISTER_HREF } from './site-links';
 // label (icon only). The logo links home. Server component; LoginMenu is the one client island.
 
 // Tailwind only generates classes it can read literally, so each landing breakpoint maps to a
-// full class string here (never built from the number).
+// full class string here (never built from the number). 0 never collapses, so it keeps a
+// 44 px tap target on phones.
 const HIDE: Record<(typeof NAV_LINKS)[number]['hide'], string> = {
   1180: 'max-[1180px]:hidden',
   760: 'max-[760px]:hidden',
+  0: 'inline-flex min-h-11 items-center',
 };
 const NAV_LINK = 'text-[14px] text-ds-ink-muted transition-colors hover:text-ds-ink';
 
@@ -24,11 +26,11 @@ export function SiteHeader() {
       className="sticky top-0 z-50 border-b border-ds-border bg-ds-nav-bg backdrop-blur-[12px]"
       aria-label="Primary"
     >
-      <div className="mx-auto flex w-full max-w-[1180px] items-center gap-5 px-5 py-3">
+      <div className="mx-auto flex w-full max-w-[1180px] items-center gap-5 px-5 py-3 max-[520px]:gap-3">
         <Link className="inline-flex shrink-0 items-center" href="/">
-          <BrandLogo height={40} eager className="h-9 sm:h-10" />
+          <BrandLogo height={40} eager className="h-7 min-[380px]:h-8 min-[400px]:h-9 sm:h-10" />
         </Link>
-        <div className="ml-auto flex items-center gap-5 max-[520px]:gap-3">
+        <div className="ml-auto flex items-center gap-3 max-[520px]:gap-2">
           {NAV_LINKS.map((l) => (
             <a key={l.href} className={`${NAV_LINK} ${HIDE[l.hide]}`} href={l.href}>
               {l.label}

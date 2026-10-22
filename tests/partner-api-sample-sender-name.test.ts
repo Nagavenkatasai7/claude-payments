@@ -9,7 +9,7 @@ const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
 describe('partner API create-transaction samples include sender.name', () => {
   it.each([
     'src/app/admin-dashboard/partners/[id]/page.tsx',
-    'src/app/docs/page.tsx',
+    'src/content/docs/sandbox.mdx',
   ])('%s: every "sender" object in a sample carries a name', (rel) => {
     const src = read(rel);
     const senders = src.match(/"sender"\s*:\s*\{[^}]*\}/g) ?? [];

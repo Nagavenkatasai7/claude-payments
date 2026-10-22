@@ -64,11 +64,15 @@ const nextConfig: NextConfig = {
         destination: '/admin-dashboard/:path*',
         permanent: true,
       },
+      // The docs moved from the /docs-next preview to /docs (one docs site). `:path*` matches zero
+      // or more segments, so /docs-next itself goes to /docs too
+      // (node_modules/next/dist/docs/01-app/03-api-reference/05-config/01-next-config-js/redirects.md:77).
+      { source: '/docs-next/:path*', destination: '/docs/:path*', permanent: true },
     ];
   },
 };
 
-// Partner guides (UI redesign M4): src/content/docs/*.mdx are IMPORTED by the /docs-next
+// Partner guides (UI redesign M4): src/content/docs/*.mdx are IMPORTED by the /docs
 // pages and compiled at build to server components (no client JS, no inline script, no CSP
 // change). The wrap only adds the .mdx loader (node_modules/@next/mdx/index.js): no
 // pageExtensions change, so no .mdx file becomes a route. remark-gfm (pipe tables, task

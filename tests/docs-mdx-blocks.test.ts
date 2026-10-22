@@ -34,10 +34,10 @@ describe('<Fact>', () => {
 });
 
 describe('<GuideLink>', () => {
-  it('links a registered guide under /docs-next', async () => {
+  it('links a registered guide under /docs', async () => {
     const { GuideLink } = await import('@/components/docs/mdx-blocks');
     const out = html(createElement(GuideLink, { slug: 'webhooks' }, 'Webhooks'));
-    expect(out).toMatch(/^<a [^>]*href="\/docs-next\/webhooks"[^>]*>Webhooks<\/a>$/);
+    expect(out).toMatch(/^<a [^>]*href="\/docs\/webhooks"[^>]*>Webhooks<\/a>$/);
   });
   it('throws for a slug that is not in the registry', async () => {
     const { GuideLink } = await import('@/components/docs/mdx-blocks');

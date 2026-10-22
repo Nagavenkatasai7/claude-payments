@@ -59,21 +59,30 @@ describe('robots.txt (robots.ts)', () => {
 });
 
 describe('sitemap.xml (sitemap.ts)', () => {
-  // Program-Fix 15 PR A adds the three legal drafts (/terms, /privacy, /legal).
-  it('lists exactly the six public pages on the canonical host, with no hardcoded dates', async () => {
+  // Program-Fix 15 PR A adds the three legal drafts (/terms, /privacy, /legal). The docs add
+  // their API reference and every published guide (a coming-soon guide stays out).
+  it('lists exactly the public pages and the published docs on the canonical host, with no hardcoded dates', async () => {
     const { default: sitemap } = await import('@/app/sitemap');
+    const { GUIDES } = await import('@/content/docs/registry');
     const entries = sitemap();
+    const guides = GUIDES.filter((g) => g.status === 'published').map((g) => `${SITE}/docs/${g.slug}`);
+    expect(guides).toContain(`${SITE}/docs/ai-apps`);
+    expect(guides).not.toContain(`${SITE}/docs/funding`);
     expect(entries.map((e) => e.url)).toEqual([
       `${SITE}/`,
       `${SITE}/about`,
       `${SITE}/docs`,
+      `${SITE}/docs/api`,
+      ...guides,
       `${SITE}/terms`,
       `${SITE}/privacy`,
       `${SITE}/legal`,
     ]);
     for (const e of entries) {
       expect(e.lastModified).toBeUndefined();
-      for (const p of PRIVATE_PATHS) expect(e.url).not.toContain(p);
+      // robots.ts Disallow rules are path prefixes from the root (so /docs/api is not under /api).
+      const path = new URL(e.url).pathname;
+      for (const p of PRIVATE_PATHS) expect({ path, p, private: path === p || path.startsWith(`${p}/`) }).toEqual({ path, p, private: false });
     }
   });
 });

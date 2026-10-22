@@ -31,7 +31,38 @@ Content-Type: application/json
 - `reference` is our transfer ID. Echo it in your status callbacks.
 - The instruction is **at least once**: deduplicate on `reference`, so a retry can never pay out twice.
 - Answer `2xx`, optionally with a JSON body carrying `providerRef` (your reference, stored once against the transfer).
-- Instructions also carry an additive `compliance` object with the originator, beneficiary, purpose and screening summary. Ignore unknown keys, and do not reject an instruction that lacks it.
+- When you sent a `client_reference` and your own rail pays the transfer out, the instruction carries it as `client_reference`. A transfer paid out by another partner's rail never carries it.
+
+### Compliance block
+
+Instructions also carry an additive `compliance` object. Ignore unknown keys, and do not reject an instruction that lacks it.
+
+```json
+"compliance": {
+  "version": 1,
+  "originator": {
+    "entity_type": "individual",
+    "name": "Ravi Kumar", "country": "US", "phone": "12025550142",
+    "id_type": "passport", "id_last4": "1234"
+  },
+  "beneficiary": { "entity_type": "individual", "name": "Anita Sharma",
+                   "relationship": "parent", "country": "IN" },
+  "purpose": "family_support",
+  "purpose_code": null,
+  "kyc": { "status": "verified", "tier": "T1", "verified_at": "2026-09-01T12:00:00.000Z" },
+  "screening": { "status": "cleared", "reasons": [],
+                 "screened_at": "2026-09-23T10:00:00.000Z",
+                 "list_source": "…", "list_version": "…", "decision": "clear" },
+  "edd_required": false
+}
+```
+
+- `version` is `1`. `originator` has `entity_type` (`individual` or `business`; for a business, `name` is the business), `name`, `country`, `phone`, `id_type` and `id_last4`.
+- Never sent: the full ID number, date of birth, email or residential address. The originator's address is not included yet.
+- `purpose` is our purpose value. `purpose_code` is always `null` for now.
+- `screening.list_source`, `list_version` and `decision` appear only when a sanctions screening record exists for the transfer.
+- A transfer settled on another partner's rail carries `"routed": true` and `originator: null`: the sender's identity is not shared with another partner. `originator` is also `null` when it could not be loaded, and older instructions have no block.
+- The signatures cover the block like every other byte of the body.
 
 ### Reversals
 
@@ -45,9 +76,9 @@ We wait at most <Fact name="railAckTimeoutSec" /> seconds for your `2xx`. A slow
 
 - A public `https://` host on port 443. No IP addresses, no internal or single-label host names, no credentials in the URL.
 - We follow at most <Fact name="maxRedirects" /> redirects, and only `307` or `308` to the same origin. A `301`, `302` or `303` would turn the signed `POST` into a `GET`, so it is refused.
-- Your acknowledgement must be <Fact name="ackMaxKb" /> KB or less, uncompressed. `providerRef` is at most <Fact name="providerRefMaxChars" /> characters of letters, digits and `. _ : -`.
+- Your acknowledgement must be <Fact name="ackMaxKb" /> KB or less, uncompressed: we send `Accept-Encoding: identity` and never decompress. `providerRef` is at most <Fact name="providerRefMaxChars" /> characters of letters, digits and `. _ : -`.
 
-An endpoint that breaks these rules is refused before the instruction is sent; the instruction is retried, so fix the endpoint on your dashboard and the retries pick it up.
+An endpoint that breaks these rules is refused before the instruction is sent; the instruction is retried, so fix the endpoint on your dashboard (Integrations → Settlement webhooks) and the retries pick it up.
 
 ## Retries
 
@@ -77,6 +108,7 @@ Content-Type: application/json
 - The state machine only moves forward, so replays and out-of-order callbacks are safe.
 - A `failed` or `returned` may carry an optional `reason` string. It is stored on the transfer for your operations team and ours, cut to <Fact name="failureReasonMaxChars" /> characters.
 - A `failed` after `paid_out` is recorded for operations and never reverses a delivery. A `paid_out` after `failed` is refused and the transfer stays cancelled.
+- Send your payout confirmation (for example a bank UTR) as `payout_reference` on `paid_out`: 1 to 64 letters, digits and `. _ : / # -`. We save the first one; later ones, and a value that does not fit, are ignored, and the status still applies.
 - **Echo the amount on `paid_out`.** Send back the `amount.destination` and `destination_currency` from our instruction. If they differ, the transfer is not marked delivered: it is held for our operations team, who resolve it with you, and we answer with `"held": true` so you stop retrying. A `paid_out` with no `amount` is accepted for now but is deprecated.
 - Unsigned, mis-signed and out-of-window callbacks are rejected with `401`.
 
@@ -100,6 +132,6 @@ valid    = |now - t| within the tolerance
 
 - The tolerance is <Fact name="signatureToleranceSec" /> seconds either side of now. Reject anything outside it.
 - Compare in constant time.
-- Keep a record of the messages you have processed (for example a hash of `t.rawBody`) for at least 15 minutes, and answer a repeat with `2xx` without acting on it. We do the same.
+- Keep a record of the messages you have processed (for example a hash of `t.rawBody`) for at least 15 minutes, and answer a repeat with `2xx` without acting on it. We do the same: a repeated callback gets `{ "ok": true, "duplicate": true }`.
 - **Secret rotation.** When a secret is changed, the old one stays valid for <Fact name="secretRotationOverlapDays" /> days. During that time our instructions carry one `v1` per active secret: accept the message if any of them matches. Your callbacks may be signed with either secret.
 - **Deprecated:** the older `x-signature` header (an HMAC of the raw body with no timestamp) is still sent, and still accepted when `x-smartremit-signature` is absent. It will be retired, so verify the timestamped header now. When both are present, `x-smartremit-signature` alone decides.
