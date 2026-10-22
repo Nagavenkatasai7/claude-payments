@@ -322,6 +322,28 @@ describe('/api/mcp: modern (2026-07-28) clients', () => {
   });
 });
 
+describe('/api/mcp: tool input size (GHSA-46jr-4wx8-v453)', () => {
+  const call = (name: string, args: Record<string, unknown>) => ({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: args } });
+
+  it('refuses tools/call arguments with more elements than MCP_MAX_TOOL_INPUT_ELEMENTS before the tool runs', async () => {
+    const { MCP_MAX_TOOL_INPUT_ELEMENTS } = await import('@/lib/mcp/server');
+    expect(MCP_MAX_TOOL_INPUT_ELEMENTS).toBe(64);
+    const auth = fakeAuth({ sra_good: principal() }, true);
+    state.auth = auth;
+    const junk = Array.from({ length: MCP_MAX_TOOL_INPUT_ELEMENTS + 1 }, (_, i) => i);
+    const res = await route.POST(jsonRpc(call('get_quote', { amount: 100, junk }), { authorization: 'Bearer sra_good', 'mcp-protocol-version': '2025-06-18' }));
+    const text = JSON.stringify(await rpcBody(res));
+    expect(text).toContain(`more than the maximum of ${MCP_MAX_TOOL_INPUT_ELEMENTS} elements`);
+    expect(auth.recorded).toEqual([]);
+  });
+
+  it('the largest real tool input (prepare_transfer, every field) stays well under the cap', async () => {
+    const { MCP_MAX_TOOL_INPUT_ELEMENTS } = await import('@/lib/mcp/server');
+    const { prepareTransferInput } = await import('@/lib/mcp/prepare');
+    expect(Object.keys(prepareTransferInput.shape).length).toBeLessThan(MCP_MAX_TOOL_INPUT_ELEMENTS / 4);
+  });
+});
+
 describe('/api/mcp: scopes', () => {
   const call = (name: string, args: Record<string, unknown> = {}) => ({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name, arguments: args } });
 

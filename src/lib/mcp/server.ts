@@ -35,17 +35,24 @@ import {
 // the verified token's principal. The same instance shape serves both protocol eras (the SDK's
 // modern 2026-07-28 path and its stateless legacy fallback for 2025-era clients).
 //
-// SDK APIs (installed @modelcontextprotocol/server 2.2.0):
-// - new McpServer(serverInfo, options): dist/createMcpHandler-CfX6zgs1.d.mts:3255; ServerOptions
-//   .instructions at :2834.
+// SDK APIs (installed @modelcontextprotocol/server 2.3.1):
+// - new McpServer(serverInfo, options): dist/createMcpHandler-D4NN8WsG.d.mts:3245; ServerOptions
+//   .instructions at :2837; McpServerOptions.maxToolInputElements at :3230 (checked before schema
+//   validation, dist/mcp-DIH4cS6P.mjs:1811).
 // - registerTool(name, { title, description, inputSchema, annotations, scopeChallenge }, cb):
-//   :3361-3371 (a zod object is a StandardSchemaWithJSON, :1381).
-// - requireScopes(...scopes): :2816. The serving entry answers a failing scope challenge with HTTP
+//   :3372-3395 (a zod object is a StandardSchemaWithJSON).
+// - requireScopes(...scopes): :2819. The serving entry answers a failing scope challenge with HTTP
 //   403 + `WWW-Authenticate: Bearer error="insufficient_scope"` BEFORE the tool runs, on both eras
-//   (dist/index.mjs:446-448 legacy transport, :1391-1394 modern; the response shape is
-//   dist/mcp-DYuW2ZSs.mjs:555-561).
+//   (pinned by tests/mcp-route.test.ts "scopes"; the response shape is dist/mcp-DIH4cS6P.mjs:546).
 
 export const MCP_SERVER_INFO = { name: 'SmartRemit', version: '1.0.0' } as const;
+
+/**
+ * GHSA-46jr-4wx8-v453: the SDK walks every array element and object member of tools/call arguments
+ * while validating, so an oversized payload costs memory. Our largest input (prepare_transfer) has 7
+ * flat fields and no arrays; 64 leaves room and refuses anything bigger before validation.
+ */
+export const MCP_MAX_TOOL_INPUT_ELEMENTS = 64;
 
 export type McpServerDeps = GuardDeps & McpDataDeps;
 
@@ -68,7 +75,10 @@ function config(spec: McpToolSpec, hints: Hints = READ_ONLY) {
 }
 
 export function buildMcpServer(principal: AgentPrincipal, deps: McpServerDeps): McpServer {
-  const server = new McpServer(MCP_SERVER_INFO, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer(MCP_SERVER_INFO, {
+    instructions: SERVER_INSTRUCTIONS,
+    maxToolInputElements: MCP_MAX_TOOL_INPUT_ELEMENTS,
+  });
   // The ONLY identity a tool sees: the token's tenant and customer. Tool input never names either.
   const owner: PortalOwner = { partnerId: principal.partnerId, phone: principal.phone };
   const data: McpDataDeps = { toolDeps: deps.toolDeps, db: deps.db };
