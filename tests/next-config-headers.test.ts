@@ -71,9 +71,30 @@ describe('next.config after the MDX wrap', () => {
     expect(await cfg.redirects!()).toEqual([
       { source: '/dashboard', destination: '/admin-dashboard', permanent: true },
       { source: '/dashboard/:path*', destination: '/admin-dashboard/:path*', permanent: true },
+      { source: '/docs-next/:path*', destination: '/docs/:path*', permanent: true },
     ]);
     expect(cfg.poweredByHeader).toBe(false);
     expect(cfg.serverExternalPackages).toEqual(['nodemailer']);
+  });
+
+  // The /docs-next preview became /docs: every old link lands on the same page under /docs.
+  // Next's own matcher and destination builder, as the redirect router uses them
+  // (node_modules/next/dist/shared/lib/router/utils/path-match.d.ts, prepare-destination.d.ts).
+  it('/docs-next and every page under it redirect to the same page under /docs', async () => {
+    const cfg = await loadConfig();
+    const rule = (await cfg.redirects!()).find((r) => r.source.startsWith('/docs-next'))!;
+    const { getPathMatch } = await import('next/dist/shared/lib/router/utils/path-match');
+    const { prepareDestination } = await import('next/dist/shared/lib/router/utils/prepare-destination');
+    const match = getPathMatch(rule.source, { strict: true, removeUnnamedParams: true, sensitive: false });
+    const to = (p: string) => {
+      const params = match(p);
+      return params === false ? null : prepareDestination({ appendParamsToQuery: false, destination: rule.destination, params, query: {} }).newUrl;
+    };
+    expect(to('/docs-next')).toBe('/docs');
+    expect(to('/docs-next/ai-apps')).toBe('/docs/ai-apps');
+    expect(to('/docs-next/api')).toBe('/docs/api');
+    expect(to('/docs')).toBeNull();
+    expect(to('/docs-nextx')).toBeNull();
   });
 
   it('adds only the MDX loader hook: no pageExtensions change, no other key', async () => {

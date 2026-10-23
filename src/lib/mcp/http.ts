@@ -14,11 +14,11 @@ import { buildMcpServer, type McpServerDeps } from './server';
 //     verified for THIS host's resource; missing / invalid / for another tenant → 401 with the
 //     RFC 9728 challenge;
 //  5. the SDK's handler, given a fresh McpServer bound to the token's principal.
-// createMcpHandler (dist/createMcpHandler-CfX6zgs1.d.mts:4145) serves 2026-07-28 traffic and, by
-// default (`legacy: 'stateless'`, :3906-3927; dist/index.mjs:1049-1061), answers every 2025-era request (initialize with
+// createMcpHandler (2.3.1: dist/createMcpHandler-D4NN8WsG.d.mts:4165) serves 2026-07-28 traffic and, by
+// default (`legacy: 'stateless'`, :3947; dist/index.mjs:1046), answers every 2025-era request (initialize with
 // 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05) from a fresh instance over a stateless
 // streamable HTTP transport; GET and DELETE (2025 session operations) get 405 there. It does no
-// token verification: authInfo is passed through as given (:3885-3891, :4141-4144).
+// token verification: authInfo is passed through as given (:4161).
 
 export interface McpSite {
   partnerId: PartnerId;

@@ -38,6 +38,20 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
     expect(header).toContain('alt="SmartRemit.ai"');
   });
 
+  // One docs site (owner, 2026-10-22): a "Docs" header link next to About that never collapses,
+  // on the landing and the shell alike, and the footer says "Docs".
+  it('header shows a Docs link at every width, on the shell and the landing', async () => {
+    const { header, footer } = await render();
+    const shellDocs = header.match(/<a [^>]*href="\/docs"[^>]*>Docs<\/a>/);
+    expect(shellDocs).not.toBeNull();
+    expect(shellDocs![0]).not.toMatch(/hidden/);
+    const landingDocs = LANDING_HEADER.match(/<(?:a|Link)\s+className="([^"]*)"\s+href="\/docs"\s*>\s*Docs\s*<\/(?:a|Link)>/);
+    expect(landingDocs).not.toBeNull();
+    expect(landingDocs![1]).not.toMatch(/hidden/);
+    expect(footer).toMatch(/<a [^>]*href="\/docs"[^>]*>Docs<\/a>/);
+    expect(LANDING_FOOTER).not.toMatch(/Partner docs/);
+  });
+
   it('the logo links home (/), not the landing-only #top', async () => {
     const { header } = await render();
     expect(header).toMatch(/<a[^>]*href="\/"[^>]*><img[^>]*alt="SmartRemit.ai"/);
@@ -83,8 +97,8 @@ describe('SiteHeader/SiteFooter mirror the landing (owner direction 2026-09-28)'
     const { header, footer } = await render();
     expect(header).toMatch(/href="\/partner"[^>]*>(<span[^>]*>)?Partners/);
     expect(footer).toMatch(/href="\/partner"[^>]*>Partners/);
-    // The integration docs stay reachable from the footer.
-    expect(footer).toMatch(/href="\/docs"[^>]*>Partner docs/);
+    // The docs stay reachable from the footer (one docs site, labelled "Docs").
+    expect(footer).toMatch(/href="\/docs"[^>]*>Docs</);
   });
 
   it('footer carries the columns, the non-custodial disclaimer and the legal nav', async () => {

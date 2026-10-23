@@ -1,16 +1,17 @@
 // The ONE list of shared site-shell links (UI redesign M4). It replicates the landing's header
 // (src/app/page.tsx LoginMenu + <nav>) and footer, with the landing's in-page anchors written as
 // '/#…' so they work from any page. tests/site-shell.test.ts pins parity with the landing in both
-// directions. The new docs and trust pages are deliberately NOT linked until the post-demo swap
-// (tests/docs-next-unlinked.test.ts).
+// directions. The trust page is deliberately NOT linked until the post-demo swap
+// (tests/trust-unlinked.test.ts).
 
-/** Header section links. `hide` is the landing breakpoint at which the link collapses. */
+/** Header section links. `hide` is the landing breakpoint at which the link collapses (0: never). */
 export const NAV_LINKS = [
   { href: '/#inside', label: 'What’s inside', hide: 1180 },
   { href: '/#calculator', label: 'Calculator', hide: 1180 },
   { href: '/#waitlist', label: 'Join waitlist', hide: 760 },
   { href: '/#partner-with-us', label: 'Partner with us', hide: 760 },
   { href: '/about', label: 'About', hide: 760 },
+  { href: '/docs', label: 'Docs', hide: 0 },
 ] as const;
 
 /**
@@ -22,7 +23,7 @@ export const NAV_LINKS = [
  */
 export const CUSTOMER_PORTAL_LOGIN = 'https://send.smartremit.ai/portal/login';
 
-/** The "Log in" menu. Partners go to the partner dashboard; the docs stay in the footer. */
+/** The "Log in" menu. Partners go to the partner dashboard; the docs are a header link. */
 export const LOGIN_MENU = [
   { href: CUSTOMER_PORTAL_LOGIN, title: 'Customers', sub: 'Track transfers & receipts' },
   { href: '/login', title: 'Employee portal', sub: 'Staff & partner dashboards' },
@@ -45,7 +46,7 @@ export const FOOTER_COLUMNS: readonly FooterColumn[] = [
       { href: '/#inside', label: 'What’s inside' },
       { href: '/#corridors', label: 'Corridors' },
       { href: '/#calculator', label: 'FX calculator' },
-      { href: '/docs', label: 'Partner docs' },
+      { href: '/docs', label: 'Docs' },
       { href: '/#partner-with-us', label: 'Partner with us' },
     ],
   },

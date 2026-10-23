@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 
 // UI redesign M4 PR-6: /trust is a static, data-free server page in the landing shell, UNLINKED
-// and noindex until the post-demo swap. The page module is pinned by source (like /docs-next).
+// and noindex until the post-demo swap. The page module is pinned by source (like /docs).
 
 describe('/trust route contract (source)', () => {
   it('the layout wraps the SiteShell, titles the page and sets noindex (and only the layout sets robots)', () => {

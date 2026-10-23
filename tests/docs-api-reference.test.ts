@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { loadPartnerOpenApiDocument } from '@/lib/openapi/load-spec';
 import type { SpecOperation } from '@/lib/openapi/types';
 
-// UI redesign M4 PR-4: the pure helpers behind the /docs-next API reference (grouping, stable
+// UI redesign M4 PR-4: the pure helpers behind the /docs API reference (grouping, stable
 // anchors, the curl example). Everything they print comes from openapi.yaml.
 
 const doc = loadPartnerOpenApiDocument();

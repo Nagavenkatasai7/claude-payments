@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 // is logged, nothing is injected as HTML, the form talks to nothing but our own proxy, and the
 // island renders only for allowlisted sandbox operations.
 
-const FILE = 'src/app/docs-next/api/TryIt.tsx';
+const FILE = 'src/app/docs/api/TryIt.tsx';
 const src = () => readFileSync(FILE, 'utf8');
 
 describe('TryIt.tsx (client form) source guard', () => {
@@ -57,7 +57,7 @@ describe('TryIt.tsx (client form) source guard', () => {
   });
 
   it('Operation.tsx renders the island only for allowlisted sandbox operations', () => {
-    const op = readFileSync('src/app/docs-next/api/Operation.tsx', 'utf8');
+    const op = readFileSync('src/app/docs/api/Operation.tsx', 'utf8');
     expect(op).toMatch(/import \{ TryIt \} from '\.\/TryIt'/);
     expect(op).toMatch(/op\.sandbox && isTryItOperation\(op\.operationId\)/);
   });

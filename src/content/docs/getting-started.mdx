@@ -2,6 +2,12 @@
 
 SmartRemit is remittance infrastructure for licensed money transmitters. Your customers chat with the SmartRemit WhatsApp assistant, and you integrate through the Partner API, signed settlement instructions and signed status callbacks. SmartRemit never holds funds: you, the licensed partner, move the money.
 
+## Where SmartRemit is today
+
+SmartRemit is a working demonstration of production-grade remittance infrastructure. The AI conversation, live exchange-rate quoting, the signed instruction-and-callback loop, durable processing, dashboards and WhatsApp notifications are real. Actual fund movement, the production identity-verification vendor, a commercial sanctions feed and a live payout rail are simulated today: the reference rail runs the exact signed loop a production rail would.
+
+Compliance screening (sanctions) runs on every transfer and cannot be switched off, in every mode; a watchlist hit returns `422`. Today it runs against a built-in reference rule set, not yet a live commercial AML feed.
+
 ## Keys and environments
 
 Every request carries your API key as a bearer token:
@@ -63,6 +69,14 @@ curl -X POST https://smartremit.ai/api/partner/v1/quote \
 ```
 
 The response carries the fee, the total charge, the exchange rate and the amount the recipient receives. A `503` means live exchange rates are briefly unavailable; nothing was stored, so retry later.
+
+## Creating a transaction
+
+- `beneficiary.name` and `sender.name` are 1 to 80 characters, with no brackets (`[ ] { } < >`) and no control or line-break characters.
+- `beneficiary.payout_method` is `bank`, `upi` or `usdc` (default `bank`). An inline `payout_destination` is at most 64 printable characters. A masked display value, such as `****1234` or `account on file`, is refused with `422`.
+- `destination_country` is optional and defaults to `IN`. An unsupported value is refused with `400`; it is never changed to India.
+- Each of these is refused before the `Idempotency-Key` is bound, so a corrected retry with the same key succeeds.
+- Transactions created through the API are never added to the customer's saved recipients in chat.
 
 ## Next steps
 

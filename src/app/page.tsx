@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
+import Link from 'next/link';
 import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
 import { waLink, WA_MESSAGES, corridorMessage, WA_PHONE, formatWaPhone } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
@@ -208,14 +209,16 @@ export default async function LandingPage({
         className="sticky top-0 z-50 border-b border-[#dbe4f0] bg-[rgba(245,249,255,0.85)] backdrop-blur-[12px]"
         aria-label="Primary"
       >
-        <div className="mx-auto flex w-full max-w-[1180px] items-center gap-5 px-5 py-3">
+        <div className="mx-auto flex w-full max-w-[1180px] items-center gap-5 px-5 py-3 max-[520px]:gap-3">
           <a className="inline-flex shrink-0 items-center" href="#top">
-            <BrandLogo height={40} eager className="h-9 sm:h-10" />
+            <BrandLogo height={40} eager className="h-7 min-[380px]:h-8 min-[400px]:h-9 sm:h-10" />
           </a>
           {/* Collapses right to left as the bar narrows: section links, then
               Create account, then the Log in menu (a plain link on phones),
-              then the WhatsApp label (icon only; the sticky CTA carries it). */}
-          <div className="ml-auto flex items-center gap-5 max-[520px]:gap-3">
+              then the WhatsApp label (icon only; the sticky CTA carries it).
+              Docs never collapses, so the gaps and the phone logo are a little
+              tighter than before to keep every label on one line. */}
+          <div className="ml-auto flex items-center gap-3 max-[520px]:gap-2">
             <a
               className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[1180px]:hidden"
               href="#inside"
@@ -246,6 +249,12 @@ export default async function LandingPage({
             >
               About
             </a>
+            <Link
+              className="inline-flex min-h-11 items-center text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f]"
+              href="/docs"
+            >
+              Docs
+            </Link>
             <LoginMenu />
             <a
               className="inline-flex min-h-11 items-center text-[14px] font-medium text-[#475569] transition-colors hover:text-[#0b1b3f] min-[761px]:hidden"
@@ -599,9 +608,9 @@ export default async function LandingPage({
             </div>
             <p className="mt-8 text-[14px] text-[#475569]">
               Building a remittance product?{' '}
-              <a className="font-semibold text-[#0c5bd2] hover:underline" href="/docs">
+              <Link className="font-semibold text-[#0c5bd2] hover:underline" href="/docs">
                 Read the partner docs →
-              </a>
+              </Link>
             </p>
           </div>
         </section>
@@ -857,9 +866,9 @@ export default async function LandingPage({
                 </a>
               </li>
               <li>
-                <a className="hover:text-[#0b1b3f]" href="/docs">
-                  Partner docs
-                </a>
+                <Link className="hover:text-[#0b1b3f]" href="/docs">
+                  Docs
+                </Link>
               </li>
               <li>
                 <a className="hover:text-[#0b1b3f]" href="#partner-with-us">

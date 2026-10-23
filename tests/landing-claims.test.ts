@@ -10,7 +10,7 @@ import { resolve } from 'node:path';
 // always on"). Static grep over the page sources, like landing-corridors.test.ts.
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf-8');
 const LANDING = read('src/app/page.tsx');
-const DOCS = read('src/app/docs/page.tsx');
+const DOCS = read('src/content/docs/getting-started.mdx');
 const SHOWCASE = read('src/app/landing/showcase.tsx');
 
 const squash = (s: string) => s.replace(/\s+/g, ' ');
@@ -37,12 +37,12 @@ describe('landing sanctions claims are qualified (Program-Fix 14, docs-01)', () 
     expect(LANDING).toContain('<ShieldIcon /> Sanctions screening runs on every transfer (demo: reference list)');
   });
 
-  it('the /docs 422 claim carries the /about caveat', () => {
+  it('the docs 422 claim (getting-started guide) carries the /about caveat', () => {
     const text = squash(DOCS);
     const at = text.indexOf('Compliance screening (sanctions) runs on');
     expect(at).toBeGreaterThan(-1);
     const para = text.slice(at, at + 420);
-    expect(para).toContain('watchlist hit returns 422');
+    expect(para).toMatch(/watchlist hit returns `?422`?/);
     expect(para).toMatch(/built-in reference rule set, not yet a live commercial AML feed/);
   });
 

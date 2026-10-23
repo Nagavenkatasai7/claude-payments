@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // Step 0 FX-8: the public pages may not call the platform's rate "mid-market"
@@ -14,7 +14,8 @@ const FILES = [
   'src/app/landing/RateCalculator.tsx',
   'src/app/landing/HeroPipeline.tsx',
   'src/app/landing/showcase.tsx',
-  'src/app/docs/page.tsx',
+  'openapi.yaml',
+  ...readdirSync('src/content/docs').filter((f) => f.endsWith('.mdx')).map((f) => `src/content/docs/${f}`),
 ];
 
 describe('public FX claims (Step 0 FX-8)', () => {

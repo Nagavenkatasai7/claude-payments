@@ -4,13 +4,13 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { loadPartnerOpenApiDocument } from '@/lib/openapi/load-spec';
 import { operationAnchor, schemaAnchor } from '@/lib/docs/api-reference';
 
-// UI redesign M4 PR-4: /docs-next/api renders EVERY operation in openapi.yaml (method, path,
+// UI redesign M4 PR-4: /docs/api renders EVERY operation in openapi.yaml (method, path,
 // scope, sandbox availability, parameters, request example, every documented status with its
 // body schema, a curl) plus the component schemas, as server-only HTML with stable anchors.
 
 const doc = loadPartnerOpenApiDocument();
 const render = async () => {
-  const { default: Page } = await import('@/app/docs-next/api/page');
+  const { default: Page } = await import('@/app/docs/api/page');
   return renderToStaticMarkup(createElement(Page));
 };
 const section = (html: string, id: string) => {
@@ -21,7 +21,7 @@ const section = (html: string, id: string) => {
 };
 const text = (s: string) => s.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
-describe('/docs-next/api page', () => {
+describe('/docs/api page', () => {
   it('tells the reader which shell variables the curl examples read', async () => {
     const t = text(await render());
     expect(t).toMatch(/\$SMARTREMIT_TEST_KEY/);

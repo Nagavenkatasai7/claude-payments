@@ -1,26 +1,40 @@
 import Link from 'next/link';
-import { GUIDES } from '@/content/docs/registry';
+import { guidesFor } from '@/content/docs/registry';
 
 // The guide list. Desktop: a sticky sidebar. Phone: a <details> disclosure (no client JS).
 // Only one of the two is displayed at a time, so assistive tech sees a single "Guides" nav.
 const LINK = 'block rounded-ds-focus px-2 py-1.5 text-[14px] text-ds-ink-muted hover:bg-ds-tint hover:text-ds-ink';
+const GROUP = 'mt-3 block px-2 pb-1 text-[12px] font-semibold text-ds-ink';
 
 function GuideList() {
   return (
     <ul className="flex flex-col gap-0.5">
       <li>
-        <Link className={LINK} href="/docs-next">
+        <Link className={LINK} href="/docs">
           Overview
         </Link>
       </li>
+      <li className={GROUP}>
+        For customers
+      </li>
+      {guidesFor('customer').map((g) => (
+        <li key={g.slug}>
+          <Link className={LINK} href={`/docs/${g.slug}`}>
+            {g.title}
+          </Link>
+        </li>
+      ))}
+      <li className={GROUP}>
+        For partners
+      </li>
       <li>
-        <Link className={LINK} href="/docs-next/api">
+        <Link className={LINK} href="/docs/api">
           API reference
         </Link>
       </li>
-      {GUIDES.map((g) => (
+      {guidesFor('partner').map((g) => (
         <li key={g.slug}>
-          <Link className={LINK} href={`/docs-next/${g.slug}`}>
+          <Link className={LINK} href={`/docs/${g.slug}`}>
             {g.title}
           </Link>
         </li>

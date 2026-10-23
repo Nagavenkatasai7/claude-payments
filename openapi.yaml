@@ -147,7 +147,7 @@ paths:
       operationId: createQuote
       summary: Price a transfer
       description: >
-        FX and fee quote at platform mid-market. Nothing is stored. Pass
+        FX and fee quote at the platform reference rate. Nothing is stored. Pass
         destination_country (resolved to its home currency) or destination_currency
         (default INR); destination_country wins when both are present. Pass
         sender.phone to price the sender's first transfer at no fee
@@ -248,7 +248,8 @@ paths:
         under a key, every request with that key and a valid body returns that same
         transaction with its current state (the body is validated but not compared).
         Sanctions screening runs on every mint in every mode; a hit is 422 and the attempt
-        is recorded as blocked. A transaction created without sender.name is held for
+        is recorded as blocked. Today screening runs against a built-in reference rule set,
+        not yet a live commercial AML feed. A transaction created without sender.name is held for
         manual review. client_reference is optional: your own order number, 1 to 64
         letters, digits and . _ : / # - characters. It is saved once and comes back in
         every answer and in the settlements statement. It is also in the settlement
@@ -276,7 +277,7 @@ paths:
           required: true
           description: >
             A fresh random UUID per transaction, with no personal data. Values beginning
-            draft:, b2binvoice:, sched: or test: are reserved.
+            draft:, b2binvoice:, sched:, test: or paylink: are reserved and refused with 400.
           schema: { type: string }
       requestBody:
         required: true
@@ -403,9 +404,11 @@ paths:
       operationId: pushRate
       summary: Push one corridor rate
       description: >
-        Push the wholesale conversion rate you offer for one corridor. It competes for routed
-        flow; it does not change your own /quote, which stays at platform mid-market.
-        ttl_seconds defaults to 3600 and is clamped to 60–86400.
+        Push the wholesale conversion rate you offer for one corridor. When your fresh rate
+        beats the platform reference rate and your settlement rail is configured, eligible
+        platform transfers are routed to you for settlement. A pushed rate does not change the
+        pricing of your own /quote or /transactions: those stay at the platform reference rate.
+        ttl_seconds defaults to 3600 and is clamped to 60–86400; an expired rate stops competing.
       tags: [Rates]
       x-smartremit-scope: rates:write
       x-smartremit-sandbox: false
@@ -419,7 +422,16 @@ paths:
               effective_rate: 85.1
               ttl_seconds: 3600
       responses:
-        '200': { description: The saved rate. }
+        '200':
+          description: The saved rate.
+          content:
+            application/json:
+              example:
+                source_currency: USD
+                destination_currency: INR
+                effective_rate: 85.1
+                expires_at: '2026-09-23T11:00:00.000Z'
+                pushed_at: '2026-09-23T10:00:00.000Z'
         '400': { description: 'source_currency or destination_currency is unsupported or the two are equal, effective_rate is not a number greater than 0 and less than 100000, or ttl_seconds is not a number.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks rates:write (test keys never hold it), or the partner is not active.' }
@@ -427,12 +439,25 @@ paths:
     get:
       operationId: listRates
       summary: Your rate sheet
-      description: The partner's current rates, with freshness and margin.
+      description: >
+        Your current rates. fresh says whether the rate is still competing (it has a rate and
+        its expiry is in the future). margin_bps is your platform-configured fallback margin.
       tags: [Rates]
       x-smartremit-scope: rates:read
       x-smartremit-sandbox: false
       responses:
-        '200': { description: The rate sheet. }
+        '200':
+          description: The rate sheet.
+          content:
+            application/json:
+              example:
+                rates:
+                  - source_currency: USD
+                    destination_currency: INR
+                    effective_rate: 85.1
+                    expires_at: '2026-09-23T11:00:00.000Z'
+                    fresh: true
+                    margin_bps: 150
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks rates:read (test keys never hold it), or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
@@ -444,8 +469,17 @@ paths:
       description: >
         The instruction ledger for reconciliation: every live transfer of yours that was paid
         and sent for settlement in a half-open [from, to) window on paid_at, in UTC. Oldest
-        first. Totals cover the returned page only. Any partner_id parameter is ignored.
-        Each row ends with client_reference and payout_reference (the last two CSV columns).
+        first. Listed: paid and delivered transfers, and cancelled ones only if a rail was
+        instructed (see refund_status: none, requested, pending, completed or failed). A
+        transfer held for compliance review (in_review) is never listed; once released it
+        appears on its release day, with paid_at set to the release time. totals cover the
+        returned page only (every listed row, cancelled included), per currency, in integer
+        minor units (cents: 20000 = 200.00). The statement never includes payout account
+        details or sender or recipient identity. reference is the transaction id; on the
+        reference rail, provider_ref and payout_reference are simulated. In CSV, a text cell
+        starting with = + - @, a tab or a carriage return is prefixed with ' so a spreadsheet
+        never runs it as a formula. Any partner_id parameter is ignored. Each row ends with
+        client_reference and payout_reference (the last two CSV columns).
       tags: [Settlements]
       x-smartremit-scope: settlements:read
       x-smartremit-sandbox: false
