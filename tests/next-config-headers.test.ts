@@ -71,6 +71,7 @@ describe('next.config after the MDX wrap', () => {
     expect(await cfg.redirects!()).toEqual([
       { source: '/dashboard', destination: '/admin-dashboard', permanent: true },
       { source: '/dashboard/:path*', destination: '/admin-dashboard/:path*', permanent: true },
+      { source: '/docs-next', destination: '/docs', permanent: true },
       { source: '/docs-next/:path*', destination: '/docs/:path*', permanent: true },
     ]);
     expect(cfg.poweredByHeader).toBe(false);
@@ -80,15 +81,20 @@ describe('next.config after the MDX wrap', () => {
   // The /docs-next preview became /docs: every old link lands on the same page under /docs.
   // Next's own matcher and destination builder, as the redirect router uses them
   // (node_modules/next/dist/shared/lib/router/utils/path-match.d.ts, prepare-destination.d.ts).
+  // Bare /docs-next has its own rule FIRST: on Vercel the `:path*` rule sends it to "/docs/"
+  // (trailing slash, an extra hop), seen by the post-deploy smoke on cbd6fed.
   it('/docs-next and every page under it redirect to the same page under /docs', async () => {
     const cfg = await loadConfig();
-    const rule = (await cfg.redirects!()).find((r) => r.source.startsWith('/docs-next'))!;
+    const rules = (await cfg.redirects!()).filter((r) => r.source.startsWith('/docs-next'));
+    expect(rules[0]).toEqual({ source: '/docs-next', destination: '/docs', permanent: true });
     const { getPathMatch } = await import('next/dist/shared/lib/router/utils/path-match');
     const { prepareDestination } = await import('next/dist/shared/lib/router/utils/prepare-destination');
-    const match = getPathMatch(rule.source, { strict: true, removeUnnamedParams: true, sensitive: false });
     const to = (p: string) => {
-      const params = match(p);
-      return params === false ? null : prepareDestination({ appendParamsToQuery: false, destination: rule.destination, params, query: {} }).newUrl;
+      for (const rule of rules) {
+        const params = getPathMatch(rule.source, { strict: true, removeUnnamedParams: true, sensitive: false })(p);
+        if (params !== false) return prepareDestination({ appendParamsToQuery: false, destination: rule.destination, params, query: {} }).newUrl;
+      }
+      return null;
     };
     expect(to('/docs-next')).toBe('/docs');
     expect(to('/docs-next/ai-apps')).toBe('/docs/ai-apps');
