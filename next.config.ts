@@ -64,9 +64,11 @@ const nextConfig: NextConfig = {
         destination: '/admin-dashboard/:path*',
         permanent: true,
       },
-      // The docs moved from the /docs-next preview to /docs (one docs site). `:path*` matches zero
-      // or more segments, so /docs-next itself goes to /docs too
-      // (node_modules/next/dist/docs/01-app/03-api-reference/05-config/01-next-config-js/redirects.md:77).
+      // The docs moved from the /docs-next preview to /docs (one docs site). Bare /docs-next gets its
+      // own rule, as /dashboard does: on Vercel the `:path*` rule (zero or more segments,
+      // node_modules/next/dist/docs/01-app/03-api-reference/05-config/01-next-config-js/redirects.md:77)
+      // sends it to "/docs/", an extra trailing-slash hop (post-deploy smoke on cbd6fed).
+      { source: '/docs-next', destination: '/docs', permanent: true },
       { source: '/docs-next/:path*', destination: '/docs/:path*', permanent: true },
     ];
   },
