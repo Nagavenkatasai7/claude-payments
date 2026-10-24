@@ -4,6 +4,7 @@ import { mcpResourceUrl, type AgentScope } from './contract';
 import {
   AGENT_GRANT_TTL_MS,
   AGENT_IP_LIMITS,
+  AGENT_REGISTER_BODY_MAX,
   CLIENT_ID_RE,
   CLIENT_SECRET_PREFIX,
   REFRESH_TOKEN_PREFIX,
@@ -54,7 +55,7 @@ export async function handleRegister(req: Request, ctx: HostCtx, deps: AgentServ
   if (!(await deps.toolsOn(ctx.partnerId))) return oauthError('access_denied', 'AI apps are not available here.', 403);
   const type = (req.headers.get('content-type') ?? '').split(';', 1)[0].trim().toLowerCase();
   if (type !== 'application/json') return oauthError('invalid_client_metadata', 'The body must be application/json.');
-  const text = await readCapped(req, 8 * 1024);
+  const text = await readCapped(req, AGENT_REGISTER_BODY_MAX);
   if (text === null) return oauthError('invalid_client_metadata', 'The body is too large.');
   let body: unknown;
   try {

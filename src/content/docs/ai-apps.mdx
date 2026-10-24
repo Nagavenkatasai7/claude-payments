@@ -190,7 +190,7 @@ You only need this section if you are building your own MCP client. SmartRemit f
 - PKCE with `S256` is required. `plain` is refused.
 - Send `resource=https://send.smartremit.ai/api/mcp` (RFC 8707) on both the authorization and the token request; any other value is `invalid_target`.
 - Register at `/oauth/register` with `token_endpoint_auth_method` `none` (a public client, the usual choice) or `client_secret_post` / `client_secret_basic` (the secret is shown once).
-- Register with `redirect_uris` that use `https` (a loopback `http` address is allowed for local tools). The redirect URI must match exactly.
+- Register with up to 20 `redirect_uris` that use `https` (a loopback `http` address is allowed for local tools), each at most 512 characters. The redirect URI must match exactly.
 - Authorization codes last <Fact name="agentCodeTtlSec" /> seconds and work once. Access tokens (`sra_…`) last <Fact name="agentAccessTokenMinutes" /> minutes. Refresh tokens (`srr_…`) rotate on every use; presenting an already-used refresh token ends the whole connection.
 - Send the access token only in the `Authorization: Bearer` header, never in a query string.
 - Partner API keys are never accepted on the MCP server.

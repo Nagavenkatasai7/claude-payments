@@ -168,6 +168,13 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect(res.status).toBe(400);
       expect(json.error).toBe('invalid_redirect_uri');
     });
+    it('registers 20 redirect URIs of the longest allowed length (Perplexity sends more than 5)', async () => {
+      const uris = Array.from({ length: 20 }, (_, i) => `https://www.perplexity.ai/cb/${String(i).padStart(2, '0')}/${'a'.repeat(470)}`);
+      expect(uris.every((u) => u.length <= 512)).toBe(true);
+      const { res, json } = await register({ redirect_uris: uris, client_name: 'Perplexity', token_endpoint_auth_method: 'none' });
+      expect(res.status).toBe(201);
+      expect(json.redirect_uris).toEqual(uris);
+    });
     it('a non-JSON or oversized body is invalid_client_metadata', async () => {
       const r1 = await handleRegister(new Request(`${ISS}/oauth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' }), CTX, deps());
       expect(r1.status).toBe(400);
