@@ -17,8 +17,11 @@ export const AGENT_CONSENT_TTL_SEC = 600;
 export const AGENT_CODE_USED_TTL_SEC = 3600;
 
 export const AGENT_CLIENT_NAME_MAX = 60;
-export const AGENT_MAX_REDIRECT_URIS = 5;
+/** Perplexity registers more than 5 (its "invalid_redirect_uri: At most 5 …", Oct 24). */
+export const AGENT_MAX_REDIRECT_URIS = 20;
 export const AGENT_REDIRECT_URI_MAX = 512;
+/** The registration body cap: 20 redirect URIs of AGENT_REDIRECT_URI_MAX characters plus the rest. */
+export const AGENT_REGISTER_BODY_MAX = 16 * 1024;
 export const AGENT_STATE_MAX = 512;
 
 export const ACCESS_TOKEN_PREFIX = 'sra_';

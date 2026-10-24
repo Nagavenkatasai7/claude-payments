@@ -94,7 +94,7 @@ describe('dynamic client registration (RFC 7591)', () => {
     [{ ...ok, redirect_uris: [] }, 'invalid_redirect_uri'],
     [{ ...ok, redirect_uris: undefined }, 'invalid_redirect_uri'],
     [{ ...ok, redirect_uris: ['http://evil.example/cb'] }, 'invalid_redirect_uri'],
-    [{ ...ok, redirect_uris: Array.from({ length: 6 }, (_, i) => `https://a.example/${i}`) }, 'invalid_redirect_uri'],
+    [{ ...ok, redirect_uris: Array.from({ length: 21 }, (_, i) => `https://a.example/${i}`) }, 'invalid_redirect_uri'],
     [{ ...ok, redirect_uris: ['https://a.example/cb#x'] }, 'invalid_redirect_uri'],
     [{ ...ok, client_name: 'x'.repeat(61) }, 'invalid_client_metadata'],
     [{ ...ok, client_name: 'Bad‮name' }, 'invalid_client_metadata'],
@@ -110,6 +110,11 @@ describe('dynamic client registration (RFC 7591)', () => {
     const r = parseClientRegistration(body);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toBe(error);
+  });
+  // Perplexity registers more than 5 redirect URIs ("invalid_redirect_uri: At most 5 …", Oct 24).
+  it('accepts up to 20 distinct redirect URIs', () => {
+    const uris = Array.from({ length: 20 }, (_, i) => `https://www.perplexity.ai/rest/connections/oauth_callback/${i}`);
+    expect(parseClientRegistration({ ...ok, redirect_uris: uris })).toMatchObject({ ok: true, value: { redirectUris: uris } });
   });
   it('dedupes redirect URIs and trims the name', () => {
     const r = parseClientRegistration({ ...ok, client_name: '  My app  ', redirect_uris: [ok.redirect_uris[0], ok.redirect_uris[0]] });
