@@ -1,4 +1,4 @@
-import { chat } from './ollama';
+import { chat } from './llm';
 import { getRedis } from './redis';
 import { getStore, type RedisLike } from './store';
 import { getCustomerStore } from './customer-store';
@@ -115,7 +115,7 @@ export function buildSummaryContext(
 
 /**
  * Deterministic fallback digest — a plain-text summary built PURELY from the
- * same SummaryContext the model would have received, with NO Ollama call and NO
+ * same SummaryContext the model would have received, with NO model call and NO
  * cache. The dashboard renders this whenever getCustomerSummary returns null (a
  * model/cache failure) so the summary card is never silently empty.
  *
@@ -191,13 +191,13 @@ export interface CustomerSummarizerDeps {
     ensureDefaultPartner(): Promise<Partner>;
   };
   dailyVolume: { getTodayCents(partnerId: PartnerId, phone: string): Promise<number> };
-  /** Injectable model seam (defaults to the shared Ollama client). */
+  /** Injectable model seam (defaults to the shared Claude client, task customer_summary). */
   chatFn?: (messages: ChatMessage[], tools: ChatTool[]) => Promise<ChatMessage>;
   timeoutMs?: number;
 }
 
 export function createCustomerSummarizer(deps: CustomerSummarizerDeps) {
-  const chatFn = deps.chatFn ?? chat;
+  const chatFn = deps.chatFn ?? ((m: ChatMessage[], t: ChatTool[]) => chat(m, t, { task: 'customer_summary' }));
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return {

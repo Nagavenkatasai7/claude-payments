@@ -91,7 +91,7 @@ describe('end-to-end happy path', () => {
     const draftStore = createDraftStore(redis);
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
-    // Scripted Kimi: quote -> approve card (a draft). A stale create_transfer /
+    // Scripted model: quote -> approve card (a draft). A stale create_transfer /
     // generate_payment_link pair (e.g. from old history) is refused at dispatch.
     const script: ChatMessage[] = [
       toolCall('c1', 'get_quote', {

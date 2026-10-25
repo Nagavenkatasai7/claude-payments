@@ -13,9 +13,9 @@ import type { ChatMessage, Ticket, TicketMessage } from '@/lib/types';
 //     never see internal notes; empty model output throws (callers degrade to
 //     "AI unavailable").
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import {
   draftReply,
   summarizeCase,

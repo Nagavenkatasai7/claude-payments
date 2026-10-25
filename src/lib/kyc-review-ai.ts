@@ -1,4 +1,4 @@
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { AuditEntry } from '@/lib/kyc-case-store';
 import type { ChatMessage, Customer } from '@/lib/types';
 
@@ -139,7 +139,7 @@ export async function suggestKycReview(
       `KYC audit trail (oldest first):\n${auditLines(audit, customer)}\n\n` +
       `Summarize the case and suggest a review decision.`,
   };
-  const reply = await chat([{ role: 'system', content: REVIEW_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: REVIEW_SYSTEM }, user], [], { task: 'kyc_review' });
   const raw = (reply.content ?? '').trim();
   if (!raw) throw new Error('Empty AI response');
 

@@ -126,14 +126,16 @@ export const env = {
   get partnerDocsBlobToken(): string {
     return process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN ?? '';
   },
-  get ollamaBaseUrl() {
-    return required('OLLAMA_BASE_URL');
+  // The Claude API key for every AI call (src/lib/llm.ts). Read on the first
+  // model call, never at boot: a missing key makes each bot turn answer with
+  // the fallback line, and the money paths keep working.
+  get anthropicApiKey() {
+    return requiredTrimmed('ANTHROPIC_API_KEY');
   },
-  get ollamaApiKey() {
-    return required('OLLAMA_API_KEY');
-  },
-  get ollamaModel() {
-    return required('OLLAMA_MODEL');
+  // OPTIONAL: move the customer bot to another listed Claude model
+  // (llm-models.ts AGENT_MODEL_CHOICES). Unset or unknown ⇒ the code default.
+  get anthropicAgentModel(): string | undefined {
+    return process.env.ANTHROPIC_AGENT_MODEL?.trim() || undefined;
   },
   get whatsappToken() {
     return requiredTrimmed('WHATSAPP_TOKEN');

@@ -53,8 +53,10 @@ export const SUBPROCESSORS: readonly Subprocessor[] = [
     regionStatus: 'being-confirmed',
   },
   {
-    name: 'Ollama Cloud',
-    purpose: 'AI model for the conversational agent',
+    // Every request asks for US-only processing (inference_geo "us", src/lib/llm.ts);
+    // the region stays "Being confirmed" until production usage logs show it.
+    name: 'Anthropic (Claude API)',
+    purpose: 'AI model for the conversational agent and staff assistant tools',
     data: 'Conversation text, including recipient names and phone numbers',
     region: 'Being confirmed',
     regionStatus: 'being-confirmed',

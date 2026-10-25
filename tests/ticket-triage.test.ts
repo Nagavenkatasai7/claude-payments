@@ -24,7 +24,7 @@ vi.mock('next/headers', async (orig) => ({
  * A freshly created customer ticket lands category=null/priority='normal'; the
  * worker drains a 'ticket.triage' row out-of-band → triageSuggest → setTriage →
  * audit. The model (chat()) is STUBBED everywhere so triageSuggest never hits
- * Ollama; tests assert the CLAMPED value the worker persists and the audit row.
+ * the model; tests assert the CLAMPED value the worker persists and the audit row.
  *
  * Coverage:
  *  - the worker handler: runs triageSuggest, calls setTriage with the clamped
@@ -33,11 +33,11 @@ vi.mock('next/headers', async (orig) => ({
  *  - all three creation sites enqueue ONE deduped 'triage:<id>' outbox row.
  */
 
-// chat() is the single Ollama seam triageSuggest calls — stub it (the prompt
-// says: vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }))). vi.hoisted lets the
+// chat() is the single model seam triageSuggest calls — stub it (the prompt
+// says: vi.mock('@/lib/llm', () => ({ chat: vi.fn() }))). vi.hoisted lets the
 // hoisted factory reference the mock fn so tests can drive its return value.
 const { chatMock } = vi.hoisted(() => ({ chatMock: vi.fn() }));
-vi.mock('@/lib/ollama', () => ({ chat: chatMock }));
+vi.mock('@/lib/llm', () => ({ chat: chatMock }));
 
 const PHONE = '15551230000';
 const OTHER_PHONE = '15559990000';
@@ -186,7 +186,7 @@ describe('outbox worker — ticket.triage handler', () => {
 
   it('a model outage throws and retries (not done, not dead on first failure)', async () => {
     const ticket = await createCustomerTicket({ id: 'tk_down' });
-    chatMock.mockRejectedValue(new Error('Ollama 500'));
+    chatMock.mockRejectedValue(new Error('model 500'));
 
     await createOutboxRepo(db).enqueue('ticket.triage', { ticketId: ticket.id }, { dedupeKey: `triage:${ticket.id}` });
     const r = await drainOnce(deps(), 'w1');
@@ -319,7 +319,7 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
     it('enqueues one deduped triage row for the new ticket', async () => {
       vi.resetModules();
       const redirectMock = vi.fn((p: string) => { throw new Error(`REDIRECT:${p}`); });
-      vi.doMock('@/lib/ollama', () => ({ chat: chatMock }));
+      vi.doMock('@/lib/llm', () => ({ chat: chatMock }));
       vi.doMock('@/lib/customer-auth', () => ({ requireCustomer: async () => sessionCustomer }));
       vi.doMock('@/db/client', async (orig) => ({ ...(await orig() as object), getDb: () => db }));
       vi.doMock('@/lib/partner-store', async (orig) => ({ ...(await orig() as object), getPartnerStore: () => ps }));
@@ -376,7 +376,7 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
 
       vi.resetModules();
       const redirectMock = vi.fn((p: string) => { throw new Error(`REDIRECT:${p}`); });
-      vi.doMock('@/lib/ollama', () => ({ chat: chatMock }));
+      vi.doMock('@/lib/llm', () => ({ chat: chatMock }));
       vi.doMock('@/lib/customer-auth', () => ({ requireCustomer: async () => sessionCustomer }));
       vi.doMock('@/db/client', async (orig) => ({ ...(await orig() as object), getDb: () => db }));
       vi.doMock('@/lib/partner-store', async (orig) => ({ ...(await orig() as object), getPartnerStore: () => ps }));

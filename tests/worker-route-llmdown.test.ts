@@ -5,7 +5,7 @@ import { fakeRedis } from './helpers';
 import { fakeGateRedis } from './helpers-gate-redis';
 import { freshDb } from './helpers-db';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { OllamaHttpError } from '@/lib/llm-provider-error';
+import { ProviderHttpError } from '@/lib/llm-provider-error';
 import type { Db } from '@/db/client';
 
 // LLM provider outages reach ops: the PRODUCTION wiring in /api/worker's
@@ -41,10 +41,10 @@ vi.mock('@/lib/aml-sweep', async (orig) => {
   return { ...real, amlRedis: () => fakeAmlRedis() };
 });
 // Only chat() is mocked: the provider-error types live in their own leaf module.
-vi.mock('@/lib/ollama', () => ({
+vi.mock('@/lib/llm', () => ({
   chat: vi.fn(async () => {
     box.chatCalls += 1;
-    const { OllamaHttpError: E } = await import('@/lib/llm-provider-error');
+    const { ProviderHttpError: E } = await import('@/lib/llm-provider-error');
     throw new E(402, 'out of credit');
   }),
 }));
@@ -64,7 +64,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe('/api/worker runAgentTurn wiring — llmdown', () => {
   it('a 402 from the model raises llmdown:402:<hour> (no botfallback), with one model call', async () => {
-    expect(new OllamaHttpError(402, '').permanent).toBe(true);
+    expect(new ProviderHttpError(402, '').permanent).toBe(true);
     await createOutboxRepo(db).enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {} });
     const res = await POST(
       new NextRequest('https://smartremit.test/api/worker', { method: 'POST', headers: { authorization: `Bearer ${SECRET}` } }),

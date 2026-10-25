@@ -10,9 +10,9 @@ import type { CorridorDemand } from '@/lib/corridor-demand';
 // call, the right numbers reach the model, no sender phones leak, empty output
 // throws (the caller hides the brief).
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import { narrateCorridorBrief, getCorridorBrief, type BriefCache } from '@/lib/corridor-brief-ai';
 
 const chatMock = vi.mocked(chat);
@@ -134,7 +134,7 @@ describe('narrateCorridorBrief — behavior with chat() stubbed', () => {
 });
 
 // getCorridorBrief — the admin Corridors page's entry point. The model call is
-// slow (up to OLLAMA_TIMEOUT_MS), so a brief for the same top-N numbers is
+// slow (up to LLM_TIMEOUT_MS), so a brief for the same top-N numbers is
 // reused from the shared cache for an hour, and concurrent page loads share one
 // in-flight call. The cache is best-effort: a cache outage still narrates.
 describe('getCorridorBrief — cached narration', () => {

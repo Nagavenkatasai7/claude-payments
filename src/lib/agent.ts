@@ -128,7 +128,7 @@ export function sanitizeReply(
 
 export function createAgent(deps: AgentDeps) {
   const partnerId: PartnerId = deps.partnerId ?? DEFAULT_PARTNER_ID;
-  // One retry on a transient chat() failure (Ollama Cloud 5xx / timeout / a
+  // One retry on a transient chat() failure (provider 5xx / 529 / timeout / a
   // momentarily malformed response). A throw means history.push(assistant) never
   // ran, so the retry re-sends the identical messages cleanly.
   // Never retry once the caller's row deadline (fix 7) has fired: the retry
@@ -157,7 +157,7 @@ export function createAgent(deps: AgentDeps) {
     const history = await deps.store.getConversation(partnerId, phone);
     history.push({ role: 'user', content: incomingText });
 
-    // A throw anywhere below (Ollama after its retry, a Redis blip mid-turn, …)
+    // A throw anywhere below (the model after its retry, a Redis blip mid-turn, …)
     // would otherwise surface the route's bare "something went wrong" catch-all
     // AND drop the turn. Degrade to a friendly retry line and PRESERVE history
     // (the inbound message + any partial turns) so the customer can just resend.
@@ -293,123 +293,128 @@ export function createAgent(deps: AgentDeps) {
     // shown (never a value read back from the model's world), at the top of a text reply.
     let scamWarning = false;
 
+    // ONE prefix per turn (Claude API move, 2026-10-25): the system prompt, the
+    // turn's notes, the history as it stood at turn start and the customer
+    // context are built ONCE, and each round sends that prefix plus what this
+    // turn has appended since. Claude checks that nothing before a returned
+    // thinking block changes (a 400 on accounts made on or after 2026-08-31),
+    // so a turn only ever appends. The round-0 notes therefore stay in the
+    // later rounds of the same turn. None of the prefix is persisted.
+    const historyAtTurnStart = history.length;
+    const prefix: ChatMessage[] = [
+      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired }) },
+    ];
+    // Web channel: in the prefix, so the model still knows the channel's limits
+    // after tool results arrive. Never persisted.
+    if (channel === 'web') {
+      prefix.push({ role: 'system', content: WEB_CHANNEL_NOTE });
+    }
+    // Telegram test channel: in the prefix for the same reason. Never persisted.
+    if (turn.surface === 'telegram') {
+      prefix.push({ role: 'system', content: TELEGRAM_CHANNEL_NOTE });
+    }
+    // Step 1: a transcribed voice note. The read-back rule rides every round
+    // (after a tool result the model must still read back before acting).
+    // Never persisted.
+    if (turn.inputModality === 'voice') {
+      prefix.push({ role: 'system', content: VOICE_INPUT_NOTE });
+    }
+    if (turn.isNewConversation) {
+      prefix.push({
+        role: 'system',
+        content:
+          '[NEW CONVERSATION] First message in over 24 hours. Greet warmly and ask how you can help (you may reference their recent history if shown). Do NOT call list_saved_recipients or send_recipient_picker yet — wait until the user actually wants to send. Only then offer a picker or take their details.',
+      });
+    }
+    // Recipient button tap: the model proceeds straight to amount + funding and
+    // NEVER re-asks who. fix 5: this note is FIXED text — the tapped recipient's
+    // name, number and country ride the get_customer_context result (data),
+    // and the stored payout rides nothing (resolveStoredPayout rehydrates it
+    // server-side for every chat mint).
+    if (customerContext.selected_recipient) {
+      prefix.push({
+        role: 'system',
+        content:
+          "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
+      });
+    }
+    if (scheduleNeedsName) {
+      prefix.push({ role: 'system', content: SCHEDULE_NEEDS_NAME_NOTE });
+    }
+    // These two notes LEAD with verify-before-send; only inject them when our
+    // KYC gate is active. A 'delegated' partner (gateActive=false) handles KYC
+    // on their side, so a brand-new customer just gets the normal warm greeting.
+    if (gateActive) {
+      if (turn.isNewCustomer) {
+        prefix.push({
+          role: 'system',
+          content:
+            `[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, explain they must verify their identity before their first send, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, and share that URL asking them to verify first. You may mention they can send up to ${t0CapTxt}/day for their first 3 days once verified. Do NOT ask how much they want to send until they are verified.`,
+        });
+      } else if (turn.tierReminderDayOfWindow) {
+        prefix.push({
+          role: 'system',
+          content:
+            `[TIER_REMINDER day ${turn.tierReminderDayOfWindow}/3] T0 customer in their observation window. Briefly remind them which day they're on and share the kyc_url (from check_send_limit({amount_usd: 0})) before continuing the normal flow.`,
+        });
+      }
+    }
+    if (sendCurrencies.length > 1) {
+      const detected = currencyForPhone(phone) ?? sendCurrencies[0];
+      prefix.push({
+        role: 'system',
+        content:
+          `[SEND CURRENCIES: ${sendCurrencies.join(', ')}. The sender sends in ${detected} ` +
+          `(auto-detected from their number) — do NOT ask which currency; the tools default to it. ` +
+          `Pass source_currency ONLY if the sender explicitly asks for a different listed currency.]`,
+      });
+    }
+    if (senderDefaultsNote) {
+      prefix.push({ role: 'system', content: senderDefaultsNote });
+    }
+    // Deterministic verify-before-send guard. The hard gate is enforced at the
+    // tool level (every quote/transfer re-checks isSendVerified), but the model
+    // must ALSO lead the conversation with verification instead of collecting an
+    // amount — otherwise an unverified sender gets "how much?" before being asked
+    // to verify. Server-injected so it never depends on the model reading prompt.ts.
+    if (gateActive && !isSendVerified(noteCustomer)) {
+      prefix.push({
+        role: 'system',
+        content:
+          '[UNVERIFIED SENDER] This customer is NOT identity-verified, so they cannot send money yet — ' +
+          'every quote and transfer is blocked at the tool level until they verify. If they signal any ' +
+          'intent to send (even before naming an amount), do NOT ask "how much", do NOT call get_quote ' +
+          'or send_approve_picker, and do NOT collect recipient/payment details. Instead call ' +
+          'check_send_limit({amount_usd: 0}) for the kyc_url and ask them to verify first, sharing the link. ' +
+          'Do not claim their verification is complete or in progress — just ask them to finish verifying.',
+      });
+    }
+    prefix.push(...history);
+    // fix 5: the customer context as a tool RESULT, after the new user
+    // message — the same assistant-tool_calls + tool shape the history
+    // replays every turn (see the history.push of role 'tool' below). Lives
+    // in the prefix only: never persisted, rebuilt fresh on every (re)run.
+    if (hasCustomerContext) {
+      prefix.push(
+        {
+          role: 'assistant',
+          // '' not null: llm-translate.ts turns this into a lone tool_use block.
+          content: '',
+          tool_calls: [
+            { id: CONTEXT_CALL_ID, type: 'function', function: { name: 'get_customer_context', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', tool_call_id: CONTEXT_CALL_ID, content: JSON.stringify(customerContext) },
+      );
+    }
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Cooperative row deadline (fix 7): the worker aborts this signal at
       // ROW_DEADLINE_MS. Stop BEFORE starting another LLM call / tool round so
       // no tool runs after the worker has given up on us; the catch in
       // runAgentTurn turns this into FALLBACK_REPLY with history preserved.
       if (signal?.aborted) throw new Error('agent turn aborted: row deadline');
-      // A one-off system note for new conversations. Not persisted to history
-      // (only injected into the messages sent to the model this turn) so it
-      // doesn't echo on every later turn.
-      const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired }) },
-      ];
-      // Web channel: injected EVERY round (not just round 0) so the model still
-      // knows the channel's limits after tool results arrive. Never persisted.
-      if (channel === 'web') {
-        messages.push({ role: 'system', content: WEB_CHANNEL_NOTE });
-      }
-      // Telegram test channel: also every round, for the same reason. Never persisted.
-      if (turn.surface === 'telegram') {
-        messages.push({ role: 'system', content: TELEGRAM_CHANNEL_NOTE });
-      }
-      // Step 1: a transcribed voice note. The read-back rule rides EVERY round
-      // (after a tool result the model must still read back before acting).
-      // Never persisted.
-      if (turn.inputModality === 'voice') {
-        messages.push({ role: 'system', content: VOICE_INPUT_NOTE });
-      }
-      if (turn.isNewConversation && round === 0) {
-        messages.push({
-          role: 'system',
-          content:
-            '[NEW CONVERSATION] First message in over 24 hours. Greet warmly and ask how you can help (you may reference their recent history if shown). Do NOT call list_saved_recipients or send_recipient_picker yet — wait until the user actually wants to send. Only then offer a picker or take their details.',
-        });
-      }
-      // Recipient button tap: the model proceeds straight to amount + funding and
-      // NEVER re-asks who. fix 5: this note is FIXED text — the tapped recipient's
-      // name, number and country ride the get_customer_context result (data),
-      // and the stored payout rides nothing (resolveStoredPayout rehydrates it
-      // server-side for every chat mint).
-      if (round === 0 && customerContext.selected_recipient) {
-        messages.push({
-          role: 'system',
-          content:
-            "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
-        });
-      }
-      if (round === 0 && scheduleNeedsName) {
-        messages.push({ role: 'system', content: SCHEDULE_NEEDS_NAME_NOTE });
-      }
-      // These two notes LEAD with verify-before-send; only inject them when our
-      // KYC gate is active. A 'delegated' partner (gateActive=false) handles KYC
-      // on their side, so a brand-new customer just gets the normal warm greeting.
-      if (round === 0 && gateActive) {
-        if (turn.isNewCustomer) {
-          messages.push({
-            role: 'system',
-            content:
-              `[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, explain they must verify their identity before their first send, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, and share that URL asking them to verify first. You may mention they can send up to ${t0CapTxt}/day for their first 3 days once verified. Do NOT ask how much they want to send until they are verified.`,
-          });
-        } else if (turn.tierReminderDayOfWindow) {
-          messages.push({
-            role: 'system',
-            content:
-              `[TIER_REMINDER day ${turn.tierReminderDayOfWindow}/3] T0 customer in their observation window. Briefly remind them which day they're on and share the kyc_url (from check_send_limit({amount_usd: 0})) before continuing the normal flow.`,
-          });
-        }
-      }
-      if (round === 0 && sendCurrencies.length > 1) {
-        const detected = currencyForPhone(phone) ?? sendCurrencies[0];
-        messages.push({
-          role: 'system',
-          content:
-            `[SEND CURRENCIES: ${sendCurrencies.join(', ')}. The sender sends in ${detected} ` +
-            `(auto-detected from their number) — do NOT ask which currency; the tools default to it. ` +
-            `Pass source_currency ONLY if the sender explicitly asks for a different listed currency.]`,
-        });
-      }
-      if (round === 0 && senderDefaultsNote) {
-        messages.push({ role: 'system', content: senderDefaultsNote });
-      }
-      // Deterministic verify-before-send guard. The hard gate is enforced at the
-      // tool level (every quote/transfer re-checks isSendVerified), but the model
-      // must ALSO lead the conversation with verification instead of collecting an
-      // amount — otherwise an unverified sender gets "how much?" before being asked
-      // to verify. Server-injected so it never depends on the model reading prompt.ts.
-      if (round === 0 && gateActive && !isSendVerified(noteCustomer)) {
-        messages.push({
-          role: 'system',
-          content:
-            '[UNVERIFIED SENDER] This customer is NOT identity-verified, so they cannot send money yet — ' +
-            'every quote and transfer is blocked at the tool level until they verify. If they signal any ' +
-            'intent to send (even before naming an amount), do NOT ask "how much", do NOT call get_quote ' +
-            'or send_approve_picker, and do NOT collect recipient/payment details. Instead call ' +
-            'check_send_limit({amount_usd: 0}) for the kyc_url and ask them to verify first, sharing the link. ' +
-            'Do not claim their verification is complete or in progress — just ask them to finish verifying.',
-        });
-      }
-      messages.push(...history);
-      // fix 5: the customer context as a tool RESULT, after the new user
-      // message — the same assistant-tool_calls + tool shape the history
-      // replays every turn (see the history.push of role 'tool' below). Lives
-      // in `messages` only: never persisted, rebuilt fresh on every (re)run.
-      if (round === 0 && hasCustomerContext) {
-        messages.push(
-          {
-            role: 'assistant',
-            // '' not null: nothing on this transport has ever sent null content,
-            // and a strict OpenAI-compatible proxy may reject it.
-            content: '',
-            tool_calls: [
-              { id: CONTEXT_CALL_ID, type: 'function', function: { name: 'get_customer_context', arguments: '{}' } },
-            ],
-          },
-          { role: 'tool', tool_call_id: CONTEXT_CALL_ID, content: JSON.stringify(customerContext) },
-        );
-      }
-
+      const messages: ChatMessage[] = [...prefix, ...history.slice(historyAtTurnStart)];
       const assistant = await chatWithRetry(messages, channelTools, signal);
       history.push(assistant);
 

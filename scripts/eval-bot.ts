@@ -1,50 +1,42 @@
 /**
  * Program-Fix 49B (prompt-11): the nightly real-model bot eval.
  *
- *   EVAL_OLLAMA_API_KEY=… npx tsx scripts/eval-bot.ts
+ *   EVAL_ANTHROPIC_API_KEY=… npx tsx scripts/eval-bot.ts
  *
  * Runs the 24 recorded cases (scripts/eval-bot-cases.ts) once each against the
  * model and prints one line per case. It does NOTHING without
- * EVAL_OLLAMA_API_KEY: it prints a skip line and exits 0 before importing the
+ * EVAL_ANTHROPIC_API_KEY: it prints a skip line and exits 0 before importing the
  * prompt or tool code, so CI without the secret is a no-op. It never gates a
  * merge: the Nightly workflow runs it with continue-on-error.
  *
- * Optional overrides (script-only, never read by the app):
- *   EVAL_OLLAMA_BASE_URL — default https://ollama.com/v1 (Ollama's
- *     OpenAI-compatible cloud endpoint: https://docs.ollama.com/api/openai-compatibility)
- *   EVAL_OLLAMA_MODEL    — default kimi-k2.6 (the production agent's model family)
+ * Optional override (script-only, never read by the app):
+ *   EVAL_ANTHROPIC_MODEL — default claude-haiku-5-5 (the production bot's
+ *     model); claude-sonnet-5-5 checks the fallback model.
  *
- * The key is sent only as the Authorization header to that endpoint and is
- * never printed. Output carries case ids, titles and failure reasons only.
+ * The calls go through the app's own Claude adapter (src/lib/llm.ts createChat),
+ * so the eval tests the exact request the bot sends. The key is sent only to
+ * the Claude API and is never printed. Output carries case ids, titles and
+ * failure reasons only.
  */
+import Anthropic from '@anthropic-ai/sdk';
 import type { ChatMessage, ChatTool } from '@/lib/types';
+import { createChat } from '@/lib/llm';
+import { HAIKU } from '@/lib/llm-models';
 
-export const EVAL_DEFAULT_BASE_URL = 'https://ollama.com/v1';
-export const EVAL_DEFAULT_MODEL = 'kimi-k2.6';
+export const EVAL_DEFAULT_MODEL = HAIKU;
 /** Per call; 24 calls (8.8 min) stay inside the nightly step's 9-minute timeout. */
 const EVAL_TIMEOUT_MS = 22_000;
 
 type Env = Record<string, string | undefined>;
 type FetchFn = typeof fetch;
 
-/** An OpenAI-compatible chat call bound to the eval key (not the app's env). */
+/** The bot's chat call bound to the eval key (not the app's env). */
 export function makeEvalChat(env: Env, fetchImpl: FetchFn = fetch) {
-  const baseUrl = (env.EVAL_OLLAMA_BASE_URL || EVAL_DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const model = env.EVAL_OLLAMA_MODEL || EVAL_DEFAULT_MODEL;
-  const key = env.EVAL_OLLAMA_API_KEY ?? '';
-  return async (messages: ChatMessage[], tools: ChatTool[]): Promise<ChatMessage> => {
-    const res = await fetchImpl(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, messages, tools, tool_choice: 'auto' }),
-      signal: AbortSignal.timeout(EVAL_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`eval model HTTP ${res.status}`);
-    const data = (await res.json()) as { choices?: { message?: ChatMessage }[] };
-    const message = data?.choices?.[0]?.message;
-    if (!message) throw new Error('eval model returned no message');
-    return message;
-  };
+  const client = new Anthropic({ apiKey: env.EVAL_ANTHROPIC_API_KEY ?? '', maxRetries: 0, fetch: fetchImpl });
+  const model = env.EVAL_ANTHROPIC_MODEL || EVAL_DEFAULT_MODEL;
+  const chat = createChat({ client: () => client, agentModel: () => model });
+  return (messages: ChatMessage[], tools: ChatTool[]): Promise<ChatMessage> =>
+    chat(messages, tools, { task: 'agent', timeoutMs: EVAL_TIMEOUT_MS });
 }
 
 /**
@@ -56,8 +48,8 @@ export async function main(
   fetchImpl: FetchFn = fetch,
   log: (line: string) => void = console.log,
 ): Promise<number> {
-  if (!env.EVAL_OLLAMA_API_KEY) {
-    log('eval-bot: skipped (EVAL_OLLAMA_API_KEY is not set)');
+  if (!env.EVAL_ANTHROPIC_API_KEY) {
+    log('eval-bot: skipped (EVAL_ANTHROPIC_API_KEY is not set)');
     return 0;
   }
   // Imported only past the key check: the skip path never loads the app graph.

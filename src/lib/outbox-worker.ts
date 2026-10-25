@@ -96,7 +96,7 @@ export interface WorkerDeps {
   /**
    * Run one conversational agent turn and return the reply text (Stage 2c —
    * the inbound webhook enqueues 'agent.turn' instead of running the agent in
-   * a best-effort after()). DI'd: the route wires the real createAgent+Ollama;
+   * a best-effort after()). DI'd: the route wires the real createAgent+Claude;
    * tests stub it.
    */
   runAgentTurn: (
@@ -145,7 +145,7 @@ export interface WorkerDeps {
  * Hard per-row wall clock. Money handlers are bounded by RAIL_TIMEOUT_MS (15s)
  * far inside this. It exists for agent.turn and ticket.triage — and the
  * honest budget arithmetic is: an agent turn may run MAX_TOOL_ROUNDS (6) tool
- * rounds, each up to 2 × OLLAMA_TIMEOUT_MS (chatWithRetry) = 40s, i.e. up to
+ * rounds, each up to 2 × LLM_TIMEOUT_MS (chatWithRetry) = 40s, i.e. up to
  * 240s for a legitimate long turn. Nothing that long fits a 60s function, so
  * the deadline is enforced COOPERATIVELY: the agent.turn branch hands
  * runAgentTurn an AbortSignal that fires at (rowDeadlineMs − COOP_GRACE_MS);
@@ -850,11 +850,11 @@ async function handle(
 
     // ── AI auto-triage of a freshly-created CUSTOMER ticket (out-of-band) ────
     // The copilot's one-shot triageSuggest runs HERE, never inline at ticket
-    // creation — a synchronous Ollama call must never block the customer-facing
+    // creation — a synchronous model call must never block the customer-facing
     // redirect. The model's output is CLAMPED to the closed lists inside
     // triageSuggest, so setTriage always gets a safe shape. Idempotent: setTriage
     // is a plain re-settable write, so an at-least-once redelivery just re-sets
-    // the same value. A model/Ollama outage throws and rides the worker's
+    // the same value. A model provider outage throws and rides the worker's
     // retry/backoff; a permanent failure dead-letters like any other kind,
     // leaving the ticket un-triaged for staff to hand-sort (acceptable).
     case 'ticket.triage': {

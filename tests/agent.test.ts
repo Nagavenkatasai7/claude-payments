@@ -10,7 +10,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
-import { OllamaHttpError } from '@/lib/llm-provider-error';
+import { ProviderHttpError } from '@/lib/llm-provider-error';
 import { freshDb, seedPartner } from './helpers-db';
 import { VOICE_INPUT_NOTE } from '@/lib/voice-notes';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -221,7 +221,7 @@ describe('createAgent', () => {
       scheduleStore: freshScheduleStore(redis),
       draftStore: createDraftStore(redis),
       ...extraDeps(redis, store),
-      chat: async () => { throw new Error('Ollama request failed (503)'); }, // throws on both the call and its retry
+      chat: async () => { throw new Error('Model request failed (503)'); }, // throws on both the call and its retry
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
     expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?");
@@ -242,7 +242,7 @@ describe('createAgent', () => {
       ...extraDeps(redis, store),
       chat: async () => {
         calls += 1;
-        if (calls === 1) throw new Error('Ollama request failed (502)');
+        if (calls === 1) throw new Error('Model request failed (502)');
         return { role: 'assistant', content: 'Back online — how can I help?' };
       },
     });
@@ -254,7 +254,7 @@ describe('createAgent', () => {
   it('a permanent provider error (402) is NOT retried; onFallback gets that error; history is saved', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
-    const err402 = new OllamaHttpError(402, 'out of credit');
+    const err402 = new ProviderHttpError(402, 'out of credit');
     let calls = 0;
     const onFallback = vi.fn();
     const agent = createAgent({
@@ -274,7 +274,7 @@ describe('createAgent', () => {
     expect(saved.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
   });
 
-  it('a transient OllamaHttpError (503) is still retried once, then reported via onFallback', async () => {
+  it('a transient ProviderHttpError (503) is still retried once, then reported via onFallback', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     let calls = 0;
@@ -284,13 +284,13 @@ describe('createAgent', () => {
       scheduleStore: freshScheduleStore(redis),
       draftStore: createDraftStore(redis),
       ...extraDeps(redis, store),
-      chat: async () => { calls += 1; throw new OllamaHttpError(503, 'busy'); },
+      chat: async () => { calls += 1; throw new ProviderHttpError(503, 'busy'); },
       onFallback,
     });
     expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
     expect(calls).toBe(2);
     expect(onFallback).toHaveBeenCalledTimes(1);
-    expect((onFallback.mock.calls[0][0] as OllamaHttpError).status).toBe(503);
+    expect((onFallback.mock.calls[0][0] as ProviderHttpError).status).toBe(503);
   });
 
   it('onFallback is not called on a normal reply nor on the empty-reply fallback', async () => {
@@ -320,7 +320,7 @@ describe('createAgent', () => {
       scheduleStore: freshScheduleStore(redis),
       draftStore: createDraftStore(redis),
       ...extraDeps(redis, store),
-      chat: async () => { throw new OllamaHttpError(402, 'x'); },
+      chat: async () => { throw new ProviderHttpError(402, 'x'); },
       onFallback: () => { throw new Error('reporter broke'); },
     });
     expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
@@ -1786,10 +1786,10 @@ describe('row deadline (fix 7)', () => {
       }
       // Round 1: the worker's row deadline fires WHILE this LLM call is in flight.
       // Deterministic — no timer: this double aborts the caller's signal itself and
-      // throws the same AbortError ollama.chat raises for a caller abort.
+      // throws the same AbortError llm.chat raises for a caller abort.
       expect(opts?.signal).toBe(ctrl.signal); // the agent threads the signal into every deps.chat call
       ctrl.abort();
-      throw Object.assign(new Error('Ollama request aborted by the caller (row deadline)'), { name: 'AbortError' });
+      throw Object.assign(new Error('Model request aborted by the caller (row deadline)'), { name: 'AbortError' });
     });
     const agent = createAgent({
       store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps, chat,
@@ -1916,7 +1916,7 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
     expect((await draftStore.consumeDraft(result.draft_id))?.recipient.payoutDestination).toBe(ACCOUNT);
   });
 
-  it('pair shape: at round 0 messages end [..history, assistant{get_customer_context}, tool{matching id}]; absent at round 1 and from the persisted conversation', async () => {
+  it('pair shape: at round 0 messages end [..history, assistant{get_customer_context}, tool{matching id}]; round 1 only appends; absent from the persisted conversation', async () => {
     const seen: ChatMessage[][] = [];
     let round = 0;
     const { agent, store } = build(async (messages) => {
@@ -1938,14 +1938,16 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
       role: 'assistant', content: '',
       tool_calls: [{ id: 'ctx_r0', type: 'function', function: { name: 'get_customer_context', arguments: '{}' } }],
     });
-    // Review follow-up: never null content on this transport — a strict
-    // OpenAI-compatible proxy may reject it, which would degrade every
-    // returning customer's turn to the fallback reply.
+    // Review follow-up: never null content (an empty string becomes a lone
+    // tool_use block in the Claude request).
     expect(typeof call.content).toBe('string');
     expect(result.role).toBe('tool');
     expect(result.tool_call_id).toBe(call.tool_calls![0].id);
-    // Round 1 rebuilds from history: the synthetic pair is gone.
-    expect(JSON.stringify(seen[1])).not.toContain('ctx_r0');
+    // Round 1 is round 0 plus this round's call and result, appended: Claude
+    // rejects a request whose prefix before a returned thinking block changed
+    // (preserved-thinking check), so a turn never rewrites earlier rounds.
+    expect(seen[1].slice(0, r0.length)).toEqual(r0);
+    expect(seen[1].slice(r0.length).map((m) => m.role)).toEqual(['assistant', 'tool']);
     expect(JSON.stringify(await store.getConversation('default', PHONE))).not.toContain('ctx_r0');
   });
 

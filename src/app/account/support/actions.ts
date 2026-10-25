@@ -85,7 +85,7 @@ export async function createTicketAction(formData: FormData): Promise<void> {
   });
 
   // Out-of-band AI triage: a durable outbox row the worker drains (NEVER an
-  // inline Ollama call — that must never block this redirect). Only customer
+  // inline model call — that must never block this redirect). Only customer
   // tickets are created here, so this is always in-scope.
   await enqueueTriage(getDb(), ticket.id);
 

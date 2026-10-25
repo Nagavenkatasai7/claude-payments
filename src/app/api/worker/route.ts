@@ -50,7 +50,7 @@ import { newTransferId } from '@/lib/id';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { safeFetch } from '@/lib/safe-fetch';
 import { pingDeadMan } from '@/lib/dead-man-ping';
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import { transcribeVoiceNote } from '@/lib/voice-transcribe';
 import { voiceSettingsFromEnv } from '@/lib/voice-notes';
 import { createAgent } from '@/lib/agent';

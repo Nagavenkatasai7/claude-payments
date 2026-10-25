@@ -36,9 +36,11 @@ const HOUR_MS = 60 * 60 * 1000;
 export const LLM_ALERT_TIMEOUT_MS = 1000;
 
 const HINTS: Record<number, string> = {
+  400: 'our own spend limit in the Claude Console is reached',
   401: 'the provider rejected our API key',
   402: 'billing/credits exhausted',
   403: 'access to the model was refused',
+  429: 'the monthly spend cap is reached',
 };
 
 /** The alert for a fallback caused by `err`, or null unless it is a permanent provider error. Pure. */
@@ -48,7 +50,7 @@ export function llmDownAlertFor(err: unknown, hour: number): { message: string; 
   return {
     message:
       `⚠️ SmartRemit ops: the model provider is rejecting every request (HTTP ${err.status}: ${hint}). ` +
-      `Every bot turn is answering with the fallback line until this is fixed. Check the Ollama Cloud account.`,
+      `Every bot turn is answering with the fallback line until this is fixed. Check the Claude Console (API key, billing, spend limit).`,
     dedupeKey: `llmdown:${err.status}:${hour}`,
   };
 }
