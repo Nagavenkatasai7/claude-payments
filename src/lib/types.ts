@@ -298,6 +298,11 @@ export interface Schedule {
   purpose?: TransferPurpose;
   /** Batch B follow-up A2: the reason for purpose `other`, carried onto every run (encrypted at rest). */
   purposeDetail?: string;
+  /**
+   * The name of the AI app that set this schedule up (Oct 25, MCP create_schedule), bounded
+   * untrusted text: the app chose it. Absent: the customer set it up (portal or WhatsApp).
+   */
+  createdVia?: string;
 }
 
 // 'support' (NEW): tickets-only staff — answers customer queries, escalates to

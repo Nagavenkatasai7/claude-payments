@@ -180,18 +180,21 @@ describe('sign-in + MCP endpoint, joined', () => {
     vi.unstubAllGlobals();
   });
 
-  it('a token from the real sign-in lists the seven tools and reads the customer’s recipients', async () => {
+  it('a token from the real sign-in lists the ten tools and reads the customer’s recipients', async () => {
     const { accessToken } = await signIn();
     expect(accessToken).toMatch(/^sra_/);
     const c = await connect(accessToken);
     const names = (await c.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       'cancel_prepared_transfer',
+      'change_schedule',
       'check_send_limit',
+      'create_schedule',
       'get_quote',
       'get_transfer_status',
       'list_recent_transfers',
       'list_recipients',
+      'list_schedules',
       'prepare_transfer',
     ]);
     const r = await c.callTool({ name: 'list_recipients', arguments: {} });

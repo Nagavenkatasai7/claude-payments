@@ -65,6 +65,8 @@ export default async function PortalSchedulesPage({ searchParams }: { searchPara
       purpose: t('portal.schedules.purposeLine', { purpose: s.purpose ? PURPOSE_LABELS[s.purpose] : t('portal.schedules.purposeNotStated') }),
       endsOn: fmtDate(s.endDate),
       lastRun: fmtDate(s.lastRunAt),
+      // The AI app that set it up (its own name, bounded at write; React escapes it).
+      setUpIn: s.createdVia ? t('portal.schedules.setUpIn', { app: boundUntrustedText(s.createdVia, NAME_MAX) }) : null,
     };
   });
   const done = DONE[one(sp.done) ?? ''];
@@ -105,6 +107,7 @@ export default async function PortalSchedulesPage({ searchParams }: { searchPara
                 <p className="text-[14px] text-ds-ink-muted">{r.purpose}</p>
                 {r.endsOn ? <p className="text-[13px] text-ds-ink-muted">{t('portal.schedules.endsOn', { date: r.endsOn })}</p> : null}
                 {r.lastRun ? <p className="text-[13px] text-ds-ink-muted">{t('portal.schedules.lastRun', { date: r.lastRun })}</p> : null}
+                {r.setUpIn ? <p className="text-[13px] text-ds-ink-muted">{r.setUpIn}</p> : null}
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {r.paused ? (

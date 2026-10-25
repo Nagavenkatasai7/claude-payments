@@ -7,11 +7,13 @@ import type { PartnerId } from '../types';
 
 /**
  * The permissions a customer can grant an AI app. Stage C2 adds 'transfers:prepare': prepare a
- * transfer (a draft) that the customer pays on the SmartRemit pay page. No scope lets an app pay.
+ * transfer (a draft) that the customer pays on the SmartRemit pay page. 'schedules:manage' (Oct 25):
+ * see, set up, pause, resume and cancel the customer's repeat payments; every run still sends the
+ * customer a pay link, paid with their WhatsApp code. No scope lets an app pay.
  */
-export type AgentScope = 'quotes:read' | 'recipients:read' | 'transfers:read' | 'transfers:prepare';
+export type AgentScope = 'quotes:read' | 'recipients:read' | 'transfers:read' | 'transfers:prepare' | 'schedules:manage';
 
-export const AGENT_SCOPES: readonly AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'];
+export const AGENT_SCOPES: readonly AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare', 'schedules:manage'];
 
 /** Who an MCP request acts for, from a verified access token whose grant is live. */
 export interface AgentPrincipal {
@@ -25,9 +27,13 @@ export interface AgentPrincipal {
   scopes: readonly AgentScope[];
 }
 
-/** The only extra a tool-call audit row may carry: the id of the draft the call prepared or cancelled. */
+/**
+ * The only extras a tool-call audit row may carry: the id of the draft the call prepared or
+ * cancelled, or of the repeat payment (schedule) it set up or changed.
+ */
 export interface AgentToolCallExtra {
-  draftId: string;
+  draftId?: string;
+  scheduleId?: string;
 }
 
 export type AgentTokenCheck =
@@ -49,7 +55,8 @@ export interface AgentAuth {
   toolsActive(partnerId: PartnerId, phone: string): Promise<boolean>;
   /**
    * Record one tool call (audit row; never tool arguments). `extra.draftId` names the draft a
-   * prepare or cancel touched (Stage C2). Best effort: never throws.
+   * prepare or cancel touched (Stage C2); `extra.scheduleId` the repeat payment a schedule tool
+   * set up or changed. Best effort: never throws.
    */
   recordToolCall(principal: AgentPrincipal, tool: string, outcome: 'ok' | 'error' | 'refused', extra?: AgentToolCallExtra): Promise<void>;
 }

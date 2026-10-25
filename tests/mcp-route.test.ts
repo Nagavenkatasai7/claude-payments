@@ -13,8 +13,8 @@ import { fakeRedis, type FakeRedis } from './helpers';
 const HOST = 'send.smartremit.ai';
 const RESOURCE = `https://${HOST}/api/mcp`;
 const METADATA = `https://${HOST}/.well-known/oauth-protected-resource/api/mcp`;
-const CHALLENGE = `Bearer resource_metadata="${METADATA}", scope="quotes:read recipients:read transfers:read transfers:prepare"`;
-const ALL: AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'];
+const CHALLENGE = `Bearer resource_metadata="${METADATA}", scope="quotes:read recipients:read transfers:read transfers:prepare schedules:manage"`;
+const ALL: AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare', 'schedules:manage'];
 
 const state: {
   site: { partnerId: string; slug: string } | null;
@@ -172,7 +172,7 @@ describe('/api/mcp: 401 and CORS', () => {
     const res = await route.POST(jsonRpc(initialize('2025-06-18')));
     const params = extractWWWAuthenticateParams(res);
     expect(params.resourceMetadataUrl?.href).toBe(METADATA);
-    expect(params.scope).toBe('quotes:read recipients:read transfers:read transfers:prepare');
+    expect(params.scope).toBe('quotes:read recipients:read transfers:read transfers:prepare schedules:manage');
   });
 
   it('an unknown token → 401, the challenge plus error="invalid_token"', async () => {
@@ -278,20 +278,25 @@ describe('/api/mcp: legacy (2025-era) clients, stateless', () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'cancel_prepared_transfer',
+      'change_schedule',
       'check_send_limit',
+      'create_schedule',
       'get_quote',
       'get_transfer_status',
       'list_recent_transfers',
       'list_recipients',
+      'list_schedules',
       'prepare_transfer',
     ]);
     for (const t of tools) {
       expect(t.description).toContain('cannot pay or move money');
-      // Only the two C2 tools change anything (a draft); every other tool only reads.
-      expect(t.annotations?.readOnlyHint).toBe(!['prepare_transfer', 'cancel_prepared_transfer'].includes(t.name));
+      // Only the two C2 tools (a draft) and the two schedule changers change anything; every other tool only reads.
+      expect(t.annotations?.readOnlyHint).toBe(!['prepare_transfer', 'cancel_prepared_transfer', 'create_schedule', 'change_schedule'].includes(t.name));
     }
     expect(tools.find((t) => t.name === 'cancel_prepared_transfer')?.annotations?.destructiveHint).toBe(true);
     expect(tools.find((t) => t.name === 'prepare_transfer')?.annotations?.destructiveHint).toBe(false);
+    expect(tools.find((t) => t.name === 'create_schedule')?.annotations?.destructiveHint).toBe(true);
+    expect(tools.find((t) => t.name === 'change_schedule')?.annotations?.destructiveHint).toBe(true);
     // The gate is off for this customer: every call is the switched-off tool error.
     const r = await client.callTool({ name: 'check_send_limit', arguments: {} });
     expect(r.isError).toBe(true);
@@ -302,7 +307,7 @@ describe('/api/mcp: legacy (2025-era) clients, stateless', () => {
   it('the default SDK client (2025-11-25) works the same', async () => {
     const client = await connect('sra_good');
     expect(client.getNegotiatedProtocolVersion()).toBe('2025-11-25');
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(10);
     await client.close();
   });
 });
@@ -313,7 +318,7 @@ describe('/api/mcp: modern (2026-07-28) clients', () => {
     state.auth = auth;
     const client = await connect('sra_good', { modern: true });
     expect(client.getProtocolEra()).toBe('modern');
-    expect((await client.listTools()).tools).toHaveLength(7);
+    expect((await client.listTools()).tools).toHaveLength(10);
     const r = await client.callTool({ name: 'get_transfer_status', arguments: { transfer_id: 'tx_123456' } });
     expect(r.isError).toBe(true);
     expect(JSON.parse((r.content as Array<{ text: string }>)[0].text)).toEqual({ error: TOOLS_OFF_MESSAGE });
@@ -379,6 +384,9 @@ describe('/api/mcp: scopes', () => {
       get_transfer_status: 'transfers:read',
       prepare_transfer: 'transfers:prepare',
       cancel_prepared_transfer: 'transfers:prepare',
+      list_schedules: 'schedules:manage',
+      create_schedule: 'schedules:manage',
+      change_schedule: 'schedules:manage',
     };
     state.auth = fakeAuth({ sra_none: principal({ scopes: [] }) });
     for (const [name, scope] of Object.entries(want)) {
@@ -391,7 +399,11 @@ describe('/api/mcp: scopes', () => {
               ? { recipient_id: 'r_123', amount: 100, purpose: 'gift' }
               : name === 'cancel_prepared_transfer'
                 ? { prepared_transfer_id: 'dr_123456' }
-                : {};
+                : name === 'create_schedule'
+                  ? { recipient_id: 'r_123', amount: 100, frequency: 'monthly', day_of_month: 5, purpose: 'gift' }
+                  : name === 'change_schedule'
+                    ? { schedule_id: 's_123456', action: 'pause' }
+                    : {};
       const res = await route.POST(jsonRpc(call(name, args), { authorization: 'Bearer sra_none', 'mcp-protocol-version': '2025-06-18' }));
       expect(res.status, name).toBe(403);
       expect(res.headers.get('www-authenticate'), name).toContain(`scope="${scope}"`);

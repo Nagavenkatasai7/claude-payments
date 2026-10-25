@@ -113,14 +113,14 @@ export const prepareTransferInput = z.object({
 
 export type PrepareTransferArgs = z.infer<typeof prepareTransferInput>;
 
-const PURPOSE_DETAIL_MESSAGE: Record<PurposeDetailCode, string> = {
+export const PURPOSE_DETAIL_MESSAGE: Record<PurposeDetailCode, string> = {
   missing: 'Purpose "other" needs purpose_detail: the customer\'s own reason, 10 to 120 characters.',
   too_short: 'purpose_detail is too short. It needs 10 to 120 characters, in the customer\'s own words.',
   too_long: 'purpose_detail is too long. It needs 10 to 120 characters.',
   nonsense: 'purpose_detail is not clear. Ask the customer for their reason in their own words.',
 };
 
-const SCAM_REVIEW =
+export const SCAM_REVIEW =
   'This reason needs the customer to read a safety warning before they send. The customer can send this transfer in the SmartRemit portal.';
 
 /**

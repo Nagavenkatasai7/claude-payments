@@ -482,6 +482,9 @@ export const schedules = pgTable(
     // Batch B follow-up A2: the reason for purpose `other`, carried onto every run.
     // ENCRYPTED under ctx.schedule(id, 'purpose_detail_enc').
     purposeDetailEnc: text('purpose_detail_enc'),
+    // The AI app's self-chosen name when an app set the schedule up (MCP create_schedule, Oct 25);
+    // null when the customer did. Shown as "Set up in <app>".
+    createdVia: text('created_via'),
   },
   (t) => [index('schedules_status').on(t.status, t.frequency)],
 );

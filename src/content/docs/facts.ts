@@ -61,6 +61,12 @@ export const FACTS = {
   mcpPrepareReplaySec: 120,
   /** src/lib/mcp/prepare.ts MCP_PREPARE_LIMIT.limit (AI-app prepares, all apps together, per customer per hour). */
   mcpPreparePerHour: 10,
+  /** src/lib/mcp/schedules.ts SCHEDULE_REPLAY_TTL_S (a repeated create_schedule returns the same repeat payment). */
+  mcpScheduleReplaySec: 120,
+  /** src/lib/mcp/schedules.ts MCP_SCHEDULE_CREATE_LIMIT.limit (repeat payments set up by AI apps, all apps together, per customer per day). */
+  mcpScheduleCreatesPerDay: 5,
+  /** src/lib/mcp/schedules.ts MCP_SCHEDULE_CHANGE_LIMIT.limit (pause / resume / cancel by AI apps, per customer per hour). */
+  mcpScheduleChangesPerHour: 20,
 } as const;
 
 export type FactName = keyof typeof FACTS;

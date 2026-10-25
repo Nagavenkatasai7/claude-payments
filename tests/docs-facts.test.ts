@@ -106,5 +106,11 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.mcpPrepareReplaySec).toBe(PREPARE_REPLAY_TTL_S);
     expect(FACTS.mcpPreparePerHour).toBe(MCP_PREPARE_LIMIT.limit);
     expect(MCP_PREPARE_LIMIT.windowSec).toBe(3600);
+    const { MCP_SCHEDULE_CREATE_LIMIT, MCP_SCHEDULE_CHANGE_LIMIT, SCHEDULE_REPLAY_TTL_S } = await import('@/lib/mcp/schedules');
+    expect(FACTS.mcpScheduleReplaySec).toBe(SCHEDULE_REPLAY_TTL_S);
+    expect(FACTS.mcpScheduleCreatesPerDay).toBe(MCP_SCHEDULE_CREATE_LIMIT.limit);
+    expect(MCP_SCHEDULE_CREATE_LIMIT.windowSec).toBe(86_400);
+    expect(FACTS.mcpScheduleChangesPerHour).toBe(MCP_SCHEDULE_CHANGE_LIMIT.limit);
+    expect(MCP_SCHEDULE_CHANGE_LIMIT.windowSec).toBe(3600);
   });
 });

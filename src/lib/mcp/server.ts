@@ -11,6 +11,17 @@ import {
   prepareTransferTool,
 } from './prepare';
 import {
+  CHANGE_SCHEDULE,
+  CREATE_SCHEDULE,
+  LIST_SCHEDULES,
+  changeScheduleInput,
+  changeScheduleTool,
+  createScheduleInput,
+  createScheduleTool,
+  listSchedulesInput,
+  listSchedulesTool,
+} from './schedules';
+import {
   CHECK_SEND_LIMIT,
   GET_QUOTE,
   GET_TRANSFER_STATUS,
@@ -31,7 +42,7 @@ import {
   type McpToolSpec,
 } from './tools';
 
-// Stage C1 (+ C2's prepare and cancel tools): ONE fresh McpServer per HTTP request (createMcpHandler's per-request factory), bound to
+// Stage C1 (+ C2's prepare and cancel tools, + the repeat-payment tools): ONE fresh McpServer per HTTP request (createMcpHandler's per-request factory), bound to
 // the verified token's principal. The same instance shape serves both protocol eras (the SDK's
 // modern 2026-07-28 path and its stateless legacy fallback for 2025-era clients).
 //
@@ -49,8 +60,9 @@ export const MCP_SERVER_INFO = { name: 'SmartRemit', version: '1.0.0' } as const
 
 /**
  * GHSA-46jr-4wx8-v453: the SDK walks every array element and object member of tools/call arguments
- * while validating, so an oversized payload costs memory. Our largest input (prepare_transfer) has 7
- * flat fields and no arrays; 64 leaves room and refuses anything bigger before validation.
+ * while validating, so an oversized payload costs memory. Our largest inputs (prepare_transfer,
+ * create_schedule) have 7 and 8 flat fields and no arrays; 64 leaves room and refuses anything
+ * bigger before validation.
  */
 export const MCP_MAX_TOOL_INPUT_ELEMENTS = 64;
 
@@ -62,8 +74,14 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 const PREPARES = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 /** C2 cancel_prepared_transfer: removes an unpaid draft; a second call finds nothing. */
 const CANCELS = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } as const;
+/**
+ * create_schedule and change_schedule (Oct 25): they change the customer's repeat payments, and a
+ * cancel is final, so both are destructive changes the app must confirm. A retry of the same
+ * set-up returns the same schedule; a repeated pause or cancel is refused, never doubled.
+ */
+const SCHEDULES = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false } as const;
 
-type Hints = typeof READ_ONLY | typeof PREPARES | typeof CANCELS;
+type Hints = typeof READ_ONLY | typeof PREPARES | typeof CANCELS | typeof SCHEDULES;
 
 function config(spec: McpToolSpec, hints: Hints = READ_ONLY) {
   return {
@@ -109,6 +127,17 @@ export function buildMcpServer(principal: AgentPrincipal, deps: McpServerDeps): 
     CANCEL_PREPARED_TRANSFER.name,
     { ...config(CANCEL_PREPARED_TRANSFER, CANCELS), inputSchema: cancelPreparedTransferInput },
     (args) => runGuardedTool(CANCEL_PREPARED_TRANSFER.name, principal, guard, () => cancelPreparedTransferTool(principal, args, data)),
+  );
+  // Repeat payments (Oct 25): list, set up, and pause / resume / cancel the customer's own schedules.
+  const sched = { ...data, redis: deps.redis, now: deps.now };
+  server.registerTool(LIST_SCHEDULES.name, { ...config(LIST_SCHEDULES), inputSchema: listSchedulesInput }, () =>
+    runGuardedTool(LIST_SCHEDULES.name, principal, guard, () => listSchedulesTool(principal, sched)),
+  );
+  server.registerTool(CREATE_SCHEDULE.name, { ...config(CREATE_SCHEDULE, SCHEDULES), inputSchema: createScheduleInput }, (args) =>
+    runGuardedTool(CREATE_SCHEDULE.name, principal, guard, () => createScheduleTool(principal, args, sched)),
+  );
+  server.registerTool(CHANGE_SCHEDULE.name, { ...config(CHANGE_SCHEDULE, SCHEDULES), inputSchema: changeScheduleInput }, (args) =>
+    runGuardedTool(CHANGE_SCHEDULE.name, principal, guard, () => changeScheduleTool(principal, args, sched)),
   );
   return server;
 }

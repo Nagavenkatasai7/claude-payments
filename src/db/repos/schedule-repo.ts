@@ -53,6 +53,7 @@ export function createScheduleRepo(
     // Batch B follow-up A2: decrypted like the payout destination (the cron run and the owner's form need it).
     const detail = openOptional(row.purposeDetailEnc, provider, ctx.schedule(row.id, 'purpose_detail_enc'));
     if (detail) s.purposeDetail = detail;
+    if (row.createdVia) s.createdVia = row.createdVia;
     return s;
   }
 
@@ -79,6 +80,7 @@ export function createScheduleRepo(
       endDate: s.endDate ?? null,
       purpose: s.purpose ?? null,
       purposeDetailEnc: s.purposeDetail ? encryptField(s.purposeDetail, provider, ctx.schedule(s.id, 'purpose_detail_enc')) : null,
+      createdVia: s.createdVia ?? null,
       lastRunAt: s.lastRunAt ? new Date(s.lastRunAt) : null,
       createdAt: new Date(s.createdAt),
     };
