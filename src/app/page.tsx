@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import Link from 'next/link';
 import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
+import { DEFAULT_CURRENCY_FOR_COUNTRY, type CurrencyCode } from '@/lib/types';
+import { calcDestinations } from './landing/calc-destinations';
 import { waLink, WA_MESSAGES, corridorMessage, WA_PHONE, formatWaPhone } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
@@ -24,11 +26,13 @@ import { companyFooterLine } from '@/lib/company';
 // root div), so it never touches the sh-* dashboard or .payapp themes.
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
-const TITLE = 'SmartRemit.ai — Global money transfers, made simpler.';
-// The corridor count follows ./landing/corridors (one list), never a literal.
-const CORRIDOR_COUNT = WAITLIST_DESTINATIONS.length;
+const TITLE = 'SmartRemit.ai — Send money home from the chat apps you already use.';
+// Raj's website brief (Oct 25, owner go): US to India is the launch corridor and every other
+// supported country is "coming next". The count follows ./landing/corridors (one list), never a
+// literal: every waitlist country except the US (send-from) and India (launch).
+const COMING_NEXT_COUNT = WAITLIST_DESTINATIONS.filter((d) => d.value !== 'US' && d.value !== 'IN').length;
 const DESCRIPTION =
-  `Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, ${CORRIDOR_COUNT} corridors — any direction. Sanctions screening runs on every transfer (demo: reference list; production feed per partner).`;
+  `Send money home by chatting with the SmartRemit AI on WhatsApp. It quotes the rate for your transfer, a hosted page takes payment, and a licensed partner settles. SmartRemit never holds your money. Launching with US to India, with ${COMING_NEXT_COUNT} more countries coming next. Sanctions screening runs on every transfer (demo: reference list; production feed per partner).`;
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -36,7 +40,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: TITLE,
     description:
-      `Send money by chatting on WhatsApp. Live mid-market FX, licensed partners settle. Non-custodial remittance infrastructure across ${CORRIDOR_COUNT} corridors.`,
+      'Send money home by chatting on WhatsApp. Licensed partners settle, and SmartRemit never holds your money. Launching with US to India.',
     type: 'website',
     siteName: 'SmartRemit.ai',
     images: [SHARE_IMAGE],
@@ -71,6 +75,26 @@ const COUNTRIES = [
   { name: 'Austria', short: 'Austria', code: 'at' },
   { name: 'Belgium', short: 'Belgium', code: 'be' },
 ];
+
+// The corridor section (Raj's brief, Oct 25): US to India first, the rest "coming next".
+const LAUNCH_COUNTRIES = COUNTRIES.filter((c) => c.code === 'us' || c.code === 'in');
+const COMING_NEXT_COUNTRIES = COUNTRIES.filter((c) => c.code !== 'us' && c.code !== 'in');
+const CHIP =
+  'inline-flex items-center gap-2.5 rounded-full border border-[#dbe4f0] bg-white py-2 pr-4 pl-2.5 transition-[border-color,background-color,transform] duration-150';
+
+function Flag({ code }: { code: string }) {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      className="block h-auto w-7 rounded-[4px] bg-[#eef4fc]"
+      src={`/flags/${code}.svg`}
+      alt=""
+      width={28}
+      height={21}
+      loading="lazy"
+    />
+  );
+}
 
 // Corridor checkbox options for the "Partner with us" form (and the waitlist's
 // destination list) live in ./landing/corridors — one list, shared with the
@@ -167,7 +191,7 @@ export default async function LandingPage({
   }>;
 }) {
   // ui-08 (Task 9): the figure is shown ONLY with its provenance — live ⇒
-  // "mid-market rate, ECB fixing of <date>"; a cached rate ⇒ "indicative";
+  // "daily reference rate, ECB fixing of <date>"; a cached rate ⇒ "indicative";
   // refused (getFxRates throws RateUnavailableError) ⇒ no figure at all, never
   // a constant labelled live. Any throw degrades — the page never errors on FX.
   // Home-Send H1: the featured send partner, resolved on the server in parallel with
@@ -175,6 +199,12 @@ export default async function LandingPage({
   // request: it awaits searchParams). Never throws; unset env ⇒ null with no db work
   // ⇒ the calculator is unchanged. Amount/destination are read client-side.
   const featuredPromise = getFeaturedSendPartner();
+  // The calculator's "to" picker: one leg per other destination currency, in parallel with the
+  // USD leg. A refused leg only hides that country's figure (calc-destinations.ts).
+  const otherCurrencies = [...new Set(Object.values(DEFAULT_CURRENCY_FOR_COUNTRY))].filter(
+    (c): c is CurrencyCode => c !== 'USD' && c !== 'INR',
+  );
+  const legsPromise = Promise.allSettled(otherCurrencies.map((c) => getFxRates(c)));
   let fxRate: number | null = null;
   let fxLive = false;
   let fxAsOf: string | null = null;
@@ -191,6 +221,12 @@ export default async function LandingPage({
   // is ever labelled live (HeroPipeline's `live`; ChatMock never claims it).
   const illustrativeRate = fxRate ?? FALLBACK_FX_RATE;
   const featuredSendPartner = await featuredPromise;
+  const legs = await legsPromise;
+  const legToUsd = new Map<CurrencyCode, number>();
+  legs.forEach((r, i) => {
+    if (r.status === 'fulfilled') legToUsd.set(otherCurrencies[i], r.value.toUsd);
+  });
+  const destinations = calcDestinations(fxRate, (c) => legToUsd.get(c) ?? null);
 
   const params = await searchParams;
   const partnerStatus = params?.partner;
@@ -225,11 +261,14 @@ export default async function LandingPage({
             >
               What&rsquo;s inside
             </a>
+            {/* Raj's brief: the rate at the top right. The chip opens the calculator; with no
+                figure (FX refused) it is the plain Calculator link it replaced. */}
             <a
-              className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[1180px]:hidden"
+              className="whitespace-nowrap text-[14px] font-semibold text-[#047857] tabular-nums transition-colors hover:text-[#0b1b3f] max-[1180px]:hidden"
               href="#calculator"
+              aria-label={fxRate === null ? 'Calculator' : `Calculator: 1 USD = ${fmtRate(fxRate)}, daily reference rate`}
             >
-              Calculator
+              {fxRate === null ? 'Calculator' : `$1 = ${fmtRate(fxRate)}`}
             </a>
             <a
               className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[760px]:hidden"
@@ -302,12 +341,12 @@ export default async function LandingPage({
             <div>
               <h1
                 id="hero-h"
-                className="text-[clamp(40px,6.2vw,74px)] font-extrabold leading-[1.03] tracking-[-0.038em] text-[#0b1b3f]"
+                className="text-[clamp(36px,5vw,60px)] font-extrabold leading-[1.05] tracking-[-0.035em] text-[#0b1b3f]"
               >
-                Global money transfers,{' '}
+                Send money home{' '}
                 {/* AA-large on #f5f9ff at every stop: #0e7490 5.1, #0d9488 3.5, #059669 3.6. */}
                 <span className="inline-block bg-[linear-gradient(95deg,#0e7490,#0d9488_45%,#059669)] bg-clip-text pb-[0.08em] text-transparent">
-                  made simpler.
+                  from the chat apps you already use.
                 </span>
               </h1>
               <span
@@ -315,13 +354,14 @@ export default async function LandingPage({
                 aria-hidden="true"
               />
               <p className="mt-6 text-[clamp(20px,2.3vw,26px)] font-medium tracking-[-0.01em] text-[#0b1b3f]">
-                Powered through <strong className="font-bold">WhatsApp.</strong>
+                Start on <strong className="font-bold">WhatsApp.</strong> Telegram and AI assistants
+                such as Claude are in testing.
               </p>
               <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
-                An AI agent quotes the live mid-market rate in WhatsApp, a hosted page takes
-                payment, and a licensed partner settles — every step signed and audited.
-                Sanctions screening runs on every transfer (demo: reference list; production
-                feed per partner).
+                The SmartRemit AI quotes the rate for your transfer in the chat, a hosted page takes
+                payment, and a licensed partner settles — every step signed and audited. SmartRemit
+                never holds your money. Sanctions screening runs on every transfer (demo: reference
+                list; production feed per partner).
               </p>
 
               <ul className="mt-8 grid max-w-[560px] gap-3 sm:grid-cols-3">
@@ -433,7 +473,7 @@ export default async function LandingPage({
                   </h3>
                   <p className={SHOWCASE_COPY}>
                     Quote, KYC, approval, receipt — the entire transfer is a conversation. The
-                    agent locks the live mid-market rate and holds it for you. It never holds
+                    agent locks the rate for your transfer and holds it while you pay. It never holds
                     your funds.
                   </p>
                 </div>
@@ -507,29 +547,51 @@ export default async function LandingPage({
               id="corridors-h"
               className="text-[clamp(28px,4vw,46px)] font-semibold leading-[1.1] tracking-[-0.025em]"
             >
-              {CORRIDOR_COUNT} corridors. Any direction.
+              Launching with US to India.
             </h2>
             <p className="mt-4 text-[16px] text-[#475569]">
-              Send and receive between all of these — tap a country to start the chat.
+              We start where families send the most. Tap India to start the chat.
             </p>
-            <div className="mt-9 flex flex-wrap justify-center gap-3">
-              {COUNTRIES.map((c) => (
+            <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
+              {LAUNCH_COUNTRIES.map((c, i) => (
+                <span key={c.short} className="inline-flex items-center gap-3">
+                  {i > 0 ? (
+                    <span className="text-[20px] text-[#475569]" aria-hidden="true">
+                      &rarr;
+                    </span>
+                  ) : null}
+                  {c.code === 'in' ? (
+                    <a
+                      className={`${CHIP} border-[#0c5bd2]/50 hover:border-[#0c5bd2] hover:bg-[#eef4fc] hover:[transform:translateY(-2px)]`}
+                      href={waLink(corridorMessage(c.name))}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <Flag code={c.code} />
+                      <span className="text-[14px] font-semibold text-[#0b1b3f]">{c.short}</span>
+                    </a>
+                  ) : (
+                    <span className={CHIP}>
+                      <Flag code={c.code} />
+                      <span className="text-[14px] font-semibold text-[#0b1b3f]">{c.short}</span>
+                    </span>
+                  )}
+                </span>
+              ))}
+            </div>
+
+            <h3 className="mt-14 text-[20px] font-semibold tracking-[-0.01em]">Coming next</h3>
+            <p className="mt-2 text-[15px] text-[#475569]">
+              {COMING_NEXT_COUNT} more countries, to send from or to. Tap one to join the waitlist.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-center gap-3">
+              {COMING_NEXT_COUNTRIES.map((c) => (
                 <a
                   key={c.short}
-                  className="inline-flex items-center gap-2.5 rounded-full border border-[#dbe4f0] bg-white py-2 pr-4 pl-2.5 transition-[border-color,background-color,transform] duration-150 hover:border-[#0c5bd2]/40 hover:bg-[#eef4fc] hover:[transform:translateY(-2px)]"
-                  href={waLink(corridorMessage(c.name))}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  className={`${CHIP} hover:border-[#0c5bd2]/40 hover:bg-[#eef4fc] hover:[transform:translateY(-2px)]`}
+                  href="#waitlist"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    className="block h-auto w-7 rounded-[4px] bg-[#eef4fc]"
-                    src={`/flags/${c.code}.svg`}
-                    alt=""
-                    width={28}
-                    height={21}
-                    loading="lazy"
-                  />
+                  <Flag code={c.code} />
                   <span className="text-[14px] font-semibold text-[#0b1b3f]">{c.short}</span>
                 </a>
               ))}
@@ -561,18 +623,24 @@ export default async function LandingPage({
                   <>
                     1 USD = {fmtRate(fxRate)}{' '}
                     <span className="text-[#475569]">
-                      ({fxLive ? 'mid-market rate' : 'indicative rate'}
+                      ({fxLive ? 'daily reference rate' : 'indicative rate'}
                       {fxAsOf ? `, ECB fixing of ${fxAsOf}` : ''}).
                     </span>
                   </>
                 )}
               </p>
               <p className="mt-2 max-w-[46ch] text-[15px] leading-relaxed text-[#475569]">
-                No markup baked into the rate — your first transfer is free, then a flat $1.99
-                per bank transfer.
+                Your first transfer has no SmartRemit fee, then a flat $1.99 per bank transfer.
+                You see the exact rate and total before you pay.
               </p>
             </div>
-            <RateCalculator rate={fxRate} live={fxLive} asOf={fxAsOf} featured={featuredSendPartner} />
+            <RateCalculator
+              rate={fxRate}
+              live={fxLive}
+              asOf={fxAsOf}
+              featured={featuredSendPartner}
+              destinations={destinations}
+            />
           </div>
         </section>
 
@@ -848,6 +916,11 @@ export default async function LandingPage({
               <li>
                 <a className="hover:text-[#0b1b3f]" href="/about">
                   About
+                </a>
+              </li>
+              <li>
+                <a className="hover:text-[#0b1b3f]" href="/trust">
+                  Security &amp; compliance
                 </a>
               </li>
               <li>

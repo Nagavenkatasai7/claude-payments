@@ -205,6 +205,12 @@ export default function AboutPage() {
                 {`KYC decisions, blocked attempts and sensitive-data reveals are written to an append-only, per-partner audit log.`}
               </Pillar>
             </div>
+            <Link
+              href="/trust"
+              className="mt-8 inline-flex min-h-11 items-center rounded-full border border-[#c5d3e6] px-5 text-[14px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white"
+            >
+              Security &amp; compliance →
+            </Link>
           </div>
         </section>
 

@@ -3,13 +3,11 @@ import type { ReactNode } from 'react';
 import { SiteShell } from '@/components/site/SiteShell';
 
 // UI redesign M4 PR-6: the public trust page in the landing look (SiteShell = the landing header
-// and footer). An UNLINKED preview until the post-demo swap (SPEC §7): noindex is set here ONLY,
-// and no child segment sets robots (nested metadata would overwrite it:
-// node_modules/next/dist/docs/01-app/03-api-reference/04-functions/generate-metadata.md).
+// and footer). Public and indexed since the owner's go of 2026-10-25 (Raj's website brief): the
+// footer links it ("Security & compliance") and the sitemap lists it. No segment sets robots.
 export const metadata: Metadata = {
   title: 'Trust & security — SmartRemit',
   description: 'How SmartRemit protects data: security practices, compliance status, sub-processors and responsible disclosure.',
-  robots: { index: false, follow: false },
 };
 
 export default function TrustLayout({ children }: { children: ReactNode }) {

@@ -13,6 +13,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   return [
     { url: 'https://smartremit.ai/' },
     { url: 'https://smartremit.ai/about' },
+    { url: 'https://smartremit.ai/trust' },
     { url: 'https://smartremit.ai/docs' },
     { url: 'https://smartremit.ai/docs/api' },
     ...GUIDES.filter((g) => g.status === 'published').map((g) => ({ url: `https://smartremit.ai/docs/${g.slug}` })),

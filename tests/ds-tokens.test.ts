@@ -112,8 +112,8 @@ describe('--ds-* tokens are extracted from the landing', () => {
     expect(derived.get('--ds-gradient-bar')).toBe('linear-gradient(90deg,var(--ds-primary),var(--ds-brand-sky),var(--ds-brand-mint))');
   });
   it('type scale, radii and shadows match the landing recipes', () => {
-    expect(ds.get('--ds-text-hero')).toBe('clamp(40px,6.2vw,74px)');
-    expect(landing).toContain('text-[clamp(40px,6.2vw,74px)] font-extrabold leading-[1.03] tracking-[-0.038em]');
+    expect(ds.get('--ds-text-hero')).toBe('clamp(36px,5vw,60px)');
+    expect(landing).toContain('text-[clamp(36px,5vw,60px)] font-extrabold leading-[1.05] tracking-[-0.035em]');
     expect(ds.get('--ds-text-h2')).toBe('clamp(28px,4vw,46px)');
     expect(ds.get('--ds-text-h3')).toBe('clamp(24px,3.2vw,38px)');
     expect(ds.get('--ds-shadow-cta')).toBe('0 10px 30px -10px rgba(37,211,102,0.65)');

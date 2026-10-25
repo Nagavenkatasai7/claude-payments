@@ -357,7 +357,7 @@
   --ds-radius-card: 1rem;
   --ds-radius-inner: 0.75rem;
   --ds-radius-focus: 6px;
-  --ds-text-hero: clamp(40px,6.2vw,74px);
+  --ds-text-hero: clamp(36px,5vw,60px);
   --ds-text-h2: clamp(28px,4vw,46px);
   --ds-text-h3: clamp(24px,3.2vw,38px);
   --ds-text-lead: clamp(20px,2.3vw,26px);

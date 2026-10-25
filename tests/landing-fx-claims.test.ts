@@ -5,11 +5,12 @@ import { resolve } from 'node:path';
 // Step 0 FX-8: the public pages may not call the platform's rate "mid-market"
 // or promise "no (hidden) markup". The rate is the ECB's daily REFERENCE rate,
 // published "for information purposes only" (step0-rate-fixes.md §2), and a
-// routed transfer is priced on a partner's rate. src/app/page.tsx is deferred
-// to the landing follow-up (collision list), so it is not checked here.
+// routed transfer is priced on a partner's rate. src/app/page.tsx joined the list
+// with Raj's website brief rework (2026-10-25).
 // Static grep over the sources, like landing-claims.test.ts.
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf-8');
 const FILES = [
+  'src/app/page.tsx',
   'src/app/about/page.tsx',
   'src/app/landing/RateCalculator.tsx',
   'src/app/landing/HeroPipeline.tsx',
