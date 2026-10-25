@@ -163,19 +163,31 @@ function checkMeta(meta: Record<string, unknown>): void {
 }
 
 /**
- * One audit row for a customer's own schedule change: actor `system:customer-portal`, subject = the
- * keyed customer subject (never the phone). Throws on a guard refusal or a DB failure (the caller's
- * transaction then rolls back).
+ * An AI app acting for the customer through the MCP server (Oct 25): its client id (the audit
+ * actor) and its self-chosen name (bounded untrusted text, stored as "Set up in <app>").
+ */
+export interface ScheduleAgentVia {
+  clientId: string;
+  appName: string;
+}
+
+const AGENT_CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+
+/**
+ * One audit row for a customer's own schedule change: actor `system:customer-portal`, or
+ * `agent:<client id>` when an AI app made it (`via`); subject = the keyed customer subject (never
+ * the phone). Throws on a guard refusal or a DB failure (the caller's transaction then rolls back).
  */
 export async function recordScheduleAudit(
   db: DbOrTx,
-  e: { partnerId: PartnerId; phone: string; action: ScheduleAuditAction; meta: ScheduleAuditMeta },
+  e: { partnerId: PartnerId; phone: string; action: ScheduleAuditAction; meta: ScheduleAuditMeta; via?: ScheduleAgentVia },
 ): Promise<void> {
   checkMeta(e.meta as Record<string, unknown>);
+  if (e.via && !AGENT_CLIENT_ID_RE.test(e.via.clientId)) throw new Error('portal schedule audit: bad agent client id');
   await createAuditRepo(db).record({
     partnerId: e.partnerId,
-    actor: PORTAL_AUTH_ACTOR,
-    actorType: 'system',
+    actor: e.via ? `agent:${e.via.clientId}` : PORTAL_AUTH_ACTOR,
+    actorType: e.via ? 'agent' : 'system',
     action: e.action,
     subjectId: auditSubjectId(e.partnerId, normalizePhone(e.phone)),
     meta: e.meta,
@@ -188,9 +200,10 @@ export type CreateScheduleResult = { ok: true; scheduleId: string } | { ok: fals
 
 /**
  * Create one schedule for (partnerId, phone). `ctx` is a web ToolContext for the SAME (partner,
- * phone) (the caller builds it from the host and the session). The recipient is re-resolved here by
- * rid, so a deleted, another customer's or another tenant's recipient is `not_found` with nothing
- * written.
+ * phone) (the caller builds it from the host and the session, or the MCP server from the verified
+ * token). The recipient is re-resolved here by rid, so a deleted, another customer's or another
+ * tenant's recipient is `not_found` with nothing written. `via` (an AI app) is stored on the
+ * schedule as its name and audited as the app.
  */
 export async function createPortalSchedule(
   db: Db,
@@ -198,6 +211,7 @@ export async function createPortalSchedule(
   partnerId: PartnerId,
   phone: string,
   value: ScheduleFormValue,
+  via?: ScheduleAgentVia,
 ): Promise<CreateScheduleResult> {
   if (ctx.partnerId !== partnerId || ctx.phone !== phone) throw new Error('portal schedule: context mismatch');
   const recipient = await findByRid(db, partnerId, phone, value.rid);
@@ -225,6 +239,7 @@ export async function createPortalSchedule(
   );
   if (!v.ok) return { ok: false, code: v.code };
   const schedule: Schedule = { id: newTransferId(), ...v.schedule, createdAt: new Date().toISOString() };
+  if (via) schedule.createdVia = boundUntrustedText(via.appName, NAME_MAX) || 'an AI app';
   // Serialized with a recipient delete (review LOW 2): both take the same per-(tenant, sender)
   // address-book lock, and the recipient is re-resolved under it. A delete that committed first is
   // seen here (not_found, nothing written); a delete that comes after waits and its schedule sweep
@@ -238,7 +253,7 @@ export async function createPortalSchedule(
     if (!fresh) return 'not_found';
     if (fresh.payoutMethod !== schedule.payoutMethod || fresh.payoutDestination !== schedule.payoutDestination) return 'recipient_changed';
     await createScheduleRepo(tx).saveSchedule(schedule);
-    await recordScheduleAudit(tx, { partnerId, phone, action: 'schedule.create', meta: { scheduleId: schedule.id } });
+    await recordScheduleAudit(tx, { partnerId, phone, action: 'schedule.create', meta: { scheduleId: schedule.id }, ...(via ? { via } : {}) });
     return 'saved';
   });
   if (outcome !== 'saved') return { ok: false, code: outcome };
@@ -257,13 +272,17 @@ function refusalCode(reason: string): ScheduleStatusRefusal {
   return 'changed';
 }
 
-/** One status change on the customer's OWN schedule: scoped read → transition table → conditional write + audit. */
+/**
+ * One status change on the customer's OWN schedule: scoped read → transition table → conditional
+ * write + audit (as the AI app when `via` is given).
+ */
 export async function setPortalScheduleStatus(
   db: Db,
   partnerId: PartnerId,
   phone: string,
   id: unknown,
   op: ScheduleAction,
+  via?: ScheduleAgentVia,
 ): Promise<SetScheduleStatusResult> {
   if (!isScheduleId(id)) return { ok: false, code: 'not_found' };
   const current = await createScheduleRepo(db).getOwnedSchedule(partnerId, phone, id);
@@ -284,6 +303,7 @@ export async function setPortalScheduleStatus(
       phone,
       action: `schedule.${op}`,
       meta: { scheduleId: id, from: current.status, to: decision.to },
+      ...(via ? { via } : {}),
     });
     return { ok: true, status: decision.to };
   });

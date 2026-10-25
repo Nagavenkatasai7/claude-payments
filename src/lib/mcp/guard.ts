@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/server';
-import type { AgentAuth, AgentPrincipal } from '@/lib/agent-auth';
+import type { AgentAuth, AgentPrincipal, AgentToolCallExtra } from '@/lib/agent-auth';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
 import type { RedisLike } from '@/lib/store';
@@ -11,7 +11,7 @@ import type { RedisLike } from '@/lib/store';
 //  2. the gate (agent.tools on for the tenant AND demo mode for the phone). It FAILS CLOSED: an
 //     error is "off";
 //  3. the tool itself; then one audit record (recordToolCall, with the draft id a prepare or
-//     cancel touched), best effort.
+//     cancel touched, or the schedule id a schedule tool touched), best effort.
 // Scope checks happen earlier, in the SDK's per-tool scope challenge (an HTTP 403 before dispatch).
 
 export const TOOLS_OFF_MESSAGE = 'SmartRemit AI tools are switched off.';
@@ -41,9 +41,12 @@ export async function underGrantLimits(redis: RedisLike, grantId: string, now: n
 
 /**
  * What a tool body returns: the JSON data for the AI, or a customer-safe message for a tool error.
- * `draftId` (Stage C2) names the draft a prepare or cancel touched; it goes to the audit row only.
+ * `draftId` (Stage C2) names the draft a prepare or cancel touched, `scheduleId` the repeat payment
+ * a schedule tool set up or changed; they go to the audit row only.
  */
-export type ToolOutcome = { ok: true; data: Record<string, unknown>; draftId?: string } | { ok: false; message: string };
+export type ToolOutcome =
+  | { ok: true; data: Record<string, unknown>; draftId?: string; scheduleId?: string }
+  | { ok: false; message: string };
 
 export interface GuardDeps {
   auth: AgentAuth;
@@ -72,7 +75,7 @@ export async function runGuardedTool(
 ): Promise<CallToolResult> {
   let outcome: 'ok' | 'error' | 'refused';
   let result: CallToolResult;
-  let draftId: string | undefined;
+  let extra: AgentToolCallExtra | undefined;
   if (!(await underGrantLimits(deps.redis, principal.grantId, deps.now?.()))) {
     outcome = 'refused';
     result = errorResult(RATE_LIMITED_MESSAGE);
@@ -84,7 +87,9 @@ export async function runGuardedTool(
       const r = await body();
       outcome = r.ok ? 'ok' : 'error';
       result = r.ok ? jsonResult(r.data) : errorResult(r.message);
-      if (r.ok) draftId = r.draftId;
+      if (r.ok && (r.draftId || r.scheduleId)) {
+        extra = { ...(r.draftId ? { draftId: r.draftId } : {}), ...(r.scheduleId ? { scheduleId: r.scheduleId } : {}) };
+      }
     } catch (err) {
       logWarn('mcp.tool', 'tool failed', { tool, err: err instanceof Error ? err.name : 'error' });
       outcome = 'error';
@@ -92,7 +97,7 @@ export async function runGuardedTool(
     }
   }
   try {
-    await deps.auth.recordToolCall(principal, tool, outcome, draftId ? { draftId } : undefined);
+    await deps.auth.recordToolCall(principal, tool, outcome, extra);
   } catch {
     // best effort by contract; a throwing implementation must not break the call
   }

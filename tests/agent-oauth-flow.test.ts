@@ -336,7 +336,7 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       const { clientId, code } = await getCode();
       const { res, json } = await exchange(clientId, code);
       expect(res.status).toBe(200);
-      expect(json).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'quotes:read recipients:read transfers:read transfers:prepare' });
+      expect(json).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'quotes:read recipients:read transfers:read transfers:prepare schedules:manage' });
       expect(json.access_token).toMatch(/^sra_/);
       expect(json.refresh_token).toMatch(/^srr_/);
       expect(res.headers.get('cache-control')).toBe('no-store');
@@ -603,7 +603,7 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       const r = await auth().verifyAccessToken(t.access, RESOURCE);
       expect(r).toEqual({
         ok: true,
-        principal: { grantId: expect.stringMatching(/^agg_/), partnerId: 'default', phone: PHONE, clientId: t.clientId, clientName: 'Claude', scopes: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare'] },
+        principal: { grantId: expect.stringMatching(/^agg_/), partnerId: 'default', phone: PHONE, clientId: t.clientId, clientName: 'Claude', scopes: ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare', 'schedules:manage'] },
       });
     });
     it('missing / garbage / a partner API key', async () => {

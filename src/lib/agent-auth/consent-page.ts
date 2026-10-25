@@ -57,6 +57,7 @@ const SCOPE_LINE: Record<AgentScope, MessageKey> = {
   'recipients:read': 'agent.consent.recipients',
   'transfers:read': 'agent.consent.transfers',
   'transfers:prepare': 'agent.consent.prepare',
+  'schedules:manage': 'agent.consent.schedules',
 };
 
 export function renderConsentPage(v: ConsentView): string {
@@ -67,7 +68,7 @@ export function renderConsentPage(v: ConsentView): string {
     '<ul>' +
     v.scopes.map((s) => `<li>${esc(t(SCOPE_LINE[s]))}</li>`).join('') +
     '</ul>' +
-    `<p class="no">${esc(t(v.scopes.includes('transfers:prepare') ? 'agent.consent.cannotPay' : 'agent.consent.cannot'))}</p>` +
+    `<p class="no">${esc(t(v.scopes.includes('transfers:prepare') || v.scopes.includes('schedules:manage') ? 'agent.consent.cannotPay' : 'agent.consent.cannot'))}</p>` +
     `<p class="muted">${esc(t('agent.consent.unverified'))}</p>` +
     `<p class="muted">${esc(t('agent.consent.returnTo', { host: v.returnHost }))}</p>` +
     `<p class="muted">${esc(t('agent.consent.disconnect'))}</p>` +

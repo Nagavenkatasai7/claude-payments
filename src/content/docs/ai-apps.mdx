@@ -1,8 +1,8 @@
 ## What this is
 
-SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "how much can I still send today?" or "did yesterday's transfer arrive?".
+SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "how much can I still send today?" or "did yesterday's transfer arrive?", and set up a repeat payment such as "send Mom $200 on the 5th of every month".
 
-The rule that shapes everything below: **the AI app never pays.** It can look things up, and it can prepare a transfer to one of the customer's saved recipients. Preparing a transfer gives a pay link. Only the customer pays, on the SmartRemit pay page, with a code sent to their WhatsApp. Nothing moves until they do.
+The rule that shapes everything below: **the AI app never pays.** It can look things up, it can prepare a transfer to one of the customer's saved recipients, and it can set up, pause and cancel the customer's repeat payments. Preparing a transfer gives a pay link, and each due day of a repeat payment sends the customer a pay link on WhatsApp. Only the customer pays, on the SmartRemit pay page, with a code sent to their WhatsApp. Nothing moves until they do.
 
 AI apps are invite-only early access, and SmartRemit has to switch them on for your account first. SmartRemit is not listed in any app's public connector directory.
 
@@ -18,7 +18,7 @@ AI apps are invite-only early access, and SmartRemit has to switch them on for y
 | MCP server URL | `https://send.smartremit.ai/api/mcp` |
 | Transport | Streamable HTTP, stateless (no `Mcp-Session-Id`) |
 | Sign-in | OAuth 2.1 with PKCE (S256), dynamic client registration |
-| Scopes | `quotes:read`, `recipients:read`, `transfers:read`, `transfers:prepare` (all four by default) |
+| Scopes | `quotes:read`, `recipients:read`, `transfers:read`, `transfers:prepare`, `schedules:manage` (all five by default) |
 
 Use this address exactly. The host decides which SmartRemit service you sign in to, and a token issued for one host does not work on another.
 
@@ -70,6 +70,8 @@ The connection lasts <Fact name="agentGrantDays" /> days from the last time the 
 Open the SmartRemit portal, go to **Connected AI apps**, and select **Disconnect** next to the app. Or send `disconnect apps` to SmartRemit on WhatsApp or Telegram: that disconnects every AI app at once. The app loses access at once: its next request is refused, even if it still holds a token. Removing the connector inside the AI app does not, by itself, end SmartRemit's side; disconnect in SmartRemit too.
 
 A transfer that an app prepared and that is not paid yet stays open until its link expires. To stop it sooner, ask the app to cancel it, or let the link expire.
+
+A repeat payment that an app set up keeps running after you disconnect the app, because it is yours. Each due day still sends you a pay link that only you can pay. To stop it, cancel it on the portal's **Repeat payments** page or on WhatsApp.
 
 ## Tools
 
@@ -148,11 +150,44 @@ Cancels a transfer that this app prepared, while it is not paid. Scope `transfer
 
 Returns `cancelled: true`. A paid, expired or unknown id, or one another app prepared, gives the same answer: "Prepared transfer not found." A paid transfer cannot be cancelled or refunded here.
 
+### list_schedules
+
+The customer's active and paused repeat payments, newest first. Scope `schedules:manage`. No input. Each has `schedule_id`, `status`, `recipient_name`, `recipient_id`, `amount`, `currency`, `frequency` (`monthly` or `weekly`), `day_of_month` or `day_of_week`, `end_date`, `next_due_date` (the next day a pay link goes out, US Eastern date), `last_pay_link_sent_at`, `purpose` and `set_up_in` (the name of the app that set it up, or `null`). No account number or phone number is returned.
+
+### create_schedule
+
+Sets up a repeat payment to one of the customer's saved recipients in India. Scope `schedules:manage`. It uses the same checks as the SmartRemit portal: a saved recipient with a saved account, India only, the customer's legal name on file, an amount inside the platform range and a required purpose. Nothing is paid: on each due day SmartRemit makes the transfer, with every usual check and the customer's send limits, and sends the customer the pay link on WhatsApp. The portal shows "Set up in" and the app's name.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `recipient_id` | string, required | From `list_recipients`. |
+| `amount` | number, required | The amount to send each time, in the sender's currency. |
+| `frequency` | string, required | `monthly` or `weekly`. |
+| `day_of_month` | integer | Required for `monthly`: 1 to 28. |
+| `day_of_week` | string | Required for `weekly`: `sunday` to `saturday`. |
+| `end_date` | string | Optional last date, `YYYY-MM-DD`, in the future. Absent: it runs until cancelled. |
+| `purpose` | string, required | One of `family_support`, `gift`, `education`, `medical`, `savings`, `bills`, `business`, `other`. |
+| `purpose_detail` | string | Required when `purpose` is `other`: the customer's own reason, 10 to 120 characters. |
+
+Returns `created: true` and the repeat payment as `list_schedules` shows it. The same call repeated within <Fact name="mcpScheduleReplaySec" /> seconds returns the same repeat payment, not a second one. A reason that needs the customer to read a safety warning is refused here; the customer can set that one up in the SmartRemit portal.
+
+### change_schedule
+
+Pauses, resumes or cancels one of the customer's repeat payments. Scope `schedules:manage`. A cancel is final. To change the amount or the day, cancel it and set up a new one.
+
+| Input | Type | Notes |
+| --- | --- | --- |
+| `schedule_id` | string, required | From `list_schedules`. |
+| `action` | string, required | `pause`, `resume` or `cancel`. |
+
+Returns `changed: true`, the new `status` and the `next_due_date`. Another customer's id, or an unknown one, answers "Repeat payment not found."
+
 ## Limits
 
 - <Fact name="mcpGrantCallsPerMin" /> tool calls a minute and <Fact name="mcpGrantCallsPerHour" /> an hour per connection. Over the limit, the tool answers "Too many requests from this app. Wait a minute, then try again."
 - A request body is at most <Fact name="mcpMaxBodyKb" /> KB.
 - `prepare_transfer`: at most <Fact name="mcpPreparePerHour" /> prepared transfers an hour per customer, all apps together. This budget is separate from the SmartRemit portal's, so an app never blocks the customer's own sends.
+- `create_schedule`: at most <Fact name="mcpScheduleCreatesPerDay" /> new repeat payments a day per customer, all apps together. `change_schedule`: at most <Fact name="mcpScheduleChangesPerHour" /> changes an hour per customer, all apps together, on a budget separate from the portal's.
 - The send limits themselves are the customer's normal SmartRemit limits; an AI app never raises them.
 
 ## Errors
@@ -169,6 +204,9 @@ Returns `cancelled: true`. A paid, expired or unknown id, or one another app pre
 | Tool error "This prepared transfer is being paid now…" | The customer is paying it at this moment, so it cannot be cancelled. | Check `get_transfer_status`. |
 | Tool error "Prepared transfer not found…" | The prepared transfer is paid, cancelled or expired, or another app prepared it. | Check `get_transfer_status`. |
 | HTTP `403` `insufficient_scope` on `prepare_transfer` | The connection was made before SmartRemit added `transfers:prepare`, or without it. | Disconnect and connect again, allowing all permissions. |
+| HTTP `403` `insufficient_scope` on `list_schedules`, `create_schedule` or `change_schedule` | The connection was made before SmartRemit added `schedules:manage` (October 2026), or without it. | Connect again and allow all permissions. Most apps ask you to sign in again by themselves. |
+| Tool error "Repeat payments go to recipients in India only…" | Repeat payments are India only today. | Send to that recipient with `prepare_transfer`. |
+| Tool error "Repeat payment not found…" | Unknown id, or not this customer's repeat payment. | Get the id with `list_schedules`. |
 | Tool error "Something went wrong on our side…" | A temporary SmartRemit problem. | Try again later. |
 | Sign-in page "This is not available" | AI apps are not switched on for this account. | Ask SmartRemit. |
 | The app cannot add the connector (registration answers `403` `access_denied`). Claude says "Couldn't register with smartremit's sign-in service" and offers an OAuth Client ID field: leave it empty. | AI apps are switched off for this SmartRemit service. | Ask SmartRemit. |

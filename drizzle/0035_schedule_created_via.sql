@@ -1,0 +1,1 @@
+ALTER TABLE "schedules" ADD COLUMN "created_via" text;

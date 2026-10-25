@@ -27,7 +27,7 @@ export interface AgentAuthDeps {
   audit(e: AgentAuditInput): Promise<void>;
 }
 
-/** A draft id (draft-store newTransferId: base64url); anything else is left out of the audit row. */
+/** A draft or schedule id (newTransferId: base64url); anything else is left out of the audit row. */
 const DRAFT_ID = /^[A-Za-z0-9_-]{6,64}$/;
 
 /** last_used_at is written at most once per grant per this window. */
@@ -86,13 +86,14 @@ export function createAgentAuth(deps: AgentAuthDeps): AgentAuth {
       extra?: AgentToolCallExtra,
     ): Promise<void> {
       try {
-        const draftId = extra && DRAFT_ID.test(extra.draftId) ? extra.draftId : undefined;
+        const draftId = extra?.draftId !== undefined && DRAFT_ID.test(extra.draftId) ? extra.draftId : undefined;
+        const scheduleId = extra?.scheduleId !== undefined && DRAFT_ID.test(extra.scheduleId) ? extra.scheduleId : undefined;
         await deps.audit({
           partnerId: principal.partnerId,
           phone: principal.phone,
           clientId: principal.clientId,
           action: 'agent.tool.called',
-          meta: { tool: String(tool).slice(0, 64), clientId: principal.clientId, outcome, ...(draftId ? { draftId } : {}) },
+          meta: { tool: String(tool).slice(0, 64), clientId: principal.clientId, outcome, ...(draftId ? { draftId } : {}), ...(scheduleId ? { scheduleId } : {}) },
         });
       } catch {
         /* best effort: never throws */
