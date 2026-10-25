@@ -1,4 +1,4 @@
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { RedisLike } from '@/lib/store';
 import type { ChatMessage, Ticket, TicketMessage, TicketPriority } from '@/lib/types';
 
@@ -80,7 +80,7 @@ export async function draftReply(
       (customerContext ? `Context: ${customerContext}\n` : '') +
       `\nConversation so far:\n${threadText(visible)}\n\nDraft the next support reply.`,
   };
-  const reply = await chat([{ role: 'system', content: DRAFT_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: DRAFT_SYSTEM }, user], [], { task: 'ticket_draft' });
   return contentOf(reply);
 }
 
@@ -94,7 +94,7 @@ export async function summarizeCase(ticket: Ticket, messages: TicketMessage[]): 
       `${ticket.category ? ` · Category: ${ticket.category}` : ''}\n` +
       `Opened: ${ticket.createdAt}\n\nFull thread:\n${threadText(messages)}`,
   };
-  const reply = await chat([{ role: 'system', content: SUMMARY_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: SUMMARY_SYSTEM }, user], [], { task: 'ticket_summary' });
   return contentOf(reply);
 }
 
@@ -111,7 +111,7 @@ export async function triageSuggest(
     role: 'user',
     content: `Subject: ${subject}\nFirst message: ${firstMessage}`,
   };
-  const reply = await chat([{ role: 'system', content: TRIAGE_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: TRIAGE_SYSTEM }, user], [], { task: 'ticket_triage' });
   const raw = reply.content ?? '';
   let parsed: { category?: unknown; priority?: unknown } = {};
   const match = raw.match(/\{[\s\S]*?\}/);

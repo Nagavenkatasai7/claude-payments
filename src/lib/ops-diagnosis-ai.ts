@@ -1,4 +1,4 @@
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { ChatMessage } from '@/lib/types';
 import { permanentCodeInError } from '@/lib/whatsapp-errors';
 
@@ -131,7 +131,7 @@ function clamp<T extends string>(list: readonly T[], value: unknown, fallback: T
  */
 export async function diagnoseOps(bundle: OpsDiagnosisBundle): Promise<OpsDiagnosis> {
   const user: ChatMessage = { role: 'user', content: bundleText(bundle) };
-  const reply = await chat([{ role: 'system', content: DIAGNOSE_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: DIAGNOSE_SYSTEM }, user], [], { task: 'ops_diagnosis' });
   const raw = reply.content ?? '';
 
   let parsed: {

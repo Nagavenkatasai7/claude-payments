@@ -1,6 +1,4 @@
-process.env.OLLAMA_BASE_URL ||= 'https://ollama.test/v1';
-process.env.OLLAMA_API_KEY ||= 'test-key';
-process.env.OLLAMA_MODEL ||= 'kimi-test';
+process.env.ANTHROPIC_API_KEY ||= 'test-key';
 process.env.WHATSAPP_TOKEN ||= 'test-token';
 process.env.WHATSAPP_PHONE_NUMBER_ID ||= '123456';
 process.env.WHATSAPP_VERIFY_TOKEN ||= 'verify-test';

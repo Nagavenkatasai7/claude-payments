@@ -14,9 +14,9 @@ import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 //     closed list, empty output throws, the guardrails are in the prompt;
 //  3. amlExplainFallback: deterministic per rule.
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import {
   AML_EXPLAIN_NEXT_STEPS,
   AML_EXPLAIN_SYSTEM_PROMPT,
@@ -234,7 +234,7 @@ describe('explainAml (one chat call, clamped)', () => {
   it('calls the model with the copilot timeout, not the 20 s agent budget', async () => {
     chatMock.mockResolvedValueOnce(reply('{"summary":"ok","checks":[],"next_step":"escalate"}'));
     await explainAml(bundle());
-    expect(chatMock.mock.calls[0][2]).toEqual({ timeoutMs: AML_EXPLAIN_TIMEOUT_MS });
+    expect(chatMock.mock.calls[0][2]).toEqual({ timeoutMs: AML_EXPLAIN_TIMEOUT_MS, task: 'aml_explain' });
     expect(AML_EXPLAIN_TIMEOUT_MS).toBeGreaterThan(20_000);
     expect(AML_EXPLAIN_TIMEOUT_MS).toBeLessThanOrEqual(50_000);
   });

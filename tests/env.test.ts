@@ -7,10 +7,20 @@ describe('env', () => {
   });
 
   it('throws a clear error when a variable is missing', () => {
-    const original = process.env.OLLAMA_API_KEY;
-    delete process.env.OLLAMA_API_KEY;
-    expect(() => env.ollamaApiKey).toThrow(/OLLAMA_API_KEY/);
-    process.env.OLLAMA_API_KEY = original;
+    const original = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    expect(() => env.anthropicApiKey).toThrow(/ANTHROPIC_API_KEY/);
+    process.env.ANTHROPIC_API_KEY = original;
+  });
+
+  it('ANTHROPIC_AGENT_MODEL is optional and trimmed', () => {
+    const original = process.env.ANTHROPIC_AGENT_MODEL;
+    delete process.env.ANTHROPIC_AGENT_MODEL;
+    expect(env.anthropicAgentModel).toBeUndefined();
+    process.env.ANTHROPIC_AGENT_MODEL = '  claude-sonnet-5-5 ';
+    expect(env.anthropicAgentModel).toBe('claude-sonnet-5-5');
+    if (original === undefined) delete process.env.ANTHROPIC_AGENT_MODEL;
+    else process.env.ANTHROPIC_AGENT_MODEL = original;
   });
 
   describe('appBaseUrl self-derivation (when APP_BASE_URL is empty/unset)', () => {

@@ -15,9 +15,9 @@ import type { AuditEntry } from '@/lib/kyc-case-store';
 //     throws (callers degrade to "AI unavailable"); the one-shot contract passes
 //     NO tools, ever.
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import {
   suggestKycReview,
   KYC_DECISIONS,

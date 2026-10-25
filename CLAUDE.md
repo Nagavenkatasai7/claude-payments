@@ -14,7 +14,7 @@ Live at **https://smartremit.ai** — the canonical production domain (the `clau
 
 - **Neon via `drizzle-orm/neon-serverless` WebSocket Pool** — money paths need interactive transactions + `FOR UPDATE SKIP LOCKED`. Neon is THE ledger.
 - **Upstash Redis is hot/ephemeral only**: sessions, conversations (30d TTL), drafts, OTPs, throttles, msg dedup, rate limits, velocity counters, FX L2 cache.
-- **ONE stylesheet pipeline** (`src/app/tailwind.css`); legacy CSS deleted. **Ollama Cloud / Kimi K2.6** is the agent; Meta WhatsApp Cloud API is chat I/O (per-partner BYO numbers supported).
+- **ONE stylesheet pipeline** (`src/app/tailwind.css`); legacy CSS deleted. **Claude API** (`@anthropic-ai/sdk`, `src/lib/llm.ts`; bot on Haiku 5.5, compliance helpers on Sonnet 5.5, US inference) is the agent; Meta WhatsApp Cloud API is chat I/O (per-partner BYO numbers supported).
 
 ## Architecture spine (do not regress these)
 

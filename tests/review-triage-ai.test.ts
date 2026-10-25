@@ -11,9 +11,9 @@ import type { ChatMessage, Transfer } from '@/lib/types';
 //     to the closed lists (off-list ⇒ normal / hold); only MASKED signals reach
 //     the model; an empty rationale throws (callers degrade to "AI unavailable").
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import {
   suggestDisposition,
   URGENCIES,

@@ -1,5 +1,5 @@
 import { createAgent, type AgentDeps } from './agent';
-import { chat } from './ollama';
+import { chat } from './llm';
 import { raiseLlmDownAlert } from './llm-alert';
 import { env } from './env';
 import { getStore, type Store } from './store';

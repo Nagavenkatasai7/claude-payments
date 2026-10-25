@@ -13,7 +13,7 @@
  * Pure: no DB, no Redis, no network. `runEval` takes the chat function, so the
  * unit tests drive it with a stub (each case carries a recorded passing and a
  * recorded failing reply to prove its check), and the nightly script drives it
- * with the real model (scripts/eval-bot.ts, only when EVAL_OLLAMA_API_KEY is set).
+ * with the real model (scripts/eval-bot.ts, only when EVAL_ANTHROPIC_API_KEY is set).
  *
  * Every phone number here is fictitious (555 range, or the sample numbers the
  * unit tests already use), and the "sanctioned" name is a placeholder: the

@@ -19,7 +19,7 @@ import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
-import { OllamaHttpError } from '@/lib/llm-provider-error';
+import { ProviderHttpError } from '@/lib/llm-provider-error';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -1105,7 +1105,7 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(r.processed).toBe(1);
     expect(sendText).not.toHaveBeenCalled();
 
-    runAgentTurn.mockRejectedValue(new Error('ollama blip'));
+    runAgentTurn.mockRejectedValue(new Error('model blip'));
     await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'again', turn: {} });
     r = await drainOnce(deps(), 'w1');
     expect(r.failed).toBe(1); // retried with backoff — NOT lost
@@ -2104,7 +2104,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
 
   it('a permanent provider fallback (402) raises ONE llmdown:402:<hour> alert and NO botfallback; customers still get the line', async () => {
     runAgentTurn.mockImplementation(async (...a: unknown[]) => {
-      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(402, 'out of credit'));
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new ProviderHttpError(402, 'out of credit'));
       return FALLBACK_REPLY;
     });
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
@@ -2124,7 +2124,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
 
   it('a transient provider fallback (503) raises botfallback only, never llmdown', async () => {
     runAgentTurn.mockImplementation(async (...a: unknown[]) => {
-      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new OllamaHttpError(503, 'busy'));
+      (a[4] as { onFallback: (e: unknown) => void }).onFallback(new ProviderHttpError(503, 'busy'));
       return FALLBACK_REPLY;
     });
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });

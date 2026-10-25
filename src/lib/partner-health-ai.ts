@@ -1,4 +1,4 @@
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { ChatMessage } from '@/lib/types';
 import type { HealthBand } from '@/lib/partner-health';
 
@@ -41,7 +41,7 @@ export async function narratePartnerHealth(
       `Signals:\n${signals.length ? signals.map((s) => `- ${s}`).join('\n') : '- (none)'}\n\n` +
       `Write the account manager's note.`,
   };
-  const reply = await chat([{ role: 'system', content: HEALTH_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: HEALTH_SYSTEM }, user], [], { task: 'partner_health' });
   const text = (reply.content ?? '').trim();
   if (!text) throw new Error('Empty AI response');
   return text;

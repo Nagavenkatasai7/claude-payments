@@ -20,9 +20,9 @@ import {
 //  2. The AI narrator (chat() stubbed): consumes only the band + signals,
 //     throws on empty output, and carries the forbidden-content guardrails.
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
 
 const chatMock = vi.mocked(chat);

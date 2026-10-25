@@ -62,7 +62,7 @@ function usdCell(d: CorridorDemand) {
 }
 
 // The AI brief is the slow part of this page (one model call, up to
-// OLLAMA_TIMEOUT_MS). It streams in under its own Suspense boundary so the
+// LLM_TIMEOUT_MS). It streams in under its own Suspense boundary so the
 // ranked table never waits for it (node_modules/next/dist/docs/01-app/02-guides/
 // streaming.md: "Each <Suspense> boundary is an independent streaming point").
 // getCorridorBrief reuses a cached brief for the same numbers for an hour.
