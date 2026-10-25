@@ -1,7 +1,7 @@
 // The landing page's "Choose your chat app" cards (Raj's follow-up, Oct 25: show Telegram and the
 // AI apps). One list so tests/landing-channels.test.ts can pin the honest status of each channel:
-// WhatsApp is open to everyone; Telegram sits behind an admin switch; the AI apps (MCP) are
-// invite-only. Public copy never says "testing" (owner rule, Oct 25).
+// WhatsApp and Telegram (@smartremit_bot, owner: "ready to use", Oct 25) are open to everyone;
+// the AI apps (MCP) are invite-only. Public copy never says "testing" (owner rule, Oct 25).
 
 export type ChannelStatus = 'available' | 'coming-soon' | 'early-access';
 
@@ -14,6 +14,7 @@ export interface ChatChannel {
 }
 
 export const AI_APPS_GUIDE_HREF = '/docs/ai-apps';
+export const TELEGRAM_BOT_HREF = 'https://t.me/smartremit_bot';
 
 export const CHAT_CHANNELS: readonly ChatChannel[] = [
   {
@@ -26,9 +27,9 @@ export const CHAT_CHANNELS: readonly ChatChannel[] = [
   {
     id: 'telegram',
     title: 'Telegram',
-    status: 'coming-soon',
-    badge: 'Coming soon',
-    body: 'The same SmartRemit AI and the same steps, in Telegram.',
+    status: 'available',
+    badge: 'Available now',
+    body: 'The same SmartRemit AI and the same steps, in Telegram. Open the bot, share your phone number and say hi.',
   },
   {
     id: 'ai-apps',

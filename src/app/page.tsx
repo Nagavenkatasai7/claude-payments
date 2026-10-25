@@ -18,7 +18,7 @@ import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
 import { submitPartnerRequestAction } from './partners-action';
 import WaitlistForm from './landing/WaitlistForm';
-import { CHAT_CHANNELS, AI_APPS_GUIDE_HREF, type ChannelStatus } from './landing/channels';
+import { CHAT_CHANNELS, AI_APPS_GUIDE_HREF, TELEGRAM_BOT_HREF, type ChannelStatus } from './landing/channels';
 import { PARTNER_CORRIDORS, WAITLIST_DESTINATIONS } from './landing/corridors';
 import { PARTNER_TYPES } from '@/lib/partner-type';
 import { companyFooterLine } from '@/lib/company';
@@ -127,6 +127,18 @@ const SHOWCASE_H3 = 'text-[clamp(24px,3.2vw,38px)] font-semibold leading-[1.12] 
 const SHOWCASE_COPY = 'mt-4 max-w-[46ch] text-[16px] leading-relaxed text-[#475569]';
 const FOOT_HEAD = 'mb-4 block text-[12px] font-bold uppercase tracking-[0.1em] text-[#475569]';
 const FOOT_LIST = 'flex flex-col gap-2.5 text-[14px] text-[#475569]';
+
+// Telegram hand-off: a deep Telegram blue so the white label keeps AA contrast (5.6:1).
+const BTN_TG =
+  'inline-flex min-h-[52px] items-center justify-center gap-2.5 rounded-full bg-[#0f6aa3] px-7 text-[16px] font-bold text-white shadow-[0_10px_30px_-12px_rgba(15,106,163,0.6)] transition-[background-color,transform] duration-150 hover:bg-[#0c5a8c] hover:[transform:translateY(-1px)]';
+
+function TelegramIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M21.94 4.66 18.9 19.02c-.23 1.01-.83 1.26-1.68.79l-4.63-3.41-2.23 2.15c-.25.25-.45.45-.93.45l.33-4.71 8.58-7.75c.37-.33-.08-.52-.58-.19L7.16 13.03l-4.57-1.43c-.99-.31-1.01-.99.21-1.47l17.86-6.88c.83-.31 1.55.19 1.28 1.41Z" />
+    </svg>
+  );
+}
 
 // "Choose your chat app" badge colours: green only for what is open to everyone.
 const CHANNEL_BADGE: Record<ChannelStatus, string> = {
@@ -362,8 +374,9 @@ export default async function LandingPage({
                 aria-hidden="true"
               />
               <p className="mt-6 text-[clamp(20px,2.3vw,26px)] font-medium tracking-[-0.01em] text-[#0b1b3f]">
-                Start on <strong className="font-bold">WhatsApp.</strong> Telegram and AI assistants
-                such as Claude are coming soon.
+                Start on <strong className="font-bold">WhatsApp</strong> or{' '}
+                <strong className="font-bold">Telegram.</strong> AI assistants such as Claude, ChatGPT
+                and Perplexity are in early access.
               </p>
               <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
                 The SmartRemit AI quotes the rate for your transfer in the chat, a hosted page takes
@@ -496,6 +509,16 @@ export default async function LandingPage({
                     >
                       <WhatsAppIcon size={18} />
                       <span>Start on WhatsApp</span>
+                    </a>
+                  ) : c.id === 'telegram' ? (
+                    <a
+                      className={`${BTN_TG} mt-5 self-start`}
+                      href={TELEGRAM_BOT_HREF}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <TelegramIcon />
+                      <span>Start on Telegram</span>
                     </a>
                   ) : c.id === 'ai-apps' ? (
                     <Link
