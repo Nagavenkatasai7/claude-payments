@@ -1,15 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 
-// UI redesign M4 PR-6: /trust is a static, data-free server page in the landing shell, UNLINKED
-// and noindex until the post-demo swap. The page module is pinned by source (like /docs).
+// UI redesign M4 PR-6: /trust is a static, data-free server page in the landing shell. Public and
+// indexed since the owner's go of 2026-10-25 (tests/trust-linked.test.ts). The page module is
+// pinned by source (like /docs).
 
 describe('/trust route contract (source)', () => {
-  it('the layout wraps the SiteShell, titles the page and sets noindex (and only the layout sets robots)', () => {
+  it('the layout wraps the SiteShell and titles the page, and no trust file sets robots', () => {
     const layout = readFileSync('src/app/trust/layout.tsx', 'utf8');
     expect(layout).toMatch(/SiteShell/);
     expect(layout).toMatch(/Trust & security/);
-    expect(layout).toMatch(/robots: \{ index: false, follow: false \}/);
+    expect(layout).not.toMatch(/\brobots\s*:/);
     expect(readFileSync('src/app/trust/page.tsx', 'utf8')).not.toMatch(/\brobots\s*:/);
   });
   it('the page renders from the trust content modules, with a PageHeader and a #disclosure section', () => {

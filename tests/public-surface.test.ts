@@ -71,6 +71,7 @@ describe('sitemap.xml (sitemap.ts)', () => {
     expect(entries.map((e) => e.url)).toEqual([
       `${SITE}/`,
       `${SITE}/about`,
+      `${SITE}/trust`,
       `${SITE}/docs`,
       `${SITE}/docs/api`,
       ...guides,

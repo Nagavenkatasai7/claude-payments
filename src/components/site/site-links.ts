@@ -1,8 +1,7 @@
 // The ONE list of shared site-shell links (UI redesign M4). It replicates the landing's header
 // (src/app/page.tsx LoginMenu + <nav>) and footer, with the landing's in-page anchors written as
 // '/#…' so they work from any page. tests/site-shell.test.ts pins parity with the landing in both
-// directions. The trust page is deliberately NOT linked until the post-demo swap
-// (tests/trust-unlinked.test.ts).
+// directions. The trust page is linked from the footer (owner go 2026-10-25, Raj's website brief).
 
 /** Header section links. `hide` is the landing breakpoint at which the link collapses (0: never). */
 export const NAV_LINKS = [
@@ -43,6 +42,7 @@ export const FOOTER_COLUMNS: readonly FooterColumn[] = [
     heading: 'Product',
     links: [
       { href: '/about', label: 'About' },
+      { href: '/trust', label: 'Security & compliance' },
       { href: '/#inside', label: 'What’s inside' },
       { href: '/#corridors', label: 'Corridors' },
       { href: '/#calculator', label: 'FX calculator' },

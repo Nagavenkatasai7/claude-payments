@@ -19,10 +19,21 @@ function landingCountries(): Array<{ name: string; code: string }> {
 }
 
 describe('landing page corridors (Program-Fix 33)', () => {
-  it('has no literal "8 corridors" — the count is derived', () => {
-    expect(PAGE).not.toContain('8 corridors');
-    expect(PAGE).toContain('${CORRIDOR_COUNT} corridors');
-    expect(PAGE).toContain('{CORRIDOR_COUNT} corridors');
+  it('leads with US to India and derives the coming-next count (no literal count)', () => {
+    expect(PAGE).not.toMatch(/\b\d+ (more )?(corridors|countries)\b/);
+    expect(PAGE).not.toContain('Any direction');
+    expect(PAGE).toContain('Launching with US to India.');
+    expect(PAGE).toContain('{COMING_NEXT_COUNT} more countries');
+    expect(PAGE).toContain('${COMING_NEXT_COUNT} more countries coming next');
+    expect(PAGE).toMatch(/COMING_NEXT_COUNT = WAITLIST_DESTINATIONS\.filter\(\(d\) => d\.value !== 'US' && d\.value !== 'IN'\)\.length/);
+  });
+
+  it('only India starts a chat; coming-next countries open the waitlist', () => {
+    const at = PAGE.indexOf('id="corridors"');
+    const section = PAGE.slice(at, PAGE.indexOf('</section>', at));
+    expect(section.match(/waLink\(corridorMessage\(c\.name\)\)/g)).toHaveLength(1);
+    expect(section).toContain("c.code === 'in' ?");
+    expect(section).toContain('href="#waitlist"');
   });
 
   it('the derived count is the waitlist destination list (18) and matches the country authority', () => {

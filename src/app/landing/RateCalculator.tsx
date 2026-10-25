@@ -2,7 +2,10 @@
 
 import { useMemo, useState } from 'react';
 import { calculatorMessage, waLink, WA_MESSAGES } from './wa';
-import { inr as formatInr } from './format';
+import { inr as formatInr, destAmount } from './format';
+// Types only: the destination list is built on the server (./calc-destinations).
+import type { CalcDestination } from './calc-destinations';
+import type { CountryCode } from '@/lib/types';
 import WhatsAppIcon from './WhatsAppIcon';
 // Pure, types-only module (never fx.ts → rate.ts → log.ts in a client bundle).
 import { PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
@@ -21,6 +24,14 @@ interface Props {
    * null/undefined ⇒ today's WhatsApp CTA, byte-for-byte (test-pinned).
    */
   featured?: FeaturedSendPartner | null;
+  /**
+   * Raj's website brief (Oct 25), widget step 2: the "to" picker (src/app/landing/calc-destinations.ts).
+   * Absent ⇒ no picker and today's USD to INR calculator, byte-for-byte (test-pinned). The launch
+   * destination (India) keeps the send buttons; a coming-next one points at the waitlist instead.
+   */
+  destinations?: readonly CalcDestination[];
+  /** The destination selected at first render (default: the first, India). */
+  initialTo?: CountryCode;
 }
 
 const DEFAULT_AMOUNT = 1000;
@@ -50,15 +61,19 @@ const btnPartnerBlock =
  * hydration / with JS disabled. After hydration, the amount input drives both
  * the "they get" figure and the WhatsApp prefill + button label.
  */
-export default function RateCalculator({ rate, live, asOf, featured }: Props) {
+export default function RateCalculator({ rate, live, asOf, featured, destinations, initialTo }: Props) {
   const [amount, setAmount] = useState<string>(String(DEFAULT_AMOUNT));
+  const [to, setTo] = useState<CountryCode | undefined>(initialTo);
+  const dest = destinations && destinations.length > 0 ? (destinations.find((d) => d.code === to) ?? destinations[0]) : null;
+  const comingNext = dest !== null && !dest.launch;
+  const shownRate = dest ? dest.rate : rate;
 
   const numeric = useMemo(() => {
     const n = Number.parseFloat(amount);
     return Number.isFinite(n) && n > 0 ? n : 0;
   }, [amount]);
 
-  const theyGet = rate === null ? null : numeric * rate;
+  const theyGet = shownRate === null ? null : numeric * shownRate;
   const hasAmount = numeric > 0;
 
   const message = hasAmount
@@ -74,7 +89,7 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
   // primary, WhatsApp secondary) only when the server resolved a featured partner AND
   // its slug yields a link; otherwise nothing changes. The link is built here, from
   // the calculator's own state, by the pure validator in send-handoff.ts.
-  const handoffHref = featured
+  const handoffHref = featured && !comingNext
     ? buildSendHandoffUrl({ slug: featured.slug, amount: hasAmount ? numeric : undefined, to: 'IN' })
     : null;
   const partner = featured && handoffHref ? featured : null;
@@ -84,6 +99,27 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
 
   return (
     <div className={`${tier2Card} p-[22px]`}>
+      {dest && destinations ? (
+        <div className="mb-4 flex flex-col gap-1.5">
+          <p className="text-[12.5px] leading-normal text-[var(--lp-text-300)]">From the United States (USD)</p>
+          <label htmlFor="calc-to" className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">Send to</label>
+          <select
+            id="calc-to"
+            className="min-h-11 rounded-xl border border-[var(--lp-border)] bg-[var(--lp-bg-900)] px-3 text-base font-semibold text-[var(--lp-text-100)] focus:border-[#0c5bd2] focus:outline-none focus:ring-2 focus:ring-[#0c5bd2]/25"
+            value={dest.code}
+            onChange={(e) => setTo(e.target.value as CountryCode)}
+          >
+            {destinations.filter((d) => d.launch).map((d) => (
+              <option key={d.code} value={d.code}>{`${d.name} (${d.currency})`}</option>
+            ))}
+            <optgroup label="Coming next">
+              {destinations.filter((d) => !d.launch).map((d) => (
+                <option key={d.code} value={d.code}>{`${d.name} (${d.currency})`}</option>
+              ))}
+            </optgroup>
+          </select>
+        </div>
+      ) : null}
       <div className="flex items-end gap-3.5">
         <label className="flex flex-1 flex-col gap-1.5">
           <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">You send</span>
@@ -110,7 +146,13 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
         <div className="flex flex-1 flex-col gap-1.5">
           <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">They get</span>
           <span className="py-[9px] text-[22px] leading-normal font-extrabold text-[var(--lp-green-text)]" aria-live="polite">
-            {theyGet === null ? '—' : hasAmount ? formatInr(theyGet) : '₹0'}
+            {theyGet === null
+              ? '—'
+              : dest
+                ? destAmount(hasAmount ? theyGet : 0, dest.currency)
+                : hasAmount
+                  ? formatInr(theyGet)
+                  : '₹0'}
           </span>
         </div>
       </div>
@@ -119,7 +161,16 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
         Fee: $0 on your first transfer, then $1.99.
       </p>
 
-      {partner && handoffHref ? (
+      {comingNext && dest ? (
+        <>
+          <p className="mb-3 text-[13.5px] leading-normal text-[var(--lp-text-100)]">
+            {`${dest.name} is coming next. Join the waitlist and we will tell you when it opens.`}
+          </p>
+          <a className={btnPartnerBlock} href="#waitlist">
+            <span>Join the waitlist</span>
+          </a>
+        </>
+      ) : partner && handoffHref ? (
         <>
           {!isLive ? (
             <p className="mb-2 text-center">
