@@ -175,19 +175,19 @@ export default function RateCalculator({ rate, live, asOf, featured, destination
           {!isLive ? (
             <p className="mb-2 text-center">
               <span className="inline-block rounded-full border border-[#b45309] bg-[#fffbeb] px-2.5 py-0.5 text-xs font-bold tracking-[.04em] text-[#92400e]">
-                TEST — no real money
+                DEMO — no real money
               </span>
             </p>
           ) : null}
           <a className={btnPartnerBlock} href={handoffHref}>
             <span>
-              {isLive ? `Send with ${partner.displayName}` : `Try a test send with ${partner.displayName}`}
+              {isLive ? `Send with ${partner.displayName}` : `Try a demo send with ${partner.displayName}`}
             </span>
           </a>
           <p className="mt-2.5 mb-3 text-center text-[12.5px] leading-[1.5] text-[var(--lp-text-300)]">
             {isLive
               ? `Money is handled by ${partner.legalName}, a licensed money transmitter. SmartRemit provides the technology.`
-              : 'Test mode — no money moves.'}
+              : 'Demo mode — no money moves.'}
           </p>
           <a className={btnWaSecondary} href={href} target="_blank" rel="noopener noreferrer">
             <WhatsAppIcon />

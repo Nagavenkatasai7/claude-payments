@@ -86,11 +86,12 @@ test('an unknown guide is a 404', async ({ request }) => {
   expect((await request.get('/docs/no-such-guide')).status()).toBe(404);
 });
 
-test('the landing links Docs in the header and footer, and never /docs-next or /trust (SPEC §7)', async ({ page }) => {
+// /trust is linked from the footer since PR #519 (tests/e2e/trust-smoke.spec.ts pins that link).
+test('the landing links Docs in the header and footer, and never /docs-next (SPEC §7)', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('nav[aria-label="Primary"] a[href="/docs"]', { hasText: 'Docs' })).toBeVisible();
   await expect(page.locator('footer a[href="/docs"]', { hasText: 'Docs' })).toBeVisible();
-  await expect(page.locator('a[href^="/docs-next"], a[href="/trust"]')).toHaveCount(0);
+  await expect(page.locator('a[href^="/docs-next"]')).toHaveCount(0);
 });
 
 test('the old /docs-next paths redirect permanently to the same page under /docs', async ({ request }) => {

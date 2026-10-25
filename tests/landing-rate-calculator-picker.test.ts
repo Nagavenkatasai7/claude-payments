@@ -54,7 +54,7 @@ describe('RateCalculator — the "to" picker', () => {
 
   it('a featured partner button is offered only for India', () => {
     const featured = { slug: 'acme-pay', displayName: 'Acme Pay', mode: 'test' as const };
-    expect(render({ ...BASE, featured })).toContain('Try a test send with Acme Pay');
+    expect(render({ ...BASE, featured })).toContain('Try a demo send with Acme Pay');
     expect(render({ ...BASE, featured, initialTo: 'GB' })).not.toContain('Acme Pay');
   });
 });
