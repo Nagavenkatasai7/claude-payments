@@ -239,7 +239,7 @@ describe('getCustomerSummary', () => {
   it('returns null when the model throws — and caches nothing', async () => {
     const redis = fakeRedis();
     const chatFn = vi.fn(async (): Promise<ChatMessage> => {
-      throw new Error('Ollama request failed (500): boom');
+      throw new Error('Model request failed (500): boom');
     });
     const s = createCustomerSummarizer(deps({ redis, chatFn }));
 

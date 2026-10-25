@@ -1,4 +1,4 @@
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { ChatMessage, Transfer } from '@/lib/types';
 
 // review-triage-ai — the compliance-analyst copilot's one-shot AI helper (U6).
@@ -111,7 +111,7 @@ export async function suggestDisposition(
       `Hold age: ${holdAgeHours(t, now)}h since payment captured\n\n` +
       `Suggest a disposition for the analyst.`,
   };
-  const reply = await chat([{ role: 'system', content: TRIAGE_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: TRIAGE_SYSTEM }, user], [], { task: 'review_triage' });
   const parsed = extractJsonObject(reply.content ?? '') ?? {};
   const rationale = typeof parsed.rationale === 'string' ? parsed.rationale.trim() : '';
   if (!rationale) throw new Error('Empty AI response');

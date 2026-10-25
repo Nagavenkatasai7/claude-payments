@@ -24,10 +24,10 @@ vi.mock('@/db/client', () => ({ getDb: () => db }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => ({}) }));
 vi.mock('@/lib/ticket-ai', () => ({ checkCopilotRateLimit: (...a: unknown[]) => rateLimit(...(a as [])) }));
 vi.mock('@/lib/partner-mfa-gate', () => ({ inviteMfaPending: (...a: unknown[]) => mfaPending(...(a as [])) }));
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
 import { POST } from '@/app/api/copilot/aml-explain/route';
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 
 const chatMock = vi.mocked(chat);
 

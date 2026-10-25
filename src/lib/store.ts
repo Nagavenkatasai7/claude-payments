@@ -1,4 +1,5 @@
 import { eq, sql } from 'drizzle-orm';
+import { stripProviderContent } from './llm-translate';
 import { getRedis } from './redis';
 import { easternDayStart, easternMonth, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
@@ -269,7 +270,8 @@ export function createStore(redis: RedisLike, db: Db) {
       return legacy ? (JSON.parse(legacy) as ChatMessage[]) : [];
     },
     async saveConversation(partnerId: PartnerId, phone: string, messages: ChatMessage[]): Promise<void> {
-      await redis.set(`conv:${partnerId}:${phone}`, JSON.stringify(trimHistory(messages)), { ex: 30 * 24 * 3600 });
+      // Provider blocks (thinking) belong to one turn: never persisted.
+      await redis.set(`conv:${partnerId}:${phone}`, JSON.stringify(trimHistory(stripProviderContent(messages))), { ex: 30 * 24 * 3600 });
     },
 
     // ── Transfer ledger (Postgres) ───────────────────────────────────────

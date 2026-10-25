@@ -44,7 +44,7 @@ describe('outbox getDead / countDeadByErrorPrefix — deterministic clustering',
     // Three rows that failed the same way — a shared leading chunk, then a
     // varying trailing host. errorPrefix keeps the shared chunk; the trailing
     // host differs and is dropped, so they cluster (case-insensitively).
-    const shared = 'Ollama request failed (502): upstream rail unreachable — ';
+    const shared = 'Model request failed (502): upstream rail unreachable — ';
     const subject = await seedDead('settlement.instruct', `${shared}partner-a.example`);
     await seedDead('settlement.instruct', `${shared}partner-b.example`);
     await seedDead('rail.callback', `${shared.toUpperCase()}partner-c.example`);

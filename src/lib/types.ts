@@ -250,6 +250,11 @@ export interface ChatMessage {
   content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  // The model provider's own content blocks for an assistant message (Claude
+  // thinking + tool_use blocks, llm-translate.ts). They must go back unchanged
+  // on the next round of the SAME turn, and they are NEVER persisted: the store
+  // strips them before it saves the history.
+  providerContent?: unknown[];
 }
 
 export interface ChatTool {

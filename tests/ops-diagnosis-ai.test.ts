@@ -13,9 +13,9 @@ import type { ChatMessage } from '@/lib/types';
 //     (callers degrade to "AI unavailable"); the deterministic errorPrefix
 //     helper normalizes for sibling clustering.
 
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import {
   diagnoseOps,
   errorPrefix,
@@ -248,8 +248,8 @@ describe('errorPrefix — deterministic normalization for sibling clustering', (
   });
 
   it('two errors that differ only by a trailing id share a prefix', () => {
-    const a = errorPrefix('Ollama request failed (502): upstream A timed out at 12:00', 30);
-    const b = errorPrefix('Ollama request failed (502): upstream B timed out at 13:00', 30);
+    const a = errorPrefix('Model request failed (502): upstream A timed out at 12:00', 30);
+    const b = errorPrefix('Model request failed (502): upstream B timed out at 13:00', 30);
     expect(a).toBe(b);
   });
 

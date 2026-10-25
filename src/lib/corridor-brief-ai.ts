@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import type { RedisLike } from '@/lib/store';
 import type { ChatMessage } from '@/lib/types';
 import type { CorridorDemand } from '@/lib/corridor-demand';
@@ -67,14 +67,14 @@ async function narrateTable(table: string): Promise<string> {
     role: 'user',
     content: `Ranked demand table (highest first):\n${table}\n\nWrite the expansion brief.`,
   };
-  const reply = await chat([{ role: 'system', content: BRIEF_SYSTEM }, user], []);
+  const reply = await chat([{ role: 'system', content: BRIEF_SYSTEM }, user], [], { task: 'corridor_brief' });
   const text = (reply.content ?? '').trim();
   if (!text) throw new Error('Empty AI response');
   return text;
 }
 
 // ── Cached entry point for the admin Corridors page ─────────────────────────
-// A model call takes seconds and can run to OLLAMA_TIMEOUT_MS, so the page
+// A model call takes seconds and can run to LLM_TIMEOUT_MS, so the page
 // streams the brief in after the table and reuses one brief per set of top-N
 // numbers for an hour. The key is a hash of the fact table (counts and sums
 // only), so new demand gets a fresh brief and nothing readable is stored in the

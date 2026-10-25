@@ -37,12 +37,12 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
-vi.mock('@/lib/ollama', () => ({ chat: vi.fn() }));
+vi.mock('@/lib/llm', () => ({ chat: vi.fn() }));
 
 import { explainAmlAction } from '@/app/partner/(app)/transfers/[id]/explain-actions';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
-import { chat } from '@/lib/ollama';
+import { chat } from '@/lib/llm';
 import { t } from '@/lib/i18n';
 
 const chatMock = vi.mocked(chat);

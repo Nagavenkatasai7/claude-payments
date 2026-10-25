@@ -3250,7 +3250,7 @@ async function openRecallDisputeTool(
     });
 
     // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker
-    // drains (NEVER an inline Ollama call — this tool runs in the agent turn and
+    // drains (NEVER an inline model call — this tool runs in the agent turn and
     // must stay fast). Deduped on the ticket id; setTriage is idempotent, so
     // re-confirming over the pre-filled 'refund' category is safe.
     await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
@@ -3638,7 +3638,7 @@ async function disputeBillTool(
   await ctx.store.markB2bInvoiceDisputed(invoice.id, partnerId);
 
   // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker drains
-  // (never an inline Ollama call — this tool runs in the agent turn). Deduped on
+  // (never an inline model call — this tool runs in the agent turn). Deduped on
   // the ticket id.
   await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
     'ticket.triage',

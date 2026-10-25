@@ -82,7 +82,7 @@ describe('Trust content is honest', () => {
   it('lists the core stack and email host, and nothing switched off or unconfirmed', async () => {
     const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
     const names = SUBPROCESSORS.map((s) => s.name).join('|');
-    for (const n of ['Vercel', 'Neon', 'Upstash', 'WhatsApp', 'Ollama', 'Persona', 'Hostinger']) expect(names).toContain(n);
+    for (const n of ['Vercel', 'Neon', 'Upstash', 'WhatsApp', 'Anthropic', 'Persona', 'Hostinger']) expect(names).toContain(n);
     // Card funding is off; error reporting is unconfirmed; ops alerts go to WhatsApp only.
     expect(names).not.toMatch(/Stripe|Sentry|webhook/i);
   });

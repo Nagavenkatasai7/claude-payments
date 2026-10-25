@@ -39,7 +39,7 @@ Two invariants are structurally untoggleable:
 | Language | **TypeScript** end-to-end | |
 | Ledger | **Neon Postgres** via **Drizzle ORM** on `drizzle-orm/neon-serverless` (WebSocket Pool) | Money paths need interactive transactions and `FOR UPDATE SKIP LOCKED`; the HTTP driver can't do either |
 | Hot state | **Upstash Redis** (REST) | Sessions, conversations, OTPs, drafts, throttles, dedup, counters, FX cache |
-| AI agent | **Ollama Cloud** running **Kimi K2.6** | The conversational brain; tool-calling chat loop |
+| AI agent | **Claude API** (Haiku 5.5 for the bot, Sonnet 5.5 for compliance helpers; US inference) | The conversational brain; tool-calling chat loop |
 | Chat channel | **Meta WhatsApp Cloud API** | Inbound webhooks + outbound sends/templates; per-partner BYO numbers |
 | UI | **Tailwind CSS v4** + **shadcn/ui** (Radix) | One stylesheet pipeline (`src/app/tailwind.css`); the legacy hand-rolled CSS was fully retired |
 | Charts | **Recharts** | Analytics dashboard |
@@ -123,14 +123,14 @@ Meta POST /api/whatsapp            (shared/default number)
   → enqueue outbox row 'agent.turn' (dedupe wamid:{id}) + pokeWorker()
 ```
 
-The agent turn itself is a **durable outbox row** — a killed function or an Ollama
+The agent turn itself is a **durable outbox row** — a killed function or a model
 outage retries with backoff instead of eating the customer's message. The payload
 carries `routedPartnerId`, never tokens; the worker re-resolves the partner's
 WhatsApp credentials at run time.
 
 ### 4.2 The agent (`src/lib/agent.ts`, `prompt.ts`, `tools.ts`)
 
-A tool-calling loop (max rounds) against Kimi K2.6:
+A tool-calling loop (max rounds) against Claude Haiku 5.5:
 - **System prompt** is built per-partner: `buildSystemPrompt({brand, botPersona,
   kycGateActive})`. The bot identifies as the partner's brand, never SmartRemit,
   when white-labeled. With the KYC gate off (the default), the prompt's onboarding
@@ -551,7 +551,7 @@ Vercel cron → `/api/cron` (daily schedules).
 | `WHATSAPP_AUTH_TEMPLATE` (default `verification_code`) | Meta AUTHENTICATION template for portal OTPs |
 | `WHATSAPP_VERIFICATION_{NEEDED,IN_PROGRESS,VERIFIED,FAILED}_TEMPLATE` | KYC status templates (free-form fallback until approved) |
 | `OPS_ALERT_PHONE` | Stuck-money / dead-letter WhatsApp alerts |
-| `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` / `OLLAMA_MODEL` | The agent LLM |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AGENT_MODEL` (optional) | The agent LLM |
 | `PERSONA_API_KEY` / `PERSONA_WEBHOOK_SECRET` / template + env ids | Hosted KYC |
 | `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` | First staff admin (seeds only when staff list empty) |
 | `APP_BASE_URL` | Public base URL (set to `https://smartremit.ai`; self-derives on Vercel otherwise) |

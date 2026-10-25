@@ -15,7 +15,7 @@ import type { ChatMessage, Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { FALLBACK_REPLY } from '@/lib/agent';
-import { OllamaHttpError } from '@/lib/llm-provider-error';
+import { ProviderHttpError } from '@/lib/llm-provider-error';
 
 // web-chat (B5) — the dashboard chat thread is keyed conv:web:<phone>, fully
 // separate from the WhatsApp thread at conv:<phone>; the agent runs with the
@@ -131,7 +131,7 @@ describe('webThreadStore', () => {
 describe('createWebChat', () => {
   it('a permanent provider error (402): FALLBACK_REPLY, alertLlmDown awaited once with that error, the out row logged', async () => {
     const deps = buildDeps();
-    const err402 = new OllamaHttpError(402, 'out of credit');
+    const err402 = new ProviderHttpError(402, 'out of credit');
     let settled = false;
     const alertLlmDown = vi.fn(async () => {
       await new Promise((r) => setTimeout(r, 20));

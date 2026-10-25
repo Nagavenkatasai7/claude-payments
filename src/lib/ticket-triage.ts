@@ -4,10 +4,10 @@ import { pokeWorker } from '@/lib/outbox';
 
 // ticket-triage — the enqueue-side helper for AI auto-triage (U2). A freshly
 // created CUSTOMER ticket lands category=null/priority='normal'; rather than run
-// the synchronous Ollama call inline (which would block the customer-facing
+// the synchronous model call inline (which would block the customer-facing
 // redirect), every creation site enqueues ONE durable 'ticket.triage' outbox
 // row. The worker (src/lib/outbox-worker.ts) drains it out-of-band: load the
-// ticket + its first message → triageSuggest → setTriage → audit. A model/Ollama
+// ticket + its first message → triageSuggest → setTriage → audit. A model provider
 // outage just leaves the ticket un-triaged (the worker's retry/backoff/dead-letter
 // handles it like any other kind); staff hand-sort in the meantime.
 //
