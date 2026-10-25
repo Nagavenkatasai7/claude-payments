@@ -18,6 +18,7 @@ import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
 import { submitPartnerRequestAction } from './partners-action';
 import WaitlistForm from './landing/WaitlistForm';
+import { CHAT_CHANNELS, AI_APPS_GUIDE_HREF, type ChannelStatus } from './landing/channels';
 import { PARTNER_CORRIDORS, WAITLIST_DESTINATIONS } from './landing/corridors';
 import { PARTNER_TYPES } from '@/lib/partner-type';
 import { companyFooterLine } from '@/lib/company';
@@ -126,6 +127,13 @@ const SHOWCASE_H3 = 'text-[clamp(24px,3.2vw,38px)] font-semibold leading-[1.12] 
 const SHOWCASE_COPY = 'mt-4 max-w-[46ch] text-[16px] leading-relaxed text-[#475569]';
 const FOOT_HEAD = 'mb-4 block text-[12px] font-bold uppercase tracking-[0.1em] text-[#475569]';
 const FOOT_LIST = 'flex flex-col gap-2.5 text-[14px] text-[#475569]';
+
+// "Choose your chat app" badge colours: green only for what is open to everyone.
+const CHANNEL_BADGE: Record<ChannelStatus, string> = {
+  available: 'border-[#047857]/40 bg-[#ecfdf5] text-[#065f46]',
+  'coming-soon': 'border-[#c5d3e6] bg-[#f5f9ff] text-[#334155]',
+  'early-access': 'border-[#0c5bd2]/35 bg-[#eef4fc] text-[#0a4fb8]',
+};
 
 function fmtRate(rate: number): string {
   return '₹' + rate.toFixed(2);
@@ -444,6 +452,66 @@ export default async function LandingPage({
                 <AuditIcon /> Full audit trail
               </li>
             </ul>
+          </div>
+        </section>
+
+        {/* ============ CHOOSE YOUR CHAT APP — Raj's follow-up, Oct 25 ============ */}
+        <section
+          id="channels"
+          className={`scroll-mt-20 px-5 pt-[clamp(56px,8vw,110px)] ${RISE}`}
+          aria-labelledby="channels-h"
+        >
+          <div className="mx-auto w-full max-w-[1180px]">
+            <div className="mx-auto max-w-[680px] text-center">
+              <h2
+                id="channels-h"
+                className="text-[clamp(28px,4vw,46px)] font-semibold leading-[1.1] tracking-[-0.025em]"
+              >
+                Choose your chat app
+              </h2>
+              <p className="mt-4 text-[16px] text-[#475569]">
+                One SmartRemit AI, in the apps you already use. The rate, the checks and the secure
+                pay page are the same everywhere.
+              </p>
+            </div>
+            <ul className="mt-10 grid gap-5 md:grid-cols-3">
+              {CHAT_CHANNELS.map((c) => (
+                <li
+                  key={c.id}
+                  className="flex flex-col rounded-[20px] border border-[#dbe4f0] bg-white p-6 shadow-[0_18px_40px_-28px_rgba(11,27,63,0.35)]"
+                >
+                  <span
+                    className={`self-start rounded-full border px-3 py-1 text-[12.5px] font-semibold ${CHANNEL_BADGE[c.status]}`}
+                  >
+                    {c.badge}
+                  </span>
+                  <h3 className="mt-4 text-[20px] font-semibold leading-[1.25] tracking-[-0.01em]">{c.title}</h3>
+                  <p className="mt-2 flex-1 text-[15px] leading-relaxed text-[#475569]">{c.body}</p>
+                  {c.id === 'whatsapp' ? (
+                    <a
+                      className={`${BTN_WA} mt-5 self-start`}
+                      href={genericHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <WhatsAppIcon size={18} />
+                      <span>Start on WhatsApp</span>
+                    </a>
+                  ) : c.id === 'ai-apps' ? (
+                    <Link
+                      className="mt-5 inline-flex min-h-11 items-center self-start text-[15px] font-semibold text-[#0c5bd2] hover:underline"
+                      href={AI_APPS_GUIDE_HREF}
+                    >
+                      How AI apps connect &rarr;
+                    </Link>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-5 text-center text-[12.5px] text-[#475569]">
+              Claude, ChatGPT and Perplexity are trademarks of their owners. SmartRemit is not
+              affiliated with or endorsed by them.
+            </p>
           </div>
         </section>
 
