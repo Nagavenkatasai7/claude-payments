@@ -4,11 +4,11 @@ SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP
 
 The rule that shapes everything below: **the AI app never pays.** It can look things up, and it can prepare a transfer to one of the customer's saved recipients. Preparing a transfer gives a pay link. Only the customer pays, on the SmartRemit pay page, with a code sent to their WhatsApp. Nothing moves until they do.
 
-This is a test program. It is open to invited testers only, and SmartRemit has to switch it on for your account first. SmartRemit is not listed in any app's public connector directory.
+AI apps are invite-only early access, and SmartRemit has to switch them on for your account first. SmartRemit is not listed in any app's public connector directory.
 
 ## Before you start
 
-- A SmartRemit account (the phone number you use with SmartRemit on WhatsApp), invited to the AI apps test. Ask SmartRemit to switch it on; until then the sign-in page says "This is not available".
+- A SmartRemit account (the phone number you use with SmartRemit on WhatsApp), invited to AI apps early access. Ask SmartRemit to switch it on; until then the sign-in page says "This is not available".
 - An AI app that can add a remote MCP server ("custom connector"). The plans that allow this are set by each app, not by SmartRemit, and they change; the sections below say what each app documented when this guide was written.
 
 ## The server address
@@ -161,7 +161,7 @@ Returns `cancelled: true`. A paid, expired or unknown id, or one another app pre
 | --- | --- | --- |
 | HTTP `401` with `WWW-Authenticate: Bearer resource_metadata=…` | No token, an expired or revoked token, or a token for another host. | The app signs in again (an expired access token is refreshed automatically). |
 | HTTP `403` `insufficient_scope` | The connection was granted without the scope this tool needs. | Disconnect and connect again, allowing all permissions. |
-| Tool error "SmartRemit AI tools are switched off." | The test is not switched on for this account, or SmartRemit switched it off. | Ask SmartRemit. |
+| Tool error "SmartRemit AI tools are switched off." | AI apps are not switched on for this account, or SmartRemit switched them off. | Ask SmartRemit. |
 | Tool error "Too many requests from this app…" | A rate limit above. | Wait a minute. |
 | Tool error "Transfer not found." | Unknown id, or not this customer's transfer. | Check the id with `list_recent_transfers`. |
 | Tool error "Recipient not found…" | The `recipient_id` is not one of this customer's saved recipients. | Get the id with `list_recipients`. |
@@ -170,8 +170,8 @@ Returns `cancelled: true`. A paid, expired or unknown id, or one another app pre
 | Tool error "Prepared transfer not found…" | The prepared transfer is paid, cancelled or expired, or another app prepared it. | Check `get_transfer_status`. |
 | HTTP `403` `insufficient_scope` on `prepare_transfer` | The connection was made before SmartRemit added `transfers:prepare`, or without it. | Disconnect and connect again, allowing all permissions. |
 | Tool error "Something went wrong on our side…" | A temporary SmartRemit problem. | Try again later. |
-| Sign-in page "This is not available" | The test is not switched on for this account. | Ask SmartRemit. |
-| The app cannot add the connector (registration answers `403` `access_denied`). Claude says "Couldn't register with smartremit's sign-in service" and offers an OAuth Client ID field: leave it empty. | The test is switched off for this SmartRemit service. | Ask SmartRemit. |
+| Sign-in page "This is not available" | AI apps are not switched on for this account. | Ask SmartRemit. |
+| The app cannot add the connector (registration answers `403` `access_denied`). Claude says "Couldn't register with smartremit's sign-in service" and offers an OAuth Client ID field: leave it empty. | AI apps are switched off for this SmartRemit service. | Ask SmartRemit. |
 
 ## For client developers
 

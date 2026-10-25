@@ -42,9 +42,9 @@ describe('RateCalculator — featured send partner', () => {
   it('test mode: a test-send button to the partner portal, a TEST badge and the test-mode note', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'test' } });
     expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/portal/send?amount=1000.00&to=IN', WA_HREF]);
-    expect(html).toContain('Try a test send with Acme Pay');
-    expect(html).toContain('TEST — no real money');
-    expect(html).toContain('Test mode — no money moves.');
+    expect(html).toContain('Try a demo send with Acme Pay');
+    expect(html).toContain('DEMO — no real money');
+    expect(html).toContain('Demo mode — no money moves.');
     expect(html).not.toContain('licensed money transmitter');
     expect(html).not.toContain('wa.me');
   });
@@ -56,8 +56,8 @@ describe('RateCalculator — featured send partner', () => {
     });
     expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/portal/send?amount=1000.00&to=IN', WA_HREF]);
     expect(html).toContain('Send with Acme Pay');
-    expect(html).not.toContain('Try a test send');
-    expect(html).not.toContain('TEST — no real money');
+    expect(html).not.toContain('Try a demo send');
+    expect(html).not.toContain('DEMO — no real money');
     expect(html).toContain(
       'Money is handled by Acme Money Services LLC, a licensed money transmitter. SmartRemit provides the technology.',
     );
@@ -66,14 +66,14 @@ describe('RateCalculator — featured send partner', () => {
   it('live mode WITHOUT a legal name never claims a licensed transmitter: it renders the test copy', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'live' } });
     expect(html).not.toContain('licensed money transmitter');
-    expect(html).toContain('Try a test send with Acme Pay');
-    expect(html).toContain('TEST — no real money');
-    expect(html).toContain('Test mode — no money moves.');
+    expect(html).toContain('Try a demo send with Acme Pay');
+    expect(html).toContain('DEMO — no real money');
+    expect(html).toContain('Demo mode — no money moves.');
   });
 
   it('keeps the WhatsApp CTA beside the partner button: partner first (primary), WhatsApp second', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'test' } });
-    expect(html.indexOf('Try a test send with Acme Pay')).toBeLessThan(html.indexOf('Send $1,000 to India on WhatsApp'));
+    expect(html.indexOf('Try a demo send with Acme Pay')).toBeLessThan(html.indexOf('Send $1,000 to India on WhatsApp'));
     // The e2e smoke's selector (tests/e2e/dashboard-smoke.spec.ts) still matches.
     expect(html).toContain('href="https://api.whatsapp.com/send/?phone=');
   });

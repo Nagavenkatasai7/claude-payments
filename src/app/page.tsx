@@ -355,7 +355,7 @@ export default async function LandingPage({
               />
               <p className="mt-6 text-[clamp(20px,2.3vw,26px)] font-medium tracking-[-0.01em] text-[#0b1b3f]">
                 Start on <strong className="font-bold">WhatsApp.</strong> Telegram and AI assistants
-                such as Claude are in testing.
+                such as Claude are coming soon.
               </p>
               <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
                 The SmartRemit AI quotes the rate for your transfer in the chat, a hosted page takes
