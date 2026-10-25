@@ -53,7 +53,8 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
   // The single landing <h1> — the light-brand hero headline.
   const h1 = page.getByRole('heading', { level: 1 });
   await expect(h1).toBeVisible();
-  await expect(h1).toContainText(/global money transfers/i);
+  // Raj's website brief (Oct 25, PR #519): the chat-apps headline.
+  await expect(h1).toContainText(/send money home from the chat apps/i);
   // At least one WhatsApp CTA pointing at the bot number. Program-Fix 25 PR B:
   // any number — the owner moves it with NEXT_PUBLIC_WHATSAPP_NUMBER.
   const waCta = page
