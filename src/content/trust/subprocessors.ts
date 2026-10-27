@@ -53,6 +53,22 @@ export const SUBPROCESSORS: readonly Subprocessor[] = [
     regionStatus: 'being-confirmed',
   },
   {
+    // @smartremit_bot (src/lib/telegram.ts); the customer shares a phone number to link the chat.
+    name: 'Telegram',
+    purpose: 'Telegram messaging',
+    data: 'Phone numbers, message content, Telegram name and user ID',
+    region: 'Being confirmed',
+    regionStatus: 'being-confirmed',
+  },
+  {
+    // src/lib/voice-transcribe.ts; the speech region is set in the deploy settings and not verified yet.
+    name: 'Microsoft (Azure AI Speech)',
+    purpose: 'Turns voice notes into text, when voice notes are on',
+    data: 'Voice note audio',
+    region: 'Being confirmed',
+    regionStatus: 'being-confirmed',
+  },
+  {
     // Every request asks for US-only processing (inference_geo "us", src/lib/llm.ts);
     // the region stays "Being confirmed" until production usage logs show it.
     name: 'Anthropic (Claude API)',
