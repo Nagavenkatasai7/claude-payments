@@ -87,6 +87,18 @@ describe('Trust content is honest', () => {
     expect(names).not.toMatch(/Stripe|Sentry|webhook/i);
   });
 
+  it('lists every live chat channel and the voice-note transcriber', async () => {
+    // Telegram (@smartremit_bot, src/lib/telegram.ts) is live and linked from the home page, and
+    // Azure AI Speech (src/lib/voice-transcribe.ts) receives voice-note audio.
+    const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
+    const telegram = SUBPROCESSORS.find((s) => /Telegram/.test(s.name));
+    expect(telegram?.data).toMatch(/phone numbers/i);
+    expect(telegram?.data).toMatch(/message content/i);
+    const speech = SUBPROCESSORS.find((s) => /Azure AI Speech/.test(s.name));
+    expect(speech?.purpose).toMatch(/voice notes/i);
+    expect(speech?.data).toMatch(/audio/i);
+  });
+
   it('the cache row names every category it holds, including payout details in short-lived drafts', async () => {
     const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
     const upstash = SUBPROCESSORS.find((s) => s.name === 'Upstash');
