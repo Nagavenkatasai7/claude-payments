@@ -61,7 +61,7 @@ export const SUBPROCESSORS: readonly Subprocessor[] = [
     regionStatus: 'being-confirmed',
   },
   {
-    // src/lib/voice-transcribe.ts; the region comes from AZURE_SPEECH_REGION, not verified here.
+    // src/lib/voice-transcribe.ts; the speech region is set in the deploy settings and not verified yet.
     name: 'Microsoft (Azure AI Speech)',
     purpose: 'Turns voice notes into text, when voice notes are on',
     data: 'Voice note audio',
