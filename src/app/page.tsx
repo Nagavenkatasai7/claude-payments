@@ -350,7 +350,7 @@ export default async function LandingPage({
           aria-labelledby="hero-h"
         >
           {/* Backdrop (decorative): soft sky/green light and a dotted "globe"
-              field behind the phone, echoing the launch poster. */}
+              field behind the calculator, echoing the launch poster. */}
           <div className="pointer-events-none absolute inset-0 z-0" aria-hidden="true">
             <div className="absolute -top-[25%] -right-[15%] h-[85%] w-[70%] bg-[radial-gradient(closest-side,rgba(72,179,245,0.24),transparent)]" />
             <div className="absolute -bottom-[30%] -left-[15%] h-[70%] w-[60%] bg-[radial-gradient(closest-side,rgba(52,211,153,0.16),transparent)]" />
@@ -418,26 +418,24 @@ export default async function LandingPage({
               </div>
             </div>
 
-            <div className="relative">
-              {/* Dashed routes + pins around the phone (decorative, desktop only). */}
-              <svg
-                className="pointer-events-none absolute top-1/2 left-1/2 hidden h-[640px] w-[500px] -translate-x-1/2 -translate-y-1/2 lg:block"
-                viewBox="0 0 500 640"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path d="M40 150 C 120 40, 330 20, 450 110" stroke="#11a1c6" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.7" />
-                <path d="M470 380 C 500 470, 430 560, 330 600" stroke="#34d399" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.8" />
-                <g fill="#0c5bd2">
-                  <circle cx="40" cy="150" r="7" />
-                  <circle cx="450" cy="110" r="7" />
-                </g>
-                <circle cx="40" cy="150" r="14" fill="#0c5bd2" opacity="0.14" />
-                <circle cx="450" cy="110" r="14" fill="#0c5bd2" opacity="0.14" />
-                <circle cx="470" cy="380" r="6" fill="#047857" />
-                <circle cx="470" cy="380" r="13" fill="#34d399" opacity="0.22" />
-              </svg>
-              <ChatMock rate={illustrativeRate} />
+            {/* Live FX calculator (owner, Oct 30): top right of the hero; the phone picture moved to #chat-demo. */}
+            <div id="calculator" className="relative scroll-mt-24">
+              <p className={`${EYEBROW} text-[#047857]`}>Live FX</p>
+              <RateCalculator
+                rate={fxRate}
+                live={fxLive}
+                asOf={fxAsOf}
+                featured={featuredSendPartner}
+                destinations={destinations}
+              />
+              {/* With no rate, the calculator itself explains that the rate is quoted in chat. */}
+              {fxRate === null ? null : (
+                <p className="mt-3 text-[14px] leading-relaxed text-[#475569]">
+                  1 USD = {fmtRate(fxRate)}, {fxLive ? 'daily reference rate' : 'indicative rate'}
+                  {fxAsOf ? ` (ECB fixing of ${fxAsOf})` : ''}. You see the exact rate and total before
+                  you pay.
+                </p>
+              )}
             </div>
           </div>
         </section>
@@ -555,7 +553,7 @@ export default async function LandingPage({
 
             <div className="mt-[clamp(48px,6vw,88px)] flex flex-col gap-[clamp(64px,8vw,120px)]">
               {/* (a) The conversation — the whole transfer, stage by stage (the
-                  chat itself is the hero's phone). */}
+                  chat itself is the #chat-demo phone). */}
               <div className={`flex flex-col gap-10 lg:gap-14 ${RISE}`}>
                 <div className="max-w-[720px]">
                   <p className={`${EYEBROW} text-[#047857]`}>The conversation</p>
@@ -692,46 +690,48 @@ export default async function LandingPage({
 
         {/* ============ LIVE FX CALCULATOR ============ */}
         <section
-          id="calculator"
+          id="chat-demo"
           className={`scroll-mt-20 border-t border-[#dbe4f0] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
-          aria-labelledby="calculator-h"
+          aria-labelledby="chat-demo-h"
         >
           <div className="mx-auto grid w-full max-w-[1080px] items-center gap-10 lg:grid-cols-2 lg:gap-20">
             <div>
-              <p className={`${EYEBROW} text-[#047857]`}>
-                Live FX
-              </p>
+              <p className={`${EYEBROW} text-[#047857]`}>In the chat</p>
               <h2
-                id="calculator-h"
+                id="chat-demo-h"
                 className="text-[clamp(28px,4vw,46px)] font-semibold leading-[1.1] tracking-[-0.025em]"
               >
-                The honest rate, before you send.
+                Quote, check and pay in one chat.
               </h2>
               <p className="mt-4 max-w-[46ch] text-[17px] leading-relaxed text-[#0b1b3f]">
-                {fxRate === null ? (
-                  <>Live rate temporarily unavailable — you&apos;ll see the exact rate in chat before you confirm.</>
-                ) : (
-                  <>
-                    1 USD = {fmtRate(fxRate)}{' '}
-                    <span className="text-[#475569]">
-                      ({fxLive ? 'daily reference rate' : 'indicative rate'}
-                      {fxAsOf ? `, ECB fixing of ${fxAsOf}` : ''}).
-                    </span>
-                  </>
-                )}
+                The SmartRemit AI quotes your rate, checks the details with you and sends a secure
+                link to pay. You see the exact rate and total before you pay.
               </p>
               <p className="mt-2 max-w-[46ch] text-[15px] leading-relaxed text-[#475569]">
                 Your first transfer has no SmartRemit fee, then a flat $1.99 per bank transfer.
-                You see the exact rate and total before you pay.
               </p>
             </div>
-            <RateCalculator
-              rate={fxRate}
-              live={fxLive}
-              asOf={fxAsOf}
-              featured={featuredSendPartner}
-              destinations={destinations}
-            />
+            <div className="relative">
+              {/* Dashed routes + pins around the phone (decorative, desktop only). */}
+              <svg
+                className="pointer-events-none absolute top-1/2 left-1/2 hidden h-[640px] w-[500px] -translate-x-1/2 -translate-y-1/2 lg:block"
+                viewBox="0 0 500 640"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path d="M40 150 C 120 40, 330 20, 450 110" stroke="#11a1c6" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.7" />
+                <path d="M470 380 C 500 470, 430 560, 330 600" stroke="#34d399" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.8" />
+                <g fill="#0c5bd2">
+                  <circle cx="40" cy="150" r="7" />
+                  <circle cx="450" cy="110" r="7" />
+                </g>
+                <circle cx="40" cy="150" r="14" fill="#0c5bd2" opacity="0.14" />
+                <circle cx="450" cy="110" r="14" fill="#0c5bd2" opacity="0.14" />
+                <circle cx="470" cy="380" r="6" fill="#047857" />
+                <circle cx="470" cy="380" r="13" fill="#34d399" opacity="0.22" />
+              </svg>
+              <ChatMock rate={illustrativeRate} />
+            </div>
           </div>
         </section>
 
