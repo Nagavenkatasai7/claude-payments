@@ -25,6 +25,9 @@ describe('classifyOffTopic: clear off-topic requests are declined', () => {
     'pretend you are a pirate and talk like one',
     'mujhe ek kavita likh do',
     'escríbeme un poema',
+    'generate python code for a calculator',
+    'build me a website for my bakery',
+    'write me some code that sorts a list',
   ])('%j → off topic', (text) => {
     expect(classifyOffTopic(text)).toBe(true);
   });
@@ -52,6 +55,22 @@ describe('classifyOffTopic: never blocks remittance, status, support or greeting
     'is it safe to send money to India with you',
     'Priya',
     '',
+    // Review fix: answers to the bot's purpose, occupation and code questions.
+    'treatment for my dad',
+    'medicine for my mother',
+    'medical treatment of my father',
+    'it is for her medication of diabetes',
+    'hospital bills for my father',
+    'surgery for my mom',
+    'I write code for a living',
+    'I build apps for a living',
+    'software engineer, I write code',
+    'give me another code',
+    'generate a new code',
+    'make a new code please',
+    'the code never came, generate another one',
+    'how do I fix the app',
+    'make the website work',
   ])('%j → not off topic', (text) => {
     expect(classifyOffTopic(text)).toBe(false);
   });

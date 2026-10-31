@@ -102,6 +102,59 @@ describe('classifyHelpIntent: everything else goes to the model', () => {
   });
 });
 
+// Review fix: "unauthorised" skips the model and opens a fraud case, so it must
+// be a first-person claim. A denial ("it's not a scam"), a question ("is this
+// a scam?") or a send request that mentions fraud reaches the model.
+describe('classifyHelpIntent: a fraud claim is first person', () => {
+  it.each([
+    ['I was scammed', 'en'],
+    ["I think I've been scammed", 'en'],
+    ['my card was stolen', 'en'],
+    ['my account got hacked', 'en'],
+    ['someone used my account', 'en'],
+    ["I didn't make this", 'en'],
+    ['I did not authorize this transfer', 'en'],
+    ['unauthorized transaction on my card', 'en'],
+    ['I want to report fraud', 'en'],
+    ["I'm a victim of fraud", 'en'],
+    ['मेरा अकाउंट हैक हो गया', 'hi'],
+    ['मेरे साथ धोखा हुआ', 'hi'],
+    ['mere saath dhokha hua', 'hinglish'],
+    ['mera account hack ho gaya', 'hinglish'],
+    ['me estafaron', 'es'],
+    ['mi cuenta fue hackeada', 'es'],
+    ['yo no hice esta transferencia', 'es'],
+  ])('%j → unauthorised (%s)', (text, lang) => {
+    expect(classifyHelpIntent(text)).toEqual({ intent: 'unauthorised', lang });
+  });
+
+  it.each([
+    "no it's not a scam, he is my brother",
+    'not a scam, please continue',
+    'no, this is not fraud',
+    'nahi, ye scam nahi hai',
+    'ye dhokha nahi hai',
+    'यह धोखा नहीं है',
+    'क्या यह धोखाधड़ी है?',
+    'no es una estafa, es mi hermano',
+    '¿es una estafa?',
+    'Is this a scam?',
+    'is it a scam',
+    'is smartremit legit or a scam',
+    'are you a scam?',
+    'send $200 to my mom, her card was stolen',
+    'please send 100 to dad, my old card was stolen so I use a new one',
+    'my mom got scammed last year so I want to be careful',
+    "I didn't send it yet",
+    "I didn't make the payment yet, can you send the link again",
+    'maine abhi tak nahi bheja',
+    'how do I avoid scams',
+    'scam',
+  ])('%j → not unauthorised', (text) => {
+    expect(classifyHelpIntent(text)?.intent).not.toBe('unauthorised');
+  });
+});
+
 describe('the intent decides the case reason and whether the model still runs', () => {
   it('cancel records a case and lets the bot continue; every other intent answers with fixed text', () => {
     expect(helpIntentSkipsModel('cancel')).toBe(false);

@@ -26,18 +26,27 @@ const ON_TOPIC = anyOf(
   /^(?:hi|hello|hey|hii|good morning|good evening|thanks|thank you|namaste|namaskar|hola|gracias|buenos dias|buenos días|ok|okay)\b/u,
   // Hinglish and Spanish money words
   /\b(?:paise|paisa|bhejna|bhejne|bhejo|bheja|rupaye|khata|dinero|enviar|envío|envio|pago|transferencia|tasa|comisión|comision|cuenta|ayuda|persona)\b/u,
+  // Answers to the bot's own questions (review fix): a transfer's purpose ("medicine for my
+  // mother"), the sender's occupation ("I write code for a living") and the pay page's code.
+  /\b(?:medical|medicine|medicines|medication|medications|treatment|hospital|surgery|operation|doctor|clinic|tuition)\b/u,
+  /\b(?:occupation|job|profession|employer|employed|salary|for a living|engineer|developer|programmer)\b/u,
+  /\b(?:otp|pin|passcode|login|new code|another code|the code|my code|code again|resend)\b/u,
 );
+// A statement about the customer ("I write code", "she builds apps") is not a request.
+const SELF_STATEMENT = rx(/\b(?:i|we|he|she|they)\s+(?:write|writes|build|builds|develop|develops|create|creates|code|codes|make|makes|fix|fixes)\b/u);
 const HAS_MONEY_FIGURE = /[$₹€£]|\d+\s*(?:dollars?|rupees?|rs|usd|inr|mxn|pesos?)\b/iu;
 
 const OFF_TOPIC = anyOf(
-  // code
-  /\b(?:write|create|generate|make|build|debug|fix|give me)\b(?:\s+\S+){0,4}?\s+(?:code|script|program|function|regex|sql|html|css|app|website)\b/u,
+  // code ("make" and "give me" are left out: "give me another code" is the pay page's code,
+  // and "fix the app" is a support question)
+  /\b(?:write|create|generate|build|debug|fix)\b(?:\s+\S+){0,4}?\s+(?:code|script|program|function|regex|sql|html|css)\b/u,
+  /\b(?:write|create|generate|build|develop|design)\b(?:\s+\S+){0,4}?\s+(?:app|website|webpage)\b/u,
   /\b(?:python|javascript|typescript|java|golang|php|ruby|kotlin|swift|c\+\+)\b(?:\s+\S+){0,4}?\s+(?:script|code|program|function|bug|error)\b/u,
   /\b(?:code|script|program|function)\b(?:\s+\S+){0,2}?\s+in\s+(?:python|javascript|typescript|java|golang|php|ruby|kotlin|swift)\b/u,
   // writing for the customer
   /\bwrite\b(?:\s+\S+){0,3}?\s+(?:essay|poem|story|song|lyrics|novel|speech|cover letter|resume|cv|tweet|blog|article)\b/u,
-  // health
-  /\b(?:cure|cures|treatment|symptoms?|diagnosis|medicine|medication|dosage|side effects?)\s+(?:for|of)\b/u,
+  // health (never "treatment for" or "medicine for": medical is a transfer purpose)
+  /\b(?:cure|cures|symptoms?|diagnosis|dosage|side effects?)\s+(?:for|of)\b/u,
   /\bis it safe to take\b/u,
   // trivia, jokes and the like
   /\btell me a (?:joke|story|riddle|fun fact)\b/u,
@@ -68,7 +77,7 @@ export function classifyOffTopic(text: unknown): boolean {
   if (typeof text !== 'string') return false;
   const t = normalizeChatText(text);
   if (t === '') return false;
-  if (HAS_MONEY_FIGURE.test(text) || ON_TOPIC(t)) return false;
+  if (HAS_MONEY_FIGURE.test(text) || ON_TOPIC(t) || SELF_STATEMENT.test(t)) return false;
   return CODE_FENCE.test(text) || OFF_TOPIC(t);
 }
 

@@ -26,6 +26,26 @@ describe('routeTurn', () => {
     expect(routeTurn({ text: 'cancel my transfer' })).toEqual({ kind: 'model', cancel: { intent: 'cancel', lang: 'en' } });
   });
 
+  it('answers to the bot\'s send questions reach the model (review fix)', () => {
+    // The scam-warning answer, the purpose answer, the occupation answer and a lost pay-page code.
+    for (const text of [
+      "no it's not a scam, he is my brother",
+      'nahi, ye scam nahi hai',
+      'no es una estafa, es mi hermano',
+      'Is this a scam?',
+      'send $200 to my mom, her card was stolen',
+      'treatment for my dad',
+      'medicine for my mother',
+      'medical treatment of my father',
+      'it is for her medication of diabetes',
+      'I write code for a living',
+      'give me another code',
+      'generate a new code',
+    ]) {
+      expect(routeTurn({ text }), text).toEqual({ kind: 'model', cancel: null });
+    }
+  });
+
   it('HELP comes before the off-topic check', () => {
     // "help" is an on-topic word for the scope guard as well, but the HELP route must win.
     expect(routeTurn({ text: 'help' }).kind).toBe('help');
