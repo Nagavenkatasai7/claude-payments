@@ -14,20 +14,25 @@ import type { NoticeLang } from './ai-notice';
  * keyword, never a bare length:
  *
  *  - card: 15 digits starting 34/37, or 16-19 digits with a card prefix, and
- *    Luhn-valid. Spaces or hyphens between groups are allowed (the first group
- *    then has 4 digits). A phone has at most 15 digits, and a 15-digit Amex
- *    shape after a '+' is never read as a card.
+ *    Luhn-valid. Groups may be split by spaces of any width, a line break, or
+ *    one '-', '.' or ',' (the first group then has 4 digits, or every group
+ *    has one). A phone has at most 15 digits, and a 15-digit Amex shape after
+ *    a '+' is never read as a card. Comma or dot groups in an amount context
+ *    ("amounts 2000, 1500, …") are a list of amounts.
  *  - cvv: 3-4 digits right after a cvv/cvc/security code keyword.
  *  - routing: 9 digits, ABA checksum, in a message that says routing/ABA/ACH.
  *  - account: 6-18 digits right after an account / acct / a/c / khata / खाता /
  *    cuenta keyword; or 8-18 digits in a message that also has an IFSC or a
- *    routing number, unless it is shaped like a phone or written as an amount.
+ *    routing number, unless it is shaped like a phone, follows a phone keyword
+ *    (phone, whatsapp, mobile, …), is an 8-digit date or is written as an amount.
  *  - ifsc: four letters, a zero, six letters or digits (one letter case).
- *  - ssn: 3-2-4 formatted, or 9 digits right after an ssn/itin keyword.
+ *  - ssn: 3-2-4 formatted (spaces, '-' or '.'; not in an amount context such
+ *    as "send 500 25 1000"), or 9 digits right after an ssn/itin keyword.
  *  - pan: five letters, four digits, a letter (one letter case). The entity
  *    letter is not checked, so the common sample ABCDE1234F is hidden too.
  *  - aadhaar: 12 digits starting 2-9, Verhoeff-valid, and either 4-4-4
- *    formatted or right after an aadhaar / aadhar / uid / आधार keyword.
+ *    formatted (not in an amount context) or right after an aadhaar / aadhar /
+ *    uid / आधार keyword.
  *  - iban: country letters, check digits and 11-30 letters or digits (one
  *    letter case, spaced in fours or not), mod-97 valid.
  *
@@ -37,8 +42,12 @@ import type { NoticeLang } from './ai-notice';
  *
  * Each match becomes a fixed English label such as [card number hidden]. The
  * labels hold no digits, so redacting twice changes nothing and the reply
- * guard and the log mask never read a label as a figure. Pure; never throws;
- * linear in the input (every window is bounded).
+ * guard and the log mask never read a label as a figure. The rules read a copy
+ * with zero-width and other format characters dropped and every decimal digit
+ * (fullwidth, Devanagari, …) as ASCII, mapped back to the input, so the text
+ * around a hidden number stays byte for byte. Pure; never throws; every
+ * keyword window and separator is bounded, so no pattern backtracks
+ * exponentially (tests/inbound-redact.test.ts pins the timing).
  */
 
 export type RedactedKind = 'card' | 'cvv' | 'routing' | 'account' | 'ifsc' | 'ssn' | 'pan' | 'aadhaar' | 'iban';
@@ -153,9 +162,15 @@ export function ibanValid(compact: string): boolean {
 // Words that may sit between a keyword and its number ("account number is",
 // "khata number", "aadhaar card no."). Bounded: the keyword test looks at the
 // last KW_WINDOW characters before a number only.
-const FILLER = String.raw`(?:[\s:#=.\-]*(?:no|nr|num|number|numbers|n[oº°]|número|numero|is|was|hai|card|details|sankhya|नंबर|संख्या))*[\s:#=.\-]*$`;
+//
+// The filler is unambiguous and bounded (review fix, ReDoS): each word must end
+// at a non-letter, no word is a prefix of another that could split one run of
+// letters two ways ("no" vs the old "n[oº°]"), and at most four words repeat.
+// A "nonono…x" window therefore costs a constant number of steps, not 2^k.
+const FILLER = String.raw`(?:[\s:#=.\-]*(?:numbers|number|numero|número|num|nr|n[º°]|no|is|was|hai|card|details|sankhya|नंबर|संख्या)(?!\p{L})){0,4}[\s:#=.\-]*$`;
 const KW_WINDOW = 60;
-const ACCOUNT_KW = new RegExp(String.raw`(?<!\p{L})(?:account|acct|a\/c|acc(?=[\s.:#\-]*(?:no|num|number|#|:))|khata|खाता|cuenta)` + FILLER, 'iu');
+// "acc" alone is a keyword when no/num/number/#/: follows it, or the number itself ("acc 50100123456789").
+const ACCOUNT_KW = new RegExp(String.raw`(?<!\p{L})(?:account|acct|a\/c|acc(?=[\s.:#\-]*(?:no|num|number|#|:|$))|khata|खाता|cuenta)` + FILLER, 'iu');
 const SSN_KW = new RegExp(String.raw`(?<!\p{L})(?:ssn|itin|social security|seguro social)` + FILLER, 'iu');
 const AADHAAR_KW = new RegExp(String.raw`(?<!\p{L})(?:aadhaar|aadhar|adhaar|adhar|uidai|uid|आधार)` + FILLER, 'iu');
 const CVV_KW = new RegExp(String.raw`(?<!\p{L})(?:cvv2?|cvc2?|cid|security code|card code)` + FILLER, 'iu');
@@ -165,9 +180,23 @@ const ROUTING_WORD = /(?<!\p{L})(?:routing|aba|rtn|ach)(?!\p{L})/iu;
 const AMOUNT_BEFORE = /(?:[$₹€£¥]|(?<!\p{L})(?:rs\.?|inr|usd|aed|eur|gbp|mxn|cad|aud))\s*$/iu;
 const AMOUNT_AFTER = /^\s*(?:rupees?|rs(?!\p{L})|inr|usd|dollars?|lakhs?|lacs?|crores?|k(?!\p{L})|aed|eur|gbp|mxn|pesos?)/iu;
 
+// An amount list: an amount word or a currency just before the number. The
+// unkeyed 4-4-4 Aadhaar, 3-2-4 SSN and comma- or dot-grouped card rules skip a
+// number in this context ("amounts 2000 1500 3000", "send 500 25 1000").
+const AMOUNT_CONTEXT_BEFORE =
+  /(?:(?<!\p{L})(?:amounts?|send|sending|sent|pay|paying|paid|transfer|total|rs\.?|inr|usd|aed|eur|gbp|mxn|cad|aud|dollars?|rupees?|pesos?)|[$₹€£¥])[\s:#=\-]*$/iu;
+
 // Phone shapes kept out of the message-level account rule: an Indian mobile
 // (with or without 91 / 0), and a US number with its leading 1.
 const PHONE_SHAPE = /^(?:[6-9]\d{9}|91[6-9]\d{9}|0[6-9]\d{9}|1[2-9]\d{9})$/;
+// A phone keyword right before a number marks it a phone, whatever its shape
+// ("recipient phone 415 555 2671", "her whatsapp 447911123456").
+const PHONE_KW = new RegExp(
+  String.raw`(?<!\p{L})(?:phone|ph|mobile|mob|cell|cellphone|whatsapp|wa|tel|telephone|contact|call|फोन|फ़ोन|मोबाइल|teléfono|telefono|celular|móvil|movil)` + FILLER,
+  'iu',
+);
+// An 8-digit date (YYYYMMDD or DDMMYYYY) is never the message-level account number.
+const DATE_SHAPE = /^(?:(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:19|20)\d{2})$/;
 
 // ── candidates ──────────────────────────────────────────────────────────────
 
@@ -181,6 +210,8 @@ interface Group {
   start: number;
   end: number;
   digits: string;
+  /** The characters between this group and the one before it ('' for the first). */
+  sep: string;
 }
 
 interface DigitRun {
@@ -191,9 +222,20 @@ interface DigitRun {
   plus: boolean;
 }
 
-// Digit groups joined by ONE space or hyphen. A run never starts or ends inside
-// a token (letters, digits, '_', or a '-' joined to one), so ids stay whole.
-const RUN = /(?<![A-Za-z0-9_])(?<![A-Za-z0-9_]-)\d+(?:[ -]\d+)*(?![A-Za-z0-9_])(?!-[A-Za-z0-9_])/g;
+// Digit groups joined by ONE space (any width) or hyphen. A run never starts
+// or ends inside a token (letters, digits, '_', or a '-' joined to one), so ids
+// stay whole. Every rule but the card and the 3-2-4 SSN reads these runs.
+const RUN = /(?<![A-Za-z0-9_])(?<![A-Za-z0-9_]-)\d+(?:[ \t\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000-]\d+)*(?![A-Za-z0-9_])(?!-[A-Za-z0-9_])/g;
+// The card and 3-2-4 SSN rules also read groups split by up to two spaces, a
+// line break, or one '-', '.' or ',' with spaces around it ("4111, 1111, …",
+// "4111\n1111\n…", "123.45.6789", "123 - 45 - 6789"). Each separator is bounded.
+const HWS = String.raw`[\t \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]`;
+const PUNCT = String.raw`[\-.,\u2010-\u2015\u2212]`;
+const BROAD_SEP = String.raw`(?:${HWS}{1,2}(?:${PUNCT}${HWS}{0,2})?|${PUNCT}${HWS}{0,2}|${HWS}{0,2}\r?\n${HWS}{0,2})`;
+const BROAD_RUN = new RegExp(
+  String.raw`(?<![A-Za-z0-9_])(?<![A-Za-z0-9_][\-.,])\d+(?:${BROAD_SEP}\d+)*(?![A-Za-z0-9_])(?!-[A-Za-z0-9_])`,
+  'g',
+);
 const TOKEN_EDGE_BEFORE = String.raw`(?<![A-Za-z0-9_\-])`;
 const TOKEN_EDGE_AFTER = String.raw`(?![A-Za-z0-9_\-])`;
 const IFSC_RE = new RegExp(TOKEN_EDGE_BEFORE + String.raw`[A-Za-z]{4}0[A-Za-z0-9]{6}` + TOKEN_EDGE_AFTER, 'g');
@@ -207,18 +249,28 @@ function oneCase(s: string): boolean {
   return letters === letters.toUpperCase() || letters === letters.toLowerCase();
 }
 
-function digitRuns(text: string): DigitRun[] {
+function digitRuns(text: string, re: RegExp): DigitRun[] {
   const runs: DigitRun[] = [];
-  for (const m of text.matchAll(RUN)) {
+  for (const m of text.matchAll(re)) {
     const start = m.index ?? 0;
     const groups: Group[] = [];
+    let prevEnd = start;
     for (const g of m[0].matchAll(/\d+/g)) {
       const gs = start + (g.index ?? 0);
-      groups.push({ start: gs, end: gs + g[0].length, digits: g[0] });
+      groups.push({ start: gs, end: gs + g[0].length, digits: g[0], sep: text.slice(prevEnd, gs) });
+      prevEnd = gs + g[0].length;
     }
     runs.push({ start, end: start + m[0].length, groups, plus: text[start - 1] === '+' });
   }
   return runs;
+}
+
+/** A separator holding a comma or a dot (a list of amounts can look like that). */
+const LISTY_SEP = /[.,]/;
+
+/** An amount word or currency just before `at`, or a unit just after `end`. */
+function amountContext(text: string, at: number, end: number): boolean {
+  return AMOUNT_CONTEXT_BEFORE.test(before(text, at)) || AMOUNT_AFTER.test(text.slice(end, end + 12));
 }
 
 const before = (text: string, at: number) => text.slice(Math.max(0, at - KW_WINDOW), at);
@@ -229,7 +281,7 @@ function cardPrefixOk(d: string): boolean {
 }
 
 /** Card windows: a run's consecutive groups, the longest valid one from each start. */
-function cardSpans(run: DigitRun): Span[] {
+function cardSpans(text: string, run: DigitRun): Span[] {
   const out: Span[] = [];
   const g = run.groups;
   let i = run.plus ? 1 : 0;
@@ -239,9 +291,15 @@ function cardSpans(run: DigitRun): Span[] {
     for (let j = i; j < g.length; j++) {
       digits += g[j].digits;
       if (digits.length > 19) break;
-      // Grouped: the first group has 4 digits and every group 3-6 (4-4-4-4, 4-6-5, 4-4-4-4-3).
-      const grouped = j === i || (g[i].digits.length === 4 && g.slice(i, j + 1).every((x) => x.digits.length >= 3 && x.digits.length <= 6));
-      if (grouped && cardPrefixOk(digits) && luhnValid(digits)) best = j;
+      const win = g.slice(i, j + 1);
+      // Grouped: the first group has 4 digits and every group 3-6 (4-4-4-4, 4-6-5, 4-4-4-4-3),
+      // or every group is one digit ("4 1 1 1 …", a dictated number).
+      const grouped =
+        j === i || (g[i].digits.length === 4 && win.every((x) => x.digits.length >= 3 && x.digits.length <= 6)) || win.every((x) => x.digits.length === 1);
+      if (!grouped || !cardPrefixOk(digits) || !luhnValid(digits)) continue;
+      // A comma- or dot-grouped number in an amount context is a list of amounts.
+      if (win.slice(1).some((x) => LISTY_SEP.test(x.sep)) && amountContext(text, g[i].start, g[j].end)) continue;
+      best = j;
     }
     if (best >= 0) {
       out.push({ start: g[i].start, end: g[best].end, kind: 'card' });
@@ -249,6 +307,22 @@ function cardSpans(run: DigitRun): Span[] {
     } else {
       i++;
     }
+  }
+  return out;
+}
+
+/** 3-2-4 SSN windows: three groups split by no comma or line break, standing alone in their run. */
+function ssnShapedSpans(text: string, run: DigitRun): Span[] {
+  const out: Span[] = [];
+  const g = run.groups;
+  const apart = (sep: string) => /[,\n]/.test(sep);
+  for (let i = run.plus ? 1 : 0; i + 2 < g.length; i++) {
+    if (g[i].digits.length !== 3 || g[i + 1].digits.length !== 2 || g[i + 2].digits.length !== 4) continue;
+    if (apart(g[i + 1].sep) || apart(g[i + 2].sep)) continue;
+    if (i > 0 && !apart(g[i].sep)) continue;
+    if (i + 3 < g.length && !apart(g[i + 3].sep)) continue;
+    if (amountContext(text, g[i].start, g[i + 2].end)) continue;
+    out.push({ start: g[i].start, end: g[i + 2].end, kind: 'ssn' });
   }
   return out;
 }
@@ -320,26 +394,78 @@ function claim(accepted: Span[], candidates: Span[]): void {
   }
 }
 
+interface Detect {
+  /** The text the rules read: format characters dropped, every decimal digit as ASCII. */
+  text: string;
+  /** For each UTF-16 unit of `text`, where it starts and ends in the input (absent: `text` is the input). */
+  from?: number[];
+  to?: number[];
+}
+
+const FORMAT_CHAR = /\p{Cf}/u;
+const DECIMAL_DIGIT = /\p{Nd}/u;
+
+/** A non-ASCII decimal digit's value: NFKC for fullwidth and styled digits, else its place in its 0-9 block. */
+function digitValue(ch: string): string {
+  const k = ch.normalize('NFKC');
+  if (/^[0-9]$/.test(k)) return k;
+  const cp = ch.codePointAt(0) ?? 0;
+  let base = cp;
+  // Unicode encodes each script's digits as one contiguous 0-9 block.
+  while (base > 0 && cp - base < 60 && DECIMAL_DIGIT.test(String.fromCodePoint(base - 1))) base--;
+  return String((cp - base) % 10);
+}
+
+/**
+ * The copy the rules read, with a map back to the input (review fix): a
+ * zero-width or other format character between digits ("4111\u200b1111…")
+ * and fullwidth or Devanagari digits ("４１１１", "४१११") no longer hide a
+ * number. Linear.
+ */
+function detectCopy(input: string): Detect {
+  if (!/[\p{Cf}]|(?![0-9])\p{Nd}/u.test(input)) return { text: input };
+  let text = '';
+  const from: number[] = [];
+  const to: number[] = [];
+  let i = 0;
+  for (const ch of input) {
+    const end = i + ch.length;
+    if (!FORMAT_CHAR.test(ch)) {
+      const out = ch.length === 1 && ch >= '0' && ch <= '9' ? ch : DECIMAL_DIGIT.test(ch) ? digitValue(ch) : ch;
+      for (let u = 0; u < out.length; u++) {
+        text += out[u];
+        from.push(i);
+        to.push(end);
+      }
+    }
+    i = end;
+  }
+  return { text, from, to };
+}
+
 export function redactSensitive(input: string): Redaction {
   if (typeof input !== 'string' || input.length === 0) return { text: '', kinds: [] };
-  const text = input;
-  const runs = digitRuns(text);
+  const d = detectCopy(input);
+  const text = d.text;
+  const runs = digitRuns(text, RUN);
   const plain = runs.filter((r) => !r.plus);
+  const broad = digitRuns(text, BROAD_RUN);
   const accepted: Span[] = [];
 
   // Priority: the strictest checks claim first.
   claim(accepted, ibanSpans(text));
-  claim(accepted, runs.flatMap(cardSpans));
+  claim(accepted, broad.flatMap((r) => cardSpans(text, r)));
   claim(
     accepted,
     plain.flatMap((r): Span[] => {
-      const d = runDigits(r);
-      if (!/^[2-9]\d{11}$/.test(d) || !verhoeffValid(d)) return [];
-      const formatted = runShape(r) === '4-4-4';
+      const digits = runDigits(r);
+      if (!/^[2-9]\d{11}$/.test(digits) || !verhoeffValid(digits)) return [];
+      // Keyword-free 4-4-4 only outside a list of amounts ("amounts 2000 1500 3000").
+      const formatted = runShape(r) === '4-4-4' && !amountContext(text, r.start, r.end);
       return formatted || (r.groups.length === 1 && AADHAAR_KW.test(before(text, r.start))) ? [{ start: r.start, end: r.end, kind: 'aadhaar' }] : [];
     }),
   );
-  claim(accepted, plain.filter((r) => runShape(r) === '3-2-4').map((r) => ({ start: r.start, end: r.end, kind: 'ssn' as const })));
+  claim(accepted, broad.flatMap((r) => ssnShapedSpans(text, r)));
   claim(accepted, tokenSpans(text, PAN_RE, 'pan'));
   claim(accepted, tokenSpans(text, IFSC_RE, 'ifsc'));
   if (ROUTING_WORD.test(text)) {
@@ -371,32 +497,36 @@ export function redactSensitive(input: string): Redaction {
     }),
   );
   // An IFSC or routing number in the message: a bare 8-18 digit number is the
-  // account it goes with, unless it is shaped like a phone or written as an amount.
+  // account it goes with, unless it is a phone (its shape, or a phone keyword
+  // right before it), a date, or written as an amount.
   if (accepted.some((a) => a.kind === 'ifsc' || a.kind === 'routing')) {
     claim(
       accepted,
       plain.flatMap((r): Span[] => {
-        const d = runDigits(r);
+        const digits = runDigits(r);
         const pieces: Array<{ start: number; end: number; digits: string }> =
-          d.length >= 8 && d.length <= 18 ? [{ start: r.start, end: r.end, digits: d }] : r.groups;
+          digits.length >= 8 && digits.length <= 18 ? [{ start: r.start, end: r.end, digits }] : r.groups;
         return pieces
-          .filter((p) => p.digits.length >= 8 && p.digits.length <= 18 && !PHONE_SHAPE.test(p.digits))
+          .filter((p) => p.digits.length >= 8 && p.digits.length <= 18 && !PHONE_SHAPE.test(p.digits) && !DATE_SHAPE.test(p.digits))
+          .filter((p) => !PHONE_KW.test(before(text, p.start)))
           .filter((p) => !AMOUNT_BEFORE.test(before(text, p.start)) && !AMOUNT_AFTER.test(text.slice(p.end, p.end + 12)))
           .map((p) => ({ start: p.start, end: p.end, kind: 'account' as const }));
       }),
     );
   }
 
-  if (accepted.length === 0) return { text, kinds: [] };
+  if (accepted.length === 0) return { text: input, kinds: [] };
   accepted.sort((a, b) => a.start - b.start);
   let out = '';
   let at = 0;
   const kinds: RedactedKind[] = [];
   for (const s of accepted) {
-    out += text.slice(at, s.start) + REDACTION_LABELS[s.kind];
-    at = s.end;
+    const start = d.from ? d.from[s.start] : s.start;
+    const end = d.to ? d.to[s.end - 1] : s.end;
+    out += input.slice(at, start) + REDACTION_LABELS[s.kind];
+    at = end;
     if (!kinds.includes(s.kind)) kinds.push(s.kind);
   }
-  out += text.slice(at);
+  out += input.slice(at);
   return { text: out, kinds };
 }

@@ -217,3 +217,101 @@ describe('redaction notice', () => {
     expect(redactionNotice('xx' as never)).toBe(REDACTION_NOTICES.en);
   });
 });
+
+// Review fixes (PR1): a bounded keyword filler, more separators for cards and
+// SSNs, and phones and amounts kept out of the unkeyed rules.
+describe('redactSensitive stays fast on hostile keyword fillers (no exponential backtracking)', () => {
+  it('an adversarial a/c + "nonono…" segment finishes in under 50 ms', () => {
+    const seg = 'a/c' + 'no'.repeat(27) + 'x 1 ';
+    redactSensitive('warm up');
+    const t = performance.now();
+    redactSensitive(seg);
+    expect(performance.now() - t).toBeLessThan(50);
+  });
+
+  it.each(['a/c', 'ssn', 'uid', 'cvv'])('4,096 characters of repeated %s segments finish in under 250 ms', (kw) => {
+    const seg = kw + 'no'.repeat(27) + 'x 1 ';
+    const text = seg.repeat(Math.ceil(4096 / seg.length)).slice(0, 4096);
+    const t = performance.now();
+    redactSensitive(text);
+    expect(performance.now() - t).toBeLessThan(250);
+  });
+
+  it('the keyword fillers still work', () => {
+    expect(hidden('account no. 123456').text).toBe(`account no. ${REDACTION_LABELS.account}`);
+    expect(hidden('a/c number is 50100123456789').text).toBe(`a/c number is ${REDACTION_LABELS.account}`);
+    expect(hidden('aadhaar card no: 234567890125').text).toBe(`aadhaar card no: ${REDACTION_LABELS.aadhaar}`);
+    expect(hidden('cvv no 123').text).toBe(`cvv no ${REDACTION_LABELS.cvv}`);
+    expect(hidden('ssn nº 123456789').text).toBe(`ssn nº ${REDACTION_LABELS.ssn}`);
+  });
+});
+
+describe('redactSensitive hides cards and SSNs written with other separators and digits', () => {
+  const cards: Array<[string, string]> = [
+    ['my card 4111\n1111\n1111\n1111', 'my card '],
+    ['Card: 4111 1111\n1111 1111', 'Card: '],
+    ['my card 4111 1111 1111 1111', 'my card '],
+    ['my card 4111  1111  1111  1111', 'my card '],
+    ['my card 4111 1111 1111 1111', 'my card '],
+    ['my card 4111​1111​1111​1111', 'my card '],
+    ['my card 4111, 1111, 1111, 1111', 'my card '],
+    ['my card 4111.1111.1111.1111', 'my card '],
+    ['my card 4111  1111  1111  1111', 'my card '],
+    ['my card 4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1', 'my card '],
+    ['my card ４１１１ １１１１ １１１１ １１１１', 'my card '],
+    ['my card ४१११ ११११ ११११ ११११', 'my card '],
+  ];
+  it.each(cards)('card: %j', (input, lead) => {
+    const r = hidden(input);
+    expect(r.text).toBe(`${lead}${REDACTION_LABELS.card}`);
+    expect(r.kinds).toEqual(['card']);
+  });
+
+  it.each([
+    ['my ssn is 123.45.6789', 'my ssn is '],
+    ['my ssn is 123 - 45 - 6789', 'my ssn is '],
+    ['ssn 123 45 6789', 'ssn '],
+  ])('ssn: %j', (input, lead) => {
+    const r = hidden(input);
+    expect(r.text).toBe(`${lead}${REDACTION_LABELS.ssn}`);
+    expect(r.kinds).toEqual(['ssn']);
+  });
+
+  it('acc followed straight by a number is an account keyword', () => {
+    expect(hidden('acc 50100123456789').text).toBe(`acc ${REDACTION_LABELS.account}`);
+    expect(hidden('according to you 50100123456789').kinds).toEqual([]);
+  });
+
+  it('keeps the text around the hidden number byte for byte', () => {
+    expect(hidden('card 4111​1111​1111​1111 thanks​!').text).toBe(`card ${REDACTION_LABELS.card} thanks​!`);
+    expect(hidden('पहले ४१११ ११११ ११११ ११११ फिर').text).toBe(`पहले ${REDACTION_LABELS.card} फिर`);
+  });
+});
+
+describe('redactSensitive keeps phones and amounts that sit next to bank details', () => {
+  it.each([
+    ['routing 021000021, recipient phone 415 555 2671', `routing ${REDACTION_LABELS.routing}, recipient phone 415 555 2671`],
+    ['IFSC HDFC0001234 her whatsapp 447911123456', `IFSC ${REDACTION_LABELS.ifsc} her whatsapp 447911123456`],
+    ['IFSC HDFC0001234, mobile number: 4155552671', `IFSC ${REDACTION_LABELS.ifsc}, mobile number: 4155552671`],
+    ['IFSC HDFC0001234 sent on 20261031', `IFSC ${REDACTION_LABELS.ifsc} sent on 20261031`],
+  ])('%j', (input, expected) => {
+    expect(hidden(input).text).toBe(expected);
+  });
+
+  it.each(['amounts 2000 1500 3000', 'send 500 25 1000', 'pay 2345 6789 0125 rupees', 'amounts: 2000, 1500, 3000', 'send 2000 1500 3000'])(
+    'unchanged: %j',
+    (text) => {
+      const r = hidden(text);
+      expect(r.text).toBe(text);
+      expect(r.kinds).toEqual([]);
+    },
+  );
+
+  it('every three-amount list after "amounts" stays whole', () => {
+    let changed = 0;
+    for (let a = 2000; a <= 3000; a += 100) for (let b = 1000; b <= 2000; b += 100) for (const c of [3000, 4500]) {
+      if (hidden(`amounts ${a} ${b} ${c}`).kinds.length > 0) changed++;
+    }
+    expect(changed).toBe(0);
+  });
+});

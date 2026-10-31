@@ -153,3 +153,12 @@ describe('scrub — bounded work on hostile input (Program-Fix 47)', () => {
     expect(scrub('to a.b+c@mail.example.co.uk, cc x_y@ex-ample.io')).toBe('to <email>, cc <email>');
   });
 });
+
+describe('scrub — the R49 keyword filler cannot backtrack exponentially (review fix)', () => {
+  it('8 KB of a/c + "nonono…" segments scrub in under 250 ms', () => {
+    const seg = 'a/c' + 'no'.repeat(27) + 'x 1 ';
+    const t = performance.now();
+    scrub(seg.repeat(Math.ceil(8192 / seg.length)));
+    expect(performance.now() - t).toBeLessThan(250);
+  });
+});
