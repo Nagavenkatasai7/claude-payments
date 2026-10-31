@@ -89,11 +89,102 @@ describe('ci.yml migration safety job', () => {
   });
 
   // The production build applies migrations (scripts/migrate-on-build.mjs), so
-  // the guard no longer asks production: ci.yml (pull request runs) holds no secret.
-  it('never calls production, and ci.yml receives no secret', () => {
+  // the guard no longer asks production: ci.yml (pull request runs) holds no
+  // production secret. The one secret it reads is the dedicated, spend-capped
+  // bot-eval key (R31), in the bot eval job's eval step only.
+  it('never calls production, and ci.yml receives no secret but the bot-eval key', () => {
     expect(job).not.toMatch(/MIGRATIONS_URL|MIGRATIONS_READ_TOKEN/);
     const secrets = [...ci.matchAll(/\$\{\{\s*secrets\.(\w+)\s*\}\}/g)].map((m) => m[1]);
-    expect(secrets).toEqual([]);
+    expect(secrets).toEqual(['EVAL_ANTHROPIC_API_KEY']);
+    for (const id of jobIds(ci).filter((j) => j !== 'bot-eval')) expect(jobBlock(ci, id), id).not.toMatch(/secrets\./);
+  });
+});
+
+// R31 (Q10): the real-model bot eval. A pull request that changes what the bot
+// model sees runs the 20-case subset, report-only until BOT_EVAL_ENFORCE=1;
+// the nightly runs every case, required, and archives the dated report.
+/** A workflow text without its comment lines (comments may name what is forbidden). */
+const codeOnly = (text: string) =>
+  text
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('#'))
+    .join('\n');
+
+describe('ci.yml bot eval (R31)', () => {
+  const job = jobBlock(ci, 'bot-eval');
+  const step = (name: string) => {
+    const at = job.indexOf(`- name: ${name}`);
+    expect(at, name).toBeGreaterThan(-1);
+    const rest = job.slice(at + 1);
+    const next = rest.search(/\n {6}- /);
+    return next < 0 ? job.slice(at) : job.slice(at, at + 1 + next);
+  };
+
+  it('is a need of the required ci job, is not named ci, and runs on pull_request only (never pull_request_target)', () => {
+    expect(job).toMatch(/name: bot eval/);
+    const needs = /needs: \[([^\]]*)\]/.exec(jobBlock(ci, 'ci'));
+    expect(needs![1].split(',').map((s) => s.trim())).toContain('bot-eval');
+    expect(codeOnly(ci)).not.toMatch(/pull_request_target/);
+    expect(codeOnly(job)).not.toMatch(/permissions:/);
+  });
+
+  it('decides the scope from git (full history, no persisted token) before installing anything', () => {
+    expect(job).toMatch(/fetch-depth: 0/);
+    expect(job).toMatch(/persist-credentials: false/);
+    const scope = step('Does this change touch the bot model?');
+    expect(scope).toMatch(/id: scope/);
+    expect(scope).toMatch(/run: node scripts\/ci\/eval-scope\.mjs/);
+    expect(scope).toMatch(/PR_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+    expect(scope).toMatch(/MG_HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
+    expect(job.indexOf('eval-scope.mjs')).toBeLessThan(job.indexOf('npm ci'));
+    expect(step('Install')).toMatch(/if: steps\.scope\.outputs\.in_scope == 'true'/);
+  });
+
+  it('runs the PR subset in scope only, report-only until BOT_EVAL_ENFORCE is 1, with the key in that step alone', () => {
+    const run = step('Bot eval (PR subset, real models)');
+    expect(run).toMatch(/if: steps\.scope\.outputs\.in_scope == 'true'/);
+    expect(run).toMatch(/continue-on-error: \$\{\{ vars\.BOT_EVAL_ENFORCE != '1' \}\}/);
+    expect(run).toMatch(/EVAL_SUBSET: pr/);
+    expect(run).toMatch(/EVAL_REQUIRED: \$\{\{ vars\.BOT_EVAL_ENFORCE == '1' && '1' \|\| '0' \}\}/);
+    expect(run).toMatch(/EVAL_ANTHROPIC_API_KEY: \$\{\{ secrets\.EVAL_ANTHROPIC_API_KEY \}\}/);
+    expect(run).toMatch(/EVAL_REPORT_DIR: /);
+    expect(run).toMatch(/timeout-minutes: \d+/);
+    expect(run).toMatch(/run: npx tsx scripts\/eval-bot\.ts/);
+    expect(job.match(/secrets\./g)?.length).toBe(1);
+    expect(step('Report-only result')).toMatch(/steps\.eval\.outcome == 'failure'/);
+  });
+
+  it('uploads the dated report for 90 days', () => {
+    const up = step('Upload the eval report');
+    expect(up).toMatch(/uses: actions\/upload-artifact@[0-9a-f]{40} # v4/);
+    expect(up).toMatch(/retention-days: 90/);
+    expect(up).toMatch(/if: \$\{\{ !cancelled\(\) && steps\.scope\.outputs\.in_scope == 'true' \}\}/);
+  });
+});
+
+describe('nightly.yml bot eval (R31)', () => {
+  it('runs in its own job, required, with no continue-on-error, and uploads the report', () => {
+    expect(codeOnly(jobBlock(nightly, 'full-tests'))).not.toMatch(/eval-bot/);
+    const job = jobBlock(nightly, 'bot-eval');
+    expect(codeOnly(job)).not.toMatch(/continue-on-error/);
+    expect(job).toMatch(/EVAL_REQUIRED: '1'/);
+    expect(job).toMatch(/EVAL_ANTHROPIC_API_KEY: \$\{\{ secrets\.EVAL_ANTHROPIC_API_KEY \}\}/);
+    expect(job).toMatch(/EVAL_REPORT_DIR: /);
+    expect(job).toMatch(/timeout-minutes: 20/);
+    expect(job).toMatch(/run: npx tsx scripts\/eval-bot\.ts/);
+    expect(job).toMatch(/uses: actions\/upload-artifact@[0-9a-f]{40} # v4/);
+    expect(job).toMatch(/retention-days: 90/);
+    expect(codeOnly(job)).not.toMatch(/permissions:/);
+  });
+
+  it('archives the report on the eval-reports branch from a job that runs no repo code (Q-R31.3)', () => {
+    const job = jobBlock(nightly, 'bot-eval-archive');
+    expect(job).toMatch(/needs: \[bot-eval\]/);
+    expect(job).toMatch(/permissions:\n\s+contents: write/);
+    expect(job).toMatch(/uses: actions\/download-artifact@[0-9a-f]{40} # v4/);
+    expect(job).toMatch(/eval-reports/);
+    expect(codeOnly(job)).not.toMatch(/npm ci|npx |node scripts|secrets\./);
+    for (const id of jobIds(nightly).filter((j) => j !== 'bot-eval-archive')) expect(codeOnly(jobBlock(nightly, id)), id).not.toMatch(/contents: write/);
   });
 });
 

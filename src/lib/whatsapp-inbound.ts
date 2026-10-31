@@ -15,6 +15,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { isInfraError } from '@/lib/infra-error';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn, scrub } from '@/lib/log';
+import { redactSensitive } from '@/lib/inbound-redact';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -533,8 +534,15 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
 
   let messageText: string;
   let buttonTap: ButtonTap | undefined;
+  let redacted = false;
   if (incoming.kind === 'text') {
-    messageText = incoming.text;
+    // R49: hide card, account, routing, IFSC, SSN, PAN, Aadhaar and IBAN numbers
+    // BEFORE the durable row, so the payload, the sealed log, Redis history and
+    // the model only see the label. Consent, disconnect and referral matching
+    // above read the raw text in memory only; nothing stores it.
+    const red = redactSensitive(incoming.text);
+    messageText = red.text;
+    redacted = red.kinds.length > 0;
   } else if (incoming.kind === 'button') {
     const parsed = parseButtonId(incoming.buttonId);
     if (!parsed) {
@@ -556,6 +564,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
     tierReminderDayOfWindow,
     ...(voice ? { inputModality: 'voice' as const } : {}),
     ...(deps.channel === 'tg' ? { surface: 'telegram' as const } : {}),
+    ...(redacted ? { redacted: true } : {}),
   };
 
   // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped). The

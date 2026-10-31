@@ -9,11 +9,11 @@ import {
   WEB_TOOL_ALLOWLIST,
   WEB_ONLY_TOOLS,
   WHATSAPP_HIDDEN_TOOLS,
-  runLegacyCreateTransferForTests,
   rateLockMinutes,
   rateLockLine,
   RATE_LOCK_MINUTES,
   buildApproveSummary,
+  buildQuoteText,
   maskAccount,
 } from '@/lib/tools';
 import type { CurrencyCode, Quote, Transfer } from '@/lib/types';
@@ -46,6 +46,8 @@ import { cancelWithinWindow } from '@/lib/sender-cancel';
 import { beginHold, beginSettlement } from '@/lib/settlement';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { mintViaPayPage } from './helpers-mint';
+import { BLOCK_REPLY, capRefusalReply, FIXED_REPLIES, fixedReply, HELP_SUFFIX, HOLD_REPLY } from '@/lib/hold-replies';
 
 // One customer portal (Oct 2): list_recent_transfers asks customerHistoryUrl for the "all
 // transfers" link. Unset (null) ⇒ the real helper (flag off in tests ⇒ /account/history).
@@ -66,6 +68,9 @@ const SENDER_FULL_NAME = 'Alex Rivera';
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
 let db: Db;
+
+/** R30: mint through prepareSendDraft + the pay page (tests/helpers-mint.ts), the path every send now takes. */
+const payPageMint = (args: Record<string, unknown>, ctx: Parameters<typeof mintViaPayPage>[1]) => mintViaPayPage(args, ctx, db);
 
 async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE, partnerId = 'default') {
   const store = createStore(redis, db);
@@ -109,6 +114,8 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     outboxRepo: createOutboxRepo(db),
     // M2-14: the database the locked one-recall-per-transfer transaction runs on (PGlite here).
     recallDb: db,
+    // R43: the database request_human_help's one-transaction case write runs on (PGlite here).
+    helpDb: db,
     // Program-Fix 15 PR C seam: the locked sender cancel, bound to PGlite.
     senderCancel: (p: string, id: string) => cancelWithinWindow(db, p, id, { via: 'bot' }),
   };
@@ -152,7 +159,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-nine tools', () => {
+  it('exposes all twenty-nine tools (R30 deleted create_transfer; R56 added decline_off_topic)', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -164,7 +171,7 @@ describe('toolSchemas', () => {
       'check_send_limit',
       'create_invoice',
       'create_schedule',
-      'create_transfer',
+      'decline_off_topic',
       'dispute_bill',
       'generate_payment_link',
       'get_customer_context',
@@ -214,13 +221,6 @@ describe('toolSchemas', () => {
     expect(props).not.toHaveProperty('payout_method');
   });
 
-  it('create_transfer schema includes funding_method and recipient_phone', () => {
-    const ct = toolSchemas.find((t) => t.function.name === 'create_transfer')!;
-    const props = ct.function.parameters.properties as Record<string, unknown>;
-    expect(props).toHaveProperty('funding_method');
-    expect(props).toHaveProperty('recipient_phone');
-  });
-
   // Item 2: bank details are never collected in chat — the secure pay page
   // gathers them. The bot no longer REQUIRES payout_destination/payout_method on
   // the tools that previously did.
@@ -232,13 +232,6 @@ describe('toolSchemas', () => {
     // The recipient-identity fields stay required.
     expect(required).toContain('recipient_name');
     expect(required).toContain('recipient_phone');
-  });
-
-  it('create_transfer no longer requires payout_destination or payout_method', () => {
-    const tool = toolSchemas.find((t) => t.function.name === 'create_transfer')!;
-    const required = tool.function.parameters.required as string[];
-    expect(required).not.toContain('payout_destination');
-    expect(required).not.toContain('payout_method');
   });
 
   it('create_schedule no longer requires payout_destination or payout_method', () => {
@@ -439,7 +432,7 @@ describe('executeTool', () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis);
     // First transfer (free)
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
         amount_usd: 100,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -461,9 +454,9 @@ describe('executeTool', () => {
     expect(result.fee_usd).toBe(5.99);
   });
 
-  it('create_transfer persists a transfer and increments the user count', async () => {
+  it('a pay-page mint persists a transfer and increments the user count', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '+91 98765 43210',
@@ -483,35 +476,36 @@ describe('executeTool', () => {
     expect(await ctx.store.getTransferCount('default', PHONE)).toBe(1);
   });
 
-  it('create_transfer with watchlisted recipient returns blocked status', async () => {
+  it('a watchlisted recipient is blocked before any draft; the blocked row cannot be paid and the refusal names no reason (R30)', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
         amount_usd: 200,
         recipient_name: 'John Doe',
         recipient_phone: '919876543210',
-        payout_method: 'upi',
-        payout_destination: 'john@upi',
         funding_method: 'bank_transfer',
       },
       ctx,
     );
-    expect(result.compliance_status).toBe('blocked');
-    expect(result.status).toBe('blocked');
+    expect(result.error).toBe('blocked');
+    const blocked = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].complianceStatus).toBe('blocked');
 
-    // generate_payment_link for a blocked transfer should return an error
+    // generate_payment_link for a blocked transfer refuses with the fixed block text
     const linkResult = await executeTool(
       'generate_payment_link',
-      { transfer_id: result.transfer_id },
+      { transfer_id: blocked[0].id },
       { ...ctx, channel: 'web' }, // R6b: WhatsApp refuses this tool at dispatch
     );
-    expect(linkResult.error).toBeDefined();
-    expect(linkResult.error).toMatch(/compliance/i);
+    expect(linkResult.error).toBe(fixedReply('block', { help: true })); // R43: every dead end offers HELP
+    expect(linkResult.url).toBeUndefined();
+    expect(JSON.stringify(linkResult)).not.toMatch(/compliance|sanction|screen/i);
   });
 
-  it('create_transfer returns an error and does NOT persist when recipient_phone is missing', async () => {
+  it('a send returns an error and does NOT persist when recipient_phone is missing', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis);
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         payout_method: 'upi',
@@ -527,10 +521,10 @@ describe('executeTool', () => {
     expect(await ctx.store.listTransfers()).toHaveLength(0);
   });
 
-  it('create_transfer returns an error and does NOT persist when recipient_phone is invalid (too short)', async () => {
+  it('a send returns an error and does NOT persist when recipient_phone is invalid (too short)', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis);
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '12345',
@@ -547,7 +541,7 @@ describe('executeTool', () => {
 
   it('generate_payment_link builds a URL for an existing transfer', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -569,7 +563,7 @@ describe('executeTool', () => {
 
   it('check_payment_status reports a transfer status', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -596,8 +590,8 @@ describe('executeTool', () => {
   describe('update_recipient_phone', () => {
     it('sets the normalized recipientPhone on an existing transfer', async () => {
       const ctx = await buildCtx(fakeRedis());
-      // Create a transfer first (with valid phone for the create_transfer enforcement)
-      const created = await runLegacyCreateTransferForTests({
+      // Create a transfer first (with a valid phone, which the send path enforces)
+      const created = await payPageMint({
           amount_usd: 200,
           recipient_name: 'Dad',
           recipient_phone: '919876543210',
@@ -637,7 +631,7 @@ describe('executeTool', () => {
 
     it('returns an error for an invalid phone number', async () => {
       const ctx = await buildCtx(fakeRedis());
-      const created = await runLegacyCreateTransferForTests({
+      const created = await payPageMint({
           amount_usd: 200,
           recipient_name: 'Dad',
           recipient_phone: '919876543210',
@@ -666,7 +660,7 @@ describe('executeTool', () => {
 
 describe('update_recipient_phone — writes only the recipient phone', { retry: 0 }, () => {
   async function createOne(ctx: Awaited<ReturnType<typeof buildCtx>>): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
       amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
     }, ctx);
@@ -878,7 +872,8 @@ describe('check_send_limit', () => {
     expect(r.within_cap).toBe(true);
     expect(r.tier).toBe('T0');
     expect(r.daily_cap_usd).toBe(T0_CAP_USD);
-    expect(r.today_remaining_usd).toBe(T0_CAP_USD);
+    expect(r).not.toHaveProperty('today_remaining_usd'); // R30: never how much is left
+    expect(r.reply_to_customer).toBeUndefined(); // within the cap ⇒ nothing to relay
     expect(r.day_of_window).toBe(1);
     // The default partner has NOT opted into verify-before-send → no kyc_url
     // even for T0 (the gate-ON variant is covered in its own suite below).
@@ -890,6 +885,7 @@ describe('check_send_limit', () => {
     const r = await executeTool('check_send_limit', { amount_usd: OVER_CAP_USD }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
+    expect(r.reply_to_customer).toBe(capRefusalReply('over_per_transfer_cap'));
   });
 
   it('T0 customer over the daily cap (cumulative) returns reason=over_daily_cap', async () => {
@@ -900,8 +896,12 @@ describe('check_send_limit', () => {
     const r = await executeTool('check_send_limit', { amount_usd: 300 }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
-    expect(r.today_used_usd).toBe(300);
-    expect(r.today_remaining_usd).toBe(200);
+    // R30: the fixed refusal, and no figure for what was used or what is left.
+    expect(r.reply_to_customer).toBe(FIXED_REPLIES.cap_daily);
+    expect(r).not.toHaveProperty('today_used_usd');
+    expect(r).not.toHaveProperty('today_remaining_usd');
+    expect(Object.values(r)).not.toContain(200);
+    expect(Object.values(r)).not.toContain(300);
   });
 
   it('zero-amount request returns within_cap=true (status-only)', async () => {
@@ -911,17 +911,16 @@ describe('check_send_limit', () => {
     expect(r.kyc_url).toBeUndefined(); // gate-off default partner ⇒ no verify handoff
   });
 
-  it('check_send_limit: dormant path returns edd_required:false with all today\'s fields intact', async () => {
+  it('check_send_limit: dormant path returns edd_required:false, the cap fields, and no remaining or threshold figure (R30)', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
     const res = await executeTool('check_send_limit', { amount_usd: 200 }, ctx);
-    // Today's fields unchanged (regression):
     expect(res).toHaveProperty('within_cap');
     expect(res).toHaveProperty('tier');
     expect(res).toHaveProperty('daily_cap_usd');
-    expect(res).toHaveProperty('today_remaining_usd');
-    // Additive KYC fields:
+    expect(res).not.toHaveProperty('today_remaining_usd');
+    expect(res).not.toHaveProperty('today_used_usd');
     expect(res.edd_required).toBe(false);
-    expect(res.edd_threshold_usd).toBe(3000);
+    expect(res).not.toHaveProperty('edd_threshold_usd'); // R30: never the EDD threshold
   });
 
   it('check_send_limit: edd_required:true when cumulative-month + requested >= $3k and SoF/occupation absent', async () => {
@@ -943,7 +942,7 @@ describe('check_send_limit', () => {
   });
 });
 
-describe('create_transfer — daily volume increment', () => {
+describe('pay-page mint — daily volume increment', () => {
   it('increments daily_volume by the transfer amount in cents on success', async () => {
     resetRateCacheForTests();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -963,7 +962,7 @@ describe('create_transfer — daily volume increment', () => {
       partnerId: 'default',
       fullName: SENDER_FULL_NAME,
     });
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 100,
       recipient_name: 'Mom',
       recipient_phone: '919876543210',
@@ -975,7 +974,7 @@ describe('create_transfer — daily volume increment', () => {
   });
 });
 
-describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
+describe('pay-page mint — KYC EDD / Travel-Rule plumbing', () => {
   // Phase 3: a SENDABLE customer (verified) outside the 3-day window so the
   // verify-before-send gate passes and the cap (T1) doesn't block these
   // EDD/Travel-Rule plumbing assertions.
@@ -996,7 +995,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
   it('EDD enum args persist onto the Customer (sticky)', async () => {
     const ctx = await buildCtx(fakeRedis(), '15551234567');
     await grandfathered(ctx);
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 100,
       recipient_name: 'Mom',
       recipient_phone: '919876543210',
@@ -1019,7 +1018,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
     // $2,500 YESTERDAY this month + $600 → crosses $3k; an invalid SoF must NOT
     // satisfy the EDD requirement, so the transfer must be flagged edd_required.
     await seedMonthSpend(ctx.phone, 2500);
-    const r = await runLegacyCreateTransferForTests({
+    const r = await payPageMint({
       amount_usd: 600,
       recipient_name: 'Mom',
       recipient_phone: '919876543210',
@@ -1062,7 +1061,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
     });
     // Approve-tap path: context supplies the draftId.
     const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
-    const r = await runLegacyCreateTransferForTests({}, ctx);
+    const r = await payPageMint({}, ctx);
     // Travel-Rule fields are encrypted at rest — only the decrypted read returns them.
     const transfer = await ctx.store.getTransferDecrypted(r.transfer_id as string);
     expect(transfer?.recipientLegalName).toBe('Mother Legal Name');
@@ -1423,8 +1422,9 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     // New contract: a compliance block returns { blocked, reply_to_customer },
     // never an { error } the model would paraphrase as a technical glitch.
     expect(r.blocked).toBe(true);
-    expect(typeof r.reply_to_customer).toBe('string');
+    expect(r.reply_to_customer).toBe(fixedReply('block', { help: true })); // R30: the fixed block text
     expect(String(r.reply_to_customer).toLowerCase()).not.toContain('went wrong');
+    expect(String(r.reply_to_customer).toLowerCase()).not.toContain('notified');
     expect(r.sent).toBeUndefined();
     expect(r.draft_id).toBeUndefined();
     expect(ctaFetched).toBe(false);
@@ -1606,6 +1606,73 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('bank a/c ****6789');
     expect(s).not.toContain('their bank account (you');
+  });
+});
+
+// R32 (bot part): the quote the bot shows is written by code, from the quote
+// itself. buildQuoteText is the Approve card's figure lines, without the
+// recipient, the payout destination or the rate lock (get_quote locks nothing).
+describe('buildQuoteText — the code-written quote (R32)', () => {
+  const figureLines = (s: string) => s.split('\n').slice(1, 4);
+
+  it("equals the Approve card's figure lines: send amount, fee, rate and what they get", () => {
+    const q = baseQuote();
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer' });
+    const card = buildApproveSummary(q, 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    const lines = text.split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe('Sending $500.00.');
+    expect(card.split('\n')[0]).toBe('Sending $500.00 to Mom.');
+    expect(lines.slice(1)).toEqual(figureLines(card));
+    expect(text).toBe('Sending $500.00.\nFee $1.99\nRate: 1 USD = ₹83\nThey get ₹41,500 within 1 business day.');
+  });
+
+  it('carries the same rate date, reward and first-transfer framing as the card', () => {
+    const q = baseQuote({ feeUsd: 0, feeSource: 0 });
+    const card = buildApproveSummary(q, 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, '2026-10-02');
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer', rateDate: '2026-10-02' });
+    expect(text.split('\n').slice(1)).toEqual(figureLines(card));
+    expect(text).toContain('first transfer free');
+    expect(text).toContain('(daily reference rate, 2 Oct)');
+  });
+
+  it('formats a non-INR destination like the card (AED, GBP source)', () => {
+    const q = baseQuote({ sourceCurrency: 'GBP', amountSource: 400, feeSource: 1.6, fxRate: 4.6, amountInr: 1840, destinationCurrency: 'AED' });
+    const card = buildApproveSummary(q, 'Ali', 'bank', '', 'bank_transfer', 'AED');
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer' });
+    expect(text.split('\n')[0]).toBe('Sending £400.00.');
+    expect(text.split('\n').slice(1)).toEqual(figureLines(card));
+    expect(text).not.toContain('₹');
+  });
+
+  it('never names a recipient, an account or the rate lock', () => {
+    const text = buildQuoteText(baseQuote(), {});
+    expect(text).not.toMatch(/To:|\*\*\*\*|Rate locked|tap soon/);
+  });
+});
+
+describe('get_quote: quote_text (R32)', () => {
+  it('the quote arm returns the code-written quote_text, built from the same quote', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(typeof r.quote_text).toBe('string');
+    const q: Quote = {
+      amountUsd: Number(r.amount_usd), feeUsd: Number(r.fee_usd), totalChargeUsd: Number(r.total_charge_usd),
+      fxRate: Number(r.fx_rate), amountInr: Number(r.amount_dest), deliveryEstimate: String(r.delivery_estimate),
+      sourceCurrency: r.source_currency as CurrencyCode, amountSource: Number(r.amount_source), feeSource: Number(r.fee_source),
+      totalChargeSource: Number(r.total_charge_source), destinationCurrency: r.destination_currency as CurrencyCode,
+    };
+    expect(r.quote_text).toBe(
+      buildQuoteText(q, { fundingMethod: 'bank_transfer', ...(typeof r.rate_date === 'string' ? { rateDate: r.rate_date } : {}) }),
+    );
+    expect(String(r.quote_text)).toContain('within 1 business day');
+  });
+
+  it('a cap refusal carries no quote_text', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 99_999, funding_method: 'bank_transfer' }, ctx);
+    expect(r.quote_text).toBeUndefined();
   });
 });
 
@@ -1821,15 +1888,20 @@ describe('get_quote cap guard (Bundle D)', () => {
     expect(r.amount_inr).toBeUndefined();
     expect(r.kyc_url).toBeUndefined();        // gate-off partner ⇒ no verify handoff
     expect(r.per_transfer_cap_usd).toBe(T0_CAP_USD);
+    expect(r.reply_to_customer).toBe(FIXED_REPLIES.cap_per_transfer);
   });
 
-  it('refuses an over-daily amount and reports the remaining', async () => {
+  it('refuses an over-daily amount with the fixed reply and no remaining figure (R30)', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 400 }); // $400 already used today (ledger)
     const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
-    expect(r.today_remaining_usd).toBe(100); // cap − used
+    expect(r.reply_to_customer).toBe(FIXED_REPLIES.cap_daily);
+    expect(r).not.toHaveProperty('today_remaining_usd');
+    expect(r).not.toHaveProperty('today_used_usd');
+    expect(Object.values(r)).not.toContain(100); // cap − used is never handed to the model
+    expect(Object.values(r)).not.toContain(400);
     expect(r.fee_usd).toBeUndefined();
   });
 
@@ -1850,10 +1922,10 @@ describe('get_quote cap guard (Bundle D)', () => {
   });
 });
 
-describe('create_transfer records the sender\'s funding method (Bundle C)', () => {
+describe('the pay-page mint records the sender\'s funding method (Bundle C)', () => {
   it('writes lastFundingMethod onto the customer after a successful create', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200,
       recipient_name: 'Mom',
       recipient_phone: '919876543210',
@@ -1876,7 +1948,7 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
     });
     // $200 (not $500) so a repeat stays within the T0 $500/day cap and exercises
     // the REAL cap gate inside repeat_transfer rather than tripping it.
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
     }, ctx);
   };
@@ -1931,6 +2003,7 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
     expect(r.needs_edd).toBe(true);
     expect(r.sent).toBeUndefined();
     expect(r.payout_destination).toBe('****@okhdfc'); // fix 5: masked — the follow-up card rehydrates server-side
+    expect(r).not.toHaveProperty('edd_threshold_usd'); // R30: never the EDD threshold
   });
 
   // A3 follow-up: "send Mom again, for her medicine" goes through repeat_transfer,
@@ -1952,7 +2025,7 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
       name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
       lastUsedAt: new Date().toISOString(),
     });
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer', purpose: 'education',
     }, ctx);
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
@@ -2118,20 +2191,6 @@ describe('Phase 3 verify-before-send gate (bot tools)', () => {
     expect(r.amount_inr).toBeUndefined(); // no quote built
   });
 
-  it('create_transfer (legacy path) returns kyc_required and creates NO transfer', async () => {
-    const redis = fakeRedis();
-    const ctx = await buildCtx(redis, UNVERIFIED);
-    await seedUnverified(ctx);
-    const r = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
-      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
-    }, ctx);
-    expect(r.kyc_required).toBe(true);
-    expect(r.reason).toBe('kyc_required');
-    expect(typeof r.kyc_url).toBe('string');
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-  });
-
   it('send_approve_picker returns kyc_required and creates NO draft', async () => {
     const ctx = await buildCtx(fakeRedis(), UNVERIFIED);
     await seedUnverified(ctx);
@@ -2159,7 +2218,8 @@ describe('KYC gate OFF — cap refusals never surface verification (QA audit fix
     expect(r.reason).toBe('over_per_transfer_cap');
     expect(r.tier).toBe('T0');
     expect(r.daily_cap_usd).toBe(T0_CAP_USD);
-    expect(r.today_remaining_usd).toBe(T0_CAP_USD);
+    expect(r).not.toHaveProperty('today_remaining_usd');
+    expect(r.reply_to_customer).toBe(FIXED_REPLIES.cap_per_transfer);
     expect(r.kyc_url).toBeUndefined();
     expect(startSpy).not.toHaveBeenCalled();
   });
@@ -2395,7 +2455,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     expect(JSON.stringify(r)).not.toContain('rail-partner-x');
   });
 
-  it('approve-tap mint: the draft route + draft quote mint VERBATIM (settlementPartnerId + winning fxRate)', async () => {
+  it('pay-page mint: the draft route + draft quote mint VERBATIM (settlementPartnerId + winning fxRate)', async () => {
     const redis = fakeRedis();
     const base = await buildCtx(redis, '15550008888');
     await seedPartner(db, 'rail-partner-x');
@@ -2411,7 +2471,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
       settlementPartnerId: 'rail-partner-x',
     });
     const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
-    const r = await runLegacyCreateTransferForTests({}, ctx);
+    const r = await payPageMint({}, ctx);
     expect(r.error).toBeUndefined();
     const t = await ctx.store.getTransfer(r.transfer_id as string);
     expect(t?.settlementPartnerId).toBe('rail-partner-x'); // the winning rail
@@ -2419,8 +2479,6 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     expect(t?.amountInr).toBe(17_200);
     expect(t?.feeUsd).toBe(0);
     expect(t?.partnerId).toBe('default');                  // ownership unchanged
-    // Tool result (fed to the LLM) leaks nothing about the routing partner.
-    expect(JSON.stringify(r)).not.toContain('rail-partner-x');
   });
 });
 
@@ -2429,7 +2487,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
 
   // Mint an awaiting_payment transfer owned by ctx.phone via the real tool path.
   async function mintTransfer(ctx: Ctx): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -2624,6 +2682,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     await forceStatus(ctx, id, 'cancelled');
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.error_code).toBe('cancelled');
+    expect(String(r.message)).toContain(HELP_SUFFIX); // R43: the HELP keyword, not "say you'd like to talk to a person"
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
@@ -2635,30 +2694,33 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.error_code).toBe('never_charged');
     expect(String(r.message).toLowerCase()).toContain('not charged');
+    expect(String(r.message)).toContain(HELP_SUFFIX); // R43: every dead end offers HELP
     expect(JSON.stringify(r).toLowerCase()).not.toContain('blocked');
     expectCustomerSafe(r);
   });
 
-  it('in_review past the 30-minute window: not refundable yet — the established "under review" wording only', async () => {
+  it('in_review past the 30-minute window: not refundable yet — the fixed refund_while_held text, no review wording (R30)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintTransfer(ctx);
     const t = (await ctx.store.getTransfer(id))!;
     expect((await beginHold(db, t)).kind).toBe('held');
     await db.execute(sql`UPDATE outbox SET created_at = now() - interval '31 minutes' WHERE dedupe_key = ${`stage1:${id}`}`);
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('under_review');
-    expect(String(r.message).toLowerCase()).toContain('under review');
+    expect(r.error_code).toBe('not_refundable_yet');
+    expect(r.message).toBe(fixedReply('refund_while_held', { help: true }));
+    expect(JSON.stringify(r).toLowerCase()).not.toContain('review');
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
 
-  it('in_review legacy row (no stage1, forced status): the established "under review" wording, nothing flagged or alerted', async () => {
+  it('in_review legacy row (no stage1, forced status): the fixed refund_while_held text, nothing flagged or alerted', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintTransfer(ctx);
     await forceStatus(ctx, id, 'in_review');
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('under_review');
-    expect(String(r.message).toLowerCase()).toContain('under review');
+    expect(r.error_code).toBe('not_refundable_yet');
+    expect(r.message).toBe(fixedReply('refund_while_held', { help: true }));
+    expect(JSON.stringify(r).toLowerCase()).not.toContain('review');
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
     expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
@@ -2867,7 +2929,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
 
   // Mint a small ($100) transfer so two fit inside the T0 daily cap ($500/day).
   async function mintSmall(ctx: Ctx): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 100,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -2938,7 +3000,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
 
   async function mintDelivered(ctx: Ctx): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 500,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -3042,7 +3104,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
 
   it('a still-refundable (paid, not delivered) transfer ⇒ use_request_refund, no ticket', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const created = await runLegacyCreateTransferForTests({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+    const created = await payPageMint({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
       ctx,
     );
     const id = created.transfer_id as string;
@@ -3104,10 +3166,11 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the fifteen read-only/refund/recall/help/pay-link/sender-name tools', () => {
+  it('the allowlist is exactly the sixteen read-only/refund/recall/help/decline/pay-link/sender-name tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
+      'decline_off_topic',
       'generate_payment_link',
       'get_customer_context',
       'get_quote',
@@ -3143,6 +3206,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
     expect(names).toContain('request_human_help');
     expect(names).toContain('create_schedule'); // a WhatsApp-only tool is still present
     // Program-Fix 49B (prompt-07): hidden from the WhatsApp schemas only.
+    // (R30 deleted create_transfer, so it is on no channel at all.)
     expect(names).not.toContain('create_transfer');
     expect(names).not.toContain('generate_payment_link');
     expect(toolSchemasForChannel('whatsapp')).toHaveLength(
@@ -3153,7 +3217,6 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
 
 describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
   const BLOCKED = [
-    'create_transfer',
     'create_schedule',
     'cancel_schedule',
     'cancel_draft',
@@ -3189,17 +3252,6 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     expect(waCalls).toHaveLength(0);
   });
 
-  it('a blocked create_transfer mints NOTHING', async () => {
-    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
-    const r = await executeTool(
-      'create_transfer',
-      { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
-      ctx,
-    );
-    expect(r).toEqual({ error: 'not available here' });
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-  });
-
   it('a blocked create_schedule saves NOTHING', async () => {
     const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
     const r = await executeTool(
@@ -3216,7 +3268,7 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     const v = await executeTool('validate_phone', { phone: '+91 98765 43210' }, ctx);
     expect(v.valid).toBe(true);
 
-    const created = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+    const created = await payPageMint({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
       { ...ctx, channel: 'whatsapp' as const }, // setup mint via the test seam
     );
     const status = await executeTool('check_payment_status', { transfer_id: created.transfer_id }, ctx);
@@ -3235,14 +3287,14 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     expect(r.error).toBeUndefined();
     expect(typeof r.schedule_id).toBe('string');
     // …and the WhatsApp hidden-tool gate applies to it (fail-closed).
-    const hidden = await executeTool('create_transfer', { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' }, ctx);
+    const hidden = await executeTool('generate_payment_link', { transfer_id: 'tx_any' }, ctx);
     expect(hidden).toEqual({ error: 'not available here' });
   });
 
   it('request_refund on web keeps its ownership + paid-only guards', async () => {
     const redis = fakeRedis();
     const owner = await buildCtx(redis);
-    const created = await runLegacyCreateTransferForTests({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+    const created = await payPageMint({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
       owner,
     );
     const id = created.transfer_id as string;
@@ -3267,15 +3319,15 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
 describe('list_recent_transfers (web-only history lookup)', () => {
   const HISTORY_URL = 'https://smartremit.test/account/history';
 
-  // Past sends happened in the bot ⇒ mint via the WhatsApp channel (create_transfer
-  // is blocked on web). Small amounts keep the T0 $500/day cap clear.
+  // Past sends happened in the bot ⇒ mint through the pay page (no chat channel
+  // mints directly). Small amounts keep the T0 $500/day cap clear.
   const send = (
     ctx: Awaited<ReturnType<typeof buildCtx>>,
     name: string,
     phone: string,
     amount: number,
   ) =>
-    runLegacyCreateTransferForTests({
+    payPageMint({
         amount_usd: amount,
         recipient_name: name,
         recipient_phone: phone,
@@ -3402,7 +3454,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
     });
     // $200 (not $500) so a repeat stays within the T0 $500/day cap and exercises
     // the REAL cap gate inside repeat_transfer rather than tripping it.
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
     }, ctx, // setup: a past send, minted via the test seam
     );
@@ -3442,6 +3494,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
 
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
     expect(r.needs_edd).toBe(true);
+    expect(r.error).toBe(FIXED_REPLIES.edd_elsewhere); // R30: the fixed text, no 'verification questions'
     expect(String(r.error).toLowerCase()).toContain('whatsapp');
     expect(r.sent).toBeUndefined();
     expect(r.pay_url).toBeUndefined();
@@ -3473,7 +3526,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
 
 describe('transfer-id tools — strict ownership (404-never-403, both channels)', () => {
   async function mintFor(ctx: Awaited<ReturnType<typeof buildCtx>>): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+    const created = await payPageMint({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
       ctx,
     );
     expect(created.error).toBeUndefined();
@@ -4053,7 +4106,7 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
   });
 });
 
-describe('create_transfer — B2B (business-to-business, ach_pull, non-custodial)', () => {
+describe('pay-page mint — B2B (business-to-business, ach_pull, non-custodial)', () => {
   it('mints a b2b transfer: discriminators, business names, invoice link; never captures funds', async () => {
     const ctx = await buildCtx(fakeRedis());
     // fix 6: a chat B2B send pays the sender's OWN unpaid bill (b2b_invoices is
@@ -4064,7 +4117,7 @@ describe('create_transfer — B2B (business-to-business, ach_pull, non-custodial
       buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }],
       amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
     });
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
       amount_source: 400,                          // within the seeded T0 $500/day cap
       recipient_name: 'Globex Trading LLC',       // payee business legal name
       recipient_phone: '919876543210',
@@ -4091,7 +4144,7 @@ describe('create_transfer — B2B (business-to-business, ach_pull, non-custodial
 
   it('a consumer create with no B2B args stays byte-for-byte b2c (path unchanged)', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const result = await runLegacyCreateTransferForTests({
+    const result = await payPageMint({
       amount_usd: 500, recipient_name: 'Mom', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
     }, ctx);
@@ -4139,7 +4192,7 @@ describe('send_approve_picker — B2B draft → approve-tap mint threads busines
 
     // Approve-tap mint path: the system supplies the draftId via button-tap ctx.
     const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } as const };
-    const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+    const minted = await payPageMint({}, tapCtx);
     expect(minted.status).toBe('awaiting_payment');
 
     const saved = await ctx.store.getTransferDecrypted(minted.transfer_id as string);
@@ -4181,7 +4234,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
         amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
       });
     }
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
       amount_source: 400,
       recipient_name: 'Globex Trading LLC',
       recipient_phone: '919876543210',
@@ -4240,7 +4293,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
 
     it('a B2C transfer alone still reads as no B2B bill', async () => {
       const ctx = await buildCtx(fakeRedis());
-      await runLegacyCreateTransferForTests({
+      await payPageMint({
         amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
         payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
       }, ctx);
@@ -4330,7 +4383,8 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       const r = await executeTool('cancel_bill', {}, ctx);
       expect(r.deferred).toBe(true);
       expect(r.cancelled).toBeUndefined();
-      expect(String(r.reply_hint).toLowerCase()).toContain('under review');
+      expect(r.reply_hint).toBe(fixedReply('payment_held', { help: true })); // R30: no review wording; R43: HELP
+      expect(JSON.stringify(r).toLowerCase()).not.toContain('review');
       expect((await ctx.store.getTransfer(id))?.status).toBe('in_review'); // unchanged
     });
 
@@ -4618,7 +4672,7 @@ describe('tools are tenant-scoped (fix 1)', () => {
     await seedPartner(db, 'acme');
     const redis = fakeRedis();
     const dflt = await buildCtx(redis);
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
       amount_usd: 500, recipient_name: 'Mom', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
     }, dflt);
@@ -4649,7 +4703,7 @@ describe('tools are tenant-scoped (fix 1)', () => {
     expect(await acme.draftStore.getActiveDraftId('default', PHONE)).toBeNull();
   });
 
-  it('an approve tap under acme NEVER resolves a default-tenant draft for the same phone (hard guard, D12)', async () => {
+  it("acme's cancel NEVER sees a default-tenant draft for the same phone (hard guard, D12)", async () => {
     await seedPartner(db, 'acme');
     const redis = fakeRedis();
     const dflt = await buildCtx(redis);
@@ -4660,12 +4714,6 @@ describe('tools are tenant-scoped (fix 1)', () => {
       quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
     });
     const acme = await buildCtx(redis, PHONE, 'acme');
-    const r = await runLegacyCreateTransferForTests({}, { ...acme, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } });
-    expect(r.error).toBeDefined();
-    expect(r.transfer_id).toBeUndefined();
-    expect(await acme.store.listTransfers()).toHaveLength(0);            // nothing minted under acme
-    expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();      // and default's draft was not consumed
-    // Cancel is guarded the same way: acme's "cancel" cannot see default's pointer.
     // (answers exactly like "no pointer" — the same reason and the same fix 34B hint)
     expect(await executeTool('cancel_draft', {}, acme)).toEqual(await executeTool('cancel_draft', {}, await buildCtx(fakeRedis(), '15550008888')));
     expect(await executeTool('cancel_draft', {}, acme)).toMatchObject({ cancelled: false, reason: 'no_active_draft' });
@@ -4681,7 +4729,6 @@ describe('verification hand-offs record the inquiry under the TURN tenant (revie
     ['check_send_limit', {}],
     ['get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }],
     ['send_approve_picker', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
-    ['create_transfer', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
   ])('%s under acme records the inquiry on acme\'s row only', async (tool, args) => {
     const redis = fakeRedis();
     const dflt = await buildCtx(redis); // verified default-tenant row for PHONE
@@ -4703,10 +4750,7 @@ describe('verification hand-offs record the inquiry under the TURN tenant (revie
       },
     };
     const fullArgs = { ...args, amount_usd: (args as { amount_usd?: number }).amount_usd ?? 100 };
-    // R6b: no chat channel dispatches create_transfer; its mint runs via the seam.
-    const r = tool === 'create_transfer'
-      ? await runLegacyCreateTransferForTests(fullArgs, ctx)
-      : await executeTool(tool, fullArgs, ctx);
+    const r = await executeTool(tool, fullArgs, ctx);
     expect(JSON.stringify(r)).toContain('https://kyc.example/v');
     expect((await acme.customerStore.getCustomer('acme', PHONE))!.kycInquiryId).toBe('inq_tool_1');
     expect((await acme.customerStore.getCustomer('default', PHONE))!.kycInquiryId).toBeUndefined();
@@ -4734,17 +4778,6 @@ describe('Task 9 — FX unavailable is a friendly refusal, never a thrown agent 
     }, ctx);
     expect(r).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
     expect(await ctx.draftStore.getActiveDraftId('default', PHONE)).toBeNull();
-  });
-
-  it('create_transfer (legacy explicit-args path) refuses and mints nothing', async () => {
-    const ctx = await buildCtx(fakeRedis());
-    fxDown();
-    const r = await runLegacyCreateTransferForTests({
-      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom',
-      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
-    }, ctx);
-    expect(r).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
-    expect(await ctx.store.getTransferCount('default', PHONE)).toBe(0);
   });
 
   it('check_send_limit refuses rather than evaluating the cap on an unknown USD rate', async () => {
@@ -4780,7 +4813,7 @@ describe('Task 9 — FX unavailable is a friendly refusal, never a thrown agent 
     expect(draft?.quote.fxFetchedAt).toBeLessThanOrEqual(Date.now());
   });
 
-  it('an approve tap on a draft whose rate is older than the ceiling is refused (fresh quote needed), nothing minted', async () => {
+  it('the pay page refuses a draft whose rate is older than the ceiling (fresh quote needed), nothing minted', async () => {
     const base = await buildCtx(fakeRedis());
     const draftId = await base.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'default',
@@ -4789,8 +4822,8 @@ describe('Task 9 — FX unavailable is a friendly refusal, never a thrown agent 
       quote: { feeUsd: 0, fxRate: 85, amountInr: 8500, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 },
     });
     const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
-    const r = await runLegacyCreateTransferForTests({}, ctx);
-    expect(r).toEqual({ error: FX_QUOTE_EXPIRED_MESSAGE });
+    const r = await payPageMint({}, ctx);
+    expect(r).toMatchObject({ error: 'fx_unavailable', finalize: { quoteExpired: true } });
     expect(await ctx.store.getTransferCount('default', PHONE)).toBe(0);
   });
 });
@@ -4834,7 +4867,7 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
     (await ctx.draftStore.consumeDraft(r.draft_id as string))?.recipient.payoutDestination;
 
   it('no tool offers payout_method / payout_destination to the model', () => {
-    for (const name of ['create_transfer', 'create_schedule', 'send_approve_picker', 'repeat_transfer']) {
+    for (const name of ['create_schedule', 'send_approve_picker', 'repeat_transfer']) {
       const props = toolSchemas.find((t) => t.function.name === name)!.function.parameters.properties as Record<string, unknown>;
       expect(props, name).not.toHaveProperty('payout_method');
       expect(props, name).not.toHaveProperty('payout_destination');
@@ -5008,32 +5041,6 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
     expect((await ctx.store.getTransferDecrypted(blocked[0].id))?.payoutDestination).toBe('');
   });
 
-  it('legacy create_transfer IGNORES the model-supplied destination: the stored account for a known number, "" for an unknown one', async () => {
-    const { ctx } = await returningCtx();
-    const a = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: 'Mom', recipient_phone: MOM,
-      payout_method: 'bank', payout_destination: 'xxxx9012', funding_method: 'bank_transfer',
-    }, ctx);
-    expect((await ctx.store.getTransferDecrypted(a.transfer_id as string))?.payoutDestination).toBe(REAL);
-    const b = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: 'Dad', recipient_phone: '919811111111',
-      payout_method: 'bank', payout_destination: 'SBIN0009999 000000000001', funding_method: 'bank_transfer',
-    }, ctx);
-    expect((await ctx.store.getTransferDecrypted(b.transfer_id as string))?.payoutDestination).toBe('');
-    expect((await ctx.store.listRecipients('default', ctx.phone, 25)).map((x) => x.name)).not.toContain('Dad');
-  });
-
-  it('legacy create_transfer: a WATCHLISTED name is still blocked and recorded (empty destination), never saved as a recipient', async () => {
-    const { ctx } = await returningCtx();
-    const r = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: 'John Doe', recipient_phone: '919800000000',
-      payout_method: 'bank', payout_destination: '****9012', funding_method: 'bank_transfer',
-    }, ctx);
-    expect(r.status).toBe('blocked');
-    expect((await ctx.store.getTransferDecrypted(r.transfer_id as string))?.payoutDestination).toBe('');
-    expect((await ctx.store.listRecipients('default', ctx.phone, 25)).map((x) => x.name)).not.toContain('John Doe');
-  });
-
   it('create_schedule IGNORES the model-supplied destination: the stored account for a known number, "" for an unknown one', async () => {
     const { ctx } = await returningCtx();
     const s1 = await executeTool('create_schedule', {
@@ -5053,7 +5060,7 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
     const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
     for (const bad of ['bank_pull', 'crypto']) {
       expect((await executeTool('send_approve_picker', { amount_usd: 200, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM }, ctx)).error, bad).toBeDefined();
-      expect((await runLegacyCreateTransferForTests({ amount_usd: 100, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM }, ctx)).error, bad).toBeDefined();
+      expect((await payPageMint({ amount_usd: 100, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM }, ctx)).error, bad).toBeDefined();
     }
     for (const bad of ['bank_pull', 'ach_pull', 'crypto']) {
       expect((await executeTool('create_schedule', {
@@ -5094,7 +5101,7 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
       { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_mine', amount_source: 399 },  // not the billed amount
     ]) {
       expect((await executeTool('send_approve_picker', b2bArgs(over), ctx)).error, JSON.stringify(over)).toBeDefined();
-      expect((await runLegacyCreateTransferForTests(b2bArgs(over), ctx)).error, JSON.stringify(over)).toBeDefined();
+      expect((await payPageMint(b2bArgs(over), ctx)).error, JSON.stringify(over)).toBeDefined();
     }
     expect(createDraft).not.toHaveBeenCalled();
     expect(await ctx.store.listTransfers()).toHaveLength(0);
@@ -5111,7 +5118,7 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
       quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
       ...over,
     } as Parameters<typeof ctx.draftStore.createDraft>[0]);
-    const tap = (draftId: string) => runLegacyCreateTransferForTests({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const tap = (draftId: string) => payPageMint({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
     const masked = await draftOf({});
     expect((await tap(masked)).error).toBeDefined();
     expect(await ctx.draftStore.getDraft(masked)).not.toBeNull();
@@ -5210,7 +5217,7 @@ describe('fix 5 (F43): no payout destination reaches the model unmasked (UPI inc
     const ctx = await buildCtx(fakeRedis());
     await seedBoth(ctx);
     for (const [name, phone] of [['Mom', MOM], ['Dad', DAD]] as const) {
-      await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer' }, ctx);
+      await payPageMint({ amount_usd: 100, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer' }, ctx);
     }
     await seedMonthSpend(ctx.phone, 3000); // over the $3k month threshold (yesterday, ledger — fix 16 removed addCents)
     for (const phone of [MOM, DAD]) {
@@ -5223,7 +5230,7 @@ describe('fix 5 (F43): no payout destination reaches the model unmasked (UPI inc
   it('the web-channel approve summary (repeat_transfer → send_approve_picker) shows UPI ****@handle, never the id', async () => {
     const base = await buildCtx(fakeRedis());
     await seedBoth(base);
-    await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: MOM, funding_method: 'bank_transfer' }, base);
+    await payPageMint({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: MOM, funding_method: 'bank_transfer' }, base);
     const r = await executeTool('repeat_transfer', { recipient_phone: MOM }, { ...base, channel: 'web' as const });
     expect(String(r.summary)).toContain('To: UPI ****@okhdfc');
     expectNoLeak('web summary', r);
@@ -5416,26 +5423,6 @@ describe('review follow-up: every remaining model-facing recipient name is clamp
     expect(createDraft).not.toHaveBeenCalled();
   });
 
-  it("create_transfer's result clamps recipient_name (direct call and approve-tap)", async () => {
-    const ctx = await buildCtx(fakeRedis());
-    const direct = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: DIRTY, recipient_phone: '919876543210', funding_method: 'bank_transfer',
-    }, ctx);
-    expect(direct.error).toBeUndefined();
-    expect(direct.recipient_name).toBe(CLEAN);
-
-    const base = await buildCtx(fakeRedis(), '15551238888');
-    const draftId = await base.draftStore.createDraft({
-      senderPhone: base.phone, partnerId: 'default',
-      recipient: { name: DIRTY, recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
-      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
-      quote: { feeUsd: 0, fxRate: 85, amountInr: 8500 },
-    });
-    const tap = await runLegacyCreateTransferForTests({}, { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
-    expect(tap.error).toBeUndefined();
-    expect(tap.recipient_name).toBe(CLEAN);
-  });
-
   it('list_schedules clamps recipient_name', async () => {
     const ctx = await buildCtx(fakeRedis());
     await ctx.scheduleStore.saveSchedule({
@@ -5448,9 +5435,9 @@ describe('review follow-up: every remaining model-facing recipient name is clamp
   });
 });
 
-// ── Program fix 16 (Task 10, test 13): the approve-tap and legacy create_transfer are capped INSIDE the mint ──
-describe('create_transfer — in-lock send cap (Program fix 16)', () => {
-  it('approve-tap: a sender at cap gets cap_eval from the LOCKED mint even when the tool pre-check was stale', async () => {
+// ── Program fix 16 (Task 10, test 13): the pay-page mint is capped INSIDE the sender lock ──
+describe('pay page — in-lock send cap (Program fix 16)', () => {
+  it('a sender at cap is refused by the LOCKED mint even when the pre-check was stale', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 450 });
     const draftId = await ctx.draftStore.createDraft({
@@ -5461,13 +5448,12 @@ describe('create_transfer — in-lock send cap (Program fix 16)', () => {
     });
     // A stale pre-check (e.g. a concurrent send landed after it) must not matter: the lock decides.
     vi.spyOn(ctx.dailyVolumeStore, 'getTodayCents').mockResolvedValue(0);
-    const r = await runLegacyCreateTransferForTests({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } });
-    expect(r.error).toBe('Cap exceeded for this transfer.');
-    expect(r.cap_eval).toMatchObject({ tier: 'T0', reason: 'over_daily_cap', today_remaining_usd: 50, daily_cap_usd: 500, per_transfer_cap_usd: 500 });
+    const r = await payPageMint({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } });
+    expect(r.error).toBe('cap');
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1); // the seeded row only
   });
 
-  it('approve-tap: a busy sender lock restores the draft and asks the customer to retry', async () => {
+  it('a busy sender lock keeps the draft, and the same link mints on retry', async () => {
     const ctx = await buildCtx(fakeRedis());
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone, partnerId: 'default',
@@ -5476,26 +5462,15 @@ describe('create_transfer — in-lock send cap (Program fix 16)', () => {
       quote: { feeUsd: 0, fxRate: 85, amountInr: 8_500 },
     });
     vi.spyOn(ctx.store, 'mintUnderSenderLock').mockRejectedValueOnce(new SendBusyError());
-    const tap = () => runLegacyCreateTransferForTests({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const tap = () => payPageMint({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
     const r = await tap();
-    expect(String(r.error)).toContain('try again');
-    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // put back
+    expect(r.error).toBe('busy');
+    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // kept
     const r2 = await tap();
     expect(r2.transfer_id).toBeTruthy();
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
   });
 
-  it('legacy explicit-args path: the in-lock refusal is the same cap_eval shape', async () => {
-    const ctx = await buildCtx(fakeRedis());
-    await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 450 });
-    vi.spyOn(ctx.dailyVolumeStore, 'getTodayCents').mockResolvedValue(0);
-    const r = await runLegacyCreateTransferForTests({
-      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
-    }, ctx);
-    expect(r.error).toBe('Cap exceeded for this transfer.');
-    expect(r.cap_eval).toMatchObject({ reason: 'over_daily_cap', tier: 'T0' });
-    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
-  });
 });
 
 describe('fix 38: seller text with a web address is refused at write; the buyer push is clamped at render', () => {
@@ -5706,30 +5681,6 @@ describe('Program-Fix 33 — destination-country authority', () => {
     });
   });
 
-  describe('create_transfer (explicit-args path)', () => {
-    it('with a +52 recipient and NO destination is refused; nothing is minted', async () => {
-      stubCorridorFetch();
-      const ctx = await buildCtx(fakeRedis());
-      const r = await runLegacyCreateTransferForTests({
-        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT,
-      }, ctx);
-      expect(r.transfer_id).toBeUndefined();
-      expect(String(r.error)).toContain('destination_country');
-      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
-    });
-
-    it('with an unknown destination is a returned { error }; nothing is minted', async () => {
-      stubCorridorFetch();
-      const ctx = await buildCtx(fakeRedis());
-      const r = await runLegacyCreateTransferForTests({
-        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'ZZ',
-      }, ctx);
-      expect(r.transfer_id).toBeUndefined();
-      expect(String(r.error)).toContain('MX');
-      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
-    });
-  });
-
   describe('schedules are India-only (owner decision 1)', () => {
     const base = { amount_usd: 50, recipient_name: 'Rahul', funding_method: 'bank_transfer', frequency: 'monthly', day_of_month: 5 };
 
@@ -5827,8 +5778,8 @@ describe('Program-Fix 33 — destination-country authority', () => {
   });
 
   describe('schemas', () => {
-    it('destination_country is required on get_quote, create_transfer and send_approve_picker, and each lists all ten codes', () => {
-      for (const name of ['get_quote', 'create_transfer', 'send_approve_picker']) {
+    it('destination_country is required on get_quote and send_approve_picker, and each lists all ten codes', () => {
+      for (const name of ['get_quote', 'send_approve_picker']) {
         const tool = toolSchemas.find((t) => t.function.name === name)!;
         expect(tool.function.parameters.required, name).toContain('destination_country');
         const props = tool.function.parameters.properties as Record<string, { description?: string; enum?: string[] }>;
@@ -5961,6 +5912,37 @@ describe('request_human_help — a real case behind every "a person will help" (
     expect(String(r.reply_hint)).not.toContain('in this chat');
     expect(String(r.reply_hint)).toContain(String(r.case_id));
   });
+
+  it('R43: on Telegram the hint names the phone number, not a WhatsApp number', async () => {
+    const base = await buildCtx(fakeRedis());
+    const ctx = { ...base, turn: { isNewConversation: false, surface: 'telegram' as const } };
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(String(r.reply_hint)).toContain('sign in with this phone number');
+    expect(String(r.reply_hint)).not.toContain('WhatsApp');
+  });
+
+  it('R43: the case, its triage row and its alert commit together through openHelpCase (one transaction on helpDb)', async () => {
+    const base = await buildCtx(fakeRedis());
+    const spy = vi.spyOn(db, 'transaction');
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, base);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    spy.mockRestore();
+  });
+});
+
+describe('decline_off_topic (R56): a code-written decline', () => {
+  it('returns the fixed OFF_TOPIC_REPLY and runs nothing else', async () => {
+    const { OFF_TOPIC_REPLY } = await import('@/lib/scope-guard');
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('decline_off_topic', {}, ctx);
+    expect(r).toEqual({ declined_off_topic: true, reply_to_customer: OFF_TOPIC_REPLY });
+  });
+
+  it('is offered on both channels', () => {
+    expect(toolSchemasForChannel('whatsapp').map((t) => t.function.name)).toContain('decline_off_topic');
+    expect(toolSchemasForChannel('web').map((t) => t.function.name)).toContain('decline_off_topic');
+  });
 });
 
 describe('cancel_draft — "nothing to cancel" never reads as "nothing was set up" (fix 34B)', () => {
@@ -5988,7 +5970,7 @@ describe('repeat_transfer — by transfer_id (fix 34B, prompt-09)', () => {
       name, recipientPhone: phone, payoutMethod: 'upi', payoutDestination: `${name.toLowerCase()}@okhdfc`,
       lastUsedAt: new Date().toISOString(),
     });
-    const r = await runLegacyCreateTransferForTests({
+    const r = await payPageMint({
       amount_usd: amount, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer',
     }, ctx);
     return r.transfer_id as string;
@@ -6136,13 +6118,14 @@ describe('Program-Fix 44: bill expiry + durable open-twin check', { retry: 0 }, 
       lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }], amountUsd: 400, currency: 'USD',
       status: 'unpaid', createdAt: new Date(Date.now() - 31 * DAY).toISOString(),
     });
-    const r = await runLegacyCreateTransferForTests({
+    const r = await payPageMint({
       amount_source: 400, recipient_name: 'Globex Trading LLC', recipient_phone: '919876543210',
       funding_method: 'ach_pull', entity_type: 'business',
       sender_business_name: 'Acme Imports Ltd', recipient_business_name: 'Globex Trading LLC',
       invoice_id: 'inv_old',
     }, ctx);
-    expect(r).toEqual({ error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' });
+    expect(r).toMatchObject({ error: 'bill_refused', prepare: { message: 'That bill is not open for this account. Call present_bill to fetch the current bill.' } });
+    expect(await ctx.store.listTransfers()).toHaveLength(0);
   });
 });
 
@@ -6181,17 +6164,16 @@ describe('Program-Fix 49B: rate-lock copy is derived, never a literal (prompt-05
   });
 });
 
-describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_link (prompt-07)', () => {
-  it('the hidden set is exactly the two tools', () => {
-    expect([...WHATSAPP_HIDDEN_TOOLS].sort()).toEqual(['create_transfer', 'generate_payment_link']);
+describe('Program-Fix 49B: WhatsApp hides generate_payment_link (prompt-07)', () => {
+  it('the hidden set is exactly generate_payment_link (R30 deleted create_transfer)', () => {
+    expect([...WHATSAPP_HIDDEN_TOOLS].sort()).toEqual(['generate_payment_link']);
   });
   it('web keeps generate_payment_link (it is allowlisted there)', () => {
     const names = toolSchemasForChannel('web').map((t) => t.function.name);
     expect(names).toContain('generate_payment_link');
   });
-  // R6b (A7L-1): the rolling-release reason for dispatching them expired, so the
-  // hidden pair is now refused at DISPATCH too. Fail-closed: an absent channel
-  // counts as WhatsApp. Nothing is minted, no link is made, and no draft is read.
+  // R6b (A7L-1): the hidden tool is refused at DISPATCH too. Fail-closed: an
+  // absent channel counts as WhatsApp. No link is made and no draft is read.
   const LEGACY_ARGS = {
     amount_usd: 200,
     recipient_name: 'Mom',
@@ -6202,18 +6184,9 @@ describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_lin
   it.each([
     ['whatsapp', 'whatsapp' as const],
     ['absent (defaults to WhatsApp)', undefined],
-  ])('create_transfer is refused at dispatch on channel %s and mints nothing', async (_label, channel) => {
-    const ctx = await buildCtx(fakeRedis());
-    const r = await executeTool('create_transfer', LEGACY_ARGS, { ...ctx, channel });
-    expect(r).toEqual({ error: 'not available here' });
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-  });
-  it.each([
-    ['whatsapp', 'whatsapp' as const],
-    ['absent (defaults to WhatsApp)', undefined],
   ])('generate_payment_link is refused at dispatch on channel %s, even for the owner', async (_label, channel) => {
     const ctx = await buildCtx(fakeRedis());
-    const minted = await runLegacyCreateTransferForTests(LEGACY_ARGS, ctx);
+    const minted = await payPageMint(LEGACY_ARGS, ctx);
     expect(typeof minted.transfer_id).toBe('string');
     const r = await executeTool('generate_payment_link', { transfer_id: minted.transfer_id }, { ...ctx, channel });
     expect(r).toEqual({ error: 'not available here' });
@@ -6222,7 +6195,7 @@ describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_lin
     const ctx = await buildCtx(fakeRedis());
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      await executeTool('create_transfer', LEGACY_ARGS, { ...ctx, channel: 'whatsapp' });
+      await executeTool('generate_payment_link', { transfer_id: 'tx_any' }, { ...ctx, channel: 'whatsapp' });
       const line = warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
       expect(line).toContain('whatsapp.tool-blocked');
       expect(line).not.toContain(ctx.phone);
@@ -6232,49 +6205,141 @@ describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_lin
   });
   it('web still dispatches generate_payment_link for the owner', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const minted = await runLegacyCreateTransferForTests(LEGACY_ARGS, ctx);
+    const minted = await payPageMint(LEGACY_ARGS, ctx);
     const link = await executeTool('generate_payment_link', { transfer_id: minted.transfer_id }, { ...ctx, channel: 'web' });
     expect(link.error).toBeUndefined();
     expect(link.url).toBe(`https://smartremit.test/pay/${minted.transfer_id}`);
   });
-  it('create_transfer is refused on every channel state (web refuses via the allowlist)', async () => {
-    const ctx = await buildCtx(fakeRedis());
-    for (const channel of ['whatsapp', 'web', undefined] as const) {
-      const r = await executeTool('create_transfer', LEGACY_ARGS, { ...ctx, channel });
-      expect(r).toEqual({ error: 'not available here' });
-    }
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-  });
 });
 
-// R6b (R7 binding): the legacy mint seam is test-only. executeTool cannot reach
-// it by name, and no module in src/ re-exports it.
-describe('R6b: runLegacyCreateTransferForTests is an @internal seam', () => {
-  it('executeTool does not dispatch the seam by name', async () => {
+// R30: the legacy chat create_transfer tool is deleted (it leaked
+// compliance_status / compliance_reasons, and no channel offered it since R6b).
+// No schema, no dispatch, no seam: every send is the approve card plus the pay page.
+describe('R30: the legacy create_transfer tool is gone', () => {
+  it('no channel shows a create_transfer schema', () => {
+    expect(toolSchemas.map((t) => t.function.name)).not.toContain('create_transfer');
+    for (const channel of ['whatsapp', 'web'] as const) {
+      expect(toolSchemasForChannel(channel).map((t) => t.function.name)).not.toContain('create_transfer');
+      expect(toolSchemasForChannel(channel, { purposeRequired: true }).map((t) => t.function.name)).not.toContain('create_transfer');
+    }
+  });
+
+  it('executeTool mints nothing for create_transfer or the old seam name, on any channel', async () => {
     const ctx = await buildCtx(fakeRedis());
-    for (const channel of ['whatsapp', 'web', undefined] as const) {
-      const r = await executeTool('runLegacyCreateTransferForTests', { amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', destination_country: 'IN', funding_method: 'bank_transfer' }, { ...ctx, channel });
-      expect(r.transfer_id).toBeUndefined();
-      expect(r.error).toBeDefined();
+    const args = { amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', destination_country: 'IN', funding_method: 'bank_transfer' };
+    for (const name of ['create_transfer', 'runLegacyCreateTransferForTests']) {
+      for (const channel of ['whatsapp', 'web', undefined] as const) {
+        const r = await executeTool(name, args, { ...ctx, channel });
+        expect(r.transfer_id).toBeUndefined();
+        expect(r.error).toBeDefined();
+      }
     }
     expect(await ctx.store.listTransfers()).toHaveLength(0);
   });
-  it('the seam is named in src/ only at its definition in tools.ts (no index or re-export)', () => {
+
+  it('nothing in src/ names the tool or its seam any more', () => {
     const hits: string[] = [];
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, e.name);
         if (e.isDirectory()) walk(full);
-        else if (/\.(ts|tsx|js|mjs)$/.test(e.name) && readFileSync(full, 'utf-8').includes('runLegacyCreateTransferForTests')) {
-          hits.push(relative(process.cwd(), full));
+        else if (/\.(ts|tsx|js|mjs)$/.test(e.name)) {
+          const src = readFileSync(full, 'utf-8');
+          if (/runLegacyCreateTransferForTests|createTransferTool|create_transfer\b/.test(src)) hits.push(relative(process.cwd(), full));
         }
       }
     };
     walk(join(process.cwd(), 'src'));
-    expect(hits).toEqual([join('src', 'lib', 'tools.ts')]);
-    const tools = readFileSync(join(process.cwd(), 'src', 'lib', 'tools.ts'), 'utf-8');
-    expect(tools.match(/runLegacyCreateTransferForTests/g)).toHaveLength(1);
-    expect(tools).toContain('@internal');
+    expect(hits).toEqual([]);
+  });
+});
+
+// R30 (no tipping-off): what the model sees about a held, blocked or capped
+// transfer is the fixed text from hold-replies.ts, never a reason, a review
+// word, or how much is left today.
+describe('R30: held, blocked and capped transfers read the fixed replies', () => {
+  const REVIEW_WORDS = /review|compliance|sanction|screen|watchlist|flagged|suspicious|in_review/i;
+  const setStatus = (id: string, status: 'in_review' | 'blocked') =>
+    db.execute(sql`UPDATE transfers SET status = ${status} WHERE id = ${id}`);
+  const mintOne = async (ctx: Awaited<ReturnType<typeof buildCtx>>) => {
+    const r = await payPageMint({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' }, ctx);
+    expect(typeof r.transfer_id).toBe('string');
+    return r.transfer_id as string;
+  };
+
+  it('check_payment_status on a held transfer: the processing label and HOLD_REPLY, no review word', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintOne(ctx);
+    await setStatus(id, 'in_review');
+    for (const channel of ['whatsapp', 'web'] as const) {
+      const r = await executeTool('check_payment_status', { transfer_id: id }, { ...ctx, channel });
+      // R43: the held reply also says how to reach a person.
+      expect(r).toEqual({ transfer_id: id, status: FIXED_REPLIES.status_held, reply_to_customer: fixedReply('hold', { help: true }) });
+      expect(JSON.stringify(r)).not.toMatch(REVIEW_WORDS);
+    }
+  });
+
+  it('check_payment_status on a blocked transfer: BLOCK_REPLY and never the raw token', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintOne(ctx);
+    await setStatus(id, 'blocked');
+    const r = await executeTool('check_payment_status', { transfer_id: id }, ctx);
+    expect(r.reply_to_customer).toBe(fixedReply('block', { help: true }));
+    expect(r.status).toBe('on hold');
+    expect(JSON.stringify(r)).not.toContain('blocked');
+    expect(JSON.stringify(r)).not.toMatch(REVIEW_WORDS);
+  });
+
+  it('check_payment_status on an ordinary transfer is unchanged (raw status, nothing to relay)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintOne(ctx);
+    expect(await executeTool('check_payment_status', { transfer_id: id }, ctx)).toEqual({ transfer_id: id, status: 'awaiting_payment' });
+  });
+
+  it('list_recent_transfers and get_customer_context label a held transfer with the fixed processing label', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintOne(ctx);
+    await setStatus(id, 'in_review');
+    const listed = await executeTool('list_recent_transfers', {}, { ...ctx, channel: 'web' });
+    expect(JSON.stringify(listed)).toContain(FIXED_REPLIES.status_held);
+    expect(JSON.stringify(listed)).not.toMatch(REVIEW_WORDS);
+    const context = await executeTool('get_customer_context', {}, ctx);
+    expect(JSON.stringify(context)).toContain(FIXED_REPLIES.status_held);
+    expect(JSON.stringify(context)).not.toMatch(REVIEW_WORDS);
+  });
+
+  it('repeat_transfer over the cap relays the fixed cap reply and never a remaining figure', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await payPageMint({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' }, ctx);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: OVER_CAP_USD }, ctx);
+    expect(r.sent).toBeUndefined();
+    expect(r.reply_to_customer).toBe(FIXED_REPLIES.cap_per_transfer);
+    const json = JSON.stringify(r);
+    for (const field of ['today_remaining_usd', 'today_used_usd', 'edd_threshold_usd']) expect(json).not.toContain(field);
+  });
+
+  it('check_bill_status on a held bill payment: a plain processing state, no review word', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintOne(ctx);
+    await db.execute(sql`UPDATE transfers SET transfer_type = 'b2b', status = 'in_review' WHERE id = ${id}`);
+    const r = await executeTool('check_bill_status', {}, ctx);
+    expect(r.found).toBe(true);
+    expect(r.status).toBe('processing');
+    expect(r.status_summary).toBe(FIXED_REPLIES.payment_held);
+    expect(JSON.stringify(r)).not.toMatch(REVIEW_WORDS);
+  });
+
+  it('no tool description names a remaining figure, the EDD threshold or a dollar trigger', () => {
+    for (const t of toolSchemas) {
+      const text = JSON.stringify(t.function);
+      for (const gone of ['today_remaining_usd', 'today_used_usd', 'edd_threshold_usd', '$3,000', '3000']) {
+        expect(text, `${t.function.name}: ${gone}`).not.toContain(gone);
+      }
+    }
   });
 });
 
@@ -6291,7 +6356,7 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
   for (const [label, lock] of lockCases) {
     it(`${label}: refuses, leaves the number unchanged and points to a person`, async () => {
       const ctx = await buildCtx(fakeRedis());
-      const created = await runLegacyCreateTransferForTests({
+      const created = await payPageMint({
         amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
         payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
       }, ctx);
@@ -6310,7 +6375,7 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
 
   it('awaiting_payment: still updates, and the reply number comes from the written row', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
       amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
     }, ctx);
@@ -6325,7 +6390,7 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
   it("another sender's transfer is still not found, locked or not", async () => {
     const redis = fakeRedis();
     const owner = await buildCtx(redis);
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
       amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
     }, owner);
@@ -6373,7 +6438,7 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
   const B32 = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
   async function mint(ctx: Ctx, deliver: boolean): Promise<string> {
-    const created = await runLegacyCreateTransferForTests({
+    const created = await payPageMint({
         amount_usd: 100,
         recipient_name: 'Mom',
         recipient_phone: '919876543210',
@@ -6471,8 +6536,8 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
 });
 
 // Release safety Batch 2 part A: the sends.paused kill switch in the chat tools.
-describe('create_transfer — sends.paused kill switch', () => {
-  it('approve-tap: a paused send restores the draft and returns the paused message; the same card works after', async () => {
+describe('pay page — sends.paused kill switch', () => {
+  it('a paused send keeps the draft and mints nothing; the same link works after', async () => {
     const ctx = await buildCtx(fakeRedis());
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone, partnerId: 'default',
@@ -6480,28 +6545,18 @@ describe('create_transfer — sends.paused kill switch', () => {
       amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
       quote: { feeUsd: 0, fxRate: 85, amountInr: 8_500 },
     });
-    const { SENDS_PAUSED_MESSAGE, invalidateFlagCache } = await import('@/lib/flags');
+    const { invalidateFlagCache } = await import('@/lib/flags');
     vi.spyOn(ctx.store, 'isFlagOn').mockResolvedValueOnce(true);
-    const tap = () => runLegacyCreateTransferForTests({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const tap = () => payPageMint({}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
     const r = await tap();
-    expect(r).toMatchObject({ error: SENDS_PAUSED_MESSAGE, sends_paused: true });
-    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // put back
+    expect(r).toMatchObject({ error: 'sends_paused' });
+    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // kept
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
     invalidateFlagCache(db);
     const r2 = await tap();
     expect(r2.transfer_id).toBeTruthy();
   });
 
-  it('legacy explicit-args path: a paused send returns the paused message and mints nothing', async () => {
-    const ctx = await buildCtx(fakeRedis());
-    const { SENDS_PAUSED_MESSAGE } = await import('@/lib/flags');
-    vi.spyOn(ctx.store, 'isFlagOn').mockResolvedValueOnce(true);
-    const r = await runLegacyCreateTransferForTests({
-      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
-    }, ctx);
-    expect(r).toMatchObject({ error: SENDS_PAUSED_MESSAGE, sends_paused: true });
-    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
-  });
 });
 
 // ── Step 0 FX-5: the card's lock line counts down to a partner push expiry ──
@@ -6584,7 +6639,7 @@ describe('Step 0 FX-5: rate lock with a partner push expiry (FX_PAY_RATE_CHECK_E
       name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
       lastUsedAt: new Date().toISOString(),
     });
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
     }, base);
     const ctx = { ...base, channel: 'web' as const, routeSelector: async () => PUSH(7 * 60_000 + 30_000) };
@@ -6616,7 +6671,7 @@ describe('Step 0 FX-7: rate provenance from the chat send path', () => {
     const draft = await base.draftStore.getDraft(r.draft_id as string);
     expect(draft?.quote).toMatchObject({ fxAsOf: date, fxOrigin: 'platform' });
     const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: r.draft_id as string } } };
-    const minted = await runLegacyCreateTransferForTests({}, ctx);
+    const minted = await payPageMint({}, ctx);
     expect(minted.error).toBeUndefined();
     const t = await base.store.getTransfer(minted.transfer_id as string);
     expect(t).toMatchObject({
@@ -6767,7 +6822,7 @@ describe('Required purpose: the send tools refuse a send without one', () => {
       lastUsedAt: new Date().toISOString(),
     });
     // A past transfer from before the requirement (seeded with it off, so one with no purpose exists).
-    await runLegacyCreateTransferForTests({
+    await payPageMint({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, funding_method: 'bank_transfer',
       ...(purpose ? { purpose } : {}),
     }, { ...ctx, purposeRequired: false });
@@ -6787,7 +6842,7 @@ describe('Required purpose: the send tools refuse a send without one', () => {
       }
       // the shared schema array is never mutated by the per-turn copy
       expect(requiredOf(toolSchemas, 'send_approve_picker')).not.toContain('purpose');
-      expect(requiredOf(toolSchemas, 'create_transfer')).not.toContain('purpose');
+      expect(requiredOf(toolSchemas, 'create_schedule')).not.toContain('purpose');
     });
 
     it('repeat_transfer keeps purpose optional in its schema (the handler asks, offering the last one)', () => {
@@ -6797,7 +6852,7 @@ describe('Required purpose: the send tools refuse a send without one', () => {
 
     it('every purpose enum in the schemas is the canonical TRANSFER_PURPOSES list', async () => {
       const { TRANSFER_PURPOSES } = await import('@/lib/purpose-codes');
-      for (const name of ['send_approve_picker', 'create_transfer', 'create_schedule', 'repeat_transfer']) {
+      for (const name of ['send_approve_picker', 'create_schedule', 'repeat_transfer']) {
         const props = (toolSchemas.find((t) => t.function.name === name)!.function.parameters as { properties: Record<string, { enum?: string[] }> }).properties;
         expect(props.purpose.enum, name).toEqual([...TRANSFER_PURPOSES]);
       }
@@ -6862,26 +6917,13 @@ describe('Required purpose: the send tools refuse a send without one', () => {
     });
   });
 
-  describe('create_transfer (explicit-args path)', () => {
-    it('no purpose ⇒ needs_purpose and nothing minted; a valid purpose is stored on the transfer', async () => {
-      const ctx = await required();
-      await ctx.store.upsertRecipient('default', ctx.phone, {
-        name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
-      });
-      const before = await ctx.store.getTransferCount('default', ctx.phone);
-      const refused = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM }, ctx);
-      expect(refused.needs_purpose).toBe(true);
-      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(before);
-      const ok = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'gift' }, ctx);
-      expect((await ctx.store.getTransfer(String(ok.transfer_id)))?.purpose).toBe('gift');
-    });
-
-    it('the approve-tap path mints a draft made before the requirement (no purpose) — an in-flight card still works', async () => {
+  describe('the pay page', () => {
+    it('mints a draft made before the requirement (no purpose) — an in-flight card still works', async () => {
       const ctx = await buildCtx(fakeRedis());
       stubWhatsApp();
       const r = await executeTool('send_approve_picker', picker(), ctx);
       const tapCtx = { ...ctx, purposeRequired: true as const, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
-      const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+      const minted = await payPageMint({}, tapCtx);
       expect(minted.needs_purpose).toBeUndefined();
       expect(minted.transfer_id).toBeTruthy();
     });
@@ -6986,13 +7028,14 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
   });
   const cardText = (body: string) => String((JSON.parse(body) as { interactive?: { body?: { text?: string } } }).interactive?.body?.text ?? '');
 
-  it('schemas: purpose_detail is offered (never required) on the four send tools', () => {
+  it('schemas: purpose_detail is offered (never required) on the three send tools', () => {
     for (const tools of [toolSchemas, toolSchemasForChannel('whatsapp', { purposeRequired: true })]) {
-      for (const name of ['send_approve_picker', 'create_transfer', 'create_schedule', 'repeat_transfer']) {
+      for (const name of ['send_approve_picker', 'create_schedule', 'repeat_transfer']) {
         const params = tools.find((t) => t.function.name === name)?.function.parameters as
           | { properties: Record<string, { type?: string }>; required?: string[] }
           | undefined;
-        if (!params) continue; // create_transfer is hidden on WhatsApp
+        expect(params, name).toBeDefined();
+        if (!params) continue;
         expect(params.properties.purpose_detail?.type, name).toBe('string');
         expect(params.required ?? [], name).not.toContain('purpose_detail');
       }
@@ -7082,7 +7125,7 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
     expect(JSON.stringify(r)).not.toMatch(/category|lottery/);
     expect(cardText(bodies[0]).startsWith(`${PURPOSE_SCAM_WARNING}\n\n`)).toBe(true);
     const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
-    const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+    const minted = await payPageMint({}, tapCtx);
     const t = await createTransferRepo(db).getTransfer(String(minted.transfer_id), { decrypt: true });
     expect(t).toMatchObject({ purpose: 'other', purposeDetail: 'lottery', complianceStatus: 'flagged' });
 
@@ -7095,12 +7138,12 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
     expect(d2?.purposeDetail).toContain('lottery');
   });
 
-  it('requirement off ⇒ create_transfer (explicit args) holds an invalid risky reason too', async () => {
+  it('requirement off ⇒ a send through the card and the pay page holds an invalid risky reason too', async () => {
     const ctx = await buildCtx(fakeRedis());
     await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
     });
-    const ok = await runLegacyCreateTransferForTests({
+    const ok = await payPageMint({
       amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other', purpose_detail: 'bitcoins',
     }, ctx);
     const t = await createTransferRepo(db).getTransfer(String(ok.transfer_id), { decrypt: true });
@@ -7112,23 +7155,9 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
     stubWhatsApp();
     const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'to claim my lottery prize' }), ctx);
     const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: r.draft_id as string } } as const };
-    const minted = await runLegacyCreateTransferForTests({}, tapCtx);
+    const minted = await payPageMint({}, tapCtx);
     const t = await createTransferRepo(db).getTransfer(String(minted.transfer_id), { decrypt: true });
     expect(t).toMatchObject({ purpose: 'other', purposeDetail: 'to claim my lottery prize', complianceStatus: 'flagged' });
-  });
-
-  it('create_transfer (explicit args) applies the same rule', async () => {
-    const ctx = await required();
-    await ctx.store.upsertRecipient('default', ctx.phone, {
-      name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
-    });
-    const refused = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other' }, ctx);
-    expect(refused.needs_purpose_detail).toBe(true);
-    const ok = await runLegacyCreateTransferForTests({
-      amount_usd: 100, recipient_name: 'Mom', recipient_phone: IN_MOM, purpose: 'other', purpose_detail: 'maa ki dawai ke liye',
-    }, ctx);
-    const t = await createTransferRepo(db).getTransfer(String(ok.transfer_id), { decrypt: true });
-    expect(t).toMatchObject({ purpose: 'medical', purposeDetail: 'maa ki dawai ke liye' });
   });
 
   describe('repeat_transfer', () => {
@@ -7136,7 +7165,7 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
       await ctx.store.upsertRecipient('default', ctx.phone, {
         name: 'Mom', recipientPhone: IN_MOM, payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
       });
-      await runLegacyCreateTransferForTests({
+      await payPageMint({
         amount_usd: 200, recipient_name: 'Mom', recipient_phone: IN_MOM, funding_method: 'bank_transfer', purpose: 'gift',
       }, { ...ctx, purposeRequired: false });
     };

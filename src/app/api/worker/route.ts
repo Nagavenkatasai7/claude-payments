@@ -214,6 +214,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
         waCreds, // WL2: interactive sends + replies leave from the partner's number
         partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID, // fix 1: the turn runs under the routed tenant
         ...(opts?.onFallback ? { onFallback: opts.onFallback } : {}), // the fallback's cause picks llmdown vs botfallback
+        ...(opts?.onReplyGuard ? { onReplyGuard: opts.onReplyGuard } : {}), // R32: the worker raises the replyguard alert
       });
       // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
       return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });

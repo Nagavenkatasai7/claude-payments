@@ -33,7 +33,9 @@ export const TEMPLATE_LANG = 'en';
 export const TEMPLATE_TRANSFER_DELIVERED_SENDER = 'transfer_delivered_sender'; // §3.2
 export const TEMPLATE_SCHEDULED_PAYMENT_READY = 'scheduled_payment_ready';     // §3.3
 export const TEMPLATE_PAYMENT_REMINDER = 'payment_reminder';                   // §3.4
-export const TEMPLATE_TRANSFER_IN_REVIEW = 'transfer_in_review';               // §3.5
+// R30 (no tipping-off): the held notice is transfer_processing, built from HOLD_REPLY.
+// It replaces transfer_in_review ("being reviewed by our team for security"), which must never be sent.
+export const TEMPLATE_TRANSFER_PROCESSING = 'transfer_processing';             // §3.5
 export const TEMPLATE_TRANSFER_RELEASED = 'transfer_released';                 // §3.6
 export const TEMPLATE_TRANSFER_CANCELLED = 'transfer_cancelled';              // §3.7
 export const TEMPLATE_VERIFICATION_REMINDER = 'verification_reminder';        // §3.8
@@ -173,11 +175,12 @@ export function deliveredSenderTemplate(transfer: Transfer): { name: string; lan
 }
 
 /**
- * The ready-to-send template for the held ("in review") notice (§3.5). The
- * ledger row carries no sender name, so {{1}} is "there" ("Hi there, …").
+ * The ready-to-send template for a held transfer (§3.5, transfer_processing): the
+ * fixed hold text, never a review. The ledger row carries no sender name, so
+ * {{1}} is "there" ("Hi there, …").
  */
-export function inReviewTemplate(transfer: Transfer): { name: string; lang: string; params: string[] } {
-  return { name: TEMPLATE_TRANSFER_IN_REVIEW, lang: TEMPLATE_LANG, params: transferInReviewParams(transfer, 'there') };
+export function processingTemplate(transfer: Transfer): { name: string; lang: string; params: string[] } {
+  return { name: TEMPLATE_TRANSFER_PROCESSING, lang: TEMPLATE_LANG, params: transferProcessingParams(transfer, 'there') };
 }
 
 /**
@@ -280,8 +283,8 @@ function senderAmountRecipientParams(transfer: Transfer, senderName: string): st
   ];
 }
 
-/** §3.5 transfer_in_review — compliance hold. Params: [name, amount, recipient]. */
-export function transferInReviewParams(transfer: Transfer, senderName: string): string[] {
+/** §3.5 transfer_processing — a held transfer, in the fixed hold wording. Params: [name, amount, recipient]. */
+export function transferProcessingParams(transfer: Transfer, senderName: string): string[] {
   return senderAmountRecipientParams(transfer, senderName);
 }
 

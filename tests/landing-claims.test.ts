@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { APPROVED_PUBLIC_PHRASINGS, findPublicClaims } from '@/lib/claims-register';
 
 // Program-Fix 14 PR B (docs-01): the landing page claimed sanctions screening
 // with no qualifier, while the demo screens against a built-in reference list
@@ -58,5 +59,63 @@ describe('landing sanctions claims are qualified (Program-Fix 14, docs-01)', () 
       const window = text.slice(m.index!, m.index! + 260);
       expect(window, `unqualified claim: "${window.slice(0, 120)}"`).toMatch(QUALIFIER);
     }
+  });
+});
+
+// R20: the public pages say only what SmartRemit can stand behind. Every public
+// page source is scanned against the claims register (src/lib/claims-register.ts):
+// no instant or in-minutes delivery, no unqualified encryption, audit or safety
+// claim, no "under their own brand", no Telegram "available now", nothing that
+// makes SmartRemit the licensed sender of the money, and (home page only, Q11)
+// no named AI app. src/lib/prompt.ts is not scanned: its rules quote banned
+// phrases in order to forbid them.
+describe('public pages carry no banned claim (R20 claims register)', () => {
+  const walk = (d: string): string[] =>
+    readdirSync(resolve(process.cwd(), d), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(d, e.name)) : /\.(tsx?|mdx)$/.test(e.name) ? [join(d, e.name)] : [],
+    );
+  const HOME = ['src/app/page.tsx', ...walk('src/app/landing')];
+  const SITE = [...walk('src/app/about'), ...walk('src/content'), ...walk('src/lib/legal')];
+
+  it('scans the home page, the about page, the docs and trust content, and the legal drafts', () => {
+    expect(HOME).toContain('src/app/landing/channels.ts');
+    expect(HOME).toContain('src/app/landing/HeroPipeline.tsx');
+    expect(SITE).toContain('src/app/about/page.tsx');
+    expect(SITE).toContain('src/content/docs/ai-apps.mdx');
+    expect(SITE).toContain('src/lib/legal/drafts.ts');
+  });
+
+  for (const f of HOME) {
+    it(`${f} (home scope) makes no banned claim`, () => {
+      expect({ f, hits: findPublicClaims(read(f), 'home') }).toEqual({ f, hits: [] });
+    });
+  }
+  for (const f of SITE) {
+    it(`${f} makes no banned claim`, () => {
+      expect({ f, hits: findPublicClaims(read(f), 'site') }).toEqual({ f, hits: [] });
+    });
+  }
+
+  it('the home page and the about page say who provides the transfer, in the approved words', () => {
+    const provider = APPROVED_PUBLIC_PHRASINGS.find((p) => p.topic === 'provider')!.say;
+    expect(squash(LANDING)).toContain(provider);
+    expect(squash(read('src/app/about/page.tsx'))).toContain(provider);
+  });
+
+  it('the AI-apps guide intro is generic: no app named, no endorsement, invitation only', () => {
+    const guide = read('src/content/docs/ai-apps.mdx');
+    const intro = squash(guide.slice(0, guide.indexOf('## Before you start')));
+    expect(intro).not.toMatch(/\b(Claude|ChatGPT|Perplexity|Gemini|Copilot)\b/);
+    expect(intro).toContain('an AI app that supports custom MCP connectors');
+    expect(intro).toContain("SmartRemit is not listed in any app's public connector directory and is not affiliated with or endorsed by any AI app maker.");
+    expect(intro).toMatch(/invite-only early access/);
+    // The cited connector steps stay (tests/docs-content-guard.test.ts allows their hosts).
+    expect(guide).toContain('## Connect from Claude');
+  });
+
+  it('the home h1 the production smoke checks is unchanged (tests/e2e/dashboard-smoke.spec.ts)', () => {
+    const h1 = squash(LANDING).match(/<h1 id="hero-h"[^>]*>([\s\S]*?)<\/h1>/);
+    expect(h1).not.toBeNull();
+    expect(h1![1]).toMatch(/^ Send money home\{' '\} .*from the chat apps you already use\. <\/span> $/);
   });
 });

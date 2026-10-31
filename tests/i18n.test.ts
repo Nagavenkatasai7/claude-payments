@@ -56,9 +56,12 @@ describe('catalogues', () => {
   it('transfer status labels equal the customer portal’s today (one mapping, no drift)', async () => {
     const { t } = await import('@/lib/i18n');
     const { transferStatusLabel } = await import('@/app/account/format');
+    const { transferStatusView } = await import('@/lib/ui/transfer-status');
     for (const s of ['awaiting_payment', 'paid', 'in_review', 'delivered', 'cancelled', 'blocked'] as const) {
-      expect(t(`status.transfer.${s}`)).toBe(transferStatusLabel({ status: s, refundStatus: undefined }));
+      // R30: /account and the portal pill show the CUSTOMER label (a held transfer is "Processing").
+      expect(t(transferStatusView({ status: s }, 'customer').labelKey)).toBe(transferStatusLabel({ status: s, refundStatus: undefined }));
     }
+    expect(transferStatusLabel({ status: 'in_review', refundStatus: undefined })).not.toMatch(/review/i);
     for (const r of ['requested', 'pending', 'completed'] as const) {
       expect(t(`status.refund.${r}`)).toBe(transferStatusLabel({ status: 'paid', refundStatus: r }));
     }

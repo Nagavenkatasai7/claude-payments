@@ -90,7 +90,7 @@ function MyRewardsCard({ rewards }: { rewards: MyRewards }) {
  * layout is never the guard).
  *
  * One customer portal (Oct 2): also the legacy /account home's four tiles (sent this month, daily
- * limit left, transfers, pending refunds; the same numbers, from the same helpers the bot's
+ * limit (R30: never what is left today), transfers, pending refunds; the same numbers, from the same helpers the bot's
  * check_send_limit uses) and the saved recipients with "Send again" (the send page pre-selects the
  * rid, src/app/portal/send/page.tsx). Every read is keyed by the HOST's partner and the SESSION
  * phone, never by request input; the recipient list shows masked accounts only.
@@ -141,8 +141,8 @@ export default async function PortalHomePage() {
           <StatTile label={t('portal.home.stat.sentMonth')} value={<Money amount={sentThisMonthUsd(scanned, new Date())} currency="USD" />} sub={t('portal.home.stat.sentMonthSub')} />
           <StatTile
             label={t('portal.home.stat.dailyLeft')}
-            value={<Money amount={cap.dailyRemainingUsd} currency="USD" />}
-            sub={t('portal.home.stat.dailyLeftSub', { limit: formatMoney(cap.dailyLimitUsd, 'USD') })}
+            value={<Money amount={cap.dailyLimitUsd} currency="USD" />}
+            sub={t('portal.home.stat.dailyLeftSub')}
           />
           <StatTile label={t('portal.home.stat.transfers')} value={scanned.length} sub={t('portal.home.stat.transfersSub')} />
           <StatTile label={t('portal.home.stat.refunds')} value={cap.pendingRefunds} sub={t('portal.home.stat.refundsSub')} />

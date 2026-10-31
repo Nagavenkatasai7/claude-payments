@@ -14,6 +14,20 @@ function allSources(dir: string): string[] {
   });
 }
 
+// R30 review fix: the out-of-window held notice is the fixed hold text from
+// hold-replies.ts, never "being reviewed by our team"; no template a send path
+// uses names a review.
+describe('the held-transfer template (R30, no tipping-off)', () => {
+  it('transfer_processing is HOLD_REPLY with the name, amount and recipient, and no sent template says review', async () => {
+    const { TEMPLATES } = await import('@/content/docs/whatsapp-template-catalog');
+    const { HOLD_REPLY } = await import('@/lib/hold-replies');
+    const e = TEMPLATES.find((x) => x.name === 'transfer_processing');
+    expect(e?.body.replace('Hi {{1}}, your transfer of {{2}} to {{3}}', 'Your transfer')).toBe(HOLD_REPLY);
+    expect(TEMPLATES.find((x) => x.name === 'transfer_in_review')).toBeUndefined();
+    for (const x of TEMPLATES.filter((y) => y.sentToday)) expect(`${x.name}: ${x.body}`).not.toMatch(/being reviewed|under review|in review|cleared review|compliance|security check/i);
+  });
+});
+
 describe('WhatsApp template catalog is code-true', () => {
   it('fixed names equal the code constants (all 9), with no duplicates', async () => {
     const { TEMPLATES } = await import('@/content/docs/whatsapp-template-catalog');
@@ -22,7 +36,7 @@ describe('WhatsApp template catalog is code-true', () => {
     const fixed = TEMPLATES.filter((x) => x.nameSource === 'fixed').map((x) => x.name).sort();
     expect(fixed).toEqual([
       w.RECIPIENT_TEMPLATE_NAME, t.TEMPLATE_TRANSFER_DELIVERED_SENDER, t.TEMPLATE_SCHEDULED_PAYMENT_READY,
-      t.TEMPLATE_PAYMENT_REMINDER, t.TEMPLATE_TRANSFER_IN_REVIEW, t.TEMPLATE_TRANSFER_RELEASED,
+      t.TEMPLATE_PAYMENT_REMINDER, t.TEMPLATE_TRANSFER_PROCESSING, t.TEMPLATE_TRANSFER_RELEASED,
       t.TEMPLATE_TRANSFER_CANCELLED, t.TEMPLATE_VERIFICATION_REMINDER, t.TEMPLATE_SCHEDULE_NAME_NEEDED,
     ].sort());
     expect(new Set(TEMPLATES.map((x) => x.name)).size).toBe(TEMPLATES.length);
@@ -42,7 +56,7 @@ describe('WhatsApp template catalog is code-true', () => {
       transfer_delivered_sender: t.transferDeliveredSenderParams(tr).length,
       scheduled_payment_ready: t.scheduledPaymentReadyParams({ amountUsd: 100, recipientName: 'Priya' } as never, 'tx_1', 'Anand').bodyParams.length,
       payment_reminder: t.paymentReminderParams(tr, 'Anand').bodyParams.length,
-      transfer_in_review: t.transferInReviewParams(tr, 'Anand').length,
+      transfer_processing: t.transferProcessingParams(tr, 'Anand').length,
       transfer_released: t.transferReleasedParams(tr, 'Anand').length,
       transfer_cancelled: t.transferCancelledParams(tr, 'Anand').length,
       verification_reminder: t.verificationReminderParams('Anand', 'sess_1').bodyParams.length,
@@ -84,7 +98,7 @@ describe('WhatsApp template catalog is code-true', () => {
       ),
       transfer_delivered_sender: /transferDeliveredSenderParams\(|deliveredSenderTemplate\(|TEMPLATE_TRANSFER_DELIVERED_SENDER/.test(text),
       payment_reminder: /paymentReminderParams\(|TEMPLATE_PAYMENT_REMINDER/.test(text),
-      transfer_in_review: /transferInReviewParams\(|inReviewTemplate\(|TEMPLATE_TRANSFER_IN_REVIEW/.test(text),
+      transfer_processing: /transferProcessingParams\(|processingTemplate\(|TEMPLATE_TRANSFER_PROCESSING/.test(text),
       transfer_released: /transferReleasedParams\(|TEMPLATE_TRANSFER_RELEASED/.test(text),
       transfer_cancelled: /transferCancelledParams\(|TEMPLATE_TRANSFER_CANCELLED/.test(text),
       verification_reminder: /verificationReminderParams\(|TEMPLATE_VERIFICATION_REMINDER/.test(text),

@@ -8,6 +8,7 @@ import type { AgentAuth, AgentPrincipal } from '@/lib/agent-auth';
 import type { ToolContextDeps } from '@/lib/tool-context';
 import { buildToolContext } from '@/lib/tool-context';
 import { executeTool } from '@/lib/tools';
+import { BLOCK_REPLY, HOLD_REPLY } from '@/lib/hold-replies';
 import { createStore, type Store } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -21,6 +22,7 @@ import { recipientRid } from '@/lib/portal-recipients';
 import { webFormTurn } from '@/lib/portal-send';
 import {
   CANNOT_PAY,
+  CHECK_SEND_LIMIT,
   TRANSFER_NOT_FOUND,
   checkSendLimitTool,
   getQuoteTool,
@@ -31,6 +33,7 @@ import {
   type McpDataDeps,
 } from '@/lib/mcp/tools';
 import { handleMcpRequest } from '@/lib/mcp/http';
+import { capRefusalReply } from '@/lib/hold-replies';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 
@@ -220,6 +223,22 @@ describe('get_transfer_status (404-never-403)', () => {
     const r = await getTransferStatusTool(owner, { transfer_id: blocked }, data());
     if (!r.ok) throw new Error('expected ok');
     expect(r.data.status).toBe('on hold');
+    // R30 review fix: the same fixed note the bot relays (hold-replies.ts), never a reason.
+    expect(r.data.status_note).toBe(BLOCK_REPLY);
+  });
+
+  it('R30: a held transfer carries the fixed hold note the bot relays, and no review word', async () => {
+    const held = await seedLedgerSpend(db, { partnerId: 'pa', phone: PHONE, amountUsd: 40, status: 'in_review' });
+    const r = await getTransferStatusTool(owner, { transfer_id: held }, data());
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data.status_note).toBe(HOLD_REPLY);
+    expect(JSON.stringify(r.data)).not.toMatch(/review|compliance|flag/i);
+  });
+
+  it('an ordinary transfer has no status note', async () => {
+    const r = await getTransferStatusTool(owner, { transfer_id: ownTx }, data());
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data).not.toHaveProperty('status_note');
   });
 });
 
@@ -245,10 +264,12 @@ describe('get_quote (the bot quote path)', () => {
     expect(String(r.data.next_step)).toContain('WhatsApp');
   });
 
-  it('over the daily limit → no quote, the limit figures', async () => {
+  it('over the daily limit → no quote, the limits, the fixed refusal and never a remaining figure (R30)', async () => {
     const r = await getQuoteTool(owner, { amount: 9000 }, data());
     if (!r.ok) throw new Error(`expected ok: ${JSON.stringify(r)}`);
     expect(r.data).toMatchObject({ quote_available: false, reason: expect.any(String), daily_limit_usd: expect.any(Number) });
+    expect(r.data.message).toBe(capRefusalReply(r.data.reason));
+    expect(r.data).not.toHaveProperty('remaining_today_usd');
   });
 
   it('an amount the bot refuses → a tool error with its message', async () => {
@@ -282,12 +303,12 @@ describe('check_send_limit', () => {
       tier: bot.tier,
       daily_limit_usd: bot.daily_cap_usd,
       per_transfer_limit_usd: bot.per_transfer_cap_usd,
-      remaining_today_usd: bot.today_remaining_usd,
       extra_details_required: false,
     });
+    expect(r.data).not.toHaveProperty('remaining_today_usd'); // R30: never how much is left
   });
 
-  it("today's own spend lowers the remaining figure; another tenant's does not", async () => {
+  it("today's spend never shows as a remaining figure (R30); another tenant's changes nothing", async () => {
     const before = await checkSendLimitTool(owner, data());
     await seedLedgerSpend(db, { partnerId: 'pb', phone: PHONE, amountUsd: 300, status: 'paid' });
     const afterOther = await checkSendLimitTool(owner, data());
@@ -295,7 +316,12 @@ describe('check_send_limit', () => {
     await seedLedgerSpend(db, { partnerId: 'pa', phone: PHONE, amountUsd: 100, status: 'paid' });
     const afterOwn = await checkSendLimitTool(owner, data());
     if (!before.ok || !afterOwn.ok) throw new Error('expected ok');
-    expect(afterOwn.data.remaining_today_usd).toBe((before.data.remaining_today_usd as number) - 100);
+    expect(afterOwn).toEqual(before);
+    expect(JSON.stringify(afterOwn.data)).not.toMatch(/remaining|left/i);
+  });
+
+  it('the tool description never promises how much is left (R30)', () => {
+    expect(CHECK_SEND_LIMIT.description).not.toMatch(/still send|remaining|left/i);
   });
 });
 

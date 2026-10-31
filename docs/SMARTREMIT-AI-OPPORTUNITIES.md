@@ -13,7 +13,7 @@
 
 ## AI Today
 
-1. **Conversational send-money agent** — `src/lib/agent.ts` → `src/lib/ollama.ts` (Kimi K2.6), a 15-tool deterministic loop (`get_quote`, `create_transfer`, etc.); the model never moves money or clears compliance — minting goes through `createTransfer`, caps via `evaluateCap`, sanctions via `screenTransfer`, and `sanitizeReply` strips every model-emitted URL.
+1. **Conversational send-money agent** — `src/lib/agent.ts` → `src/lib/ollama.ts` (Kimi K2.6), a 15-tool deterministic loop (`get_quote`, `send_approve_picker`, etc.); the model never moves money or clears compliance — minting goes through `createTransfer`, caps via `evaluateCap`, sanctions via `screenTransfer`, and `sanitizeReply` strips every model-emitted URL.
 2. **Rung-1 staff support-ticket copilot** — `src/lib/ticket-ai.ts` (`draftReply` / `summarizeCase` / `triageSuggest`), one `chat()` call, suggest-only behind self-gated, rate-limited, audited routes (`/api/copilot/*`); a human edits and explicitly sends.
 
 ---

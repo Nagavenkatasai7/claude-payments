@@ -14,7 +14,7 @@ Three decisions, in order of how much they matter:
 
 **1. Keep the customer chat exactly as built.** The WhatsApp bot is already the
 right agentic pattern: a single agent (`src/lib/agent.ts`) driving ~17 deterministic
-tools (`src/lib/tools.ts` — `get_quote`, `create_transfer`, `check_send_limit`,
+tools (`src/lib/tools.ts` — `get_quote`, `check_send_limit`,
 `send_approve_picker`, `repeat_transfer`, schedule tools, …) inside a bounded loop
 (`MAX_TOOL_ROUNDS = 6`). Every money-adjacent tool re-checks caps, the KYC gate, and
 sanctions **server-side**; the model can never bypass policy. `sanitizeReply()`

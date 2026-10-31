@@ -316,11 +316,7 @@ function narrowRepeat(r: Record<string, unknown>, brand: string): { kind: 'draft
   if (r.cap_eval && typeof r.cap_eval === 'object') {
     const ev = r.cap_eval as Record<string, unknown>;
     if (ev.reason === SEND_GATE_REASON) return { kind: 'copy', copy: { error: 'portal.send.kycBody', kyc: 'verify' } };
-    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-    return {
-      kind: 'copy',
-      copy: capCopy(typeof ev.reason === 'string' ? ev.reason : undefined, { todayRemainingUsd: n(ev.today_remaining_usd), perTransferCapUsd: n(ev.per_transfer_cap_usd) }, brand),
-    };
+    return { kind: 'copy', copy: capCopy(typeof ev.reason === 'string' ? ev.reason : undefined, brand) };
   }
   return { kind: 'copy', copy: { error: 'portal.send.cannot_complete' } };
 }

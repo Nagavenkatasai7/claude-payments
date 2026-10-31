@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { encryptField } from '@/lib/field-crypto';
+import { draftSealCtx, sealedDraftPointerKey } from '@/lib/redis-seal';
 import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import type { Draft } from '@/lib/types';
@@ -147,5 +149,93 @@ describe('draft store', () => {
     await ds.restoreDraft(consumed, id);
     expect(await ds.getActiveDraftId('acme', '15551234567')).toBe(id);
     expect((await ds.getDraft(id))?.partnerId).toBe('acme');
+  });
+});
+
+// R49 part 1: the sealed-draft READERS. This build still writes plaintext
+// drafts and phone pointers; PR9 seals the draft under its id and writes only
+// the HMAC pointer. Every reader here takes both formats.
+describe('draft store reads the sealed format too (R49 readers)', () => {
+  const PH = '15551234567';
+  const sealDraft = (redis: ReturnType<typeof fakeRedis>, id: string, draft: Record<string, unknown>, ctxId = id) =>
+    redis.dump.set(`recipient_draft:${id}`, encryptField(JSON.stringify(draft), undefined, draftSealCtx(ctxId)));
+  const stored = () => ({ ...sampleDraft(), createdAt: new Date().toISOString() });
+
+  it('a legacy JSON draft still reads', async () => {
+    const redis = fakeRedis();
+    redis.dump.set('recipient_draft:legacy1', JSON.stringify(stored()));
+    expect((await createDraftStore(redis).getDraft('legacy1'))?.amountUsd).toBe(300);
+  });
+
+  it('a sealed draft reads and consumes; the raw value holds no phone or payout', async () => {
+    const redis = fakeRedis();
+    sealDraft(redis, 'sealed1', stored());
+    expect(redis.dump.get('recipient_draft:sealed1')).not.toContain(PH);
+    expect(redis.dump.get('recipient_draft:sealed1')).not.toContain('mom@upi');
+    const ds = createDraftStore(redis);
+    expect((await ds.getDraft('sealed1'))?.recipient.name).toBe('Mom');
+    expect((await ds.consumeDraft('sealed1'))?.amountUsd).toBe(300);
+    expect(await ds.getDraft('sealed1')).toBeNull();
+  });
+
+  it('a sealed blob copied to another draft id does not open (null, error name logged only)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const redis = fakeRedis();
+    sealDraft(redis, 'other', stored(), 'original');
+    const ds = createDraftStore(redis);
+    expect(await ds.getDraft('other')).toBeNull();
+    expect(await ds.consumeDraft('other')).toBeNull();
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain('draft');
+    expect(logged).not.toContain(PH);
+    warn.mockRestore();
+  });
+
+  it('getActiveDraftId falls back to the HMAC pointer (a PR9 write); the key holds no phone', async () => {
+    const redis = fakeRedis();
+    const bot = sealedDraftPointerKey('default', PH, 'bot');
+    const web = sealedDraftPointerKey('default', PH, 'web');
+    expect(bot).not.toContain(PH);
+    redis.dump.set(bot, 'draftBot');
+    redis.dump.set(web, 'draftWeb');
+    const ds = createDraftStore(redis);
+    expect(await ds.getActiveDraftId('default', PH)).toBe('draftBot');
+    expect(await ds.getActiveDraftId('default', PH, 'web')).toBe('draftWeb');
+    expect(await ds.getActiveDraftId('acme', PH)).toBeNull();
+  });
+
+  it("the plaintext pointer (this build's own write) wins when both exist", async () => {
+    const redis = fakeRedis();
+    redis.dump.set(sealedDraftPointerKey('default', PH, 'bot'), 'olderSealed');
+    const ds = createDraftStore(redis);
+    const id = await ds.createDraft(sampleDraft());
+    expect(await ds.getActiveDraftId('default', PH)).toBe(id);
+  });
+
+  it('consumeDraft clears both pointers when they point at the consumed draft, and neither when they do not', async () => {
+    const redis = fakeRedis();
+    sealDraft(redis, 'sealed2', stored());
+    const bot = sealedDraftPointerKey('default', PH, 'bot');
+    redis.dump.set(bot, 'sealed2');
+    redis.dump.set(`active_draft:default:${PH}`, 'sealed2');
+    const ds = createDraftStore(redis);
+    await ds.consumeDraft('sealed2');
+    expect(redis.dump.has(bot)).toBe(false);
+    expect(redis.dump.has(`active_draft:default:${PH}`)).toBe(false);
+
+    sealDraft(redis, 'sealed3', stored());
+    redis.dump.set(bot, 'newer');
+    await ds.consumeDraft('sealed3');
+    expect(redis.dump.get(bot)).toBe('newer');
+  });
+
+  it('a web draft clears only the web HMAC pointer', async () => {
+    const redis = fakeRedis();
+    sealDraft(redis, 'w1', { ...stored(), channel: 'web' });
+    redis.dump.set(sealedDraftPointerKey('default', PH, 'web'), 'w1');
+    redis.dump.set(sealedDraftPointerKey('default', PH, 'bot'), 'w1');
+    await createDraftStore(redis).consumeDraft('w1');
+    expect(redis.dump.has(sealedDraftPointerKey('default', PH, 'web'))).toBe(false);
+    expect(redis.dump.get(sealedDraftPointerKey('default', PH, 'bot'))).toBe('w1');
   });
 });

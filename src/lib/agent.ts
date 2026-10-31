@@ -17,13 +17,15 @@ import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
-import { logWarn } from './log';
+import { logError, logWarn } from './log';
 import { VOICE_INPUT_NOTE } from './voice-notes';
-import { resolveKycMode, resolvePartnerBranding } from './partner-config';
+import { resolveKycMode, resolvePartnerBranding, resolvePartnerDisclosure } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { env } from './env';
 import { BRAND_MAX, boundUntrustedText, hasModelHost, hasWebAddress, stripModelHosts } from './untrusted-text';
 import { isPermanentProviderError } from './llm-provider-error';
+import { offTopicReply } from './scope-guard';
+import { detectReplyLang } from './ai-notice';
 
 const MAX_TOOL_ROUNDS = 6;
 // fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
@@ -34,6 +36,18 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
 import { PURPOSE_SCAM_WARNING } from './purpose-detail';
+import { modelVisibleResult } from './model-visible-result';
+import { composeReply } from './compose-reply';
+import { MIN_USD } from './fx';
+import {
+  addPolicyFacts,
+  addTextFacts,
+  addToolResultFacts,
+  checkReply,
+  emptyReplyFacts,
+  type ReplyFacts,
+  type ReplyGuardReport,
+} from './reply-guard';
 export { FALLBACK_REPLY };
 
 export interface AgentDeps {
@@ -63,6 +77,38 @@ export interface AgentDeps {
   // runAgentTurn degrades to FALLBACK_REPLY because something threw (the
   // worker and web chat use it to raise the llmdown alert). Absent ⇒ unchanged.
   onFallback?: (err: unknown) => void;
+  // R32 (bot part): called at most once per turn, synchronously, when the reply
+  // guard finds figures or claims in the RAW model text that no fact of the
+  // turn backs. mode 'shadow' (agent.reply_guard off): the reply went out
+  // unchanged; 'on': it was replaced with FALLBACK_REPLY. The worker and web
+  // chat raise the deduped ops alert. Absent ⇒ the guard still runs and logs.
+  onReplyGuard?: (report: ReplyGuardReport) => void;
+}
+
+/**
+ * R32: the facts a turn's reply is checked against: what the system prompt
+ * states (limits, refund timing, the disclosed delivery days), the customer's
+ * own messages and every tool result the model has in front of it (earlier
+ * results in the stored conversation, and the round-0 customer context).
+ * This turn's raw tool results are added as they arrive.
+ */
+function startingFacts(
+  history: readonly ChatMessage[],
+  customerContext: unknown,
+  policy: Parameters<typeof addPolicyFacts>[1],
+): ReplyFacts {
+  const facts = addPolicyFacts(emptyReplyFacts(), policy);
+  for (const m of history) {
+    if (m.role === 'user') addTextFacts(facts, m.content, 'customer');
+    else if (m.role === 'tool') {
+      try {
+        addToolResultFacts(facts, JSON.parse(m.content ?? ''));
+      } catch {
+        addTextFacts(facts, m.content);
+      }
+    }
+  }
+  return addToolResultFacts(facts, customerContext);
 }
 
 // Injected as a system message on EVERY round of a web-channel turn (not
@@ -126,6 +172,20 @@ export function sanitizeReply(
   return `${stripped}\n\n${link}`.trim();
 }
 
+/** R49: an error's class name for a log line (never its message: it can echo customer text). */
+/**
+ * R32 review fix: a tool result that refuses the send (a blocked transfer, a cap
+ * or verification refusal, or a fixed reply the model must relay). The quotes
+ * collected earlier in the turn are dropped, so none follows the refusal.
+ */
+function isRefusal(result: Record<string, unknown>): boolean {
+  return result.blocked === true || result.within_cap === false || result.needs_edd === true || typeof result.reply_to_customer === 'string';
+}
+
+function errName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
+}
+
 export function createAgent(deps: AgentDeps) {
   const partnerId: PartnerId = deps.partnerId ?? DEFAULT_PARTNER_ID;
   // One retry on a transient chat() failure (provider 5xx / 529 / timeout / a
@@ -143,7 +203,8 @@ export function createAgent(deps: AgentDeps) {
     } catch (err) {
       // A 401/402/403 can never succeed on retry: one provider call, not two.
       if (signal?.aborted || isPermanentProviderError(err)) throw err;
-      console.warn('chat() failed once — retrying:', err);
+      // R49: the error NAME only: a provider error can echo the request (history).
+      logWarn('agent.chat', 'chat() failed once — retrying', { error: errName(err) });
       return await deps.chat(messages, tools, { signal });
     }
   }
@@ -162,9 +223,9 @@ export function createAgent(deps: AgentDeps) {
     // AND drop the turn. Degrade to a friendly retry line and PRESERVE history
     // (the inbound message + any partial turns) so the customer can just resend.
     try {
-      return await completeTurn(phone, turn, history, opts.signal);
+      return await completeTurn(phone, incomingText, turn, history, opts.signal);
     } catch (err) {
-      console.error('runAgentTurn failed — returning fallback:', err);
+      logError('agent.turn', 'runAgentTurn failed — returning fallback', { error: errName(err) });
       try {
         deps.onFallback?.(err);
       } catch {
@@ -173,7 +234,7 @@ export function createAgent(deps: AgentDeps) {
       try {
         await deps.store.saveConversation(partnerId, phone, history);
       } catch (saveErr) {
-        console.error('saveConversation after failure also failed:', saveErr);
+        logError('agent.turn', 'saveConversation after failure also failed', { error: errName(saveErr) });
       }
       return FALLBACK_REPLY;
     }
@@ -181,6 +242,7 @@ export function createAgent(deps: AgentDeps) {
 
   async function completeTurn(
     phone: string,
+    incomingText: string,
     turn: TurnContext,
     history: ChatMessage[],
     signal?: AbortSignal,
@@ -292,6 +354,10 @@ export function createAgent(deps: AgentDeps) {
     // Batch B follow-up A4: a send tool's scam_warning. Only OUR constant is ever
     // shown (never a value read back from the model's world), at the top of a text reply.
     let scamWarning = false;
+    // R56: the model called decline_off_topic. The turn ends with the fixed,
+    // code-written decline in the customer's language; the model is not asked
+    // again, so it cannot add to or soften it.
+    let declinedReply: string | null = null;
 
     // ONE prefix per turn (Claude API move, 2026-10-25): the system prompt, the
     // turn's notes, the history as it stood at turn start and the customer
@@ -323,7 +389,9 @@ export function createAgent(deps: AgentDeps) {
       prefix.push({
         role: 'system',
         content:
-          '[NEW CONVERSATION] First message in over 24 hours. Greet warmly and ask how you can help (you may reference their recent history if shown). Do NOT call list_saved_recipients or send_recipient_picker yet — wait until the user actually wants to send. Only then offer a picker or take their details.',
+          '[NEW CONVERSATION] First message in over 24 hours. Greet warmly and ask how you can help (you may reference their recent history if shown). Do NOT call list_saved_recipients or send_recipient_picker yet — wait until the user actually wants to send. Only then offer a picker or take their details. ' +
+          // R17: the code adds the AI notice above the first reply (ai-notice.ts).
+          'The system already shows the customer a short notice above your reply that they are chatting with an AI assistant: do not repeat it. If they ask, say plainly that you are an AI assistant.',
       });
     }
     // Recipient button tap: the model proceeds straight to amount + funding and
@@ -408,6 +476,19 @@ export function createAgent(deps: AgentDeps) {
       );
     }
 
+    // R32: the turn's facts (the reply guard reads them) and the code-written
+    // quotes of this turn's get_quote calls, in call order (the prompt forbids
+    // the model to restate figures, so every quote must be shown). A refusal
+    // later in the turn (a get_quote or send tool that is blocked, over a cap
+    // or relaying a fixed reply) drops them: no quote follows a refusal.
+    const facts = startingFacts(history, customerContext, {
+      minUsd: MIN_USD,
+      limits: sendLimits,
+      deliveryBusinessDays: resolvePartnerDisclosure(notePartner).deliveryBusinessDays,
+    });
+    const quoteTexts: string[] = [];
+    let quoteCorridor: string | null = null;
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Cooperative row deadline (fix 7): the worker aborts this signal at
       // ROW_DEADLINE_MS. Stop BEFORE starting another LLM call / tool round so
@@ -436,12 +517,24 @@ export function createAgent(deps: AgentDeps) {
           try {
             result = await executeTool(call.function.name, args, toolCtx);
           } catch (err) {
-            console.error(`tool ${call.function.name} threw:`, err);
+            logError('agent.tool', 'a tool threw', { tool: call.function.name, error: errName(err) });
             result = { error: 'That step hit a temporary snag — apologize briefly and ask the user to try again.' };
           }
           // An interactive (picker/approve card) sent by a tool IS the reply.
           if ((result as Record<string, unknown>).sent === true) interactiveSent = true;
           if ((result as Record<string, unknown>).scam_warning === PURPOSE_SCAM_WARNING) scamWarning = true;
+          if ((result as Record<string, unknown>).declined_off_topic === true) declinedReply = offTopicReply(detectReplyLang(incomingText));
+          // R32: the raw result is a fact of this turn; get_quote's quote_text
+          // is the code-written quote the reply ends with.
+          addToolResultFacts(facts, result);
+          const qt = call.function.name === 'get_quote' ? (result as Record<string, unknown>).quote_text : undefined;
+          if (typeof qt === 'string' && qt.trim()) {
+            if (!quoteTexts.includes(qt)) quoteTexts.push(qt);
+            const dc = (result as Record<string, unknown>).destination_country;
+            quoteCorridor = typeof dc === 'string' ? dc : quoteCorridor;
+          } else if (isRefusal(result)) {
+            quoteTexts.length = 0;
+          }
           // Collect canonical payment links generated by our code. Web only
           // (R6b): WhatsApp's dispatch refuses generate_payment_link, and this
           // channel check keeps a link off WhatsApp structurally, like pay_url.
@@ -485,17 +578,31 @@ export function createAgent(deps: AgentDeps) {
           if (gateActive && typeof (result as Record<string, unknown>).kyc_url === 'string') {
             paymentLinks.push((result as Record<string, unknown>).kyc_url as string);
           }
+          // R30 (no tipping-off): the model (and the stored history) only ever
+          // sees the model-visible copy: no remaining figure, no EDD threshold,
+          // no screening field, at any depth.
           history.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: JSON.stringify(result),
+            content: JSON.stringify(modelVisibleResult(result)),
           });
+        }
+        if (declinedReply !== null) {
+          // Every tool call above has its result, so the history stays well formed.
+          history.push({ role: 'assistant', content: declinedReply });
+          break;
         }
         continue;
       }
 
       reply = assistant.content || '';
       break;
+    }
+
+    if (declinedReply !== null) {
+      await deps.store.saveConversation(partnerId, phone, history);
+      // A card a tool already sent in the same round is still the reply.
+      return interactiveSent ? '' : declinedReply;
     }
 
     // Deterministic verify-link backstop. The model is NOT trusted to deliver the
@@ -534,21 +641,66 @@ export function createAgent(deps: AgentDeps) {
       await deps.store.saveConversation(partnerId, phone, history);
       return '';
     }
-    if (!reply) reply = FALLBACK_REPLY;
+
+    // R32 (bot part): the reply guard reads the RAW model text, before any
+    // formatting or code-written slot. Off (shadow) only reports; on replaces
+    // the reply with the fixed fallback. The switch is read only on a failed
+    // check, and an unreadable switch stays shadow.
+    const riskWarning = scamWarning ? PURPOSE_SCAM_WARNING : undefined;
+    if (reply.trim()) {
+      const check = checkReply(reply, facts);
+      if (!check.ok) {
+        const mode = (await replyGuardOn(quoteCorridor)) ? 'on' : 'shadow';
+        logWarn('agent.reply-guard', 'reply figures or claims not backed by the turn', {
+          mode,
+          kinds: [...new Set(check.issues.map((i) => i.kind))].join(','),
+        });
+        try {
+          deps.onReplyGuard?.({ issues: check.issues, mode });
+        } catch {
+          // reporting never breaks the reply
+        }
+        if (mode === 'on') {
+          // The customer reads the fixed fallback (any risk warning still
+          // first); the code quote and links go with the replaced reply. The
+          // stored history holds what the customer saw, so the model never
+          // builds on the figures it got wrong.
+          history[history.length - 1] = { role: 'assistant', content: FALLBACK_REPLY };
+          await deps.store.saveConversation(partnerId, phone, history);
+          return composeReply({ riskWarning, modelText: FALLBACK_REPLY });
+        }
+      }
+    }
+
+    const quoteText = quoteTexts.join('\n\n');
+    if (!reply && !quoteText) reply = FALLBACK_REPLY;
     // WhatsApp does not render CommonMark: convert to *bold* / • bullets first,
     // so sanitizeReply's URL/host policy runs over the exact text we send.
     if (channel === 'whatsapp') reply = toWhatsAppFormatting(reply);
-    // Sanitize: strip model-emitted URLs, append canonical link if present.
-    reply = sanitizeReply(reply, paymentLinks, replyAllowHosts(env.appBaseUrl, branding.brand));
+    // Sanitize: strip every model-emitted URL (the code-made link is appended last).
+    let modelText = sanitizeReply(reply, [], replyAllowHosts(env.appBaseUrl, branding.brand));
+    const link = paymentLinks.length > 0 ? paymentLinks[paymentLinks.length - 1] : '';
     // Program-Fix 34A: a reply that sanitizing EMPTIED (a URL-only answer) is
     // still an answer the customer must see — never '' past this point.
-    if (!reply.trim()) reply = FALLBACK_REPLY;
-    // Batch B follow-up A4: the customer reads the scam warning first, word for
-    // word, whatever the model wrote (a WhatsApp card already starts with it, and
-    // returned above). Never doubled when the model already included it.
-    if (scamWarning && !reply.includes(PURPOSE_SCAM_WARNING)) reply = `${PURPOSE_SCAM_WARNING}\n\n${reply}`;
+    if (!modelText.trim() && !link && !quoteText) modelText = FALLBACK_REPLY;
+    // PR1: one order — [redaction][risk warning] model text [code quote], then
+    // the link (R49: the reply sender adds the redaction notice on top). Batch B follow-up A4: the scam warning comes first, word for
+    // word (a WhatsApp card already starts with it, and returned above), never
+    // doubled when the model already included it. R32: the quote is code text.
+    let out = composeReply({ riskWarning, modelText, quoteText: quoteText || undefined });
+    if (link) out = `${out}\n\n${link}`.trim();
     await deps.store.saveConversation(partnerId, phone, history);
-    return reply;
+    return out;
+  }
+
+  /** R32: agent.reply_guard for this tenant (and the quoted corridor). Fails to shadow. */
+  async function replyGuardOn(corridor: string | null): Promise<boolean> {
+    try {
+      return await deps.store.isFlagOn('agent.reply_guard', { partnerId, corridor });
+    } catch (err) {
+      logWarn('agent.reply-guard-flag', err instanceof Error ? err.name : 'unknown');
+      return false;
+    }
   }
 
   return { runAgentTurn };

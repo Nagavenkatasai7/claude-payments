@@ -224,7 +224,7 @@ describe('createAgent', () => {
       chat: async () => { throw new Error('Model request failed (503)'); }, // throws on both the call and its retry
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
-    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?");
+    expect(reply).toBe(FALLBACK_REPLY);
     // History (the inbound message) must be saved so the customer can resend
     // without losing context — not dropped by the error path.
     const saved = await store.getConversation('default', PHONE);
@@ -413,7 +413,10 @@ describe('createAgent', () => {
     });
 
     const reply = await agent.runAgentTurn(PHONE, 'send $500 via upi');
-    expect(reply).toBe('You send $500, they get a lot of INR.');
+    // R32: a quoting turn ends with the code-written quote, after the model text.
+    const [modelPart, quotePart] = reply.split('\n\n');
+    expect(modelPart).toBe('You send $500, they get a lot of INR.');
+    expect(quotePart).toMatch(/^Sending \$500\.00\.\n.*\nRate: 1 USD = ₹85\.2\nThey get ₹42,600 within 1 business day\.$/);
 
     const conv = await store.getConversation('default', PHONE);
     expect(conv.some((m) => m.role === 'tool')).toBe(true);
@@ -783,6 +786,11 @@ describe('createAgent — TurnContext', () => {
     await agent.runAgentTurn('15551234567', 'hi', turn);
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
     expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
+    // R17: the model is told the AI notice is already above its reply, not to repeat it, and to admit being an AI.
+    const note = String(sys.find((s) => typeof s === 'string' && s.startsWith('[NEW CONVERSATION]')));
+    expect(note).toContain('AI assistant');
+    expect(note).toMatch(/do not repeat it/i);
+    expect(note).toMatch(/say plainly that you are an AI assistant/i);
   });
 
   // Step 1 voice notes: the read-back note rides EVERY round of a voice turn
@@ -912,7 +920,7 @@ describe('createAgent — TurnContext', () => {
     expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(false);
   });
 
-  it('R6b: an approve-tap create_transfer on WhatsApp is refused at dispatch; the draft survives, nothing is minted', async () => {
+  it('R30: a stale approve-tap call to the deleted create_transfer runs nothing; the draft survives, nothing is minted', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
@@ -971,7 +979,8 @@ describe('createAgent — TurnContext', () => {
     expect(await store.listTransfers()).toHaveLength(0);
     const saved = await store.getConversation('default', '15551234567');
     const toolMsg = saved.find((m) => m.role === 'tool');
-    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'not available here' });
+    // R30 deleted the tool, so the old name is simply unknown (no schema, no dispatch).
+    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'Unknown tool: create_transfer' });
   });
 });
 
@@ -997,9 +1006,8 @@ describe('replay safety', () => {
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });
 
-    // LLM tries to call create_transfer with the (guessed) draftId — but with
-    // no buttonTap in context, it must fall back to the legacy explicit-args
-    // path, which requires recipient_phone etc. and rejects an empty payload.
+    // LLM tries to call the deleted create_transfer with the (guessed) draftId:
+    // R30 removed the tool, so the call runs nothing at all.
     const responses: ChatMessage[] = [
       {
         role: 'assistant',
@@ -1527,7 +1535,9 @@ describe('best-rate routing wiring (B2)', () => {
       ...deps, chat: async () => script.next(),
     });
     const reply = await agent.runAgentTurn(PHONE, 'how much to send $100?');
-    expect(reply).toBe('Here is your quote!');
+    // R32: the code-written quote follows the model text, at the WINNING rate.
+    expect(reply.split('\n\n')[0]).toBe('Here is your quote!');
+    expect(reply).toContain('Rate: 1 USD = ₹86\nThey get ₹8,600 within 1 business day.');
     // The LIVE selector was consulted with this corridor + the mid cross-rate.
     expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledWith(
@@ -1599,7 +1609,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toContain('list_recent_transfers'); // web-only history lookup
     expect(names).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(names).toContain('request_human_help'); // fix 34B: a signed-in customer can ask for a person
-    expect(names).toHaveLength(15); // Program-Fix 14: + set_sender_name
+    expect(names).toContain('decline_off_topic'); // R56: the fixed off-topic decline
+    expect(names).toHaveLength(16); // Program-Fix 14: + set_sender_name; R56: + decline_off_topic
   });
 
   it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
@@ -1615,8 +1626,10 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     });
     await agent.runAgentTurn(PHONE, 'hello');
     // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name.
-    // Program-Fix 49B: create_transfer and generate_payment_link are hidden on WhatsApp (29 → 27).
-    expect(seenTools).toHaveLength(27);
+    // Program-Fix 49B: generate_payment_link is hidden on WhatsApp; R30 deleted create_transfer (28 → 27).
+    // R56: + decline_off_topic (27 → 28).
+    expect(seenTools).toHaveLength(28);
+    expect(seenTools.map((t) => t.function.name)).toContain('decline_off_topic');
     expect(seenTools.map((t) => t.function.name)).not.toContain('create_transfer');
     expect(seenTools.map((t) => t.function.name)).not.toContain('generate_payment_link');
     expect(seenTools.map((t) => t.function.name)).toContain('set_sender_name');
@@ -1769,9 +1782,9 @@ describe('row deadline (fix 7)', () => {
     const ctrl = new AbortController();
     const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
       if (chat.mock.calls.length === 1) {
-        // Round 0: the model runs a side-effecting tool (a schedule write). R6b:
-        // create_transfer is no longer dispatched on WhatsApp, so the write that
-        // must happen EXACTLY once is create_schedule's row, not a chat mint.
+        // Round 0: the model runs a side-effecting tool (a schedule write). No
+        // chat tool mints (R30 deleted the old one), so the write that must
+        // happen EXACTLY once is create_schedule's row.
         return {
           role: 'assistant', content: '',
           tool_calls: [{ id: 'c1', type: 'function', function: {
@@ -1797,7 +1810,7 @@ describe('row deadline (fix 7)', () => {
 
     const reply = await agent.runAgentTurn(PHONE, 'send $50 to Mom', { isNewConversation: false }, { signal: ctrl.signal });
 
-    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
+    expect(reply).toBe(FALLBACK_REPLY);
     const scheduleStore = freshScheduleStore(redis);
     expect(await scheduleStore.listSchedules()).toHaveLength(1); // round 0 wrote EXACTLY once and is never re-run
     expect(await store.listTransfers()).toHaveLength(0); // no chat mint on WhatsApp (R6b)
@@ -2274,5 +2287,287 @@ describe('Purpose detail: the "Other" reason and the scam warning in a bot turn'
       `${PURPOSE_SCAM_WARNING}\n\nYour monthly transfer is set up.`,
     );
     expect(reply.split(PURPOSE_SCAM_WARNING).length).toBe(2);
+  });
+});
+
+// ── R56: a code-written decline ends the turn ───────────────────────────────
+describe('R56: decline_off_topic ends the turn with the fixed decline', () => {
+  async function declineTurn(text: string, after = 'Sure! Here is a python script: print(1)') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let calls = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        calls++;
+        if (calls === 1) {
+          return { role: 'assistant', content: '', tool_calls: [{ id: 'd1', type: 'function', function: { name: 'decline_off_topic', arguments: '{}' } }] };
+        }
+        return { role: 'assistant', content: after };
+      },
+    });
+    const reply = await agent.runAgentTurn(PHONE, text);
+    return { reply, calls, history: await store.getConversation('default', PHONE) };
+  }
+
+  it('the reply is OFF_TOPIC_REPLY verbatim and the model is not asked again', async () => {
+    const { OFF_TOPIC_REPLY } = await import('@/lib/scope-guard');
+    const { reply, calls, history } = await declineTurn('can you do my chemistry homework about acids');
+    expect(reply).toBe(OFF_TOPIC_REPLY);
+    expect(calls).toBe(1);
+    // History stays well formed: the tool result is followed by the decline as the assistant's reply.
+    expect(history[history.length - 1]).toEqual({ role: 'assistant', content: OFF_TOPIC_REPLY });
+  });
+
+  it("the decline is in the customer's language", async () => {
+    const { offTopicReply } = await import('@/lib/scope-guard');
+    const { reply } = await declineTurn('hola, quiero que me escribas un ensayo por favor');
+    expect(reply).toBe(offTopicReply('es'));
+  });
+});
+
+// ── R43: the fallback always offers a way to a person ───────────────────────
+describe('R43: FALLBACK_REPLY points at the HELP keyword', () => {
+  it('says to send again or reply HELP', () => {
+    expect(FALLBACK_REPLY).toBe("Sorry, I'm having trouble right now. Please send that again, or reply HELP to reach a person.");
+  });
+});
+
+// ── R32 (bot part): code-written quotes and the reply guard ─────────────────
+describe('R32: the quote is written by code, and the reply guard checks the raw model text', () => {
+  async function quoteTurn(
+    modelText: string,
+    opts: { flag?: boolean; flagThrows?: boolean; text?: string } = {},
+  ) {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedNamedSender(deps.customerStore);
+    if (opts.flag) {
+      await createFeatureFlagRepo(db).upsert({ key: 'agent.reply_guard', scopeType: 'global', scopeId: '', enabled: true, reason: 'reply guard on', updatedBy: 'admin' });
+    }
+    invalidateFlagCache(db);
+    if (opts.flagThrows) vi.spyOn(store, 'isFlagOn').mockRejectedValue(new Error('flag store down'));
+    const reports: import('@/lib/reply-guard').ReplyGuardReport[] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () =>
+        call++ === 0
+          ? { role: 'assistant', content: '', tool_calls: [{ id: 'q1', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 500, funding_method: 'bank_transfer' }) } }] }
+          : { role: 'assistant', content: modelText },
+    });
+    const reply = await agent.runAgentTurn(PHONE, opts.text ?? 'how much to send $500 to India?');
+    return { reply, reports, history: await store.getConversation('default', PHONE) };
+  }
+
+  it('a quoting turn ends with the code-written quote, after the model text; the model never saw it', async () => {
+    const { reply, reports, history } = await quoteTurn('Here is your quote. Shall I go ahead?');
+    const [modelPart, quotePart] = reply.split('\n\n');
+    expect(modelPart).toBe('Here is your quote. Shall I go ahead?');
+    expect(quotePart).toMatch(/^Sending \$500\.00\.\n/);
+    expect(quotePart).toContain('Rate: 1 USD = ₹85.2');
+    expect(quotePart).toContain('They get ₹42,600 within 1 business day.');
+    expect(reports).toEqual([]);
+    const tool = history.find((m) => m.role === 'tool');
+    expect(tool?.content).not.toContain('quote_text');
+    expect(tool?.content).not.toContain('Sending $500.00.');
+  });
+
+  it('a model figure that matches the quote is fine; one that does not is reported (shadow keeps the reply)', async () => {
+    expect((await quoteTurn('Mom gets ₹42,600 for your $500. Go ahead?')).reports).toEqual([]);
+    const { reply, reports } = await quoteTurn('Mom gets ₹43,000 instantly. Go ahead?');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].mode).toBe('shadow');
+    expect(reports[0].issues.map((i) => i.kind).sort()).toEqual(['amount', 'claim']);
+    expect(reply.startsWith('Mom gets ₹43,000 instantly. Go ahead?\n\nSending $500.00.')).toBe(true);
+  });
+
+  it('with agent.reply_guard on, the reply is replaced with the fixed fallback and the history holds what the customer saw', async () => {
+    const { reply, reports, history } = await quoteTurn('Mom gets ₹43,000. Go ahead?', { flag: true });
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(reports).toEqual([{ mode: 'on', issues: [{ kind: 'amount', found: '₹43,000' }] }]);
+    expect(history[history.length - 1]).toEqual({ role: 'assistant', content: FALLBACK_REPLY });
+  });
+
+  it('an unreadable switch keeps shadow mode (never replaces a reply on a flag outage)', async () => {
+    const { reply, reports } = await quoteTurn('Mom gets ₹43,000. Go ahead?', { flagThrows: true });
+    expect(reports[0].mode).toBe('shadow');
+    expect(reply.startsWith('Mom gets ₹43,000. Go ahead?')).toBe(true);
+  });
+
+  // Review fix: every quote of the turn is shown (the prompt forbids the model to restate
+  // figures), and a later refusal in the same turn drops the quotes.
+  async function scriptedTurn(rounds: ChatMessage[], text = 'quote it') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedNamedSender(deps.customerStore);
+    invalidateFlagCache(db);
+    let call = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps,
+      chat: async () => rounds[Math.min(call++, rounds.length - 1)],
+    });
+    return agent.runAgentTurn(PHONE, text);
+  }
+  const toolCall = (id: string, name: string, args: Record<string, unknown>): ChatMessage => ({
+    role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+  });
+
+  it('two get_quote calls in one turn: both code-written quotes follow the model text, in call order', async () => {
+    const reply = await scriptedTurn(
+      [
+        { role: 'assistant', content: '', tool_calls: [
+          { id: 'a', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 100, funding_method: 'bank_transfer' }) } },
+          { id: 'b', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 200, funding_method: 'bank_transfer' }) } },
+        ] },
+        { role: 'assistant', content: 'Here are both quotes.' },
+      ],
+      'how much does mom get for $100 vs $200?',
+    );
+    expect(reply.startsWith('Here are both quotes.\n\n')).toBe(true);
+    const i100 = reply.indexOf('Sending $100.00.');
+    const i200 = reply.indexOf('Sending $200.00.');
+    expect(i100).toBeGreaterThan(0);
+    expect(i200).toBeGreaterThan(i100);
+  });
+
+  it('a quote followed by a refusal in the same turn: the refusal is not followed by the quote', async () => {
+    const reply = await scriptedTurn(
+      [
+        toolCall('q', 'get_quote', { amount_usd: 500, funding_method: 'bank_transfer' }),
+        toolCall('c', 'check_send_limit', { amount_usd: 100000 }),
+        { role: 'assistant', content: 'This is more than you can send in one transfer. You can send a smaller amount.' },
+      ],
+      'send $500, actually make it $100000',
+    );
+    expect(reply).not.toContain('Sending $');
+    expect(reply).not.toContain('They get');
+  });
+
+  it("the customer's own numbers and earlier tool results in the conversation are facts", async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.saveConversation('default', PHONE, [
+      { role: 'user', content: 'quote $200 to India' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'old', type: 'function', function: { name: 'get_quote', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'old', content: JSON.stringify({ source_currency: 'USD', amount_source: 200, fee_source: 1.99, destination_currency: 'INR', amount_dest: 17040, fx_rate: 85.2 }) },
+      { role: 'assistant', content: 'Here is your quote.' },
+    ]);
+    const reports: unknown[] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () => ({ role: 'assistant', content: 'The fee on your $200 send was $1.99, and $350 would be a new quote. Shall I check?' }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'what was the fee again? and what about 350');
+    expect(reports).toEqual([]);
+    expect(reply).toBe('The fee on your $200 send was $1.99, and $350 would be a new quote. Shall I check?');
+  });
+
+  it('a reply with no figures reads no switch and reports nothing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const flagSpy = vi.spyOn(store, 'isFlagOn');
+    const reports: unknown[] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () => ({ role: 'assistant', content: 'Hi there! How can I help?' }),
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Hi there! How can I help?');
+    expect(reports).toEqual([]);
+    expect(flagSpy.mock.calls.filter(([k]) => k === 'agent.reply_guard')).toHaveLength(0);
+  });
+
+  it('a throwing hook never breaks the reply', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: () => { throw new Error('boom'); },
+      chat: async () => ({ role: 'assistant', content: 'Sending is instant!' }),
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Sending is instant!');
+  });
+});
+
+// R49 part 1: a provider or tool error can echo the request (the chat history,
+// the customer's text). The agent's failure lines go through the scrubbing
+// logger with the error's NAME only, never the error object or its message.
+describe('R49: the agent never logs a raw error object', () => {
+  const SECRET = 'history says card 4111 1111 1111 1111 and phone 15551234567';
+  // An Error argument is rendered the way the console would print it (name, message, stack).
+  const allLogged = (spies: Array<ReturnType<typeof vi.spyOn>>) =>
+    spies
+      .flatMap((s) => s.mock.calls.flat())
+      .map((a) => (a instanceof Error ? `${a.name}: ${a.message}\n${a.stack}` : typeof a === 'string' ? a : JSON.stringify(a)))
+      .join('\n');
+  const oneStringPerLine = (spies: Array<ReturnType<typeof vi.spyOn>>) => {
+    for (const call of spies.flatMap((s) => s.mock.calls)) {
+      expect(call).toHaveLength(1);
+      expect(typeof call[0]).toBe('string');
+    }
+  };
+
+  it('a chat() retry, a fallback and a failed save log the error name only', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    store.saveConversation = async () => {
+      throw new TypeError(SECRET);
+    };
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async () => {
+        throw new RangeError(SECRET);
+      },
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hi')).toBe(FALLBACK_REPLY);
+    const logged = allLogged([warn, error]);
+    expect(logged).not.toContain('4111');
+    expect(logged).not.toContain('15551234567');
+    expect(logged).not.toContain('history says');
+    expect(logged).toContain('RangeError');
+    expect(logged).toContain('TypeError');
+    // Every line is the logger's one JSON line, never a raw Error argument.
+    oneStringPerLine([warn, error]);
+  });
+
+  it('a tool that throws logs the tool name and the error name only', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    store.getTransferCount = async () => {
+      throw new Error(SECRET);
+    };
+    let round = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async () => {
+        round++;
+        if (round === 1) {
+          return { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'get_quote', arguments: '{"amount_usd":100}' } }] };
+        }
+        return { role: 'assistant', content: 'Sorry, let me try that again.' };
+      },
+    });
+    await agent.runAgentTurn(PHONE, 'send 100');
+    const logged = allLogged([warn, error]);
+    expect(logged).not.toContain('4111');
+    expect(logged).not.toContain('history says');
+    expect(logged).toContain('get_quote');
+    expect(logged).toContain('Error');
+    oneStringPerLine([warn, error]);
   });
 });

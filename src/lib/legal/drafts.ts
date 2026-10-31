@@ -21,7 +21,7 @@
 import { DRAFT_TTL_SECONDS } from '../draft-ttl';
 import { COMPANY, COMPANY_NAME_AND_ADDRESS } from '../company';
 
-export const LEGAL_DRAFT_VERSION = 'draft-2026-10-12a' as const;
+export const LEGAL_DRAFT_VERSION = 'draft-2026-10-31a' as const;
 
 /** Program-Fix 49B: the chat quote's lock, derived from the draft lifetime (the
  *  same source as the approve card's "Rate locked for N min."), never a literal. */
@@ -120,7 +120,7 @@ export const TERMS_DRAFT: LegalDraft = {
       id: 'assistant',
       heading: 'The chat assistant',
       paragraphs: [
-        'The chat is run by an AI assistant. Its answers can be wrong; the pay page and your receipt are the record of what you agreed and paid. If something looks wrong, contact the licensed partner named on your receipt.',
+        'The chat is run by an AI assistant, and it tells you so when a conversation starts. Its answers can be wrong; the pay page and your receipt are the record of what you agreed and paid. Reply HELP in the chat at any time to reach a person. If something looks wrong, you can also contact the licensed partner named on your receipt.',
       ],
     },
     {
@@ -216,7 +216,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       id: 'security',
       heading: 'How your information is protected',
       paragraphs: [
-        'Payout details, recipient names and customer identity information are encrypted at rest. Staff access to unmasked details is restricted and recorded.',
+        'Payout details, recipients’ legal names and customer identity information are encrypted at rest. Phone numbers, the recipient name you type in the chat, support messages and the recent chat history are not encrypted yet. Staff access to unmasked details is restricted and recorded.',
       ],
     },
     {
@@ -288,7 +288,7 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
       paragraphs: [
         'You have the right to cancel a remittance transfer and obtain a refund of all funds paid, including any fees. To cancel, you must contact the licensed partner named on your receipt, or reply in the WhatsApp chat where you arranged the transfer, within 30 minutes of paying for the transfer.',
         'When you contact the partner, give information that identifies the transfer, including the amount and where the funds were sent. The partner will refund your money within three business days of your request, as long as the funds have not already been picked up or deposited into your recipient’s account.',
-        'Many transfers are delivered within minutes. If the funds have already been deposited or picked up, the transfer can no longer be cancelled, but you may still report an error as described above.',
+        'Your receipt shows the date your recipient is expected to receive the funds. If the funds have already been deposited or picked up, the transfer can no longer be cancelled, but you may still report an error as described above.',
       ],
     },
     {
@@ -321,7 +321,7 @@ export const LICENSING_DRAFT: LegalDraft = {
       id: 'smartremit-role',
       heading: 'What SmartRemit does',
       paragraphs: [
-        'SmartRemit is a technology provider. It builds and runs the chat, quoting, screening and pay-page software that licensed partners offer under their own brand. SmartRemit never holds, receives or disburses customer money: funds move only on the partner’s own payment rails.',
+        'SmartRemit is a technology provider. It builds and runs the chat, quoting, screening and pay-page software that licensed partners use to provide their transfers. Customers see the SmartRemit name in the chat and on the pay page; the licensed partner that provides your transfer is the licensed partner named on your receipt. SmartRemit never holds, receives or disburses customer money: funds move only on the partner’s own payment rails.',
         `SmartRemit is operated by ${COMPANY_NAME_AND_ADDRESS}.`,
       ],
     },

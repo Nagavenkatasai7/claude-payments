@@ -13,7 +13,6 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import { auditSubjectId } from './customer-ref';
 import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
-import { formatMoney } from './ui/money';
 import { FX_MAX_AGE_MS } from './rate';
 import type { DraftStore } from './draft-store';
 import { boundUntrustedText, NAME_MAX } from './untrusted-text';
@@ -129,7 +128,6 @@ export type PortalSendLimits =
       reason?: string;
       dailyCapUsd: number;
       perTransferCapUsd: number;
-      todayRemainingUsd: number;
       eddRequired: boolean;
     }
   | { kind: 'kyc_required' }
@@ -146,7 +144,6 @@ export function narrowSendLimits(r: Record<string, unknown>): PortalSendLimits {
     typeof r.tier !== 'string' ||
     !num(r.daily_cap_usd) ||
     !num(r.per_transfer_cap_usd) ||
-    !num(r.today_remaining_usd) ||
     typeof r.edd_required !== 'boolean'
   ) {
     return { kind: 'unavailable' };
@@ -158,7 +155,6 @@ export function narrowSendLimits(r: Record<string, unknown>): PortalSendLimits {
     reason: typeof r.reason === 'string' ? r.reason : undefined,
     dailyCapUsd: r.daily_cap_usd,
     perTransferCapUsd: r.per_transfer_cap_usd,
-    todayRemainingUsd: r.today_remaining_usd,
     eddRequired: r.edd_required,
   };
 }
@@ -485,17 +481,16 @@ export function portalKycGate(
   return routeKycCopy(verifyCard, canVerifyInProfile(partner, customer), brand);
 }
 
-/** The cap copy per reason; the limits are USD-equivalent (the cap basis), shown through formatMoney. */
-export function capCopy(
-  reason: string | undefined,
-  fig: { todayRemainingUsd: number; perTransferCapUsd: number },
-  brand: string,
-): SendCopy {
+/**
+ * The cap copy per reason. R30 (no tipping-off): the text is the fixed hold-replies.ts entry and
+ * carries no figure, so the portal never states the day's headroom or what amount trips a limit.
+ */
+export function capCopy(reason: string | undefined, brand: string): SendCopy {
   switch (reason) {
     case 'over_daily_cap':
-      return { error: 'portal.send.cap_daily', vars: { remaining: formatMoney(fig.todayRemainingUsd, 'USD') } };
+      return { error: 'portal.send.cap_daily' };
     case 'over_per_transfer_cap':
-      return { error: 'portal.send.cap_per_transfer', vars: { max: formatMoney(fig.perTransferCapUsd, 'USD') } };
+      return { error: 'portal.send.cap_per_transfer' };
     case 'verification_rejected':
       return contactPartner(brand);
     case 'verification_required_after_window':
@@ -523,10 +518,7 @@ export function prepareResultCopy(r: Exclude<PrepareSendResult, { kind: 'draft' 
     case 'sender_name_required':
       return { error: 'portal.send.name_needed' };
     case 'cap':
-      return capCopy(r.evaluation.reason, {
-        todayRemainingUsd: r.evaluation.todayRemainingCents / 100,
-        perTransferCapUsd: r.evaluation.perTransferCapCents / 100,
-      }, brand);
+      return capCopy(r.evaluation.reason, brand);
     case 'bill_refused':
     case 'blocked':
       return { error: 'portal.send.cannot_complete' };
@@ -537,7 +529,7 @@ export function prepareResultCopy(r: Exclude<PrepareSendResult, { kind: 'draft' 
 export function limitsCopy(l: PortalSendLimits, brand: string): SendCopy | null {
   if (l.kind === 'kyc_required') return verifyCard;
   if (l.kind === 'unavailable') return { error: 'portal.send.fx_unavailable' };
-  if (!l.withinCap) return capCopy(l.reason, l, brand);
+  if (!l.withinCap) return capCopy(l.reason, brand);
   if (l.eddRequired) return { error: 'portal.send.edd_whatsapp' };
   return null;
 }

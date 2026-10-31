@@ -42,7 +42,7 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['agent.tools', 'paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'telegram.bot', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['agent.reply_guard', 'agent.tools', 'paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'telegram.bot', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
@@ -72,6 +72,22 @@ describe('flag definitions', () => {
     await setFlag(db, 'agent.tools', 'partner', 'default');
     expect(await isFlagOn(db, 'agent.tools', { partnerId: 'default' })).toBe(true);
     expect(await isFlagOn(db, 'agent.tools', { partnerId: 'other' })).toBe(false);
+  });
+
+  it('R32: agent.reply_guard is a feature switch (global, partner or corridor), off with no row (off = shadow, alerts only)', async () => {
+    const def = FLAG_DEFINITIONS['agent.reply_guard'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global', 'partner', 'corridor']);
+    expect(def.description).toMatch(/shadow/i);
+    expect(def.description).toMatch(/replace/i);
+    const db = await freshDb();
+    invalidateFlagCache(db);
+    expect(await isFlagOn(db, 'agent.reply_guard', { partnerId: 'default', corridor: 'IN' })).toBe(false);
+    await setFlag(db, 'agent.reply_guard', 'corridor', 'MX');
+    expect(await isFlagOn(db, 'agent.reply_guard', { partnerId: 'default', corridor: 'MX' })).toBe(true);
+    expect(await isFlagOn(db, 'agent.reply_guard', { partnerId: 'default', corridor: 'IN' })).toBe(false);
+    await setFlag(db, 'agent.reply_guard', 'partner', 'acme');
+    expect(await isFlagOn(db, 'agent.reply_guard', { partnerId: 'acme' })).toBe(true);
   });
 
   it('voice.notes is an ordinary feature switch (global or one partner), not a kill switch', () => {

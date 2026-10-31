@@ -8,6 +8,7 @@ import { portalToolContext, sendLimitsForPortal, PORTAL_FUNDING_METHODS } from '
 import { getPortalTransfer, type PortalOwner } from '@/lib/portal-transfers';
 import { recipientRid } from '@/lib/portal-recipients';
 import { transferSummaryFields } from '@/lib/recent-transfers';
+import { capRefusalReply, fixedReply } from '@/lib/hold-replies';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import { normalizePhone } from '@/lib/phone';
@@ -109,7 +110,8 @@ export async function getQuoteTool(owner: PortalOwner, args: z.infer<typeof getQ
         reason: str(r.reason),
         daily_limit_usd: num(r.daily_cap_usd),
         per_transfer_limit_usd: num(r.per_transfer_cap_usd),
-        remaining_today_usd: num(r.today_remaining_usd),
+        // R30 (no tipping-off): the fixed refusal to relay, never the day's headroom.
+        message: str(r.reply_to_customer) ?? capRefusalReply(r.reason),
       }),
     };
   }
@@ -143,7 +145,7 @@ export const CHECK_SEND_LIMIT: McpToolSpec = {
   name: 'check_send_limit',
   title: 'Check send limits',
   scope: 'quotes:read',
-  description: `How much this customer can still send today and per transfer (US dollar equivalents). ${CANNOT_PAY}`,
+  description: `This customer's daily and per-transfer sending limits (US dollar equivalents) and whether they can send now. ${CANNOT_PAY}`,
 };
 
 export const checkSendLimitInput = z.object({});
@@ -161,7 +163,6 @@ export async function checkSendLimitTool(owner: PortalOwner, deps: McpDataDeps =
       reason: l.reason,
       daily_limit_usd: l.dailyCapUsd,
       per_transfer_limit_usd: l.perTransferCapUsd,
-      remaining_today_usd: l.todayRemainingUsd,
       extra_details_required: l.eddRequired,
       next_step: l.eddRequired ? EXTRA_DETAILS_ELSEWHERE : SEND_ELSEWHERE,
     }),
@@ -251,7 +252,7 @@ export const GET_TRANSFER_STATUS: McpToolSpec = {
   name: 'get_transfer_status',
   title: 'Get a transfer status',
   scope: 'transfers:read',
-  description: `The status of one of the customer's own transfers, by its transfer_id (from list_recent_transfers). ${CANNOT_PAY}`,
+  description: `The status of one of the customer's own transfers, by its transfer_id (from list_recent_transfers). When status_note is present, tell the customer exactly that note and nothing more about why. ${CANNOT_PAY}`,
 };
 
 export const getTransferStatusInput = z.object({
@@ -272,5 +273,11 @@ export async function getTransferStatusTool(
   const t = await getPortalTransfer(owner, id, deps.db);
   if (!t) return { ok: false, message: TRANSFER_NOT_FOUND };
   const f = transferSummaryFields(t);
-  return { ok: true, data: { transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName } };
+  // R30 (no tipping-off): a held or blocked transfer also carries the fixed note the bot relays
+  // (hold-replies.ts HOLD_REPLY / BLOCK_REPLY), so an AI app says the same words and never a reason.
+  const note = t.status === 'in_review' ? fixedReply('hold') : t.status === 'blocked' ? fixedReply('block') : undefined;
+  return {
+    ok: true,
+    data: { transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName, ...(note ? { status_note: note } : {}) },
+  };
 }

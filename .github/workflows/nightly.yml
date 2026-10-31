@@ -30,17 +30,104 @@ jobs:
       - name: Full test suite
         run: npx vitest run
 
-      # Program-Fix 49B (prompt-11): the real-model bot eval. The script itself
-      # no-ops (exit 0) when the secret is absent, so this step is a no-op until
-      # the owner adds EVAL_ANTHROPIC_API_KEY. A model failure is reported here but
-      # never fails the nightly (continue-on-error) and never gates a merge.
-      - name: Bot eval (real model, optional)
-        continue-on-error: true
-        # Bounded inside the job's 20 min: 24 calls x 22 s = 8.8 min worst case.
-        timeout-minutes: 9
+  # R31: the full real-model bot eval (scripts/eval-bot.ts, docs/BOT-EVAL.md):
+  # every case on every model staff can select, 3 runs each (about 350 calls).
+  # REQUIRED: a missing EVAL_ANTHROPIC_API_KEY or a failed blocking case fails
+  # this job, which opens the nightly alert below. A pending case never fails
+  # it. The script stops starting calls after EVAL_TIME_BUDGET_MIN, so the
+  # dated report is still written and uploaded inside the step's timeout.
+  bot-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Bot eval (all cases, real models)
+        timeout-minutes: 20
         env:
           EVAL_ANTHROPIC_API_KEY: ${{ secrets.EVAL_ANTHROPIC_API_KEY }}
+          EVAL_REQUIRED: '1'
+          EVAL_TIME_BUDGET_MIN: '17'
+          EVAL_REPORT_DIR: ${{ runner.temp }}/bot-eval-report
         run: npx tsx scripts/eval-bot.ts
+
+      - name: Upload the eval report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bot-eval-report
+          path: ${{ runner.temp }}/bot-eval-report/
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # Q-R31.3: artifacts expire after 90 days, so each nightly report is also
+  # committed to the eval-reports branch (reports/<year>/), kept for good as
+  # AI-testing evidence. The only job here with contents: write, and it runs
+  # no repo code: it downloads the report, commits it and pushes that one
+  # branch. A failed push opens the nightly alert like any other job.
+  bot-eval-archive:
+    needs: [bot-eval]
+    if: ${{ !cancelled() && (needs.bot-eval.result == 'success' || needs.bot-eval.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: eval-reports
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        id: report
+        # No report (the eval could not run): nothing to archive.
+        continue-on-error: true
+        with:
+          name: bot-eval-report
+          path: ${{ runner.temp }}/bot-eval-report
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.report.outcome == 'success'
+        with:
+          fetch-depth: 1
+
+      - name: Commit the report to the eval-reports branch
+        if: steps.report.outcome == 'success'
+        env:
+          SRC: ${{ runner.temp }}/bot-eval-report
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$SRC"/eval-*.json "$SRC"/eval-*.md)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No report files to archive."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin eval-reports >/dev/null; then
+            git fetch -q --depth 1 origin eval-reports
+            git switch -q -C eval-reports FETCH_HEAD
+          else
+            git switch -q --orphan eval-reports
+          fi
+          dest="reports/$(date -u +%Y)"
+          mkdir -p "$dest"
+          cp "${files[@]}" "$dest/"
+          git add reports
+          if git diff --cached --quiet; then
+            echo "The report is already on eval-reports."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Bot eval report $(date -u +%F) (${GITHUB_SHA::7})"
+          git push -q origin HEAD:refs/heads/eval-reports
+          echo "Archived $(printf '%s ' "${files[@]##*/}")on eval-reports."
 
   audit:
     runs-on: ubuntu-latest
@@ -199,7 +286,7 @@ jobs:
   # issues; before this, only whoever last edited the schedule heard about a
   # red run. The only job with write access, and only to issues.
   alert:
-    needs: [full-tests, audit, secret-scan, prod-smoke]
+    needs: [full-tests, bot-eval, bot-eval-archive, audit, secret-scan, prod-smoke]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 3

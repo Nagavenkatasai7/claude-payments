@@ -593,3 +593,36 @@ describe('the poke follows a NEW outbox row, never a deduped replay (R4 follow-u
     expect(pokeWorker).not.toHaveBeenCalled();
   });
 });
+
+// R49 part 1: a card, account, IFSC, SSN, PAN, Aadhaar or IBAN number the
+// customer types is hidden BEFORE the durable row is written, so the outbox
+// payload, the sealed log, Redis history and the model only ever see the label.
+describe('inbound redaction (R49)', () => {
+  it('the agent.turn payload carries the redacted text and turn.redacted', async () => {
+    await processInboundWebhook(
+      webhook([text('send to IFSC HDFC0001234 a/c 50100123456789, card 4111 1111 1111 1111', 'wamid.RD1')]),
+      { routedPartnerId: null },
+    );
+    const out = await outboxRows();
+    expect(out).toHaveLength(1);
+    const payload = out[0].payload as { messageText: string; turn: { redacted?: boolean } };
+    expect(payload.messageText).toBe('send to IFSC [IFSC hidden] a/c [account number hidden], card [card number hidden]');
+    expect(payload.turn.redacted).toBe(true);
+    const raw = JSON.stringify(out);
+    expect(raw).not.toContain('50100123456789');
+    expect(raw).not.toContain('HDFC0001234');
+    expect(raw).not.toContain('4111');
+  });
+
+  it('a message with nothing to hide is byte-identical and carries no redacted flag', async () => {
+    await processInboundWebhook(webhook([text('send $1,000 to +91 98765 43210 on 2026-11-02', 'wamid.RD2')]), { routedPartnerId: null });
+    const payload = (await outboxRows())[0].payload as { messageText: string; turn: Record<string, unknown> };
+    expect(payload.messageText).toBe('send $1,000 to +91 98765 43210 on 2026-11-02');
+    expect('redacted' in payload.turn).toBe(false);
+  });
+
+  it('STOP is still matched on the raw text (consent runs before redaction)', async () => {
+    await processInboundWebhook(webhook([text('STOP', 'wamid.RD3')]), { routedPartnerId: null });
+    expect((await customer())?.optedOutAt).toBeDefined();
+  });
+});

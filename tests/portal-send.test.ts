@@ -16,6 +16,8 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { resetRateCacheForTests } from '@/lib/rate';
 import {
+  capCopy,
+  limitsCopy,
   loadSendReview,
   markReviewDrafted,
   narrowSendLimits,
@@ -37,6 +39,7 @@ import {
 import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 import { TRANSFER_PURPOSES } from '@/lib/purpose-codes';
 import { t } from '@/lib/i18n';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
@@ -157,9 +160,9 @@ describe('sendLimitsForPortal', () => {
       reason: bot.reason,
       dailyCapUsd: bot.daily_cap_usd,
       perTransferCapUsd: bot.per_transfer_cap_usd,
-      todayRemainingUsd: bot.today_remaining_usd,
       eddRequired: false,
     });
+    expect(r).not.toHaveProperty('todayRemainingUsd'); // R30: never how much is left
   });
 
   it('EDD: a send taking the month to $3,000 → eddRequired', async () => {
@@ -183,6 +186,33 @@ describe('sendLimitsForPortal', () => {
     expect(narrowSendLimits({ within_cap: false, reason: 'kyc_required', kyc_url: '' })).toEqual({ kind: 'kyc_required' });
     expect(narrowSendLimits({ error: 'FX down' })).toEqual({ kind: 'unavailable' });
     expect(narrowSendLimits({ within_cap: true, tier: 'T1' })).toEqual({ kind: 'unavailable' });
+  });
+
+  it('narrowSendLimits: a record with no remaining figure is complete (R30 removed it from the tool)', () => {
+    expect(narrowSendLimits({ within_cap: true, tier: 'T1', daily_cap_usd: 2999, per_transfer_cap_usd: 2999, edd_required: false })).toEqual({
+      kind: 'limits', withinCap: true, tier: 'T1', reason: undefined, dailyCapUsd: 2999, perTransferCapUsd: 2999, eddRequired: false,
+    });
+  });
+});
+
+describe('R30: the portal cap copy is the fixed text, with no figure', () => {
+  it('capCopy names the kind of limit and passes no amount', () => {
+    expect(capCopy('over_daily_cap', 'Acme')).toEqual({ error: 'portal.send.cap_daily' });
+    expect(capCopy('over_per_transfer_cap', 'Acme')).toEqual({ error: 'portal.send.cap_per_transfer' });
+    expect(capCopy('verification_required_after_window', 'Acme')).toEqual({ error: 'portal.send.cap_verify', kyc: 'verify' });
+    expect(capCopy(undefined, 'Acme')).toEqual({ error: 'portal.send.cannot_complete' });
+  });
+  it('the portal strings are the hold-replies.ts entries word for word', () => {
+    expect(t('portal.send.cap_daily')).toBe(FIXED_REPLIES.cap_daily);
+    expect(t('portal.send.cap_per_transfer')).toBe(FIXED_REPLIES.cap_per_transfer);
+    expect(t('portal.send.cap_verify')).toBe(FIXED_REPLIES.cap_verify);
+    expect(t('portal.send.edd_whatsapp')).toBe(FIXED_REPLIES.edd_elsewhere);
+    expect(t('portal.timeline.under_review')).toBe(FIXED_REPLIES.timeline_held); // the held timeline step
+    expect(t('portal.timeline.under_review').toLowerCase()).not.toContain('review');
+  });
+  it('limitsCopy over the daily cap carries no vars', () => {
+    const copy = limitsCopy({ kind: 'limits', withinCap: false, tier: 'T0', reason: 'over_daily_cap', dailyCapUsd: 500, perTransferCapUsd: 500, eddRequired: false }, 'Acme');
+    expect(copy).toEqual({ error: 'portal.send.cap_daily' });
   });
 });
 

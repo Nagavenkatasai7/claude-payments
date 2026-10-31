@@ -21,6 +21,14 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
 
+// R17: the AI notice and its durable marker are covered by
+// tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
+// shown, so these suites keep checking the exact reply text of each path.
+vi.mock('@/lib/ai-notice-marker', async (orig) => ({
+  ...(await orig<typeof import('@/lib/ai-notice-marker')>()),
+  aiNoticeDueFor: async () => false,
+}));
+
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
 // measure of the per-batch creds memoization (fix 11).
@@ -1026,11 +1034,13 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     expect(JSON.stringify(sendText.mock.calls)).not.toMatch(new RegExp(LEGACY_TOKEN));
   });
 
-  it('an unknown kind dead-letters instead of looping forever', async () => {
+  it('an unknown kind waits uncharged instead of dead-lettering (PR1: a rollback never kills a newer build\'s rows)', async () => {
     await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES ('bogus.kind', '{}'::jsonb)`);
     await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}`);
     const r = await drainOnce(deps(), 'w1');
-    expect(r.dead).toBe(1);
+    expect(r).toMatchObject({ dead: 0, failed: 0, released: 1 });
+    const row = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE kind = 'bogus.kind'`)).rows[0];
+    expect(row).toMatchObject({ status: 'pending', attempts: MAX_ATTEMPTS - 1 });
   });
 });
 
@@ -1603,7 +1613,7 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
       const opts = _a[4] as { signal?: AbortSignal } | undefined;
       expect(opts?.signal).toBeInstanceOf(AbortSignal); // 5th argument: (phone, message, turn, waCreds, opts)
       await new Promise((res) => opts!.signal!.addEventListener('abort', res, { once: true }));
-      return "Sorry, I'm having trouble right now. Could you send that again?"; // the agent's own FALLBACK_REPLY on abort
+      return FALLBACK_REPLY; // the agent's own fallback on abort
     });
     await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'slow', turn: {} });
     // rowDeadlineMs 200 ⇒ the COOPERATIVE signal fires at max(1, 200 − COOP_GRACE_MS) = 1ms,
@@ -2135,6 +2145,77 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
   });
 });
 
+// R32 (bot part): the agent reports a reply-guard mismatch through
+// opts.onReplyGuard; the worker raises ONE deduped ops alert per tenant and
+// hour in the same transaction as the reply. Shadow sends the agent's reply;
+// in 'on' mode the agent already replaced it, and the fallback alert stays off.
+describe('drainOnce — agent.turn reply guard (R32)', () => {
+  const P = '15551230000';
+  const outboxRows = async (kind: string) =>
+    ((await db.execute(sql`SELECT id, status, attempts, dedupe_key, payload FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as {
+      rows: Array<{ id: number; status: string; attempts: number; dedupe_key: string | null; payload: Record<string, unknown> }>;
+    }).rows;
+  type GuardOpts = { onReplyGuard?: (r: { issues: Array<{ kind: string; found: string }>; mode: 'shadow' | 'on' }) => void };
+
+  it('shadow: a mismatch enqueues one replyguard:<tenant>:<hour> alert and the original reply goes out', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'shadow', issues: [{ kind: 'amount', found: '$43,000' }] });
+      return 'Mom gets $43,000 instantly.';
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'b', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const alerts = (await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupe_key).toMatch(/^replyguard:default:\d+$/);
+    expect(Object.keys(alerts[0].payload)).toEqual(['message']);
+    const msg = String(alerts[0].payload.message);
+    expect(msg).toMatch(/shadow/i);
+    expect(msg).toContain('amount');
+    expect(msg).not.toContain('43,000');
+    expect(msg).not.toContain(P);
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual(['Mom gets $43,000 instantly.', 'Mom gets $43,000 instantly.']);
+  });
+
+  it("on: the agent's replacement goes out, the alert says it was replaced, and no botfallback alert", async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'on', issues: [{ kind: 'rate', found: '1 USD = ₹84' }] });
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const keys = (await outboxRows('ops.alert')).map((r) => String(r.dedupe_key));
+    expect(keys.filter((k) => k.startsWith('replyguard:'))).toHaveLength(1);
+    expect(keys.filter((k) => k.startsWith('botfallback:'))).toHaveLength(0);
+    const alert = (await outboxRows('ops.alert')).find((r) => String(r.dedupe_key).startsWith('replyguard:'))!;
+    expect(String(alert.payload.message)).toMatch(/replaced/i);
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual([FALLBACK_REPLY]);
+  });
+
+  it('a routed partner turn alerts under that tenant', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'shadow', issues: [{ kind: 'claim', found: 'instant' }] });
+      return 'It is instant.';
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {}, routedPartnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    const alerts = (await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'));
+    expect(alerts.map((r) => r.dedupe_key)).toEqual([expect.stringMatching(/^replyguard:acme:\d+$/)]);
+  });
+
+  it('a clean turn raises no reply-guard alert', async () => {
+    runAgentTurn.mockResolvedValue('Hi there!');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    expect((await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'))).toHaveLength(0);
+  });
+});
+
 describe('drainOnce — agent.turn ordering with inline cards (Program-Fix 34A review M1/S1)', () => {
   const P = '15551230000';
   const makeDue = () => db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE status IN ('pending','failed')`);
@@ -2607,7 +2688,7 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 // unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
 // skipping the free-form call would silence alerts.
 describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', { retry: 0 }, () => {
-  const TPL = { name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
+  const TPL = { name: 'transfer_processing', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
   const windowClosed = () =>
     WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131047 } }));
   const notApproved = () =>
@@ -2635,7 +2716,7 @@ describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', {
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
     const r = await drainOnce(deps(), 'w1');
     expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
-    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_in_review', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
+    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_processing', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
     expect(sendText).not.toHaveBeenCalled();
   });
 

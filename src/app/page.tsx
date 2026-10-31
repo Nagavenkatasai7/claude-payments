@@ -33,7 +33,7 @@ const TITLE = 'SmartRemit.ai — Send money home from the chat apps you already 
 // literal: every waitlist country except the US (send-from) and India (launch).
 const COMING_NEXT_COUNT = WAITLIST_DESTINATIONS.filter((d) => d.value !== 'US' && d.value !== 'IN').length;
 const DESCRIPTION =
-  `Send money home by chatting with the SmartRemit AI on WhatsApp. It quotes the rate for your transfer, a hosted page takes payment, and a licensed partner settles. SmartRemit never holds your money. Launching with US to India, with ${COMING_NEXT_COUNT} more countries coming next. Sanctions screening runs on every transfer (demo: reference list; production feed per partner).`;
+  `Chat with the SmartRemit AI on WhatsApp to send money home. It quotes the rate for your transfer, and you pay on a secure hosted page. A licensed money transmitter provides the transfer. SmartRemit provides the technology and never holds your money. Launching with US to India, with ${COMING_NEXT_COUNT} more countries coming next. Sanctions screening runs on every transfer (demo: reference list; production feed per partner).`;
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -41,7 +41,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: TITLE,
     description:
-      'Send money home by chatting on WhatsApp. Licensed partners settle, and SmartRemit never holds your money. Launching with US to India.',
+      'Chat on WhatsApp to send money home. A licensed money transmitter provides the transfer. SmartRemit provides the technology and never holds your money. Launching with US to India.',
     type: 'website',
     siteName: 'SmartRemit.ai',
     images: [SHARE_IMAGE],
@@ -143,6 +143,7 @@ function TelegramIcon({ size = 18 }: { size?: number }) {
 // "Choose your chat app" badge colours: green only for what is open to everyone.
 const CHANNEL_BADGE: Record<ChannelStatus, string> = {
   available: 'border-[#047857]/40 bg-[#ecfdf5] text-[#065f46]',
+  'by-invitation': 'border-[#0c5bd2]/35 bg-[#eef4fc] text-[#0a4fb8]',
   'coming-soon': 'border-[#c5d3e6] bg-[#f5f9ff] text-[#334155]',
   'early-access': 'border-[#0c5bd2]/35 bg-[#eef4fc] text-[#0a4fb8]',
 };
@@ -374,21 +375,21 @@ export default async function LandingPage({
                 aria-hidden="true"
               />
               <p className="mt-6 text-[clamp(20px,2.3vw,26px)] font-medium tracking-[-0.01em] text-[#0b1b3f]">
-                Start on <strong className="font-bold">WhatsApp</strong> or{' '}
-                <strong className="font-bold">Telegram.</strong> AI assistants such as Claude, ChatGPT
-                and Perplexity are in early access.
+                Start on <strong className="font-bold">WhatsApp</strong>.{' '}
+                <strong className="font-bold">Telegram</strong> is open by invitation, and AI
+                assistants that support custom connectors are in early access.
               </p>
               <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
-                The SmartRemit AI quotes the rate for your transfer in the chat, a hosted page takes
-                payment, and a licensed partner settles — every step signed and audited. SmartRemit
-                never holds your money. Sanctions screening runs on every transfer (demo: reference
-                list; production feed per partner).
+                The SmartRemit AI quotes the rate for your transfer in the chat, and you pay on a
+                secure hosted page. A licensed money transmitter provides the transfer. SmartRemit
+                provides the technology and never holds your money. Sanctions screening runs on
+                every transfer (demo: reference list; production feed per partner).
               </p>
 
               <ul className="mt-8 grid max-w-[560px] gap-3 sm:grid-cols-3">
                 {[
                   { icon: <BoltIcon />, label: 'Familiar and easy' },
-                  { icon: <ShieldIcon />, label: 'Safe and secure' },
+                  { icon: <ShieldIcon />, label: 'You confirm every payment' },
                   { icon: <GlobeIcon />, label: 'Built for a borderless world' },
                 ].map((b) => (
                   <li key={b.label} className="flex items-center gap-3">
@@ -462,7 +463,7 @@ export default async function LandingPage({
                 <ShieldIcon /> Sanctions screening runs on every transfer (demo: reference list)
               </li>
               <li className="inline-flex items-center gap-2.5">
-                <AuditIcon /> Full audit trail
+                <AuditIcon /> Audited staff access to personal data
               </li>
             </ul>
           </div>
@@ -532,8 +533,7 @@ export default async function LandingPage({
               ))}
             </ul>
             <p className="mt-5 text-center text-[12.5px] text-[#475569]">
-              Claude, ChatGPT and Perplexity are trademarks of their owners. SmartRemit is not
-              affiliated with or endorsed by them.
+              SmartRemit is not affiliated with or endorsed by any AI app maker.
             </p>
           </div>
         </section>
@@ -563,9 +563,9 @@ export default async function LandingPage({
                     An agent that speaks money.
                   </h3>
                   <p className={SHOWCASE_COPY}>
-                    Quote, KYC, approval, receipt — the entire transfer is a conversation. The
-                    agent locks the rate for your transfer and holds it while you pay. It never holds
-                    your funds.
+                    Quote, KYC, approval, receipt — the chat guides every step, and you pay on a
+                    secure hosted page. The agent locks the rate for your transfer and holds it while
+                    you pay. It never holds your funds.
                   </p>
                 </div>
                 <HeroPipeline rate={illustrativeRate} live={fxLive} />
@@ -579,9 +579,9 @@ export default async function LandingPage({
                     Every transfer, observable.
                   </h3>
                   <p className={SHOWCASE_COPY}>
-                    Staff watch money move in real time — live transfers, a compliance review
-                    queue, FX analytics. PII stays encrypted at rest, and every reveal is
-                    written to the audit log.
+                    Staff follow every transfer, a compliance review queue and FX analytics.
+                    Payout account details, legal names and identity data are encrypted at the
+                    field level, and every staff reveal is written to the audit log.
                   </p>
                 </div>
                 <div className="lg:order-1">

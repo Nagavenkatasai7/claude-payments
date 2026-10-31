@@ -168,7 +168,8 @@ describe('Home', () => {
   it('one customer portal: the four tiles, from THIS customer on THIS partner only', async () => {
     const html = await home();
     expect(html).toContain('data-stat-tiles');
-    for (const label of ['Sent this month', 'Daily limit left', 'Transfers', 'Pending refunds']) expect(html).toContain(label);
+    for (const label of ['Sent this month', 'Daily limit', 'Transfers', 'Pending refunds']) expect(html).toContain(label);
+    expect(html).not.toContain('Daily limit left'); // R30: never how much is left today
     // A's fixture: two live transfers (B's two are on another partner and never counted).
     expect(html).toMatch(/>Transfers<\/p><p[^>]*>2<\/p>/);
   });
@@ -390,6 +391,17 @@ describe('renderReceiptText', () => {
     expect(text).toContain('Acme');
     expect(text).toContain('tx_12345678');
     expect(text).not.toContain(FULL_ACCOUNT);
+  });
+
+  it('R30 review fix: a held transfer\'s receipt reads the customer status, never a review word', () => {
+    const t = {
+      id: 'tx_held1', createdAt: '2026-01-02T03:04:05.000Z', recipientName: 'R', payoutDestination: '****2222', payoutMethod: 'bank',
+      amountUsd: 100, feeUsd: 1, totalChargeUsd: 101, fxRate: 85, amountInr: 8500, status: 'in_review', refundStatus: 'none',
+      sourceCurrency: 'USD', destinationCurrency: 'INR',
+    } as unknown as Transfer;
+    const v = receiptView(t);
+    expect(v.statusKey).toBe('status.customer.in_review');
+    expect(renderReceiptText(v, 'Acme')).not.toMatch(/review/i);
   });
 
   it('Batch B1: "Payout reference" shows only after delivery', () => {

@@ -4,9 +4,30 @@ import { scrub, logError, logWarn } from '@/lib/log';
 afterEach(() => vi.restoreAllMocks());
 
 describe('scrub — the PII backstop for money-path logs', () => {
-  it('masks phone numbers and account numbers to last-4', () => {
+  it('masks phone numbers and bare long digit runs to last-4', () => {
     expect(scrub('sender 15551234567 paid')).toBe('sender …4567 paid');
-    expect(scrub('account 123456789012 ifsc HDFC0001234')).toBe('account …9012 ifsc HDFC…1234');
+    expect(scrub('ref 123456789012 failed')).toBe('ref …9012 failed');
+  });
+
+  // R49: the inbound-redact patterns run first, so the numbers the 7-digit
+  // mask cannot see (spaced card groups, 3-2-4 SSNs, PAN, IFSC, 4-4-4 Aadhaar)
+  // never reach a log line either.
+  it('hides account, card, SSN, PAN, IFSC, Aadhaar and IBAN numbers whole', () => {
+    expect(scrub('account 123456789012 ifsc HDFC0001234')).toBe('account [account number hidden] ifsc [IFSC hidden]');
+    expect(scrub('card 4111 1111 1111 1111 declined')).toBe('card [card number hidden] declined');
+    expect(scrub('card 4111-1111-1111-1111')).toBe('card [card number hidden]');
+    expect(scrub('ssn 123-45-6789')).toBe('ssn [SSN hidden]');
+    expect(scrub('pan ABCPE1234F')).toBe('pan [PAN hidden]');
+    expect(scrub('uid 2345 6789 0125')).toBe('uid [Aadhaar number hidden]');
+    expect(scrub('iban GB82 WEST 1234 5698 7654 32')).toBe('iban [IBAN hidden]');
+    expect(scrub(new Error('rail rejected a/c 50100123456789 IFSC SBIN0001234'))).toBe(
+      'Error: rail rejected a/c [account number hidden] IFSC [IFSC hidden]',
+    );
+  });
+
+  it('still keeps short numbers and 6-digit provider codes readable after the redaction pass', () => {
+    expect(scrub('Meta error (#131056) for account')).toBe('Meta error (#131056) for account');
+    expect(scrub('attempt 3 of 8, code 503, sent 2,500.00')).toBe('attempt 3 of 8, code 503, sent 2,500.00');
   });
 
   it('masks emails entirely', () => {
@@ -97,6 +118,16 @@ describe('scrub — bounded work on hostile input (Program-Fix 47)', () => {
     }
   });
 
+  it('a spaced card number straddling the cut is dropped, never partly exposed (R49)', () => {
+    const card = '4111 1111 1111 1111';
+    for (let pad = 1; pad <= card.length; pad++) {
+      const s = 'y'.repeat(MAX - pad - 1) + ' ' + card + ' tail';
+      const out = scrub(s);
+      expect(out.endsWith('…[truncated]')).toBe(true);
+      expect(out).not.toMatch(/\d/);
+    }
+  });
+
   it('an email straddling the cut is dropped, never left half-unmasked', () => {
     const email = 'maria.lopez@example.com';
     for (let pad = 1; pad <= email.length; pad++) {
@@ -120,5 +151,14 @@ describe('scrub — bounded work on hostile input (Program-Fix 47)', () => {
 
   it('still masks ordinary and multi-label addresses', () => {
     expect(scrub('to a.b+c@mail.example.co.uk, cc x_y@ex-ample.io')).toBe('to <email>, cc <email>');
+  });
+});
+
+describe('scrub — the R49 keyword filler cannot backtrack exponentially (review fix)', () => {
+  it('8 KB of a/c + "nonono…" segments scrub in under 250 ms', () => {
+    const seg = 'a/c' + 'no'.repeat(27) + 'x 1 ';
+    const t = performance.now();
+    scrub(seg.repeat(Math.ceil(8192 / seg.length)));
+    expect(performance.now() - t).toBeLessThan(250);
   });
 });
