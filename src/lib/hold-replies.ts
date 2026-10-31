@@ -54,6 +54,8 @@ export const FIXED_REPLIES = {
   status_held: "processing, we'll message you",
   /** The held step on a transfer's timeline (the customer portal). */
   timeline_held: "Processing. We'll message you as soon as there is an update.",
+  /** The status pill of a held transfer on customer surfaces (the portal, its receipt, /account). */
+  label_held: 'Processing',
 } as const;
 
 export type FixedReplyKind = keyof typeof FIXED_REPLIES;

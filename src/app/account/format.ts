@@ -1,4 +1,5 @@
 import type { Transfer, TransferStatus } from '@/lib/types';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 
 // Shared, customer-safe formatting for the /account portal — mirrors the
 // recent-transfers.ts labels (the customer never sees the raw 'blocked' token or
@@ -22,7 +23,7 @@ export function transferAmount(t: Transfer): string {
 const STATUS_LABEL: Record<TransferStatus, string> = {
   awaiting_payment: 'Awaiting payment',
   paid: 'Paid',
-  in_review: 'Under review',
+  in_review: FIXED_REPLIES.label_held, // R30: a customer never sees review wording
   delivered: 'Delivered',
   cancelled: 'Cancelled',
   blocked: 'On hold', // NEVER the raw internal token

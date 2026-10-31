@@ -8,6 +8,7 @@ import type { AgentAuth, AgentPrincipal } from '@/lib/agent-auth';
 import type { ToolContextDeps } from '@/lib/tool-context';
 import { buildToolContext } from '@/lib/tool-context';
 import { executeTool } from '@/lib/tools';
+import { BLOCK_REPLY, HOLD_REPLY } from '@/lib/hold-replies';
 import { createStore, type Store } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -222,6 +223,22 @@ describe('get_transfer_status (404-never-403)', () => {
     const r = await getTransferStatusTool(owner, { transfer_id: blocked }, data());
     if (!r.ok) throw new Error('expected ok');
     expect(r.data.status).toBe('on hold');
+    // R30 review fix: the same fixed note the bot relays (hold-replies.ts), never a reason.
+    expect(r.data.status_note).toBe(BLOCK_REPLY);
+  });
+
+  it('R30: a held transfer carries the fixed hold note the bot relays, and no review word', async () => {
+    const held = await seedLedgerSpend(db, { partnerId: 'pa', phone: PHONE, amountUsd: 40, status: 'in_review' });
+    const r = await getTransferStatusTool(owner, { transfer_id: held }, data());
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data.status_note).toBe(HOLD_REPLY);
+    expect(JSON.stringify(r.data)).not.toMatch(/review|compliance|flag/i);
+  });
+
+  it('an ordinary transfer has no status note', async () => {
+    const r = await getTransferStatusTool(owner, { transfer_id: ownTx }, data());
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data).not.toHaveProperty('status_note');
   });
 });
 

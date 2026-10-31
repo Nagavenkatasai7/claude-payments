@@ -31,6 +31,8 @@ export const en = {
   'status.transfer.cancelled': 'Cancelled',
   'status.transfer.blocked': 'On hold',
   'status.transfer.unknown': 'In progress',
+  // R30: what a CUSTOMER sees for a held transfer (portal pill, receipt, /account); staff keep 'Under review'.
+  'status.customer.in_review': FIXED_REPLIES.label_held,
   'status.refund.requested': 'Refund requested',
   'status.refund.pending': 'Refund on the way',
   'status.refund.completed': 'Refunded',
@@ -1214,6 +1216,7 @@ export const en = {
   'portal.timeline.paid': 'Payment received',
   'portal.timeline.delivered': 'Delivered to your recipient',
   'portal.timeline.under_review': FIXED_REPLIES.timeline_held, // R30: the fixed hold text, never a review word
+  'portal.timeline.not_completed': FIXED_REPLIES.block, // a blocked transfer is final: the fixed block text, no update promised
   'portal.timeline.cancelled': 'Cancelled',
   'portal.timeline.refund_requested': 'Refund requested',
   'portal.timeline.refund_in_progress': 'Refund on the way',

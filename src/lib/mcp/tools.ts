@@ -8,7 +8,7 @@ import { portalToolContext, sendLimitsForPortal, PORTAL_FUNDING_METHODS } from '
 import { getPortalTransfer, type PortalOwner } from '@/lib/portal-transfers';
 import { recipientRid } from '@/lib/portal-recipients';
 import { transferSummaryFields } from '@/lib/recent-transfers';
-import { capRefusalReply } from '@/lib/hold-replies';
+import { capRefusalReply, fixedReply } from '@/lib/hold-replies';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import { normalizePhone } from '@/lib/phone';
@@ -252,7 +252,7 @@ export const GET_TRANSFER_STATUS: McpToolSpec = {
   name: 'get_transfer_status',
   title: 'Get a transfer status',
   scope: 'transfers:read',
-  description: `The status of one of the customer's own transfers, by its transfer_id (from list_recent_transfers). ${CANNOT_PAY}`,
+  description: `The status of one of the customer's own transfers, by its transfer_id (from list_recent_transfers). When status_note is present, tell the customer exactly that note and nothing more about why. ${CANNOT_PAY}`,
 };
 
 export const getTransferStatusInput = z.object({
@@ -273,5 +273,11 @@ export async function getTransferStatusTool(
   const t = await getPortalTransfer(owner, id, deps.db);
   if (!t) return { ok: false, message: TRANSFER_NOT_FOUND };
   const f = transferSummaryFields(t);
-  return { ok: true, data: { transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName } };
+  // R30 (no tipping-off): a held or blocked transfer also carries the fixed note the bot relays
+  // (hold-replies.ts HOLD_REPLY / BLOCK_REPLY), so an AI app says the same words and never a reason.
+  const note = t.status === 'in_review' ? fixedReply('hold') : t.status === 'blocked' ? fixedReply('block') : undefined;
+  return {
+    ok: true,
+    data: { transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName, ...(note ? { status_note: note } : {}) },
+  };
 }

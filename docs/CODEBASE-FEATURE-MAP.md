@@ -52,7 +52,7 @@ _Ground-truth inventory built by a 9-agent parallel exploration (each claim carr
 | TurnContext construction (incoming metadata) | ✅ built | src/app/api/whatsapp/route.ts:177-182 | isNewConversation, buttonTap, isNewCustomer, tierReminderDayOfWindow passed to agent. |
 | Async agent turn execution (durable `agent.turn` outbox row, fast webhook ack) | ✅ built | src/lib/whatsapp-inbound.ts `processInboundWebhook` enqueues `agent.turn` (wamid-deduped) + `pokeWorker`; src/lib/outbox-worker.ts runs it (re-verified 2026-09-22) | Returns {ok:true} before the agent runs; the turn survives a killed function and is retried by the worker, not an `after()` hook. |
 | Meta AUTHENTICATION template approval status | 🟦 mocked | env.ts:99-102; sendOtpCode AUTHENTICATION path falls back to free-form | Template not yet approved in WhatsApp Manager; all OTP sends currently use free-form fallback. |
-| Meta §3 template suite approval (scheduled_payment_ready, payment_reminder, transfer_delivered_sender, transfer_in_review/released/cancelled, verification_*) | 🟦 mocked | src/lib/whatsapp-templates.ts:16-22; env.ts:127-138; docs/meta-whatsapp-config.md | Only transfer_delivered (recipient) is approved/live; all sender-side + verification templates pending -> cron degrades to free-form text. |
+| Meta §3 template suite approval (scheduled_payment_ready, payment_reminder, transfer_delivered_sender, transfer_processing (was transfer_in_review; R30)/released/cancelled, verification_*) | 🟦 mocked | src/lib/whatsapp-templates.ts:16-22; env.ts:127-138; docs/meta-whatsapp-config.md | Only transfer_delivered (recipient) is approved/live; all sender-side + verification templates pending -> cron degrades to free-form text. |
 
 ## Quote / Transfer / Payment
 

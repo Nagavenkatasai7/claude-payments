@@ -302,9 +302,10 @@ describe('beginHold — the transactional compliance hold', { retry: 0 }, () => 
     expect(payload.to).toBe('15551230000');
     expect(Object.keys(payload).sort()).toEqual(['body', 'category', 'partnerId', 'template', 'to']);
     expect(payload.category).toBe('essential'); // Program-Fix 49A: survives STOP
-    // 2026-10-03: the approved transfer_in_review template rides along, used only
-    // when Meta refuses the plain text because the 24-hour window has closed.
-    expect((payload.template as { name: string }).name).toBe('transfer_in_review');
+    // 2026-10-03: the held-notice template rides along, used only when Meta refuses
+    // the plain text because the 24-hour window has closed. R30 review fix: it is
+    // transfer_processing (the fixed hold text), never transfer_in_review.
+    expect((payload.template as { name: string }).name).toBe('transfer_processing');
   });
 
   it("is idempotent: a second call returns { kind: 'already' } and enqueues nothing", async () => {

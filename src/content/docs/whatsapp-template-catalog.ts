@@ -7,6 +7,8 @@
 // Branding (owner decision, 2026-10-04): SmartRemit is the only brand customers
 // see, so a template that names the brand names SmartRemit, on every number.
 
+import { HOLD_REPLY } from '@/lib/hold-replies';
+
 export const TEMPLATE_BRAND = 'SmartRemit';
 
 export interface TemplateEntry {
@@ -103,16 +105,17 @@ export const TEMPLATES: readonly TemplateEntry[] = [
     purpose: 'Delivery confirmation to the sender. Sent instead of the plain message only when the sender has not written in the last 24 hours.',
   },
   {
-    name: 'transfer_in_review',
+    name: 'transfer_processing',
     category: 'UTILITY',
     language: 'en',
-    body: "Hi {{1}}, your transfer of {{2}} to {{3}} is being reviewed by our team for security. We'll update you shortly — no action is needed right now.",
+    // R30: the fixed hold text (hold-replies.ts HOLD_REPLY) with the name, amount and recipient; never a review word.
+    body: `Hi {{1}}, ${HOLD_REPLY.replace(/^Your transfer/, 'your transfer of {{2}} to {{3}}')}`,
     paramCount: 3,
     samples: ['Anand', '$1,000.00', 'Priya'],
     sentToday: true,
     nameSource: 'fixed',
     purpose:
-      'Tells the sender a transfer is held for compliance review. {{1}} is "there" today (the transfer record carries no sender name). Sent instead of the plain message only when the sender has not written in the last 24 hours.',
+      'Tells the sender a held transfer is being processed, in the same fixed words the bot uses, without naming a review or a reason. {{1}} is "there" today (the transfer record carries no sender name). Sent instead of the plain message only when the sender has not written in the last 24 hours.',
   },
   verificationStatus('verification_needed', 'needed', 'Please verify your identity to start sending money.'),
   verificationStatus('verification_in_progress', 'in progress or received', 'Your identity verification is in progress.'),

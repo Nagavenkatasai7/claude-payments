@@ -123,15 +123,15 @@ describe('sendBusinessInitiated — flag ON (WHATSAPP_WINDOW_AWARE=true)', () =>
 
 describe('rowTemplate — the optional template on a whatsapp.text outbox row (2026-10-03)', () => {
   it('accepts a well-formed template and flattens each param for Meta', () => {
-    expect(rowTemplate({ name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya\nSharma'] })).toEqual({
-      name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya Sharma'],
+    expect(rowTemplate({ name: 'transfer_processing', lang: 'en', params: ['there', '$1,000.00', 'Priya\nSharma'] })).toEqual({
+      name: 'transfer_processing', lang: 'en', params: ['there', '$1,000.00', 'Priya Sharma'],
     });
   });
 
   it('absent or malformed ⇒ undefined (the row sends its plain text, exactly as before)', () => {
     expect(rowTemplate(undefined)).toBeUndefined();
     expect(rowTemplate(null)).toBeUndefined();
-    expect(rowTemplate('transfer_in_review')).toBeUndefined();
+    expect(rowTemplate('transfer_processing')).toBeUndefined();
     expect(rowTemplate({ name: 'Bad Name!', lang: 'en', params: [] })).toBeUndefined();
     expect(rowTemplate({ name: 'ok_name', lang: 'english please', params: [] })).toBeUndefined();
     expect(rowTemplate({ name: 'ok_name', lang: 'en', params: [1, 2] })).toBeUndefined();

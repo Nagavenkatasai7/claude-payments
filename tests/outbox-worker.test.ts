@@ -2688,7 +2688,7 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 // unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
 // skipping the free-form call would silence alerts.
 describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', { retry: 0 }, () => {
-  const TPL = { name: 'transfer_in_review', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
+  const TPL = { name: 'transfer_processing', lang: 'en', params: ['there', '$1,000.00', 'Priya'] };
   const windowClosed = () =>
     WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131047 } }));
   const notApproved = () =>
@@ -2716,7 +2716,7 @@ describe('drainOnce — whatsapp.text with an optional template (2026-10-03)', {
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'held text', partnerId: 'acme', template: TPL });
     const r = await drainOnce(deps(), 'w1');
     expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
-    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_in_review', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
+    expect(sendTemplate.mock.calls).toEqual([['15551230000', 'transfer_processing', 'en', ['there', '$1,000.00', 'Priya'], undefined]]);
     expect(sendText).not.toHaveBeenCalled();
   });
 
