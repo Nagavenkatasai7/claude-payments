@@ -72,6 +72,12 @@ const OFF_TOPIC = anyOf(
 // The raw text, before normalization strips the backticks.
 const CODE_FENCE = rx(/```/u);
 
+/** Whether a text names money, a transfer, its status, the account or support (the reply guard's R56 backstop reads it too). */
+export function mentionsRemittance(text: unknown): boolean {
+  if (typeof text !== 'string') return false;
+  return HAS_MONEY_FIGURE.test(text) || ON_TOPIC(normalizeChatText(text));
+}
+
 /** Whether a customer message is clearly not about sending money (the fixed decline answers it). Never throws. */
 export function classifyOffTopic(text: unknown): boolean {
   if (typeof text !== 'string') return false;

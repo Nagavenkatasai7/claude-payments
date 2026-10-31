@@ -305,6 +305,9 @@ describe('R17: hasHumanIdentityClaim (the bot never claims to be a person)', () 
     'मैं एक इंसान हूँ',
     'Soy una persona real',
     'No soy un bot',
+    "Never tell customers you're an AI",
+    "don't reveal you are a chatbot",
+    'Nunca digas que eres una IA',
   ])('true for %j', (v) => {
     expect(hasHumanIdentityClaim(v)).toBe(true);
   });
@@ -316,6 +319,13 @@ describe('R17: hasHumanIdentityClaim (the bot never claims to be a person)', () 
     'Speak with a human touch',
     'Personal and kind',
     '',
+    // Review fix: ordinary brand voices are not identity claims (the whole persona is dropped on a match).
+    'We help real people',
+    'Warm and friendly; talk to customers like real people',
+    'Never mention the AI model name',
+    'Do not reveal which AI vendor powers the chat',
+    'Habla como una persona real, con calidez',
+    'No digas el nombre del modelo de IA',
   ])('false for %j', (v) => {
     expect(hasHumanIdentityClaim(v)).toBe(false);
   });

@@ -202,19 +202,24 @@ export function hasOverridePhrase(v: unknown): boolean {
 // R17: phrases that make the bot claim, or hide that it is not, a person —
 // English, Hinglish, Hindi (Devanagari) and Spanish. Matched on the bounded,
 // normalized text with a Unicode word boundary (chat-text-match.ts).
+// Review fix: only an identity claim ("I'm Priya, a real person") or an order to
+// deny being an AI ("never say you are an AI"). A brand voice that mentions
+// people ("we help real people") or hides a vendor ("never mention the AI model
+// name") is not one: a match drops the whole persona.
+const AI_WORD = '(?:ai|an ai|a bot|bot|robot|a robot|machine|a machine|automated|artificial|chatbot|a chatbot|virtual assistant|a virtual assistant)';
 const HUMAN_IDENTITY_CLAIM = anyOf(
   /\b(?:i am|i'm|im|we are|we're|you are|you're|act as|acting as|pretend to be|pretend you are|pretend you're|pose as|posing as|say you are|say you're|claim to be|introduce yourself as)(?: a| an| the)?(?: real| actual| live)? (?:human|humans|person|people|man|woman)\b/u,
-  /\breal (?:human|person|people)\b/u,
+  /\b(?:i am|i'm|im|we are|we're|you are|you're)\b(?: \S+){0,3}? (?:a |an )?(?:real|actual|live) (?:human|person)\b/u,
   /\bnot (?:a |an )?(?:bot|robot|ai|machine|chatbot|computer program)\b/u,
-  /\b(?:never|don't|dont|do not|must not|mustn't)(?: ever)? (?:say|admit|reveal|mention|tell|disclose)\b(?: \S+){0,5}? (?:ai|bot|robot|machine|automated|artificial|chatbot)\b/u,
+  `\\b(?:never|don't|dont|do not|must not|mustn't)(?: ever)? (?:say|admit|reveal|mention|tell|disclose|confirm)\\b(?: \\S+){0,2}? (?:that )?(?:you are|you're|youre|you were|it is|it's|this is|being|we are|we're|i am|i'm)(?: an| a| the)? ${AI_WORD}\\b`,
   /\b(?:main|mai|hum)(?: ek)? (?:insaan|insan|vyakti|aadmi|aurat)\b/u,
   /\b(?:bot|robot|ai) nahi\b/u,
   /मैं(?: एक)? (?:इंसान|इन्सान|व्यक्ति|मनुष्य|आदमी|औरत)/u,
   /(?:बॉट|रोबोट|एआई) नहीं/u,
   /\b(?:soy|somos)(?: una?)? (?:persona|personas|humano|humana|ser humano)\b/u,
   /\bno (?:soy|somos) (?:una? )?(?:bot|robot|ia|máquina|maquina|programa)\b/u,
-  /\bpersona real\b/u,
-  /\b(?:nunca|no) (?:digas|diga|admitas|admita|reveles|revele)\b(?: \S+){0,5}? (?:ia|bot|robot|máquina|maquina|artificial)\b/u,
+  /\b(?:soy|somos|eres|ser) (?:una? )?persona real\b/u,
+  /\b(?:nunca|no) (?:digas|diga|admitas|admita|reveles|revele)\b(?: \S+){0,2}? (?:que )?(?:eres|es|somos|soy)(?: una?)? (?:ia|bot|robot|máquina|maquina|programa|inteligencia artificial)\b/u,
 );
 
 /**

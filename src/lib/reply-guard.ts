@@ -1,4 +1,5 @@
 import { BANNED_REPLY_CLAIMS, CLAIM_NEGATION } from './claims-register';
+import { mentionsRemittance } from './scope-guard';
 
 /**
  * reply-guard (R32, bot part) — checks the RAW model text of a turn against
@@ -10,6 +11,14 @@ import { BANNED_REPLY_CLAIMS, CLAIM_NEGATION } from './claims-register';
  * names a money figure, an exchange rate, a delivery day count or a delivery
  * date that no fact backs, or makes a banned delivery claim (claims-register.ts),
  * gets an issue.
+ *
+ * The customer's figures are kept apart (review fix): they back an echoed
+ * amount only ("$350 to Mom"), never a rate, a fee or a delivery day count, so
+ * nobody can make a false rate pass by stating it first. Free-text tool fields
+ * (names, nicknames, descriptions) are data and back nothing.
+ *
+ * R56 backstop: a reply with a code block or code lines, or a long reply that
+ * never mentions money, a transfer or the account, gets an off_topic issue.
  *
  * Shadow mode (the agent.reply_guard switch off, the default) only alerts;
  * with the switch on, the agent replaces the reply with the fixed fallback.
@@ -28,7 +37,7 @@ import { BANNED_REPLY_CLAIMS, CLAIM_NEGATION } from './claims-register';
  * Pure. Never throws: a bad input is treated as empty.
  */
 
-export type ReplyIssueKind = 'amount' | 'rate' | 'delivery' | 'claim';
+export type ReplyIssueKind = 'amount' | 'rate' | 'delivery' | 'claim' | 'off_topic';
 
 export interface ReplyIssue {
   kind: ReplyIssueKind;
@@ -49,6 +58,8 @@ export interface MoneyFact {
 
 export interface ReplyFacts {
   amounts: MoneyFact[];
+  /** Figures the customer typed: they back an echoed amount only, never a fee, a rate or a day count. */
+  customerAmounts: MoneyFact[];
   rates: number[];
   /** Day counts (business days; 0 is the same day). */
   days: number[];
@@ -64,7 +75,7 @@ export interface ReplyGuardReport {
 }
 
 export function emptyReplyFacts(): ReplyFacts {
-  return { amounts: [], rates: [], days: [], dates: [] };
+  return { amounts: [], customerAmounts: [], rates: [], days: [], dates: [] };
 }
 
 // ── Lexicon ──────────────────────────────────────────────────────────────────
@@ -269,30 +280,26 @@ function splitRates(text: string): { rest: string; rates: Array<Found<{ value: n
 /**
  * Add the figures in free text. `tool`: text a tool returned (money, rates,
  * day phrases, dates; any other number counts as a figure of unknown
- * currency). `customer`: the customer's own words, whose every number also
- * counts as a rate and a day count (an echoed number is not drift).
+ * currency). `customer`: the customer's own words. Their money and bare
+ * numbers go to `customerAmounts` (an echoed send amount is not drift) and
+ * their dates count; a rate or a day count they typed backs nothing.
  */
 export function addTextFacts(facts: ReplyFacts, text: unknown, source: 'tool' | 'customer' = 'tool'): ReplyFacts {
   const t = norm(text);
   if (!t) return facts;
+  const customer = source === 'customer';
+  const amounts = customer ? (facts.customerAmounts ??= []) : facts.amounts;
   const { rest, rates } = splitRates(t);
-  for (const r of rates) facts.rates.push(r.value.value);
+  if (!customer) for (const r of rates) facts.rates.push(r.value.value);
   let bare = rest;
   for (const m of moneyIn(rest)) {
-    facts.amounts.push({ value: m.value.value, currency: m.value.currency });
+    amounts.push({ value: m.value.value, currency: m.value.currency });
     bare = mask(bare, m.start, m.text.length);
   }
-  for (const d of daysIn(t)) facts.days.push(...d.value);
+  if (!customer) for (const d of daysIn(t)) facts.days.push(...d.value);
   for (const d of datesIn(t)) facts.dates.push(d.value);
   for (const m of t.matchAll(ISO_DATE_RE)) facts.dates.push(`${m[1]}-${m[2]}`);
-  for (const m of bare.matchAll(BARE_NUMBER_RE)) {
-    const { value } = parseNum(m[1]);
-    facts.amounts.push({ value });
-    if (source === 'customer') {
-      facts.rates.push(value);
-      if (Number.isInteger(value)) facts.days.push(value);
-    }
-  }
+  for (const m of bare.matchAll(BARE_NUMBER_RE)) amounts.push({ value: parseNum(m[1]).value });
   return facts;
 }
 
@@ -345,11 +352,19 @@ function addNumberFact(facts: ReplyFacts, key: string, value: number, ctx: Curre
   else facts.amounts.push({ value, currency: ctx.plain });
 }
 
+/**
+ * Free-text fields a tool result carries as DATA: a recipient's name or
+ * nickname, a bill's description. Text in them may come from an outsider, so
+ * a figure inside one never backs the reply (review fix).
+ */
+const FREE_TEXT_KEY =
+  /(?:^|_)(?:name|names|nickname|nicknames|memo|description|label|comment|comments|address|email|bill_text|invoice_text|biller|payee|merchant|seller|buyer)$/iu;
+
 function walk(facts: ReplyFacts, value: unknown, key: string, ctx: CurrencyContext, seen: WeakSet<object>, depth: number): void {
   if (depth > 8) return;
   if (typeof value === 'number') return addNumberFact(facts, key, value, ctx);
   if (typeof value === 'string') {
-    addTextFacts(facts, value);
+    if (!FREE_TEXT_KEY.test(key)) addTextFacts(facts, value);
     return;
   }
   if (value === null || typeof value !== 'object' || seen.has(value)) return;
@@ -391,6 +406,7 @@ function asFacts(f: unknown): ReplyFacts {
   const x = (f ?? {}) as Partial<ReplyFacts>;
   return {
     amounts: Array.isArray(x.amounts) ? x.amounts : [],
+    customerAmounts: Array.isArray(x.customerAmounts) ? x.customerAmounts : [],
     rates: Array.isArray(x.rates) ? x.rates : [],
     days: Array.isArray(x.days) ? x.days : [],
     dates: Array.isArray(x.dates) ? x.dates : [],
@@ -434,11 +450,33 @@ export function checkReply(reply: string, factsIn: ReplyFacts): ReplyCheck {
   for (const m of moneyIn(rest)) {
     if (hedged(rest, m.start)) continue;
     const { value, decimals, currency } = m.value;
-    const ok = facts.amounts.some((f) => compatible(f.currency, currency) && sameFigure(f.value, value, decimals));
+    const backs = (f: MoneyFact) => compatible(f.currency, currency) && sameFigure(f.value, value, decimals);
+    const ok = facts.amounts.some(backs) || (!priceContext(rest, m.start, m.text.length) && facts.customerAmounts.some(backs));
     if (!ok) add('amount', m.text);
   }
 
+  if (offTopic(text)) add('off_topic', 'reply');
+
   return { ok: issues.length === 0, issues };
+}
+
+// A fee, a charge or a rate around a figure: the customer's own numbers never back it.
+const PRICE_BEFORE = /\b(?:fees?|charges?|charged|commission|costs?|markup|spread|rate)\b[^.!?\n]{0,24}$/iu;
+const PRICE_AFTER = /^\s*(?:fees?|charges?|commission|per\b|for each\b|for every\b|a dollar\b|\/)/iu;
+
+function priceContext(text: string, start: number, length: number): boolean {
+  return PRICE_BEFORE.test(text.slice(Math.max(0, start - 40), start)) || PRICE_AFTER.test(text.slice(start + length, start + length + 16));
+}
+
+// R56 backstop: code, or a long answer about something else.
+const CODE_FENCE = /```/u;
+const CODE_LINE = /^\s*(?:def |class |import |from \S+ import |function |const |let |var |public |private |#include|SELECT |INSERT |console\.log|print\(|<\/?[a-z][a-z0-9]*[ >])/gimu;
+const LONG_REPLY_CHARS = 400;
+
+function offTopic(text: string): boolean {
+  if (CODE_FENCE.test(text)) return true;
+  if ((text.match(CODE_LINE) ?? []).length >= 2) return true;
+  return text.length > LONG_REPLY_CHARS && !mentionsRemittance(text);
 }
 
 // ── The ops alert ────────────────────────────────────────────────────────────
@@ -462,7 +500,7 @@ export function replyGuardAlertFor(input: {
       : 'Shadow mode: the reply was sent unchanged (agent.reply_guard is off).';
   return {
     message:
-      `⚠️ SmartRemit ops: the bot reply guard found figures or claims that no tool result backs (tenant ${input.tenant}, ${input.where}; ` +
+      `⚠️ SmartRemit ops: the bot reply guard found figures or claims that no tool result backs, or an answer outside sending money (tenant ${input.tenant}, ${input.where}; ` +
       `checks: ${kinds}). ${outcome} Read the conversation log to see what the customer was told.`,
     dedupeKey: `replyguard:${input.tenant}:${input.hour}`,
   };

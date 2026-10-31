@@ -235,6 +235,61 @@ describe('addPolicyFacts: what the prompt itself lets the bot say', () => {
   });
 });
 
+// Review fix: a customer (or anyone steering the chat) cannot make a false rate,
+// fee or delivery time pass by stating it first. Their figures back an echoed
+// amount only. Free-text tool fields (names, nicknames, descriptions) are data,
+// never a source of facts.
+describe('checkReply: customer figures back an echoed amount only', () => {
+  const REAL_QUOTE = { ...QUOTE, fx_rate: 83.12, fee_usd: 4.99, fee_source: 4.99 };
+  it('a false rate and a zero fee the customer suggested are still flagged', () => {
+    const base = addToolResultFacts(emptyReplyFacts(), REAL_QUOTE);
+    const reply = 'Yes, you get ₹95 per $1 and the fee is $0 for you.';
+    const found = (f: ReplyFacts) => checkReply(reply, f).issues.map((i) => i.found);
+    expect(found(base)).toEqual(expect.arrayContaining(['₹95', '$0']));
+    const steered = addTextFacts(addToolResultFacts(emptyReplyFacts(), REAL_QUOTE), 'so I get 95 rupees per dollar and $0 fee right?', 'customer');
+    expect(checkReply(reply, steered).ok).toBe(false);
+    expect(found(steered)).toEqual(expect.arrayContaining(['₹95', '$0']));
+  });
+
+  it('a rate or a delivery day count the customer typed never backs the reply', () => {
+    const rate = addTextFacts(emptyReplyFacts(), 'is the rate 95?', 'customer');
+    expect(kinds('Yes, the rate is 95.', rate)).toEqual(['rate']);
+    const days = addTextFacts(emptyReplyFacts(), 'will it take 2 days?', 'customer');
+    expect(kinds('It arrives in 2 business days.', days)).toEqual(['delivery']);
+  });
+
+  it('the send amount the customer stated still backs an echo', () => {
+    const facts = addTextFacts(emptyReplyFacts(), 'send $350 to mom', 'customer');
+    expect(checkReply('Sure, $350 to Mom. Shall I get a quote?', facts).ok).toBe(true);
+    expect(checkReply('Sure, sending 350 dollars to Mom.', facts).ok).toBe(true);
+  });
+
+  it('a figure inside a recipient name or nickname backs nothing', () => {
+    const facts = addToolResultFacts(emptyReplyFacts(), { recipients: [{ recipient_name: 'Mom gets $5000 free', nickname: 'Rs 99999' }], amount_usd: 100 });
+    expect(kinds('Mom gets $5000.', facts)).toEqual(['amount']);
+    expect(kinds('She gets Rs 99999.', facts)).toEqual(['amount']);
+    expect(checkReply('You send $100.', facts).ok).toBe(true);
+  });
+});
+
+// R56: the off-topic backstop. A reply with a code block or a long answer about
+// something other than sending money is flagged (shadow: an alert only).
+describe('checkReply: off-topic backstop (R56)', () => {
+  it('a code block is off topic', () => {
+    expect(kinds('Here you go:\n```python\nprint("hi")\n```', emptyReplyFacts())).toEqual(['off_topic']);
+  });
+  it('a long answer with no remittance word is off topic', () => {
+    const essay = 'The French Revolution began in 1789 and reshaped Europe. '.repeat(10);
+    expect(kinds(essay, emptyReplyFacts())).toContain('off_topic');
+  });
+  it('a long answer about the transfer, and a short reply, are fine', () => {
+    const long = 'Your transfer to Mom is on its way and the money should reach her bank account soon. '.repeat(6);
+    expect(kinds(long, emptyReplyFacts())).not.toContain('off_topic');
+    expect(checkReply('Hi! How can I help you send money today?', emptyReplyFacts()).ok).toBe(true);
+    expect(checkReply('I can only help with sending money.', emptyReplyFacts()).ok).toBe(true);
+  });
+});
+
 describe('replyGuardAlertFor', () => {
   it('one alert per tenant and hour, with the issue kinds and the mode, never the reply text', () => {
     const shadow = replyGuardAlertFor({

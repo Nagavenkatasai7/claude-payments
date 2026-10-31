@@ -2403,6 +2403,56 @@ describe('R32: the quote is written by code, and the reply guard checks the raw 
     expect(reply.startsWith('Mom gets ₹43,000. Go ahead?')).toBe(true);
   });
 
+  // Review fix: every quote of the turn is shown (the prompt forbids the model to restate
+  // figures), and a later refusal in the same turn drops the quotes.
+  async function scriptedTurn(rounds: ChatMessage[], text = 'quote it') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedNamedSender(deps.customerStore);
+    invalidateFlagCache(db);
+    let call = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps,
+      chat: async () => rounds[Math.min(call++, rounds.length - 1)],
+    });
+    return agent.runAgentTurn(PHONE, text);
+  }
+  const toolCall = (id: string, name: string, args: Record<string, unknown>): ChatMessage => ({
+    role: 'assistant', content: '', tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+  });
+
+  it('two get_quote calls in one turn: both code-written quotes follow the model text, in call order', async () => {
+    const reply = await scriptedTurn(
+      [
+        { role: 'assistant', content: '', tool_calls: [
+          { id: 'a', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 100, funding_method: 'bank_transfer' }) } },
+          { id: 'b', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 200, funding_method: 'bank_transfer' }) } },
+        ] },
+        { role: 'assistant', content: 'Here are both quotes.' },
+      ],
+      'how much does mom get for $100 vs $200?',
+    );
+    expect(reply.startsWith('Here are both quotes.\n\n')).toBe(true);
+    const i100 = reply.indexOf('Sending $100.00.');
+    const i200 = reply.indexOf('Sending $200.00.');
+    expect(i100).toBeGreaterThan(0);
+    expect(i200).toBeGreaterThan(i100);
+  });
+
+  it('a quote followed by a refusal in the same turn: the refusal is not followed by the quote', async () => {
+    const reply = await scriptedTurn(
+      [
+        toolCall('q', 'get_quote', { amount_usd: 500, funding_method: 'bank_transfer' }),
+        toolCall('c', 'check_send_limit', { amount_usd: 100000 }),
+        { role: 'assistant', content: 'This is more than you can send in one transfer. You can send a smaller amount.' },
+      ],
+      'send $500, actually make it $100000',
+    );
+    expect(reply).not.toContain('Sending $');
+    expect(reply).not.toContain('They get');
+  });
+
   it("the customer's own numbers and earlier tool results in the conversation are facts", async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
