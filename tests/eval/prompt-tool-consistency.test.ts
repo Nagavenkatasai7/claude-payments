@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildSystemPrompt, SYSTEM_PROMPT } from '@/lib/prompt';
 import { toolSchemas, toolSchemasForChannel } from '@/lib/tools';
-import { EVAL_CASES, UNVERIFIED_SENDER_NOTE } from '../../scripts/eval-bot-cases';
+import { CRITICAL_CATEGORIES, EVAL_CASES, EVAL_CATEGORIES, EVAL_LANGS, PR_SUBSET_IDS, UNVERIFIED_SENDER_NOTE } from '../../scripts/eval-bot-cases';
 import { MODEL_HIDDEN_KEYS } from '@/lib/model-visible-result';
 import { FIXED_REPLIES, fixedReply } from '@/lib/hold-replies';
 
@@ -101,10 +101,46 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
 });
 
 describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the app', () => {
-  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases, the 2 R56 scope cases and the R32 code-quote case, ids 1..32', () => {
-    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 32 }, (_, i) => i + 1));
-    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 and 25-32 keep it off.
+  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases, the 2 R56 scope cases, the R32 code-quote case and the 26 R31 risk cases, ids 1..58', () => {
+    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 58 }, (_, i) => i + 1));
+    // Required purpose: 19-24 run with the purpose.detect switch on; the rest keep it off.
     expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24]);
+  });
+
+  it('R31: every case names a known category and language, and the risk cases cover EN, HI, Hinglish and ES', () => {
+    for (const c of EVAL_CASES) {
+      expect(EVAL_CATEGORIES, `#${c.id}`).toContain(c.category);
+      expect(EVAL_LANGS, `#${c.id}`).toContain(c.lang);
+    }
+    for (const lang of EVAL_LANGS) expect(EVAL_CASES.filter((c) => c.lang === lang).length, lang).toBeGreaterThanOrEqual(3);
+    for (const cat of EVAL_CATEGORIES) expect(EVAL_CASES.filter((c) => c.category === cat).length, cat).toBeGreaterThanOrEqual(2);
+  });
+
+  it('R31: a case is critical exactly when its category is tipping-off, structuring or AI admission', () => {
+    expect([...CRITICAL_CATEGORIES].sort()).toEqual(['ai_admission', 'structuring', 'tipping_off']);
+    for (const c of EVAL_CASES) expect(Boolean(c.critical), `#${c.id} ${c.category}`).toBe(CRITICAL_CATEGORIES.has(c.category));
+  });
+
+  it('R31: a pending case names the roadmap item that will make it pass, and is never critical', () => {
+    const pending = EVAL_CASES.filter((c) => c.pending !== undefined);
+    expect(pending.length).toBeGreaterThan(0);
+    for (const c of pending) {
+      expect(c.pending, `#${c.id}`).toMatch(/^R\d{2}$/);
+      expect(c.critical, `#${c.id}`).toBeFalsy();
+    }
+  });
+
+  it('R31 (Q10): the PR subset is 20 distinct, non-pending cases covering every category and language', () => {
+    const byId = new Map(EVAL_CASES.map((c) => [c.id, c]));
+    expect(PR_SUBSET_IDS.length).toBe(20);
+    expect(new Set(PR_SUBSET_IDS).size).toBe(20);
+    const subset = PR_SUBSET_IDS.map((id) => byId.get(id)!);
+    for (const c of subset) {
+      expect(c, 'a PR subset id exists').toBeDefined();
+      expect(c.pending, `#${c.id}`).toBeUndefined();
+    }
+    expect(new Set(subset.map((c) => c.category))).toEqual(new Set(EVAL_CATEGORIES));
+    expect(new Set(subset.map((c) => c.lang))).toEqual(new Set(EVAL_LANGS));
   });
 
   it('R30: no recorded tool result carries a remaining figure, the EDD threshold or a screening field', () => {
