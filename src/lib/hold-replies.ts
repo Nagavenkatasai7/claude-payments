@@ -24,7 +24,7 @@ import { boundUntrustedText } from './untrusted-text';
  */
 
 /** The wording version the partner's compliance officer (MLRO) approves. Bump it on any text change. */
-export const HOLD_REPLIES_VERSION = '2026-10-31.1 (draft, awaiting MLRO approval)';
+export const HOLD_REPLIES_VERSION = '2026-10-31.2 (draft, awaiting MLRO approval)';
 
 export const FIXED_REPLIES = {
   /** A paid transfer that is held before payout (status in_review). */
