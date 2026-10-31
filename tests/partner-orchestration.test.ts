@@ -196,7 +196,7 @@ describe('WL1 default partner (no KYC gate configured)', () => {
     await h.agent.runAgentTurn(PHONE, 'send $200 to Anita, bank 1234567890, 919876543210');
 
     // prompt is SmartRemit-branded, NO verify note, and the send proceeds.
-    expect(h.systemSnapshots[0]).toContain('You are the assistant for SmartRemit');
+    expect(h.systemSnapshots[0]).toContain('You are the AI assistant for SmartRemit.');
     expect(h.systemSnapshots[0]).not.toContain('[UNVERIFIED SENDER]');
     expect([...redis.dump.keys()].some((k) => k.startsWith('recipient_draft:'))).toBe(true);
   });

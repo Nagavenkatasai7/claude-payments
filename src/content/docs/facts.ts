@@ -49,7 +49,7 @@ export const FACTS = {
   mcpRecipientsMax: 50,
   /** src/lib/mcp/tools.ts listRecentTransfersInput limit max. */
   mcpRecentTransfersMax: 10,
-  /** src/lib/portal-session-cookie.ts PORTAL_SESSION_POLICY.stepUpFreshMs in minutes (AI-app consent step-up). */
+  /** src/lib/portal-session-cookie.ts PORTAL_SESSION_POLICY.stepUpFreshMs, as minutes (AI-app consent step-up). */
   agentStepUpMinutes: 15,
   /** src/lib/agent-auth/config.ts AGENT_GRANT_TTL_MS in days (sliding on each refresh). */
   agentGrantDays: 30,

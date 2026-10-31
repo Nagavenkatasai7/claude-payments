@@ -88,7 +88,7 @@ describe('the recorded cases prove their own checks', () => {
       return { role: 'assistant', content: 'ok' };
     }, EVAL_CASES.slice(0, 1));
     expect(seen[0].first.role).toBe('system');
-    expect(seen[0].first.content).toContain('You are the assistant for SmartRemit');
+    expect(seen[0].first.content).toContain('You are the AI assistant for SmartRemit.');
     expect(seen[0].toolNames).not.toContain('create_transfer');
   });
 

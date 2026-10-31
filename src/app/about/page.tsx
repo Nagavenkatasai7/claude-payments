@@ -104,10 +104,10 @@ export default function AboutPage() {
               Money home, in a message.
             </h1>
             <p className="mt-5 max-w-[680px] text-[clamp(16px,2.2vw,20px)] text-[#475569]">
-              {`Sending money to family across borders should feel as simple as texting them. SmartRemit makes the whole thing happen inside a WhatsApp conversation — no app to install, no forms to wrestle with.`}
+              {`Sending money to family across borders should feel as simple as texting them. With SmartRemit it starts in a WhatsApp conversation — no app to install, no forms to wrestle with — and you pay on a secure page.`}
             </p>
             <p className="mt-4 max-w-[680px] text-[16px] text-[#475569]">
-              {`SmartRemit is non-custodial technology infrastructure — not a bank and not a money transmitter. We orchestrate the conversation, the quote, the compliance checks and the secure pay page; licensed money-transmitter partners are the ones who actually move and settle the funds on their own regulated rails. We never hold your money.`}
+              {`SmartRemit is non-custodial technology infrastructure — not a bank and not a money transmitter. A licensed money transmitter provides the transfer. SmartRemit provides the technology and never holds your money. We run the conversation, the quote, the compliance checks and the secure pay page, and the licensed partner moves and settles the funds on its own regulated rails.`}
             </p>
           </div>
         </section>
@@ -153,7 +153,7 @@ export default function AboutPage() {
               Remittance rails for the licensed transmitter.
             </h2>
             <p className="mt-5 max-w-[760px] text-[17px] text-[#475569]">
-              {`SmartRemit is multi-tenant infrastructure: one platform serves many partners, each with its own WhatsApp number, settlement rail, rates and isolated dashboard, while customers always see SmartRemit. The licensed partner keeps the license and the funds flow — SmartRemit orchestrates everything around the money.`}
+              {`SmartRemit is multi-tenant infrastructure: one platform serves many partners, each with its own WhatsApp number, settlement rail, rates and isolated dashboard, while customers always see SmartRemit. The licensed partner keeps the license, provides the transfer and runs the funds flow; SmartRemit provides the technology around it.`}
             </p>
             <div className="mt-8 grid gap-5 sm:grid-cols-2">
               <Pillar title="The SmartRemit WhatsApp agent + pay page">
@@ -183,7 +183,7 @@ export default function AboutPage() {
           <div className={SECTION}>
             <span className={KICKER}>Trust &amp; compliance</span>
             <h2 className="mt-3 text-[clamp(26px,3.6vw,40px)] font-semibold tracking-[-0.02em]">
-              Built so the money path is safe by construction.
+              Built so SmartRemit never holds your money.
             </h2>
             <div className="mt-8 grid gap-5 sm:grid-cols-2">
               <Pillar title="Non-custodial by design">
@@ -195,13 +195,13 @@ export default function AboutPage() {
               <Pillar title="Licensed partners move the money">
                 {`The regulated money-transmitter partner holds the license and operates the rails. SmartRemit is the technology layer around them.`}
               </Pillar>
-              <Pillar title="Encrypted at rest, masked by default">
-                {`Payout destinations, recipient legal names, customer data and integration secrets are AES-256-GCM encrypted at rest and masked in dashboards; staff reveals are audited.`}
+              <Pillar title="Field-level encryption, masked by default">
+                {`Payout account details, recipients' legal names, identity-verification data and integration secrets are encrypted at the field level (AES-256-GCM) and masked in dashboards; staff reveals are audited. Phone numbers, support messages and the recent chat history are not encrypted yet.`}
               </Pillar>
               <Pillar title="Durable & idempotent">
                 {`Every external effect is a transactional outbox row with automatic retry — nothing is silently lost, and crash-replays never duplicate a transfer.`}
               </Pillar>
-              <Pillar title="Full audit trail">
+              <Pillar title="Append-only audit log">
                 {`KYC decisions, blocked attempts and sensitive-data reveals are written to an append-only, per-partner audit log.`}
               </Pillar>
             </div>

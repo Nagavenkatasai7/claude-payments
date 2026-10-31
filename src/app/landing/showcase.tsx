@@ -167,7 +167,7 @@ export function OpsMock() {
           ))}
         </div>
         <p className="mt-3 text-[11.5px] text-[#52607a]">
-          PII encrypted at rest — every staff reveal is audited.
+          Payout and identity data encrypted at the field level — every staff reveal is audited.
         </p>
       </div>
     </div>
@@ -244,7 +244,7 @@ export function AiMock() {
             <span className="text-[#047857]">✓</span> Tiered KYC — partner-delegable
           </li>
           <li className="flex items-baseline gap-2">
-            <span className="text-[#047857]">✓</span> Full audit trail, end to end
+            <span className="text-[#047857]">✓</span> Audit log of KYC decisions and staff reveals
           </li>
         </ul>
       </div>
