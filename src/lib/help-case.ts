@@ -19,7 +19,12 @@ import type { PartnerId } from './types';
  *    this tenant: findOpenHumanHelpCase is tenant-scoped in SQL);
  *  - the ticket.triage outbox row (deduped triage:<id>);
  *  - one ops.alert (deduped help:<id>), carrying the tenant, the case id and the
- *    fixed reason only: never the phone or the customer's words.
+ *    fixed reason only: never the phone or the customer's words;
+ *  - on a REUSED case, a new and more serious reason (an unauthorised payment
+ *    after a plain HELP, say) is not folded in silently: a fixed staff-only note
+ *    ("Also reported: <reason>.", never the customer's text), an alert deduped
+ *    help:<id>:<reason> and a fresh triage (triage:<id>:<reason>), so staff see
+ *    the escalation. The same reason again adds nothing.
  * The caller pokes the worker AFTER its commit (openHelpCaseAndPoke does both),
  * so the worker never wakes for rows that may still roll back.
  *
@@ -56,6 +61,34 @@ export interface HelpCaseResult {
 
 const HELP_SUMMARY_MAX = 300;
 
+/**
+ * How serious a reason is. A reused case escalates only for a reason above a
+ * plain question that the case has not recorded yet.
+ */
+const REASON_RANK: Readonly<Record<HelpCaseReason, number>> = {
+  question: 0,
+  other: 0,
+  cancel_request: 1,
+  complaint: 2,
+  account_access: 3,
+  payment_problem: 4,
+  unauthorised: 5,
+};
+const FIRST_REASON = /^Reason: ([a-z_]+)\./;
+const ALSO_REPORTED = /^Also reported: ([a-z_]+)\./;
+
+/** The reasons a case already records: its opening message and every escalation note. */
+async function recordedReasons(tx: DbOrTx, ticketId: string): Promise<Set<string>> {
+  const messages = await createTicketRepo(tx).listMessages(ticketId, { includeInternal: true });
+  const out = new Set<string>();
+  messages.forEach((m, i) => {
+    // The opening message's fixed prefix, then only OUR notes (never a customer or staff reply).
+    const hit = i === 0 ? FIRST_REASON.exec(m.body) : m.actorType === 'system' ? ALSO_REPORTED.exec(m.body) : null;
+    if (hit) out.add(hit[1]);
+  });
+  return out;
+}
+
 function caseBody(input: OpenHelpCaseInput): string {
   if (input.source === 'keyword') {
     return `Reason: ${input.reason}. Opened by the ${input.channel} chat when the customer asked for help. The customer's message is not copied here; read it in the conversation log.`;
@@ -89,6 +122,21 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
     { message: `🙋 SmartRemit ops: a customer asked for a person — case ${ticket.id} (${ticket.partnerId}) is in the Tickets queue. Reason: ${input.reason}.` },
     { dedupeKey: `help:${ticket.id}` },
   );
+  if (open && REASON_RANK[input.reason] > REASON_RANK.question && !(await recordedReasons(tx, ticket.id)).has(input.reason)) {
+    await tickets.appendMessage({
+      ticketId: ticket.id,
+      actorType: 'system',
+      actorId: 'system',
+      internal: true,
+      body: `Also reported: ${input.reason}. The ${input.channel} chat matched a new request on this open case. The customer's message is not copied here; read it in the conversation log.`,
+    });
+    await outbox.enqueue('ticket.triage', { ticketId: ticket.id }, { dedupeKey: `triage:${ticket.id}:${input.reason}` });
+    await outbox.enqueue(
+      'ops.alert',
+      { message: `🙋 SmartRemit ops: open case ${ticket.id} (${ticket.partnerId}) has a new report. Reason: ${input.reason}.` },
+      { dedupeKey: `help:${ticket.id}:${input.reason}` },
+    );
+  }
   return { caseId: ticket.id, partnerId: ticket.partnerId, created: !open };
 }
 

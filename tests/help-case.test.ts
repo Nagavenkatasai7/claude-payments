@@ -81,14 +81,45 @@ describe('openHelpCase(tx): ticket + triage + one deduped alert, in the caller t
     expect(await outboxRows('ops.alert')).toEqual([]);
   });
 
-  it('a second request reuses the open case and adds nothing (a retried turn too)', async () => {
+  it('a second request for the same reason reuses the open case and adds nothing (a retried turn too)', async () => {
     const input = { partnerId: 'default', phone: PHONE, reason: 'question', channel: 'whatsapp', source: 'keyword' } as const;
     const a = await db.transaction((tx) => openHelpCase(tx, input));
-    const b = await db.transaction((tx) => openHelpCase(tx, { ...input, reason: 'complaint' }));
+    const b = await db.transaction((tx) => openHelpCase(tx, input));
     expect(b).toEqual({ caseId: a.caseId, partnerId: 'default', created: false });
     expect(await createTicketRepo(db).listByCustomer(PHONE)).toHaveLength(1);
     expect(await outboxRows('ticket.triage')).toHaveLength(1);
     expect(await outboxRows('ops.alert')).toHaveLength(1);
+    expect(await createTicketRepo(db).listMessages(a.caseId, { includeInternal: true })).toHaveLength(1);
+  });
+
+  // Review fix: a later, more serious report must reach staff even when a case is open.
+  it('HELP then "I didn\'t make this transfer": the reused case gets a fixed note, its own alert and a fresh triage', async () => {
+    const base = { partnerId: 'default', phone: PHONE, channel: 'whatsapp', source: 'keyword' } as const;
+    const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
+    const b = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
+    expect(b).toEqual({ caseId: a.caseId, partnerId: 'default', created: false });
+    const msgs = await createTicketRepo(db).listMessages(a.caseId, { includeInternal: true });
+    expect(msgs).toHaveLength(2);
+    expect(msgs[1]).toMatchObject({ actorType: 'system', internal: true });
+    expect(msgs[1].body).toMatch(/^Also reported: unauthorised\./);
+    expect(msgs[1].body).not.toContain(PHONE);
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.map((x) => x.dedupe_key)).toEqual([`help:${a.caseId}`, `help:${a.caseId}:unauthorised`]);
+    expect(String(alerts[1].payload.message)).toContain('unauthorised');
+    expect(JSON.stringify(alerts[1].payload)).not.toContain(PHONE);
+    expect((await outboxRows('ticket.triage')).map((x) => x.dedupe_key)).toEqual([`triage:${a.caseId}`, `triage:${a.caseId}:unauthorised`]);
+    // The same report again adds nothing more.
+    await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
+    expect(await outboxRows('ops.alert')).toHaveLength(2);
+    expect(await createTicketRepo(db).listMessages(a.caseId, { includeInternal: true })).toHaveLength(2);
+  });
+
+  it('a cancel case followed by a fraud claim escalates; a plain question after either does not', async () => {
+    const base = { partnerId: 'default', phone: PHONE, channel: 'telegram', source: 'keyword' } as const;
+    const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'cancel_request' }));
+    await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
+    await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
+    expect((await outboxRows('ops.alert')).map((x) => x.dedupe_key)).toEqual([`help:${a.caseId}`, `help:${a.caseId}:unauthorised`]);
   });
 
   it("is tenant-scoped: a sibling tenant's open case for the same phone is never reused", async () => {
