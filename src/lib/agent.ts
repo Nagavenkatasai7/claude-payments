@@ -34,6 +34,7 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
 import { PURPOSE_SCAM_WARNING } from './purpose-detail';
+import { modelVisibleResult } from './model-visible-result';
 export { FALLBACK_REPLY };
 
 export interface AgentDeps {
@@ -485,10 +486,13 @@ export function createAgent(deps: AgentDeps) {
           if (gateActive && typeof (result as Record<string, unknown>).kyc_url === 'string') {
             paymentLinks.push((result as Record<string, unknown>).kyc_url as string);
           }
+          // R30 (no tipping-off): the model (and the stored history) only ever
+          // sees the model-visible copy: no remaining figure, no EDD threshold,
+          // no screening field, at any depth.
           history.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: JSON.stringify(result),
+            content: JSON.stringify(modelVisibleResult(result)),
           });
         }
         continue;

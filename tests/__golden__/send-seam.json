@@ -234,11 +234,10 @@
       {
         "ok": {
           "error": "Cap exceeded for this transfer.",
+          "reply_to_customer": "This is more than you can send today. You can send a smaller amount, or try again on another day.",
           "cap_eval": {
             "tier": "T0",
             "reason": "over_daily_cap",
-            "today_used_usd": 400,
-            "today_remaining_usd": 100,
             "daily_cap_usd": 500
           }
         }
@@ -263,11 +262,10 @@
       {
         "ok": {
           "error": "Cap exceeded for this transfer.",
+          "reply_to_customer": "This is more than you can send in one transfer. You can send a smaller amount.",
           "cap_eval": {
             "tier": "T0",
             "reason": "over_per_transfer_cap",
-            "today_used_usd": 0,
-            "today_remaining_usd": 500,
             "daily_cap_usd": 500
           }
         }
@@ -285,7 +283,7 @@
       {
         "ok": {
           "blocked": true,
-          "reply_to_customer": "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team."
+          "reply_to_customer": "This transfer can't be completed, and you have not been charged. If you'd like help, say you'd like to talk to a person."
         }
       }
     ],
@@ -912,8 +910,7 @@
           "reason": "over_per_transfer_cap",
           "daily_cap_usd": 500,
           "per_transfer_cap_usd": 500,
-          "today_used_usd": 0,
-          "today_remaining_usd": 500,
+          "reply_to_customer": "This is more than you can send in one transfer. You can send a smaller amount.",
           "day_of_window": 1
         }
       }
@@ -934,8 +931,7 @@
           "reason": "over_per_transfer_cap",
           "daily_cap_usd": 500,
           "per_transfer_cap_usd": 500,
-          "today_used_usd": 0,
-          "today_remaining_usd": 500,
+          "reply_to_customer": "This is more than you can send in one transfer. You can send a smaller amount.",
           "day_of_window": 1,
           "kyc_url": "https://example.com/admin-dashboard/customers"
         }

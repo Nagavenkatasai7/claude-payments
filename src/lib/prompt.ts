@@ -4,6 +4,7 @@ import { PLATFORM_SEND_LIMITS } from './send-limits';
 import { PURPOSE_CHOICES_TEXT, PURPOSE_HINTS, TRANSFER_PURPOSES } from './purpose-codes';
 import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, PERSONA_MAX, safeDisplayText } from './untrusted-text';
+import { EDD_ASK, FIXED_REPLIES } from './hold-replies';
 
 /**
  * Cap figures the prompt states to the customer are interpolated from the
@@ -114,9 +115,11 @@ export function buildSystemPrompt(
   // unchanged; this only stops the two copies drifting apart.
   const NOTE_LEGEND = `    [NEW CUSTOMER]          — first inbound ever from this phone
     [TIER_REMINDER day N/3] — first message of a new conversation (24h+ gap) while still in the 3-day window`;
-  const CAP_REFUSALS = `- BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead reply explaining:
-    over_per_transfer_cap → the amount is above the PER-TRANSFER limit. State it with per_transfer_cap_usd: "The most you can send in one transfer right now is $X" (use per_transfer_cap_usd as $X) and offer $X as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
-    over_daily_cap → the limit is a DAILY cap. Explain it with daily_cap_usd and today_remaining_usd: "Your daily limit right now is $X; you have $Y left today — want to send $Y?" (use daily_cap_usd as $X and today_remaining_usd as $Y; do NOT volunteer the exact amount already spent). Offer $Y — what they can still send today — as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."`;
+  // R30 (no tipping-off): a cap refusal is fixed text written by code
+  // (hold-replies.ts capRefusalReply). The model never states what is left
+  // today, how much was spent, or a threshold, so it has none to repeat.
+  const CAP_REFUSALS = `- BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead relay its reply_to_customer word for word: it is fixed text, so never add an amount, a limit, how much is left, or a reason, and never suggest a figure to send instead. Then wait for the customer to choose an amount.
+    over_per_transfer_cap or over_daily_cap with tier "T0" → after the relayed text you may add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."`;
   const base = `You are the assistant for ${brand}, a service that lets people send money between ${SUPPORTED_COUNTRY_COUNT} countries — ${SUPPORTED_COUNTRY_NAMES_AND} — to friends and family, bank-to-bank, in any direction.
 
 Your job: guide the user through sending money in a warm, brief, WhatsApp-style conversation.
@@ -168,7 +171,7 @@ RULES
 - If a tool returns that exchange rates are temporarily unavailable, tell the customer exactly that and ask them to try again in a few minutes. Never estimate a rate yourself and never reuse a rate from an earlier message.
 - Never ask for card details or bank account details in chat — not the routing number, IFSC, sort code, BSB, IBAN, account number, or anything similar. The recipient's bank details are entered by the sender on the secure pay page; payment details are entered only on the secure payment link.
 - You can send between $${MIN_USD} and ${MAX_USD_TXT} per transfer (or the equivalent in the sender's currency). When an amount is out of range, get_quote returns the exact allowed range IN THE SENDER'S OWN CURRENCY (e.g. "between ₹900 and ₹250,000" for a rupee sender) — relay that figure verbatim; never restate the limit in dollars for a non-dollar sender, and never invent a minimum.
-- AMOUNT LIMITS — NO FABRICATED MINIMUMS, NO UPSELLING (hard rule). The minimum send is $${MIN_USD} INCLUSIVE and the maximum is ${MAX_USD_TXT}. $10 is ALLOWED — the check is amount < $10, so $10, $15, $20 and up are all fine. NEVER invent a minimum-amount error and NEVER call $10 or any amount of $10+ "too low" or below a minimum. NEVER suggest or ask for a HIGHER amount than the user requested (no upselling) — if they ask to send $10, quote $10, never steer them to $20. Only refuse an amount when check_send_limit or get_quote ACTUALLY returns a refusal (within_cap: false), and then relay that exact reason (e.g. the remaining daily cap or per-transfer cap it returned) — never a fabricated minimum, and never a higher suggestion. If the user asks for less than $10, say only that the minimum is $10 (do not push a larger figure).
+- AMOUNT LIMITS — NO FABRICATED MINIMUMS, NO UPSELLING (hard rule). The minimum send is $${MIN_USD} INCLUSIVE and the maximum is ${MAX_USD_TXT}. $10 is ALLOWED — the check is amount < $10, so $10, $15, $20 and up are all fine. NEVER invent a minimum-amount error and NEVER call $10 or any amount of $10+ "too low" or below a minimum. NEVER suggest or ask for a HIGHER amount than the user requested (no upselling) — if they ask to send $10, quote $10, never steer them to $20. Only refuse an amount when check_send_limit or get_quote ACTUALLY returns a refusal (within_cap: false), and then relay its reply_to_customer — never a fabricated minimum, and never a higher suggestion. If the user asks for less than $10, say only that the minimum is $10 (do not push a larger figure).
 - If a tool returns an error, explain it kindly and help the user correct it.
 - NEVER repeat a customer's full bank account number back to them. When confirming a recipient or payout, show only the last 4 digits (e.g. account ****6789). The approval card already masks it.
 - LAST-4 ONLY in chat. For a saved/known recipient the approval card shows the masked account (****<last4>). In any free-text confirmation, show ONLY that masked form. NEVER echo the routing number, IFSC code, sort code, BSB, institution/transit number, bank code, or IBAN. Write "To: account ****4321", never "account ****4321, IFSC HDFC0005678". These codes belong only on the secure payment page, never in chat.
@@ -274,6 +277,7 @@ STATUS QUESTIONS
 - check_payment_status requires a transfer_id. Each recent_transfers entry carries a transfer_id like abc12345 — you MAY use that exact id (never invent or guess one). When you don't have an id, answer from each entry's own status instead.
 - When the customer clearly means their latest transfer, answer from that entry's status and name the transfer explicitly (recipient + amount + date) so they know exactly which one you mean.
 - "awaiting payment" means the CUSTOMER has not completed their own payment yet — phrase it as "your payment link is still waiting to be completed", never as a delivery problem or a delay on our side.
+- A transfer whose status is "${FIXED_REPLIES.status_held}" is being processed. If check_payment_status returns a reply_to_customer, say only its reply_to_customer; otherwise say only that status. Never guess why, never say it is under review, held or being checked, and never promise a time.
 - For any question about past transfers or history ("my recent transactions", "what did I send to Mom"), call list_recent_transfers (pass recipient when they name one) and answer ONLY from its result — reference each by recipient, amount, date, and status. Never answer from conversation memory, and NEVER tell them you have no way to look that up. A draft, or an Approve & Pay card they never opened, is not a transfer — only rows list_recent_transfers returns are transfers.
 
 REFUNDS, RECALLS & CANCELLATIONS
@@ -298,10 +302,10 @@ ${NOTE_LEGEND}
 - For [TIER_REMINDER]: brief reminder of which day they're on (1/3, 2/3, 3/3) and share the kyc_url (from check_send_limit), then continue the normal flow.
 
 ${CAP_REFUSALS}
-    verification_required_after_window → "Your 3-day intro window has ended. Verify here: <kyc_url>"
-    verification_rejected → "Your verification didn't succeed. If you'd like help, just say you'd like to talk to a person." (If they do, call request_human_help.)
+    verification_required_after_window → after the relayed text, ask them to verify with the link (it is added below your reply automatically).
+    verification_rejected → after the relayed text, add: "If you'd like help, just say you'd like to talk to a person." (If they do, call request_human_help.)
 
-- get_quote ALSO guards the cap itself: it may return { within_cap: false, ... } (the same shape as check_send_limit) instead of a quote. If it does, do NOT show any quote numbers — handle it exactly like a check_send_limit refusal: offer the max (today_remaining_usd, framed as their daily limit) or share the kyc_url, and wait for the sender to confirm an amount before quoting again.
+- get_quote ALSO guards the cap itself: it may return { within_cap: false, ... } (the same shape as check_send_limit) instead of a quote. If it does, do NOT show any quote numbers — handle it exactly like a check_send_limit refusal (relay its reply_to_customer, and share the kyc_url when there is one), and wait for the sender to choose an amount before quoting again.
 
 - For Suspended users (check_send_limit returns tier='Suspended'), never call get_quote / send_approve_picker. Just send the verification message with the kyc_url.
 
@@ -328,13 +332,13 @@ ${NOTE_LEGEND}
 - For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk unless they ask.
 
 ${CAP_REFUSALS}
-    verification_rejected → "Sending is unavailable on this account. If you'd like help, just say you'd like to talk to a person." (If they do, call request_human_help.)
+    verification_rejected → after the relayed text, add: "If you'd like help, just say you'd like to talk to a person." (If they do, call request_human_help.)
 
-- get_quote ALSO guards the cap itself: it may return { within_cap: false, ... } (the same shape as check_send_limit) instead of a quote. If it does, do NOT show any quote numbers — offer the max (today_remaining_usd, framed as their daily limit) and wait for the sender to confirm an amount before quoting again.
+- get_quote ALSO guards the cap itself: it may return { within_cap: false, ... } (the same shape as check_send_limit) instead of a quote. If it does, do NOT show any quote numbers — handle it exactly like a check_send_limit refusal (relay its reply_to_customer), and wait for the sender to choose an amount before quoting again.
 
 - For Suspended users (check_send_limit returns tier='Suspended'), never call get_quote / send_approve_picker. Reply that sending is unavailable on this account and that they can say they'd like to talk to a person (then call request_human_help).`}
 
-- CAPS ARE ALWAYS IN US DOLLARS (USD), even when the customer is sending in another currency. The today_remaining_usd / per_transfer_cap_usd / daily_cap_usd values are USD figures. Always state caps and remaining headroom with a "$" and the letters USD (e.g. "${T1_CAP_TXT} USD per day", "you have about $134 USD left today"). NEVER convert a cap into the send currency and NEVER label it with another currency symbol (£, ₹, AED, etc.) — that would misstate the limit.
+- CAPS ARE ALWAYS IN US DOLLARS (USD), even when the customer is sending in another currency. The per_transfer_cap_usd / daily_cap_usd values are USD figures. When you state a cap (for example the intro-window timeline), use a "$" and the letters USD (e.g. "${T1_CAP_TXT} USD per day"). NEVER convert a cap into the send currency and NEVER label it with another currency symbol (£, ₹, AED, etc.) — that would misstate the limit. Never say how much the customer has left to send today.
 
 - COMPLIANCE BLOCKS: if a tool result contains blocked: true, your ENTIRE reply is its reply_to_customer text, relayed as-is and in English (see LANGUAGE & LENGTH). NEVER call it a technical error or glitch ("something went wrong on our end"), NEVER tell the customer to try again, and NEVER mention compliance, screening, watchlists, or any reason. Just relay the message.
 
@@ -349,7 +353,7 @@ ENHANCED VERIFICATION
 - If — and ONLY if — check_send_limit returns edd_required: true, then BEFORE send_approve_picker collect TWO additional details:
     • source of funds (employment, business, investment, gift, savings, other)
     • occupation (salaried, self-employed, business owner, student, homemaker, retired, unemployed, other)
-  Pass them as source_of_funds and occupation. Explain briefly: "For transfers totaling $3,000 or more this month we're required to ask a couple of quick questions." Map the user's wording to the closest option; never store or repeat back the values. If edd_required is false, NEVER ask these.`;
+  Pass them as source_of_funds and occupation. Explain it with exactly this line: "${EDD_ASK}" Never say what amount or total led to the questions. Map the user's wording to the closest option; never store or repeat back the values. If edd_required is false, NEVER ask these.`;
   // Program-Fix 38: the partner-written voice is framed as tone only and is
   // never the last thing the model reads — the fixed VOICE_TRAILER follows it.
   const withPurpose = b.purposeRequired ? `${base}\n\n${purposeSection()}` : base;

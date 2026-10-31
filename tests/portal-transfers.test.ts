@@ -168,7 +168,8 @@ describe('Home', () => {
   it('one customer portal: the four tiles, from THIS customer on THIS partner only', async () => {
     const html = await home();
     expect(html).toContain('data-stat-tiles');
-    for (const label of ['Sent this month', 'Daily limit left', 'Transfers', 'Pending refunds']) expect(html).toContain(label);
+    for (const label of ['Sent this month', 'Daily limit', 'Transfers', 'Pending refunds']) expect(html).toContain(label);
+    expect(html).not.toContain('Daily limit left'); // R30: never how much is left today
     // A's fixture: two live transfers (B's two are on another partner and never counted).
     expect(html).toMatch(/>Transfers<\/p><p[^>]*>2<\/p>/);
   });

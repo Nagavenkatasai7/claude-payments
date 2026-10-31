@@ -912,7 +912,7 @@ describe('createAgent — TurnContext', () => {
     expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(false);
   });
 
-  it('R6b: an approve-tap create_transfer on WhatsApp is refused at dispatch; the draft survives, nothing is minted', async () => {
+  it('R30: a stale approve-tap call to the deleted create_transfer runs nothing; the draft survives, nothing is minted', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
@@ -971,7 +971,8 @@ describe('createAgent — TurnContext', () => {
     expect(await store.listTransfers()).toHaveLength(0);
     const saved = await store.getConversation('default', '15551234567');
     const toolMsg = saved.find((m) => m.role === 'tool');
-    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'not available here' });
+    // R30 deleted the tool, so the old name is simply unknown (no schema, no dispatch).
+    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'Unknown tool: create_transfer' });
   });
 });
 
@@ -997,9 +998,8 @@ describe('replay safety', () => {
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });
 
-    // LLM tries to call create_transfer with the (guessed) draftId — but with
-    // no buttonTap in context, it must fall back to the legacy explicit-args
-    // path, which requires recipient_phone etc. and rejects an empty payload.
+    // LLM tries to call the deleted create_transfer with the (guessed) draftId:
+    // R30 removed the tool, so the call runs nothing at all.
     const responses: ChatMessage[] = [
       {
         role: 'assistant',
@@ -1615,7 +1615,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     });
     await agent.runAgentTurn(PHONE, 'hello');
     // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name.
-    // Program-Fix 49B: create_transfer and generate_payment_link are hidden on WhatsApp (29 → 27).
+    // Program-Fix 49B: generate_payment_link is hidden on WhatsApp; R30 deleted create_transfer (28 → 27).
     expect(seenTools).toHaveLength(27);
     expect(seenTools.map((t) => t.function.name)).not.toContain('create_transfer');
     expect(seenTools.map((t) => t.function.name)).not.toContain('generate_payment_link');
@@ -1769,9 +1769,9 @@ describe('row deadline (fix 7)', () => {
     const ctrl = new AbortController();
     const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
       if (chat.mock.calls.length === 1) {
-        // Round 0: the model runs a side-effecting tool (a schedule write). R6b:
-        // create_transfer is no longer dispatched on WhatsApp, so the write that
-        // must happen EXACTLY once is create_schedule's row, not a chat mint.
+        // Round 0: the model runs a side-effecting tool (a schedule write). No
+        // chat tool mints (R30 deleted the old one), so the write that must
+        // happen EXACTLY once is create_schedule's row.
         return {
           role: 'assistant', content: '',
           tool_calls: [{ id: 'c1', type: 'function', function: {

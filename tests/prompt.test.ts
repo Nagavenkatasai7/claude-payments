@@ -3,6 +3,7 @@ import { SYSTEM_PROMPT, VOICE_TRAILER, buildSystemPrompt } from '@/lib/prompt';
 import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { toolSchemasForChannel, RATE_LOCK_MINUTES } from '@/lib/tools';
 import { DRAFT_TTL_SECONDS } from '@/lib/draft-store';
+import { EDD_ASK, FIXED_REPLIES } from '@/lib/hold-replies';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -112,12 +113,11 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('never echo the routing number');
   });
 
-  it('Fix #2: over_daily_cap message does NOT volunteer the amount already spent', () => {
-    // Old wording "(already sent $Z today)" must be gone
+  it('Fix #2 / R30: a cap refusal states neither the amount already spent nor what is left today', () => {
     expect(SYSTEM_PROMPT).not.toContain('already sent $Z today');
-    // New wording uses today_remaining_usd
-    expect(SYSTEM_PROMPT).toContain('today_remaining_usd');
-    expect(SYSTEM_PROMPT).toContain('do NOT volunteer the exact amount already spent');
+    expect(SYSTEM_PROMPT).not.toContain('today_remaining_usd');
+    expect(SYSTEM_PROMPT).not.toContain('today_used_usd');
+    expect(SYSTEM_PROMPT).not.toContain('left today');
   });
 
   it('Fix #3: send-amount lock rule is present', () => {
@@ -166,6 +166,47 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(p).toContain('detected_destination_country');
     // Source currency is auto-detected from the sender's number, never assumed USD.
     expect(p).toContain('never assume usd');
+  });
+});
+
+describe('SYSTEM_PROMPT — R30: no thresholds, no remaining amounts, fixed hold wording', () => {
+  const variants = [
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true, purposeRequired: true }),
+  ];
+
+  it('has no $134 example, no $3,000 trigger and no "left today" in any variant', () => {
+    for (const p of variants) {
+      expect(p).not.toContain('$134');
+      expect(p).not.toContain('$3,000');
+      expect(p).not.toContain('3,000');
+      expect(p).not.toContain('left today');
+      expect(p).not.toContain('remaining headroom');
+    }
+  });
+
+  it('ENHANCED VERIFICATION explains the two questions with the fixed EDD_ASK text, never an amount', () => {
+    for (const p of variants) {
+      const section = p.slice(p.indexOf('ENHANCED VERIFICATION'));
+      expect(section).toContain(`"${EDD_ASK}"`);
+      expect(section).not.toMatch(/totaling|this month/i);
+    }
+  });
+
+  it('STATUS QUESTIONS: a held transfer gets only the fixed wording, never a guess at why', () => {
+    for (const p of variants) {
+      expect(p).toContain(`"${FIXED_REPLIES.status_held}"`);
+      expect(p).toContain('say only its reply_to_customer');
+      expect(p).toContain('never say it is under review, held or being checked');
+    }
+  });
+
+  it('a refusal from check_send_limit or get_quote is relayed as reply_to_customer, never as "the remaining daily cap"', () => {
+    for (const p of variants) {
+      expect(p).not.toContain('the remaining daily cap');
+      expect(p).toContain('relay its reply_to_customer');
+    }
   });
 });
 
@@ -315,20 +356,14 @@ describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeli
     buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
   ];
 
-  it('over_daily_cap refusals are framed as a DAILY limit (daily_cap_usd + today_remaining_usd) in BOTH variants', () => {
+  it('R30: every cap refusal relays the tool\'s fixed reply_to_customer word for word in BOTH variants', () => {
     for (const p of variants) {
-      expect(p).toContain('over_daily_cap → the limit is a DAILY cap');
-      expect(p).toContain('Your daily limit right now is $X; you have $Y left today — want to send $Y?');
-      expect(p).toContain('use daily_cap_usd as $X and today_remaining_usd as $Y');
-      expect(p).toContain('as the actionable next step');
-    }
-  });
-
-  it('over_per_transfer_cap refusals use per_transfer_cap_usd (fix 16: the per-transfer cap can sit below the daily cap)', () => {
-    for (const p of variants) {
-      expect(p).toContain('over_per_transfer_cap → the amount is above the PER-TRANSFER limit');
-      expect(p).toContain('use per_transfer_cap_usd as $X');
-      // The pre-fix rule ("never phrase it per transfer") is gone.
+      expect(p).toContain('relay its reply_to_customer word for word');
+      expect(p).toContain('never add an amount, a limit, how much is left, or a reason');
+      // The figures the old wording asked for are gone.
+      expect(p).not.toContain('you have $Y left today');
+      expect(p).not.toContain('today_remaining_usd as $Y');
+      expect(p).not.toContain('use per_transfer_cap_usd as $X');
       expect(p).not.toContain('NEVER phrase the limit as "per transfer"');
     }
   });
@@ -341,10 +376,11 @@ describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeli
     }
   });
 
-  it('the get_quote cap-guard offers the remaining daily amount, never the per-transfer field', () => {
+  it('R30: the get_quote cap-guard is handled like a check_send_limit refusal, with no figure offered', () => {
     for (const p of variants) {
-      expect(p).toContain('offer the max (today_remaining_usd, framed as their daily limit)');
-      expect(p).not.toContain('(today_remaining_usd / per_transfer_cap_usd)');
+      expect(p).toContain('get_quote ALSO guards the cap itself');
+      expect(p).toContain('handle it exactly like a check_send_limit refusal (relay its reply_to_customer');
+      expect(p).not.toContain('offer the max');
     }
   });
 

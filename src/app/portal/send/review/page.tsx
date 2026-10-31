@@ -172,8 +172,7 @@ export default async function PortalSendReviewPage() {
   }
   if (q.kind === 'kyc_required') return shell(<Refusal copy={kycRoute({ error: 'portal.send.kycBody', kyc: 'verify' })} />);
   if (q.kind === 'cap') {
-    const ev = q.evaluation;
-    return shell(<Refusal copy={kycRoute(capCopy(ev.reason, { todayRemainingUsd: ev.todayRemainingCents / 100, perTransferCapUsd: ev.perTransferCapCents / 100 }, site.brand))} />);
+    return shell(<Refusal copy={kycRoute(capCopy(q.evaluation.reason, site.brand))} />);
   }
   if (q.kind === 'fx_unavailable') return shell(<Refusal copy={{ error: 'portal.send.fx_unavailable' }} />);
   if (q.kind === 'invalid_request') return shell(<Refusal copy={{ error: 'portal.send.amount_not_allowed' }} />);

@@ -4,6 +4,7 @@ import type { CurrencyCode, Transfer } from './types';
 import { NAME_MAX, safeDisplayText } from './untrusted-text';
 import { maskPhoneLast4 } from './mask';
 import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
+import { HOLD_REPLY } from './hold-replies';
 
 export interface StageResult {
   transfer: Transfer;
@@ -96,6 +97,10 @@ const STAGE1_DELIVERY = deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS);
  * B2B / ACH-pull (`transferType==='b2b'` or `fundingMethod==='ach_pull'`) gets
  * "debited from your business account" wording; the consumer (b2c) shape is
  * byte-identical to before. The raw bank account is NEVER named in either case.
+ *
+ * R30 (no tipping-off): a held transfer's message carries the fixed HOLD_REPLY
+ * (hold-replies.ts) and opens exactly like the paid one ("charged"), so it never
+ * names a review or hints at one.
  */
 export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }): string {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
@@ -107,12 +112,12 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
 
   if (isBusinessFunded(transfer)) {
     return opts?.held
-      ? `✅ Payment received — ${sourceCharge} will be debited from your business account. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
+      ? `✅ Payment received — ${sourceCharge} will be debited from your business account. ${HOLD_REPLY} Transfer ID: ${transfer.id}`
       : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
   }
 
   return opts?.held
-    ? `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
+    ? `✅ Payment received — ${sourceCharge} charged. ${HOLD_REPLY} Transfer ID: ${transfer.id}`
     : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
 }
 

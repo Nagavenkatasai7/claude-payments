@@ -1,6 +1,6 @@
 ## What this is
 
-SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "how much can I still send today?" or "did yesterday's transfer arrive?", and set up a repeat payment such as "send Mom $200 on the 5th of every month".
+SmartRemit runs a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server. A SmartRemit customer can connect an AI app such as Claude, ChatGPT or Perplexity to their own SmartRemit account. The app can then answer questions like "how much would my mother get for $500?", "what are my sending limits?" or "did yesterday's transfer arrive?", and set up a repeat payment such as "send Mom $200 on the 5th of every month".
 
 The rule that shapes everything below: **the AI app never pays.** It can look things up, it can prepare a transfer to one of the customer's saved recipients, and it can set up, pause and cancel the customer's repeat payments. Preparing a transfer gives a pay link, and each due day of a repeat payment sends the customer a pay link on WhatsApp. Only the customer pays, on the SmartRemit pay page, with a code sent to their WhatsApp. Nothing moves until they do.
 
@@ -88,13 +88,13 @@ What it would cost to send an amount, and what the recipient would get. Scope `q
 | `destination_country` | string | ISO 3166 alpha-2. Default `IN` (India). |
 | `funding_method` | string | How the customer would pay. Default `bank_transfer`. |
 
-Returns `quote_available: true` with `send_amount`, `send_currency`, `fee`, `total_to_pay`, `exchange_rate`, `recipient_gets`, `recipient_currency`, `delivery_estimate`, `rate_date`, `rate_locked: false` and a `next_step`. The rate is **not** locked: it locks for <Fact name="rateLockMinutes" /> minutes only once the customer starts the send in WhatsApp or the portal. Over a limit, the answer is `quote_available: false` with the `reason` and the limits; before identity verification it is `reason: "verification_required"`.
+Returns `quote_available: true` with `send_amount`, `send_currency`, `fee`, `total_to_pay`, `exchange_rate`, `recipient_gets`, `recipient_currency`, `delivery_estimate`, `rate_date`, `rate_locked: false` and a `next_step`. The rate is **not** locked: it locks for <Fact name="rateLockMinutes" /> minutes only once the customer starts the send in WhatsApp or the portal. Over a limit, the answer is `quote_available: false` with the `reason`, the limits and a fixed `message` to pass on; before identity verification it is `reason: "verification_required"`.
 
 ### check_send_limit
 
-How much the customer can send now. Scope `quotes:read`. No input.
+The customer's sending limits, and whether they can send now. Scope `quotes:read`. No input.
 
-Returns `can_send_now`, `daily_limit_usd`, `per_transfer_limit_usd`, `remaining_today_usd`, `extra_details_required` and a `next_step`, or `verification_required: true` before identity verification.
+Returns `can_send_now`, `daily_limit_usd`, `per_transfer_limit_usd`, `extra_details_required` and a `next_step`, or `verification_required: true` before identity verification.
 
 ### list_recipients
 

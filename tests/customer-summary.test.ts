@@ -9,6 +9,7 @@ import {
   type CustomerSummarizerDeps,
 } from '@/lib/customer-summary';
 import type { ChatMessage, ChatTool, Customer, Partner, Transfer } from '@/lib/types';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 
 /**
  * customer-summary — the AI smart-summary card on the customer dashboard.
@@ -110,19 +111,26 @@ describe('buildSummaryContext', () => {
     expect(json).not.toContain(PHONE);                 // the sender's own number
   });
 
-  it('derives tier + remaining daily limit the same way check_send_limit does', () => {
+  it('derives tier + daily limit the same way check_send_limit does, and never what is left (R30)', () => {
     // Verified, past the 3-day window, gate on ⇒ T1 ($2,999/day); $500 used.
     const ctx = buildSummaryContext(customer(), [], 50_000, true);
     expect(ctx.tier).toBe('T1');
     expect(ctx.dailyLimitUsd).toBe(2999);
-    expect(ctx.dailyRemainingUsd).toBe(2499);
+    expect(ctx).not.toHaveProperty('dailyRemainingUsd');
+    expect(JSON.stringify(ctx)).not.toContain('2499');
   });
 
   it('states the RESOLVED limits: a tenant T1 cap of $1,000 makes dailyLimitUsd 1000 (fix 16)', () => {
     const limits = resolveEffectiveSendLimits({ sendLimits: { t1DailyCapCents: 100_000 } }, null);
     const ctx = buildSummaryContext(customer(), [], 50_000, true, limits);
     expect(ctx.dailyLimitUsd).toBe(1000);
-    expect(ctx.dailyRemainingUsd).toBe(500);
+    expect(ctx).not.toHaveProperty('dailyRemainingUsd');
+  });
+
+  it('a held transfer is projected with the fixed processing label (R30)', () => {
+    const ctx = buildSummaryContext(customer(), [transfer({ status: 'in_review' })], 0, true);
+    expect(ctx.recentTransfers[0].status).toBe(FIXED_REPLIES.status_held);
+    expect(JSON.stringify(ctx).toLowerCase()).not.toMatch(/review|looked at/);
   });
 
   it('counts only in-flight refunds as pending and overlays refund state per transfer', () => {
@@ -194,6 +202,13 @@ describe('buildDeterministicSummary', () => {
     expect(out).not.toContain('4242');
     expect(out).not.toContain('543210');
     expect(out).not.toContain(PHONE);
+  });
+
+  it('never states how much is left to send today (R30)', () => {
+    const ctx = buildSummaryContext(customer(), [transfer({ status: 'paid' })], 50_000, true);
+    const out = buildDeterministicSummary(ctx);
+    expect(out.toLowerCase()).not.toMatch(/left today|remaining/);
+    expect(out).not.toContain('2499');
   });
 });
 
@@ -285,5 +300,8 @@ describe('SUMMARY_SYSTEM_PROMPT — guardrails pinned', () => {
   });
   it('forbids compliance detail', () => {
     expect(SUMMARY_SYSTEM_PROMPT.toLowerCase()).toContain('no compliance detail');
+    // R30: the model is never handed, and never asked about, a remaining figure.
+    expect(SUMMARY_SYSTEM_PROMPT.toLowerCase()).not.toContain('remaining');
+    expect(SUMMARY_SYSTEM_PROMPT.toLowerCase()).not.toContain('taking a look');
   });
 });

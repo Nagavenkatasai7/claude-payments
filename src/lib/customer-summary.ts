@@ -9,6 +9,7 @@ import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits } from './send-limits'
 import type { SendLimits } from './types';
 import { sendGateActive } from './kyc-gate';
 import { logWarn } from './log';
+import { FIXED_REPLIES } from './hold-replies';
 import type {
   ChatMessage,
   ChatTool,
@@ -28,8 +29,8 @@ import type {
  *   - last 5 transfers (id / recipient / amount / status / refund state) from
  *     the default MASKED ledger read — and even the masked payout destination
  *     is deliberately NOT projected into the context,
- *   - tier + remaining daily limit (the same evaluateCap/sendGateActive
- *     composition check_send_limit uses),
+ *   - tier + daily limit (the same evaluateCap/sendGateActive composition
+ *     check_send_limit uses); R30: never the day's headroom,
  *   - how many refunds are still in flight.
  *
  * GUARDRAILS (do not regress):
@@ -42,13 +43,14 @@ import type {
 
 export const SUMMARY_SYSTEM_PROMPT = [
   'You write a short account summary for a SmartRemit customer, shown as a card on their account dashboard.',
-  "You are given a JSON snapshot of the customer's OWN account: their most recent transfers (id, recipient, amount, status, refund state), their current tier, their remaining daily sending limit in USD, and how many refunds are still in progress.",
+  "You are given a JSON snapshot of the customer's OWN account: their most recent transfers (id, recipient, amount, status, refund state), their current tier, their daily sending limit in USD, and how many refunds are still in progress.",
   'Rules:',
   '- Reply with 2-3 friendly sentences in plain language. Plain text only — no lists, no markdown, no emojis.',
   '- NEVER invent numbers, transfers, dates, or facts that are not in the JSON snapshot. Amounts in the snapshot are exact — repeat them verbatim or leave them out.',
   '- NO financial advice of any kind: never suggest when or how much to send, never comment on exchange-rate timing, never mention investments.',
   '- NO promises or guarantees: never promise delivery times or outcomes.',
-  '- NO compliance detail: never mention screening, sanctions, reviews, or verification internals. If a transfer is held up, say the team is taking a look.',
+  `- NO compliance detail: never mention screening, sanctions, reviews, or verification internals. A transfer whose status is "${FIXED_REPLIES.status_held}" is being processed: say only that, never why.`,
+  '- Never say how much the customer has left to send today.',
 ].join('\n');
 
 /** Customer-friendly status words so the model never parrots raw enum values. */
@@ -57,7 +59,7 @@ const STATUS_FACT: Record<string, string> = {
   paid: 'processing',
   delivered: 'delivered',
   cancelled: 'cancelled',
-  in_review: 'being looked at by the team',
+  in_review: FIXED_REPLIES.status_held, // R30: the fixed hold label, never a reason
   blocked: 'could not be completed',
 };
 
@@ -73,7 +75,6 @@ export interface SummaryTransferFact {
 export interface SummaryContext {
   tier: Tier;
   dailyLimitUsd: number;
-  dailyRemainingUsd: number;
   pendingRefunds: number;
   recentTransfers: SummaryTransferFact[];
 }
@@ -98,7 +99,7 @@ export function buildSummaryContext(
   return {
     tier: cap.tier,
     dailyLimitUsd: cap.dailyCapCents / 100,
-    dailyRemainingUsd: cap.todayRemainingCents / 100,
+    // R30 (no tipping-off): never the remaining figure, on any surface.
     pendingRefunds: transfers.filter(
       (t) => t.refundStatus === 'requested' || t.refundStatus === 'pending',
     ).length,
@@ -125,7 +126,7 @@ export function buildSummaryContext(
  * customer's own facts restated. Always returns non-empty plain text.
  */
 export function buildDeterministicSummary(context: SummaryContext): string {
-  const { recentTransfers, pendingRefunds, dailyRemainingUsd } = context;
+  const { recentTransfers, pendingRefunds } = context;
   const sentences: string[] = [];
 
   if (recentTransfers.length === 0) {
@@ -147,13 +148,6 @@ export function buildDeterministicSummary(context: SummaryContext): string {
       `You have ${pendingRefunds} ${noun} being reviewed by our team — we'll confirm once it's approved.`,
     );
   }
-
-  // Headroom is a fact already in the context (the same cap composition the
-  // bot's check_send_limit uses); no advice, just the remaining number.
-  const remaining = Math.max(0, Math.round(dailyRemainingUsd));
-  sentences.push(
-    `You have about $${remaining} of your daily sending limit left today.`,
-  );
 
   return sentences.join(' ');
 }

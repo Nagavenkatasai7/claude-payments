@@ -1,3 +1,5 @@
+import { FIXED_REPLIES } from '../../hold-replies';
+
 // The en catalogue: the source of truth for keys. To add a language, add <locale>.ts with the SAME
 // keys and register it in ./index.ts (one line); tests/i18n.test.ts fails otherwise.
 export const en = {
@@ -1211,7 +1213,7 @@ export const en = {
   'portal.timeline.created': 'Transfer created',
   'portal.timeline.paid': 'Payment received',
   'portal.timeline.delivered': 'Delivered to your recipient',
-  'portal.timeline.under_review': 'Under review. We will contact you if we need anything.',
+  'portal.timeline.under_review': FIXED_REPLIES.timeline_held, // R30: the fixed hold text, never a review word
   'portal.timeline.cancelled': 'Cancelled',
   'portal.timeline.refund_requested': 'Refund requested',
   'portal.timeline.refund_in_progress': 'Refund on the way',
@@ -1262,8 +1264,8 @@ export const en = {
   'portal.home.viewAll': 'View all',
   'portal.home.stat.sentMonth': 'Sent this month',
   'portal.home.stat.sentMonthSub': 'USD equivalent',
-  'portal.home.stat.dailyLeft': 'Daily limit left',
-  'portal.home.stat.dailyLeftSub': 'of {limit}',
+  'portal.home.stat.dailyLeft': 'Daily limit', // R30: the limit, never the day's headroom
+  'portal.home.stat.dailyLeftSub': 'USD equivalent',
   'portal.home.stat.transfers': 'Transfers',
   'portal.home.stat.transfersSub': 'all time',
   'portal.home.stat.refunds': 'Pending refunds',
@@ -1556,13 +1558,14 @@ export const en = {
   'portal.send.viewTransfers': 'View transfers',
   'portal.send.startNew': 'Start a new transfer',
   'portal.send.changed': 'These details changed in another window. Check them again before you continue.',
-  'portal.send.edd_whatsapp': 'This transfer needs a few extra verification questions that can only be answered in our WhatsApp chat. Message us on WhatsApp to finish it.',
+  'portal.send.edd_whatsapp': FIXED_REPLIES.edd_elsewhere, // R30: hold-replies.ts is the only source
   'portal.send.cannot_complete': 'This transfer can’t be completed. If you have questions, contact support.',
   'portal.send.fx_unavailable': 'We can’t get an exchange rate right now. Please try again in a few minutes.',
   'portal.send.amount_not_allowed': 'We can’t send this amount. Try a different amount.',
-  'portal.send.cap_daily': 'This is more than you can send today. You can still send {remaining} today.',
-  'portal.send.cap_per_transfer': 'This is more than you can send in one transfer. The most is {max}.',
-  'portal.send.cap_verify': 'Your account needs identity verification before you can send.',
+  // R30 (no tipping-off): the cap texts are hold-replies.ts entries, with no figure.
+  'portal.send.cap_daily': FIXED_REPLIES.cap_daily,
+  'portal.send.cap_per_transfer': FIXED_REPLIES.cap_per_transfer,
+  'portal.send.cap_verify': FIXED_REPLIES.cap_verify,
   'portal.send.contact_partner': 'We can’t accept transfers from this account. Please contact {brand} support.',
   'portal.send.kycTitle': 'Verify your identity to send',
   'portal.send.kycBody': 'Your account needs identity verification before you can send money.',

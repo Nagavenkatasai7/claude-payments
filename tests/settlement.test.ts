@@ -9,6 +9,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Transfer } from '@/lib/types';
+import { HOLD_REPLY } from '@/lib/hold-replies';
 
 // beginSettlement — THE transactional money path (Stage 2c). The paid flip and
 // every external effect commit in ONE transaction, each effect dedupe-keyed.
@@ -287,7 +288,8 @@ describe('beginHold — the transactional compliance hold', { retry: 0 }, () => 
     expect(after?.paymentProviderRef).toBeUndefined(); // no mock ref — no rail was touched
     expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
     const body = await stage1Body('st_t1');
-    expect(body).toContain('quick review');
+    expect(body).toContain(HOLD_REPLY); // R30: the fixed hold text
+    expect(String(body).toLowerCase()).not.toContain('review');
     expect(body).not.toContain('within 1 business day');
     expect(body).not.toContain('123456789012'); // PII: the destination never enters the payload
   });

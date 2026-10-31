@@ -159,7 +159,7 @@ export interface WorkerDeps {
  * kind EXCEPT agent.turn, where it is TERMINAL (dead + the deduped dead:<id>
  * alert). Reason: withRowDeadline ABANDONS the handler promise, and an agent
  * turn is not idempotent — send_approve_picker creates a draft + sends a
- * cta_url card, create_transfer/create_schedule mint fresh ids with no
+ * cta_url card, create_schedule mints fresh ids with no
  * idempotency key, sendText has no dedupe key — so a retry running beside a
  * turn that ignored its signal (a hung tool) would double-mint and double-send.
  * The abandoned turn's late reply is dropped by the `abandoned` check in `handle`.
