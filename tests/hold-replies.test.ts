@@ -15,6 +15,7 @@ import {
   HOLD_REPLY,
   type FixedReplyKind,
 } from '@/lib/hold-replies';
+import { REDACTION_NOTICES } from '@/lib/inbound-redact';
 
 // R30 (no tipping-off): hold-replies.ts is the ONLY source of the text a
 // customer sees when a transfer is held, cannot go ahead, needs more details or
@@ -95,6 +96,16 @@ describe('hold-replies: the fixed table never tips the customer off', () => {
       expect(offences(old), old).not.toEqual([]);
     }
   });
+});
+
+// R49: the redaction notice is a fixed customer text too (inbound-redact.ts),
+// under the same banned-word and no-figure check.
+describe('hold-replies: the R49 redaction notice passes the same check', () => {
+  for (const [lang, text] of Object.entries(REDACTION_NOTICES)) {
+    it(`redaction notice (${lang}) has no banned word, digit or currency sign`, () => {
+      expect(offences(text), `${lang}: ${text}`).toEqual([]);
+    });
+  }
 });
 
 // R43: the HELP keyword reaches a person, and the case-opened replies live in

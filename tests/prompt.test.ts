@@ -4,6 +4,7 @@ import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { toolSchemasForChannel, RATE_LOCK_MINUTES } from '@/lib/tools';
 import { DRAFT_TTL_SECONDS } from '@/lib/draft-store';
 import { EDD_ASK, FIXED_REPLIES } from '@/lib/hold-replies';
+import { REDACTION_LABELS } from '@/lib/inbound-redact';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -1219,5 +1220,25 @@ describe('SYSTEM_PROMPT — R17 AI identity and R56 scope', () => {
     for (const channel of ['whatsapp', 'web'] as const) {
       expect(toolSchemasForChannel(channel).map((t) => t.function.name)).toContain('decline_off_topic');
     }
+  });
+});
+
+describe('SYSTEM_PROMPT — R49 hidden numbers', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' }),
+  ];
+
+  it('says a [… hidden] label is a number we hid, never to ask for it again, and bank details go on the secure page', () => {
+    for (const p of variants) {
+      expect(p).toContain(REDACTION_LABELS.card);
+      expect(p).toContain('we hid it');
+      expect(p.toLowerCase()).toContain('never ask the customer to type it again');
+    }
+  });
+
+  it('names a label the redaction really writes', () => {
+    expect(SYSTEM_PROMPT).toContain(REDACTION_LABELS.account);
   });
 });

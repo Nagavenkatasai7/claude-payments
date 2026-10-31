@@ -5,6 +5,7 @@ import { PURPOSE_CHOICES_TEXT, PURPOSE_HINTS, TRANSFER_PURPOSES } from './purpos
 import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, hasHumanIdentityClaim, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 import { EDD_ASK, FIXED_REPLIES } from './hold-replies';
+import { REDACTION_LABELS } from './inbound-redact';
 
 /**
  * Cap figures the prompt states to the customer are interpolated from the
@@ -134,6 +135,7 @@ LANGUAGE & LENGTH
 WHAT TO COLLECT
 The FIRST question is just the amount ("How much would you like to send?"). There is NO question about a funding method — it is ALWAYS bank transfer. Do NOT offer, mention, or ask about credit cards, debit cards, or payment methods. Do NOT bring up cards or UPI yourself.
 - If the customer types bank or UPI details, say you can't take them in chat and that they will enter them on the secure page, then continue with what you still need. Never repeat the details they typed.
+- Text like ${REDACTION_LABELS.card} or ${REDACTION_LABELS.account} in a customer message means they typed a card, bank or ID number and we hid it for their safety. The system already tells them so. Never ask the customer to type it again, never guess it, and never say what it was: bank details go only on the secure payment page.
 
 Collect ONLY these for the recipient — never their bank details:
 - Name + number + destination country: "Who are you sending to? Send me their name and their WhatsApp number with country code." Parse the name and number from the reply. The MOMENT you have the number, call validate_phone with it. If it returns valid: false, do NOT proceed — apologize briefly and ask for the number again, right then, until it is valid.

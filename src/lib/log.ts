@@ -7,12 +7,19 @@
 // the backstop for values that ride inside error messages we don't control
 // (e.g. a provider echoing the request back in its error body).
 
+import { redactSensitive } from './inbound-redact';
+
 /**
  * Mask emails and any 7+ digit run (phones, accounts, IBAN/PAN bodies) to
  * last-4. The threshold is 7 — not 6 — so 6-digit provider ERROR CODES (e.g.
  * Meta's 131056) stay readable for ops. OTPs are also 6 digits, but codes are
  * never logged at all by policy; this scrubber is the backstop for PII riding
  * inside messages we don't control.
+ *
+ * R49: the inbound-redact patterns run first (redactSensitive), so the numbers
+ * the 7-digit mask cannot see whole (spaced card groups, a 3-2-4 SSN, PAN,
+ * IFSC, a 4-4-4 Aadhaar, a spaced IBAN, a short account number after its
+ * keyword) become their fixed label. The labels hold no digits.
  */
 export function scrub(value: unknown): string {
   const s =
@@ -22,8 +29,8 @@ export function scrub(value: unknown): string {
         ? `${value.name}: ${value.message}`
         : JSON.stringify(value) ?? String(value);
   const capped = capInput(s);
-  const out = capped.text
-    .replace(EMAIL, '<email>')
+  const out = redactSensitive(capped.text)
+    .text.replace(EMAIL, '<email>')
     .replace(/\d{7,}/g, (m) => `…${m.slice(-4)}`);
   return capped.cut ? `${out}${TRUNCATED}` : out;
 }
@@ -45,12 +52,17 @@ const TRUNCATED = '…[truncated]';
  * part of a phone number or an email. A cut through `15551234567` could leave
  * up to 6 digits (below the 7-digit mask), and a cut through `name@example.com`
  * leaves `name@exam`, which no longer looks like an email; both are dropped
- * whole instead.
+ * whole instead. R49: a trailing run of digit groups (`4111 1111 11`, a card
+ * cut mid-way, which no rule would recognise) is dropped too.
  */
 function capInput(s: string): { text: string; cut: boolean } {
   if (s.length <= SCRUB_MAX_CHARS) return { text: s, cut: false };
   let end = SCRUB_MAX_CHARS;
   while (end > 0 && /[A-Za-z0-9._%+@-]/.test(s[end - 1])) end--;
+  // Linear, from the end: drop the trailing digits, spaces and hyphens when they hold a digit.
+  let tail = end;
+  while (tail > 0 && /[\d \-]/.test(s[tail - 1])) tail--;
+  if (/\d/.test(s.slice(tail, end))) end = tail;
   return { text: s.slice(0, end), cut: true };
 }
 

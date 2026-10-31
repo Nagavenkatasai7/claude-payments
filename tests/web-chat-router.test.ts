@@ -20,6 +20,7 @@ import { OFF_TOPIC_REPLY } from '@/lib/scope-guard';
 import { helpIntentReply } from '@/lib/help-intents';
 import { pausedReply } from '@/lib/turn-router';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
+import { redactionNotice } from '@/lib/inbound-redact';
 import type { Customer, Transfer } from '@/lib/types';
 import type { Db } from '@/db/client';
 
@@ -153,5 +154,42 @@ describe('R56 and the R26 slot on the web chat', () => {
     const { chatBot } = webChat({ agentPaused: async () => true });
     expect(await chatBot.runTurn(customer(), 'send $100 to Mom')).toBe(`${NOTICE_WEB}\n\n${pausedReply('en')}`);
     expect(chat).not.toHaveBeenCalled();
+  });
+});
+
+// R49 part 1: the web chat hides a typed card, account, IFSC, SSN, PAN, Aadhaar
+// or IBAN number before the sealed log, Redis history and the model see it, and
+// the reply leads with the redaction notice (under the AI notice when due).
+describe('R49 on the web chat', () => {
+  const RED = redactionNotice('en');
+
+  it('the log, the model and the Redis thread see the label; the reply leads with the notice', async () => {
+    const { chatBot, store } = webChat();
+    expect(await chatBot.runTurn(customer(), 'my card 4111 1111 1111 1111 and IFSC HDFC0001234 a/c 50100123456789')).toBe(
+      `${NOTICE_WEB}\n\n${RED}\n\nHello from the dashboard!`,
+    );
+    const sent = JSON.stringify(chat.mock.calls[0][0]);
+    expect(sent).toContain('my card [card number hidden] and IFSC [IFSC hidden] a/c [account number hidden]');
+    expect(sent).not.toContain('4111');
+    expect(sent).not.toContain('50100123456789');
+    const ins = (await createConversationLogRepo(db).listThread('default', PHONE)).filter((m) => m.direction === 'in').map((m) => m.text);
+    expect(ins).toEqual(['my card [card number hidden] and IFSC [IFSC hidden] a/c [account number hidden]']);
+    const history = JSON.stringify(await store.getConversation('default', `web:${PHONE}`));
+    expect(history).not.toContain('4111');
+    expect(history).not.toContain('HDFC0001234');
+  });
+
+  it('a message with nothing to hide gets no redaction notice', async () => {
+    const { chatBot } = webChat();
+    await chatBot.runTurn(customer(), 'hi');
+    expect(await chatBot.runTurn(customer(), 'send $1,000 to +91 98765 43210')).toBe('Hello from the dashboard!');
+  });
+
+  it('a HELP message with a hidden number opens the case and carries the notice', async () => {
+    const { chatBot } = webChat();
+    await chatBot.runTurn(customer(), 'hi');
+    const reply = await chatBot.runTurn(customer(), 'HELP card 4111111111111111 charged twice');
+    expect(reply.startsWith(`${RED}\n\n`)).toBe(true);
+    expect(await createTicketRepo(db).listByCustomerInTenant('default', PHONE)).toHaveLength(1);
   });
 });

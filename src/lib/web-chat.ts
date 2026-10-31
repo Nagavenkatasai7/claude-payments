@@ -24,6 +24,8 @@ import { aiNoticeDueFor, recordAiNotice } from './ai-notice-marker';
 import { logWarn } from './log';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { replyGuardAlertFor, type ReplyGuardReport } from './reply-guard';
+import { redactSensitive, redactionNotice } from './inbound-redact';
+import { composeReply } from './compose-reply';
 
 // web-chat (B5) — the WhatsApp agent brain re-channeled into the customer web
 // dashboard. The web thread is keyed `conv:<partnerId>:web:<phone>` — deliberately SEPARATE
@@ -93,8 +95,14 @@ export function createWebChat(deps: WebChatDeps) {
   const { conversationLog, alertLlmDown = raiseLlmDownAlert, db: dbDep, agentPaused, ...agentDeps } = deps;
   const store = webThreadStore(agentDeps.store);
   return {
-    async runTurn(customer: Customer, text: string, opts?: WebChatTurnOptions): Promise<string> {
+    async runTurn(customer: Customer, rawText: string, opts?: WebChatTurnOptions): Promise<string> {
       const db = dbDep ?? getDb();
+      // R49: card, account, routing, IFSC, SSN, PAN, Aadhaar and IBAN numbers are
+      // hidden first, so the sealed log, the Redis thread and the model only see
+      // the label; the reply then leads with the redaction notice.
+      const red = redactSensitive(rawText);
+      const text = red.text;
+      const redacted = red.kinds.length > 0;
       const partnerId = customer.partnerId;
       const phone = customer.senderPhone;
       // R3b: the portal customer's own (tenant, phone) thread, web channel.
@@ -115,7 +123,8 @@ export function createWebChat(deps: WebChatDeps) {
       // next reply simply shows the notice again (fail safe).
       const finish = async (body: string, noticeLang: NoticeLang): Promise<string> => {
         const notice = noticeDue ? aiNoticeText(noticeLang, 'web') : '';
-        const reply = withAiNotice(body, notice);
+        const led = redacted ? composeReply({ redactionNotice: redactionNotice(noticeLang), modelText: body }) : body;
+        const reply = withAiNotice(led, notice);
         await conversationLog.append({ ...entry, direction: 'out', text: reply.trim() ? reply : CARD_MARKER });
         if (notice) {
           try {

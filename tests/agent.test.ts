@@ -2449,3 +2449,75 @@ describe('R32: the quote is written by code, and the reply guard checks the raw 
     expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Sending is instant!');
   });
 });
+
+// R49 part 1: a provider or tool error can echo the request (the chat history,
+// the customer's text). The agent's failure lines go through the scrubbing
+// logger with the error's NAME only, never the error object or its message.
+describe('R49: the agent never logs a raw error object', () => {
+  const SECRET = 'history says card 4111 1111 1111 1111 and phone 15551234567';
+  // An Error argument is rendered the way the console would print it (name, message, stack).
+  const allLogged = (spies: Array<ReturnType<typeof vi.spyOn>>) =>
+    spies
+      .flatMap((s) => s.mock.calls.flat())
+      .map((a) => (a instanceof Error ? `${a.name}: ${a.message}\n${a.stack}` : typeof a === 'string' ? a : JSON.stringify(a)))
+      .join('\n');
+  const oneStringPerLine = (spies: Array<ReturnType<typeof vi.spyOn>>) => {
+    for (const call of spies.flatMap((s) => s.mock.calls)) {
+      expect(call).toHaveLength(1);
+      expect(typeof call[0]).toBe('string');
+    }
+  };
+
+  it('a chat() retry, a fallback and a failed save log the error name only', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    store.saveConversation = async () => {
+      throw new TypeError(SECRET);
+    };
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async () => {
+        throw new RangeError(SECRET);
+      },
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hi')).toBe(FALLBACK_REPLY);
+    const logged = allLogged([warn, error]);
+    expect(logged).not.toContain('4111');
+    expect(logged).not.toContain('15551234567');
+    expect(logged).not.toContain('history says');
+    expect(logged).toContain('RangeError');
+    expect(logged).toContain('TypeError');
+    // Every line is the logger's one JSON line, never a raw Error argument.
+    oneStringPerLine([warn, error]);
+  });
+
+  it('a tool that throws logs the tool name and the error name only', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    store.getTransferCount = async () => {
+      throw new Error(SECRET);
+    };
+    let round = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async () => {
+        round++;
+        if (round === 1) {
+          return { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'get_quote', arguments: '{"amount_usd":100}' } }] };
+        }
+        return { role: 'assistant', content: 'Sorry, let me try that again.' };
+      },
+    });
+    await agent.runAgentTurn(PHONE, 'send 100');
+    const logged = allLogged([warn, error]);
+    expect(logged).not.toContain('4111');
+    expect(logged).not.toContain('history says');
+    expect(logged).toContain('get_quote');
+    expect(logged).toContain('Error');
+    oneStringPerLine([warn, error]);
+  });
+});

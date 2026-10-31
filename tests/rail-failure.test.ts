@@ -92,8 +92,13 @@ describe('handleRailFailure — a PAID, CHARGED consumer row (the normal case)',
     await store.saveTransfer(fixture());
     await handleRailFailure(db, 'rf_t1', { code: 'failed', reason: 'no such account 123456789012 at branch' });
     expect((await load())?.adminNote).not.toContain('123456789012');
-    expect((await load())?.adminNote).toContain('…9012');
+    // R49: scrub() hides a number after an account keyword whole (inbound-redact).
+    expect((await load())?.adminNote).toContain('[account number hidden]');
     expect(await alertText('railfail:rf_t1')).not.toContain('123456789012');
+    // A bare long run (no keyword) is still masked to its last 4.
+    await store.saveTransfer(fixture({ id: 'rf_t2' }));
+    await handleRailFailure(db, 'rf_t2', { code: 'failed', reason: 'rail ref 123456789012 rejected' });
+    expect((await load('rf_t2'))?.adminNote).toContain('…9012');
   });
 
   it('a routed transfer names the settlement partner in the alert', async () => {

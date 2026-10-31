@@ -56,6 +56,8 @@ import { cancelCaseWanted, openHelpCase, type HelpCaseChannel } from '@/lib/help
 import { helpCaseReasonFor, helpIntentReply, helpReplyLang } from '@/lib/help-intents';
 import { aiNoticeText, detectReplyLang, withAiNotice, type AiNoticeChannel, type NoticeLang } from '@/lib/ai-notice';
 import { aiNoticeDueFor, recordAiNotice } from '@/lib/ai-notice-marker';
+import { redactSensitive, redactionNotice } from '@/lib/inbound-redact';
+import { composeReply } from '@/lib/compose-reply';
 import { offTopicReply } from '@/lib/scope-guard';
 import {
   sttAuthAlertFor,
@@ -535,6 +537,11 @@ interface TurnReplyTarget {
   logChannel: ConversationChannel;
   /** Which AI notice wording (R17): the chat, or a transcribed voice note. */
   noticeChannel: AiNoticeChannel;
+  /**
+   * R49: a number was hidden from the customer's text (inbound-redact), so
+   * the reply leads with the redaction notice (composeReply's redaction slot).
+   */
+  redacted: boolean;
 }
 
 /** One reply, before the notice: its text (or a card already sent) and the notice's language. */
@@ -556,6 +563,9 @@ interface TurnReply {
  * sends nothing, as before. The marker is read BEFORE the transaction, so its
  * fail-safe (an unreadable marker shows the notice) never aborts the
  * transaction; a notice is recorded only with a reply row this run created.
+ * R49: a turn whose text had a number hidden leads with the redaction notice
+ * (composeReply's redaction slot), under the AI notice, on every route; a
+ * card-only turn then sends the notice(s) alone.
  */
 async function sendTurnReply(db: Db, t: TurnReplyTarget, compose: (tx: DbOrTx) => Promise<TurnReply>): Promise<void> {
   const surface = t.logChannel === 'tg' ? 'tg' : 'wa';
@@ -563,7 +573,9 @@ async function sendTurnReply(db: Db, t: TurnReplyTarget, compose: (tx: DbOrTx) =
   await db.transaction(async (tx) => {
     const reply = await compose(tx);
     const notice = noticeDue ? aiNoticeText(reply.lang, t.noticeChannel) : '';
-    const body = reply.cardSent ? notice : withAiNotice(reply.text, notice);
+    const redaction = t.redacted ? redactionNotice(reply.lang) : '';
+    const text = redaction ? composeReply({ redactionNotice: redaction, modelText: reply.cardSent ? '' : reply.text }) : reply.text;
+    const body = reply.cardSent ? withAiNotice(redaction, notice) : withAiNotice(text, notice);
     let created = false;
     if (body.trim()) {
       created = await createOutboxRepo(tx).enqueue(
@@ -579,7 +591,7 @@ async function sendTurnReply(db: Db, t: TurnReplyTarget, compose: (tx: DbOrTx) =
       phone: t.phone,
       channel: t.logChannel,
       direction: 'out',
-      text: reply.cardSent ? (notice ? `${notice}\n\n${CARD_MARKER}` : CARD_MARKER) : body,
+      text: reply.cardSent ? (body ? `${body}\n\n${CARD_MARKER}` : CARD_MARKER) : body,
     });
     if (notice && created) {
       await recordAiNotice(tx, { partnerId: t.tenant, phone: t.phone, surface, channel: t.noticeChannel, lang: reply.lang });
@@ -1159,11 +1171,26 @@ async function handle(
       const logChannel: ConversationChannel = p.channel === 'tg' ? 'tg' : 'wa';
       // PR1: every reply below goes through sendTurnReply with this target.
       const chatChannel: HelpCaseChannel = logChannel === 'tg' ? 'telegram' : 'whatsapp';
-      const target: TurnReplyTarget = { rowId: row.id, phone, tenant, routedPartnerId, logChannel, noticeChannel: chatChannel };
       // Step 1: a voice row carries the Meta media id (validated: digits only).
       // Its payload text is a placeholder, so the log gets a marker instead and
       // the transcript is logged as its own entry once it exists.
       const voiceRef = voiceRefOf(p.media);
+      // R49: the webhook already hid card, account, IFSC, SSN, PAN, Aadhaar and
+      // IBAN numbers (turn.redacted). Redacting again is a no-op on that text
+      // and covers a row queued before this build, so the log and the model
+      // never see the raw number. A button tap's text is ours: never redacted.
+      const payloadTurn = (p.turn ?? {}) as TurnContext;
+      const inbound =
+        voiceRef || payloadTurn.buttonTap !== undefined ? { text: str(p.messageText), kinds: [] } : redactSensitive(str(p.messageText));
+      const target: TurnReplyTarget = {
+        rowId: row.id,
+        phone,
+        tenant,
+        routedPartnerId,
+        logChannel,
+        noticeChannel: chatChannel,
+        redacted: payloadTurn.redacted === true || inbound.kinds.length > 0,
+      };
       // ── Partner-Demo R3b: the customer's text goes to the sealed, permanent
       // conversation log under (tenant, phone) — the same key the inbound
       // webhook created the customer under — BEFORE the gate, so a deferred or
@@ -1176,7 +1203,7 @@ async function handle(
         phone,
         channel: logChannel,
         direction: 'in',
-        text: voiceRef ? VOICE_LOG_MARKER : str(p.messageText),
+        text: voiceRef ? VOICE_LOG_MARKER : inbound.text,
       });
       // ── Program-Fix 34A: one turn at a time per (tenant, phone), in order ──
       // Order of checks: the bound (computed with the FIFO check in ONE query),
@@ -1214,7 +1241,7 @@ async function handle(
       }
       let fallbackErr: unknown;
       try {
-        let messageText = str(p.messageText);
+        let messageText = inbound.text;
         // ── Step 1: a voice note is transcribed HERE, after the gate and the
         // lock, so a deferred turn never downloads or bills. Any outcome but
         // `ok` is ONE fixed reply (reply:<row id>, logged with it) and the row
@@ -1247,16 +1274,19 @@ async function handle(
             }
             return;
           }
+          // R49: the transcript is redacted before its log entry and the model.
+          const spoken = redactSensitive(heard.transcript);
           await createConversationLogRepo(deps.db).append({
             id: conversationMessageId('in', `${row.id}:t`),
             partnerId: tenant,
             phone,
             channel: logChannel,
             direction: 'in',
-            text: VOICE_TRANSCRIPT_PREFIX + heard.transcript,
+            text: VOICE_TRANSCRIPT_PREFIX + spoken.text,
           });
-          messageText = heard.transcript;
+          messageText = spoken.text;
           target.noticeChannel = 'voice';
+          if (spoken.kinds.length > 0) target.redacted = true;
         }
         // ── PR1: the ONE ordered router (turn-router.ts), after transcription:
         // R26's paused slot, then HELP (R43), then off-topic (R56), then the

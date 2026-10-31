@@ -15,6 +15,7 @@ import { OFF_TOPIC_REPLY, offTopicReply } from '@/lib/scope-guard';
 import { helpIntentReply } from '@/lib/help-intents';
 import { pausedReply } from '@/lib/turn-router';
 import { MEDIA_REPLY } from '@/lib/consent';
+import { redactionNotice } from '@/lib/inbound-redact';
 import { VOICE_FAIL_REPLY, VOICE_PLACEHOLDER, type VoiceOutcome } from '@/lib/voice-notes';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
@@ -370,6 +371,90 @@ describe('R17: the AI notice leads the first reply and comes back after 24 hours
     await outbox.enqueue('agent.turn', { phone: Q, messageText: VOICE_PLACEHOLDER, turn: { inputModality: 'voice' }, routedPartnerId: null, media: { id: '4243', mimeType: 'audio/ogg' } });
     await drainOnce(deps({ transcribeVoice: undefined }), 'w1');
     expect((await bodies())[1]).toBe(`${NOTICE_WA}\n\n${MEDIA_REPLY}`);
+  });
+});
+
+// R49 part 1: the redaction notice (inbound-redact.ts) leads every reply to a
+// turn whose text had a number hidden, through composeReply's redaction slot,
+// on every route (model, card-only, HELP, off-topic). It sits under the AI
+// notice when that is due. The worker redacts the payload text again before
+// the log and the model, so a row queued before this build is covered too.
+describe('R49: the redaction notice and the worker-side redaction', { retry: 0 }, () => {
+  const RED = redactionNotice('en');
+
+  it('a redacted turn: the notice leads the model reply; the model and the log see the label only', async () => {
+    await noticeShown();
+    await turn('my card is [card number hidden]', { turn: { isNewConversation: false, redacted: true } });
+    await drainOnce(deps(), 'w1');
+    expect(await bodies()).toEqual([`${RED}\n\nHi! How can I help?`]);
+    expect(runAgentTurn.mock.calls[0][1]).toBe('my card is [card number hidden]');
+  });
+
+  it('under the AI notice when that is due', async () => {
+    await turn('a/c [account number hidden]', { turn: { isNewConversation: false, redacted: true } });
+    await drainOnce(deps(), 'w1');
+    expect(await bodies()).toEqual([`${NOTICE_WA}\n\n${RED}\n\nHi! How can I help?`]);
+  });
+
+  it('a card-only redacted turn sends the notice alone, logged above the card marker', async () => {
+    await noticeShown();
+    runAgentTurn.mockResolvedValue('');
+    await turn('send to [account number hidden]', { turn: { isNewConversation: false, redacted: true } });
+    await drainOnce(deps(), 'w1');
+    expect(await bodies()).toEqual([RED]);
+    expect((await thread()).filter((m) => m.direction === 'out').map((m) => m.text)).toEqual([`${RED}\n\n${CARD_MARKER}`]);
+  });
+
+  it('the HELP reply carries it too', async () => {
+    await noticeShown();
+    await turn('HELP my card [card number hidden] was charged twice', { turn: { isNewConversation: false, redacted: true } });
+    await drainOnce(deps(), 'w1');
+    const body = (await bodies())[0] as string;
+    expect(body.startsWith(`${RED}\n\n`)).toBe(true);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it('a row queued before this build (raw text, no flag) is redacted before the log and the model', async () => {
+    await noticeShown();
+    await turn('IFSC HDFC0001234 a/c 50100123456789');
+    await drainOnce(deps(), 'w1');
+    expect(runAgentTurn.mock.calls[0][1]).toBe('IFSC [IFSC hidden] a/c [account number hidden]');
+    const ins = (await thread()).filter((m) => m.direction === 'in').map((m) => m.text);
+    expect(ins).toEqual(['IFSC [IFSC hidden] a/c [account number hidden]']);
+    expect(await bodies()).toEqual([`${RED}\n\nHi! How can I help?`]);
+  });
+
+  it('a turn with nothing hidden is byte-identical (no notice)', async () => {
+    await noticeShown();
+    await turn('send $1,000 to +91 98765 43210');
+    await drainOnce(deps(), 'w1');
+    expect(await bodies()).toEqual(['Hi! How can I help?']);
+    expect(runAgentTurn.mock.calls[0][1]).toBe('send $1,000 to +91 98765 43210');
+  });
+
+  it('a button tap text is never redacted', async () => {
+    await noticeShown();
+    await turn('[Tapped: 4111111111111111]', { turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId: 'd_1' } } });
+    await drainOnce(deps(), 'w1');
+    expect(runAgentTurn.mock.calls[0][1]).toBe('[Tapped: 4111111111111111]');
+  });
+
+  it('a voice transcript is redacted before the transcript log entry and the model, and the reply leads with the notice', async () => {
+    vi.stubEnv('AZURE_SPEECH_KEY', 'fake-speech-key');
+    vi.stubEnv('AZURE_SPEECH_REGION', 'eastus');
+    vi.stubEnv('DEMO_PHONES', '');
+    vi.stubEnv('VOICE_NOTES_BETA_PHONES', P);
+    await createFeatureFlagRepo(db).upsert({ key: 'voice.notes', scopeType: 'global', scopeId: '', enabled: true, reason: 'voice beta test', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+    await recordAiNotice(db, { partnerId: 'default', phone: P, surface: 'wa', channel: 'voice', lang: 'en' });
+    transcribeVoice.mockResolvedValue({ kind: 'ok', transcript: 'my card is 4111 1111 1111 1111 send 100 to mom' });
+    await turn(VOICE_PLACEHOLDER, { turn: { isNewConversation: false, inputModality: 'voice' }, media: { id: '4242', mimeType: 'audio/ogg' } });
+    await drainOnce(deps(), 'w1');
+    expect(runAgentTurn.mock.calls[0][1]).toBe('my card is [card number hidden] send 100 to mom');
+    const logged = JSON.stringify(await thread());
+    expect(logged).not.toContain('4111');
+    expect(logged).toContain('[card number hidden]');
+    expect(await bodies()).toEqual([`${RED}\n\nHi! How can I help?`]);
   });
 });
 

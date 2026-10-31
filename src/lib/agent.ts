@@ -17,7 +17,7 @@ import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
-import { logWarn } from './log';
+import { logError, logWarn } from './log';
 import { VOICE_INPUT_NOTE } from './voice-notes';
 import { resolveKycMode, resolvePartnerBranding, resolvePartnerDisclosure } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
@@ -172,6 +172,11 @@ export function sanitizeReply(
   return `${stripped}\n\n${link}`.trim();
 }
 
+/** R49: an error's class name for a log line (never its message: it can echo customer text). */
+function errName(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
+}
+
 export function createAgent(deps: AgentDeps) {
   const partnerId: PartnerId = deps.partnerId ?? DEFAULT_PARTNER_ID;
   // One retry on a transient chat() failure (provider 5xx / 529 / timeout / a
@@ -189,7 +194,8 @@ export function createAgent(deps: AgentDeps) {
     } catch (err) {
       // A 401/402/403 can never succeed on retry: one provider call, not two.
       if (signal?.aborted || isPermanentProviderError(err)) throw err;
-      console.warn('chat() failed once — retrying:', err);
+      // R49: the error NAME only: a provider error can echo the request (history).
+      logWarn('agent.chat', 'chat() failed once — retrying', { error: errName(err) });
       return await deps.chat(messages, tools, { signal });
     }
   }
@@ -210,7 +216,7 @@ export function createAgent(deps: AgentDeps) {
     try {
       return await completeTurn(phone, incomingText, turn, history, opts.signal);
     } catch (err) {
-      console.error('runAgentTurn failed — returning fallback:', err);
+      logError('agent.turn', 'runAgentTurn failed — returning fallback', { error: errName(err) });
       try {
         deps.onFallback?.(err);
       } catch {
@@ -219,7 +225,7 @@ export function createAgent(deps: AgentDeps) {
       try {
         await deps.store.saveConversation(partnerId, phone, history);
       } catch (saveErr) {
-        console.error('saveConversation after failure also failed:', saveErr);
+        logError('agent.turn', 'saveConversation after failure also failed', { error: errName(saveErr) });
       }
       return FALLBACK_REPLY;
     }
@@ -499,7 +505,7 @@ export function createAgent(deps: AgentDeps) {
           try {
             result = await executeTool(call.function.name, args, toolCtx);
           } catch (err) {
-            console.error(`tool ${call.function.name} threw:`, err);
+            logError('agent.tool', 'a tool threw', { tool: call.function.name, error: errName(err) });
             result = { error: 'That step hit a temporary snag — apologize briefly and ask the user to try again.' };
           }
           // An interactive (picker/approve card) sent by a tool IS the reply.
@@ -663,7 +669,7 @@ export function createAgent(deps: AgentDeps) {
     // still an answer the customer must see — never '' past this point.
     if (!modelText.trim() && !link && !quoteText) modelText = FALLBACK_REPLY;
     // PR1: one order — [redaction][risk warning] model text [code quote], then
-    // the link. Batch B follow-up A4: the scam warning comes first, word for
+    // the link (R49: the reply sender adds the redaction notice on top). Batch B follow-up A4: the scam warning comes first, word for
     // word (a WhatsApp card already starts with it, and returned above), never
     // doubled when the model already included it. R32: the quote is code text.
     let out = composeReply({ riskWarning, modelText, quoteText: quoteText ?? undefined });

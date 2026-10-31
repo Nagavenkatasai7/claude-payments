@@ -4,7 +4,9 @@
  *   [redaction notice] [risk warning] model text [code-written quote text]
  *
  * - redaction notice: R49's one line when an account or card number the
- *   customer typed was hidden (the slot is empty until R49 fills it).
+ *   customer typed was hidden (inbound-redact.ts). The reply senders fill it
+ *   (outbox-worker.ts sendTurnReply, web-chat.ts), so it leads every route's
+ *   reply, a card-only turn included; the agent never sees it.
  * - risk warning: the scam warning a send tool returned (PURPOSE_SCAM_WARNING
  *   today; R48 fills it with the risk warnings).
  * - model text: what the model wrote, already formatted and stripped of URLs.

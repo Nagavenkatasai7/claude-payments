@@ -8,7 +8,8 @@ import { partnerIntegrations } from '@/db/schema';
 import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
-import { logError } from './log';
+import { logError, logWarn } from './log';
+import { conversationSealCtx, openJson, sealedConversationKey } from './redis-seal';
 import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
@@ -243,6 +244,32 @@ export function createStore(redis: RedisLike, db: Db) {
   const customersRepo = createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph));
   const legacyTenantOf = legacyTenantResolver(customersRepo);
 
+  /**
+   * R49: the sealed thread for (tenant, thread phone), or null when there is
+   * none (or its key cannot be derived). A value that does not open is []:
+   * a sealed write is newer than any legacy key.
+   */
+  async function readSealedConversation(partnerId: PartnerId, phone: string): Promise<ChatMessage[] | null> {
+    let key: string;
+    let sealCtx: ReturnType<typeof conversationSealCtx>;
+    try {
+      key = sealedConversationKey(partnerId, phone);
+      sealCtx = conversationSealCtx(partnerId, phone);
+    } catch (err) {
+      logWarn('store.conversation', 'sealed thread key unavailable', { error: err instanceof Error ? err.name : 'error' });
+      return null;
+    }
+    const raw = await redis.get(key);
+    if (raw === null) return null;
+    try {
+      const messages = openJson<unknown>(raw, sealCtx);
+      return Array.isArray(messages) ? (messages as ChatMessage[]) : [];
+    } catch (err) {
+      logWarn('store.conversation', 'sealed thread did not open: read as empty', { error: err instanceof Error ? err.name : 'error' });
+      return [];
+    }
+  }
+
   return {
     /** The D9 legacy-tenant resolver, shared with the volume + KYC-audit stores. */
     legacyTenantOf,
@@ -262,9 +289,17 @@ export function createStore(redis: RedisLike, db: Db) {
     // so a customer mid-conversation at deploy time keeps their thread and a
     // post-fix sibling tenant never sees another tenant's history. Saves always
     // write the tenant key, so the legacy key is read at most once per thread.
+    //
+    // R49 part 1 (readers): PR9 writes the sealed thread conv:<pid>:h:<thread
+    // hmac> (redis-seal.ts) and drops the plaintext key. This build reads, in
+    // order: its own plaintext key, then the sealed key, then the legacy key.
+    // A sealed value that does not open reads as an empty thread (the error
+    // name is logged, never the key or the text).
     async getConversation(partnerId: PartnerId, phone: string): Promise<ChatMessage[]> {
       const raw = await redis.get(`conv:${partnerId}:${phone}`);
       if (raw !== null) return JSON.parse(raw) as ChatMessage[];
+      const sealed = await readSealedConversation(partnerId, phone);
+      if (sealed !== null) return sealed;
       if (!(await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) return [];
       const legacy = await redis.get(`conv:${phone}`);
       return legacy ? (JSON.parse(legacy) as ChatMessage[]) : [];
@@ -272,6 +307,13 @@ export function createStore(redis: RedisLike, db: Db) {
     async saveConversation(partnerId: PartnerId, phone: string, messages: ChatMessage[]): Promise<void> {
       // Provider blocks (thinking) belong to one turn: never persisted.
       await redis.set(`conv:${partnerId}:${phone}`, JSON.stringify(trimHistory(stripProviderContent(messages))), { ex: 30 * 24 * 3600 });
+      // R49: after a rollback from PR9, drop the now-stale sealed copy so a
+      // later sealed-first reader never reads past this write. Best effort.
+      try {
+        await redis.del(sealedConversationKey(partnerId, phone));
+      } catch (err) {
+        logWarn('store.conversation', 'stale sealed thread not dropped', { error: err instanceof Error ? err.name : 'error' });
+      }
     },
 
     // ── Transfer ledger (Postgres) ───────────────────────────────────────
