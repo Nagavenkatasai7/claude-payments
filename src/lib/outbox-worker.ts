@@ -1,4 +1,4 @@
-import type { Db } from '@/db/client';
+import type { Db, DbOrTx } from '@/db/client';
 import { createOutboxRepo, LEASE_MS, retryPolicy, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -50,6 +50,12 @@ import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
 import { simulatorPayoutReference } from '@/lib/order-references';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 import { MEDIA_REPLY } from '@/lib/consent';
+import { routeTurn, pausedReply } from '@/lib/turn-router';
+import { cancelCaseWanted, openHelpCase, type HelpCaseChannel } from '@/lib/help-case';
+import { helpCaseReasonFor, helpIntentReply, helpReplyLang } from '@/lib/help-intents';
+import { aiNoticeText, detectReplyLang, withAiNotice, type AiNoticeChannel, type NoticeLang } from '@/lib/ai-notice';
+import { aiNoticeDueFor, recordAiNotice } from '@/lib/ai-notice-marker';
+import { offTopicReply } from '@/lib/scope-guard';
 import {
   sttAuthAlertFor,
   voiceNotesOn,
@@ -139,6 +145,13 @@ export interface WorkerDeps {
    * a voice row is answered with MEDIA_REPLY (voice behaves as off).
    */
   transcribeVoice?: (ref: VoiceRef, signal: AbortSignal) => Promise<VoiceOutcome>;
+  /**
+   * R26's slot in the agent.turn router (turn-router.ts): whether this tenant's
+   * AI agent is paused. A paused tenant's customers get the fixed, non-AI menu
+   * (HELP still opens a case). Absent ⇒ never paused; R26 (PR3) wires it to the
+   * agent.paused kill switch. A throw fails the row, which retries.
+   */
+  agentPaused?: (partnerId: PartnerId) => Promise<boolean>;
 }
 
 /**
@@ -255,6 +268,32 @@ export class SettlementPausedError extends Error {
     super('settlement_paused');
     this.name = 'SettlementPausedError';
   }
+}
+
+/** How long a row of a kind this build does not know waits before it is looked at again. */
+export const UNKNOWN_KIND_DEFER_SEC = 300;
+
+/**
+ * PR1 (rollback safety): thrown by `handle` for an outbox kind this build does
+ * not know — a row a NEWER build wrote, seen by this build after an Instant
+ * Rollback or during a deploy overlap. drainOnce defers it UNCHARGED (like
+ * TurnBusyError), so it never spends attempts or dead-letters, and raises ONE
+ * ops alert per kind per UTC day. The row runs once a build that knows it is
+ * serving again. Nothing was done for the row.
+ */
+export class UnknownOutboxKindError extends Error {
+  constructor(
+    readonly kind: string,
+    readonly delaySec: number = UNKNOWN_KIND_DEFER_SEC,
+  ) {
+    super('unknown_outbox_kind');
+    this.name = 'UnknownOutboxKindError';
+  }
+}
+
+/** A row's kind as it may appear in an alert or a dedupe key: bounded, one line, a safe alphabet. */
+function safeKindLabel(kind: string): string {
+  return kind.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) || '_';
 }
 
 /**
@@ -443,12 +482,14 @@ async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promi
 }
 
 /**
- * Run one agent turn and return ONLY its reply text (Program-Fix 34A). The
+ * Run one agent turn and return ONLY its reply (Program-Fix 34A). The
  * routing partner's outbound creds are re-resolved at RUN time (the payload
  * never carries tokens; rotation is picked up automatically) and live only in
  * this scope: they ride the turn for its interactive sends (cards, pickers),
  * while the reply text — model output — is what the caller enqueues. Kept a
  * separate function so the creds never share a scope with an enqueue payload.
+ * PR1: `cardSent` says a card WAS the reply (the agent returns '' then, and
+ * never otherwise), so the AI notice can still go out on its own.
  */
 async function runTurnForReply(
   deps: WorkerDeps,
@@ -458,15 +499,79 @@ async function runTurnForReply(
   routedPartnerId: PartnerId | null,
   partner: PartnerResolver,
   onFallback: (err: unknown) => void,
-): Promise<string> {
+): Promise<{ text: string; cardSent: boolean }> {
   const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
-  return deps.runAgentTurn(
+  const text = await deps.runAgentTurn(
     str(p.phone),
     messageText, // the payload's text, or a voice note's transcript (Step 1)
     (p.turn ?? {}) as TurnContext,
     waCreds,
     { signal, routedPartnerId, onFallback }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
   );
+  return { text, cardSent: !text.trim() };
+}
+
+/** Where one agent.turn's reply goes (PR1 sendTurnReply). */
+interface TurnReplyTarget {
+  rowId: number;
+  phone: string;
+  /** The tenant the turn runs under (the routed partner, or the default tenant). */
+  tenant: PartnerId;
+  /** The sending partner (null ⇒ the shared number). */
+  routedPartnerId: PartnerId | null;
+  logChannel: ConversationChannel;
+  /** Which AI notice wording (R17): the chat, or a transcribed voice note. */
+  noticeChannel: AiNoticeChannel;
+}
+
+/** One reply, before the notice: its text (or a card already sent) and the notice's language. */
+interface TurnReply {
+  text: string;
+  cardSent: boolean;
+  lang: NoticeLang;
+}
+
+/**
+ * PR1: the ONE way an agent.turn answers — every router branch (paused, HELP,
+ * off-topic, the model), the busy fallback and a voice-note failure. In ONE
+ * transaction it composes the reply (`compose` runs inside it, so a help case
+ * commits or rolls back with its reply), puts the AI notice (R17) on top when
+ * the durable marker says it is due, enqueues the whatsapp.text row
+ * (`reply:<row id>`: a re-run never answers twice), logs exactly what the
+ * customer sees (sealed, R3b) and records the notice. A card-only turn sends
+ * the notice alone and logs it above the CARD_MARKER; with no notice due it
+ * sends nothing, as before. The marker is read BEFORE the transaction, so its
+ * fail-safe (an unreadable marker shows the notice) never aborts the
+ * transaction; a notice is recorded only with a reply row this run created.
+ */
+async function sendTurnReply(db: Db, t: TurnReplyTarget, compose: (tx: DbOrTx) => Promise<TurnReply>): Promise<void> {
+  const surface = t.logChannel === 'tg' ? 'tg' : 'wa';
+  const noticeDue = await aiNoticeDueFor(db, t.tenant, t.phone, surface);
+  await db.transaction(async (tx) => {
+    const reply = await compose(tx);
+    const notice = noticeDue ? aiNoticeText(reply.lang, t.noticeChannel) : '';
+    const body = reply.cardSent ? notice : withAiNotice(reply.text, notice);
+    let created = false;
+    if (body.trim()) {
+      created = await createOutboxRepo(tx).enqueue(
+        'whatsapp.text',
+        // Program-Fix 49A: essential — a reply to the customer's own message.
+        { to: t.phone, body, category: 'essential', ...(t.routedPartnerId ? { partnerId: t.routedPartnerId } : {}) },
+        { dedupeKey: `reply:${t.rowId}` },
+      );
+    }
+    await createConversationLogRepo(tx).append({
+      id: conversationMessageId('out', t.rowId),
+      partnerId: t.tenant,
+      phone: t.phone,
+      channel: t.logChannel,
+      direction: 'out',
+      text: reply.cardSent ? (notice ? `${notice}\n\n${CARD_MARKER}` : CARD_MARKER) : body,
+    });
+    if (notice && created) {
+      await recordAiNotice(tx, { partnerId: t.tenant, phone: t.phone, surface, channel: t.noticeChannel, lang: reply.lang });
+    }
+  });
 }
 
 /**
@@ -1039,6 +1144,9 @@ async function handle(
       // Telegram test channel: a Telegram message is logged as 'tg'. The reply
       // itself still goes through whatsapp.text; the send routes it (telegram-link.ts).
       const logChannel: ConversationChannel = p.channel === 'tg' ? 'tg' : 'wa';
+      // PR1: every reply below goes through sendTurnReply with this target.
+      const chatChannel: HelpCaseChannel = logChannel === 'tg' ? 'telegram' : 'whatsapp';
+      const target: TurnReplyTarget = { rowId: row.id, phone, tenant, routedPartnerId, logChannel, noticeChannel: chatChannel };
       // Step 1: a voice row carries the Meta media id (validated: digits only).
       // Its payload text is a placeholder, so the log gets a marker instead and
       // the transcript is logged as its own entry once it exists.
@@ -1081,18 +1189,8 @@ async function handle(
         // Waited past the bound: answer with the fallback line (deduped on this
         // row id) and raise ONE hourly alert per (tenant, phone) — counts only,
         // no message content — then finish the row. Never dead-lettered.
-        // R3b: the reply row and its log row commit together.
-        await deps.db.transaction(async (tx) => {
-          await createOutboxRepo(tx).enqueue(
-            'whatsapp.text',
-            // Program-Fix 49A: essential — a reply to the customer's own message.
-            { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
-            { dedupeKey: `reply:${row.id}` },
-          );
-          await createConversationLogRepo(tx).append({
-            id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out', text: FALLBACK_REPLY,
-          });
-        });
+        // R3b: the reply row and its log row commit together (sendTurnReply).
+        await sendTurnReply(deps.db, target, async () => ({ text: FALLBACK_REPLY, cardSent: false, lang: 'en' }));
         await outbox.enqueue(
           'ops.alert',
           { message: `⚠️ SmartRemit ops: an agent.turn (outbox #${row.id}) waited over ${TURN_BUSY_MAX_WAIT_MS / 60_000} minutes behind the same customer's other turns and was answered with the fallback line. Check the outbox for a stuck or failing agent.turn.` },
@@ -1117,16 +1215,10 @@ async function handle(
           }
           if (heard.kind !== 'ok') {
             const body = heard.kind === 'off' ? MEDIA_REPLY : voiceReplyFor(heard.kind);
-            await deps.db.transaction(async (tx) => {
-              await createOutboxRepo(tx).enqueue(
-                'whatsapp.text',
-                { to: phone, body, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
-                { dedupeKey: `reply:${row.id}` },
-              );
-              await createConversationLogRepo(tx).append({
-                id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out', text: body,
-              });
-            });
+            // R17: the voice wording only when voice notes are on (the note was
+            // sent for transcription); `off` was never turned into text.
+            const voiceTarget: TurnReplyTarget = heard.kind === 'off' ? target : { ...target, noticeChannel: 'voice' };
+            await sendTurnReply(deps.db, voiceTarget, async () => ({ text: body, cardSent: false, lang: 'en' }));
             if (heard.kind === 'off') {
               logWarn('worker.agent', 'voice notes are off for this row: answered with the media reply', { id: row.id, kind: row.kind });
             }
@@ -1151,6 +1243,53 @@ async function handle(
             text: VOICE_TRANSCRIPT_PREFIX + heard.transcript,
           });
           messageText = heard.transcript;
+          target.noticeChannel = 'voice';
+        }
+        // ── PR1: the ONE ordered router (turn-router.ts), after transcription:
+        // R26's paused slot, then HELP (R43), then off-topic (R56), then the
+        // model. Each fixed reply goes out through sendTurnReply, so the AI
+        // notice, the reply dedupe and the sealed log are the same for all.
+        const turnCtx = (p.turn ?? {}) as TurnContext;
+        const route = routeTurn({
+          text: messageText,
+          isButtonTap: turnCtx.buttonTap !== undefined,
+          paused: deps.agentPaused ? await deps.agentPaused(tenant) : false,
+        });
+        const lang = detectReplyLang(messageText);
+        if (route.kind === 'help') {
+          // R43: the case, its triage row, the deduped ops alert, the reply and
+          // the notice marker commit together; a retry reuses the open case.
+          // The case body is fixed text, never the customer's message (crypto-06).
+          const match = route.match;
+          await sendTurnReply(deps.db, target, async (tx) => {
+            const helpCase = await openHelpCase(tx, {
+              partnerId: tenant,
+              phone,
+              reason: helpCaseReasonFor(match.intent),
+              channel: chatChannel,
+              source: 'keyword',
+            });
+            return { text: helpIntentReply(match, { caseId: helpCase.caseId, channel: chatChannel }), cardSent: false, lang: helpReplyLang(match.lang) };
+          });
+          pokeWorker(); // after the commit: triage, the alert and the reply go out now
+          return;
+        }
+        if (route.kind === 'paused') {
+          await sendTurnReply(deps.db, target, async () => ({ text: pausedReply(lang), cardSent: false, lang }));
+          return;
+        }
+        if (route.kind === 'off_topic') {
+          await sendTurnReply(deps.db, target, async () => ({ text: offTopicReply(route.lang), cardSent: false, lang: route.lang }));
+          return;
+        }
+        // Owner decision Q-R43.1: a cancel request with a paid or held transfer
+        // records a cancel case (its own transaction, reused on a retry), then
+        // the bot handles the cancel itself (sender-cancel inside the window).
+        if (route.cancel && (await cancelCaseWanted(deps.db, tenant, phone))) {
+          await deps.db.transaction((tx) =>
+            openHelpCase(tx, { partnerId: tenant, phone, reason: 'cancel_request', channel: chatChannel, source: 'keyword' }),
+          );
+          pokeWorker();
         }
         const reply = await runTurnForReply(deps, p, messageText, signal, routedPartnerId, partner, (e) => {
           fallbackErr = e;
@@ -1169,31 +1308,20 @@ async function handle(
         // Program-Fix 34A: the reply is its OWN outbox row, deduped on this turn's
         // id — a Meta 5xx retries the SEND, never the model, and a re-run turn
         // can never answer twice. partnerId (never creds) picks the sending
-        // number at drain time; none ⇒ the shared number. '' ⇒ a card was the
-        // reply (the agent never returns '' otherwise).
+        // number at drain time; none ⇒ the shared number. cardSent ⇒ a card was
+        // the reply (the agent returns '' then, and never otherwise).
         // Partner-Demo R3b: the customer-visible reply is logged (sealed) in ONE
         // transaction with its reply row, under the deterministic out-id. If the
         // log insert fails, the reply row rolls back and the whole turn retries
         // (model + any card sends), exactly as a failed reply enqueue does today.
-        // A card-only turn ('') logs the CARD_MARKER instead of a text.
-        const outLog = { id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: logChannel, direction: 'out' } as const;
-        if (reply.trim()) {
-          await deps.db.transaction(async (tx) => {
-            await createOutboxRepo(tx).enqueue(
-              'whatsapp.text',
-              { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
-              { dedupeKey: `reply:${row.id}` },
-            );
-            await createConversationLogRepo(tx).append({ ...outLog, text: reply });
-          });
-        } else {
-          await createConversationLogRepo(deps.db).append({ ...outLog, text: CARD_MARKER });
-        }
+        // A card-only turn logs the CARD_MARKER (under the notice, if one went out).
+        await sendTurnReply(deps.db, target, async () => ({ ...reply, lang }));
         // A permanent provider rejection (401/402/403) raises its own llmdown
         // alert INSTEAD of the generic botfallback. Enqueued only after the
         // reply committed, and a failed insert is logged, never thrown: a
-        // throw here would re-run the (non-idempotent) turn.
-        if (reply === FALLBACK_REPLY) {
+        // throw here would re-run the (non-idempotent) turn. PR1: checked on
+        // the RAW model text, before the notice was added.
+        if (reply.text === FALLBACK_REPLY) {
           try {
             const down = llmDownAlertFor(fallbackErr, hourBucket());
             if (down) {
@@ -1226,14 +1354,17 @@ async function handle(
 
     // UI redesign M3-16: a partner report job (async, masked CSV). The payload is { jobId } only;
     // the tenant is the job row's. Starts only with enough invocation budget left (else
-    // ReportDeferredError, deferred uncharged below). An older build hits `default` and retries.
+    // ReportDeferredError, deferred uncharged below). A build older than M3-16 hits its
+    // `default` and retries; a build from PR1 on defers an unknown kind uncharged instead.
     case 'partner.report': {
       await runPartnerReportJob(deps.db, str(p.jobId), { hardStopAt: budget.hardStopAt, slot: budget.reportSlot });
       return;
     }
 
     default:
-      throw new Error(`Unknown outbox kind: ${row.kind}`);
+      // PR1: a kind this build does not know (a newer build wrote it, and this
+      // one is serving after a rollback) waits, uncharged, for a build that does.
+      throw new UnknownOutboxKindError(row.kind);
   }
 }
 
@@ -1524,6 +1655,26 @@ export async function drainOnce(
           result.released++;
         } else {
           logWarn('worker.lease', 'deferUncharged refused: lease no longer ours', { id: row.id, kind: row.kind });
+        }
+        continue;
+      }
+      // PR1: an unknown kind waits the same way, plus ONE ops alert per kind per
+      // UTC day (a failed alert insert is logged; the deferral already stands).
+      if (err instanceof UnknownOutboxKindError) {
+        if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
+          result.released++;
+          const kind = safeKindLabel(err.kind);
+          try {
+            await outbox.enqueue(
+              'ops.alert',
+              { message: `⚠️ SmartRemit ops: outbox rows of kind "${kind}" are waiting: this build does not know that kind (an older build may be serving after a rollback). They run once a build that knows it is live again; nothing was done for them.` },
+              { dedupeKey: `unknownkind:${kind}:${new Date().toISOString().slice(0, 10)}` },
+            );
+          } catch {
+            logWarn('worker.kind', 'unknown-kind alert enqueue failed', { id: row.id });
+          }
+        } else {
+          logWarn('worker.lease', 'deferUncharged refused: lease no longer ours', { id: row.id, kind: safeKindLabel(row.kind) });
         }
         continue;
       }

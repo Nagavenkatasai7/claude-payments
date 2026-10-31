@@ -21,6 +21,14 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
 
+// R17: the AI notice and its durable marker are covered by
+// tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
+// shown, so these suites keep checking the exact reply text of each path.
+vi.mock('@/lib/ai-notice-marker', async (orig) => ({
+  ...(await orig<typeof import('@/lib/ai-notice-marker')>()),
+  aiNoticeDueFor: async () => false,
+}));
+
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
 // measure of the per-batch creds memoization (fix 11).
@@ -1026,11 +1034,13 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     expect(JSON.stringify(sendText.mock.calls)).not.toMatch(new RegExp(LEGACY_TOKEN));
   });
 
-  it('an unknown kind dead-letters instead of looping forever', async () => {
+  it('an unknown kind waits uncharged instead of dead-lettering (PR1: a rollback never kills a newer build\'s rows)', async () => {
     await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES ('bogus.kind', '{}'::jsonb)`);
     await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}`);
     const r = await drainOnce(deps(), 'w1');
-    expect(r.dead).toBe(1);
+    expect(r).toMatchObject({ dead: 0, failed: 0, released: 1 });
+    const row = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE kind = 'bogus.kind'`)).rows[0];
+    expect(row).toMatchObject({ status: 'pending', attempts: MAX_ATTEMPTS - 1 });
   });
 });
 
@@ -1603,7 +1613,7 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
       const opts = _a[4] as { signal?: AbortSignal } | undefined;
       expect(opts?.signal).toBeInstanceOf(AbortSignal); // 5th argument: (phone, message, turn, waCreds, opts)
       await new Promise((res) => opts!.signal!.addEventListener('abort', res, { once: true }));
-      return "Sorry, I'm having trouble right now. Could you send that again?"; // the agent's own FALLBACK_REPLY on abort
+      return FALLBACK_REPLY; // the agent's own fallback on abort
     });
     await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'slow', turn: {} });
     // rowDeadlineMs 200 ⇒ the COOPERATIVE signal fires at max(1, 200 − COOP_GRACE_MS) = 1ms,

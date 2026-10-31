@@ -46,7 +46,7 @@ import { beginHold, beginSettlement } from '@/lib/settlement';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
 import { mintViaPayPage } from './helpers-mint';
-import { BLOCK_REPLY, capRefusalReply, FIXED_REPLIES, fixedReply, HOLD_REPLY } from '@/lib/hold-replies';
+import { BLOCK_REPLY, capRefusalReply, FIXED_REPLIES, fixedReply, HELP_SUFFIX, HOLD_REPLY } from '@/lib/hold-replies';
 
 // One customer portal (Oct 2): list_recent_transfers asks customerHistoryUrl for the "all
 // transfers" link. Unset (null) ⇒ the real helper (flag off in tests ⇒ /account/history).
@@ -113,6 +113,8 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     outboxRepo: createOutboxRepo(db),
     // M2-14: the database the locked one-recall-per-transfer transaction runs on (PGlite here).
     recallDb: db,
+    // R43: the database request_human_help's one-transaction case write runs on (PGlite here).
+    helpDb: db,
     // Program-Fix 15 PR C seam: the locked sender cancel, bound to PGlite.
     senderCancel: (p: string, id: string) => cancelWithinWindow(db, p, id, { via: 'bot' }),
   };
@@ -156,7 +158,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-eight tools (R30 deleted create_transfer)', () => {
+  it('exposes all twenty-nine tools (R30 deleted create_transfer; R56 added decline_off_topic)', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -168,6 +170,7 @@ describe('toolSchemas', () => {
       'check_send_limit',
       'create_invoice',
       'create_schedule',
+      'decline_off_topic',
       'dispute_bill',
       'generate_payment_link',
       'get_customer_context',
@@ -493,7 +496,7 @@ describe('executeTool', () => {
       { transfer_id: blocked[0].id },
       { ...ctx, channel: 'web' }, // R6b: WhatsApp refuses this tool at dispatch
     );
-    expect(linkResult.error).toBe(BLOCK_REPLY);
+    expect(linkResult.error).toBe(fixedReply('block', { help: true })); // R43: every dead end offers HELP
     expect(linkResult.url).toBeUndefined();
     expect(JSON.stringify(linkResult)).not.toMatch(/compliance|sanction|screen/i);
   });
@@ -2611,6 +2614,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     await forceStatus(ctx, id, 'cancelled');
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.error_code).toBe('cancelled');
+    expect(String(r.message)).toContain(HELP_SUFFIX); // R43: the HELP keyword, not "say you'd like to talk to a person"
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
@@ -2622,6 +2626,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.error_code).toBe('never_charged');
     expect(String(r.message).toLowerCase()).toContain('not charged');
+    expect(String(r.message)).toContain(HELP_SUFFIX); // R43: every dead end offers HELP
     expect(JSON.stringify(r).toLowerCase()).not.toContain('blocked');
     expectCustomerSafe(r);
   });
@@ -3093,10 +3098,11 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the fifteen read-only/refund/recall/help/pay-link/sender-name tools', () => {
+  it('the allowlist is exactly the sixteen read-only/refund/recall/help/decline/pay-link/sender-name tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
+      'decline_off_topic',
       'generate_payment_link',
       'get_customer_context',
       'get_quote',
@@ -4309,7 +4315,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       const r = await executeTool('cancel_bill', {}, ctx);
       expect(r.deferred).toBe(true);
       expect(r.cancelled).toBeUndefined();
-      expect(r.reply_hint).toBe(FIXED_REPLIES.payment_held); // R30: no review wording
+      expect(r.reply_hint).toBe(fixedReply('payment_held', { help: true })); // R30: no review wording; R43: HELP
       expect(JSON.stringify(r).toLowerCase()).not.toContain('review');
       expect((await ctx.store.getTransfer(id))?.status).toBe('in_review'); // unchanged
     });
@@ -5838,6 +5844,37 @@ describe('request_human_help — a real case behind every "a person will help" (
     expect(String(r.reply_hint)).not.toContain('in this chat');
     expect(String(r.reply_hint)).toContain(String(r.case_id));
   });
+
+  it('R43: on Telegram the hint names the phone number, not a WhatsApp number', async () => {
+    const base = await buildCtx(fakeRedis());
+    const ctx = { ...base, turn: { isNewConversation: false, surface: 'telegram' as const } };
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(String(r.reply_hint)).toContain('sign in with this phone number');
+    expect(String(r.reply_hint)).not.toContain('WhatsApp');
+  });
+
+  it('R43: the case, its triage row and its alert commit together through openHelpCase (one transaction on helpDb)', async () => {
+    const base = await buildCtx(fakeRedis());
+    const spy = vi.spyOn(db, 'transaction');
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, base);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    spy.mockRestore();
+  });
+});
+
+describe('decline_off_topic (R56): a code-written decline', () => {
+  it('returns the fixed OFF_TOPIC_REPLY and runs nothing else', async () => {
+    const { OFF_TOPIC_REPLY } = await import('@/lib/scope-guard');
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('decline_off_topic', {}, ctx);
+    expect(r).toEqual({ declined_off_topic: true, reply_to_customer: OFF_TOPIC_REPLY });
+  });
+
+  it('is offered on both channels', () => {
+    expect(toolSchemasForChannel('whatsapp').map((t) => t.function.name)).toContain('decline_off_topic');
+    expect(toolSchemasForChannel('web').map((t) => t.function.name)).toContain('decline_off_topic');
+  });
 });
 
 describe('cancel_draft — "nothing to cancel" never reads as "nothing was set up" (fix 34B)', () => {
@@ -6168,7 +6205,8 @@ describe('R30: held, blocked and capped transfers read the fixed replies', () =>
     await setStatus(id, 'in_review');
     for (const channel of ['whatsapp', 'web'] as const) {
       const r = await executeTool('check_payment_status', { transfer_id: id }, { ...ctx, channel });
-      expect(r).toEqual({ transfer_id: id, status: FIXED_REPLIES.status_held, reply_to_customer: HOLD_REPLY });
+      // R43: the held reply also says how to reach a person.
+      expect(r).toEqual({ transfer_id: id, status: FIXED_REPLIES.status_held, reply_to_customer: fixedReply('hold', { help: true }) });
       expect(JSON.stringify(r)).not.toMatch(REVIEW_WORDS);
     }
   });
@@ -6178,7 +6216,7 @@ describe('R30: held, blocked and capped transfers read the fixed replies', () =>
     const id = await mintOne(ctx);
     await setStatus(id, 'blocked');
     const r = await executeTool('check_payment_status', { transfer_id: id }, ctx);
-    expect(r.reply_to_customer).toBe(BLOCK_REPLY);
+    expect(r.reply_to_customer).toBe(fixedReply('block', { help: true }));
     expect(r.status).toBe('on hold');
     expect(JSON.stringify(r)).not.toContain('blocked');
     expect(JSON.stringify(r)).not.toMatch(REVIEW_WORDS);

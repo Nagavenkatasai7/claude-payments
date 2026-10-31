@@ -283,7 +283,7 @@
       {
         "ok": {
           "blocked": true,
-          "reply_to_customer": "This transfer can't be completed, and you have not been charged. If you'd like help, say you'd like to talk to a person."
+          "reply_to_customer": "This transfer can't be completed, and you have not been charged. Reply HELP to reach a person."
         }
       }
     ],

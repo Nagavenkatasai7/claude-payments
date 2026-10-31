@@ -65,8 +65,11 @@ export const BLOCK_REPLY: string = FIXED_REPLIES.block;
 /** The fixed explanation before the two extra questions. */
 export const EDD_ASK: string = FIXED_REPLIES.edd_ask;
 
-/** Points the customer to a person. One place to change it (R43 moves it to the HELP keyword). */
-export const HELP_SUFFIX = "If you'd like help, say you'd like to talk to a person.";
+/**
+ * Points the customer to a person (R43): the HELP keyword, which the agent.turn
+ * router (turn-router.ts) answers with a support case even when the model is down.
+ */
+export const HELP_SUFFIX = 'Reply HELP to reach a person.';
 
 const RECEIPT_LABEL = 'Receipt:';
 const RECEIPT_MAX = 300;
@@ -116,4 +119,73 @@ export function capRefusalKind(reason: unknown): FixedReplyKind {
 /** The fixed refusal for a cap reason: no figure, no reason beyond the plain kind. */
 export function capRefusalReply(reason: unknown, opts: FixedReplyOptions = {}): string {
   return fixedReply(capRefusalKind(reason), opts);
+}
+
+// ── R43: the replies to HELP and to a request for a person ──────────────────
+// The worker's router opens a support case (help-case.ts openHelpCase) and
+// answers with one of these, without the model. Each opening line carries the
+// {case} slot; the second sentence says where a teammate's answer arrives (a
+// staff reply reaches WhatsApp or Telegram only as a link notice, never inside
+// the chat). agent_paused is the fixed, non-AI answer while the agent is paused
+// (R26's slot in turn-router.ts). No response-time promise (owner decision, Program-Fix 34). The
+// Hindi entries are Hinglish, the language the bot answers Hindi in. Wording is
+// a draft for the owner and a native speaker to approve (HOLD_REPLIES_VERSION).
+
+export const HELP_CASE_REPLIES = {
+  en: {
+    case_opened: "I've opened a case so a person on our team can help you. Your case number is {case}.",
+    case_money: "I've opened a case so a person on our team can check this payment with you. Your case number is {case}.",
+    case_unauthorised:
+      "I've opened a case so a person on our team can help you. Your case number is {case}. Please don't share any code we send you with anyone.",
+    where_whatsapp: "When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number).",
+    where_telegram: "When a teammate replies, you'll get a message here with a link to read it (sign in with this phone number).",
+    where_web: 'A teammate will reply on the Support page of your account.',
+    agent_paused: "Our assistant can't answer messages right now. Reply HELP to reach a person.",
+  },
+  hinglish: {
+    case_opened: 'Maine aapke liye ek case khol diya hai, taaki hamari team ka koi vyakti aapki madad kar sake. Aapka case number hai {case}.',
+    case_money: 'Maine ek case khol diya hai, taaki hamari team ka koi vyakti aapke saath is payment ko check kar sake. Aapka case number hai {case}.',
+    case_unauthorised:
+      'Maine ek case khol diya hai, taaki hamari team ka koi vyakti aapki madad kar sake. Aapka case number hai {case}. Hamara bheja hua koi bhi code kisi ke saath share na karein.',
+    where_whatsapp: 'Jab koi teammate jawab dega, aapko yahan ek link ke saath message milega (isi WhatsApp number se sign in karein).',
+    where_telegram: 'Jab koi teammate jawab dega, aapko yahan ek link ke saath message milega (isi phone number se sign in karein).',
+    where_web: 'Hamari team aapke account ke Support page par jawab degi.',
+    agent_paused: 'Hamara assistant abhi messages ka jawab nahi de sakta. Kisi vyakti se baat karne ke liye HELP likhein.',
+  },
+  es: {
+    case_opened: 'Abrí un caso para que una persona de nuestro equipo le ayude. Su número de caso es {case}.',
+    case_money: 'Abrí un caso para que una persona de nuestro equipo compruebe este pago con usted. Su número de caso es {case}.',
+    case_unauthorised:
+      'Abrí un caso para que una persona de nuestro equipo le ayude. Su número de caso es {case}. No comparta con nadie ningún código que le enviemos.',
+    where_whatsapp: 'Cuando alguien del equipo responda, recibirá aquí un mensaje con un enlace para leerlo (inicie sesión con este número de WhatsApp).',
+    where_telegram: 'Cuando alguien del equipo responda, recibirá aquí un mensaje con un enlace para leerlo (inicie sesión con este número de teléfono).',
+    where_web: 'Nuestro equipo le responderá en la página de Soporte de su cuenta.',
+    agent_paused: 'Nuestro asistente no puede responder mensajes en este momento. Responda HELP para hablar con una persona.',
+  },
+} as const;
+
+export type HelpReplyLang = keyof typeof HELP_CASE_REPLIES;
+export type HelpCaseReplyKind = 'case_opened' | 'case_money' | 'case_unauthorised';
+export type HelpReplyChannel = 'whatsapp' | 'telegram' | 'web';
+
+const CASE_ID_MAX = 64;
+
+/** Where a teammate's answer arrives, for a channel. */
+export function helpWhereLine(lang: HelpReplyLang, channel: HelpReplyChannel): string {
+  const t = HELP_CASE_REPLIES[lang];
+  return channel === 'web' ? t.where_web : channel === 'telegram' ? t.where_telegram : t.where_whatsapp;
+}
+
+/**
+ * The fixed case-opened reply: the opening line with the case number, then the
+ * channel's where-line. The case id is made by our code; it is still flattened
+ * and bounded, so it can never add a line.
+ */
+export function helpCaseReply(
+  kind: HelpCaseReplyKind,
+  lang: HelpReplyLang,
+  opts: { caseId: string; channel: HelpReplyChannel },
+): string {
+  const caseId = boundUntrustedText(opts.caseId, CASE_ID_MAX).replace(/\s+/g, '');
+  return `${HELP_CASE_REPLIES[lang][kind].replace('{case}', caseId)} ${helpWhereLine(lang, opts.channel)}`;
 }

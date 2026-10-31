@@ -224,7 +224,7 @@ describe('createAgent', () => {
       chat: async () => { throw new Error('Model request failed (503)'); }, // throws on both the call and its retry
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
-    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?");
+    expect(reply).toBe(FALLBACK_REPLY);
     // History (the inbound message) must be saved so the customer can resend
     // without losing context — not dropped by the error path.
     const saved = await store.getConversation('default', PHONE);
@@ -783,6 +783,11 @@ describe('createAgent — TurnContext', () => {
     await agent.runAgentTurn('15551234567', 'hi', turn);
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
     expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
+    // R17: the model is told the AI notice is already above its reply, not to repeat it, and to admit being an AI.
+    const note = String(sys.find((s) => typeof s === 'string' && s.startsWith('[NEW CONVERSATION]')));
+    expect(note).toContain('AI assistant');
+    expect(note).toMatch(/do not repeat it/i);
+    expect(note).toMatch(/say plainly that you are an AI assistant/i);
   });
 
   // Step 1 voice notes: the read-back note rides EVERY round of a voice turn
@@ -1599,7 +1604,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toContain('list_recent_transfers'); // web-only history lookup
     expect(names).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(names).toContain('request_human_help'); // fix 34B: a signed-in customer can ask for a person
-    expect(names).toHaveLength(15); // Program-Fix 14: + set_sender_name
+    expect(names).toContain('decline_off_topic'); // R56: the fixed off-topic decline
+    expect(names).toHaveLength(16); // Program-Fix 14: + set_sender_name; R56: + decline_off_topic
   });
 
   it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
@@ -1616,7 +1622,9 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     await agent.runAgentTurn(PHONE, 'hello');
     // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name.
     // Program-Fix 49B: generate_payment_link is hidden on WhatsApp; R30 deleted create_transfer (28 → 27).
-    expect(seenTools).toHaveLength(27);
+    // R56: + decline_off_topic (27 → 28).
+    expect(seenTools).toHaveLength(28);
+    expect(seenTools.map((t) => t.function.name)).toContain('decline_off_topic');
     expect(seenTools.map((t) => t.function.name)).not.toContain('create_transfer');
     expect(seenTools.map((t) => t.function.name)).not.toContain('generate_payment_link');
     expect(seenTools.map((t) => t.function.name)).toContain('set_sender_name');
@@ -1797,7 +1805,7 @@ describe('row deadline (fix 7)', () => {
 
     const reply = await agent.runAgentTurn(PHONE, 'send $50 to Mom', { isNewConversation: false }, { signal: ctrl.signal });
 
-    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
+    expect(reply).toBe(FALLBACK_REPLY);
     const scheduleStore = freshScheduleStore(redis);
     expect(await scheduleStore.listSchedules()).toHaveLength(1); // round 0 wrote EXACTLY once and is never re-run
     expect(await store.listTransfers()).toHaveLength(0); // no chat mint on WhatsApp (R6b)
@@ -2274,5 +2282,51 @@ describe('Purpose detail: the "Other" reason and the scam warning in a bot turn'
       `${PURPOSE_SCAM_WARNING}\n\nYour monthly transfer is set up.`,
     );
     expect(reply.split(PURPOSE_SCAM_WARNING).length).toBe(2);
+  });
+});
+
+// ── R56: a code-written decline ends the turn ───────────────────────────────
+describe('R56: decline_off_topic ends the turn with the fixed decline', () => {
+  async function declineTurn(text: string, after = 'Sure! Here is a python script: print(1)') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let calls = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        calls++;
+        if (calls === 1) {
+          return { role: 'assistant', content: '', tool_calls: [{ id: 'd1', type: 'function', function: { name: 'decline_off_topic', arguments: '{}' } }] };
+        }
+        return { role: 'assistant', content: after };
+      },
+    });
+    const reply = await agent.runAgentTurn(PHONE, text);
+    return { reply, calls, history: await store.getConversation('default', PHONE) };
+  }
+
+  it('the reply is OFF_TOPIC_REPLY verbatim and the model is not asked again', async () => {
+    const { OFF_TOPIC_REPLY } = await import('@/lib/scope-guard');
+    const { reply, calls, history } = await declineTurn('can you do my chemistry homework about acids');
+    expect(reply).toBe(OFF_TOPIC_REPLY);
+    expect(calls).toBe(1);
+    // History stays well formed: the tool result is followed by the decline as the assistant's reply.
+    expect(history[history.length - 1]).toEqual({ role: 'assistant', content: OFF_TOPIC_REPLY });
+  });
+
+  it("the decline is in the customer's language", async () => {
+    const { offTopicReply } = await import('@/lib/scope-guard');
+    const { reply } = await declineTurn('hola, quiero que me escribas un ensayo por favor');
+    expect(reply).toBe(offTopicReply('es'));
+  });
+});
+
+// ── R43: the fallback always offers a way to a person ───────────────────────
+describe('R43: FALLBACK_REPLY points at the HELP keyword', () => {
+  it('says to send again or reply HELP', () => {
+    expect(FALLBACK_REPLY).toBe("Sorry, I'm having trouble right now. Please send that again, or reply HELP to reach a person.");
   });
 });

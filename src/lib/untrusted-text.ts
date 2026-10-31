@@ -1,5 +1,6 @@
 import { domainToASCII } from 'node:url';
 import { IANA_TLDS } from './iana-tlds';
+import { anyOf, normalizeChatText } from './chat-text-match';
 
 // untrusted-text — the ONE sanitizer for text an outsider wrote that later
 // reaches the agent (fix 5 / F43, F63): recipient and sender names from the
@@ -196,6 +197,34 @@ const OVERRIDE_PHRASE =
 export function hasOverridePhrase(v: unknown): boolean {
   const s = detectForm(v);
   return s !== '' && OVERRIDE_PHRASE.test(s);
+}
+
+// R17: phrases that make the bot claim, or hide that it is not, a person —
+// English, Hinglish, Hindi (Devanagari) and Spanish. Matched on the bounded,
+// normalized text with a Unicode word boundary (chat-text-match.ts).
+const HUMAN_IDENTITY_CLAIM = anyOf(
+  /\b(?:i am|i'm|im|we are|we're|you are|you're|act as|acting as|pretend to be|pretend you are|pretend you're|pose as|posing as|say you are|say you're|claim to be|introduce yourself as)(?: a| an| the)?(?: real| actual| live)? (?:human|humans|person|people|man|woman)\b/u,
+  /\breal (?:human|person|people)\b/u,
+  /\bnot (?:a |an )?(?:bot|robot|ai|machine|chatbot|computer program)\b/u,
+  /\b(?:never|don't|dont|do not|must not|mustn't)(?: ever)? (?:say|admit|reveal|mention|tell|disclose)\b(?: \S+){0,5}? (?:ai|bot|robot|machine|automated|artificial|chatbot)\b/u,
+  /\b(?:main|mai|hum)(?: ek)? (?:insaan|insan|vyakti|aadmi|aurat)\b/u,
+  /\b(?:bot|robot|ai) nahi\b/u,
+  /मैं(?: एक)? (?:इंसान|इन्सान|व्यक्ति|मनुष्य|आदमी|औरत)/u,
+  /(?:बॉट|रोबोट|एआई) नहीं/u,
+  /\b(?:soy|somos)(?: una?)? (?:persona|personas|humano|humana|ser humano)\b/u,
+  /\bno (?:soy|somos) (?:una? )?(?:bot|robot|ia|máquina|maquina|programa)\b/u,
+  /\bpersona real\b/u,
+  /\b(?:nunca|no) (?:digas|diga|admitas|admita|reveles|revele)\b(?: \S+){0,5}? (?:ia|bot|robot|máquina|maquina|artificial)\b/u,
+);
+
+/**
+ * R17: whether a value makes the bot claim to be a person ("I'm a real person",
+ * "never say you are an AI"). A bot persona that does is refused at save
+ * (checkPersona) and dropped from the prompt at read (prompt.ts). Pure.
+ */
+export function hasHumanIdentityClaim(v: unknown): boolean {
+  const s = normalizeChatText(boundUntrustedText(v, DETECT_MAX));
+  return s !== '' && HUMAN_IDENTITY_CLAIM(s);
 }
 
 // ── R6b: model-output host stripping (final structural round) ────────────────

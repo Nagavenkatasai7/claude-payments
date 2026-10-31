@@ -29,6 +29,12 @@ Check quickly: `git log --oneline <target-sha>..origin/main -- drizzle/` lists e
 4. Re-run the smoke for that SHA: `gh workflow run smoke.yml -f sha=<target-sha>`.
 5. Revert or fix the bad change in a new PR. When it merges, check in Vercel that the new deployment actually went live; if production is still pinned to the rolled-back deployment, use **Promote** on the new one (`vercel promote <deployment-url>`, https://vercel.com/docs/deployments/rollback-production-deployment). *(Whether Vercel pauses auto-promotion after an Instant Rollback was not verified for this project; check the Deployments page.)*
 
+## Rows a newer build left behind
+
+A rollback also leaves the newer build's outbox rows and audit rows in place. From the partner-assurance PR1 build on, the worker never dead-letters an outbox row whose kind it does not know: it waits (pending, no attempt spent, looked at again every 5 minutes), and one ops alert per kind per UTC day (`unknownkind:<kind>:<day>`) says rows are waiting. They run as soon as a build that knows the kind is live again, so roll forward to clear them. A build older than PR1 still retries an unknown kind and dead-letters it after 8 attempts; check the dead-letter list after rolling back that far.
+
+PR1 itself adds no outbox kind, no migration and no Redis format. Its new rows are ordinary ones an older build already handles or ignores: `ai.notice_shown` audit rows (the AI notice marker; an older build never reads them and never shows the notice) and `human_help` tickets opened by the HELP keyword (the same tickets the bot's request_human_help tool opens).
+
 ## Data
 
 There is no automatic database rollback. Before a risky migration, create a Neon branch (a point-in-time copy) in the Neon console so there is a restore point. Restoring data is a separate, owner-approved step; never run destructive SQL against production to "undo" a migration in a hurry.

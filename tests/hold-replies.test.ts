@@ -8,6 +8,8 @@ import {
   EDD_ASK,
   FIXED_REPLIES,
   fixedReply,
+  HELP_CASE_REPLIES,
+  helpCaseReply,
   HELP_SUFFIX,
   HOLD_REPLIES_VERSION,
   HOLD_REPLY,
@@ -92,6 +94,48 @@ describe('hold-replies: the fixed table never tips the customer off', () => {
     ]) {
       expect(offences(old), old).not.toEqual([]);
     }
+  });
+});
+
+// R43: the HELP keyword reaches a person, and the case-opened replies live in
+// the same table family, under the same banned-word and no-figure check.
+describe('hold-replies: the HELP keyword and the case-opened replies (R43)', () => {
+  it('every dead end now points at the HELP keyword', () => {
+    expect(HELP_SUFFIX).toBe('Reply HELP to reach a person.');
+  });
+
+  const LANGS = Object.keys(HELP_CASE_REPLIES) as Array<keyof typeof HELP_CASE_REPLIES>;
+  it('covers English, Hinglish and Spanish', () => {
+    expect(LANGS.sort()).toEqual(['en', 'es', 'hinglish']);
+  });
+
+  for (const lang of LANGS) {
+    for (const [key, text] of Object.entries(HELP_CASE_REPLIES[lang])) {
+      it(`${lang}.${key} has no banned word, digit or currency sign`, () => {
+        expect(text.trim().length).toBeGreaterThan(0);
+        expect(offences(text), `${lang}.${key}: ${text}`).toEqual([]);
+      });
+    }
+    it(`${lang}: every opening line carries the {case} slot, and the where-lines do not`, () => {
+      const t = HELP_CASE_REPLIES[lang];
+      for (const k of ['case_opened', 'case_money', 'case_unauthorised'] as const) expect(t[k]).toContain('{case}');
+      for (const k of ['where_whatsapp', 'where_telegram', 'where_web'] as const) expect(t[k]).not.toContain('{case}');
+    });
+  }
+
+  it('helpCaseReply fills the case number and adds the channel line', () => {
+    expect(helpCaseReply('case_opened', 'en', { caseId: 'tk_x', channel: 'whatsapp' })).toBe(
+      `${HELP_CASE_REPLIES.en.case_opened.replace('{case}', 'tk_x')} ${HELP_CASE_REPLIES.en.where_whatsapp}`,
+    );
+    expect(helpCaseReply('case_money', 'es', { caseId: 'tk_y', channel: 'web' })).toBe(
+      `${HELP_CASE_REPLIES.es.case_money.replace('{case}', 'tk_y')} ${HELP_CASE_REPLIES.es.where_web}`,
+    );
+  });
+
+  it('a case id is flattened and bounded, so it cannot add lines or text of its own', () => {
+    const r = helpCaseReply('case_opened', 'en', { caseId: `tk_a\n${'b'.repeat(200)}`, channel: 'web' });
+    expect(r.split('\n')).toHaveLength(1);
+    expect(r.length).toBeLessThan(400);
   });
 });
 

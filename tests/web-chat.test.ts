@@ -25,6 +25,12 @@ let db: Db;
 
 // The refund writer falls back to getDb() (tools.ts request_refund); bind it to this file's PGlite.
 vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
+// R17: the web AI notice is covered by tests/web-chat-router.test.ts. Here it
+// counts as already shown, so these suites keep checking the exact reply text.
+vi.mock('@/lib/ai-notice-marker', async (orig) => ({
+  ...(await orig<typeof import('@/lib/ai-notice-marker')>()),
+  aiNoticeDueFor: async () => false,
+}));
 
 const PHONE = '15551234567';
 

@@ -101,9 +101,9 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
 });
 
 describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the app', () => {
-  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases and the 3 R30 no-tipping-off cases, ids 1..27', () => {
-    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 27 }, (_, i) => i + 1));
-    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 and 25-27 keep it off.
+  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases and the 2 R56 scope cases, ids 1..31', () => {
+    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 31 }, (_, i) => i + 1));
+    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 and 25-31 keep it off.
     expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24]);
   });
 

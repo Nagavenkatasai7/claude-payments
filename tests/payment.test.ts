@@ -14,7 +14,7 @@ import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
-import { HOLD_REPLY } from '@/lib/hold-replies';
+import { HELP_SUFFIX, HOLD_REPLY } from '@/lib/hold-replies';
 
 let db: Db;
 beforeEach(async () => {
@@ -162,6 +162,8 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
     expect(result.senderMessages[0]).not.toContain('will get');
     // R30: the fixed hold text (hold-replies.ts), never a review word
     expect(result.senderMessages[0]).toContain(HOLD_REPLY);
+    // R43: a held transfer's message says how to reach a person.
+    expect(result.senderMessages[0]).toContain(`${HOLD_REPLY} ${HELP_SUFFIX}`);
     expect(result.senderMessages[0].toLowerCase()).not.toContain('review');
     expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
   });
@@ -243,7 +245,7 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
   it('held B2B keeps the fixed hold copy AND the business-debit wording', () => {
     const msg = buildStage1Message(b2bTransfer(), { held: true });
     expect(msg).toContain('will be debited from your business account');
-    expect(msg).toContain(HOLD_REPLY);
+    expect(msg).toContain(`${HOLD_REPLY} ${HELP_SUFFIX}`);
     expect(msg.toLowerCase()).not.toContain('review');
     expect(msg).not.toContain('within 1 business day');
   });

@@ -4,8 +4,8 @@
 //   - fix 5 (F43): both are stripped of control characters, line separators and []{}<> and capped
 //     (BRAND_MAX / PERSONA_MAX). Stripped, not refused, so an existing value still saves;
 //     buildSystemPrompt clamps again at read for pre-fix rows.
-//   - Program-Fix 38: the persona may set tone only. A web address or a rule-override phrase is
-//     REFUSED before any write, with one generic message whichever check tripped.
+//   - Program-Fix 38: the persona may set tone only. A web address, a rule-override phrase or (R17)
+//     a claim to be a person is REFUSED before any write, with one generic message whichever check tripped.
 // The writers are column-only UPDATEs (never a full-row savePartner, which would rewrite every
 // other column from a possibly stale read) with their audit row in the SAME transaction. The audit
 // meta holds the lengths only, never the text. An unchanged value writes nothing.
@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm';
 import { partners } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { boundUntrustedText, BRAND_MAX, hasOverridePhrase, hasWebAddress, PERSONA_MAX } from '@/lib/untrusted-text';
+import { boundUntrustedText, BRAND_MAX, hasHumanIdentityClaim, hasOverridePhrase, hasWebAddress, PERSONA_MAX } from '@/lib/untrusted-text';
 import type { PartnerId } from '@/lib/types';
 
 export const PERSONA_REFUSAL = 'Bot voice can describe tone only — no web addresses or instructions about rules.';
@@ -26,7 +26,10 @@ export type PersonaResult = BrandTextResult | { ok: false; reason: 'persona_refu
 /** Pure: the bounded persona (undefined when blank), or a refusal. */
 export function checkPersona(raw: unknown): PersonaCheck {
   const persona = boundUntrustedText(raw, PERSONA_MAX);
-  if (persona !== '' && (hasWebAddress(persona) || hasOverridePhrase(persona))) return { ok: false, reason: 'persona_refused' };
+  // R17: nor may it make the bot claim to be a person (the same generic refusal).
+  if (persona !== '' && (hasWebAddress(persona) || hasOverridePhrase(persona) || hasHumanIdentityClaim(persona))) {
+    return { ok: false, reason: 'persona_refused' };
+  }
   return { ok: true, value: persona || undefined };
 }
 

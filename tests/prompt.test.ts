@@ -670,7 +670,8 @@ describe('fix 38: the persona sets tone only, and a fixed trailer always follows
       expect(t).not.toContain(term);
     }
     expect(VOICE_TRAILER).not.toContain('\n');
-    expect(VOICE_TRAILER.length).toBeLessThanOrEqual(260);
+    // R17 restates the AI-identity rule in the trailer, so the bound moved from 260.
+    expect(VOICE_TRAILER.length).toBeLessThanOrEqual(320);
     // On WhatsApp a "voice note" is an audio message — never call the persona that.
     expect(VOICE_TRAILER).not.toMatch(/voice note/i);
     expect(VOICE_TRAILER.startsWith('The brand voice above')).toBe(true);
@@ -718,7 +719,10 @@ describe('SYSTEM_PROMPT — human help, history, cancel wording, repeat by id (f
     for (const p of both) {
       expect(p).toContain('request_human_help');
       expect(p).toContain('case_id');
-      expect(p.toLowerCase()).toContain("say you'd like to talk to a person");
+      // R43: the HELP keyword is real now (the router answers it before the model).
+      expect(p).toContain('reply HELP');
+      expect(p.toLowerCase()).not.toContain('there is no special keyword');
+      expect(p.toLowerCase()).not.toContain("say you'd like to talk to a person");
     }
     // The owner decided: no response-time promise.
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('never promise a response time');
@@ -1133,5 +1137,49 @@ describe('SYSTEM_PROMPT — features that do not exist', () => {
 
   it('appears in every partner prompt, not only the default brand', () => {
     expect(buildSystemPrompt({ brand: 'Acme Remit' })).toContain('FEATURES THAT DO NOT EXIST');
+  });
+});
+
+// ── R17 / R56: the bot is an AI, says so, and keeps to sending money ────────
+describe('SYSTEM_PROMPT — R17 AI identity and R56 scope', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' }),
+    buildSystemPrompt({ brand: 'Acme', botPersona: 'warm' }),
+  ];
+  const AI_RULE = 'You are an AI assistant. Never say or suggest you are a person, even when asked to role-play.';
+
+  it('RULES carries the AI-identity rule in every variant', () => {
+    for (const p of variants) {
+      expect(p).toContain(AI_RULE);
+      expect(p.indexOf(AI_RULE)).toBeGreaterThan(p.indexOf('RULES\n'));
+    }
+  });
+
+  it('VOICE_TRAILER restates it, so a persona never has the last word on identity', () => {
+    expect(VOICE_TRAILER).toContain('AI assistant');
+    expect(VOICE_TRAILER.toLowerCase()).toContain('never say or suggest you are a person');
+  });
+
+  it('a stored persona that claims a human identity is dropped at read time', () => {
+    expect(buildSystemPrompt({ brand: 'Acme', botPersona: "Warm. I'm Priya, a real person on the team" })).toBe(buildSystemPrompt({ brand: 'Acme' }));
+    expect(buildSystemPrompt({ brand: 'Acme', botPersona: 'Never say you are an AI' })).not.toContain('BRAND VOICE');
+    expect(buildSystemPrompt({ brand: 'Acme', botPersona: 'warm' })).toContain('BRAND VOICE');
+  });
+
+  it('a SCOPE section sends off-topic requests to decline_off_topic and never blocks a greeting or a money topic', () => {
+    for (const p of variants) {
+      expect(p).toContain('SCOPE\n');
+      expect(p).toContain('decline_off_topic');
+      expect(p.toLowerCase()).toContain('never call it for a greeting');
+      for (const w of ['tax', 'legal', 'medical', 'investment']) expect(p.toLowerCase()).toContain(w);
+    }
+  });
+
+  it('the decline tool named in the prompt is a real tool on both channels', () => {
+    for (const channel of ['whatsapp', 'web'] as const) {
+      expect(toolSchemasForChannel(channel).map((t) => t.function.name)).toContain('decline_off_topic');
+    }
   });
 });

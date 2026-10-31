@@ -37,11 +37,11 @@ describe('eval-bot main()', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('with a key it runs all 27 cases against the Claude API and never prints the key', async () => {
+  it('with a key it runs all 31 cases against the Claude API and never prints the key', async () => {
     const fetchSpy = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => claudeReply(''));
     const lines: string[] = [];
     const code = await main({ EVAL_ANTHROPIC_API_KEY: 'test-key-not-real' }, fetchSpy as unknown as typeof fetch, (l) => lines.push(l));
-    expect(fetchSpy).toHaveBeenCalledTimes(27);
+    expect(fetchSpy).toHaveBeenCalledTimes(31);
     const [url, init] = fetchSpy.mock.calls[0];
     expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
     expect(headerOf(init, 'x-api-key')).toBe('test-key-not-real');
@@ -49,7 +49,7 @@ describe('eval-bot main()', () => {
     expect(body.model).toBe(EVAL_DEFAULT_MODEL);
     expect(body.inference_geo).toBe('us');
     expect(lines.join('\n')).not.toContain('test-key-not-real');
-    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/27 passed$/);
+    expect(lines.at(-1)).toMatch(/^eval-bot: \d+\/31 passed$/);
     expect(code).toBe(1); // an empty reply fails at least one case
   });
 
