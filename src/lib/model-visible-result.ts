@@ -7,6 +7,10 @@
  * list of transfers) can never hand the model a remaining-limit figure, the EDD
  * threshold or a screening result that it could repeat to the customer.
  * The customer-facing wording for those cases lives in hold-replies.ts.
+ *
+ * R32 (bot part): quote_text is the quote the CODE shows the customer after the
+ * model's text (compose-reply.ts). The model never sees it, so it cannot copy
+ * or reword it; it reads the quote's own fields instead.
  */
 
 /** Keys the model must never see. */
@@ -17,6 +21,7 @@ export const MODEL_HIDDEN_KEYS: ReadonlySet<string> = new Set([
   'edd_threshold_usd',
   'compliance_status',
   'compliance_reasons',
+  'quote_text',
 ]);
 
 function strip(value: unknown): unknown {

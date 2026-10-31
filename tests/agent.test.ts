@@ -413,7 +413,10 @@ describe('createAgent', () => {
     });
 
     const reply = await agent.runAgentTurn(PHONE, 'send $500 via upi');
-    expect(reply).toBe('You send $500, they get a lot of INR.');
+    // R32: a quoting turn ends with the code-written quote, after the model text.
+    const [modelPart, quotePart] = reply.split('\n\n');
+    expect(modelPart).toBe('You send $500, they get a lot of INR.');
+    expect(quotePart).toMatch(/^Sending \$500\.00\.\n.*\nRate: 1 USD = ₹85\.2\nThey get ₹42,600 within 1 business day\.$/);
 
     const conv = await store.getConversation('default', PHONE);
     expect(conv.some((m) => m.role === 'tool')).toBe(true);
@@ -1532,7 +1535,9 @@ describe('best-rate routing wiring (B2)', () => {
       ...deps, chat: async () => script.next(),
     });
     const reply = await agent.runAgentTurn(PHONE, 'how much to send $100?');
-    expect(reply).toBe('Here is your quote!');
+    // R32: the code-written quote follows the model text, at the WINNING rate.
+    expect(reply.split('\n\n')[0]).toBe('Here is your quote!');
+    expect(reply).toContain('Rate: 1 USD = ₹86\nThey get ₹8,600 within 1 business day.');
     // The LIVE selector was consulted with this corridor + the mid cross-rate.
     expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledWith(
@@ -2328,5 +2333,119 @@ describe('R56: decline_off_topic ends the turn with the fixed decline', () => {
 describe('R43: FALLBACK_REPLY points at the HELP keyword', () => {
   it('says to send again or reply HELP', () => {
     expect(FALLBACK_REPLY).toBe("Sorry, I'm having trouble right now. Please send that again, or reply HELP to reach a person.");
+  });
+});
+
+// ── R32 (bot part): code-written quotes and the reply guard ─────────────────
+describe('R32: the quote is written by code, and the reply guard checks the raw model text', () => {
+  async function quoteTurn(
+    modelText: string,
+    opts: { flag?: boolean; flagThrows?: boolean; text?: string } = {},
+  ) {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedNamedSender(deps.customerStore);
+    if (opts.flag) {
+      await createFeatureFlagRepo(db).upsert({ key: 'agent.reply_guard', scopeType: 'global', scopeId: '', enabled: true, reason: 'reply guard on', updatedBy: 'admin' });
+    }
+    invalidateFlagCache(db);
+    if (opts.flagThrows) vi.spyOn(store, 'isFlagOn').mockRejectedValue(new Error('flag store down'));
+    const reports: import('@/lib/reply-guard').ReplyGuardReport[] = [];
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () =>
+        call++ === 0
+          ? { role: 'assistant', content: '', tool_calls: [{ id: 'q1', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 500, funding_method: 'bank_transfer' }) } }] }
+          : { role: 'assistant', content: modelText },
+    });
+    const reply = await agent.runAgentTurn(PHONE, opts.text ?? 'how much to send $500 to India?');
+    return { reply, reports, history: await store.getConversation('default', PHONE) };
+  }
+
+  it('a quoting turn ends with the code-written quote, after the model text; the model never saw it', async () => {
+    const { reply, reports, history } = await quoteTurn('Here is your quote. Shall I go ahead?');
+    const [modelPart, quotePart] = reply.split('\n\n');
+    expect(modelPart).toBe('Here is your quote. Shall I go ahead?');
+    expect(quotePart).toMatch(/^Sending \$500\.00\.\n/);
+    expect(quotePart).toContain('Rate: 1 USD = ₹85.2');
+    expect(quotePart).toContain('They get ₹42,600 within 1 business day.');
+    expect(reports).toEqual([]);
+    const tool = history.find((m) => m.role === 'tool');
+    expect(tool?.content).not.toContain('quote_text');
+    expect(tool?.content).not.toContain('Sending $500.00.');
+  });
+
+  it('a model figure that matches the quote is fine; one that does not is reported (shadow keeps the reply)', async () => {
+    expect((await quoteTurn('Mom gets ₹42,600 for your $500. Go ahead?')).reports).toEqual([]);
+    const { reply, reports } = await quoteTurn('Mom gets ₹43,000 instantly. Go ahead?');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].mode).toBe('shadow');
+    expect(reports[0].issues.map((i) => i.kind).sort()).toEqual(['amount', 'claim']);
+    expect(reply.startsWith('Mom gets ₹43,000 instantly. Go ahead?\n\nSending $500.00.')).toBe(true);
+  });
+
+  it('with agent.reply_guard on, the reply is replaced with the fixed fallback and the history holds what the customer saw', async () => {
+    const { reply, reports, history } = await quoteTurn('Mom gets ₹43,000. Go ahead?', { flag: true });
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(reports).toEqual([{ mode: 'on', issues: [{ kind: 'amount', found: '₹43,000' }] }]);
+    expect(history[history.length - 1]).toEqual({ role: 'assistant', content: FALLBACK_REPLY });
+  });
+
+  it('an unreadable switch keeps shadow mode (never replaces a reply on a flag outage)', async () => {
+    const { reply, reports } = await quoteTurn('Mom gets ₹43,000. Go ahead?', { flagThrows: true });
+    expect(reports[0].mode).toBe('shadow');
+    expect(reply.startsWith('Mom gets ₹43,000. Go ahead?')).toBe(true);
+  });
+
+  it("the customer's own numbers and earlier tool results in the conversation are facts", async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.saveConversation('default', PHONE, [
+      { role: 'user', content: 'quote $200 to India' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'old', type: 'function', function: { name: 'get_quote', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'old', content: JSON.stringify({ source_currency: 'USD', amount_source: 200, fee_source: 1.99, destination_currency: 'INR', amount_dest: 17040, fx_rate: 85.2 }) },
+      { role: 'assistant', content: 'Here is your quote.' },
+    ]);
+    const reports: unknown[] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () => ({ role: 'assistant', content: 'The fee on your $200 send was $1.99, and $350 would be a new quote. Shall I check?' }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'what was the fee again? and what about 350');
+    expect(reports).toEqual([]);
+    expect(reply).toBe('The fee on your $200 send was $1.99, and $350 would be a new quote. Shall I check?');
+  });
+
+  it('a reply with no figures reads no switch and reports nothing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const flagSpy = vi.spyOn(store, 'isFlagOn');
+    const reports: unknown[] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: (r) => reports.push(r),
+      chat: async () => ({ role: 'assistant', content: 'Hi there! How can I help?' }),
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Hi there! How can I help?');
+    expect(reports).toEqual([]);
+    expect(flagSpy.mock.calls.filter(([k]) => k === 'agent.reply_guard')).toHaveLength(0);
+  });
+
+  it('a throwing hook never breaks the reply', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store),
+      onReplyGuard: () => { throw new Error('boom'); },
+      chat: async () => ({ role: 'assistant', content: 'Sending is instant!' }),
+    });
+    expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Sending is instant!');
   });
 });

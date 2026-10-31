@@ -13,6 +13,7 @@ import {
   rateLockLine,
   RATE_LOCK_MINUTES,
   buildApproveSummary,
+  buildQuoteText,
   maskAccount,
 } from '@/lib/tools';
 import type { CurrencyCode, Quote, Transfer } from '@/lib/types';
@@ -1605,6 +1606,73 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('bank a/c ****6789');
     expect(s).not.toContain('their bank account (you');
+  });
+});
+
+// R32 (bot part): the quote the bot shows is written by code, from the quote
+// itself. buildQuoteText is the Approve card's figure lines, without the
+// recipient, the payout destination or the rate lock (get_quote locks nothing).
+describe('buildQuoteText — the code-written quote (R32)', () => {
+  const figureLines = (s: string) => s.split('\n').slice(1, 4);
+
+  it("equals the Approve card's figure lines: send amount, fee, rate and what they get", () => {
+    const q = baseQuote();
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer' });
+    const card = buildApproveSummary(q, 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    const lines = text.split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe('Sending $500.00.');
+    expect(card.split('\n')[0]).toBe('Sending $500.00 to Mom.');
+    expect(lines.slice(1)).toEqual(figureLines(card));
+    expect(text).toBe('Sending $500.00.\nFee $1.99\nRate: 1 USD = ₹83\nThey get ₹41,500 within 1 business day.');
+  });
+
+  it('carries the same rate date, reward and first-transfer framing as the card', () => {
+    const q = baseQuote({ feeUsd: 0, feeSource: 0 });
+    const card = buildApproveSummary(q, 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, '2026-10-02');
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer', rateDate: '2026-10-02' });
+    expect(text.split('\n').slice(1)).toEqual(figureLines(card));
+    expect(text).toContain('first transfer free');
+    expect(text).toContain('(daily reference rate, 2 Oct)');
+  });
+
+  it('formats a non-INR destination like the card (AED, GBP source)', () => {
+    const q = baseQuote({ sourceCurrency: 'GBP', amountSource: 400, feeSource: 1.6, fxRate: 4.6, amountInr: 1840, destinationCurrency: 'AED' });
+    const card = buildApproveSummary(q, 'Ali', 'bank', '', 'bank_transfer', 'AED');
+    const text = buildQuoteText(q, { fundingMethod: 'bank_transfer' });
+    expect(text.split('\n')[0]).toBe('Sending £400.00.');
+    expect(text.split('\n').slice(1)).toEqual(figureLines(card));
+    expect(text).not.toContain('₹');
+  });
+
+  it('never names a recipient, an account or the rate lock', () => {
+    const text = buildQuoteText(baseQuote(), {});
+    expect(text).not.toMatch(/To:|\*\*\*\*|Rate locked|tap soon/);
+  });
+});
+
+describe('get_quote: quote_text (R32)', () => {
+  it('the quote arm returns the code-written quote_text, built from the same quote', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(typeof r.quote_text).toBe('string');
+    const q: Quote = {
+      amountUsd: Number(r.amount_usd), feeUsd: Number(r.fee_usd), totalChargeUsd: Number(r.total_charge_usd),
+      fxRate: Number(r.fx_rate), amountInr: Number(r.amount_dest), deliveryEstimate: String(r.delivery_estimate),
+      sourceCurrency: r.source_currency as CurrencyCode, amountSource: Number(r.amount_source), feeSource: Number(r.fee_source),
+      totalChargeSource: Number(r.total_charge_source), destinationCurrency: r.destination_currency as CurrencyCode,
+    };
+    expect(r.quote_text).toBe(
+      buildQuoteText(q, { fundingMethod: 'bank_transfer', ...(typeof r.rate_date === 'string' ? { rateDate: r.rate_date } : {}) }),
+    );
+    expect(String(r.quote_text)).toContain('within 1 business day');
+  });
+
+  it('a cap refusal carries no quote_text', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 99_999, funding_method: 'bank_transfer' }, ctx);
+    expect(r.quote_text).toBeUndefined();
   });
 });
 

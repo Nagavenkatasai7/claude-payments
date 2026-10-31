@@ -101,9 +101,9 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
 });
 
 describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the app', () => {
-  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases and the 2 R56 scope cases, ids 1..31', () => {
-    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 31 }, (_, i) => i + 1));
-    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 and 25-31 keep it off.
+  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases, the 2 R56 scope cases and the R32 code-quote case, ids 1..32', () => {
+    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 32 }, (_, i) => i + 1));
+    // Required purpose: 19-24 run with the purpose.detect switch on; 1-18 and 25-32 keep it off.
     expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24]);
   });
 
@@ -123,6 +123,15 @@ describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the ap
     expect(replies).toContain(FIXED_REPLIES.cap_daily);
     expect(replies).toContain(fixedReply('block', { help: true }));
     for (const r of replies) expect(r).not.toMatch(/notified|left today|review/i);
+  });
+
+  it('R32: a recorded get_quote result never promises delivery in minutes (the tool says business days)', () => {
+    for (const c of EVAL_CASES) {
+      for (const m of c.history.filter((h) => h.role === 'tool')) {
+        const body = JSON.parse(String(m.content)) as Record<string, unknown>;
+        if (typeof body.delivery_estimate === 'string') expect(body.delivery_estimate, `#${c.id}`).toMatch(/business day/);
+      }
+    }
   });
 
   it('the server notes it replays are still what agent.ts injects', () => {

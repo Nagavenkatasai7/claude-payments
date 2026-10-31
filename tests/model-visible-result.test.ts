@@ -41,4 +41,10 @@ describe('modelVisibleResult', () => {
     const clean = { transfer_id: 'abc', status: 'paid', n: 1, ok: true, none: null, list: ['a', 2] };
     expect(modelVisibleResult(clean)).toEqual(clean);
   });
+
+  it('R32: the code-written quote_text is for the customer, never the model (it cannot copy or reword it)', () => {
+    expect(MODEL_HIDDEN_KEYS.has('quote_text')).toBe(true);
+    const out = modelVisibleResult({ amount_source: 500, quote_text: 'Sending $500.00.\nFee $1.99', delivery_estimate: 'within 1 business day' });
+    expect(out).toEqual({ amount_source: 500, delivery_estimate: 'within 1 business day' });
+  });
 });

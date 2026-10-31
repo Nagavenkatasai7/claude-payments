@@ -2145,6 +2145,77 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
   });
 });
 
+// R32 (bot part): the agent reports a reply-guard mismatch through
+// opts.onReplyGuard; the worker raises ONE deduped ops alert per tenant and
+// hour in the same transaction as the reply. Shadow sends the agent's reply;
+// in 'on' mode the agent already replaced it, and the fallback alert stays off.
+describe('drainOnce — agent.turn reply guard (R32)', () => {
+  const P = '15551230000';
+  const outboxRows = async (kind: string) =>
+    ((await db.execute(sql`SELECT id, status, attempts, dedupe_key, payload FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as {
+      rows: Array<{ id: number; status: string; attempts: number; dedupe_key: string | null; payload: Record<string, unknown> }>;
+    }).rows;
+  type GuardOpts = { onReplyGuard?: (r: { issues: Array<{ kind: string; found: string }>; mode: 'shadow' | 'on' }) => void };
+
+  it('shadow: a mismatch enqueues one replyguard:<tenant>:<hour> alert and the original reply goes out', async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'shadow', issues: [{ kind: 'amount', found: '$43,000' }] });
+      return 'Mom gets $43,000 instantly.';
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'b', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const alerts = (await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupe_key).toMatch(/^replyguard:default:\d+$/);
+    expect(Object.keys(alerts[0].payload)).toEqual(['message']);
+    const msg = String(alerts[0].payload.message);
+    expect(msg).toMatch(/shadow/i);
+    expect(msg).toContain('amount');
+    expect(msg).not.toContain('43,000');
+    expect(msg).not.toContain(P);
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual(['Mom gets $43,000 instantly.', 'Mom gets $43,000 instantly.']);
+  });
+
+  it("on: the agent's replacement goes out, the alert says it was replaced, and no botfallback alert", async () => {
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'on', issues: [{ kind: 'rate', found: '1 USD = ₹84' }] });
+      return FALLBACK_REPLY;
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    const keys = (await outboxRows('ops.alert')).map((r) => String(r.dedupe_key));
+    expect(keys.filter((k) => k.startsWith('replyguard:'))).toHaveLength(1);
+    expect(keys.filter((k) => k.startsWith('botfallback:'))).toHaveLength(0);
+    const alert = (await outboxRows('ops.alert')).find((r) => String(r.dedupe_key).startsWith('replyguard:'))!;
+    expect(String(alert.payload.message)).toMatch(/replaced/i);
+    expect((await outboxRows('whatsapp.text')).map((t) => t.payload.body)).toEqual([FALLBACK_REPLY]);
+  });
+
+  it('a routed partner turn alerts under that tenant', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      (a[4] as GuardOpts).onReplyGuard?.({ mode: 'shadow', issues: [{ kind: 'claim', found: 'instant' }] });
+      return 'It is instant.';
+    });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {}, routedPartnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    const alerts = (await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'));
+    expect(alerts.map((r) => r.dedupe_key)).toEqual([expect.stringMatching(/^replyguard:acme:\d+$/)]);
+  });
+
+  it('a clean turn raises no reply-guard alert', async () => {
+    runAgentTurn.mockResolvedValue('Hi there!');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await drainOnce(deps(), 'w1');
+    expect((await outboxRows('ops.alert')).filter((r) => String(r.dedupe_key).startsWith('replyguard:'))).toHaveLength(0);
+  });
+});
+
 describe('drainOnce — agent.turn ordering with inline cards (Program-Fix 34A review M1/S1)', () => {
   const P = '15551230000';
   const makeDue = () => db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE status IN ('pending','failed')`);

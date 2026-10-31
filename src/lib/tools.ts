@@ -425,6 +425,30 @@ export function buildApproveSummary(
   reward?: QuotedReward,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
+  return [
+    // fix 5: the name may be a pre-fix outsider-written value, and on the web
+    // channel this summary is returned to the model — clamp it (a clean name
+    // is byte-for-byte unchanged).
+    `Sending ${fmt(q.amountSource)} to ${boundUntrustedText(recipientName, NAME_MAX)}.`,
+    ...quoteFigureLines(q, fundingMethod, destinationCurrency, rateDate, reward),
+    `To: ${maskDestination(payoutMethod, payoutDestination)}`,
+    rateLockLine(lockMinutes),
+  ].join('\n');
+}
+
+/**
+ * The card's figure lines (fee, rate, what the recipient gets and when), shared
+ * by buildApproveSummary and buildQuoteText so the card and the quote can never
+ * disagree.
+ */
+function quoteFigureLines(
+  q: import('./types').Quote,
+  fundingMethod: FundingMethod,
+  destinationCurrency: CurrencyCode,
+  rateDate: string | undefined,
+  reward: QuotedReward | undefined,
+): string[] {
+  const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
   // For INR with en-US locale: Intl renders "₹83" / "₹41,500" — identical to the
   // previous `₹${n.toLocaleString('en-IN')}` for the integers we use here.
@@ -451,15 +475,40 @@ export function buildApproveSummary(
   }
 
   return [
-    // fix 5: the name may be a pre-fix outsider-written value, and on the web
-    // channel this summary is returned to the model — clamp it (a clean name
-    // is byte-for-byte unchanged).
-    `Sending ${fmt(q.amountSource)} to ${boundUntrustedText(recipientName, NAME_MAX)}.`,
     feeLine,
     rateLine(`Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`, formatRateDate(rateDate)),
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
-    `To: ${maskDestination(payoutMethod, payoutDestination)}`,
-    rateLockLine(lockMinutes),
+  ];
+}
+
+export interface QuoteTextOptions {
+  /** The quote's funding method (the first-transfer-free saving depends on it). Default bank_transfer. */
+  fundingMethod?: FundingMethod;
+  /** Default: the quote's own destination currency, else INR (as the card). */
+  destinationCurrency?: CurrencyCode;
+  /** The platform rate's publication date (YYYY-MM-DD), only for a platform rate. */
+  rateDate?: string;
+  /** B3 rewards v1: the reward on this quote. */
+  reward?: QuotedReward;
+}
+
+/**
+ * R32 (bot part): the quote the customer reads after get_quote, written by code
+ * from the quote itself and appended to the reply after the model's text
+ * (compose-reply.ts). It is the Approve card's figure lines without the
+ * recipient, the payout destination or the rate lock: get_quote locks nothing.
+ * Pure.
+ */
+export function buildQuoteText(q: import('./types').Quote, opts: QuoteTextOptions = {}): string {
+  return [
+    `Sending ${formatSourceAmount(q.amountSource, q.sourceCurrency)}.`,
+    ...quoteFigureLines(
+      q,
+      opts.fundingMethod ?? 'bank_transfer',
+      opts.destinationCurrency ?? q.destinationCurrency ?? 'INR',
+      opts.rateDate,
+      opts.reward,
+    ),
   ].join('\n');
 }
 
@@ -1585,6 +1634,14 @@ async function getQuoteTool(
         destination_currency: q.destinationCurrency,
         destination_country: r.destinationCountry,
         delivery_estimate: q.deliveryEstimate,
+        // R32 (bot part): the quote the customer reads, written by code from
+        // this quote. The agent appends it after the model's text; the model
+        // never sees it (model-visible-result.ts) and never restates figures.
+        quote_text: buildQuoteText(q, {
+          fundingMethod: (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer',
+          ...(r.rateDate !== undefined ? { rateDate: r.rateDate } : {}),
+          ...(r.reward !== undefined ? { reward: r.reward } : {}),
+        }),
         // Program-Fix 33: the unit the sender pays in, server-formatted; the
         // prompt makes the model restate it verbatim ("$50.00 USD").
         amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),

@@ -1092,9 +1092,47 @@ describe('A2: Hinglish replies (all customers, every variant)', () => {
 });
 
 describe('B3 rewards v1: reward_note', () => {
-  it('the model restates reward_note verbatim and never invents a reward', () => {
-    expect(SYSTEM_PROMPT).toContain('If get_quote returns reward_note, state that line exactly as written');
+  it('the code quote states reward_note (R32), and the model never invents a reward', () => {
+    expect(SYSTEM_PROMPT).toContain('If get_quote returns reward_note, the quote the system adds already states it');
+    expect(SYSTEM_PROMPT).not.toContain('If get_quote returns reward_note, state that line exactly as written');
     expect(SYSTEM_PROMPT).toContain('Never promise, invent or describe a reward or discount that a tool did not return.');
+  });
+});
+
+// R32 (bot part): the quote's figures are written by code (tools.ts
+// buildQuoteText, appended after the model text). The prompt stops the model
+// restating them, and keeps it off delivery promises the guard flags.
+describe('SYSTEM_PROMPT — R32: the code writes the quote', () => {
+  const variants = [
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true, purposeRequired: true }),
+  ];
+
+  it('after get_quote the model does not restate the figures: the system adds the quote below the reply', () => {
+    for (const p of variants) {
+      expect(p).not.toContain('then confirm back the fee, the exchange rate');
+      expect(p).toContain('Do NOT restate its figures');
+      expect(p).toContain('The system adds the quote below your reply, written by code from get_quote');
+      expect(p).toContain('Never write a rate, fee, amount or delivery time that a tool did not return.');
+    }
+  });
+
+  it('the SEND AMOUNT LOCK estimate is written with "about" (an estimate, never a quote)', () => {
+    for (const p of variants) expect(p).toContain('write it with "about"');
+  });
+
+  it('the recipient-side amount is named only outside the quote', () => {
+    for (const p of variants) {
+      expect(p).not.toContain('Use destination_currency and amount_dest from the get_quote response when confirming amounts to the recipient.');
+      expect(p).toContain('outside the quote');
+    }
+  });
+
+  it('forbids delivery promises the reply guard flags (instant, minutes, guaranteed)', () => {
+    for (const p of variants) {
+      expect(p).toContain('Never call a transfer instant, never promise delivery in minutes, and never say delivery is guaranteed');
+    }
   });
 });
 

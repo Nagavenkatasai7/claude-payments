@@ -33,6 +33,7 @@ import { logWarn, scrub } from '@/lib/log';
 import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
+import { replyGuardAlertFor, type ReplyGuardReport } from '@/lib/reply-guard';
 import { llmDownAlertFor } from '@/lib/llm-alert';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
@@ -117,6 +118,8 @@ export interface WorkerDeps {
       routedPartnerId?: PartnerId | null;
       /** Receives the caught error when the turn degrades to FALLBACK_REPLY (picks llmdown vs botfallback). */
       onFallback?: (err: unknown) => void;
+      /** R32: receives the reply guard's report when the raw model text failed its check (agent.ts onReplyGuard). */
+      onReplyGuard?: (report: ReplyGuardReport) => void;
     },
   ) => Promise<string>;
   /**
@@ -490,6 +493,8 @@ async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promi
  * separate function so the creds never share a scope with an enqueue payload.
  * PR1: `cardSent` says a card WAS the reply (the agent returns '' then, and
  * never otherwise), so the AI notice can still go out on its own.
+ * R32: `replyGuard` is the reply guard's report when the raw model text failed
+ * its check (in 'on' mode the agent already replaced `text`).
  */
 async function runTurnForReply(
   deps: WorkerDeps,
@@ -499,16 +504,24 @@ async function runTurnForReply(
   routedPartnerId: PartnerId | null,
   partner: PartnerResolver,
   onFallback: (err: unknown) => void,
-): Promise<{ text: string; cardSent: boolean }> {
+): Promise<{ text: string; cardSent: boolean; replyGuard?: ReplyGuardReport }> {
   const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
+  let replyGuard: ReplyGuardReport | undefined;
   const text = await deps.runAgentTurn(
     str(p.phone),
     messageText, // the payload's text, or a voice note's transcript (Step 1)
     (p.turn ?? {}) as TurnContext,
     waCreds,
-    { signal, routedPartnerId, onFallback }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
+    {
+      signal, // fix 7's cooperative deadline
+      routedPartnerId, // the tenant the turn runs under (fix 1)
+      onFallback,
+      onReplyGuard: (r) => {
+        replyGuard = r;
+      },
+    },
   );
-  return { text, cardSent: !text.trim() };
+  return { text, cardSent: !text.trim(), ...(replyGuard ? { replyGuard } : {}) };
 }
 
 /** Where one agent.turn's reply goes (PR1 sendTurnReply). */
@@ -1315,13 +1328,28 @@ async function handle(
         // log insert fails, the reply row rolls back and the whole turn retries
         // (model + any card sends), exactly as a failed reply enqueue does today.
         // A card-only turn logs the CARD_MARKER (under the notice, if one went out).
-        await sendTurnReply(deps.db, target, async () => ({ ...reply, lang }));
+        // R32: a reply-guard mismatch raises ONE ops alert per tenant and hour,
+        // committed with the reply (kinds and mode only, never the text).
+        const guard = reply.replyGuard;
+        await sendTurnReply(deps.db, target, async (tx) => {
+          if (guard) {
+            const alert = replyGuardAlertFor({
+              tenant,
+              where: `${chatChannel === 'telegram' ? 'Telegram' : 'WhatsApp'}, outbox #${row.id}`,
+              report: guard,
+              hour: hourBucket(),
+            });
+            await createOutboxRepo(tx).enqueue('ops.alert', { message: alert.message }, { dedupeKey: alert.dedupeKey });
+          }
+          return { text: reply.text, cardSent: reply.cardSent, lang };
+        });
         // A permanent provider rejection (401/402/403) raises its own llmdown
         // alert INSTEAD of the generic botfallback. Enqueued only after the
         // reply committed, and a failed insert is logged, never thrown: a
         // throw here would re-run the (non-idempotent) turn. PR1: checked on
-        // the RAW model text, before the notice was added.
-        if (reply.text === FALLBACK_REPLY) {
+        // the RAW model text, before the notice was added. R32: a fallback the
+        // reply guard put in place ('on' mode) is its own replyguard alert.
+        if (reply.text === FALLBACK_REPLY && guard?.mode !== 'on') {
           try {
             const down = llmDownAlertFor(fallbackErr, hourBucket());
             if (down) {

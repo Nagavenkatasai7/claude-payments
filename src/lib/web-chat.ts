@@ -22,6 +22,8 @@ import { offTopicReply } from './scope-guard';
 import { aiNoticeText, detectReplyLang, withAiNotice, type NoticeLang } from './ai-notice';
 import { aiNoticeDueFor, recordAiNotice } from './ai-notice-marker';
 import { logWarn } from './log';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { replyGuardAlertFor, type ReplyGuardReport } from './reply-guard';
 
 // web-chat (B5) — the WhatsApp agent brain re-channeled into the customer web
 // dashboard. The web thread is keyed `conv:<partnerId>:web:<phone>` — deliberately SEPARATE
@@ -51,7 +53,7 @@ export function webThreadStore(base: Store): Store {
   };
 }
 
-export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId' | 'onFallback'> & {
+export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId' | 'onFallback' | 'onReplyGuard'> & {
   /**
    * Partner-Demo R3b: the sealed, permanent conversation log. REQUIRED, so a
    * caller cannot silently skip logging; production wires the Neon repo
@@ -144,10 +146,14 @@ export function createWebChat(deps: WebChatDeps) {
       }
 
       let fallbackErr: unknown;
+      let guard: ReplyGuardReport | undefined;
       const agent = createAgent({
         ...agentDeps,
         onFallback: (e) => {
           fallbackErr = e;
+        },
+        onReplyGuard: (r) => {
+          guard = r;
         },
         store,
         channel: 'web',
@@ -158,7 +164,20 @@ export function createWebChat(deps: WebChatDeps) {
       const reply = await agent.runAgentTurn(phone, text, { isNewConversation });
       // Same llmdown key as the WhatsApp worker, so one outage hour is one alert.
       if (fallbackErr !== undefined) await alertLlmDown(fallbackErr);
-      return finish(reply, lang);
+      const out = await finish(reply, lang);
+      // R32: the same deduped replyguard alert as the worker (kinds and mode
+      // only). The web reply is the HTTP answer, not an outbox row, so the
+      // alert is written after it is logged; a failed write never loses it.
+      if (guard) {
+        try {
+          const alert = replyGuardAlertFor({ tenant: partnerId, where: 'web chat', report: guard, hour: Math.floor(Date.now() / 3_600_000) });
+          await createOutboxRepo(db).enqueue('ops.alert', { message: alert.message }, { dedupeKey: alert.dedupeKey });
+          pokeWorker(); // marks the alert due (the cron's Neon gate skips unmarked work)
+        } catch (err) {
+          logWarn('web-chat.reply-guard', 'replyguard alert enqueue failed', { error: err instanceof Error ? err.name : 'error' });
+        }
+      }
+      return out;
     },
   };
 }
