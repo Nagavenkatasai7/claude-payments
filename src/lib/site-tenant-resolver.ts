@@ -12,8 +12,10 @@
 // SKIN slugs (src/lib/site-skins.ts, e.g. `tgfl`: a partner-branded look that an EXISTING tenant
 // serves) take extra steps before that order:
 //   1. The "TGFL demo portal" switch (flag portal.skins) is read FIRST, on EVERY call, under the DB
-//      deadline. Anything but a clear "on" (off, slow, error) → the NORMAL path below, exactly as
-//      before skins existed: no skin read, no extra query, and a slug nobody holds answers null.
+//      deadline. It is the one added read (feature_flags, cached 15 s per instance by flags.ts, and
+//      shared with every other flag reader). Anything but a clear "on" (off, slow, error) → the
+//      NORMAL path below decides, as it did before skins existed: no skin status read, and a slug
+//      nobody holds answers null.
 //   2. Switch on → the slug's status, cached under its OWN key (skinCacheKey; same TTL, same limiter
 //      and deadline on a miss): 'held' = a partner holds or ever held the slug, 'inactive' = the
 //      skin's tenant is not active, 'ok' = free and active. A throttled miss or a DB error is never

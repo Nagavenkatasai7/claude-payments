@@ -162,7 +162,9 @@ const SLUG_AUDIT_ACTIONS = Object.values(SLUG_AUDIT_ACTION);
  * - the slug audit history through `audit_subject_action (subject_id, action)`: slug audit rows
  *   have always been written with subject_id = the partner's id, so the arm walks the (small)
  *   partners table and probes that index per partner. It never needs a scan of the whole
- *   audit_events table, which grows with every pii.view and sanctions.screen row.
+ *   audit_events table, which grows with every pii.view and sanctions.screen row. History of a
+ *   partner row that no longer exists (only scripts/clean-smoke-partner.ts removes one: a
+ *   disposable smoke partner, whose site row and tombstones it deletes on purpose) does not count.
  */
 export function skinSlugStatusQuery(slug: string, partnerId: PartnerId) {
   return sql`
