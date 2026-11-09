@@ -3,6 +3,7 @@ import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRate
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
+import { railPartnerOf, realMoneyRail } from './live-gate';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -448,6 +449,18 @@ export async function createTransferWithOutcome(
   const settlementPartnerId =
     input.quote && input.environment !== 'test' ? input.settlementPartnerId : undefined;
 
+  // ── Fix pack 2 (R02): is this mint real money? ────────────────────────────
+  // The RAIL partner's provider type (the COMPUTED route above, else the
+  // owner), read ONCE on the root handle ABOVE the lock (never through `ops`:
+  // PGlite has one connection, and on Neon it would hold a second pool
+  // connection per mint). Never throws: a failed read is real money (the
+  // stricter path). A sandbox ('test') mint is never real money and reads nothing.
+  const railProviderType =
+    input.environment === 'test'
+      ? null
+      : await store.railProviderType(railPartnerOf({ partnerId: input.partnerId, settlementPartnerId }));
+  const realMoney = realMoneyRail({ environment: input.environment ?? 'live', railProviderType });
+
   // ── ONE locked mint per (partner, phone) ──────────────────────────────────
   // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all
   // on ledger totals read under the lock, so two concurrent mints can never
@@ -464,7 +477,7 @@ export async function createTransferWithOutcome(
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
-      requote, quotedCount, rewardPlan,
+      requote, quotedCount, rewardPlan, railProviderType, realMoney,
     }),
   );
   const transfer = minted.transfer;
@@ -519,6 +532,10 @@ interface PreparedMint {
   quotedCount?: number;
   /** B3: the approved quote's reward, cleared by the pre-lock checks (absent ⇒ none). */
   rewardPlan?: RewardPlan;
+  /** Fix pack 2 (R02): the rail partner's payment provider type (null: none / sandbox; undefined: the read failed). */
+  railProviderType: string | null | undefined;
+  /** Fix pack 2 (R02): realMoneyRail — the screen then requires a live sanctions list. */
+  realMoney: boolean;
 }
 
 /** B3: a reward the mint will re-check under the lock and record. */
@@ -684,6 +701,8 @@ async function mintLocked(
     sourceCountry: p.sourceCountry,    // NEW (P5)
     rules: p.rules,                    // NEW (P5)
     senderName: input.senderName,      // NEW (KYC) — screened via the same seam (undefined ⇒ no-op)
+    requireLiveList: p.realMoney,      // Fix pack 2 (R02): real money clears only on a live list
+    now,
   });
 
   // EDD merge: a watchlist BLOCK always wins; EDD only ever ADDS a flag.
@@ -799,6 +818,12 @@ async function mintLocked(
   // re-screens, so it never writes a second row. No evidence ⇒ no row.
   if (compliance.evidence) {
     await ops.recordAudit(sanctionsAuditEvent(input.partnerId, transfer.id, compliance.evidence));
+  }
+  // Fix pack 2 (R02): a real-money mint screened on a list that is not live
+  // was held for it: ONE ops.alert per Eastern day, in this transaction (a
+  // later refusal rolls it back with the row). A block needs no list alert.
+  if (p.realMoney && compliance.evidence?.listFitness !== 'live' && complianceStatus !== 'blocked') {
+    await ops.enqueueListNotLiveAlert();
   }
 
   // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────

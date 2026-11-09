@@ -180,6 +180,28 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     await expect(repo.loadList({ ...active, entryCount: 6 })).rejects.toThrow(/entries/);
   });
 
+  // Fix pack 2 T2 (R02): the list's age is the DB checked_at, read live.
+  it('activeVersion returns checkedAt', async () => {
+    const repo = createSanctionsListRepo(db);
+    const before = Date.now();
+    await repo.storeList(LIST);
+    const active = (await repo.activeVersion('ofac-sdn'))!;
+    expect(active.checkedAt).toBeInstanceOf(Date);
+    expect(active.checkedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(active.checkedAt!.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+  });
+
+  it('an unchanged store advances checkedAt', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = now() - interval '40 hours'`);
+    const old = (await repo.activeVersion('ofac-sdn'))!.checkedAt!;
+    expect(Date.now() - old.getTime()).toBeGreaterThan(39 * 3_600_000);
+    expect((await repo.storeList(LIST)).status).toBe('unchanged');
+    const now = (await repo.activeVersion('ofac-sdn'))!.checkedAt!;
+    expect(Date.now() - now.getTime()).toBeLessThan(60_000);
+  });
+
   it('stores duplicate entry ids once (first wins) instead of failing the whole load', async () => {
     const repo = createSanctionsListRepo(db);
     const dup = { ...LIST, entries: [...LIST.entries, { ...LIST.entries[0], names: ['Other Name'] }] };

@@ -16,6 +16,8 @@ import {
 } from './providers/sanctions-provider';
 import { inputHash, type ScreeningEvidence, type ScreeningEvidenceParty, type SanctionsDecision } from './sanctions/evidence';
 import { SanctionsListUnavailableError } from './sanctions/list-screener';
+import { listFitness, type ListFitness } from './sanctions/list-policy';
+import type { SanctionsListInfo } from './providers/sanctions-provider';
 
 // Re-export the canonical screening constants so existing importers keep working
 // without changing their import paths (compliance-config is now the source of truth).
@@ -59,6 +61,23 @@ function party(role: 'recipient' | 'sender', name: string, hit: SanctionsHit): S
   return p;
 }
 
+/** Fix pack 2 (R02): the list fields of the evidence (fitness, age, base hash). */
+function listFields(info: SanctionsListInfo, fitness: ListFitness): Pick<ScreeningEvidence, 'listFitness' | 'listCheckedAt' | 'listBaseHash'> {
+  return {
+    listFitness: fitness,
+    ...(info.checkedAt ? { listCheckedAt: info.checkedAt } : {}),
+    ...(info.baseHash ? { listBaseHash: info.baseHash } : {}),
+  };
+}
+
+/** The amount and velocity flags (not sanctions decisions), in their pinned order. */
+function amountVelocityReasons(amountUsd: number, transfersToday: number, rules: ResolvedCorridorRules): string[] {
+  const reasons: string[] = [];
+  if (amountUsd >= rules.largeAmountUsd) reasons.push(LARGE_AMOUNT_REASON);
+  if (transfersToday >= rules.velocityLimit) reasons.push(VELOCITY_REASON);
+  return reasons;
+}
+
 export async function screenTransfer(input: {
   amountUsd: number;                 // USD-equivalent (unchanged; fed by quote.amountUsd)
   recipientName: string;
@@ -67,6 +86,14 @@ export async function screenTransfer(input: {
   rules?: ResolvedCorridorRules;     // P5 — defaults to GLOBAL_DEFAULTS
   screener?: SanctionsScreener;      // P5 — defaults to a mock over rules' base ∪ extra
   senderName?: string;               // NEW (KYC) — sender legal name, screened via the SAME seam
+  /**
+   * Fix pack 2 (R02): a real-money screen (live-gate.ts realMoneyRail). It
+   * clears only on a LIVE list (list-policy.ts: OFAC SDN checked within 36 h);
+   * otherwise it is held (flagged, LIST_UNAVAILABLE first). A block still wins.
+   */
+  requireLiveList?: boolean;
+  /** Fix pack 2 (R02): the clock the list age is measured against (default: now). */
+  now?: Date;
 }): Promise<ComplianceResult> {
   const rules = input.rules ?? GLOBAL_DEFAULTS;
   const screener =
@@ -90,12 +117,13 @@ export async function screenTransfer(input: {
     // review — never cleared, never the mock, and never a throw that would
     // break every send. Any other screener error propagates as before.
     if (!(err instanceof SanctionsListUnavailableError)) throw err;
+    // Fix pack 2 (R02): the amount and velocity flags are kept next to it.
     const info = screener.listInfo();
     const unscreened = (role: 'recipient' | 'sender', name: string): ScreeningEvidenceParty =>
       ({ role, inputHash: inputHash(name), matched: false, matchScore: 0 });
     return {
       status: 'flagged',
-      reasons: [LIST_UNAVAILABLE_REASON],
+      reasons: [LIST_UNAVAILABLE_REASON, ...amountVelocityReasons(input.amountUsd, input.transfersToday, rules)],
       evidence: {
         listSource: info.source,
         listVersion: info.version,
@@ -105,11 +133,13 @@ export async function screenTransfer(input: {
         parties: input.senderName
           ? [unscreened('recipient', recipientName), unscreened('sender', senderName)]
           : [unscreened('recipient', recipientName)],
+        ...listFields(info, 'not_live'),
       },
     };
   }
 
   const info = screener.listInfo();
+  const fitness = listFitness(info, input.now ?? new Date());
   const parties = [party('recipient', recipientName, recipientHit)];
   if (input.senderName) parties.push(party('sender', senderName, senderHit));
   const anyMatch = recipientHit.matched || senderHit.matched;
@@ -122,6 +152,7 @@ export async function screenTransfer(input: {
     screenedAt,
     decision,
     parties,
+    ...listFields(info, fitness),
   };
 
   if (anyMatch) {
@@ -131,16 +162,25 @@ export async function screenTransfer(input: {
     return { status: 'blocked', reasons: blockReasons, evidence };
   }
 
+  // Fix pack 2 (R02): a real-money screen on a list that is not live is held
+  // (never cleared): LIST_UNAVAILABLE first, then the usual flags.
+  if (input.requireLiveList && fitness !== 'live') {
+    return {
+      status: 'flagged',
+      reasons: [
+        LIST_UNAVAILABLE_REASON,
+        ...(anyPossible ? [POSSIBLE_MATCH_REASON] : []),
+        ...amountVelocityReasons(input.amountUsd, input.transfersToday, rules),
+      ],
+      evidence: { ...evidence, decision: anyPossible ? 'possible_match' : 'list_unavailable' },
+    };
+  }
+
   const reasons: string[] = [];
   if (anyPossible) {
     reasons.push(POSSIBLE_MATCH_REASON);
   }
-  if (input.amountUsd >= rules.largeAmountUsd) {
-    reasons.push(LARGE_AMOUNT_REASON);
-  }
-  if (input.transfersToday >= rules.velocityLimit) {
-    reasons.push(VELOCITY_REASON);
-  }
+  reasons.push(...amountVelocityReasons(input.amountUsd, input.transfersToday, rules));
   if (reasons.length > 0) return { status: 'flagged', reasons, evidence };
   return { status: 'cleared', reasons: [], evidence };
 }

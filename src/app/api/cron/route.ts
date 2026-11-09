@@ -11,6 +11,7 @@ import { expireUnpaidLinks, expirePaymentLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
+import { checkSanctionsListHealth } from '@/lib/sanctions/list-health';
 import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
 import { pokeWorker } from '@/lib/outbox';
@@ -210,8 +211,18 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // partner-demo R4: schedules, link expiry, the sanctions-list loader and the
-  // storage cap-watch commit outbox rows above — poke so the gated worker cron drains them now
+  // Fix pack 2 (R02): the sanctions list health check, ALWAYS (even with the
+  // loader OFF): one deduped ops.alert per Eastern day when the list is not
+  // live and a partner settles on an http rail (every such mint is held).
+  // After the loader, so a fresh load counts. Fail-soft; no response field.
+  try {
+    await checkSanctionsListHealth(getDb(), new Date());
+  } catch (err) {
+    logError('cron.sanctions-list-health', err);
+  }
+
+  // partner-demo R4: schedules, link expiry, the sanctions-list loader, the
+  // list health check and the storage cap-watch commit outbox rows above — poke so the gated worker cron drains them now
   // rather than at the next :17/:47 backstop.
   pokeWorker();
   return NextResponse.json({

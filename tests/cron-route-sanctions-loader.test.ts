@@ -25,6 +25,9 @@ const runOfacSdnLoad = vi.hoisted(() =>
   vi.fn(async () => ({ status: 'activated', version: '2026-09-18', hash: 'h', entryCount: 5, nameCount: 9 })),
 );
 vi.mock('@/lib/sanctions/list-loader', () => ({ runOfacSdnLoad }));
+// Fix pack 2 (R02): the list health check runs on every daily run.
+const checkSanctionsListHealth = vi.hoisted(() => vi.fn(async () => ({ alerted: false })));
+vi.mock('@/lib/sanctions/list-health', () => ({ checkSanctionsListHealth }));
 
 import { GET } from '@/app/api/cron/route';
 
@@ -35,6 +38,7 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
   const original = process.env.SANCTIONS_LOADER_ENABLED;
   beforeEach(() => {
     runOfacSdnLoad.mockClear();
+    checkSanctionsListHealth.mockClear();
   });
   afterEach(() => {
     if (original === undefined) delete process.env.SANCTIONS_LOADER_ENABLED;
@@ -70,6 +74,34 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, fired: 2, sanctionsList: null });
     expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('health check runs after the loader', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    await GET(req());
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+    const [db, now] = checkSanctionsListHealth.mock.calls[0] as unknown as [unknown, Date];
+    expect(db).toBe(fakeDb);
+    expect(now).toBeInstanceOf(Date);
+    expect(runOfacSdnLoad.mock.invocationCallOrder[0]).toBeLessThan(checkSanctionsListHealth.mock.invocationCallOrder[0]);
+  });
+
+  it('health check runs with the loader OFF', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    await GET(req());
+    expect(runOfacSdnLoad).not.toHaveBeenCalled();
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it('a health throw is logged; response unchanged', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    checkSanctionsListHealth.mockRejectedValueOnce(new Error('boom'));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-list-health'))).toBe(true);
     err.mockRestore();
   });
 });

@@ -133,6 +133,43 @@ describe('PostgresSanctionsListSource', () => {
     await expect(src.warm()).resolves.toBeUndefined();
   });
 
+  // Fix pack 2 T2 (R02): checkedAt() is the DB checked_at of the version
+  // served, refreshed on every pointer re-check (the unchanged-hash branch
+  // too); a refresh error keeps the old value, so the list ages (fail closed).
+  it('checkedAt follows the DB', async () => {
+    const t1 = new Date(Date.now() - 3_600_000);
+    const repo = fakeRepo({ ...V1, checkedAt: t1 });
+    const src = new PostgresSanctionsListSource(() => repo, { now });
+    expect(src.checkedAt()).toBeNull();
+    await src.load();
+    expect(src.checkedAt()?.getTime()).toBe(t1.getTime());
+  });
+
+  it('advances on an unchanged-hash refresh', async () => {
+    const t1 = new Date(Date.now() - 30 * 3_600_000);
+    const t2 = new Date(Date.now() - 60_000);
+    const repo = fakeRepo({ ...V1, checkedAt: t1 });
+    const src = new PostgresSanctionsListSource(() => repo, { now, ttlMs: 1000 });
+    await src.warm();
+    expect(src.checkedAt()?.getTime()).toBe(t1.getTime());
+    repo.state.active = { ...V1, checkedAt: t2 };
+    clock += 5000;
+    await src.warm();
+    expect(repo.loadList).toHaveBeenCalledTimes(1);
+    expect(src.checkedAt()?.getTime()).toBe(t2.getTime());
+  });
+
+  it('a refresh error keeps the old checkedAt', async () => {
+    const t1 = new Date(Date.now() - 30 * 3_600_000);
+    const repo = fakeRepo({ ...V1, checkedAt: t1 });
+    const src = new PostgresSanctionsListSource(() => repo, { now, ttlMs: 1000 });
+    await src.warm();
+    clock += 5000;
+    repo.activeVersion.mockRejectedValueOnce(new Error('timeout'));
+    await src.warm();
+    expect(src.checkedAt()?.getTime()).toBe(t1.getTime());
+  });
+
   it('end to end on Postgres: nothing loaded ⇒ the screener rejects unavailable; after a store it blocks an exact match', async () => {
     const db = await freshDb();
     const src = new PostgresSanctionsListSource(() => createSanctionsListRepo(db), { now });

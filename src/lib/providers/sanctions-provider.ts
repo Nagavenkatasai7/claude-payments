@@ -149,6 +149,27 @@ export async function warmSanctionsList(): Promise<void> {
   }
 }
 
+/**
+ * Fix pack 2 (R02): the OFAC list served right now (refreshed first, like a
+ * mint does), as list info with its live checkedAt. Rejects when no list can
+ * load; list-health.ts reads that as 'not_live'. Never a name: ids and hashes.
+ */
+export async function servedOfacListInfo(): Promise<SanctionsListInfo> {
+  await warmSanctionsList();
+  const list = await ofacSource.load();
+  if (!list || !Array.isArray(list.entries) || list.entries.length === 0) {
+    throw new Error('empty sanctions list');
+  }
+  const checkedAt = ofacSource.checkedAt?.()?.toISOString();
+  return {
+    source: list.source,
+    version: list.version,
+    hash: list.hash,
+    baseHash: list.hash,
+    ...(checkedAt ? { checkedAt } : {}),
+  };
+}
+
 function ofacScreener(baseList: string[]): ListSanctionsScreener {
   const key = baseList.join('\u0000');
   let s = ofacScreeners.get(key);

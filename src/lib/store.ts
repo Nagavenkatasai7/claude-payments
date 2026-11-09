@@ -12,6 +12,7 @@ import { logError, logWarn } from './log';
 import { conversationSealCtx, openJson, sealedConversationKey } from './redis-seal';
 import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { readRailProviderType } from './live-gate';
+import { listNotLiveDedupeKey } from './sanctions/list-health';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
@@ -85,6 +86,13 @@ export interface SenderLedgerOps {
    * SAME transaction as the held transfer's insert. Ids and the category only.
    */
   enqueuePurposeFlagAlert(transferId: string, category: string): Promise<void>;
+  /**
+   * Fix pack 2 (R02): ONE ops.alert per Eastern day (listNotLiveDedupeKey, the
+   * key the daily health check uses too) when a real-money mint was held
+   * because the sanctions list is not live. In the SAME transaction as the
+   * mint; the partner id only, never a name, phone or amount.
+   */
+  enqueueListNotLiveAlert(): Promise<void>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -547,6 +555,20 @@ export function createStore(redis: RedisLike, db: Db) {
                       `the reason the customer gave matches the "${category}" scam pattern. Check it on the compliance page.`,
                   },
                   { dedupeKey: `purposeflag:${transferId}` },
+                );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
+              enqueueListNotLiveAlert: async () => {
+                // Inline literal payload (tests/outbox-payload-secrets.test.ts). The partner id only.
+                await createOutboxRepo(tx).enqueue(
+                  'ops.alert',
+                  {
+                    message:
+                      `⚠️ SmartRemit ops: a real-money transfer was held because the sanctions list is not live (partner ${partnerId}). ` +
+                      `Check the sanctions list card on the compliance page and the loader.`,
+                  },
+                  { dedupeKey: listNotLiveDedupeKey(new Date()) },
                 );
                 // partner-demo R4: after() runs post-response, after the mint commits.
                 pokeWorker();

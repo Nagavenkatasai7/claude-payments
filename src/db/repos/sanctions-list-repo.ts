@@ -41,6 +41,12 @@ export interface ActiveSanctionsVersion {
   version: string;
   hash: string;
   entryCount: number;
+  /**
+   * Fix pack 2 (R02): when the loader last confirmed this version current
+   * (checked_at; an unchanged load advances it). Optional so hand-built test
+   * fakes compile; the repo always sets it.
+   */
+  checkedAt?: Date;
 }
 
 export type StoreListStatus = 'activated' | 'unchanged';
@@ -67,6 +73,7 @@ export function createSanctionsListRepo(db: Db) {
         version: sanctionsListVersions.version,
         hash: sanctionsListVersions.hash,
         entryCount: sanctionsListVersions.entryCount,
+        checkedAt: sanctionsListVersions.checkedAt,
       })
       .from(sanctionsListVersions)
       .where(and(eq(sanctionsListVersions.source, source), eq(sanctionsListVersions.active, true)))

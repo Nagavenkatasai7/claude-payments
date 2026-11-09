@@ -4,7 +4,7 @@ import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
 import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
 import type { ActiveSanctionsVersion } from '@/db/repos/sanctions-list-repo';
-import type { SanctionsList } from '@/lib/sanctions/list-source';
+import type { SanctionsList, SanctionsListSource } from '@/lib/sanctions/list-source';
 
 // Program-Fix 14 PR C: an OFAC source whose cache holds v1 while v2 (with
 // newly listed names) is the ACTIVE version — only a warmSanctionsList() call
@@ -37,6 +37,29 @@ export async function primeStaleOfacSource(): Promise<void> {
   state.active = V2; // v2 activated after the TTL
   process.env.SANCTIONS_LIST = 'ofac-sdn';
   setOfacListSourceForTests(src);
+}
+
+/** The OFAC SDN sample fixture (5 entries; 'Testa Fixturelli' is sdn:1003). */
+export function ofacSampleList(): SanctionsList {
+  return parseOfacSdnXml(readFileSync(join(__dirname, 'fixtures', 'ofac-sdn-sample.xml'), 'utf8'));
+}
+
+/**
+ * Fix pack 2 T2 (R02): select a fresh in-memory `ofac-sdn` source (the sample
+ * fixture) whose checkedAt() is `checkedAgoMs` before the current time on every
+ * call, and SANCTIONS_LIST=ofac-sdn. 3_600_000 = a live list; anything over
+ * 36 h = stale. Undo with restoreOfacSource(original).
+ */
+export function primeOfacSource(opts: { checkedAgoMs: number }): SanctionsListSource {
+  const list = ofacSampleList();
+  const src: SanctionsListSource = {
+    load: async () => list,
+    warm: async () => {},
+    checkedAt: () => new Date(Date.now() - opts.checkedAgoMs),
+  };
+  process.env.SANCTIONS_LIST = 'ofac-sdn';
+  setOfacListSourceForTests(src);
+  return src;
 }
 
 export function restoreOfacSource(original: string | undefined): void {
