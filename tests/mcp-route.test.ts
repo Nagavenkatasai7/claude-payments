@@ -327,6 +327,80 @@ describe('/api/mcp: modern (2026-07-28) clients', () => {
   });
 });
 
+// Weekly reliability report 2026-11-09, fix 3: calls to /api/mcp ran to the 300-second function limit.
+// The SDK advertises tools.listChanged by default, so a modern client POSTs subscriptions/listen and
+// the server held that SSE stream open until the function died. The tool list never changes and each
+// request builds its own server, so nothing could ever arrive on that stream.
+describe('/api/mcp: no listen stream holds the function open', () => {
+  const listen = {
+    jsonrpc: '2.0',
+    id: 'listen:0',
+    method: 'subscriptions/listen',
+    params: {
+      _meta: {
+        'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+        'io.modelcontextprotocol/clientInfo': { name: 'listen-test', version: '0.0.1' },
+        'io.modelcontextprotocol/clientCapabilities': {},
+      },
+      notifications: { toolsListChanged: true },
+    },
+  };
+
+  /** Reads the body to its end, or resolves 'open' when it is still streaming after `ms`. */
+  async function bodyEnds(res: Response, ms: number): Promise<'ended' | 'open'> {
+    if (!res.body) return 'ended';
+    const reader = res.body.getReader();
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const left = deadline - Date.now();
+      const next = await Promise.race([reader.read(), new Promise<'open'>((ok) => setTimeout(() => ok('open'), Math.max(left, 0)))]);
+      if (next === 'open') {
+        await reader.cancel().catch(() => {});
+        return 'open';
+      }
+      if (next.done) return 'ended';
+    }
+  }
+
+  it('a raw modern subscriptions/listen POST gets a response whose body ends at once', async () => {
+    const res = await route.POST(
+      jsonRpc(listen, { authorization: 'Bearer sra_good', 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'subscriptions/listen' }),
+    );
+    expect(res.status).toBe(200);
+    expect(await bodyEnds(res, 2000)).toBe('ended');
+  });
+
+  it('a modern client that wants list-changed notifications never opens subscriptions/listen', async () => {
+    const methods: string[] = [];
+    const recording = async (url: string | URL, init?: RequestInit) => {
+      const r = new Request(url, init);
+      if (r.method === 'POST') methods.push((JSON.parse(await r.clone().text()) as { method?: string }).method ?? '');
+      return clientFetch(url, init);
+    };
+    const client = new Client(
+      { name: 'smartremit-test-client', version: '0.0.1' },
+      { versionNegotiation: { mode: 'auto' }, listChanged: { tools: { onChanged: () => {} } } },
+    );
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(RESOURCE), { fetch: recording, requestInit: { headers: { Authorization: 'Bearer sra_good' } } }),
+    );
+    expect(client.getProtocolEra()).toBe('modern');
+    expect((await client.listTools()).tools).toHaveLength(10);
+    expect(methods).not.toContain('subscriptions/listen');
+    await client.close();
+  });
+
+  it('the server does not advertise tools.listChanged', async () => {
+    const { buildMcpServer } = await import('@/lib/mcp/server');
+    const server = buildMcpServer(principal(), { auth: state.auth, redis: state.redis } as Parameters<typeof buildMcpServer>[1]);
+    expect(server.server.getCapabilities().tools?.listChanged).toBe(false);
+  });
+
+  it('the route caps its function time at 60 s (a backstop for any stream left open)', () => {
+    expect(route.maxDuration).toBe(60);
+  });
+});
+
 describe('/api/mcp: tool input size (GHSA-46jr-4wx8-v453)', () => {
   const call = (name: string, args: Record<string, unknown>) => ({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: args } });
 

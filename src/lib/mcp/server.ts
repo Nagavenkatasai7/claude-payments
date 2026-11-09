@@ -96,6 +96,12 @@ export function buildMcpServer(principal: AgentPrincipal, deps: McpServerDeps): 
   const server = new McpServer(MCP_SERVER_INFO, {
     instructions: SERVER_INSTRUCTIONS,
     maxToolInputElements: MCP_MAX_TOOL_INPUT_ELEMENTS,
+    // listChanged is OFF on purpose. The tool list is fixed and every request builds its own server,
+    // so a subscriptions/listen stream could never deliver an event; it would only hold the function
+    // open until the 300 s limit. With the bit off, clients never open one, and an explicit listen gets
+    // an empty ack and closes at once (@modelcontextprotocol/server 2.3.1, dist/mcp-DIH4cS6P.mjs:163,288).
+    // registerTool keeps an explicit false: it only defaults an unset bit to true (:1760).
+    capabilities: { tools: { listChanged: false } },
   });
   // The ONLY identity a tool sees: the token's tenant and customer. Tool input never names either.
   const owner: PortalOwner = { partnerId: principal.partnerId, phone: principal.phone };
