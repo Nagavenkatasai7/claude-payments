@@ -50,7 +50,7 @@ export function TransferRows({ rows, caption }: { rows: PortalTransferRow[]; cap
                   <Received r={r} />
                 </td>
                 <td className="px-4 py-3">
-                  <StatusPill status={r.status} refundStatus={r.refundStatus} />
+                  <StatusPill status={r.status} refundStatus={r.refundStatus} audience="customer" />
                 </td>
                 <td className="px-4 py-3 text-ds-ink-muted">{when(r.createdAt)}</td>
               </tr>
@@ -76,7 +76,7 @@ export function TransferRows({ rows, caption }: { rows: PortalTransferRow[]; cap
                 </span>
               </span>
               <span className="flex flex-wrap items-center justify-between gap-2">
-                <StatusPill status={r.status} refundStatus={r.refundStatus} />
+                <StatusPill status={r.status} refundStatus={r.refundStatus} audience="customer" />
                 <span className="text-[13px] text-ds-ink-muted">{when(r.createdAt)}</span>
               </span>
             </Link>

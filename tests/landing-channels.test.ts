@@ -5,8 +5,9 @@ import { CHAT_CHANNELS, AI_APPS_GUIDE_HREF, TELEGRAM_BOT_HREF } from '@/app/land
 
 // Raj's follow-up (Oct 25): "add the delta new items of Telegram, AI-ChatGPT, Perplexity and
 // Claude". Owner go: a "Choose your chat app" section with honest labels and no "testing" wording.
-// WhatsApp and Telegram are open to everyone (owner, Oct 25: the bot is "ready to use"); the AI
-// apps are invite-only, so they may not read as available.
+// R20 / Q11 (owner, 2026-10-31): only WhatsApp is open to everyone. Telegram serves invited phones
+// only (src/lib/telegram-inbound.ts), so it reads "By invitation"; the AI apps are invite-only
+// early access and are not named on the home page (no platform permission to use their names).
 
 const PAGE = readFileSync(resolve(process.cwd(), 'src/app/page.tsx'), 'utf-8');
 
@@ -15,18 +16,26 @@ describe('CHAT_CHANNELS', () => {
     expect(CHAT_CHANNELS.map((c) => c.id)).toEqual(['whatsapp', 'telegram', 'ai-apps']);
   });
 
-  it('WhatsApp and Telegram are available now; the AI apps are early access', () => {
-    expect(CHAT_CHANNELS.filter((c) => c.status === 'available').map((c) => c.id)).toEqual(['whatsapp', 'telegram']);
+  it('only WhatsApp is available now; Telegram is by invitation; the AI apps are early access', () => {
+    expect(CHAT_CHANNELS.filter((c) => c.status === 'available').map((c) => c.id)).toEqual(['whatsapp']);
+    const telegram = CHAT_CHANNELS.find((c) => c.id === 'telegram')!;
+    expect(telegram.status).toBe('by-invitation');
+    expect(telegram.badge).toBe('By invitation');
+    expect(telegram.body).toMatch(/invited/i);
     expect(CHAT_CHANNELS.find((c) => c.id === 'ai-apps')!.status).toBe('early-access');
+    expect(CHAT_CHANNELS.filter((c) => c.badge === 'Available now').map((c) => c.id)).toEqual(['whatsapp']);
   });
 
   it('links the SmartRemit Telegram bot', () => {
     expect(TELEGRAM_BOT_HREF).toBe('https://t.me/smartremit_bot');
   });
 
-  it('names Claude, ChatGPT and Perplexity and links the AI apps guide', () => {
+  it('names no AI app (Q11) and links the AI apps guide', () => {
     const ai = CHAT_CHANNELS.find((c) => c.id === 'ai-apps')!;
-    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(ai.title + ai.body).toContain(app);
+    const text = CHAT_CHANNELS.map((c) => `${c.title} ${c.badge} ${c.body}`).join(' ');
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity', 'Gemini', 'Copilot']) expect(text).not.toContain(app);
+    expect(ai.title).toBe('AI assistants');
+    expect(ai.body).toMatch(/supports? custom connectors/i);
     expect(AI_APPS_GUIDE_HREF).toBe('/docs/ai-apps');
   });
 
@@ -53,12 +62,16 @@ describe('landing page "Choose your chat app" section', () => {
     expect(section).toContain('Start on Telegram');
   });
 
-  it('the hero names WhatsApp and Telegram as ways to start', () => {
-    expect(PAGE).toMatch(/Start on <strong className="font-bold">WhatsApp<\/strong> or\{' '\}\s+<strong className="font-bold">Telegram\.<\/strong>/);
+  it('the hero starts on WhatsApp, says Telegram is by invitation and names no AI app', () => {
+    const squashed = PAGE.replace(/\s+/g, ' ');
+    expect(squashed).toContain(
+      'Start on <strong className="font-bold">WhatsApp</strong>.{\' \'} <strong className="font-bold">Telegram</strong> is open by invitation, and AI assistants that support custom connectors are in early access.',
+    );
+    expect(PAGE).not.toMatch(/\b(Claude|ChatGPT|Perplexity)\b/);
   });
 
-  it('carries the trademark note for the named AI apps', () => {
-    expect(section).toMatch(/Claude, ChatGPT and Perplexity are trademarks of their owners/);
+  it('says SmartRemit is not endorsed by any AI app maker', () => {
+    expect(section.replace(/\s+/g, ' ')).toContain('SmartRemit is not affiliated with or endorsed by any AI app maker.');
   });
 
   it('the page has no "testing" wording anywhere', () => {

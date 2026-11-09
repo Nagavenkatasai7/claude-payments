@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { transferStatusView } from '@/lib/ui/transfer-status';
 import { transferStatusTone } from '@/app/account/format';
+import { t } from '@/lib/i18n';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 
 const STATUSES = ['awaiting_payment', 'paid', 'in_review', 'delivered', 'cancelled', 'blocked'] as const;
 describe('transferStatusView (one mapping)', () => {
@@ -29,5 +31,27 @@ describe('transferStatusView (one mapping)', () => {
     const v = transferStatusView({ status: 'future_state' as never });
     expect(v.tone).toBe('neutral');
     expect(v.labelKey).toBe('status.transfer.unknown');
+  });
+});
+
+// Review fix (R30): customer surfaces (the portal pill, its receipt and /account)
+// never show review wording for a held transfer; staff pages keep "Under review".
+describe('transferStatusView for a customer', () => {
+  it('a held transfer reads the fixed processing label, with a neutral tone and icon', () => {
+    const v = transferStatusView({ status: 'in_review' }, 'customer');
+    expect(v.labelKey).toBe('status.customer.in_review');
+    expect(t(v.labelKey)).toBe(FIXED_REPLIES.label_held);
+    expect(t(v.labelKey)).not.toMatch(/review|hold|check|compliance/i);
+    expect(v).toMatchObject({ tone: 'info', icon: 'clock' });
+  });
+  it('every other status and the refund overlay are the same for both audiences', () => {
+    for (const s of STATUSES.filter((x) => x !== 'in_review')) {
+      expect(transferStatusView({ status: s }, 'customer'), s).toEqual(transferStatusView({ status: s }));
+    }
+    expect(transferStatusView({ status: 'in_review', refundStatus: 'pending' }, 'customer').labelKey).toBe('status.refund.pending');
+  });
+  it('staff keep the review label', () => {
+    expect(transferStatusView({ status: 'in_review' }, 'staff').labelKey).toBe('status.transfer.in_review');
+    expect(t('status.transfer.in_review')).toBe('Under review');
   });
 });

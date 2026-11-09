@@ -3,6 +3,8 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { SendBusyError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
+import { encryptField } from '@/lib/field-crypto';
+import { conversationSealCtx, sealedConversationKey } from '@/lib/redis-seal';
 import { captureQueries, freshDb, seedLedgerSpend } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer, CorridorRequest } from '@/lib/types';
@@ -351,6 +353,70 @@ describe('store', () => {
     await store.recordInboundNow('default', 'p');
     expect(redis.dump.has('lastmsg:default:p')).toBe(true);
     expect(await store.getLastInboundAt('acme', 'p')).toBeNull();
+  });
+});
+
+// R49 part 1: the sealed-history READER. This build still writes plaintext
+// conv:<pid>:<phone>; PR9 writes the sealed conv:<pid>:h:<thread hmac>. Both
+// formats read, so PR9 needs no flag day and a rollback keeps every thread.
+describe('getConversation reads the sealed format too (R49 readers)', () => {
+  const PH = '15551239999';
+  const history = [{ role: 'user' as const, content: 'send 100 to mom' }, { role: 'assistant' as const, content: 'Sure.' }];
+  const sealAt = (redis: ReturnType<typeof fakeRedis>, pid: string, threadPhone: string, value: unknown, sealCtxPid = pid, sealCtxPhone = threadPhone) =>
+    redis.dump.set(sealedConversationKey(pid, threadPhone), encryptField(JSON.stringify(value), undefined, conversationSealCtx(sealCtxPid, sealCtxPhone)));
+
+  it('a sealed thread (a PR9 write) is read when there is no plaintext key', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    sealAt(redis, 'default', PH, history);
+    expect(await store.getConversation('default', PH)).toEqual(history);
+  });
+
+  it('the plaintext key (this build\'s own write) wins when both exist', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    sealAt(redis, 'default', PH, [{ role: 'user', content: 'older' }]);
+    await store.saveConversation('default', PH, history);
+    expect(await store.getConversation('default', PH)).toEqual(history);
+  });
+
+  it('saving drops a stale sealed copy, so the newest write always wins after a rollback', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    sealAt(redis, 'default', PH, [{ role: 'user', content: 'older' }]);
+    await store.saveConversation('default', PH, history);
+    expect(redis.dump.has(sealedConversationKey('default', PH))).toBe(false);
+    expect(redis.dump.has(`conv:default:${PH}`)).toBe(true);
+  });
+
+  it('the web thread reads its own sealed key', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    sealAt(redis, 'default', `web:${PH}`, history);
+    expect(await store.getConversation('default', `web:${PH}`)).toEqual(history);
+    expect(await store.getConversation('default', PH)).toEqual([]);
+  });
+
+  it('a corrupt or moved sealed blob reads as an empty thread and logs the error name only', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    redis.dump.set(sealedConversationKey('default', PH), 'v2.k0.not-a-blob');
+    expect(await store.getConversation('default', PH)).toEqual([]);
+    // A blob sealed for another tenant, copied under this tenant's key.
+    sealAt(redis, 'acme', PH, history, 'beta', PH);
+    expect(await store.getConversation('acme', PH)).toEqual([]);
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain('store.conversation');
+    expect(logged).not.toContain(PH);
+    expect(logged).not.toContain('mom');
+  });
+
+  it('a tenant never reads another tenant\'s sealed thread', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    sealAt(redis, 'default', PH, history);
+    expect(await store.getConversation('acme', PH)).toEqual([]);
   });
 });
 

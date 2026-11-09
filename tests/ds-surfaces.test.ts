@@ -34,6 +34,12 @@ describe('Card / Badge / StatusPill / Money / Skeleton', () => {
     expect(html).toContain('bg-ds-warning-bg');
     expect(html).toContain('Under review');
   });
+  it('StatusPill for a customer (the portal) never shows review wording for a held transfer (R30)', async () => {
+    const { StatusPill } = await import('@/components/ds/status-pill');
+    const html = renderToStaticMarkup(createElement(StatusPill, { status: 'in_review', audience: 'customer' }));
+    expect(html).toContain('Processing');
+    expect(html).not.toMatch(/review/i);
+  });
   it('StatusPill applies the refund overlay', async () => {
     const { StatusPill } = await import('@/components/ds/status-pill');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: 'paid', refundStatus: 'completed' }))).toContain('Refunded');

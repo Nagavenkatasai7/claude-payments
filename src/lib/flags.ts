@@ -35,7 +35,8 @@ export type FlagKey =
   | 'rewards.enabled'
   | 'paylinks.enabled'
   | 'telegram.bot'
-  | 'agent.tools';
+  | 'agent.tools'
+  | 'agent.reply_guard';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -166,6 +167,23 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'Off: no new connection, and connected apps get "SmartRemit AI tools are switched off." Customers can still disconnect apps in the portal.',
     bannerText: 'AI agent tools (test) are on',
     scopes: ['global', 'partner'],
+    killSwitch: false,
+  },
+  // R32 (bot part): the reply guard (src/lib/reply-guard.ts) checks every bot
+  // reply's raw model text against the turn's tool results. Off (no row, or
+  // unreadable: isFlagOn fails open to false) is SHADOW mode: a mismatch only
+  // raises one ops alert per tenant and hour. On also replaces that reply with
+  // the fixed fallback. Owner decision Q-R32.1: shadow for 7 days, then on
+  // globally. Read for the turn's tenant and, when it quoted, its corridor.
+  'agent.reply_guard': {
+    key: 'agent.reply_guard',
+    label: 'Bot reply guard',
+    description:
+      'Every bot reply is checked against the figures our code produced in that turn (quote, fee, rate, delivery time) and against banned ' +
+      'claims such as "instant". Off (shadow): a mismatch sends one ops alert per partner per hour and the reply goes out unchanged. ' +
+      'On: the reply is also replaced with the fixed "please send that again, or reply HELP" line.',
+    bannerText: 'The bot reply guard replaces mismatched replies',
+    scopes: ['global', 'partner', 'corridor'],
     killSwitch: false,
   },
 };

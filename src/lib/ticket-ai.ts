@@ -1,6 +1,7 @@
 import { chat } from '@/lib/llm';
 import type { RedisLike } from '@/lib/store';
 import type { ChatMessage, Ticket, TicketMessage, TicketPriority } from '@/lib/types';
+import { HOLD_REPLY } from '@/lib/hold-replies';
 
 // ticket-ai — the support copilot's one-shot AI helpers (B3). Each function is
 // ONE chat(messages, []) call — no tools, no agent loop, no retries. The
@@ -25,7 +26,7 @@ export interface TriageSuggestion {
 const GUARDRAILS = `Hard rules — never break these:
 - Never make promises or guarantees of any kind: no delivery promises, no timing guarantees, no outcome guarantees.
 - Never commit to a refund or imply one will happen. If refunds come up, say only that our team reviews refunds.
-- Never reveal compliance, screening, sanctions, or review detail. At most, say a transfer is being reviewed.
+- Never reveal compliance, screening, sanctions, or review detail, and never say a transfer is being reviewed, checked or held for a reason. For a held transfer use only these words: "${HOLD_REPLY}"
 - Never give financial advice — no advice on rates, timing, amounts, or currencies.
 - Never invent transaction facts. Mention only facts explicitly present in the provided context; if something is unknown, say the team will check and follow up.`;
 

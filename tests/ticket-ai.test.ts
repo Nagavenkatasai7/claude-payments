@@ -75,6 +75,16 @@ describe('prompt-content guard: the system prompts forbid the dangerous content'
     expect(src).toMatch(/never reveal compliance, screening, sanctions/i);
   });
 
+  it('R30 review fix: a held transfer gets the fixed hold text, never "being reviewed"', async () => {
+    const { HOLD_REPLY } = await import('@/lib/hold-replies');
+    expect(src).not.toMatch(/at most, say a transfer is being reviewed/i);
+    chatMock.mockResolvedValue(reply('ok'));
+    await draftReply(ticket, [], '');
+    const system = String(chatMock.mock.calls.at(-1)?.[0][0].content);
+    expect(system).toContain(HOLD_REPLY);
+    expect(system).toMatch(/never say (?:a|the) transfer is (?:being )?reviewed/i);
+  });
+
   it('forbids financial advice', () => {
     expect(src).toMatch(/never give financial advice/i);
   });

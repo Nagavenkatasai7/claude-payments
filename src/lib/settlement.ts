@@ -4,7 +4,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { buildStage1Message } from '@/lib/payment';
-import { inReviewTemplate } from '@/lib/whatsapp-templates';
+import { processingTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { PartnerId, Transfer } from '@/lib/types';
 
@@ -216,9 +216,10 @@ export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult>
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
       // 2026-10-03: `template` lets the worker reach a sender outside the
-      // 24-hour window with the approved transfer_in_review template; `body`
-      // stays the free-form fallback (and is all an older worker build reads).
-      { to: held.phone, body: buildStage1Message(held, { held: true }), template: inReviewTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
+      // 24-hour window; `body` stays the free-form fallback (and is all an older
+      // worker build reads). R30: the template is transfer_processing, the fixed
+      // hold text; until Meta approves it the worker sends `body` (132001 fallback).
+      { to: held.phone, body: buildStage1Message(held, { held: true }), template: processingTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${held.id}` },
     );
     return { kind: 'held' };

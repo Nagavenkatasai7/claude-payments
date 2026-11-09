@@ -1,3 +1,14 @@
+import { afterEach } from 'vitest';
+
+// Give the event loop one turn after every test. PGlite runs in-process, so a
+// PGlite-heavy file can run all its tests on microtasks alone: the worker then
+// never reads Vitest's RPC replies, and a file past 60 s fails its shard with
+// "Timeout calling onTaskUpdate" though every test passed (tools.test.ts: 44 s
+// with no turn). The real setImmediate is kept here, before any test fakes
+// timers. Pinned by tests/event-loop-yield.test.ts.
+const realSetImmediate = globalThis.setImmediate;
+afterEach(() => new Promise<void>((resolve) => realSetImmediate(resolve)));
+
 process.env.ANTHROPIC_API_KEY ||= 'test-key';
 process.env.WHATSAPP_TOKEN ||= 'test-token';
 process.env.WHATSAPP_PHONE_NUMBER_ID ||= '123456';

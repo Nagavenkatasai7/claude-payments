@@ -83,7 +83,7 @@ export default function HeroPipeline({ rate, live }: Props) {
   return (
     <div
       role="img"
-      aria-label={`A live transfer flowing through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at ${live ? 'the daily reference rate' : 'an illustrative rate'} of 1 USD = ${rateText}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
+      aria-label={`An example transfer through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at ${live ? 'the daily reference rate' : 'an illustrative rate'} of 1 USD = ${rateText}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
       className="mx-auto w-full max-w-[1180px]"
     >
       <div
@@ -153,12 +153,12 @@ export default function HeroPipeline({ rate, live }: Props) {
           <p className="text-[16px] font-bold tracking-[-0.01em] text-[#047857]">
             ✓ {payout} delivered
           </p>
-          <p className="mt-1.5 text-[11.5px] text-[#52607a]">Mom · HDFC ••6210 · in minutes</p>
+          <p className="mt-1.5 text-[11.5px] text-[#52607a]">Mom · HDFC ••6210 · by the receipt date</p>
         </Node>
       </div>
 
       <p className="mt-5 text-center text-[12.5px] text-[#52607a]">
-        A real transfer moving through SmartRemit — conversation, quote, pay, settle, delivered.
+        An example transfer through SmartRemit — conversation, quote, pay, settle, delivered.
         Funds never touch us.
       </p>
     </div>

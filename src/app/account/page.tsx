@@ -204,9 +204,9 @@ export default async function AccountHomePage() {
           sub="USD equivalent"
         />
         <StatCard
-          label="Daily limit left"
-          value={money(cap.dailyRemainingUsd, 'USD')}
-          sub={`of ${money(cap.dailyLimitUsd, 'USD')}`}
+          label="Daily limit"
+          value={money(cap.dailyLimitUsd, 'USD')}
+          sub="USD equivalent"
         />
         <StatCard label="Transfers" value={transfers.length} sub="all time" />
         <StatCard label="Pending refunds" value={pendingRefunds} sub="in progress" />

@@ -43,7 +43,7 @@ async function renderPage(route: 'terms' | 'privacy' | 'legal'): Promise<string>
 describe('src/lib/legal/drafts.ts', () => {
   it('exports the version id and the owner banner verbatim', async () => {
     const d = await drafts();
-    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-10-12a'); // 2026-10-12: the company name and address (SR Technosolutions Inc)
+    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-10-31a'); // 2026-10-31 (R20): no in-minutes delivery, SmartRemit-only branding, the AI notice and HELP, precise encryption
     expect(d.LEGAL_DRAFT_BANNER).toBe(BANNER);
   });
 
@@ -76,6 +76,24 @@ describe('src/lib/legal/drafts.ts', () => {
     const text = allDraftText(await drafts());
     expect(text).not.toMatch(/smartremit (is|acts as) (a |an |the )?(licensed|money transmitter|bank|custodian)/i);
     expect(text).not.toMatch(/smartremit (holds|receives|disburses) (your )?(funds|money)/i);
+  });
+
+  it('R20: no in-minutes delivery, no "under their own brand", and the AI paragraph points to the notice and HELP', async () => {
+    const d = await drafts();
+    const text = allDraftText(d);
+    expect(text).not.toMatch(/within minutes|in minutes/i);
+    expect(text).not.toMatch(/under their own brand/i);
+    const role = d.LICENSING_DRAFT.sections.find((s) => s.id === 'smartremit-role')!.paragraphs.join(' ');
+    expect(role).toMatch(/customers see the SmartRemit name/i);
+    expect(role).toContain('licensed partner named on your receipt');
+    const cancel = d.REMITTANCE_RIGHTS_DRAFT.sections.find((s) => s.id === 'cancellation')!.paragraphs.join(' ');
+    expect(cancel).toMatch(/your receipt shows the date/i);
+    const ai = d.TERMS_DRAFT.sections.find((s) => s.id === 'assistant')!.paragraphs.join(' ');
+    expect(ai).toMatch(/tells you so when a conversation starts/i);
+    expect(ai).toContain('Reply HELP in the chat at any time to reach a person.');
+    const security = d.PRIVACY_DRAFT.sections.find((s) => s.id === 'security')!.paragraphs.join(' ');
+    expect(security).not.toMatch(/recipient names (are|is) encrypted|recipient names and/i);
+    expect(security).toMatch(/not encrypted yet/i);
   });
 
   it('names the licensed partner on the receipt as the provider of record (C3), and SmartRemit never holds funds', async () => {

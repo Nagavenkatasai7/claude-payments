@@ -29,6 +29,7 @@ import {
   RECIPIENT_NOT_FOUND,
   cancelPreparedTransferTool,
   prepareTransferTool,
+  refusalMessage,
   type PrepareDeps,
   type PrepareTransferArgs,
 } from '@/lib/mcp/prepare';
@@ -37,6 +38,7 @@ import type { AgentAuth } from '@/lib/agent-auth';
 import { handleMcpRequest } from '@/lib/mcp/http';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 
 // Stage C2: prepare_transfer makes ONE draft through the portal's own send path (the bot's
 // seam), on the web pointer, marked with the app that asked; the customer pays on the pay page.
@@ -364,5 +366,15 @@ describe('no pay path in the prepare tools (DoD grep)', () => {
     // The bot tools it runs: the read-only cap check only.
     expect([...src.matchAll(/executeTool\(\s*'([a-z_]+)'/g)].map((m) => m[1])).toEqual(['check_send_limit']);
     expect(src).not.toMatch(/buildToolContext\(/);
+  });
+});
+
+describe('R30: the cap refusals an app relays are the fixed replies (no figure, no remaining)', () => {
+  it('cap_daily and cap_per_transfer read hold-replies.ts word for word, whatever vars arrive', () => {
+    expect(refusalMessage({ error: 'portal.send.cap_daily', vars: { remaining: '$134.00' } })).toBe(FIXED_REPLIES.cap_daily);
+    expect(refusalMessage({ error: 'portal.send.cap_per_transfer', vars: { max: '$500.00' } })).toBe(FIXED_REPLIES.cap_per_transfer);
+  });
+  it('the EDD refusal is the fixed edd_elsewhere text', () => {
+    expect(refusalMessage({ error: 'portal.send.edd_whatsapp' })).toBe(FIXED_REPLIES.edd_elsewhere);
   });
 });

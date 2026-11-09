@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createWebChat, webThreadStore, webThreadPhone } from '@/lib/web-chat';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -25,6 +26,12 @@ let db: Db;
 
 // The refund writer falls back to getDb() (tools.ts request_refund); bind it to this file's PGlite.
 vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
+// R17: the web AI notice is covered by tests/web-chat-router.test.ts. Here it
+// counts as already shown, so these suites keep checking the exact reply text.
+vi.mock('@/lib/ai-notice-marker', async (orig) => ({
+  ...(await orig<typeof import('@/lib/ai-notice-marker')>()),
+  aiNoticeDueFor: async () => false,
+}));
 
 const PHONE = '15551234567';
 
@@ -153,6 +160,32 @@ describe('createWebChat', () => {
     const webChat = createWebChat({ ...deps, alertLlmDown, chat: async () => ({ role: 'assistant', content: 'ok' }) });
     expect(await webChat.runTurn(customerFixture(), 'hi')).toBe('ok');
     expect(alertLlmDown).not.toHaveBeenCalled();
+  });
+
+  // R32 (bot part): the web chat wires the agent's onReplyGuard to the same
+  // deduped ops alert as the worker (replyguard:<tenant>:<hour>).
+  it('a reply-guard mismatch raises ONE replyguard alert per tenant and hour; shadow returns the reply unchanged', async () => {
+    const deps = buildDeps();
+    const webChat = createWebChat({ ...deps, db, chat: async () => ({ role: 'assistant', content: 'Transfers are instant, Mom gets ₹99,999.' }) });
+    expect(await webChat.runTurn(customerFixture(), 'hi')).toBe('Transfers are instant, Mom gets ₹99,999.');
+    await webChat.runTurn(customerFixture(), 'hi again');
+    const rows = (await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: { message: string } }>;
+    };
+    const guard = rows.rows.filter((r) => r.dedupe_key.startsWith('replyguard:'));
+    expect(guard).toHaveLength(1);
+    expect(guard[0].dedupe_key).toMatch(/^replyguard:default:\d+$/);
+    expect(guard[0].payload.message).toContain('web chat');
+    expect(guard[0].payload.message).not.toContain('99,999');
+    expect(guard[0].payload.message).not.toContain(PHONE);
+  });
+
+  it('a clean web reply raises no replyguard alert', async () => {
+    const deps = buildDeps();
+    const webChat = createWebChat({ ...deps, db, chat: async () => ({ role: 'assistant', content: 'ok' }) });
+    await webChat.runTurn(customerFixture(), 'hi');
+    const rows = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(rows.rows.filter((r) => r.dedupe_key.startsWith('replyguard:'))).toHaveLength(0);
   });
 
   it('runs a turn on the web thread; the WhatsApp thread never changes', async () => {
