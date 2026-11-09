@@ -41,13 +41,9 @@ describe('createLlmOkMarker', () => {
 
   it('a SET that never settles does not block the caller, and the write was started', async () => {
     const h = harness(() => new Promise(() => {}));
-    // A reply path that marks and then returns: it must finish although the SET never does.
-    const replyPath = async () => {
-      h.mark();
-      return 'reply';
-    };
-    const timedOut = new Promise((r) => setTimeout(() => r('blocked'), 50));
-    await expect(Promise.race([replyPath(), timedOut])).resolves.toBe('reply');
+    // mark() hands back nothing to await. A returned promise (an async marker
+    // that awaits the SET) would let the reply path block on Redis.
+    expect(h.mark()).toBeUndefined();
     await flush();
     expect(h.set).toHaveBeenCalledTimes(1);
   });

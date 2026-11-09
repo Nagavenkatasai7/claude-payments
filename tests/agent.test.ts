@@ -453,6 +453,39 @@ describe('createAgent', () => {
       expect(hasMark(sent[2])).toBe(false);
     });
 
+    it('a 400 in a later round drops the stored history and keeps every message of this turn', async () => {
+      // Round 0 passes WITH the stored history and asks for a tool. The provider
+      // rejects the history only in round 1, so the drop runs on a prefix that
+      // already holds this turn's user message, tool call and tool result. The
+      // retry asks for a second tool, so round 2 proves the index moved too.
+      const QUESTION = 'who do I have saved?';
+      const toolCall = (id: string): ChatMessage => ({
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id, type: 'function', function: { name: 'list_saved_recipients', arguments: '{}' } }],
+      });
+      const sent: ChatMessage[][] = [];
+      const { agent, store } = await setup(async (messages) => {
+        sent.push(messages);
+        if (sent.length === 1) return toolCall('t1');
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        if (sent.length === 3) return toolCall('t2');
+        return { role: 'assistant', content: 'Done' };
+      });
+      expect(await agent.runAgentTurn(PHONE, QUESTION)).toBe('Done');
+      expect(sent).toHaveLength(4);
+      expect(sent.map(hasMark)).toEqual([true, true, false, false]);
+      // Round 2 still carries every message of this turn, in order.
+      const fromQuestion = (msgs: ChatMessage[]) =>
+        msgs.slice(msgs.findIndex((m) => m.role === 'user' && m.content === QUESTION)).map((m) => m.role);
+      expect(fromQuestion(sent[3])).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+      const saved = await store.getConversation('default', PHONE);
+      expect(hasMark(saved)).toBe(false);
+      expect(saved.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool', 'assistant']);
+      expect(saved[0].content).toBe(QUESTION);
+      expect(saved[5].content).toBe('Done');
+    });
+
     it('if the retry without history also fails, the turn falls back as before (two calls)', async () => {
       let calls = 0;
       const { agent, onFallback } = await setup(async () => { calls += 1; throw new ProviderHttpError(400, 'bad request'); });
