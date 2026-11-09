@@ -154,11 +154,38 @@ const SLUG_AUDIT_ACTION: Record<SetSlugMode, string> = { claim: 'partner.slug.cl
 const SLUG_AUDIT_ACTIONS = Object.values(SLUG_AUDIT_ACTION);
 
 /**
+ * The ONE statement behind readSkinSlugStatus (exported so a test can EXPLAIN exactly this SQL).
+ *
+ * It runs on the public request path (the resolver, on a status-cache miss while the skin switch
+ * is on), so every arm must have an index to use:
+ * - partner_sites by slug (the unique slug index) and tombstones by slug (the primary key);
+ * - the slug audit history through `audit_subject_action (subject_id, action)`: slug audit rows
+ *   have always been written with subject_id = the partner's id, so the arm walks the (small)
+ *   partners table and probes that index per partner. It never needs a scan of the whole
+ *   audit_events table, which grows with every pii.view and sanctions.screen row.
+ */
+export function skinSlugStatusQuery(slug: string, partnerId: PartnerId) {
+  return sql`
+    select
+      (
+        exists (select 1 from ${partnerSites} where ${partnerSites.slug} = ${slug})
+        or exists (select 1 from ${partnerSlugTombstones} where ${partnerSlugTombstones.slug} = ${slug})
+        or exists (
+          select 1 from ${partners}
+          inner join ${auditEvents} on ${auditEvents.subjectId} = ${partners.id}
+          where ${inArray(auditEvents.action, SLUG_AUDIT_ACTIONS)}
+            and (${auditEvents.meta}->>'slug' = ${slug} or ${auditEvents.meta}->>'previousSlug' = ${slug})
+        )
+      ) as held,
+      exists (select 1 from ${partners} where ${partners.id} = ${partnerId} and ${partners.status} = 'active') as tenant_active`;
+}
+
+/**
  * For a SKIN slug (site-skins.ts), in ONE statement (one snapshot, one round trip):
  * - `held`: a partner holds the slug now (ANY status: a suspended partner keeps its slug), or it is
- *   tombstoned, or the slug audit history names it (claimed, set or released). The same three
- *   sources as setPartnerSlug's availability check, without the "another partner" carve-out: a
- *   skin never takes over a host a partner had.
+ *   tombstoned, or a partner's slug audit history names it (claimed, set or released). The same
+ *   three sources as setPartnerSlug's availability check, without the "another partner" carve-out:
+ *   a skin never takes over a host a partner had.
  * - `tenantActive`: the tenant the skin maps to exists and is 'active'.
  * Not tenant-scoped by design: the question is "does ANY partner hold this slug". It returns two
  * booleans and no row data. Throws on a database error; the resolver fails closed.
@@ -168,18 +195,7 @@ export async function readSkinSlugStatus(
   slug: string,
   partnerId: PartnerId,
 ): Promise<{ held: boolean; tenantActive: boolean }> {
-  const res = await db.execute(sql`
-    select
-      (
-        exists (select 1 from ${partnerSites} where ${partnerSites.slug} = ${slug})
-        or exists (select 1 from ${partnerSlugTombstones} where ${partnerSlugTombstones.slug} = ${slug})
-        or exists (
-          select 1 from ${auditEvents}
-          where ${inArray(auditEvents.action, SLUG_AUDIT_ACTIONS)}
-            and (${auditEvents.meta}->>'slug' = ${slug} or ${auditEvents.meta}->>'previousSlug' = ${slug})
-        )
-      ) as held,
-      exists (select 1 from ${partners} where ${partners.id} = ${partnerId} and ${partners.status} = 'active') as tenant_active`);
+  const res = await db.execute(skinSlugStatusQuery(slug, partnerId));
   const row = rowsOf<{ held: boolean; tenant_active: boolean }>(res)[0];
   // No row can only mean an unexpected driver shape: report "held" so the skin stays closed.
   if (!row) return { held: true, tenantActive: false };

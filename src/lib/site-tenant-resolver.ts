@@ -10,16 +10,19 @@
 // generic sheet (no oracle). Logs carry the slug only, never the IP.
 //
 // SKIN slugs (src/lib/site-skins.ts, e.g. `tgfl`: a partner-branded look that an EXISTING tenant
-// serves) take one extra step before that order:
-//   1. status, cached under its OWN key (skinCacheKey; same TTL, same limiter and deadlines on a
-//      miss): 'held' = a partner holds or ever held the slug, 'inactive' = the skin's tenant is not
-//      active, 'ok' = free and active. A throttled miss or a DB error is never cached → null.
-//   2. 'held' → the NORMAL path below decides (the partner wins; the skin never takes over or blanks
-//      a partner's host, whatever the switch says). 'inactive' → null.
-//   3. 'ok' → the "TGFL demo portal" switch (flag portal.skins) is read on EVERY call, under the DB
-//      deadline. Anything but a clear "on" (off, slow, error) → null. On → the skin's tenant.
+// serves) take extra steps before that order:
+//   1. The "TGFL demo portal" switch (flag portal.skins) is read FIRST, on EVERY call, under the DB
+//      deadline. Anything but a clear "on" (off, slow, error) → the NORMAL path below, exactly as
+//      before skins existed: no skin read, no extra query, and a slug nobody holds answers null.
+//   2. Switch on → the slug's status, cached under its OWN key (skinCacheKey; same TTL, same limiter
+//      and deadline on a miss): 'held' = a partner holds or ever held the slug, 'inactive' = the
+//      skin's tenant is not active, 'ok' = free and active. A throttled miss or a DB error is never
+//      cached → null.
+//   3. 'held' → the NORMAL path decides (the partner wins; the skin never takes over or blanks a
+//      partner's host, whatever the switch says). 'inactive' → null. 'ok' → the skin's tenant.
 // The skin ANSWER is never cached and never written to the slug cache, so turning the switch off
-// stops the host within the flag cache's 15 s, and an old slug-cache entry can never shadow it.
+// stops the host within the flag cache's 15 s, and a slug-cache entry can never carry a skin answer
+// (a negative entry written while the switch was off is ignored once it is on).
 import { getRedis } from '@/lib/redis';
 import type { RedisLike } from '@/lib/store';
 import { getDb, type DbOrTx } from '@/db/client';
@@ -78,7 +81,7 @@ async function isLimited(reqHeaders: Headers, deps: ResolveSiteDeps): Promise<bo
 }
 
 /**
- * Step 1 for a skin slug: its status, from the status cache or (on a miss) the DB. null = no answer
+ * Step 2 for a skin slug: its status, from the status cache or (on a miss) the DB. null = no answer
  * (throttled, DB error or timeout): the caller fails closed and nothing is cached. `counted` says
  * the limiter already counted this request, so the normal path does not count it twice.
  */
@@ -125,7 +128,7 @@ async function readSkinStatus(
   return { status, counted: true };
 }
 
-/** Step 3 for a skin slug: true only on a clear "on". Off, slow or failing all read as off. */
+/** Step 1 for a skin slug: true only on a clear "on". Off, slow or failing all read as off. */
 async function skinSwitchOn(slug: string, deps: ResolveSiteDeps): Promise<boolean> {
   const skinsOn = deps.skinsOn ?? (() => isFlagOn(deps.db ?? getDb(), 'portal.skins'));
   try {
@@ -140,13 +143,14 @@ export async function resolveSiteSlug(slug: string, reqHeaders: Headers, deps: R
   // Platform/reserved/invalid labels are refused before any lookup.
   if (!isValidSiteSlug(slug)) return null;
 
-  // A skin slug (see the header). Only 'held' continues to the normal path below.
+  // A skin slug (see the header). With the switch not clearly on, or with a slug a partner holds
+  // or held ('held'), the normal path below decides, as it did before skins existed.
   let limiterCounted = false;
   const skin = skinForSlug(slug);
-  if (skin) {
+  if (skin && (await skinSwitchOn(slug, deps))) {
     const { status, counted } = await readSkinStatus(skin, reqHeaders, deps);
     if (status === null || status === 'inactive') return null;
-    if (status === 'ok') return (await skinSwitchOn(slug, deps)) ? skin.partnerId : null;
+    if (status === 'ok') return skin.partnerId;
     limiterCounted = counted;
   }
 

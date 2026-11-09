@@ -112,9 +112,10 @@ describe('resolveSiteSlug', () => {
 });
 
 // Site skins (owner go 2026-11-09): tgfl.smartremit.ai is a LOOK over SmartRemit's own tenant
-// (src/lib/site-skins.ts). The skin branch never uses the slug cache for its answer, so the
-// "TGFL demo portal" switch (portal.skins) decides on EVERY call; a real partner that holds, or ever
-// held, the slug always wins; every failure is the same null (the generic sheet).
+// (src/lib/site-skins.ts). The "TGFL demo portal" switch (portal.skins) is read FIRST, on EVERY
+// call: with it off the host behaves exactly as before skins existed (no skin read at all). With it
+// on, a real partner that holds, or ever held, the slug always wins; the skin answer never enters
+// the slug cache; every failure is the same null (the generic sheet).
 describe('resolveSiteSlug: a skin slug (tgfl)', () => {
   let db: Db; let redis: ReturnType<typeof fakeRedis>;
   const limited = async () => false;
@@ -127,9 +128,24 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
     await db.insert(partners).values([{ id: 'pa', name: 'A' }, { id: 'ps', name: 'S', status: 'suspended' }]);
   });
 
-  it('the status cache has its own key and the same short life as the slug cache', () => {
+  it('the status cache has its own key and the same short life as the slug cache', async () => {
     expect(skinCacheKey('tgfl')).toBe('site:v1:skin:tgfl');
     expect(skinCacheKey('tgfl')).not.toBe(siteCacheKey('tgfl'));
+    // The life is pinned on the write itself: fakeRedis does not expire keys, and a status without
+    // a TTL would keep an 'ok' or a 'held' for ever in real Redis.
+    const setSpy = vi.spyOn(redis, 'set');
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    expect(setSpy).toHaveBeenCalledWith(skinCacheKey('tgfl'), 'ok', { ex: SITE_CACHE_TTL_SEC });
+  });
+  it('switch off → exactly the path every other slug takes: no skin read, no status cached, the usual negative entry', async () => {
+    const execSpy = vi.spyOn(db, 'execute');
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: off })).toBeNull();
+    // readSkinSlugStatus is the only db.execute caller on this path: it never ran.
+    expect(execSpy).not.toHaveBeenCalled();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+    expect(await redis.get(siteCacheKey('tgfl'))).toBe('-');
+    execSpy.mockRestore();
   });
   it('switch on, tenant active, slug never held → the skin\'s tenant', async () => {
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
@@ -149,15 +165,18 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
     expect(await redis.get(skinCacheKey('tgfl'))).toBe('ok');
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited })).toBeNull();
   });
-  it('the answer never enters the slug cache, and a stale slug-cache entry never shadows the switch', async () => {
+  it('on → off → on: the skin answer never enters the slug cache, so neither cache can shadow the switch', async () => {
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
+    // Nothing for the off path to find: the skin's tenant was never written to the slug cache.
     expect(await redis.get(siteCacheKey('tgfl'))).toBeNull();
-    // An old negative entry (the host answered "inactive" before the switch went on) is ignored…
-    await redis.set(siteCacheKey('tgfl'), '-');
-    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
-    // …and so is a positive one once the switch is off.
-    await redis.set(siteCacheKey('tgfl'), 'default');
+    // Off: the host stops at once, although the status cache still says 'ok'.
+    expect(await redis.get(skinCacheKey('tgfl'))).toBe('ok');
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: off })).toBeNull();
+    // The off path left the usual negative entry behind…
+    expect(await redis.get(siteCacheKey('tgfl'))).toBe('-');
+    // …which never delays the host when the switch goes on again.
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
+    expect(await redis.get(siteCacheKey('tgfl'))).toBe('-');
   });
   it('the switch is asked on every call, also when the status comes from the cache', async () => {
     const skinsOn = vi.fn(async () => true);
@@ -170,9 +189,27 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
   it('a real ACTIVE partner that holds the slug wins, whatever the switch says (the skin never blanks a partner)', async () => {
     await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'tgfl' });
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('pa');
+    expect(await redis.get(skinCacheKey('tgfl'))).toBe('held');
     await redis.del(siteCacheKey('tgfl')); await redis.del(skinCacheKey('tgfl'));
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: off })).toBe('pa');
-    expect(await redis.get(skinCacheKey('tgfl'))).toBe('held');
+    // Off: the partner path alone decided; the skin status was not even read.
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+  });
+  it('a held slug counts the per-IP limiter ONCE per request, not once per cache miss', async () => {
+    await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'tgfl' });
+    // Both caches empty: the status miss counts; the slug-cache miss that follows must not count again.
+    const lim = vi.fn(async () => false);
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited: lim, skinsOn: on })).toBe('pa');
+    expect(lim).toHaveBeenCalledTimes(1);
+    // Status cached ('held'), slug cache empty: the slug-cache miss is the one count.
+    await redis.del(siteCacheKey('tgfl'));
+    lim.mockClear();
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited: lim, skinsOn: on })).toBe('pa');
+    expect(lim).toHaveBeenCalledTimes(1);
+    // Both cached: no count at all.
+    lim.mockClear();
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited: lim, skinsOn: on })).toBe('pa');
+    expect(lim).not.toHaveBeenCalled();
   });
   it('a SUSPENDED partner that holds the slug keeps it: the skin does not take the host over', async () => {
     await db.insert(partnerSites).values({ partnerId: 'ps', slug: 'tgfl' });
@@ -216,9 +253,20 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
   it('a stalled or throwing switch read → null (fail closed: the switch never reads as on by accident)', async () => {
     const log = await import('@/lib/log');
     const warn = vi.spyOn(log, 'logWarn').mockImplementation(() => {});
+    // dbTimeoutMs bounds the switch read only here: the slug cache is primed, so no DB read follows.
+    await redis.set(siteCacheKey('tgfl'), '-');
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: () => new Promise(() => {}), dbTimeoutMs: 20 })).toBeNull();
+    await redis.del(siteCacheKey('tgfl'));
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: async () => { throw new Error('x'); } })).toBeNull();
+    // Neither read the skin status: an unreadable switch is "off".
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
     warn.mockRestore();
+  });
+  it('a switch that answers anything but true (a truthy value, undefined) is off', async () => {
+    for (const v of ['on', 1, undefined, null] as unknown[]) {
+      expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: async () => v as boolean }), String(v)).toBeNull();
+    }
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
   });
   it('a rate-limited IP on a status-cache miss → null without the DB, nothing cached; a cached status skips the limiter', async () => {
     const spyDb = { select: vi.fn(), execute: vi.fn() } as unknown as Db;
@@ -236,9 +284,9 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
     expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: off })).toBeNull();
   });
-  it('an unknown value in the status cache is treated as a miss (the DB decides)', async () => {
-    await redis.set(skinCacheKey('tgfl'), 'default');
-    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: off })).toBeNull();
+  it('an unknown value in the status cache is treated as a miss: the DB decides, and the value is never used as a tenant', async () => {
+    await redis.set(skinCacheKey('tgfl'), 'pa');
+    expect(await resolveSiteSlug('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
     expect(await redis.get(skinCacheKey('tgfl'))).toBe('ok');
   });
   it('other slugs are untouched by the skin branch: the switch is never read for them', async () => {

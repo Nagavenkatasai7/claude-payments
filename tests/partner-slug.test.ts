@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import { fakeRedis } from './helpers';
 import { partners, partnerSites, auditEvents, partnerSlugTombstones } from '@/db/schema';
 import type { Db } from '@/db/client';
-import { setPartnerSlug, getPartnerSite, savePartnerTheme, readSkinSlugStatus } from '@/db/repos/partner-site-repo';
+import { setPartnerSlug, getPartnerSite, savePartnerTheme, readSkinSlugStatus, skinSlugStatusQuery } from '@/db/repos/partner-site-repo';
 import { siteCacheKey } from '@/lib/site-tenant-resolver';
 
 describe('setPartnerSlug', () => {
@@ -231,6 +231,27 @@ describe('skin slugs', () => {
       { partnerId: 'pa', actor: 'u', actorType: 'staff', action: 'partner.slug.claim', subjectId: 'pa', meta: { slug: 'tgfl2', previousSlug: null } },
     ]);
     await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'tgfl2' });
+    expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: false, tenantActive: true });
+  });
+  it('readSkinSlugStatus: history of a SUSPENDED partner counts too (the join is on the partner row, not on its status)', async () => {
+    await db.insert(auditEvents).values({ partnerId: 'ps', actor: 'u', actorType: 'staff', action: 'partner.slug.update', subjectId: 'ps', meta: { slug: 'other', previousSlug: 'tgfl' } });
+    expect((await readSkinSlugStatus(db, 'tgfl', 'default')).held).toBe(true);
+  });
+  // The statement runs on the public request path, and audit_events grows with every pii.view and
+  // sanctions.screen row. With a large audit table the planner must have a cheap path for the
+  // audit-history arm: one probe of audit_subject_action (subject_id, action) per partner, not a
+  // pass over the whole table. 20,000 unrelated rows are enough for the planner to show its choice.
+  it('readSkinSlugStatus: on a large audit table the history arm probes the (subject_id, action) index per partner', async () => {
+    await db.execute(sql`
+      insert into audit_events (partner_id, actor, actor_type, action, subject_id, meta)
+      select 'pa', 'system', 'system', 'pii.view', 'cust-' || g, '{}'::jsonb from generate_series(1, 20000) g`);
+    await db.execute(sql`analyze audit_events`);
+    await db.execute(sql`analyze partners`);
+    const res = await db.execute(sql`explain ${skinSlugStatusQuery('tgfl', 'default')}`);
+    const plan = (res as unknown as { rows: Array<Record<string, string>> }).rows.map((r) => Object.values(r)[0]).join('\n');
+    expect(plan, plan).toMatch(/using audit_subject_action on audit_events[\s\S]*?Index Cond: \(\(subject_id = partners\.id\) AND \(action = ANY/);
+    expect(plan, plan).not.toContain('Seq Scan on audit_events');
+    // And the answer is still right with the big table: nobody held the slug.
     expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: false, tenantActive: true });
   });
   it('readSkinSlugStatus: the tenant is not active when it is suspended or does not exist', async () => {
