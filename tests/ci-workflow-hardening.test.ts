@@ -124,6 +124,16 @@ describe('scheduled workflows alert on failure', () => {
     for (const j of others) expect(jobBlock(wf, j)).not.toMatch(/issues: write/);
   });
 
+  // A job timeout reaches the alert as "cancelled" and counts as a failure.
+  // The step's !cancelled() is false only when the alert job itself is being
+  // cancelled; this pins that the guard is present, not how GitHub evaluates it.
+  it.each([
+    ['nightly.yml', nightly],
+    ['worker-heartbeat.yml', heartbeat],
+  ])('%s: the alert step carries the !cancelled() guard', (_name, wf) => {
+    expect(jobBlock(wf, 'alert')).toMatch(/- name: Open, update or close the failure issue\n\s+if: \$\{\{ !cancelled\(\) \}\}\n/);
+  });
+
   it('keeps the top-level permissions of both workflows', () => {
     expect(nightly).toMatch(/^permissions:\n {2}contents: read$/m);
     expect(heartbeat).toMatch(/^permissions: \{\}$/m);
@@ -131,6 +141,29 @@ describe('scheduled workflows alert on failure', () => {
 });
 
 describe('nightly.yml', () => {
+  // The single-runner full suite hit its 20-minute limit Nov 2-9, 2026. Same
+  // shards as ci.yml's test job.
+  it('runs the full suite as 4 shards that do not cancel each other', () => {
+    const job = jobBlock(nightly, 'full-tests');
+    expect(job).toMatch(/strategy:\n(\s+#.*\n)*\s+fail-fast: false\n\s+matrix:\n\s+shard: \[1, 2, 3, 4\]/);
+    expect(job).toMatch(/SHARD: \$\{\{ matrix\.shard \}\}\n\s+run: npx vitest run --shard="\$\{SHARD\}\/4"/);
+    expect(job).toMatch(/timeout-minutes: 15\n/);
+    expect(job).not.toMatch(/eval-bot/);
+  });
+
+  it('runs the optional bot eval once, in its own job, never failing the run', () => {
+    const job = jobBlock(nightly, 'bot-eval');
+    expect(job).not.toMatch(/matrix/);
+    expect(job).toMatch(/continue-on-error: true/);
+    expect(job).toMatch(/EVAL_ANTHROPIC_API_KEY: \$\{\{ secrets\.EVAL_ANTHROPIC_API_KEY \}\}/);
+    expect(job).toMatch(/run: npx tsx scripts\/eval-bot\.ts/);
+  });
+
+  // The job holds a secret, so the checkout must not leave the token in .git/config.
+  it('bot eval checks out without persisting the token', () => {
+    expect(jobBlock(nightly, 'bot-eval')).toMatch(/uses: actions\/checkout@\S+ # v4\n\s+with:\n\s+persist-credentials: false\n/);
+  });
+
   it('blocks on production advisories and only reports dev-tree ones', () => {
     const job = jobBlock(nightly, 'audit');
     expect(job).toMatch(/- name: Audit production dependencies\n\s+run: npm audit --omit=dev --audit-level=high/);

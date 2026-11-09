@@ -211,3 +211,54 @@ describe('build error count (Bearer tier only)', () => {
     expect(r.body).not.toHaveProperty('buildErrors');
   });
 });
+
+// Report item 3 (2026-11-09): the Bearer tier shows when the Claude API last
+// answered (llm:lastOkAt, written by chat()'s onSuccess). Additive only: it
+// never moves the status code and the anonymous body never carries it.
+describe('LLM last-ok marker (Bearer tier only)', () => {
+  const LLM_KEY = 'llm:lastOkAt';
+
+  it('reports llmLastOkAt as the ISO string, or null when the key is missing', async () => {
+    box.dbMode = 'real';
+    const at = new Date(Date.now() - 3 * 60_000).toISOString();
+    gate.strings.set(LLM_KEY, at);
+    const r = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r).toMatchObject({ status: 200, body: { llmLastOkAt: at, db: 'ok' } });
+
+    gate.strings.delete(LLM_KEY);
+    const r2 = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r2.status).toBe(200);
+    expect(r2.body.llmLastOkAt).toBeNull();
+  });
+
+  it('a value that is not a date reads as null', async () => {
+    box.dbMode = 'real';
+    gate.strings.set(LLM_KEY, 'garbage');
+    const r = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r.body.llmLastOkAt).toBeNull();
+  });
+
+  it('a failing Redis gives null and the same status as without the field', async () => {
+    box.dbMode = 'real';
+    gate.failing = true;
+    const r = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r).toMatchObject({ status: 503, body: { redis: 'fail', db: 'ok', llmLastOkAt: null } });
+    gate.failing = false;
+    box.gateCtorThrows = true;
+    const r2 = await read(await route.GET(withAuth(`Bearer ${SECRET}`)));
+    expect(r2).toMatchObject({ status: 503, body: { llmLastOkAt: null } });
+  });
+
+  it('an old marker never changes the status', async () => {
+    box.dbMode = 'real';
+    gate.strings.set(LLM_KEY, new Date(Date.now() - 40 * 24 * 3600_000).toISOString());
+    expect((await route.GET(withAuth(`Bearer ${SECRET}`))).status).toBe(200);
+  });
+
+  it('the anonymous body has no llmLastOkAt key and makes no extra Redis read', async () => {
+    gate.strings.set(LLM_KEY, new Date().toISOString());
+    const r = await read(await route.GET(anon()));
+    expect(r.body).not.toHaveProperty('llmLastOkAt');
+    expect(gate.calls).toEqual([`get:${LAST_FULL_KEY}`]);
+  });
+});

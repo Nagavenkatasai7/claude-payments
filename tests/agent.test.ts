@@ -55,6 +55,8 @@ function freshScheduleStore(_redis = fakeRedis()) {
 
 const PHONE = '15551234567';
 
+type AgentDepsChat = Parameters<typeof createAgent>[0]['chat'];
+
 // Program-Fix 14: sender identity is required before screening, so a test
 // that drives a consumer send to a card or a mint seeds a legal name.
 async function seedNamedSender(customerStore: ReturnType<typeof createCustomerStore>, phone = PHONE) {
@@ -291,6 +293,236 @@ describe('createAgent', () => {
     expect(calls).toBe(2);
     expect(onFallback).toHaveBeenCalledTimes(1);
     expect((onFallback.mock.calls[0][0] as ProviderHttpError).status).toBe(503);
+  });
+
+  // Weekly reliability report 2026-11-09: a stored history the provider
+  // rejects (400) used to fail every turn of that chat until it aged out.
+  describe('a 400 caused by the stored history', () => {
+    const MARK = 'OLD-BAD-HISTORY-MARK';
+    const hasMark = (msgs: ChatMessage[]) => msgs.some((m) => (m.content ?? '').includes(MARK));
+
+    async function setup(chat: AgentDepsChat, opts: { seed?: boolean } = {}) {
+      const redis = fakeRedis();
+      const store = createStore(redis, db);
+      if (opts.seed !== false) {
+        await store.saveConversation('default', PHONE, [
+          { role: 'user', content: `earlier ${MARK}` },
+          { role: 'assistant', content: 'earlier reply' },
+        ]);
+      }
+      const onFallback = vi.fn();
+      const agent = createAgent({
+        store,
+        scheduleStore: freshScheduleStore(redis),
+        draftStore: createDraftStore(redis),
+        ...extraDeps(redis, store),
+        chat,
+        onFallback,
+      });
+      return { agent, store, onFallback };
+    }
+
+    // A delivered past send, so the round-0 get_customer_context pair is in the prefix.
+    const pastSend = (): import('@/lib/types').Transfer => ({
+      id: `tx-${Math.random().toString(36).slice(2)}`,
+      phone: PHONE, amountUsd: 200, feeUsd: 1.99, totalChargeUsd: 201.99, fxRate: 85.2, amountInr: 17040,
+      recipientName: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer', complianceStatus: 'cleared', complianceReasons: [], status: 'delivered',
+      createdAt: new Date().toISOString(), sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
+      destinationCurrency: 'INR', partnerId: 'default', amountSource: 200, feeSource: 1.99, totalChargeSource: 201.99,
+    });
+
+    it('after a successful retry the saved conversation drops the stored history and keeps this turn', async () => {
+      const { agent, store } = await setup(async (messages) => {
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        return { role: 'assistant', content: 'Hi again' };
+      });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('Hi again');
+      const saved = await store.getConversation('default', PHONE);
+      expect(hasMark(saved)).toBe(false);
+      expect(saved.some((m) => m.content === 'earlier reply')).toBe(false);
+      expect(saved).toEqual([
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'Hi again' },
+      ]);
+    });
+
+    it('the next turn on that saved conversation makes one call and carries the first turn (memory works again)', async () => {
+      const sent: ChatMessage[][] = [];
+      const { agent } = await setup(async (messages) => {
+        sent.push(messages);
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        return { role: 'assistant', content: sent.length === 2 ? 'Hi again' : 'Sure' };
+      });
+      await agent.runAgentTurn(PHONE, 'hello');
+      expect(sent).toHaveLength(2);
+      expect(await agent.runAgentTurn(PHONE, 'second message')).toBe('Sure');
+      expect(sent).toHaveLength(3);
+      const second = sent[2];
+      expect(second.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
+      expect(second.some((m) => m.role === 'assistant' && m.content === 'Hi again')).toBe(true);
+      expect(second.some((m) => m.role === 'user' && m.content === 'second message')).toBe(true);
+    });
+
+    it('the retry request is the first request minus exactly the stored messages, on every round', async () => {
+      const sent: ChatMessage[][] = [];
+      const { agent, store } = await setup(async (messages) => {
+        sent.push(messages);
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        if (sent.length === 2) {
+          return { role: 'assistant', content: '', tool_calls: [{ id: 't1', type: 'function', function: { name: 'list_saved_recipients', arguments: '{}' } }] };
+        }
+        return { role: 'assistant', content: 'Done' };
+      });
+      await store.saveTransfer(pastSend());
+      expect(await agent.runAgentTurn(PHONE, 'who do I have saved?')).toBe('Done');
+      expect(sent).toHaveLength(3);
+      const first = sent[0];
+      const at = first.findIndex((m) => (m.content ?? '').includes(MARK));
+      expect(first[at + 1]).toEqual({ role: 'assistant', content: 'earlier reply' });
+      const expected = [...first.slice(0, at), ...first.slice(at + 2)];
+      expect(sent[1]).toEqual(expected);
+      // The system notes, this turn's message and the context pair are all kept.
+      expect(sent[1].slice(0, at).every((m) => m.role === 'system')).toBe(true);
+      expect(sent[1].some((m) => m.role === 'user' && m.content === 'who do I have saved?')).toBe(true);
+      const ctxCall = sent[1].findIndex((m) => m.tool_calls?.[0]?.function.name === 'get_customer_context');
+      expect(ctxCall).toBeGreaterThan(0);
+      expect(sent[1][ctxCall + 1]).toMatchObject({ role: 'tool', tool_call_id: 'ctx_r0' });
+      // Round 1 of the same turn: the retry request plus this round's call and result.
+      expect(sent[2].slice(0, sent[1].length)).toEqual(sent[1]);
+      expect(sent[2].slice(sent[1].length).map((m) => m.role)).toEqual(['assistant', 'tool']);
+      expect(hasMark(sent[2])).toBe(false);
+      // Saved in order: this turn's message, the tool round, the reply.
+      const saved = await store.getConversation('default', PHONE);
+      expect(saved.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant']);
+      expect(saved[0].content).toBe('who do I have saved?');
+      expect(saved[3].content).toBe('Done');
+    });
+
+    it('when the retry without history also fails, the saved conversation keeps the stored history', async () => {
+      const { agent, store } = await setup(async () => { throw new ProviderHttpError(400, 'bad request'); });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
+      const saved = await store.getConversation('default', PHONE);
+      expect(hasMark(saved)).toBe(true);
+      expect(saved.some((m) => m.content === 'earlier reply')).toBe(true);
+      expect(saved[saved.length - 1]).toEqual({ role: 'user', content: 'hello' });
+    });
+
+    it('retries once without the stored history, answers normally and logs agent.history', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const sent: ChatMessage[][] = [];
+      const { agent, store, onFallback } = await setup(async (messages) => {
+        sent.push(messages);
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        return { role: 'assistant', content: 'Hi again' };
+      });
+      const reply = await agent.runAgentTurn(PHONE, 'hello');
+      expect(reply).toBe('Hi again');
+      expect(sent).toHaveLength(2);
+      expect(hasMark(sent[1])).toBe(false);
+      // The system prefix and this turn's message are still sent.
+      expect(sent[1][0].role).toBe('system');
+      expect(sent[1].some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
+      expect(onFallback).not.toHaveBeenCalled();
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('"scope":"agent.history"'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toContain('hello');
+      expect(lines[0]).not.toContain(MARK);
+      expect(lines[0]).not.toContain(PHONE);
+      expect(lines[0]).toContain('provider 400; retried without the stored history');
+      // The cause is the provider error's message (status, type, code, request id).
+      expect(lines[0]).toContain('Model request failed (400)');
+      // The bad stored history is not saved back (the next turn starts clean).
+      const saved = await store.getConversation('default', PHONE);
+      expect(hasMark(saved)).toBe(false);
+      warn.mockRestore();
+    });
+
+    it('later rounds of the same turn keep sending without the stored history', async () => {
+      const sent: ChatMessage[][] = [];
+      const { agent } = await setup(async (messages) => {
+        sent.push(messages);
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        if (sent.length === 2) {
+          return { role: 'assistant', content: '', tool_calls: [{ id: 't1', type: 'function', function: { name: 'list_saved_recipients', arguments: '{}' } }] };
+        }
+        return { role: 'assistant', content: 'Done' };
+      });
+      expect(await agent.runAgentTurn(PHONE, 'who do I have saved?')).toBe('Done');
+      expect(sent).toHaveLength(3);
+      expect(hasMark(sent[2])).toBe(false);
+    });
+
+    it('a 400 in a later round drops the stored history and keeps every message of this turn', async () => {
+      // Round 0 passes WITH the stored history and asks for a tool. The provider
+      // rejects the history only in round 1, so the drop runs on a prefix that
+      // already holds this turn's user message, tool call and tool result. The
+      // retry asks for a second tool, so round 2 proves the index moved too.
+      const QUESTION = 'who do I have saved?';
+      const toolCall = (id: string): ChatMessage => ({
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id, type: 'function', function: { name: 'list_saved_recipients', arguments: '{}' } }],
+      });
+      const sent: ChatMessage[][] = [];
+      const { agent, store } = await setup(async (messages) => {
+        sent.push(messages);
+        if (sent.length === 1) return toolCall('t1');
+        if (hasMark(messages)) throw new ProviderHttpError(400, 'bad request');
+        if (sent.length === 3) return toolCall('t2');
+        return { role: 'assistant', content: 'Done' };
+      });
+      expect(await agent.runAgentTurn(PHONE, QUESTION)).toBe('Done');
+      expect(sent).toHaveLength(4);
+      expect(sent.map(hasMark)).toEqual([true, true, false, false]);
+      // Round 2 still carries every message of this turn, in order.
+      const fromQuestion = (msgs: ChatMessage[]) =>
+        msgs.slice(msgs.findIndex((m) => m.role === 'user' && m.content === QUESTION)).map((m) => m.role);
+      expect(fromQuestion(sent[3])).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool']);
+      const saved = await store.getConversation('default', PHONE);
+      expect(hasMark(saved)).toBe(false);
+      expect(saved.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant', 'tool', 'assistant']);
+      expect(saved[0].content).toBe(QUESTION);
+      expect(saved[5].content).toBe('Done');
+    });
+
+    it('if the retry without history also fails, the turn falls back as before (two calls)', async () => {
+      let calls = 0;
+      const { agent, onFallback } = await setup(async () => { calls += 1; throw new ProviderHttpError(400, 'bad request'); });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
+      expect(calls).toBe(2);
+      expect(onFallback).toHaveBeenCalledTimes(1);
+    });
+
+    it('a spend-cap 400 is still not retried', async () => {
+      let calls = 0;
+      const { agent } = await setup(async () => { calls += 1; throw new ProviderHttpError(400, 'limit', { spendCap: true }); });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe(FALLBACK_REPLY);
+      expect(calls).toBe(1);
+    });
+
+    it('a 503 still retries the identical messages, history included', async () => {
+      const sent: ChatMessage[][] = [];
+      const { agent } = await setup(async (messages) => {
+        sent.push(messages);
+        if (sent.length === 1) throw new ProviderHttpError(503, 'busy');
+        return { role: 'assistant', content: 'ok' };
+      });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('ok');
+      expect(sent).toHaveLength(2);
+      expect(hasMark(sent[1])).toBe(true);
+    });
+
+    it('with no stored history a 400 is retried as before', async () => {
+      let calls = 0;
+      const { agent } = await setup(async () => {
+        calls += 1;
+        if (calls === 1) throw new ProviderHttpError(400, 'bad request');
+        return { role: 'assistant', content: 'ok' };
+      }, { seed: false });
+      expect(await agent.runAgentTurn(PHONE, 'hello')).toBe('ok');
+      expect(calls).toBe(2);
+    });
   });
 
   it('onFallback is not called on a normal reply nor on the empty-reply fallback', async () => {

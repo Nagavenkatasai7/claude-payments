@@ -18,6 +18,13 @@ import { handleMcpRequest, type McpHttpDeps } from '@/lib/mcp/http';
 /** Per-IP requests a minute: the blunt outer ring (fail open); the per-grant tool limits are inside. */
 export const MCP_IP_LIMIT = 300;
 
+/**
+ * A backstop on function time (seconds): tools only read Redis and Neon or build a quote, so no real
+ * call needs this long, and a stream left open by any cause stops here instead of at the 300 s limit.
+ * Route segment config: node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/02-route-segment-config/maxDuration.md:6-10.
+ */
+export const maxDuration = 60;
+
 function deps(req: NextRequest): McpHttpDeps {
   return {
     site: getPortalSite,
