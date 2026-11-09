@@ -24,6 +24,7 @@ import { AML_HOLD_REASON as AML_FROM_AML_HOLD } from '@/lib/aml-hold';
 import { FIXED_REPLIES } from '@/lib/hold-replies';
 import { holdReasonKeys } from '@/lib/partner-transfers';
 import { HOLD_REASON_CODES } from '@/lib/aml-explain-ai';
+import { canReleaseHeld } from '@/lib/dashboard-ops';
 
 // Fix pack 2 (R04, R06): ONE registry of every stored hold reason: its class,
 // who may release it, and the customer copy. The older lists are derived.
@@ -153,5 +154,19 @@ describe('senderScreeningHoldActive', () => {
 describe('AML_HOLD_REASON home', () => {
   it("AML_HOLD_REASON re-exported by aml-hold equals compliance-config's", () => {
     expect(AML_FROM_AML_HOLD).toBe(cfg.AML_HOLD_REASON);
+  });
+});
+
+// Fix pack 2 T4 (R02): the staff release gate follows the registry: a
+// 'rescreen' reason is never released by a person, platform staff included.
+describe('canReleaseHeld and the registry (fix pack 2 T4)', () => {
+  it('canReleaseHeld agrees with isRescreenOnlyHold for every registry reason', () => {
+    for (const reason of Object.keys(HOLD_REASONS)) {
+      const t = { status: 'in_review' as const, complianceStatus: 'flagged' as const, complianceReasons: [reason] };
+      expect(canReleaseHeld({ kind: 'platform' }, { kycMode: 'ours' }, t, null), reason).toBe(!isRescreenOnlyHold(t));
+      expect(canReleaseHeld({ kind: 'platform' }, { kycMode: 'ours' }, { ...t, complianceReasons: [LARGE_AMOUNT_REASON, reason] }, null), reason)
+        .toBe(!isRescreenOnlyHold({ complianceReasons: [LARGE_AMOUNT_REASON, reason] }));
+    }
+    expect(Object.keys(HOLD_REASONS).some((r) => isRescreenOnlyHold({ complianceReasons: [r] }))).toBe(true);
   });
 });

@@ -14,7 +14,15 @@ import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold } from './compliance-config';
+import { isPartnerReleasableHold, isRescreenOnlyHold } from './compliance-config';
+
+/**
+ * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
+ * (LIST_UNAVAILABLE). Only the automatic re-screen (list-hold-rescreen.ts)
+ * releases it; Reject is unchanged.
+ */
+export const RESCREEN_ONLY_RELEASE_REFUSAL =
+  'Cannot release: this hold lifts only by an automatic re-screen against a fresh sanctions list.';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -258,6 +266,10 @@ export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the
  * PLATFORM staff are unchanged: `sender` is ignored for them.
  * Sanctions-blocked rows stay unreleasable for everyone regardless of this
  * (markPaidIfInReview carries compliance_status <> 'blocked').
+ * Fix pack 2 T4 (R02): a hold the registry marks 'rescreen' (LIST_UNAVAILABLE:
+ * screened while the sanctions list was not live) is released by NO person,
+ * platform staff included: only the automatic re-screen on a fresh list
+ * (list-hold-rescreen.ts) lifts it. That check comes first.
  * Pure: the server actions (authoritative gate) and the compliance page (which
  * hides the Release button) all call it, so the UI can never drift from it.
  */
@@ -267,6 +279,7 @@ export function canReleaseHeld(
   transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
   sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
 ): boolean {
+  if (isRescreenOnlyHold(transfer)) return false;
   if (scope.kind === 'platform') return true;
   return isPartnerReleasableHold(transfer, owner, sender);
 }
@@ -307,6 +320,13 @@ export async function releaseTransfer(
   }
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
+  }
+  // Fix pack 2 T4: a hold waiting on a fresh sanctions list is never released
+  // by a person (every caller, platform included), before any write. A row
+  // gains LIST_UNAVAILABLE only on its way INTO in_review (beginHold), so this
+  // read cannot be overtaken by a concurrent addition.
+  if (isRescreenOnlyHold(transfer)) {
+    throw new Error(RESCREEN_ONLY_RELEASE_REFUSAL);
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.

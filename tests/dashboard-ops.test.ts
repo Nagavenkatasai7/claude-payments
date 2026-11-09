@@ -947,6 +947,48 @@ describe('canReleaseHeld — who may release a compliance hold (owner decision 2
   });
 });
 
+// Fix pack 2 T4 (R02): a hold waiting on a fresh sanctions list (LIST_UNAVAILABLE)
+// lifts ONLY by the automatic re-screen (list-hold-rescreen.ts). No person,
+// platform staff included, may release it; Reject is unchanged.
+describe('LIST_UNAVAILABLE holds — no person can release them (fix pack 2 T4)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+  type Held = Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>;
+  const held = (complianceReasons: string[]): Held => ({ status: 'in_review', complianceStatus: 'flagged', complianceReasons });
+  const CLEAR = { watchlistHit: null, pepHit: null };
+
+  it('platform may NOT release a LIST_UNAVAILABLE hold (alone or with LARGE)', () => {
+    for (const reasons of [[LIST_UNAVAILABLE_REASON], ['Large transfer amount.', LIST_UNAVAILABLE_REASON]]) {
+      for (const owner of [{ kycMode: 'ours' as const }, { kycMode: 'delegated' as const }, null]) {
+        expect(canReleaseHeld(PLATFORM, owner, held(reasons), CLEAR)).toBe(false);
+        expect(canReleaseHeld(PARTNER, owner, held(reasons), CLEAR)).toBe(false);
+      }
+    }
+  });
+
+  it('platform may still release POSSIBLE_MATCH', () => {
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, held([POSSIBLE_MATCH_REASON]), null)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, held(['Large transfer amount.', POSSIBLE_MATCH_REASON]), CLEAR)).toBe(true);
+  });
+
+  it('releaseTransfer throws the pinned text, writes nothing', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rel_list', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON],
+      paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+    }));
+    await expect(releaseTransfer(store, db, 'rel_list', REL)).rejects.toThrow(
+      'Cannot release: this hold lifts only by an automatic re-screen against a fresh sanctions list.',
+    );
+    expect((await store.getTransfer('rel_list'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+    // Reject is unchanged: it still cancels the hold.
+    await rejectTransfer(store, db, 'rel_list', REL);
+    expect((await store.getTransfer('rel_list'))?.status).toBe('cancelled');
+  });
+});
+
 // Money-path review findings 2 + 3: a staff action that read the row BEFORE a
 // concurrent release must never overwrite the now-paid row (stale full-row
 // upsert). Simulated with a store whose getTransfer returns the stale read.

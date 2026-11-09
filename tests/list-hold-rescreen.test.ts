@@ -1,0 +1,403 @@
+/**
+ * Fix pack 2 T4 (R02): the automatic re-screen release of LIST_UNAVAILABLE
+ * holds. sweepListUnavailableHolds re-screens each in_review row held because
+ * the sanctions list was not live, once a screen can stand for it, and
+ * releases it through ONE settlement transaction (releaseRescreenedHold) only
+ * when every name screened before was screened again. No person can release
+ * such a hold (dashboard-ops tests).
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { createStore } from '@/lib/store';
+import { createCustomerStore } from '@/lib/customer-store';
+import { fakeRedis } from './helpers';
+import { freshDb, seedPartner, captureQueries } from './helpers-db';
+import type { Db } from '@/db/client';
+import type { Transfer } from '@/lib/types';
+import { beginHold } from '@/lib/settlement';
+import { releaseTransfer, rejectTransfer } from '@/lib/dashboard-ops';
+import {
+  LARGE_AMOUNT_REASON,
+  LIST_UNAVAILABLE_REASON,
+  POSSIBLE_MATCH_REASON,
+  RECIPIENT_WATCHLIST_REASON,
+  SENDER_IDENTITY_MISSING_REASON,
+} from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
+
+// The worker poke, observed (the real one schedules via next/server after()).
+const poke = vi.hoisted(() => ({ calls: 0 }));
+vi.mock('@/lib/outbox', async (orig) => {
+  const real = await orig<typeof import('@/lib/outbox')>();
+  return { ...real, pokeWorker: () => { poke.calls++; } };
+});
+
+// The list fitness read, counted (the "no held rows -> no warm" case).
+const fitnessReads = vi.hoisted(() => ({ n: 0 }));
+vi.mock('@/lib/sanctions/list-health', async (orig) => {
+  const real = await orig<typeof import('@/lib/sanctions/list-health')>();
+  return {
+    ...real,
+    sanctionsListFitnessNow: async (now: Date) => {
+      fitnessReads.n++;
+      return real.sanctionsListFitnessNow(now);
+    },
+  };
+});
+
+// Per-row hooks on the name resolution: a row that always throws, and a reject
+// that commits while the sweep is between its reads and its transaction.
+const names = vi.hoisted(() => ({ throwFor: new Set<string>(), before: null as null | ((id: string) => Promise<void>) }));
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-rescreen')>();
+  return {
+    ...real,
+    resolveRescreenNames: async (...a: Parameters<typeof real.resolveRescreenNames>) => {
+      const id = a[1].id;
+      if (names.throwFor.has(id)) throw new Error('names unavailable');
+      if (names.before) await names.before(id);
+      return real.resolveRescreenNames(...a);
+    },
+  };
+});
+
+import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+
+const H = 3_600_000;
+const SENDER_PHONE = '15551230000';
+const SENDER = 'Alex Sender';
+const REL = { actor: 'plat', reason: 'checked' };
+
+let db: Db;
+let store: ReturnType<typeof createStore>;
+let customerStore: ReturnType<typeof createCustomerStore>;
+const originalList = process.env.SANCTIONS_LIST;
+
+function base(o: Partial<Transfer> & { id: string }): Transfer {
+  return {
+    phone: SENDER_PHONE, amountUsd: 200, feeUsd: 5, totalChargeUsd: 205,
+    fxRate: 83, amountInr: 16600, recipientName: 'Anita', recipientPhone: '919876543210',
+    payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', fundingMethod: 'bank_transfer',
+    status: 'awaiting_payment', complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: new Date(Date.now() - H).toISOString(), partnerId: 'acme', environment: 'live',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 200, feeSource: 5, totalChargeSource: 205,
+    ...o,
+  } as Transfer;
+}
+
+async function seedSender(partnerId: string, fullName: string | undefined): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await customerStore.saveCustomer({
+    senderPhone: SENDER_PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
+    senderCountry: 'US', partnerId, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
+    ...(fullName !== undefined ? { fullName } : {}),
+  });
+}
+
+/**
+ * A row held at pay time because the list was not live: the mint's evidence
+ * (a not-live screen of `screened`), then beginHold adding LIST_UNAVAILABLE.
+ */
+async function heldRow(
+  o: Partial<Transfer> & { id: string },
+  screened: { recipientName?: string; senderName?: string | null; addReasons?: string[] } = {},
+): Promise<Transfer> {
+  const t = base(o);
+  await store.saveTransfer(t);
+  const sender = screened.senderName === null ? undefined : (screened.senderName ?? SENDER);
+  await seedLiveEvidence(
+    db,
+    { id: t.id, partnerId: t.partnerId, recipientName: screened.recipientName ?? t.recipientName, ...(sender !== undefined ? { senderName: sender } : {}) },
+    { listFitness: 'not_live' },
+  );
+  expect(await beginHold(db, t, { addReasons: screened.addReasons ?? [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'held' });
+  return t;
+}
+
+type AuditRow = { actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> };
+async function auditRows(subject?: string): Promise<AuditRow[]> {
+  const r = await db.execute(sql`SELECT actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
+  const rows = (r as unknown as { rows: AuditRow[] }).rows;
+  return subject ? rows.filter((x) => x.subject_id === subject) : rows;
+}
+
+async function outbox(): Promise<Array<{ kind: string; dedupe_key: string | null; payload: Record<string, unknown> }>> {
+  const r = await db.execute(sql`SELECT kind, dedupe_key, payload FROM outbox ORDER BY id`);
+  return (r as unknown as { rows: Array<{ kind: string; dedupe_key: string | null; payload: Record<string, unknown> }> }).rows;
+}
+const keys = async () => (await outbox()).map((r) => r.dedupe_key);
+
+beforeEach(async () => {
+  db = await freshDb();
+  store = createStore(fakeRedis(), db);
+  customerStore = createCustomerStore(db, store);
+  await seedPartner(db, 'acme');
+  await seedSender('acme', SENDER);
+  poke.calls = 0;
+  fitnessReads.n = 0;
+  names.throwFor = new Set();
+  names.before = null;
+});
+afterEach(() => restoreOfacSource(originalList));
+
+describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
+  it('fresh list + clean + same names -> paid, one instruct: (http) or mocksettle:, one system transfer.release, reasons unchanged', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await seedPartner(db, 'mockp');
+    await seedSender('mockp', SENDER);
+    await heldRow({ id: 'lh_http' });
+    await heldRow({ id: 'lh_mock', partnerId: 'mockp' });
+
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 2, stillHeld: 0, blocked: 0 });
+    for (const id of ['lh_http', 'lh_mock']) {
+      const after = await store.getTransfer(id);
+      expect(after?.status).toBe('paid');
+      expect(after?.complianceStatus).toBe('flagged');
+      expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+      const releases = (await auditRows(id)).filter((a) => a.action === 'transfer.release');
+      expect(releases).toEqual([{
+        actor: 'system:list-rescreen', actor_type: 'system', action: 'transfer.release', subject_id: id,
+        meta: { previousStatus: 'in_review', newStatus: 'paid', trigger: 'list_rescreen' },
+      }]);
+      // The re-screen's own evidence row, recorded in the release transaction.
+      const screens = (await auditRows(id)).filter((a) => a.action === 'sanctions.screen');
+      expect(screens).toHaveLength(2);
+      expect(screens[1].meta.decision).toBe('clear');
+    }
+    const k = await keys();
+    expect(k.filter((x) => x?.startsWith('instruct:'))).toEqual(['instruct:lh_http']);
+    expect(k.filter((x) => x?.startsWith('mocksettle:'))).toEqual(['mocksettle:lh_mock']);
+    expect(poke.calls).toBe(1);
+  });
+
+  it('second sweep -> nothing new', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_twice' });
+    await sweepListUnavailableHolds(db, new Date());
+    const ob = await outbox();
+    const au = await auditRows();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(await outbox()).toEqual(ob);
+    expect(await auditRows()).toEqual(au);
+  });
+
+  it('two sweeps in Promise.all -> one rail effect', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_race' });
+    const [a, b] = await Promise.all([sweepListUnavailableHolds(db, new Date()), sweepListUnavailableHolds(db, new Date())]);
+    expect(a.released + b.released).toBe(1);
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual(['instruct:lh_race']);
+    expect((await auditRows('lh_race')).filter((x) => x.action === 'transfer.release')).toHaveLength(1);
+  });
+
+  it('http + stale list -> untouched, zero audit rows', async () => {
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_stale' });
+    const au = await auditRows();
+    const ob = await outbox();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(await auditRows()).toEqual(au);
+    expect(await outbox()).toEqual(ob);
+    const after = await store.getTransfer('lh_stale');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(poke.calls).toBe(0);
+  });
+
+  it('Partner-API mint with a body sender name, held LIST_UNAVAILABLE, fresh list -> not released, SENDER_IDENTITY_MISSING added, no instruct', async () => {
+    // The Partner-API body sender name is screened at mint and never stored
+    // (ensureCustomer stores no name), so the owner row has no fullName.
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme'`);
+    await seedSender('acme', undefined);
+    await heldRow({ id: 'lh_api' }, { senderName: 'Body Sender Name' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('lh_api');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
+    expect((await keys()).filter((x) => x?.startsWith('instruct:') || x?.startsWith('mocksettle:'))).toEqual([]);
+    const rescreen = (await auditRows('lh_api')).filter((a) => a.action === 'transfer.rescreen');
+    expect(rescreen).toHaveLength(1);
+    expect(rescreen[0].actor).toBe('system:list-rescreen');
+    expect(rescreen[0].meta).toEqual({
+      previousReasons: [LIST_UNAVAILABLE_REASON],
+      newReasons: [SENDER_IDENTITY_MISSING_REASON],
+      decision: 'clear',
+      uncovered: ['sender'],
+    });
+    expect(poke.calls).toBe(0);
+  });
+
+  it('payment-link mint with link.customerName only -> not released', async () => {
+    // A link screens link.customerName as the sender; the customer row the
+    // link creates carries no legal name.
+    primeOfacSource({ checkedAgoMs: H });
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme'`);
+    await seedSender('acme', undefined);
+    await heldRow({ id: 'lh_link' }, { senderName: 'Link Customer Name' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('lh_link');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
+  });
+
+  it('payee.legalName screened at mint -> covered via alsoRecipientNames, released', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    const t = await heldRow(
+      { id: 'lh_payee', recipientName: 'Priya', recipientLegalName: 'Priya Legal Sharma' },
+      { recipientName: 'Priya Legal Sharma' },
+    );
+    // The mint screened the display name too.
+    await seedLiveEvidence(db, { id: t.id, partnerId: t.partnerId, recipientName: 'Priya', senderName: SENDER }, { listFitness: 'not_live' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    expect((await store.getTransfer('lh_payee'))?.status).toBe('paid');
+    expect(await keys()).toContain('instruct:lh_payee');
+  });
+
+  it('possible match -> still in_review [POSSIBLE_MATCH], transfer.rescreen audit', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_possible', recipientName: 'Banco Ejemplo Nacionel' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('lh_possible');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([POSSIBLE_MATCH_REASON]);
+    const rescreen = (await auditRows('lh_possible')).filter((a) => a.action === 'transfer.rescreen');
+    expect(rescreen.map((r) => r.meta)).toEqual([{
+      previousReasons: [LIST_UNAVAILABLE_REASON],
+      newReasons: [POSSIBLE_MATCH_REASON],
+      decision: 'possible_match',
+      uncovered: [],
+    }]);
+    expect(JSON.stringify(rescreen).toLowerCase()).not.toContain('banco');
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual([]);
+    // A person decides now: the row left the sweep.
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+  });
+
+  it('match -> blocked, LIST_UNAVAILABLE dropped, listrescreenblock alert; never selected again; staff release refused', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_match', recipientName: 'Testa Fixturelli' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
+    const after = await store.getTransfer('lh_match');
+    expect(after?.status).toBe('in_review'); // charged: Reject cancels and refunds it
+    expect(after?.complianceStatus).toBe('blocked');
+    expect(after?.complianceReasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+    const alerts = (await outbox()).filter((r) => r.dedupe_key === 'listrescreenblock:lh_match');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe('ops.alert');
+    expect(String(alerts[0].payload.message)).toMatch(/charged, blocked by the re-screen, not paid out; reject and refund it/);
+    expect(String(alerts[0].payload.message).toLowerCase()).not.toContain('testa');
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual([]);
+    expect(poke.calls).toBe(1);
+
+    const au = await auditRows();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(await auditRows()).toEqual(au);
+
+    const ob = await outbox();
+    await expect(releaseTransfer(store, db, 'lh_match', REL)).rejects.toThrow(/Cannot release/);
+    expect((await store.getTransfer('lh_match'))?.status).toBe('in_review');
+    expect(await outbox()).toEqual(ob);
+  });
+
+  it('30 blocked rows and 30 waiting http rows (stale list) do not stop a newer mock-rail hold being released', async () => {
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await setRailProviderType(db, 'acme', 'http');
+    await seedPartner(db, 'mockp');
+    await seedSender('mockp', SENDER);
+    const old = (i: number) => new Date(Date.now() - 2 * H + i * 1000).toISOString();
+    for (let i = 0; i < 30; i++) {
+      await store.saveTransfer(base({
+        id: `lh_blk${i}`, status: 'in_review', paidAt: old(i), complianceStatus: 'blocked',
+        complianceReasons: [RECIPIENT_WATCHLIST_REASON, LIST_UNAVAILABLE_REASON],
+      }));
+      await store.saveTransfer(base({
+        id: `lh_wait${i}`, status: 'in_review', paidAt: old(i), complianceStatus: 'flagged',
+        complianceReasons: [LIST_UNAVAILABLE_REASON],
+      }));
+    }
+    await heldRow({ id: 'lh_newer', partnerId: 'mockp' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    expect((await store.getTransfer('lh_newer'))?.status).toBe('paid');
+    expect(await keys()).toContain('mocksettle:lh_newer');
+    expect((await store.getTransfer('lh_wait0'))?.status).toBe('in_review');
+  });
+
+  it('a row that throws every run does not stop the next row', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_bad' });
+    await heldRow({ id: 'lh_good' });
+    names.throwFor.add('lh_bad');
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect((await store.getTransfer('lh_good'))?.status).toBe('paid');
+    expect((await store.getTransfer('lh_bad'))?.status).toBe('in_review');
+    expect((await store.getTransfer('lh_bad'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+  });
+
+  it('LIST_UNAVAILABLE + LARGE -> held with LARGE only', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_large' }, { addReasons: [LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON] });
+    expect((await store.getTransfer('lh_large'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('lh_large');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON]);
+  });
+
+  it('legacy row at $1500 -> LARGE re-derived', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_legacy', amountUsd: 1500, totalChargeUsd: 1505, amountSource: 1500, totalChargeSource: 1505 });
+    expect((await store.getTransfer('lh_legacy'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    expect((await store.getTransfer('lh_legacy'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON]);
+  });
+
+  it('sandbox row -> mock effect', async () => {
+    // A 'test' row on an http partner is never real money: the stale list does
+    // not stop it and the rail effect is the mock settle.
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_sandbox', environment: 'test' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    const k = await keys();
+    expect(k).toContain('mocksettle:lh_sandbox');
+    expect(k.filter((x) => x?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  it('a reject racing the sweep -> moved', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_reject' });
+    names.before = async (id) => {
+      await rejectTransfer(createStore(fakeRedis(), db), db, id, { actor: 'plat', reason: 'no' });
+    };
+    const au = (await auditRows('lh_reject')).length;
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    const after = await store.getTransfer('lh_reject');
+    expect(after?.status).toBe('cancelled');
+    // Only the reject's own audit row: the sweep wrote nothing (no evidence, no release).
+    const rows = await auditRows('lh_reject');
+    expect(rows.slice(au).map((r) => r.action)).toEqual(['transfer.reject']);
+    expect((await keys()).filter((x) => x?.startsWith('mocksettle:') || x?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  it('no held rows -> no warm, one query', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    const stop = captureQueries();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    const qs = stop();
+    expect(qs).toHaveLength(1);
+    expect(fitnessReads.n).toBe(0);
+  });
+});

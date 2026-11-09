@@ -37,7 +37,7 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/sanctions/list-health.ts': ['checkSanctionsListHealth'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
-  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold'],
+  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold', 'releaseRescreenedHold'],
   // R2a: the partner alert email.send — called from drainOnce (the worker) and
   // the inbound webhook path (whatsapp-inbound.ts, which pokes).
   'src/lib/channel-health.ts': ['recordChannelHealth'],

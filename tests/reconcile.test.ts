@@ -30,6 +30,19 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
+// Fix pack 2 T4: a switch that makes the list-hold sweep throw (off by default).
+const listSweepThrows = vi.hoisted(() => ({ value: false }));
+vi.mock('@/lib/list-hold-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/list-hold-rescreen')>();
+  return {
+    ...real,
+    sweepListUnavailableHolds: async (...a: Parameters<typeof real.sweepListUnavailableHolds>) => {
+      if (listSweepThrows.value) throw new Error('list sweep down');
+      return real.sweepListUnavailableHolds(...a);
+    },
+  };
+});
+
 // Program-Fix 15 PR C: a switch that makes findStuckPaid return a STALE
 // snapshot (read before a concurrent sender cancel committed). Off (null) by
 // default, so every other case runs the real repo unchanged.
@@ -80,6 +93,7 @@ beforeEach(async () => {
   await seedPartner(db, 'acme');
   stuckSnapshot.rows = null;
   rescreenThrows.value = false;
+  listSweepThrows.value = false;
 });
 
 describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
@@ -99,7 +113,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     await store.saveTransfer(fixture());
 
     const first = await reconcileSweep(db);
-    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -174,7 +188,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
     await store.saveTransfer(fixture({ paidAt: new Date().toISOString() }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toHaveLength(0);
   });
 });
@@ -305,7 +319,7 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   it('alerts but NEVER re-instructs (there is no rail to instruct)', async () => {
     await store.saveTransfer(fixture()); // 'acme' has no integrations row ⇒ mock
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'recon:rc_t1' }]);
   });
 });
@@ -327,7 +341,7 @@ describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () =>
     await store.saveTransfer(fixture({ settlementPartnerId: 'railp' }));
 
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -346,7 +360,7 @@ describe('reconcileSweep — stale compliance reviews', () => {
   it('alerts exactly once for an in_review transfer older than 24h', async () => {
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'review:rc_rev1' }]);
     await reconcileSweep(db);
     expect(await outboxRows()).toHaveLength(1);
@@ -693,7 +707,7 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
     await overdueTicket('tk_b3', 30, 'normal');
     const today = new Date();
     const r = await reconcileSweep(db, today);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     await reconcileSweep(db, today);
     await reconcileSweep(db, new Date(today.getTime() + 60_000));
     const rows = await digestRows();
@@ -797,5 +811,34 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     const usual = await message('review:rc_rev2');
     expect(usual).toContain('release or refund it');
     expect(usual).not.toContain('sanctions list');
+  });
+});
+
+// Fix pack 2 T4 (R02): every full sweep re-screens the LIST_UNAVAILABLE holds
+// (list-hold-rescreen.ts) in its own try/catch.
+describe('reconcileSweep — list-outage holds (fix pack 2 T4)', { retry: 0 }, () => {
+  const held = (id: string) =>
+    fixture({
+      id, status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON],
+      createdAt: new Date(Date.now() - 3_600_000).toISOString(), paidAt: new Date(Date.now() - 1_800_000).toISOString(),
+    });
+
+  it('runs the list-hold sweep; a sweep throw does not fail the others; listHoldsReleased reported', async () => {
+    // A mock-rail hold on the (mock) demo list: released by the re-screen.
+    await store.saveTransfer(held('rc_lh1'));
+    const r = await reconcileSweep(db);
+    expect(r.listHoldsReleased).toBe(1);
+    expect((await store.getTransfer('rc_lh1'))?.status).toBe('paid');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('mocksettle:rc_lh1');
+
+    // A throwing sweep costs only itself: the stuck-paid sweep still alerts.
+    listSweepThrows.value = true;
+    await store.saveTransfer(held('rc_lh2'));
+    await store.saveTransfer(fixture({ id: 'rc_stuck', paidAt: new Date(Date.now() - 20 * 60_000).toISOString() }));
+    const r2 = await reconcileSweep(db);
+    expect(r2.listHoldsReleased).toBe(0);
+    expect(r2.stuckPaid).toBeGreaterThanOrEqual(1);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('recon:rc_stuck');
+    expect((await store.getTransfer('rc_lh2'))?.status).toBe('in_review');
   });
 });

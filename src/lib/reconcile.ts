@@ -12,6 +12,7 @@ import { isFlagOn } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
+import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import type { Transfer } from '@/lib/types';
 
@@ -31,7 +32,9 @@ import type { Transfer } from '@/lib/types';
 //   • cancelled + charged + unrefunded → alert (`cancelcharged:`),
 //   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
 //   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert,
-//   • customer tickets past their first-response target (fix 49C) → ONE digest a day.
+//   • customer tickets past their first-response target (fix 49C) → ONE digest a day,
+//   • an in_review hold waiting on a fresh sanctions list (LIST_UNAVAILABLE) →
+//     re-screened and released automatically when clean (fix pack 2 T4).
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing on every
 // full run can never spam: one re-instruction and one alert per stuck transfer, ever.
 
@@ -69,6 +72,8 @@ export interface SweepResult {
   fundingResumed?: number;
   stuckRefunds?: number;
   staleLocks?: number;
+  /** Fix pack 2 T4: LIST_UNAVAILABLE holds released by the automatic re-screen (0 when none). */
+  listHoldsReleased?: number;
 }
 
 /**
@@ -390,6 +395,17 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     );
   }
 
+  // LIST-OUTAGE HOLDS (fix pack 2 T4): re-screen the in_review rows held
+  // because the sanctions list was not live, and release the clean ones
+  // (list-hold-rescreen.ts, the only release path for them). Isolated: it
+  // never throws, and a failure here never costs the sweeps above.
+  let listHoldsReleased = 0;
+  try {
+    listHoldsReleased = (await sweepListUnavailableHolds(db, now)).released;
+  } catch (e) {
+    logWarn('reconcile', 'list-hold re-screen skipped', { error: e instanceof Error ? e.message : String(e) });
+  }
+
   // TICKET SLA DIGEST (Program-Fix 49C): staff-facing, never customer-facing.
   // Last, and isolated: a failed ticket read must never cost the money sweeps
   // above their result. SweepResult is deliberately unchanged.
@@ -406,6 +422,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     fundingResumed,
     stuckRefunds,
     staleLocks: staleLocks.length,
+    listHoldsReleased,
   };
 }
 

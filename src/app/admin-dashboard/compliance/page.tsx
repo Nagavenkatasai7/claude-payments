@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { WATCHLIST } from '@/lib/compliance';
-import { resolveCorridorRules } from '@/lib/compliance-config';
+import { isRescreenOnlyHold, resolveCorridorRules } from '@/lib/compliance-config';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -257,6 +257,12 @@ export default async function CompliancePage() {
                             Why is this hold being released? Recorded in the audit log.
                           </span>
                         </form>
+                      ) : isRescreenOnlyHold(t) ? (
+                        // Fix pack 2 T4: no person releases a hold waiting on
+                        // a fresh sanctions list; the automatic re-screen does.
+                        <span className="text-xs text-muted-foreground self-center">
+                          Releases automatically after a re-screen on a fresh sanctions list.
+                        </span>
                       ) : (
                         <Button
                           type="button"
