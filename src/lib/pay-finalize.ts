@@ -92,8 +92,8 @@ export async function draftPaymentStarted(db: DbOrTx, draftId: string): Promise<
 
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
- * Transfer at the moment of payment (create-at-pay). Mirrors the createTransferTool
- * button-tap parity: peek → kyc → payout destination (fix 6) → FX (Task 9) → cap →
+ * Transfer at the moment of payment (create-at-pay). The order (R30 deleted the
+ * old chat mint it once mirrored): peek → kyc → payout destination (fix 6) → FX (Task 9) → cap →
  * CLAIM-FIRST mint (the cap re-runs under the sender lock, fix 16) → consume. Returns the new transferId for the
  * caller to run the payment path.
  *
@@ -357,7 +357,7 @@ export async function finalizeDraftPayment(
     return { ok: false, error: 'blocked', transferId: transfer.id };
   }
 
-  // Parity with createTransferTool: sticky EDD (BEFORE funding so
+  // Sticky EDD (BEFORE funding so
   // recordFundingMethod's read-modify-write composes without clobbering it),
   // then funding. (Today's spend is the ledger row itself — fix 16.)
   if (

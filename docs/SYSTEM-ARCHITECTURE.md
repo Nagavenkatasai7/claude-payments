@@ -140,8 +140,8 @@ A tool-calling loop (max rounds) against Claude Haiku 5.5:
   `[TIER_REMINDER]` / `[UNVERIFIED SENDER]` (gate-on only).
 - **Tools** (the only way the bot acts): `check_send_limit`, `get_quote`,
   `list_saved_recipients`, `send_recipient_picker` (interactive buttons),
-  `send_approve_picker` (the Approve & Pay card), `create_transfer` /
-  draft creation, `generate_payment_link`, `check_payment_status`,
+  `send_approve_picker` (the Approve & Pay card and its draft; the secure pay
+  page mints it), `generate_payment_link`, `check_payment_status`,
   `update_recipient_phone`, `cancel_draft`, `repeat_transfer`, schedule tools,
   corridor-request capture. Every money-adjacent tool re-checks caps, the KYC gate,
   and sanctions server-side — the model can never bypass policy.

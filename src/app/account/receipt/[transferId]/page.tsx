@@ -6,6 +6,7 @@ import { notFound } from 'next/navigation';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
+import { BLOCK_REPLY, HOLD_REPLY } from '@/lib/hold-replies';
 import { payoutMethodLabel } from '@/lib/payout-format';
 import { isRecallEligible, refundDisposition } from '@/lib/refund-policy';
 import { isPartnerPulled } from '@/lib/funding-method';
@@ -85,8 +86,8 @@ const STATUS_SUMMARY: Record<string, string> = {
   paid: 'Payment received — your transfer is on its way.',
   delivered: 'The money has been delivered to your recipient.',
   cancelled: 'This transfer was cancelled.',
-  in_review: 'This transfer is being reviewed. We will be in touch shortly.',
-  blocked: 'This transfer could not be completed and you were not charged.',
+  in_review: HOLD_REPLY, // R30 (no tipping-off): the fixed hold text, never a review word
+  blocked: BLOCK_REPLY,
 };
 
 // The cancel deadline, in the same zone the disclosure card uses (UTC).

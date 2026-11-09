@@ -222,8 +222,12 @@ export function transferTimeline(
       if (t.paidAt) steps.push(paidDone);
       steps.push({ key: 'portal.timeline.cancelled', state: 'stopped' });
       break;
+    case 'blocked':
+      // Never charged and final: the fixed block text, which promises no update.
+      steps.push({ key: 'portal.timeline.not_completed', state: 'stopped' });
+      break;
     default:
-      // blocked (never charged) and anything unknown: the neutral review step only.
+      // Anything unknown (a newer build's status): the neutral processing step only.
       steps.push({ key: 'portal.timeline.under_review', state: 'stopped' });
   }
   const r = t.refundStatus ?? 'none';
@@ -270,7 +274,7 @@ export function receiptView(t: Transfer, reward?: Pick<QuotedReward, 'kind' | 'd
     amountDest: t.amountInr,
     destCurrency: t.destinationCurrency ?? 'INR',
     fxRate: t.fxRate,
-    statusKey: transferStatusView(t).labelKey,
+    statusKey: transferStatusView(t, 'customer').labelKey, // R30: the customer label, never "Under review"
     ...(t.status === 'delivered' && t.payoutReference ? { payoutReference: t.payoutReference } : {}),
     ...(reward ? { rewardLine: rewardReceiptLine(reward, (usd) => formatMoney(usdToSource(usd, t.sourceCurrency ?? 'USD', t.amountSource, t.amountUsd), t.sourceCurrency ?? 'USD')) } : {}),
   };

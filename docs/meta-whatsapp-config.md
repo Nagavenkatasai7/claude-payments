@@ -51,7 +51,7 @@
 | Recipient delivery confirmation | recipient | ❌ recipient never messaged us | **Yes, always** → `transfer_delivered` (rebuild) |
 | Scheduled-transfer "ready to approve" | sender | ❌ cron fires days later | **Yes** → `scheduled_payment_ready` |
 | Abandoned quote / unpaid transfer nudge | sender | ❌ often outside window | **Yes** → `payment_reminder` |
-| Compliance hold ("in review") | sender | ⚠️ maybe | **Yes** (fallback) → `transfer_in_review` |
+| Held transfer (R30: fixed hold text) | sender | ⚠️ maybe | **Yes** (fallback) → `transfer_processing` |
 | Released-after-review | sender | ❌ later | **Yes** → `transfer_released` |
 | Cancelled / rejected | sender | ⚠️ maybe | **Yes** (fallback) → `transfer_cancelled` |
 | Verification reminder (raise limit) | sender | ❌ T0 reminders fire later | **Yes** → `verification_reminder` |
@@ -108,12 +108,13 @@ Create each in **WhatsApp Manager → Account tools → Message templates → Cr
 - **Buttons:** CTA → Visit website, Dynamic, label `Complete Payment`, URL `https://smartremit.ai/pay/{{1}}`.
 - **Samples:** body {{1}}=`Anand`, {{2}}=`$50.00`, {{3}}=`Priya`; button {{1}}=`draft_abc123`
 
-### 3.5 `transfer_in_review` — compliance hold
-- **Category:** Utility · **Language:** en
-- **Body:**
-  `Hi {{1}}, your transfer of {{2}} to {{3}} is being reviewed by our team for security. We'll update you shortly — no action is needed right now.`
+### 3.5 `transfer_processing` — a held transfer (R30, no tipping-off)
+- **Category:** Utility · **Language:** en · **not yet submitted**
+- **Body** (the fixed hold text from `src/lib/hold-replies.ts` HOLD_REPLY; `tests/docs-whatsapp-templates.test.ts` pins it):
+  `Hi {{1}}, your transfer of {{2}} to {{3}} is being processed. We'll message you as soon as there is an update. You don't need to do anything right now.`
 - **Samples:** {{1}}=`Anand`, {{2}}=`$1,000.00`, {{3}}=`Priya`
-- **Wired 2026-10-03:** sent instead of the plain "in review" message only when the sender has not written in the last 24 hours. {{1}} is `there` today (the transfer record has no sender name).
+- **Wired:** sent instead of the plain held message only when the sender has not written in the last 24 hours. {{1}} is `there` today (the transfer record has no sender name). Until Meta approves it, the worker sends the plain text (the 132001 fallback).
+- **Replaces `transfer_in_review`** ("is being reviewed by our team for security"). That wording tells a customer about a review, which the Bank Secrecy Act rule against disclosing a SAR forbids. Do not submit `transfer_in_review`; if it exists on a WABA, delete it. The partner's MLRO approves this body with the other hold texts (`HOLD_REPLIES_VERSION`).
 
 ### 3.6 `transfer_released` — cleared after review
 - **Category:** Utility · **Language:** en
@@ -237,7 +238,7 @@ Every code path below is already built and is a **no-op until the matching env v
 3. **Business Settings → System users:** create a system user and generate a **permanent** token with `whatsapp_business_messaging` and `whatsapp_business_management`. https://developers.facebook.com/docs/whatsapp/cloud-api/get-started/
 4. **WhatsApp Manager → Message templates** (language **English, `en`**):
    - **AUTHENTICATION:** the OTP template → `WHATSAPP_AUTH_TEMPLATE`. It carries the portal code AND the pay-page / bill / seller confirmation code on the shared number (a partner's own number stays free-form).
-   - **UTILITY:** the §3 templates (`transfer_delivered`, `scheduled_payment_ready`, `transfer_delivered_sender`, `payment_reminder`, `transfer_in_review`, `transfer_released`, `transfer_cancelled`, `verification_reminder`).
+   - **UTILITY:** the §3 templates (`transfer_delivered`, `scheduled_payment_ready`, `transfer_delivered_sender`, `payment_reminder`, `transfer_processing`, `transfer_released`, `transfer_cancelled`, `verification_reminder`).
    - **Verification status:** the four `WHATSAPP_VERIFICATION_{NEEDED,IN_PROGRESS,VERIFIED,FAILED}_TEMPLATE`.
    - **UTILITY `ops_alert`** (one body variable) → `WHATSAPP_OPS_ALERT_TEMPLATE`.
 5. **Meta App → WhatsApp → Configuration:** callback URL `https://smartremit.ai/api/whatsapp`, verify token = `WHATSAPP_VERIFY_TOKEN`, subscribe to `messages`. If this is a different Meta app, also set `META_APP_SECRET` to that app's secret (inbound signatures fail closed).

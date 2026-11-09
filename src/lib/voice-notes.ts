@@ -202,7 +202,8 @@ export function sttAuthAlertFor(status: 401 | 403, hour: number): { message: str
 
 /**
  * Tools the agent may call at once in a voice turn: they only read, quote,
- * message THIS customer (the recipient picker) or open a support case. Every
+ * message THIS customer (the recipient picker), open a support case or decline
+ * an off-topic request (R56: a fixed text, nothing is changed). Every
  * other tool creates, changes, cancels or disputes something, saves details or
  * messages someone else, so it needs a read-back first (VOICE_INPUT_NOTE).
  * tests/voice-notes.test.ts forces every tool to be classified.
@@ -221,6 +222,7 @@ export const VOICE_LOOKUP_TOOLS: ReadonlySet<string> = new Set([
   'get_customer_context',
   'send_recipient_picker',
   'request_human_help',
+  'decline_off_topic',
 ]);
 
 /**

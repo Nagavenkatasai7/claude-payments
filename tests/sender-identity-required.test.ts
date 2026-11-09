@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { executeTool, runLegacyCreateTransferForTests, toolSchemasForChannel, WEB_TOOL_ALLOWLIST } from '@/lib/tools';
+import { executeTool, toolSchemasForChannel, WEB_TOOL_ALLOWLIST } from '@/lib/tools';
+import { fixedReply } from '@/lib/hold-replies';
+import { mintViaPayPage } from './helpers-mint';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -132,7 +134,7 @@ describe('sender identity is required before screening — approval card', { ret
     const draft = await named.draftStore.getDraft(first.draft_id as string);
     expect(draft).not.toBeNull();
     const tap = { ...named, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: first.draft_id as string } } };
-    const minted = await runLegacyCreateTransferForTests({}, tap);
+    const minted = await mintViaPayPage({}, tap, db); // the pay page mints the approved draft
     expect(typeof minted.transfer_id).toBe('string');
     await clearLegalName(db, 'default', PHONE);
 
@@ -172,9 +174,8 @@ describe('sender identity is required before screening — set_sender_name', { r
 
     const r = await executeTool('send_approve_picker', { ...SEND_ARGS }, ctx);
     expect(r.blocked).toBe(true);
-    expect(r.reply_to_customer).toBe(
-      "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
-    );
+    // R30: the fixed block text from hold-replies.ts (no reason, no 'notified').
+    expect(r.reply_to_customer).toBe(fixedReply('block', { help: true }));
     expect(r.draft_id).toBeUndefined();
     const blocked = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
     expect(blocked).toHaveLength(1);
@@ -326,31 +327,14 @@ describe('sender identity is required before screening — mint paths', { retry:
     expect(await ctx.store.listTransfers()).toHaveLength(0);
   });
 
-  it('the approve tap refuses a nameless consumer sender, mints nothing, and keeps the card tappable', async () => {
-    const { ctx, draftId } = await nameless();
-    const tap = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
-    const r = await runLegacyCreateTransferForTests({}, tap);
-    expect(r.needs_sender_name).toBe(true);
-    expect(r.reply_to_customer).toBe(NAME_QUESTION);
-    expect(r.retry_by_tapping_card).toBe(true);
-    expect(r.transfer_id).toBeUndefined();
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull();
-  });
+  // (R30 deleted the legacy chat mint; the pay page above is the only mint, and
+  // send_approve_picker's nameless refusal is covered at the top of this file.)
 
-  it('the explicit-args create path refuses a nameless consumer sender', async () => {
-    const ctx = await buildCtx();
-    const r = await runLegacyCreateTransferForTests({ ...SEND_ARGS }, ctx);
-    expect(r.needs_sender_name).toBe(true);
-    expect(r.transfer_id).toBeUndefined();
-    expect(await ctx.store.listTransfers()).toHaveLength(0);
-  });
-
-  it('a named sender still mints through the approve tap', async () => {
+  it('a named sender still mints through the pay page', async () => {
     const ctx = await buildCtx({ fullName: 'Alex Rivera' });
     const r = await executeTool('send_approve_picker', { ...SEND_ARGS }, ctx);
     const tap = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId: r.draft_id as string } } };
-    const minted = await runLegacyCreateTransferForTests({}, tap);
+    const minted = await mintViaPayPage({}, tap, db);
     expect(typeof minted.transfer_id).toBe('string');
     const rows = await sanctionsRows();
     const parties = rows.flatMap((row) => row.meta.parties as Array<Record<string, unknown>>);

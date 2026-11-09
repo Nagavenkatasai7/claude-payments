@@ -28,6 +28,7 @@ import { buildStage1Message, completePaymentStage1 } from '@/lib/payment';
 import { sql } from 'drizzle-orm';
 import { beginHold } from '@/lib/settlement';
 import { sendText } from '@/lib/whatsapp';
+import { HOLD_REPLY } from '@/lib/hold-replies';
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -79,7 +80,8 @@ describe('pay route logic: flagged transfer → in_review', () => {
       rows: Array<{ kind: string; dedupe_key: string; body: string }>;
     };
     expect(rows.rows.map((x) => [x.kind, x.dedupe_key])).toEqual([['whatsapp.text', 'stage1:f1']]);
-    expect(rows.rows[0].body).toContain('quick review');
+    expect(rows.rows[0].body).toContain(HOLD_REPLY); // R30: the fixed hold text
+    expect(rows.rows[0].body.toLowerCase()).not.toContain('review');
     expect(rows.rows[0].body).not.toContain('within 1 business day');
   });
 

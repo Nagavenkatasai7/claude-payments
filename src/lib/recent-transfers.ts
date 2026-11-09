@@ -2,15 +2,17 @@ import type { Store } from './store';
 import type { Transfer, TransferStatus } from './types';
 import { easternDate } from './dates';
 import { boundUntrustedText, ID_MAX, NAME_MAX } from './untrusted-text';
+import { FIXED_REPLIES } from './hold-replies';
 
 const MAX_RECENT = 5; // last 5 of the already-newest-first list (fixed token cost)
 
 // Customer-facing status labels. NEVER the raw internal token for `blocked` —
 // the customer must never see internal screening wording. bot-content-guard backstops this.
+// R30 (no tipping-off): a held transfer reads the fixed processing label from hold-replies.ts.
 const STATUS_LABEL: Record<TransferStatus, string> = {
   awaiting_payment: 'awaiting payment',
   paid: 'paid',
-  in_review: 'under review',
+  in_review: FIXED_REPLIES.status_held,
   delivered: 'delivered',
   cancelled: 'cancelled',
   blocked: 'on hold',

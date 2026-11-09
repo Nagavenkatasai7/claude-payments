@@ -543,6 +543,11 @@ export interface TurnContext {
   // messages from us arrive in that Telegram chat. The agent adds
   // TELEGRAM_CHANNEL_NOTE so its wording says Telegram, not WhatsApp.
   surface?: 'telegram';
+  // R49: the customer's text had a card, account, routing, IFSC, SSN, PAN,
+  // Aadhaar or IBAN number, hidden before this row was written (inbound-redact).
+  // The reply then leads with the redaction notice. Optional: older payloads
+  // lack it (the worker redacts their text again).
+  redacted?: boolean;
 }
 
 /**

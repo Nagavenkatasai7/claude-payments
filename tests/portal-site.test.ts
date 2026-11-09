@@ -59,6 +59,38 @@ describe('getPortalSite', () => {
     expect(s).toMatchObject({ brand: 'SmartRemit', logo: null });
     expect(s?.theme).toEqual({ primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false });
   });
+  // Site skins (owner go 2026-11-09): tgfl.smartremit.ai is a LOOK over SmartRemit's own tenant.
+  it('an ordinary site carries no skin', async () => {
+    expect((await getPortalSite())?.skin).toBeNull();
+  });
+  it('the skin host served by the skin\'s tenant → the skin (name, no logo, no colours yet), and the brand STAYS SmartRemit', async () => {
+    h.tenant = { partnerId: 'default', slug: 'tgfl' };
+    h.partner = { id: 'default', status: 'active' };
+    const s = await getPortalSite();
+    // brand feeds the sign-in code text, the WhatsApp consent label, receipts and the MFA issuer:
+    // they come from SmartRemit's number and mail, so they must keep naming SmartRemit.
+    expect(s).toMatchObject({ partnerId: 'default', slug: 'tgfl', brand: 'SmartRemit', logo: null });
+    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: null, theme: null, demo: true });
+    expect(s?.theme.primary).toBe('#0c5bd2');
+  });
+  it('a real partner that holds the skin slug gets NO skin (the partner wins)', async () => {
+    h.tenant = { partnerId: 'pa', slug: 'tgfl' };
+    expect((await getPortalSite())?.skin).toBeNull();
+  });
+  it('the skin\'s tenant on its own address (send) gets no skin', async () => {
+    h.tenant = { partnerId: 'default', slug: 'send' };
+    h.partner = { id: 'default', status: 'active' };
+    expect((await getPortalSite())?.skin).toBeNull();
+  });
+  it('the skin host follows the tenant\'s portal gate: tenant portal off or tenant suspended → null', async () => {
+    h.tenant = { partnerId: 'default', slug: 'tgfl' };
+    h.partner = { id: 'default', status: 'active' };
+    h.settings = { ...h.settings, portalEnabledAt: null };
+    expect(await getPortalSite()).toBeNull();
+    h.settings = { ...h.settings, portalEnabledAt: new Date() };
+    h.partner = { id: 'default', status: 'suspended' };
+    expect(await getPortalSite()).toBeNull();
+  });
   it('apex host → null', async () => {
     h.tenant = null;
     expect(await getPortalSite()).toBeNull();

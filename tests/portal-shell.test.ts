@@ -69,6 +69,77 @@ describe('portal layout', () => {
     expect(html).toContain('href="#main"');
     expect(html).toContain('<p>child</p>');
   });
+  // Site skins (owner go 2026-11-09): tgfl.smartremit.ai shows the TGFL name over SmartRemit's portal.
+  describe('with a skin', () => {
+    const SKIN = { name: 'TGFL', logoSrc: null as string | null, theme: null as null | { primary: string; accent: string }, demo: true };
+    const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } });
+
+    it('the header shows the skin name as text, not the SmartRemit logo', async () => {
+      h.site = skinned();
+      const html = await renderLayout();
+      const header = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+      expect(header).toMatch(/<span[^>]*data-skin-brand[^>]*>TGFL<\/span>/);
+      expect(header).not.toContain('<img');
+      expect(html).not.toContain('smartremit-lockup.png');
+      expect(html).not.toContain('<style>'); // no colours set: SmartRemit's tokens apply
+    });
+    it('a demo line under the header says who runs it and that no real money moves', async () => {
+      h.site = skinned();
+      const html = await renderLayout();
+      expect(html).toMatch(/<p[^>]*data-skin-demo[^>]*>TGFL demo, run by SmartRemit\. No real money moves\.<\/p>/);
+      // It sits between the header and the page, on every portal page (signed in or out).
+      expect(html.indexOf('data-skin-demo')).toBeGreaterThan(html.indexOf('</header>'));
+      expect(html.indexOf('data-skin-demo')).toBeLessThan(html.indexOf('id="main"'));
+    });
+    it('a skin that is not a demo shows no demo line', async () => {
+      h.site = skinned({ demo: false });
+      expect(await renderLayout()).not.toContain('data-skin-demo');
+    });
+    it('the footer says "Powered by SmartRemit" and keeps the company line and the SmartRemit legal pages', async () => {
+      h.site = skinned();
+      const html = await renderLayout();
+      const footer = html.slice(html.indexOf('<footer'));
+      expect(footer).toMatch(/<p[^>]*data-skin-powered[^>]*>Powered by SmartRemit<\/p>/);
+      expect(footer).toMatch(/© \d{4} SR Technosolutions Inc\./);
+      for (const p of ['terms', 'privacy', 'legal']) expect(footer).toContain(`href="https://smartremit.ai/${p}"`);
+    });
+    it('a logo under /brand/partners/ renders as an <img> with the skin name as its alt text', async () => {
+      h.site = skinned({ logoSrc: '/brand/partners/tgfl.png' });
+      const html = await renderLayout();
+      const header = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+      expect(header).toMatch(/<img[^>]*src="\/brand\/partners\/tgfl\.png"[^>]*alt="TGFL"/);
+      expect(header).not.toContain('data-skin-brand');
+    });
+    it('a logo from anywhere else is dropped: the name shows as text', async () => {
+      h.site = skinned({ logoSrc: 'https://tgfl.com/logo.png' });
+      const html = await renderLayout();
+      expect(html).not.toContain('tgfl.com');
+      expect(html).toContain('data-skin-brand');
+    });
+    it('skin colours go through the validated theme style (and only then)', async () => {
+      h.site = skinned({ theme: { primary: '#0f766e', accent: '#1d4ed8' } });
+      const html = await renderLayout();
+      expect(html).toContain('<style>.ds-site{--ds-primary:#0f766e;');
+      expect(html).toContain('--ds-accent:#1d4ed8');
+    });
+    it('the shell hooks stay: lang, main landmark, skip link, sidebar and sign-out for a signed-in customer', async () => {
+      h.site = skinned();
+      h.customer = { customer: {}, session: {}, site: h.site, token: 'x' };
+      const html = await renderLayout();
+      expect(html).toContain('class="ds-site" lang="en"');
+      expect(html).toContain('id="main"');
+      expect(html).toContain('href="#main"');
+      expect(html).toMatch(/<aside class="sh-sidebar[^"]*"/);
+      expect(html).toContain('Sign out');
+    });
+  });
+  it('without a skin: no demo line, no "Powered by" line, no skin name', async () => {
+    const html = await renderLayout();
+    expect(html).not.toContain('data-skin-demo');
+    expect(html).not.toContain('data-skin-powered');
+    expect(html).not.toContain('data-skin-brand');
+    expect(html).not.toContain('Powered by');
+  });
   it('signed out: no nav, no sign-out (the sign-in page lives under the layout)', async () => {
     const html = await renderLayout();
     expect(html).not.toContain('sh-sidebar');

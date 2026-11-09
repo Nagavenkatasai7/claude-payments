@@ -128,6 +128,20 @@ export const ctx = {
   /** Batch B2: `payment_links.customer_name_enc`, keyed by the tenant and the link id. */
   paymentLinkCustomerName: (partnerId: PartnerId, id: string): CryptoContext =>
     make('payment_links', 'customer_name_enc', [partnerId, id]),
+  /**
+   * R49: the sealed Redis chat history (`conv:<pid>:h:<thread hmac>`, redis-seal.ts),
+   * bound to the tenant and the lowercase hex of the thread HMAC (customer-ref
+   * threadKeyFor), so a blob copied to another tenant's or another thread's key
+   * does not open. PR1 ships the reader; PR9 the writer. Pinned by
+   * tests/crypto-context.test.ts.
+   */
+  redisConversation: (partnerId: PartnerId, threadKeyHex: string): CryptoContext =>
+    make('redis', 'conversation', [partnerId, threadKeyHex]),
+  /**
+   * R49: a sealed pay-link draft (`recipient_draft:<draft id>`), bound to its
+   * draft id, so a blob copied to another draft's key does not open.
+   */
+  redisDraft: (draftId: string): CryptoContext => make('redis', 'draft', [draftId]),
   /** For fix 17b (staff MFA secrets in Redis). Permanently v1-exempt. */
   staffMfa: (username: string): CryptoContext => make('staff_mfa', 'secret', [username], true),
   purpose: (purpose: CryptoPurpose): CryptoContext =>
