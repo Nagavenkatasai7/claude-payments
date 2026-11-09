@@ -227,6 +227,41 @@ describe('chat onSuccess marker', () => {
     expect(onSuccess).not.toHaveBeenCalled();
   });
 
+  it('does not fire on an empty reply (no text, no tool call); fires on a tool-call reply', async () => {
+    const onSuccess = vi.fn();
+    const empty = fakeClient(async () => reply([{ type: 'thinking', thinking: '', signature: 'sig' }]));
+    await createChat({ client: () => empty.client, onSuccess })(USER, []);
+    const blank = fakeClient(async () => reply([{ type: 'text', text: '   ', citations: null }]));
+    await createChat({ client: () => blank.client, onSuccess })(USER, []);
+    expect(onSuccess).not.toHaveBeenCalled();
+    const tool = fakeClient(async () => reply([{ type: 'tool_use', id: 'tu_1', name: 'get_quote', input: { amount_usd: 100 } }], { stop_reason: 'tool_use' }));
+    const out = await createChat({ client: () => tool.client, onSuccess })(USER, toolSchemas);
+    expect(out.tool_calls).toHaveLength(1);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires once when the overload fallback model returns a usable reply, not when it returns an empty one', async () => {
+    const onSuccess = vi.fn();
+    let n = 0;
+    const good = fakeClient(async () => {
+      n += 1;
+      if (n === 1) throw apiError(529, 'overloaded_error');
+      return reply([{ type: 'text', text: 'from sonnet', citations: null }]);
+    });
+    await createChat({ client: () => good.client, onSuccess })(USER, []);
+    expect(good.create.mock.calls.map((c) => c[0].model)).toEqual([HAIKU, SONNET]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    let m = 0;
+    const empty = fakeClient(async () => {
+      m += 1;
+      if (m === 1) throw apiError(529, 'overloaded_error');
+      return reply([]);
+    });
+    await createChat({ client: () => empty.client, onSuccess })(USER, []);
+    expect(empty.create).toHaveBeenCalledTimes(2);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
   it('a throwing marker does not break the reply', async () => {
     const { client } = fakeClient(async () => reply([{ type: 'text', text: 'still here', citations: null }]));
     const onSuccess = vi.fn(() => { throw new Error('marker blew up'); });

@@ -90,7 +90,10 @@ function logUsage(task: LlmTask, msg: Anthropic.Message, ms: number): void {
 export function createChat(deps: {
   client: () => MessagesClient;
   agentModel?: () => string | undefined;
-  /** Called after each good reply (not a refusal, not an error); must not block. */
+  /**
+   * Called when the API returned a usable reply: text or at least one tool call
+   * (not a refusal, an error or an empty reply); must not block.
+   */
   onSuccess?: () => void;
 }): ChatFn {
   return async function chatImpl(messages, tools, opts = {}) {
@@ -143,12 +146,18 @@ export function createChat(deps: {
         throw new Error(`Model declined the request (refusal: ${res.stop_details?.category ?? 'unknown'})`);
       }
       const out = fromAnthropicMessage(res);
-      try {
-        // The proof-of-life marker (llm-ok-marker.ts) is best effort: it must
-        // never cost the customer this reply.
-        deps.onSuccess?.();
-      } catch {
-        // ignored on purpose
+      // The marker means the API returned a usable reply. An empty one (no
+      // text, no tool call) reaches the customer as the fallback line, so it
+      // does not count.
+      const usable = (out.content ?? '').trim() !== '' || (out.tool_calls?.length ?? 0) > 0;
+      if (usable) {
+        try {
+          // The proof-of-life marker (llm-ok-marker.ts) is best effort: it must
+          // never cost the customer this reply.
+          deps.onSuccess?.();
+        } catch {
+          // ignored on purpose
+        }
       }
       return out;
     };

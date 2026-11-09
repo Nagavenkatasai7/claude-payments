@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createLlmOkMarker, LLM_LAST_OK_KEY, LLM_LAST_OK_TTL_SEC, LLM_OK_WRITE_EVERY_MS } from '@/lib/llm-ok-marker';
 
 // The production writer behind chat()'s onSuccess: a best-effort Redis SET of
@@ -39,9 +39,17 @@ describe('createLlmOkMarker', () => {
     expect(h.set).toHaveBeenCalledTimes(2);
   });
 
-  it('returns before the write settles (fire and forget)', () => {
+  it('a SET that never settles does not block the caller, and the write was started', async () => {
     const h = harness(() => new Promise(() => {}));
-    expect(h.mark()).toBeUndefined();
+    // A reply path that marks and then returns: it must finish although the SET never does.
+    const replyPath = async () => {
+      h.mark();
+      return 'reply';
+    };
+    const timedOut = new Promise((r) => setTimeout(() => r('blocked'), 50));
+    await expect(Promise.race([replyPath(), timedOut])).resolves.toBe('reply');
+    await flush();
+    expect(h.set).toHaveBeenCalledTimes(1);
   });
 
   it('a rejecting SET or a throwing client never throws, and warns at most once', async () => {
@@ -59,5 +67,28 @@ describe('createLlmOkMarker', () => {
     expect(() => mark()).not.toThrow();
     await flush();
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('markLlmOk (production wiring)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.doUnmock('@/lib/redis');
+    vi.resetModules();
+  });
+
+  it('is a silent no-op when the KV env is unset: no Redis client, no write, no warning', async () => {
+    vi.stubEnv('KV_REST_API_URL', '');
+    vi.stubEnv('KV_REST_API_TOKEN', '');
+    vi.resetModules();
+    const getRedis = vi.fn();
+    vi.doMock('@/lib/redis', () => ({ getRedis }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { markLlmOk } = await import('@/lib/llm-ok-marker');
+    expect(() => markLlmOk()).not.toThrow();
+    await flush();
+    expect(getRedis).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

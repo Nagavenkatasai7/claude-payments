@@ -1,4 +1,3 @@
-import { env } from './env';
 import { getRedis } from './redis';
 import { logWarn } from './log';
 import type { RedisLike } from './store';
@@ -45,7 +44,7 @@ export function createLlmOkMarker(deps: LlmOkMarkerDeps): () => void {
     // Claimed before the write, so overlapping replies do not all write.
     lastWriteMs = atMs;
     // Promise.resolve().then also catches a client that throws synchronously
-    // (a missing KV env), so nothing escapes as an unhandled rejection.
+    // (a broken client), so nothing escapes as an unhandled rejection.
     void Promise.resolve()
       .then(() => deps.redis().set(LLM_LAST_OK_KEY, new Date(atMs).toISOString(), { ex: LLM_LAST_OK_TTL_SEC }))
       .catch(warnOnce);
@@ -55,7 +54,9 @@ export function createLlmOkMarker(deps: LlmOkMarkerDeps): () => void {
 /** Production wiring: the shared Upstash client; skipped when KV is not configured (tests, local). */
 export const markLlmOk: () => void = createLlmOkMarker({
   redis: () => {
-    if (!env.kvUrl || !env.kvToken) return { set: async () => null };
+    // process.env, not env.kvUrl: those getters throw when unset, which would
+    // turn this no-op into a warning.
+    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return { set: async () => null };
     return getRedis();
   },
 });

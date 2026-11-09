@@ -137,7 +137,9 @@ export function createAgent(deps: AgentDeps) {
   // again. The usual cause is a stored history it cannot read, which would fail
   // every turn of that chat until the message ages out, so the one retry goes
   // without that history (`withoutHistory`; absent when there is none) and
-  // calls `onHistoryDropped` once it succeeds. The spend cap's 400 is permanent
+  // calls `onHistoryDropped` once it succeeds, which also drops that history
+  // from what this turn saves, so the next turn does not hit the same 400.
+  // If the retry fails, nothing is dropped. The spend cap's 400 is permanent
   // (llm-provider-error.ts) and never reaches this branch.
   async function chatWithRetry(
     messages: ChatMessage[],
@@ -151,9 +153,12 @@ export function createAgent(deps: AgentDeps) {
       // A 401/402/403 can never succeed on retry: one provider call, not two.
       if (signal?.aborted || isPermanentProviderError(err)) throw err;
       if (noHistory && err instanceof ProviderHttpError && err.status === 400 && !err.spendCap) {
-        // Counted by the weekly check. No message text or phone in the line.
-        logWarn('agent.history', 'provider 400: retrying this turn without the stored history', {
+        // Logged under scope agent.history so ops can count it. No message text
+        // or phone in the line: the cause is ProviderHttpError's message, which
+        // llm.ts builds from the status, error type, code and request id only.
+        logWarn('agent.history', 'provider 400; retried without the stored history', {
           dropped: messages.length - noHistory.withoutHistory.length,
+          cause: err.message,
         });
         const reply = await deps.chat(noHistory.withoutHistory, tools, { signal });
         noHistory.onHistoryDropped();
@@ -316,7 +321,9 @@ export function createAgent(deps: AgentDeps) {
     // thinking block changes (a 400 on accounts made on or after 2026-08-31),
     // so a turn only ever appends. The round-0 notes therefore stay in the
     // later rounds of the same turn. None of the prefix is persisted.
-    const historyAtTurnStart = history.length;
+    // `let`: a successful history-free retry removes the stored messages from
+    // the front of `history`, which moves where this turn starts.
+    let historyAtTurnStart = history.length;
     const prefix: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired }) },
     ];
@@ -444,6 +451,11 @@ export function createAgent(deps: AgentDeps) {
             withoutHistory: [...prefix.slice(0, historyStart), ...prefix.slice(historyStart + storedCount), ...thisTurn],
             onHistoryDropped: () => {
               prefix.splice(historyStart, storedCount);
+              // Also drop it from what is saved, so the conversation continues
+              // from this turn. Runs before this round's reply is pushed; the
+              // permanent conversation log is not touched.
+              history.splice(0, storedCount);
+              historyAtTurnStart -= storedCount;
               historyInPrefix = false;
             },
           }
