@@ -203,3 +203,33 @@ describe('chat (Claude adapter)', () => {
     info.mockRestore();
   });
 });
+
+// Report item 3 (2026-11-09): a passive proof that the Claude API answers in
+// production. onSuccess fires once per good reply, never on a refusal or an
+// error, and a throwing marker never costs the customer their reply.
+describe('chat onSuccess marker', () => {
+  it('fires once after a good reply', async () => {
+    const { client } = fakeClient(async () => reply([{ type: 'text', text: 'ok', citations: null }]));
+    const onSuccess = vi.fn();
+    const out = await createChat({ client: () => client, onSuccess })(USER, []);
+    expect(out).toMatchObject({ content: 'ok' });
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire on a refusal or a provider error', async () => {
+    const onSuccess = vi.fn();
+    const refused = fakeClient(async () =>
+      reply([], { stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'general_harms', explanation: null } }),
+    );
+    await expect(createChat({ client: () => refused.client, onSuccess })(USER, [])).rejects.toThrow(/declined/);
+    const failed = fakeClient(async () => { throw apiError(500, 'api_error'); });
+    await expect(createChat({ client: () => failed.client, onSuccess })(USER, [])).rejects.toBeInstanceOf(ProviderHttpError);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('a throwing marker does not break the reply', async () => {
+    const { client } = fakeClient(async () => reply([{ type: 'text', text: 'still here', citations: null }]));
+    const onSuccess = vi.fn(() => { throw new Error('marker blew up'); });
+    await expect(createChat({ client: () => client, onSuccess })(USER, [])).resolves.toMatchObject({ content: 'still here' });
+  });
+});
