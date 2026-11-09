@@ -51,7 +51,7 @@ export interface LoadDeps {
 const SOURCE = 'ofac-sdn';
 
 /** YYYY-MM-DD in America/New_York — the same day boundary the cron alerts use. */
-function easternDay(now: number): string {
+export function easternDay(now: number): string {
   return new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 

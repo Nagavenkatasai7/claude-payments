@@ -1,5 +1,6 @@
 import type { CountryCode, Partner } from './types';
 import { AML_DEFAULTS, type AmlConfig } from './aml-rules';
+import type { FixedReplyKind } from './hold-replies';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -11,14 +12,13 @@ export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
 export const LARGE_AMOUNT_USD = 1000;
 export const VELOCITY_LIMIT = 5; // raised from 3: 1-4 sends/day are normal behaviour
 
-// ── Screening-derived hold reasons (Program-Fix 43 follow-up) ──────────────
-// The exact complianceReasons strings sanctions / name screening writes
-// (screenTransfer in compliance.ts emits ONLY these constants). Generic on
-// purpose: reasons reach staff views and must never name a list entry, the
-// screened person, or the word "sanctions". Defined in this leaf module (no
-// provider / crypto imports) so dashboard-ops can key on them cheaply;
-// compliance.ts re-exports them. Changing a string here changes what new rows
-// carry, so a rename must keep the old string in SCREENING_REASONS.
+// ── Hold reasons (Program-Fix 43 follow-up; Fix pack 2 registry) ───────────
+// The exact complianceReasons strings stored rows carry. Generic on purpose:
+// reasons reach staff views and must never name a list entry, the screened
+// person, or the word "sanctions". Defined in this leaf module (no provider /
+// crypto imports) so dashboard-ops can key on them cheaply; compliance.ts
+// re-exports them. Changing a string here changes what new rows carry: never
+// change one (tests/hold-reason-registry and partner-releasable-hold pin them).
 export const POSSIBLE_MATCH_REASON = 'Name screening needs manual review.';
 export const LIST_UNAVAILABLE_REASON = 'Screening list unavailable; needs manual review.';
 export const RECIPIENT_WATCHLIST_REASON = 'Recipient is on the compliance watchlist.';
@@ -28,13 +28,62 @@ export const SENDER_WATCHLIST_REASON = 'Sender is on the compliance watchlist.';
 // CreateTransferInput.senderIdentityMissing). Screening-derived: a delegated
 // partner's staff may not release it — KYC may be delegated, sanctions may not.
 export const SENDER_IDENTITY_MISSING_REASON = 'Sender identity missing.';
-export const SCREENING_REASONS: readonly string[] = [
-  POSSIBLE_MATCH_REASON,
-  LIST_UNAVAILABLE_REASON,
-  RECIPIENT_WATCHLIST_REASON,
-  SENDER_WATCHLIST_REASON,
-  SENDER_IDENTITY_MISSING_REASON,
-];
+// Fix pack 2 (R06): the SENDER's customer row carries an uncleared screening
+// hit (senderScreeningHoldActive). Platform clears it with an audited action.
+export const SENDER_SCREENING_REASON = 'Sender screening needs manual review.';
+// The non-screening flag reasons screenTransfer (compliance.ts) and the EDD
+// check (tier-rules.ts evaluateEddForTransfer) write (UI redesign M3-10).
+export const LARGE_AMOUNT_REASON = 'Large transfer amount.';
+export const VELOCITY_REASON = 'High transfer velocity.';
+export const EDD_REQUIRED_REASON = 'edd_required';
+// Program-Fix 43 PR B: the optional per-partner AML hold (aml-hold.ts, which
+// re-exports it). Deliberately generic: it never names the rule.
+export const AML_HOLD_REASON = 'Additional review required.';
+
+/**
+ * Who may release a hold carrying a reason:
+ *  - 'partner': a delegated partner's admin (and platform staff);
+ *  - 'platform': SmartRemit platform staff only;
+ *  - 'rescreen': no person — it lifts only by the automatic re-screen against
+ *    a fresh sanctions list (Fix pack 2 T4).
+ */
+export type HoldReleasableBy = 'partner' | 'platform' | 'rescreen';
+
+export type HoldReasonEntry = {
+  class: 'screening' | 'kyc' | 'aml';
+  releasableBy: HoldReleasableBy;
+  /** The fixed customer wording (hold-replies.ts) for a transfer held for this reason. */
+  customerCopyKey: FixedReplyKind;
+};
+
+/**
+ * Fix pack 2 (R04): THE registry of every stored hold reason. A reason not in
+ * it is unknown provenance and treated as platform-only (holdReleasableBy).
+ * SPEC §3.3 + D7, owner answer O1 (2026-09-28): only KYC-class reasons are
+ * partner-releasable; every screening reason and the AML hold stay
+ * platform-only; LIST_UNAVAILABLE lifts only by the automatic re-screen.
+ */
+export const HOLD_REASONS: Readonly<Record<string, HoldReasonEntry>> = Object.freeze({
+  [POSSIBLE_MATCH_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+  [LIST_UNAVAILABLE_REASON]: { class: 'screening', releasableBy: 'rescreen', customerCopyKey: 'hold' },
+  [RECIPIENT_WATCHLIST_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'block' },
+  [SENDER_WATCHLIST_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'block' },
+  [SENDER_IDENTITY_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+  [SENDER_SCREENING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+  [LARGE_AMOUNT_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
+  [VELOCITY_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
+  [EDD_REQUIRED_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
+  [AML_HOLD_REASON]: { class: 'aml', releasableBy: 'platform', customerCopyKey: 'hold' },
+} satisfies Record<string, HoldReasonEntry>);
+
+function registryEntry(r: unknown): HoldReasonEntry | undefined {
+  return typeof r === 'string' && Object.hasOwn(HOLD_REASONS, r) ? HOLD_REASONS[r] : undefined;
+}
+
+/** Every screening-derived reason (derived from HOLD_REASONS). */
+export const SCREENING_REASONS: readonly string[] = Object.keys(HOLD_REASONS).filter(
+  (r) => HOLD_REASONS[r]!.class === 'screening',
+);
 
 /**
  * True when ANY of the hold's reasons came from sanctions / name screening.
@@ -50,33 +99,45 @@ export function isScreeningHold(t: { complianceReasons?: readonly string[] | nul
   return reasons.some((r) => SCREENING_REASONS.includes(r));
 }
 
-// ── Partner-releasable hold reasons (UI redesign M3-10) ────────────────────
-// The non-screening flag reasons screenTransfer (compliance.ts) and the EDD
-// check (tier-rules.ts evaluateEddForTransfer) write. The strings are what
-// stored rows carry: never change them (tests/partner-releasable-hold pins them).
-export const LARGE_AMOUNT_REASON = 'Large transfer amount.';
-export const VELOCITY_REASON = 'High transfer velocity.';
-export const EDD_REQUIRED_REASON = 'edd_required';
+/**
+ * The ONLY hold reasons a delegated partner's admin may release from /partner
+ * (derived from HOLD_REASONS: releasableBy 'partner'). A closed allowlist: a
+ * new reason is refused until the registry says otherwise on purpose.
+ */
+export const PARTNER_RELEASABLE_REASONS: readonly string[] = Object.freeze(
+  Object.keys(HOLD_REASONS).filter((r) => HOLD_REASONS[r]!.releasableBy === 'partner'),
+);
 
 /**
- * SPEC §3.3 + D7, owner answer O1 (2026-09-28): the ONLY hold reasons a
- * delegated partner's admin may release from /partner. KYC-class holds only;
- * every screening/sanctions reason and the AML hold stay PLATFORM-only. A
- * closed allowlist: a new reason is refused until it is added here on purpose.
+ * Who may release a hold with these reasons: the strictest reason wins
+ * (rescreen > platform > partner). Fails CLOSED: an empty or missing list, or
+ * any reason outside the registry, is 'platform' (unless a rescreen reason is
+ * present, which no person may override).
  */
-export const PARTNER_RELEASABLE_REASONS: readonly string[] = Object.freeze([
-  LARGE_AMOUNT_REASON,
-  VELOCITY_REASON,
-  EDD_REQUIRED_REASON,
-]);
+export function holdReleasableBy(reasons: readonly string[] | null | undefined): HoldReleasableBy {
+  if (!Array.isArray(reasons) || reasons.length === 0) return 'platform';
+  let out: HoldReleasableBy = 'partner';
+  for (const r of reasons) {
+    const e = registryEntry(r);
+    if (e?.releasableBy === 'rescreen') return 'rescreen';
+    if (!e || e.releasableBy === 'platform') out = 'platform';
+  }
+  return out;
+}
+
+/** A hold that only the automatic re-screen may lift (any rescreen reason present, e.g. LIST_UNAVAILABLE). */
+export function isRescreenOnlyHold(t: { complianceReasons?: readonly string[] | null }): boolean {
+  return holdReleasableBy(t.complianceReasons) === 'rescreen';
+}
 
 /**
  * SPEC §3.3 + D7: a partner admin may release ONLY a delegated partner's
  * KYC-class hold. Fails CLOSED: an unknown KYC mode, a missing partner, a
  * status other than in_review, a sanctions-blocked row, an empty or malformed
- * reasons list, ANY screening reason (isScreeningHold) or ANY reason outside
- * PARTNER_RELEASABLE_REASONS ⇒ false. Pure: the /partner release action (the
- * guard) and the transfer detail page (which hides the button) both call it.
+ * reasons list, ANY screening reason (isScreeningHold) or ANY reason the
+ * registry does not mark 'partner' (holdReleasableBy) ⇒ false. Pure: the
+ * /partner release action (the guard) and the transfer detail page (which
+ * hides the button) both call it.
  *
  * M3-10 follow-up (owner, 2026-09-29): `sender` is the transfer SENDER's
  * customer row flags, read in the owner's tenant (lib/sender-screening.ts). A
@@ -96,7 +157,49 @@ export function isPartnerReleasableHold(
   const r = t.complianceReasons;
   if (!Array.isArray(r) || r.length === 0) return false;
   if (isScreeningHold({ complianceReasons: r })) return false;
-  return r.every((x) => typeof x === 'string' && PARTNER_RELEASABLE_REASONS.includes(x));
+  return holdReleasableBy(r) === 'partner';
+}
+
+/**
+ * Fix pack 2 (R06): which customer-row screening flags make a sender hold, and
+ * who may clear it. Both are platform-only.
+ */
+export const CUSTOMER_SCREENING_FLAGS = { watchlistHit: 'platform', pepHit: 'platform' } as const;
+
+/**
+ * Fix pack 2 (R06): is the sender's screening hold active? A hit is a
+ * watchlist or PEP flag, OR a stamped flaggedAt (a stale upsert may null the
+ * booleans; the stamp keeps the hold). No hit ⇒ false. A clear later than the
+ * flag (or a clear with no flag time) lifts it; a tie stays held.
+ */
+export function senderScreeningHoldActive(
+  s:
+    | {
+        watchlistHit?: boolean | null;
+        pepHit?: boolean | null;
+        screeningFlaggedAt?: string | Date | null;
+        screeningClearedAt?: string | Date | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!s) return false;
+  const flaggedAt = s.screeningFlaggedAt ?? null;
+  const hit = s.watchlistHit === true || s.pepHit === true || flaggedAt != null;
+  if (!hit) return false;
+  const clearedAt = s.screeningClearedAt ?? null;
+  if (clearedAt != null) {
+    if (flaggedAt == null) return false;
+    const c = toMs(clearedAt);
+    const f = toMs(flaggedAt);
+    // An unreadable time cannot prove the clear came later: stay held.
+    if (Number.isFinite(c) && Number.isFinite(f) && c > f) return false;
+  }
+  return true;
+}
+
+function toMs(v: string | Date): number {
+  return v instanceof Date ? v.getTime() : Date.parse(v);
 }
 
 /**

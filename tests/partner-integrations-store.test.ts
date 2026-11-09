@@ -42,6 +42,15 @@ describe('partner-integrations store', () => {
     expect(await s.getIntegrations('acme')).toEqual(EMPTY_PARTNER_INTEGRATIONS);
   });
 
+  it('paymentProviderType returns the column, null without a row', async () => {
+    const s = createPartnerIntegrationsStore(db, provider());
+    expect(await s.paymentProviderType('acme')).toBeNull();
+    await s.saveIntegrations('acme', FULL);
+    expect(await s.paymentProviderType('acme')).toBe('mock');
+    await s.saveIntegrations('globex', { kyc: {}, payment: {}, whatsapp: {} });
+    expect(await s.paymentProviderType('globex')).toBeNull();
+  });
+
   it('round-trips a full config — every secret comes back as plaintext', async () => {
     const s = createPartnerIntegrationsStore(db, provider());
     await s.saveIntegrations('acme', FULL);

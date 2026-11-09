@@ -27,6 +27,13 @@ export interface SanctionsListInfo {
   source: string;
   version: string;
   hash: string;
+  /**
+   * Fix pack 2 (R02): when the list was last confirmed current (ISO). Absent
+   * means unknown, which list-policy.ts listFitness reads as stale.
+   */
+  checkedAt?: string;
+  /** Fix pack 2 (R02): the base list's hash before corridor additions. */
+  baseHash?: string;
 }
 
 /**

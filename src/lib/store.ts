@@ -11,6 +11,7 @@ import { pokeWorker } from './outbox';
 import { logError, logWarn } from './log';
 import { conversationSealCtx, openJson, sealedConversationKey } from './redis-seal';
 import { isFlagOn, type FlagContext, type FlagKey } from './flags';
+import { readRailProviderType } from './live-gate';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
@@ -281,6 +282,15 @@ export function createStore(redis: RedisLike, db: Db) {
      */
     isFlagOn(key: FlagKey, ctx: FlagContext = {}): Promise<boolean> {
       return isFlagOn(db, key, ctx);
+    },
+
+    /**
+     * Fix pack 2 (R02): the rail partner's payment provider type, for the
+     * real-money gate (live-gate.ts). Never throws: null = no row, undefined =
+     * the read failed (counts as real money). Read on the ROOT handle.
+     */
+    railProviderType(partnerId: PartnerId): Promise<string | null | undefined> {
+      return readRailProviderType(db, partnerId);
     },
 
     // ── Conversations (Redis — hot, trimmed, ephemeral; keyed by TENANT + phone, fix 1 D12) ──

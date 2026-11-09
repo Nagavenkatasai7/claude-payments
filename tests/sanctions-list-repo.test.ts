@@ -141,6 +141,23 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(await versions(db)).toHaveLength(2);
   });
 
+  it('freshDb applies 0036: the five columns exist and are nullable', async () => {
+    const raw = await db.execute(sql.raw(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns
+       WHERE (table_name = 'customers' AND column_name IN ('screening_flagged_at', 'screening_cleared_at'))
+          OR (table_name = 'sanctions_list_versions' AND column_name IN ('archive_path', 'archive_sha256', 'archived_at'))
+       ORDER BY table_name, column_name`,
+    ));
+    const rows = (raw as unknown as { rows: Array<Record<string, unknown>> }).rows;
+    expect(rows).toEqual([
+      { table_name: 'customers', column_name: 'screening_cleared_at', data_type: 'timestamp with time zone', is_nullable: 'YES', column_default: null },
+      { table_name: 'customers', column_name: 'screening_flagged_at', data_type: 'timestamp with time zone', is_nullable: 'YES', column_default: null },
+      { table_name: 'sanctions_list_versions', column_name: 'archive_path', data_type: 'text', is_nullable: 'YES', column_default: null },
+      { table_name: 'sanctions_list_versions', column_name: 'archive_sha256', data_type: 'text', is_nullable: 'YES', column_default: null },
+      { table_name: 'sanctions_list_versions', column_name: 'archived_at', data_type: 'timestamp with time zone', is_nullable: 'YES', column_default: null },
+    ]);
+  });
+
   it('refuses a list below the absolute entry floor, even with no active version (first load)', async () => {
     const repo = createSanctionsListRepo(db);
     await expect(repo.storeList(LIST, { minEntries: 6 })).rejects.toBeInstanceOf(SanctionsListShrinkError);
