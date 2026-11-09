@@ -21,6 +21,21 @@ describe('scrub — the PII backstop for money-path logs', () => {
     expect(scrub('delivery failed code=131056')).toBe('delivery failed code=131056');
   });
 
+  it('removes URL credentials whole, whatever characters the password holds', () => {
+    // 2026-11-09 review of the DATABASE_URL leak: the email mask alone left
+    // most of a password with URL sub-delimiters in the line.
+    expect(scrub("dial postgresql://owner:ab!c*d$e'f(g)h@ep-x.example.com/db failed")).toBe(
+      'dial postgresql://<redacted>@ep-x.example.com/db failed',
+    );
+    expect(scrub('redis rediss://default:tok_en@cache.example.com:6379 down')).toBe(
+      'redis rediss://<redacted>@cache.example.com:6379 down',
+    );
+    // A password that holds an unescaped "@": everything up to the LAST "@" goes.
+    expect(scrub('postgres://owner:p@ss@ep-x.example.com/db')).toBe('postgres://<redacted>@ep-x.example.com/db');
+    // A URL with no credentials is untouched.
+    expect(scrub('GET https://example.com/a?b=1 ok')).toBe('GET https://example.com/a?b=1 ok');
+  });
+
   it('stringifies Errors and objects before scrubbing', () => {
     expect(scrub(new Error('rail rejected 123456789012'))).toBe('Error: rail rejected …9012');
     expect(scrub({ phone: '15551234567' })).toBe('{"phone":"…4567"}');

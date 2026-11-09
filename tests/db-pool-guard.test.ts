@@ -125,6 +125,34 @@ describe('db/client: a dropped connection never prints the database password', (
     expect((JSON.parse(lines()[0]) as Record<string, string>).scope).toBe('db.client');
   });
 
+  it('drops the client reference that the idle listener hangs on the error', () => {
+    expect('client' in dropIdle(newClient())).toBe(false);
+  });
+
+  it('never throws out of the listener, even when the client reference cannot be deleted', () => {
+    // A throw inside an 'error' listener is the same uncaught exception again.
+    const err = new Error(TERMINATED);
+    Object.defineProperty(err, 'client', { value: newClient(), enumerable: true, configurable: false });
+    expect(() => pool().emit('error', err, null)).not.toThrow();
+    expect(lines()).toHaveLength(1);
+    expect(printed(err)).not.toContain(h.canary);
+  });
+
+  it('a query that waits on the dropped connection still rejects with the same error', async () => {
+    // The client listener must not hide the failure from the request: the
+    // driver rejects every queued query before it emits 'error'
+    // (_handleErrorEvent -> _errorAllQueries, index.mjs:1043).
+    const client = newClient() as DriverClient & {
+      query(text: string): Promise<unknown>;
+      _handleErrorEvent(err: Error): void;
+    };
+    pool().emit('connect', client);
+    const pending = client.query('select 1');
+    const err = new Error(TERMINATED);
+    expect(() => client._handleErrorEvent(err)).not.toThrow();
+    await expect(pending).rejects.toBe(err);
+  });
+
   it('logs one line, not two, when the client and the Pool both report the same error', () => {
     const client = newClient();
     pool().emit('connect', client);
@@ -142,6 +170,13 @@ describe('pool-guard helpers', () => {
     expect(redact('auth failed, tried p%40ss-w0rd')).toBe('auth failed, tried <redacted>');
     expect(redact('auth failed, tried p@ss-w0rd')).toBe('auth failed, tried <redacted>');
     expect(redact('Connection terminated unexpectedly')).toBe('Connection terminated unexpectedly');
+  });
+
+  it('redactorFor matches the percent-encoded password in any letter case', () => {
+    const redact = redactorFor('postgres://owner:p%40ss%2Fw0rd@ep-x.invalid/db');
+    expect(redact('tried p%40ss%2fw0rd')).toBe('tried <redacted>');
+    expect(redact('tried P%40SS%2FW0RD')).toBe('tried <redacted>');
+    expect(redact('tried p@ss/w0rd')).toBe('tried <redacted>');
   });
 
   it('redactorFor still masks URLs when there is no usable connection string', () => {

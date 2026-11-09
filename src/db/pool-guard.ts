@@ -47,17 +47,26 @@ export function redactorFor(connectionString: string | undefined): (text: string
     secrets.add(connectionString);
     try {
       const { password } = new URL(connectionString);
+      const decoded = decodeURIComponent(password);
       secrets.add(password);
-      secrets.add(decodeURIComponent(password));
+      secrets.add(decoded);
+      secrets.add(encodeURIComponent(decoded));
     } catch {
       // Not a parseable URL (or a malformed escape): URL_RUN still applies.
     }
   }
-  const literals = [...secrets].filter((s) => s.length >= MIN_SECRET_CHARS);
+  // Longest first, so the whole connection string wins over the password
+  // inside it. Case-insensitive, because a percent-escape can arrive as %2F or
+  // %2f. A secret under MIN_SECRET_CHARS is left alone: masking so short a run
+  // would shred the line and hide nothing.
+  const literals = [...secrets]
+    .filter((s) => s.length >= MIN_SECRET_CHARS)
+    .sort((a, b) => b.length - a.length)
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const bare = literals.length > 0 ? new RegExp(literals.join('|'), 'gi') : null;
   return (text) => {
-    let out = text.replace(URL_RUN, '<url>');
-    for (const secret of literals) out = out.split(secret).join('<redacted>');
-    return out;
+    const out = text.replace(URL_RUN, '<url>');
+    return bare ? out.replace(bare, '<redacted>') : out;
   };
 }
 
@@ -99,17 +108,27 @@ export function guardPool(pool: Pool): void {
   // object (the client emits it, the idle listener forwards it to the Pool).
   const reported = new WeakSet<object>();
   const report = (scope: string, err: unknown): void => {
-    if (typeof err === 'object' && err !== null) {
-      // The idle listener hung the client on the error. Drop the reference
-      // first, on every pass, so nothing later can print the client through it.
-      delete (err as { client?: unknown }).client;
-      if (reported.has(err)) return;
-      reported.add(err);
+    // A listener must never throw: a throw here is the same uncaught exception
+    // that this guard exists to stop.
+    try {
+      if (typeof err === 'object' && err !== null) {
+        // The idle listener hung the client on the error. Drop the reference
+        // first, on every pass, so nothing later can print the client through
+        // it. Reflect.deleteProperty answers false where `delete` would throw.
+        Reflect.deleteProperty(err, 'client');
+        if (reported.has(err)) return;
+        reported.add(err);
+      }
+      logError(scope, 'database connection dropped', dbErrorFields(err, redact));
+    } catch {
+      // Nothing safe is left to do with this error.
     }
-    logError(scope, 'database connection dropped', dbErrorFields(err, redact));
   };
 
   pool.on('error', (err: unknown) => report('db.pool', err));
+  // Side effect to know about: any Pool listener other than 'error' makes the
+  // driver send pool.query over the WebSocket, never over fetch (:1351-1352).
+  // That is already the case here (neonConfig.poolQueryViaFetch is off, :427).
   pool.on('connect', (client: ErrorSource) => {
     client.on('error', (err) => report('db.client', err));
   });
