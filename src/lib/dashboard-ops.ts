@@ -14,7 +14,9 @@ import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold, isRescreenOnlyHold } from './compliance-config';
+import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive } from './compliance-config';
+import { realMoneyRail } from './live-gate';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -23,6 +25,12 @@ import { isPartnerReleasableHold, isRescreenOnlyHold } from './compliance-config
  */
 export const RESCREEN_ONLY_RELEASE_REFUSAL =
   'Cannot release: this hold lifts only by an automatic re-screen against a fresh sanctions list.';
+
+/**
+ * Fix pack 2 T6 (R06): the platform release refusal while the sender's
+ * screening hold is active on a real-money rail (contracts section 8).
+ */
+export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sender screening hold first.';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -329,6 +337,18 @@ export async function releaseTransfer(
     throw new Error(RESCREEN_ONLY_RELEASE_REFUSAL);
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
+  // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
+  // sender's screening hold first (the audited clearSenderScreeningHoldAction
+  // on the customer page), then release. The flags are the OWNING tenant's
+  // row; a read error throws (nothing released). The partner path is already
+  // refused in markPaidIfInReview (partnerRelease) for a flagged sender.
+  if (
+    !partnerRelease &&
+    realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
+    senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))
+  ) {
+    throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
+  }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
   if (r.kind === 'already') {

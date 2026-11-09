@@ -22,6 +22,7 @@ import {
   POSSIBLE_MATCH_REASON,
   RECIPIENT_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
+  SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
 
@@ -404,6 +405,29 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     const rows = await auditRows('lh_reject');
     expect(rows.slice(au).map((r) => r.action)).toEqual(['transfer.reject']);
     expect((await keys()).filter((x) => x?.startsWith('mocksettle:') || x?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  // Fix pack 2 T6 (R06): the sweep never releases a real-money row whose sender
+  // has an active screening hold; it swaps LIST_UNAVAILABLE for the sender reason.
+  it('an active sender hold -> still held with SENDER_SCREENING_REASON, not released', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${SENDER_PHONE}`);
+    await heldRow({ id: 'lh_sender' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('lh_sender');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual([]);
+    // And a platform person still cannot release it while the hold is active.
+    await expect(releaseTransfer(store, db, 'lh_sender', REL)).rejects.toThrow('Cannot release: clear the sender screening hold first.');
+  });
+
+  it('a sender hold on a mock rail is not read: released as before', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${SENDER_PHONE}`);
+    await heldRow({ id: 'lh_sender_mock' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
   });
 
   it('no held rows -> no warm, one query', async () => {

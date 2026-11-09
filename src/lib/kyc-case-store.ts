@@ -198,6 +198,13 @@ export function createKycCaseStore(
         const changed = Object.keys(delta).length > 0;
         const after: Customer = changed ? { ...before, ...delta, updatedAt: nowIso } : before;
         if (changed) await txCustomers.saveCustomer(after);
+        // Fix pack 2 T6 (R06): a watchlist / PEP match stamps the sender
+        // screening hold in THIS transaction (an approved customer too: a
+        // later match records its flag). The single-column writer, so the
+        // stamp survives any stale whole-row save; it re-arms a cleared hold.
+        if (delta.pepHit === true || delta.watchlistHit === true) {
+          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(nowIso));
+        }
         if (event.matchKind !== undefined && opts.alertMessage) {
           const message =
             after.kycReviewState === 'approved'

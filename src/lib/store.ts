@@ -19,7 +19,7 @@ import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
-import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createCustomerRepo, readSenderScreeningFlags, type SenderScreeningFlags } from '@/db/repos/customer-repo';
 import { createRewardRepo, type RedemptionWrite } from '@/db/repos/reward-repo';
 import type { Catalog, PartnerRewardSettings, PartnerRewardTerms, SenderRewardUsage } from './rewards/types';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
@@ -101,6 +101,13 @@ export interface SenderLedgerOps {
    * Deliberately NOT named like the helper (tests/outbox-poke-coverage.test.ts).
    */
   recordSanctionsBlock(n: Omit<SanctionsBlockNotice, 'partnerId'>): Promise<void>;
+  /**
+   * Fix pack 2 T6 (R06): the lock sender's screening flags and hold times
+   * (customer-repo readSenderScreeningFlags, tenant-scoped, no PII column), in
+   * the mint transaction. THROWS on a read error (the mint fails, nothing is
+   * written). mintLocked calls it on a real-money rail only.
+   */
+  senderScreeningFlags(): Promise<SenderScreeningFlags | null>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -596,6 +603,7 @@ export function createStore(redis: RedisLike, db: Db) {
                 // partner-demo R4: after() runs post-response, after the mint commits.
                 pokeWorker();
               },
+              senderScreeningFlags: () => readSenderScreeningFlags(tx, partnerId, phone),
               recordSanctionsBlock: async (n) => {
                 await enqueueSanctionsBlockNotices(tx, { ...n, partnerId });
                 // partner-demo R4: after() runs post-response, after the mint commits.

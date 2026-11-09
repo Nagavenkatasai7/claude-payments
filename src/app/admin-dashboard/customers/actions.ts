@@ -11,7 +11,7 @@ import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
 import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { notifyKycReviewDecision } from '@/lib/kyc-notify';
-import { canDecideCustomerKyc } from '@/lib/compliance-config';
+import { canDecideCustomerKyc, senderScreeningHoldActive } from '@/lib/compliance-config';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -365,6 +365,70 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
     if (!(err instanceof UnchangedPartnerEntry)) throw err;
     // Rolled back: nothing written, nothing audited. The page still re-renders the current state.
   }
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
+}
+
+/** Thrown INSIDE the transaction when the locked row has no active screening hold (nothing written). */
+class NoScreeningHold extends Error {
+  constructor() {
+    super('This customer has no active screening hold.');
+    this.name = 'NoScreeningHold';
+  }
+}
+
+/**
+ * Fix pack 2 T6 (R06): clear a sender's screening hold (a Persona watchlist /
+ * PEP hit, or a stamped flaggedAt) — SmartRemit platform admins only, for a
+ * customer in any kycStatus and under either kycMode (sanctions are never
+ * delegated). Server-action checklist, in order:
+ *  1. refuseOnSiteHost + requirePlatformAdmin (partner, support and agent staff are redirected);
+ *  2. a typed reason (requireStaffReason), BEFORE any read;
+ *  3. the phone and the named tenant (targetPartnerId), then the row must exist and hold;
+ *  4. ONE transaction: clearScreeningHold (FOR UPDATE), the hold re-checked on
+ *     the LOCKED value, and the customer.screening_hold.clear audit row (subject
+ *     auditSubjectId, never the raw phone). A failed audit rolls the clear back.
+ * The Persona flags stay as evidence; the clear time lifts the hold until a
+ * later match stamps a new flag. It does NOT release any held transfer: staff
+ * release those afterwards (dashboard-ops.ts releaseTransfer).
+ */
+export async function clearSenderScreeningHoldAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  const reason = requireStaffReason(formData.get('reason'));
+  const phone = String(formData.get('phone') ?? '').trim();
+  if (!phone) throw new Error('Phone is required.');
+  const partnerId = targetPartnerId(staff, formData); // platform staff MUST name the tenant
+
+  const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
+  if (!customer) throw new Error('Customer not found.');
+  if (!senderScreeningHoldActive(customer)) throw new NoScreeningHold();
+
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (a root-handle call here would
+    // deadlock PGlite's single connection / hold a second Neon pool connection).
+    const { found, previous } = await createCustomerStore(tx, getStore()).clearScreeningHold(
+      customer.partnerId, customer.senderPhone, new Date(),
+    );
+    if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
+    // Re-checked on the value read FOR UPDATE: a concurrent clear is never doubled.
+    if (!senderScreeningHoldActive(previous)) throw new NoScreeningHold();
+    await createAuditRepo(tx).record({
+      partnerId: customer.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'customer.screening_hold.clear',
+      subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
+      meta: {
+        reason,
+        flaggedAt: previous?.screeningFlaggedAt ? previous.screeningFlaggedAt.toISOString() : null,
+        previousClearedAt: previous?.screeningClearedAt ? previous.screeningClearedAt.toISOString() : null,
+        pepHit: previous?.pepHit ?? null,
+        watchlistHit: previous?.watchlistHit ?? null,
+        kycStatus: customer.kycStatus,
+      },
+    });
+  });
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

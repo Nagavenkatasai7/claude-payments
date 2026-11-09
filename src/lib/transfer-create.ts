@@ -4,7 +4,7 @@ import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { railPartnerOf, realMoneyRail } from './live-gate';
-import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
+import { resolveCorridorRules, senderScreeningHoldActive, SENDER_SCREENING_REASON, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
@@ -747,6 +747,15 @@ async function mintLocked(
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
     }
+  }
+  // ── Sender screening hold (fix pack 2 T6, R06) ────────────────────────────
+  // Real-money rails only (no read otherwise): a sender with a Persona
+  // watchlist / PEP hit (or a stamped flaggedAt) and no later platform clear
+  // is held. A read error throws out of the lock (the mint fails, nothing is
+  // written). A watchlist BLOCK still wins.
+  if (p.realMoney && complianceStatus !== 'blocked' && senderScreeningHoldActive(await ops.senderScreeningFlags())) {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, SENDER_SCREENING_REASON];
   }
   // ── Missing sender identity (Program-Fix 14 follow-up) ────────────────────
   // AFTER screening, EDD and the AML gate so their verdicts are unchanged; it

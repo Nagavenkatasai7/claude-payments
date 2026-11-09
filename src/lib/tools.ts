@@ -49,6 +49,7 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { senderScreeningHoldActive } from './compliance-config';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
@@ -3962,6 +3963,23 @@ export async function prepareSendDraft(
     const routeExpiresAt = routeExpiryMs(route);
     const fxOrigin = rateOriginOf(route);
 
+    // Fix pack 2 (R04 / R06): is the card rail real money? The rail is the
+    // route's settlement partner, else the owner; the bot never mints sandbox,
+    // so the environment is 'live'. Read once, and only when needed (a held
+    // sender or a block); a failed read is real money (the stricter path).
+    let cardRealMoney: boolean | undefined;
+    const realMoneyCard = async (): Promise<boolean> =>
+      (cardRealMoney ??= realMoneyRail({
+        environment: 'live',
+        railProviderType: await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId),
+      }));
+    // Fix pack 2 T6 (R06): a sender with an active screening hold (the
+    // customer the KYC gate read; no new read) is refused on a real-money
+    // rail with neutral fixed text: no draft, no card, no screen.
+    if (senderScreeningHoldActive(customer) && (await realMoneyCard())) {
+      return { kind: 'sender_unavailable' };
+    }
+
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
     // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).
     await warmSanctionsList();
@@ -3976,12 +3994,7 @@ export async function prepareSendDraft(
     });
     if (screen.status === 'blocked') {
       // Fix pack 2 T5 (R04): the block notices ride the blocked row's transaction.
-      // The card rail is the route's settlement partner, else the owner; the bot
-      // never mints sandbox, so the environment is 'live'.
-      const realMoney = realMoneyRail({
-        environment: 'live',
-        railProviderType: await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId),
-      });
+      const realMoney = await realMoneyCard();
       // Record an auditable, never-charged blocked row (no velocity/volume bump).
       const blockedInput: BlockedAttemptInput = {
         phone: ctx.phone,
@@ -4177,6 +4190,13 @@ function prepareRefusalToTool(r: Exclude<PrepareSendResult, { kind: 'draft' }>):
     case 'blocked':
       // R30: the fixed block text (hold-replies.ts), never a reason.
       return { blocked: true, reply_to_customer: fixedReply('block', { help: true }) };
+    case 'sender_unavailable':
+      // Fix pack 2 T6 (R06): the neutral fixed text; never a screening or review word.
+      return {
+        error: 'Sending is not available for this account.',
+        unavailable: true,
+        reply_to_customer: fixedReply('cap_unavailable', { help: true }),
+      };
   }
 }
 

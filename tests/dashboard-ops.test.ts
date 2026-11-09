@@ -18,6 +18,8 @@ import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -986,6 +988,58 @@ describe('LIST_UNAVAILABLE holds — no person can release them (fix pack 2 T4)'
     // Reject is unchanged: it still cancels the hold.
     await rejectTransfer(store, db, 'rel_list', REL);
     expect((await store.getTransfer('rel_list'))?.status).toBe('cancelled');
+  });
+});
+
+// Fix pack 2 T6 (R06): platform staff may not release a hold on a real-money
+// rail while the SENDER's screening hold is active: the audited clear
+// (clearSenderScreeningHoldAction) comes first. Simulator / mock rails unchanged.
+describe('sender screening hold — platform release refusal (fix pack 2 T6)', () => {
+  const HTTP_RAIL = {
+    kyc: {},
+    payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+    whatsapp: {},
+  };
+  const PHONE = '15551234567';
+  async function heldOn(rail: 'http' | 'simulator', environment: 'live' | 'test' = 'live') {
+    await db.execute(sql`INSERT INTO partners (id, name) VALUES ('rp', 'Rail Partner') ON CONFLICT DO NOTHING`);
+    await createIntegrationsRepo(db).saveIntegrations('rp', {
+      ...HTTP_RAIL,
+      payment: { ...HTTP_RAIL.payment, providerType: rail },
+    });
+    await db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country, kyc_status, pep_hit, screening_flagged_at)
+      VALUES (${PHONE}, 'rp', now() - interval '10 days', 'US', 'verified', true, now() - interval '1 hour')`);
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rel_sender', partnerId: 'rp', environment, status: 'in_review', complianceStatus: 'flagged',
+      complianceReasons: ['Large transfer amount.', SENDER_SCREENING_REASON],
+      paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+    }));
+    return store;
+  }
+
+  it('platform release refused while the sender hold is active on an http rail, allowed after the clear', async () => {
+    const store = await heldOn('http');
+    await expect(releaseTransfer(store, db, 'rel_sender', REL)).rejects.toThrow('Cannot release: clear the sender screening hold first.');
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+    // The audited clear lifts the hold (the repo writer the action calls).
+    await createCustomerRepo(db, async () => null).clearScreeningHold('rp', PHONE, new Date());
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
+  });
+
+  it('simulator rail: platform release unchanged', async () => {
+    const store = await heldOn('simulator');
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
+  });
+
+  it("env 'test' on an http rail: platform release unchanged", async () => {
+    const store = await heldOn('http', 'test');
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
   });
 });
 

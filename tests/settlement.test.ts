@@ -591,3 +591,87 @@ describe('beginHold — addReasons (fix pack 2 T9)', { retry: 0 }, () => {
     expect(after?.complianceReasons).toEqual(['x']);
   });
 });
+
+// ── Fix pack 2 T6 (R06): the sender screening hold at pay. On a real-money rail
+// a not-blocked transfer whose SENDER (owning tenant) has an active screening
+// hold is held with SENDER_SCREENING_REASON added — both branches (a cleared
+// row and one already flagged LARGE / VELOCITY / EDD / AML).
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { seedSender } from './helpers-db';
+
+describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const PHONE = fixture().phone;
+  const flagNow = async () => {
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${PHONE}`);
+  };
+
+  it('cleared + http + now flagged -> in_review, reason added, no settlement.instruct', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1']);
+  });
+
+  it('flagged LARGE + active sender hold at pay -> reasons gain SENDER_SCREENING', async () => {
+    const t = live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, SENDER_SCREENING_REASON]);
+  });
+
+  it('stale list + active sender hold -> both reasons', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON, SENDER_SCREENING_REASON]);
+  });
+
+  it('a cleared hold settles; another tenant\'s flagged row for the same phone is never read', async () => {
+    await seedPartner(db, 'other');
+    await seedSender(db, { partnerId: 'other', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true WHERE partner_id = 'other' AND phone = ${PHONE}`);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() - interval '2 hours', screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme' AND phone = ${PHONE}`);
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+  });
+
+  it('simulator -> settles, no customers read', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await flagNow();
+    const stop = captureQueries();
+    const r = await settleOrHold(db, t, SIMULATOR);
+    const qs = stop();
+    expect(r.kind).toBe('started');
+    expect(qs.filter((q) => q.sql.includes('"customers"'))).toEqual([]);
+  });
+
+  it('flags read error -> throws, nothing paid', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    // The flags read fails (the table is unreadable); nothing else in the pay path reads it.
+    await db.execute(sql`ALTER TABLE customers RENAME TO customers_gone`);
+    try {
+      await expect(settleOrHold(db, t, HTTP)).rejects.toThrow();
+    } finally {
+      await db.execute(sql`ALTER TABLE customers_gone RENAME TO customers`);
+    }
+    expect((await store.getTransfer('st_t1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toEqual([]);
+  });
+});

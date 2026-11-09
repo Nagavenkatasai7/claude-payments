@@ -15,7 +15,9 @@ import {
   POSSIBLE_MATCH_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
+  senderScreeningHoldActive,
 } from '@/lib/compliance-config';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import type { ComplianceResult } from '@/lib/compliance';
 import { sanctionsAuditEvent } from '@/lib/sanctions/evidence';
 
@@ -297,6 +299,13 @@ export async function settleOrHold(
     const now = new Date();
     const newest = (await listScreenEvidence(db, transfer, now)).at(-1);
     if (!liveFresh(newest, now)) add.push(LIST_UNAVAILABLE_REASON);
+    // Fix pack 2 T6 (R06): the SENDER's screening hold (owning tenant, root
+    // handle, before any transaction), on both branches: a row already flagged
+    // LARGE / VELOCITY / EDD / AML gains the reason too, so the platform
+    // reviewer sees it. A read error throws (nothing paid).
+    if (senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))) {
+      add.push(SENDER_SCREENING_REASON);
+    }
     if (add.length > 0) return beginHold(db, transfer, { addReasons: add });
   }
   if (transfer.complianceStatus === 'cleared') {

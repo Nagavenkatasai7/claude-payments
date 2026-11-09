@@ -16,14 +16,18 @@
 //   • a name screened before that the re-screen cannot screen again (a
 //     Partner-API body sender name or a payment link's customerName, never
 //     stored) is uncovered (evidence-read.ts uncoveredRoles): never released.
+//   • fix pack 2 T6 (R06): a real-money row whose sender has an active
+//     screening hold (senderScreeningHoldActive) stays held with
+//     SENDER_SCREENING_REASON (a platform clear, then a person, decides).
 // Reads, the list warm and decryption stay OUTSIDE the transaction. A row that
 // throws is logged (id only) and costs a scan, never a slot. Never throws.
 
 import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { screenTransfer } from './compliance';
-import { LIST_UNAVAILABLE_REASON, resolveCorridorRules } from './compliance-config';
+import { LIST_UNAVAILABLE_REASON, resolveCorridorRules, senderScreeningHoldActive } from './compliance-config';
 import { railPartnerOf, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
 import { pokeWorker } from './outbox';
@@ -54,6 +58,11 @@ async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date)
   const needLive = realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null });
   if (needLive && fitness !== 'live') return 'skipped';
 
+  // Fix pack 2 T6 (R06): on a real-money rail the sender's screening hold
+  // (owning tenant) keeps the row held; a read error throws and the caller
+  // skips the row. No read otherwise.
+  const senderHold = needLive && senderScreeningHoldActive(await readSenderScreeningFlags(db, t.partnerId, t.phone));
+
   const names = await resolveRescreenNames(db, t);
   const partners = createPartnerStore(db);
   const owner = (await partners.getPartner(t.partnerId)) ?? (await partners.ensureDefaultPartner());
@@ -79,7 +88,7 @@ async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date)
   const r = await releaseRescreenedHold(db, t.id, {
     result,
     railIntegrations,
-    senderHold: false,
+    senderHold,
     realMoney: needLive,
     uncovered,
   });

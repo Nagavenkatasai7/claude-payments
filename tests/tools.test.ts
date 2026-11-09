@@ -28,7 +28,7 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
-import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
+import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
   resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
@@ -1600,6 +1600,81 @@ describe('sanctions block notices at card time (fix pack 2 T5, R04)', () => {
     const ctx = await acmeHttpCtx();
     await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
     expect(await blockAudits()).toEqual([]);
+  });
+});
+
+// Fix pack 2 T6 (R06): a sender with an active screening hold is refused at
+// card time on a real-money rail, with the neutral fixed text (no review or
+// screening wording). The default tenant and demo rails are unchanged.
+describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
+  const ACME_PHONE = '15550007722';
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Anita Sharma',
+    recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'anita@upi',
+  };
+  const flag = (partnerId: string, phone: string) =>
+    db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = ${partnerId} AND phone = ${phone}`);
+  async function ctxOn(partnerId: string, phone: string, rail?: string) {
+    if (partnerId !== 'default') await seedPartner(db, partnerId);
+    if (rail) {
+      await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES (${partnerId}, ${rail})
+        ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = ${rail}`);
+    }
+    const ctx = await buildCtx(fakeRedis(), phone, partnerId);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    return ctx;
+  }
+  /** A customers statement naming the hold times but not the whole row (a new flags-only read). */
+  const flagOnlyReads = (log: Array<{ sql: string }>) =>
+    log.map((q) => q.sql.toLowerCase()).filter((q) => q.includes('"customers"') && q.includes('screening_flagged_at') && !q.includes('first_seen_at'));
+
+  it("sender_unavailable on an http rail with fixedReply('cap_unavailable', { help: true })", async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await flag('acme', ACME_PHONE);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r).toEqual({
+      error: 'Sending is not available for this account.',
+      unavailable: true,
+      reply_to_customer: fixedReply('cap_unavailable', { help: true }),
+    });
+    expect(await ctx.store.listTransfers()).toEqual([]);
+    expect(await ctx.draftStore.getActiveDraftId('acme', ACME_PHONE)).toBeNull();
+  });
+
+  it('a cleared hold -> the card as usual', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() - interval '2 hours', screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme' AND phone = ${ACME_PHONE}`);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+    expect(r.error).toBeUndefined();
+  });
+
+  it('not on the default tenant', async () => {
+    const ctx = await ctxOn('default', '15550007733');
+    await flag('default', '15550007733');
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+    expect(r.error).toBeUndefined();
+  });
+
+  it('not on a simulator rail', async () => {
+    const ctx = await ctxOn('simco', ACME_PHONE, 'simulator');
+    await flag('simco', ACME_PHONE);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+  });
+
+  it('no new customer read', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await flag('acme', ACME_PHONE);
+    const spy = vi.spyOn(ctx.customerStore, 'getCustomer');
+    const stop = captureQueries();
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    const log = stop();
+    expect(r.unavailable).toBe(true);
+    expect(flagOnlyReads(log)).toEqual([]);
+    expect(spy).toHaveBeenCalledTimes(1); // the KYC-gate read only
   });
 });
 

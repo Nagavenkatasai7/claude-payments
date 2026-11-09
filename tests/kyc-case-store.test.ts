@@ -409,6 +409,50 @@ describe('kyc-case-store.applyPersonaEvent (Program-Fix 35)', () => {
     expect(await alerts()).toHaveLength(1);
   });
 
+  // Fix pack 2 T6 (R06): a watchlist / PEP match stamps the sender screening
+  // hold (screening_flagged_at) in the same transaction as the flag.
+  const flaggedAt = async () =>
+    ((await db.execute(sql`SELECT screening_flagged_at AS f FROM customers WHERE partner_id = 'default' AND phone = ${PHONE}`)).rows[0] as { f: Date | string | null }).f;
+
+  it('a match stamps flaggedAt, also on an approved customer', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    await store.applyPersonaEvent('default', PHONE, pep, opts());
+    const f = await flaggedAt();
+    expect(f).not.toBeNull();
+    // The store's own clock (the monotonic test clock above), like the apply's other times.
+    expect(new Date(f as string).getTime() - 1_700_000_000_000).toBeGreaterThanOrEqual(0);
+    expect(new Date(f as string).getTime() - 1_700_000_000_000).toBeLessThan(100);
+    expect((await cs.getCustomer('default', PHONE))?.screeningFlaggedAt).toBeDefined();
+
+    // An approved (verified) customer: a later watchlist match records its flag and the stamp.
+    db = await freshDb();
+    cs = createCustomerStore(db, createStore(fakeRedis(), db));
+    store = createKycCaseStore(redis, cs);
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    const watch = evt({ eventId: 'evt_w', name: 'report/watchlist.matched', referenceId: null, reportId: 'rep_3', matchKind: 'watchlist', status: 'ready' });
+    const r = await store.applyPersonaEvent('default', PHONE, watch, opts());
+    expect(r?.after.kycReviewState).toBe('approved');
+    expect(r?.after.watchlistHit).toBe(true);
+    expect(await flaggedAt()).not.toBeNull();
+  });
+
+  it('no match -> no stamp', async () => {
+    await seed({ kycReviewState: 'inquiry_started', kycInquiryId: 'inq_1' });
+    await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_nm' }), opts());
+    expect(await flaggedAt()).toBeNull();
+    // Another match kind (adverse media) sets no screening flag, so no stamp either.
+    await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_am', name: 'report/adverse-media.matched', referenceId: null, reportId: 'rep_4', matchKind: 'other' }), opts());
+    expect(await flaggedAt()).toBeNull();
+  });
+
+  it('a failed alert rolls the stamp back', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    failEnqueue.once = true;
+    await expect(store.applyPersonaEvent('default', PHONE, pep, opts())).rejects.toThrow('ledger down');
+    expect(await flaggedAt()).toBeNull();
+    expect((await cs.getCustomer('default', PHONE))?.pepHit).toBeUndefined();
+  });
+
   it('a missing row returns null and writes nothing', async () => {
     expect(await store.applyPersonaEvent('default', PHONE, pep, opts())).toBeNull();
     expect(await alerts()).toHaveLength(0);

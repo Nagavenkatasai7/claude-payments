@@ -247,6 +247,19 @@ describe('prepare_transfer', () => {
   });
 });
 
+// Fix pack 2 T6 (R06): a sender with an active screening hold on a real-money
+// rail: the portal mapping (cannot_complete), so the app relays neutral text.
+describe('prepare_transfer — sender screening hold (fix pack 2 T6)', () => {
+  it('sender_unavailable -> portal.send.cannot_complete', async () => {
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('pa', 'http')
+      ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = 'http'`);
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true, screening_flagged_at = now() WHERE partner_id = 'pa' AND phone = ${PHONE}`);
+    const r = await prepareTransferTool(principal(), args(), deps);
+    expect(r).toEqual({ ok: false, message: refusalMessage({ error: 'portal.send.cannot_complete' }) });
+    expect(drafts()).toEqual([]);
+  });
+});
+
 describe('cancel_prepared_transfer', () => {
   async function prepared(): Promise<string> {
     const r = await prepareTransferTool(principal(), args(), deps);

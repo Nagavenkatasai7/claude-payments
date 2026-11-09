@@ -20,9 +20,9 @@ import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { money } from '../../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
+import { clearSenderScreeningHoldAction, manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
-import { canDecideCustomerKyc } from '@/lib/compliance-config';
+import { canDecideCustomerKyc, senderScreeningHoldActive } from '@/lib/compliance-config';
 import { CustomerLink } from '../../customer-link';
 import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
@@ -106,6 +106,8 @@ export default async function CustomerDetailPage({
   // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to decide.
   // Mirrors the actions' gate (the server actions are the authority).
   const canDecideKyc = canDecideCustomerKyc(scopeOf(staff), customer);
+  // Fix pack 2 T6 (R06): the sender screening hold (the clear action re-checks it).
+  const screeningHold = senderScreeningHoldActive(customer);
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner), limits);
@@ -160,6 +162,16 @@ export default async function CustomerDetailPage({
               <dt>Inquiry</dt><dd>{customer.kycInquiryId ?? '—'}</dd>
               <dt>ID last 4</dt><dd>{customer.idLast4 ? `••••${customer.idLast4}` : '—'}</dd>
               <dt>Screening</dt><dd>{customer.watchlistHit ? '⚠ Watchlist hit' : customer.pepHit ? '⚠ PEP hit' : 'Clear'}</dd>
+              {(customer.screeningFlaggedAt || customer.screeningClearedAt) && (
+                <>
+                  <dt>Screening hold</dt>
+                  <dd>
+                    {screeningHold ? 'Active (real-money rails)' : 'Cleared'}
+                    {' · flagged '}{customer.screeningFlaggedAt ?? '—'}
+                    {' · cleared '}{customer.screeningClearedAt ?? '—'}
+                  </dd>
+                </>
+              )}
               <dt>Full name</dt><dd>{customer.fullName ?? '—'}</dd>
               <dt>DOB</dt><dd>{customer.dateOfBirth ?? '—'}</dd>
               <dt>Nationality</dt><dd>{customer.nationality ?? '—'}</dd>
@@ -175,6 +187,37 @@ export default async function CustomerDetailPage({
                 </>
               )}
             </dl>
+            {/* Fix pack 2 T6 (R06): the sender screening hold blocks sends on
+                real-money rails until a SmartRemit platform admin clears it with
+                a typed reason (audited). It does not release held transfers. */}
+            {isPlatformAdmin && screeningHold && (
+              <div className="mt-4 space-y-3 rounded-lg border p-4">
+                <div className="text-sm font-medium">Clear screening hold</div>
+                <p className="text-sm text-muted-foreground">
+                  A Persona watchlist or PEP match holds this sender on real-money rails
+                  (flagged {customer.screeningFlaggedAt ?? 'before the hold times were recorded'}
+                  {customer.screeningClearedAt ? `; last cleared ${customer.screeningClearedAt}` : ''}).
+                  Clear it only after reviewing the match. A reason (at least 10 characters) is recorded
+                  in the audit log with your name. Held transfers stay held: release or reject them afterwards.
+                </p>
+                <form action={clearSenderScreeningHoldAction} className="space-y-3">
+                  <input type="hidden" name="phone" value={customer.senderPhone} />
+                  <input type="hidden" name="partnerId" value={customer.partnerId} />
+                  <textarea
+                    name="reason"
+                    required
+                    minLength={10}
+                    maxLength={500}
+                    placeholder="Why the match is cleared (required)"
+                    rows={2}
+                    className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="submit" variant="outline">Clear screening hold</Button>
+                  </div>
+                </form>
+              </div>
+            )}
             {/* Program-Fix 28 (compliance-04): no one-click override. A manual
                 decision needs a typed reason (10–500 characters) and is recorded
                 in the audit log; it sends the customer no message. Shown whenever
