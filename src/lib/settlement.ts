@@ -7,6 +7,9 @@ import { buildStage1Message } from '@/lib/payment';
 import { processingTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { PartnerId, Transfer } from '@/lib/types';
+import { realMoneyRail } from '@/lib/live-gate';
+import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
 //
@@ -205,10 +208,30 @@ export async function beginSettlement(
  * Replaces the pay route's old completePaymentStage1 + re-read + saveTransfer
  * + direct sendText sequence, which had an observable intermediate 'paid'
  * state and a non-durable message.
+ *
+ * Fix pack 2 T9 (R02): `addReasons` (non-empty) first records, in the SAME
+ * transaction, compliance 'flagged' with the LEDGER's reasons plus these
+ * (de-duplicated) — applyRescreenIfAwaiting, which never touches a blocked or
+ * no-longer-awaiting row; such a row is 'already' and nothing is written.
+ * Without it the hold never rewrites compliance (unchanged).
  */
-export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult> {
+export async function beginHold(
+  db: Db,
+  transfer: Transfer,
+  opts: { addReasons?: string[] } = {},
+): Promise<HoldResult> {
+  const addReasons = opts.addReasons ?? [];
   return db.transaction(async (tx): Promise<HoldResult> => {
-    const held = await createTransferRepo(tx).markInReviewIfAwaiting(transfer.id);
+    const repo = createTransferRepo(tx);
+    if (addReasons.length > 0) {
+      // The ledger row's reasons (row-locked), never the caller's copy.
+      const current = await repo.getTransferForUpdate(transfer.id, { partnerId: transfer.partnerId });
+      if (!current) return { kind: 'already' };
+      const reasons = [...new Set([...(current.complianceReasons ?? []), ...addReasons])];
+      const flagged = await repo.applyRescreenIfAwaiting(transfer.id, transfer.partnerId, 'flagged', reasons);
+      if (!flagged) return { kind: 'already' };
+    }
+    const held = await repo.markInReviewIfAwaiting(transfer.id);
     if (!held) return { kind: 'already' };
     // `held` is the masked RETURNING row; buildStage1Message never names the
     // destination, so no payout field can reach the outbox payload. Same shape
@@ -235,6 +258,17 @@ export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult>
  *   cleared → beginSettlement (and if the LEDGER disagrees — re-screened to
  *             flagged since the caller's read — fall through to the hold)
  *   flagged → beginHold
+ *
+ * Fix pack 2 T9 (R02), the settle-time live-list backstop: on a REAL-MONEY
+ * rail (`integrations` is the rail partner's: providerType 'http', and the
+ * transfer is not a sandbox one — live-gate.ts realMoneyRail), a transfer
+ * whose NEWEST sanctions.screen evidence is not live and fresh
+ * (evidence-read.ts liveFresh) is HELD with LIST_UNAVAILABLE added — on the
+ * cleared AND the flagged branch — so a rail switched to http after a
+ * mock-list screen never settles on it. The evidence is read on the root
+ * handle before any transaction; a read error throws (nothing settles). A
+ * blocked transfer is refused first. Not real money: unchanged, zero reads.
+ * This only ever ADDS a hold: sanctions screening is never skipped.
  */
 export async function settleOrHold(
   db: Db,
@@ -243,6 +277,19 @@ export async function settleOrHold(
 ): Promise<SettleOrHoldResult> {
   if (transfer.complianceStatus === 'blocked') {
     return { kind: 'refused', complianceStatus: 'blocked' };
+  }
+  // The integrations were read: no payment providerType is the default mock
+  // rail (null), never a failed read (undefined would count as real money).
+  const realMoney = realMoneyRail({
+    environment: transfer.environment,
+    railProviderType: integrations.payment.providerType ?? null,
+  });
+  if (realMoney) {
+    const add: string[] = [];
+    const now = new Date();
+    const newest = (await listScreenEvidence(db, transfer, now)).at(-1);
+    if (!liveFresh(newest, now)) add.push(LIST_UNAVAILABLE_REASON);
+    if (add.length > 0) return beginHold(db, transfer, { addReasons: add });
   }
   if (transfer.complianceStatus === 'cleared') {
     const settled = await beginSettlement(db, transfer, integrations);

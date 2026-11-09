@@ -5,6 +5,11 @@ import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
 import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
 import type { ActiveSanctionsVersion } from '@/db/repos/sanctions-list-repo';
 import type { SanctionsList, SanctionsListSource } from '@/lib/sanctions/list-source';
+import { inputHash, sanctionsAuditEvent, type ScreeningEvidence } from '@/lib/sanctions/evidence';
+import type { ListFitness } from '@/lib/sanctions/list-policy';
+import { auditEvents } from '@/db/schema';
+import type { Db } from '@/db/client';
+import type { Transfer } from '@/lib/types';
 
 // Program-Fix 14 PR C: an OFAC source whose cache holds v1 while v2 (with
 // newly listed names) is the ACTIVE version — only a warmSanctionsList() call
@@ -60,6 +65,48 @@ export function primeOfacSource(opts: { checkedAgoMs: number }): SanctionsListSo
   process.env.SANCTIONS_LIST = 'ofac-sdn';
   setOfacListSourceForTests(src);
   return src;
+}
+
+/**
+ * Fix pack 2 T9 (R02): write one `sanctions.screen` evidence row for a stored
+ * transfer, as the mint would: OWNER tenant, the transfer id as subject, the
+ * real keyed `inputHash` of each name. Defaults to a LIVE list screened now, so
+ * a cleared transfer on an http rail settles (settleOrHold's backstop).
+ * `listFitness: null` omits the field (pre-pack-2 evidence); `at` sets the
+ * audit row's own time (default now).
+ */
+export async function seedLiveEvidence(
+  db: Db,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'recipientName'> & { senderName?: string },
+  opts: { listFitness?: ListFitness | null; screenedAgoMs?: number; at?: Date } = {},
+): Promise<ScreeningEvidence> {
+  const parties: ScreeningEvidence['parties'] = [
+    { role: 'recipient', inputHash: inputHash(t.recipientName), matched: false, matchScore: 0 },
+  ];
+  if (t.senderName !== undefined) {
+    parties.push({ role: 'sender', inputHash: inputHash(t.senderName), matched: false, matchScore: 0 });
+  }
+  const fitness = opts.listFitness === undefined ? 'live' : opts.listFitness;
+  const evidence: ScreeningEvidence = {
+    listSource: 'ofac-sdn',
+    listVersion: 'test-version',
+    listHash: 'a'.repeat(64),
+    screenedAt: new Date(Date.now() - (opts.screenedAgoMs ?? 0)).toISOString(),
+    decision: 'clear',
+    parties,
+    ...(fitness ? { listFitness: fitness } : {}),
+  };
+  const row = sanctionsAuditEvent(t.partnerId, t.id, evidence);
+  await db.insert(auditEvents).values({
+    partnerId: row.partnerId ?? null,
+    actor: row.actor,
+    actorType: row.actorType,
+    action: row.action,
+    subjectId: row.subjectId ?? null,
+    meta: row.meta ?? null,
+    ...(opts.at ? { at: opts.at } : {}),
+  });
+  return evidence;
 }
 
 export function restoreOfacSource(original: string | undefined): void {

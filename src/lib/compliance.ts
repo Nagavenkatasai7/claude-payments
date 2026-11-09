@@ -17,6 +17,7 @@ import {
 import { inputHash, type ScreeningEvidence, type ScreeningEvidenceParty, type SanctionsDecision } from './sanctions/evidence';
 import { SanctionsListUnavailableError } from './sanctions/list-screener';
 import { listFitness, type ListFitness } from './sanctions/list-policy';
+import { normalizeName } from './sanctions/normalize';
 import type { SanctionsListInfo } from './providers/sanctions-provider';
 
 // Re-export the canonical screening constants so existing importers keep working
@@ -70,6 +71,24 @@ function listFields(info: SanctionsListInfo, fitness: ListFitness): Pick<Screeni
   };
 }
 
+/**
+ * Fix pack 2 T9 (R02): the further recipient names to screen — each distinct
+ * (normalised) non-empty name that is not the primary recipient name, in order.
+ */
+function extraRecipientNames(recipientName: string, also: readonly string[] | undefined): string[] {
+  if (!also || also.length === 0) return [];
+  const seen = new Set<string>([normalizeName(recipientName)]);
+  const out: string[] = [];
+  for (const name of also) {
+    if (typeof name !== 'string') continue;
+    const key = normalizeName(name);
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
 /** The amount and velocity flags (not sanctions decisions), in their pinned order. */
 function amountVelocityReasons(amountUsd: number, transfersToday: number, rules: ResolvedCorridorRules): string[] {
   const reasons: string[] = [];
@@ -94,6 +113,14 @@ export async function screenTransfer(input: {
   requireLiveList?: boolean;
   /** Fix pack 2 (R02): the clock the list age is measured against (default: now). */
   now?: Date;
+  /**
+   * Fix pack 2 T9 (R02): further names the payee is known by (a payment link's
+   * account holder, the stored recipient name). Each distinct non-empty name
+   * other than `recipientName` is screened with the same screener as a further
+   * 'recipient' party: a match blocks (RECIPIENT_WATCHLIST), a possible match
+   * flags (POSSIBLE_MATCH). Absent or empty: the result is exactly today's.
+   */
+  alsoRecipientNames?: string[];
 }): Promise<ComplianceResult> {
   const rules = input.rules ?? GLOBAL_DEFAULTS;
   const screener =
@@ -104,14 +131,17 @@ export async function screenTransfer(input: {
   const screenedAt = new Date().toISOString();
   const recipientName = input.recipientName ?? '';
   const senderName = input.senderName ?? '';
+  const extraNames = extraRecipientNames(recipientName, input.alsoRecipientNames);
 
   let recipientHit: SanctionsHit;
   let senderHit: SanctionsHit;
+  const extraHits: SanctionsHit[] = [];
   try {
     recipientHit = await screener.screen({ name: recipientName, sourceCountry });
     senderHit = input.senderName
       ? await screener.screen({ name: senderName, sourceCountry })   // NEW (KYC)
       : { matched: false };
+    for (const name of extraNames) extraHits.push(await screener.screen({ name, sourceCountry }));
   } catch (err) {
     // Program-Fix 14 (B2): a list that cannot load FAILS CLOSED to a human
     // review — never cleared, never the mock, and never a throw that would
@@ -130,9 +160,11 @@ export async function screenTransfer(input: {
         listHash: info.hash,
         screenedAt,
         decision: 'list_unavailable',
-        parties: input.senderName
-          ? [unscreened('recipient', recipientName), unscreened('sender', senderName)]
-          : [unscreened('recipient', recipientName)],
+        parties: [
+          unscreened('recipient', recipientName),
+          ...(input.senderName ? [unscreened('sender', senderName)] : []),
+          ...extraNames.map((name) => unscreened('recipient', name)),
+        ],
         ...listFields(info, 'not_live'),
       },
     };
@@ -142,8 +174,11 @@ export async function screenTransfer(input: {
   const fitness = listFitness(info, input.now ?? new Date());
   const parties = [party('recipient', recipientName, recipientHit)];
   if (input.senderName) parties.push(party('sender', senderName, senderHit));
-  const anyMatch = recipientHit.matched || senderHit.matched;
-  const anyPossible = !anyMatch && Boolean(recipientHit.possibleMatch || senderHit.possibleMatch);
+  extraNames.forEach((name, i) => parties.push(party('recipient', name, extraHits[i])));
+  const extraMatch = extraHits.some((h) => h.matched);
+  const extraPossible = extraHits.some((h) => Boolean(h.possibleMatch));
+  const anyMatch = recipientHit.matched || senderHit.matched || extraMatch;
+  const anyPossible = !anyMatch && Boolean(recipientHit.possibleMatch || senderHit.possibleMatch || extraPossible);
   const decision: SanctionsDecision = anyMatch ? 'match' : anyPossible ? 'possible_match' : 'clear';
   const evidence: ScreeningEvidence = {
     listSource: info.source,
@@ -157,7 +192,7 @@ export async function screenTransfer(input: {
 
   if (anyMatch) {
     const blockReasons: string[] = [];
-    if (recipientHit.matched) blockReasons.push(RECIPIENT_WATCHLIST_REASON);
+    if (recipientHit.matched || extraMatch) blockReasons.push(RECIPIENT_WATCHLIST_REASON);
     if (senderHit.matched)    blockReasons.push(SENDER_WATCHLIST_REASON);
     return { status: 'blocked', reasons: blockReasons, evidence };
   }

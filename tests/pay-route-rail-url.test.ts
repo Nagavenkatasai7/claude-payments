@@ -5,13 +5,14 @@
  * failed" BEFORE captureFunding, and the transfer stays awaiting_payment. A
  * mock owner rail is unaffected.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
@@ -151,6 +152,11 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
   it('a PUBLIC https owner rail is charged and settles (the gate lets good config through)', async () => {
     rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
     await store.saveTransfer(makeTransfer({ id: 'g1' }));
+    // Fix pack 2 T9: an http rail settles only on a live, fresh screen; the
+    // pay-time re-screen runs on a live OFAC list (checked an hour ago).
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
     const res = await post('g1');
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);

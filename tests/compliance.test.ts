@@ -353,3 +353,82 @@ describe('screenTransfer — requireLiveList (fix pack 2 R02)', () => {
     expect(stale.evidence).toMatchObject({ decision: 'clear', listFitness: 'stale' });
   });
 });
+
+// ── Fix pack 2 T9 (R02): alsoRecipientNames — every further name the payee is
+// known by is screened as a 'recipient' party with the same screener.
+describe('screenTransfer — alsoRecipientNames (fix pack 2 T9)', () => {
+  const base = { amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' as const };
+
+  it('a match on the second name blocks with RECIPIENT_WATCHLIST', async () => {
+    const r = await screenTransfer({ ...base, senderName: 'Clean Person', alsoRecipientNames: ['John Doe'] });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+    expect(r.evidence!.decision).toBe('match');
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('Mom'), matched: false, matchScore: 0 },
+      { role: 'sender', inputHash: inputHash('Clean Person'), matched: false, matchScore: 0 },
+      { role: 'recipient', inputHash: inputHash('John Doe'), matched: true, matchScore: 1, matchedEntryId: 'mock:0' },
+    ]);
+    // A live-list screen still blocks first.
+    const live = await screenTransfer({ ...base, requireLiveList: true, alsoRecipientNames: ['John Doe'] });
+    expect(live.status).toBe('blocked');
+    expect(live.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+  });
+
+  it('possible on it -> POSSIBLE_MATCH', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'test-list', version: 'v1', hash: 'h' }),
+      screen: async ({ name }) => name === 'Holder Name'
+        ? { matched: false, possibleMatch: true, matchScore: 0.92, entryId: 'sdn:9' }
+        : { matched: false },
+    };
+    const r = await screenTransfer({ ...base, screener, alsoRecipientNames: ['Holder Name'] });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([POSSIBLE_MATCH_REASON]);
+    expect(r.evidence!.decision).toBe('possible_match');
+    expect(r.evidence!.parties[1]).toMatchObject({ role: 'recipient', matchScore: 0.92, matchedEntryId: 'sdn:9' });
+  });
+
+  it('duplicates and empties ignored; evidence gains one party per distinct name', async () => {
+    const seen: string[] = [];
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'test-list', version: 'v1', hash: 'h' }),
+      screen: async ({ name }) => { seen.push(name); return { matched: false }; },
+    };
+    const r = await screenTransfer({ ...base, screener, alsoRecipientNames: ['', '  ', 'mom', 'Anita Rao', 'anita  rao', 'Second Holder'] });
+    expect(r.status).toBe('cleared');
+    expect(seen).toEqual(['Mom', 'Anita Rao', 'Second Holder']);
+    expect(r.evidence!.parties.map((p) => p.inputHash)).toEqual([inputHash('Mom'), inputHash('Anita Rao'), inputHash('Second Holder')]);
+    expect(r.evidence!.parties.every((p) => p.role === 'recipient')).toBe(true);
+  });
+
+  it('the list-unavailable branch records each further name as an unscreened recipient party', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'ofac-sdn', version: 'unavailable', hash: '' }),
+      screen: async () => { throw new SanctionsListUnavailableError(); },
+    };
+    const r = await screenTransfer({ ...base, screener, senderName: 'Clean Person', alsoRecipientNames: ['Second Holder'] });
+    expect(r.status).toBe('flagged');
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('Mom'), matched: false, matchScore: 0 },
+      { role: 'sender', inputHash: inputHash('Clean Person'), matched: false, matchScore: 0 },
+      { role: 'recipient', inputHash: inputHash('Second Holder'), matched: false, matchScore: 0 },
+    ]);
+  });
+
+  it('absent -> unchanged (demo pin)', async () => {
+    for (const input of [
+      base,
+      { ...base, senderName: 'Clean Person' },
+      { ...base, recipientName: 'John Doe' },
+      { ...base, amountUsd: 1500 },
+    ]) {
+      const a = await screenTransfer(input);
+      const b = await screenTransfer({ ...input, alsoRecipientNames: [] });
+      expect(b.status).toBe(a.status);
+      expect(b.reasons).toEqual(a.reasons);
+      expect(b.evidence!.parties).toEqual(a.evidence!.parties);
+      expect(b.evidence!.decision).toBe(a.evidence!.decision);
+    }
+  });
+});

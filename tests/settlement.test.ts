@@ -441,3 +441,153 @@ describe('releaseHold — staff audit context (Program-Fix 28)', { retry: 0 }, (
     expect(await auditRows()).toHaveLength(0);
   });
 });
+
+// ── Fix pack 2 T9 (R02): the settle-time live-list backstop. A real-money rail
+// (http, env not 'test') settles only on a newest screen that is live and fresh;
+// otherwise the transfer is HELD with LIST_UNAVAILABLE added. Nothing else changes.
+import { LIST_UNAVAILABLE_REASON, LARGE_AMOUNT_REASON } from '@/lib/compliance-config';
+import { captureQueries } from './helpers-db';
+import { seedLiveEvidence } from './helpers-sanctions';
+
+const HTTP: PartnerIntegrations = {
+  kyc: {},
+  payment: {
+    providerType: 'http',
+    credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+    webhookSecret: 'w',
+  },
+  whatsapp: {},
+};
+const H = 3_600_000;
+
+describe('settleOrHold — settle-time live-list backstop (fix pack 2 T9)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+
+  it('http rail, cleared, newest evidence live and fresh -> started', async () => {
+    await store.saveTransfer(live());
+    await seedLiveEvidence(db, live(), { listFitness: 'not_live', at: new Date(Date.now() - 60_000) });
+    await seedLiveEvidence(db, live());
+    expect(await settleOrHold(db, live(), HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1', 'instruct:st_t1']);
+  });
+
+  it('evidence stale / mock (not_live) / absent -> held, LIST_UNAVAILABLE added, no settlement.instruct', async () => {
+    const cases: Array<[string, ((t: Transfer) => Promise<unknown>) | null]> = [
+      ['st_stale', (t) => seedLiveEvidence(db, t, { screenedAgoMs: 37 * H })],
+      ['st_staleList', (t) => seedLiveEvidence(db, t, { listFitness: 'stale' })],
+      ['st_mock', (t) => seedLiveEvidence(db, t, { listFitness: 'not_live' })],
+      ['st_old', (t) => seedLiveEvidence(db, t, { listFitness: null })],
+      ['st_none', null],
+      // the newest row decides: a live screen followed by a mock-list re-screen
+      ['st_newest', async (t) => {
+        await seedLiveEvidence(db, t, { at: new Date(Date.now() - 60_000) });
+        await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+      }],
+    ];
+    for (const [id, seed] of cases) {
+      const t = live({ id });
+      await store.saveTransfer(t);
+      if (seed) await seed(t);
+      expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+      const after = await store.getTransfer(id);
+      expect(after?.status).toBe('in_review');
+      expect(after?.complianceStatus).toBe('flagged');
+      expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    }
+    const keys = (await outboxRows()).map((r) => r.dedupe_key);
+    expect(keys.filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+    expect(keys).toHaveLength(cases.length); // one held stage-1 each
+  });
+
+  it('flagged LARGE + not live -> held with [LARGE, LIST_UNAVAILABLE]', async () => {
+    const t = live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
+  });
+
+  it('the LEDGER reasons are kept, never the caller\'s stale copy, and never duplicated', async () => {
+    await store.saveTransfer(live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON] }));
+    expect(await settleOrHold(db, live(), HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+  });
+
+  it("simulator / mock / env 'test' -> unchanged, zero audit reads", async () => {
+    const runs: Array<[string, Transfer, PartnerIntegrations]> = [
+      ['st_sim', live({ id: 'st_sim' }), SIMULATOR],
+      ['st_mockrail', live({ id: 'st_mockrail' }), MOCK],
+      ['st_sandbox', live({ id: 'st_sandbox', environment: 'test' }), HTTP],
+    ];
+    for (const [id, t, integrations] of runs) {
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'not_live' }); // a mock-list screen
+      const stop = captureQueries();
+      const r = await settleOrHold(db, t, integrations);
+      const qs = stop();
+      expect(r.kind).toBe('started');
+      expect(qs.filter((q) => q.sql.includes('audit_events'))).toEqual([]);
+      expect((await store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    }
+  });
+
+  it('rail switched simulator -> http after a mock-list clear -> held', async () => {
+    // Minted on a simulator rail: the mock list cleared it (not_live evidence).
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    // The rail partner switched to http before the settlement.
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1']);
+  });
+
+  it('a blocked transfer is still refused first (no read, no hold)', async () => {
+    const t = live({ complianceStatus: 'blocked' });
+    await store.saveTransfer(t);
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'refused', complianceStatus: 'blocked' });
+    expect((await store.getTransfer('st_t1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('beginHold — addReasons (fix pack 2 T9)', { retry: 0 }, () => {
+  it('beginHold without opts unchanged: compliance status and reasons untouched', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    expect(await beginHold(db, { ...fixture(), complianceStatus: 'flagged' })).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON]);
+  });
+
+  it('addReasons on a cleared row flags it with the reasons and holds it, in one transaction', async () => {
+    await store.saveTransfer(fixture());
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
+  });
+
+  it("addReasons on a row no longer awaiting -> 'already', nothing written", async () => {
+    await store.saveTransfer({ ...fixture(), status: 'paid' });
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'already' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('paid');
+    expect(after?.complianceStatus).toBe('cleared');
+    expect(after?.complianceReasons).toEqual([]);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it("addReasons on a blocked row -> 'already', never downgraded", async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'blocked', complianceReasons: ['x'] });
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'already' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.complianceStatus).toBe('blocked');
+    expect(after?.complianceReasons).toEqual(['x']);
+  });
+});
