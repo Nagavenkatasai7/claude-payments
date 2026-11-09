@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { scrub, logError, logWarn } from '@/lib/log';
+import { scrub, logError, logWarn, SCRUB_MAX_CHARS } from '@/lib/log';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -34,6 +34,24 @@ describe('scrub — the PII backstop for money-path logs', () => {
     expect(scrub('postgres://owner:p@ss@ep-x.example.com/db')).toBe('postgres://<redacted>@ep-x.example.com/db');
     // A URL with no credentials is untouched.
     expect(scrub('GET https://example.com/a?b=1 ok')).toBe('GET https://example.com/a?b=1 ok');
+  });
+
+  it('does not reach past the end of a URL host for an "@" that belongs to something else', () => {
+    // The userinfo part of a URL cannot hold a quote, "?", "#" or angle bracket.
+    expect(scrub('{"url":"https://api.example.com","note":"ok","to":"a@b.example"}')).toBe(
+      '{"url":"https://api.example.com","note":"ok","to":"<email>"}',
+    );
+    expect(scrub('GET https://api.example.com?email=jane@example.com failed')).toBe(
+      'GET https://api.example.com?email=<email> failed',
+    );
+  });
+
+  it('removes URL credentials that the 8 KB cap cuts in half', () => {
+    // The cut lands inside the password, so no "@" is left for the userinfo rule.
+    const lead = 'x'.repeat(SCRUB_MAX_CHARS - 30);
+    const out = scrub(`${lead} postgres://owner:Ab3!kQ9*zz7Wq${'p'.repeat(100)}@ep-x.example.com/db`);
+    expect(out).not.toContain('Ab3!kQ9');
+    expect(out.endsWith(' postgres://<redacted>…[truncated]')).toBe(true);
   });
 
   it('stringifies Errors and objects before scrubbing', () => {

@@ -22,7 +22,8 @@ export function scrub(value: unknown): string {
         ? `${value.name}: ${value.message}`
         : JSON.stringify(value) ?? String(value);
   const capped = capInput(s);
-  const out = capped.text
+  const text = capped.cut ? capped.text.replace(URL_CUT_TAIL, '$1<redacted>') : capped.text;
+  const out = text
     .replace(URL_USERINFO, '$1<redacted>@')
     .replace(EMAIL, '<email>')
     .replace(/\d{7,}/g, (m) => `…${m.slice(-4)}`);
@@ -40,11 +41,18 @@ const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-
 // The credentials part of a URL (`scheme://user:password@host`). It runs BEFORE
 // the email mask: on its own that mask caught only the tail of the userinfo and
 // left most of a password that holds URL sub-delimiters (2026-11-09 review of
-// the DATABASE_URL leak). Greedy up to the LAST "@" before the first "/" or
-// whitespace, so a password with an unescaped "@" goes whole. The lookbehind
-// starts a match only at the start of a scheme token, which keeps the work
-// linear under the 8 KB cap, like EMAIL above.
-const URL_USERINFO = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/]*@/g;
+// the DATABASE_URL leak). Greedy up to the LAST "@" of the authority, so a
+// password with an unescaped "@" goes whole. The run stops at whitespace and at
+// the characters that end an authority or cannot be in one (/ ? # " < >), so an
+// "@" in a query string or in the next JSON field is not taken for userinfo.
+// The lookbehind starts a match only at the start of a scheme token, which
+// keeps the work linear under the 8 KB cap, like EMAIL above.
+const URL_USERINFO = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#"<>]*@/g;
+
+// When the 8 KB cap cuts a URL inside its authority, the "@" that URL_USERINFO
+// needs is gone and the start of a password would stay. Whatever follows the
+// scheme at the very end of a cut text goes (a host cut in half is no loss).
+const URL_CUT_TAIL = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#"<>]*$/;
 
 /** Longest input scrub() looks at; the rest is dropped with a visible marker. */
 export const SCRUB_MAX_CHARS = 8 * 1024;

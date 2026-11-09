@@ -47,10 +47,21 @@ const newClient = () => new (pool().Client)(pool().options);
 
 const TERMINATED = 'Connection terminated unexpectedly';
 
-/** What the driver's idle listener does when an idle connection drops (index.mjs:1088-1089). */
+/**
+ * A real idle drop, in the driver's order. The guard's client listener went on
+ * at 'connect' and the Pool re-adds its idle listener at each release
+ * (index.mjs:1120-1126), so the guard's listener runs FIRST. Then the idle
+ * listener hangs the client on the error and forwards it to the Pool
+ * (:1088-1089); the `once` below stands in for it.
+ */
 function dropIdle(client: DriverClient, message = TERMINATED): Error {
-  const err = Object.assign(new Error(message), { client });
-  pool().emit('error', err, client);
+  const err = new Error(message);
+  pool().emit('connect', client);
+  client.once('error', (e: Error) => {
+    Object.assign(e, { client });
+    pool().emit('error', e, client);
+  });
+  client.emit('error', err);
   return err;
 }
 
@@ -122,7 +133,7 @@ describe('db/client: a dropped connection never prints the database password', (
     pool().emit('connect', client);
     expect(() => client.emit('error', new Error(TERMINATED))).not.toThrow();
     expect(lines()).toHaveLength(1);
-    expect((JSON.parse(lines()[0]) as Record<string, string>).scope).toBe('db.client');
+    expect((JSON.parse(lines()[0]) as Record<string, string>).scope).toBe('db.pool');
   });
 
   it('drops the client reference that the idle listener hangs on the error', () => {
@@ -177,6 +188,14 @@ describe('pool-guard helpers', () => {
     expect(redact('tried p%40ss%2fw0rd')).toBe('tried <redacted>');
     expect(redact('tried P%40SS%2FW0RD')).toBe('tried <redacted>');
     expect(redact('tried p@ss/w0rd')).toBe('tried <redacted>');
+  });
+
+  it('redactorFor masks the raw password even when its percent-escape is malformed', () => {
+    // decodeURIComponent throws on these; the raw password must already be in the set.
+    for (const pw of ['abcd%zzefgh', 'abcd%E0%A4%A', 'abcd%']) {
+      const redact = redactorFor(`postgres://owner:${pw}@ep-x.invalid/db`);
+      expect(redact(`server said ${pw}`)).toBe('server said <redacted>');
+    }
   });
 
   it('redactorFor still masks URLs when there is no usable connection string', () => {

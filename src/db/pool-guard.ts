@@ -17,9 +17,9 @@ import { logError } from '@/lib/log';
 // error object: err -> client -> config -> connectionString.
 //
 // Three guards, each pinned in tests/db-pool-guard.test.ts:
-//  1. A Pool 'error' listener: the emit no longer throws. It logs one line
-//     through the scrubbing logger (error name, code, redacted message), never
-//     the error object.
+//  1. A Pool 'error' listener: the emit no longer throws. A drop logs one
+//     `db.pool` line through the scrubbing logger (error name, code, redacted
+//     message), never the error object.
 //  2. An 'error' listener on every client. The Pool removes its idle listener
 //     while a client is checked out (:1126), so a connection that dropped
 //     during a transaction had no listener at all and crashed the same way.
@@ -47,8 +47,10 @@ export function redactorFor(connectionString: string | undefined): (text: string
     secrets.add(connectionString);
     try {
       const { password } = new URL(connectionString);
-      const decoded = decodeURIComponent(password);
+      // Raw form first: decodeURIComponent throws on a malformed escape, and
+      // the raw password must already be in the set when it does.
       secrets.add(password);
+      const decoded = decodeURIComponent(password);
       secrets.add(decoded);
       secrets.add(encodeURIComponent(decoded));
     } catch {
@@ -107,7 +109,7 @@ export function guardPool(pool: Pool): void {
   // One dropped idle connection reaches both listeners with the SAME error
   // object (the client emits it, the idle listener forwards it to the Pool).
   const reported = new WeakSet<object>();
-  const report = (scope: string, err: unknown): void => {
+  const report = (err: unknown): void => {
     // A listener must never throw: a throw here is the same uncaught exception
     // that this guard exists to stop.
     try {
@@ -119,17 +121,21 @@ export function guardPool(pool: Pool): void {
         if (reported.has(err)) return;
         reported.add(err);
       }
-      logError(scope, 'database connection dropped', dbErrorFields(err, redact));
+      logError('db.pool', 'database connection dropped', dbErrorFields(err, redact));
     } catch {
       // Nothing safe is left to do with this error.
     }
   };
 
-  pool.on('error', (err: unknown) => report('db.pool', err));
+  // One scope for both listeners. The client listener is added first (at
+  // 'connect'; the Pool re-adds its idle listener at each release, :1120-1126),
+  // so it sees every drop, idle or not; the Pool listener is what stops the
+  // idle emit from throwing.
+  pool.on('error', report);
   // Side effect to know about: any Pool listener other than 'error' makes the
   // driver send pool.query over the WebSocket, never over fetch (:1351-1352).
   // That is already the case here (neonConfig.poolQueryViaFetch is off, :427).
   pool.on('connect', (client: ErrorSource) => {
-    client.on('error', (err) => report('db.client', err));
+    client.on('error', report);
   });
 }
