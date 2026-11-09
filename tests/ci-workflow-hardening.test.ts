@@ -124,12 +124,13 @@ describe('scheduled workflows alert on failure', () => {
     for (const j of others) expect(jobBlock(wf, j)).not.toMatch(/issues: write/);
   });
 
-  // A job timeout reaches the alert as "cancelled" and counts as a failure; a
-  // run a person cancels must change nothing, so the alert step skips it.
+  // A job timeout reaches the alert as "cancelled" and counts as a failure.
+  // The step's !cancelled() is false only when the alert job itself is being
+  // cancelled; this pins that the guard is present, not how GitHub evaluates it.
   it.each([
     ['nightly.yml', nightly],
     ['worker-heartbeat.yml', heartbeat],
-  ])('%s: the alert step skips a run that was cancelled by hand', (_name, wf) => {
+  ])('%s: the alert step carries the !cancelled() guard', (_name, wf) => {
     expect(jobBlock(wf, 'alert')).toMatch(/- name: Open, update or close the failure issue\n\s+if: \$\{\{ !cancelled\(\) \}\}\n/);
   });
 
@@ -156,6 +157,11 @@ describe('nightly.yml', () => {
     expect(job).toMatch(/continue-on-error: true/);
     expect(job).toMatch(/EVAL_ANTHROPIC_API_KEY: \$\{\{ secrets\.EVAL_ANTHROPIC_API_KEY \}\}/);
     expect(job).toMatch(/run: npx tsx scripts\/eval-bot\.ts/);
+  });
+
+  // The job holds a secret, so the checkout must not leave the token in .git/config.
+  it('bot eval checks out without persisting the token', () => {
+    expect(jobBlock(nightly, 'bot-eval')).toMatch(/uses: actions\/checkout@\S+ # v4\n\s+with:\n\s+persist-credentials: false\n/);
   });
 
   it('blocks on production advisories and only reports dev-tree ones', () => {

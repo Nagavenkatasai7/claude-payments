@@ -52,6 +52,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -225,10 +227,15 @@ jobs:
   # issues; before this, only whoever last edited the schedule heard about a
   # red run. The only job with write access, and only to issues. A job that
   # hits its timeout reaches the script as "cancelled" and counts as a
-  # failure. A run a person cancels changes nothing: the step's !cancelled()
-  # is false then. cancelled() "Returns true if the workflow was canceled"
-  # (https://docs.github.com/en/actions/reference/workflows-and-actions/expressions);
-  # that a job timeout does not cancel the workflow is inferred, not documented.
+  # failure (the RUN's conclusion is "cancelled" then too, e.g. Nightly run
+  # 42624944766). A step-level cancelled() reads this alert job's own status
+  # (actions/runner, src/Runner.Worker/Expressions/CancelledFunction.cs), so
+  # the step's !cancelled() is false only when this alert job itself is being
+  # cancelled. After another job's timeout this job is not cancelled: the step
+  # runs and the alert fires. After a person cancels the whole run mid-job,
+  # this job (always()) starts fresh and is not itself cancelled, so the step
+  # most likely runs too and an issue may open, naming the job "(timed out or
+  # cancelled)"; the next green run closes it.
   alert:
     needs: [full-tests, bot-eval, audit, secret-scan, prod-smoke]
     if: ${{ always() }}

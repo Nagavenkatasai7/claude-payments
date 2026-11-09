@@ -1541,8 +1541,12 @@ export async function drainOnce(
           : undefined;
       // R2a: an incomplete channel is terminal too (a retry cannot fix config).
       const incomplete = err instanceof WaChannelIncompleteError;
-      // A template row to a Telegram chat has no text to fall back to (the other
-      // template callers send text instead), so no retry can ever send it.
+      // Telegram test channel only: a template row to a Telegram chat has no text
+      // to fall back to (the other template callers send text instead), so it is
+      // dead at once. Accepted trade-off, as on PERMANENT_DEAD_KINDS: if the
+      // customer moves back to WhatsApp or the Telegram switch goes off, a later
+      // retry would have gone out on WhatsApp, and that late retry is lost. No
+      // current producer enqueues 'whatsapp.template' rows; this covers legacy rows.
       const noTemplate = err instanceof TelegramNoTemplateError && row.kind === 'whatsapp.template';
       const terminal = terminalDeadline || permanentCode !== undefined || incomplete || noTemplate;
       // A RETRYABLE deadline: the abandoned handler may still be running in this

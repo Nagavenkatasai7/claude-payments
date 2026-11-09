@@ -8,9 +8,12 @@
  * "Scheduled workflow failing: <workflow>", or comments on it if it is already
  * open. The next fully green run comments and closes it. A "cancelled" job
  * counts as a failure: a job that hits its timeout-minutes reaches this script
- * as "cancelled" (the Nightly suite timed out silently Nov 2-9, 2026), and the
- * workflows skip this step with `!cancelled()` when a person cancels the run.
- * Skipped jobs change nothing. The repo is public: the issue carries only job
+ * as "cancelled" (the Nightly suite timed out silently Nov 2-9, 2026). The
+ * workflows guard this step with `!cancelled()`, which is false only when the
+ * alert job itself is being cancelled (a step-level cancelled() reads the
+ * current job's status). A person cancelling the whole run mid-job most likely
+ * still reaches this script, so an issue may open naming the job "(timed out
+ * or cancelled)"; the next green run closes it. Skipped jobs change nothing. The repo is public: the issue carries only job
  * names and the run link, never logs.
  *
  *   node scripts/ci/scheduled-alert.mjs

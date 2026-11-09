@@ -19,8 +19,8 @@ describe('summarizeNeeds', () => {
   });
 
   // A job that hits timeout-minutes reaches the alert as "cancelled" (the
-  // Nightly full suite timed out silently Nov 2-9, 2026). The workflows guard
-  // the alert step with !cancelled(), so a run a person cancels never gets here.
+  // Nightly full suite timed out silently Nov 2-9, 2026). A run a person
+  // cancels most likely reaches the script too, hence "timed out or cancelled".
   it('is failure for a cancelled (timed-out) job, naming it', () => {
     expect(summarizeNeeds({ a: { result: 'cancelled' } })).toEqual({ result: 'failure', failed: ['a (timed out or cancelled)'] });
     expect(summarizeNeeds({ a: { result: 'success' }, b: { result: 'cancelled' }, c: { result: 'failure' } })).toEqual({

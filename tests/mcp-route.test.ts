@@ -346,28 +346,42 @@ describe('/api/mcp: no listen stream holds the function open', () => {
     },
   };
 
-  /** Reads the body to its end, or resolves 'open' when it is still streaming after `ms`. */
-  async function bodyEnds(res: Response, ms: number): Promise<'ended' | 'open'> {
-    if (!res.body) return 'ended';
+  /** Reads the body to its end (state 'ended'), or stops with state 'open' when it is still streaming after `ms`. */
+  async function readBody(res: Response, ms: number): Promise<{ state: 'ended' | 'open'; text: string }> {
+    if (!res.body) return { state: 'ended', text: '' };
     const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
     const deadline = Date.now() + ms;
     for (;;) {
       const left = deadline - Date.now();
       const next = await Promise.race([reader.read(), new Promise<'open'>((ok) => setTimeout(() => ok('open'), Math.max(left, 0)))]);
       if (next === 'open') {
         await reader.cancel().catch(() => {});
-        return 'open';
+        return { state: 'open', text };
       }
-      if (next.done) return 'ended';
+      if (next.done) return { state: 'ended', text: text + decoder.decode() };
+      text += decoder.decode(next.value, { stream: true });
     }
   }
 
-  it('a raw modern subscriptions/listen POST gets a response whose body ends at once', async () => {
+  /** The JSON payloads of the SSE `data:` lines in a body. */
+  const sseData = (text: string) =>
+    text
+      .split('\n')
+      .filter((l) => l.startsWith('data: '))
+      .map((l) => JSON.parse(l.slice('data: '.length)) as { method?: string; id?: unknown; result?: { resultType?: string } });
+
+  it('a raw modern subscriptions/listen POST is acknowledged and completed, and its body ends at once', async () => {
     const res = await route.POST(
       jsonRpc(listen, { authorization: 'Bearer sra_good', 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'subscriptions/listen' }),
     );
     expect(res.status).toBe(200);
-    expect(await bodyEnds(res, 2000)).toBe('ended');
+    const body = await readBody(res, 2000);
+    expect(body.state).toBe('ended');
+    const frames = sseData(body.text);
+    expect(frames.some((f) => f.method === 'notifications/subscriptions/acknowledged')).toBe(true);
+    expect(frames.some((f) => f.id === 'listen:0' && f.result?.resultType === 'complete')).toBe(true);
   });
 
   it('a modern client that wants list-changed notifications never opens subscriptions/listen', async () => {
@@ -396,7 +410,7 @@ describe('/api/mcp: no listen stream holds the function open', () => {
     expect(server.server.getCapabilities().tools?.listChanged).toBe(false);
   });
 
-  it('the route caps its function time at 60 s (a backstop for any stream left open)', () => {
+  it('the route exports maxDuration = 60 (pins the exported value only, not that the platform applies it)', () => {
     expect(route.maxDuration).toBe(60);
   });
 });
