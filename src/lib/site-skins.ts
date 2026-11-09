@@ -35,8 +35,10 @@ export interface SiteSkin {
 }
 
 export const SITE_SKINS: Readonly<Record<string, SiteSkin>> = {
-  // TGFL (prospective partner; nothing signed). No logo file or brand colours yet, so the header
-  // shows the name as text in SmartRemit's colours.
+  // TGFL = Telangana Association of Florida, https://tgfl.org (owner, 2026-11-09: the domain is
+  // tgfl.org, not tgfl.com). A community association, not a licensed partner; nothing signed. No
+  // logo file or brand colours in the repo yet, so the header shows the name as text in
+  // SmartRemit's colours. The planned custom address is smartremitai.tgfl.org (not built).
   tgfl: { slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL', logoSrc: null, theme: null, demo: true },
 };
 

@@ -111,9 +111,9 @@ describe('portal layout', () => {
       expect(header).not.toContain('data-skin-brand');
     });
     it('a logo from anywhere else is dropped: the name shows as text', async () => {
-      h.site = skinned({ logoSrc: 'https://tgfl.com/logo.png' });
+      h.site = skinned({ logoSrc: 'https://tgfl.org/logo.png' });
       const html = await renderLayout();
-      expect(html).not.toContain('tgfl.com');
+      expect(html).not.toContain('tgfl.org');
       expect(html).toContain('data-skin-brand');
     });
     it('skin colours go through the validated theme style (and only then)', async () => {

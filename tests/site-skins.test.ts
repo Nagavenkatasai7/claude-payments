@@ -63,8 +63,8 @@ describe('skinLogoSrc', () => {
   });
   it('anything else is dropped: a remote URL, a data URI, an SVG, a path outside the folder, a traversal', () => {
     for (const bad of [
-      'https://tgfl.com/logo.png',
-      '//tgfl.com/logo.png',
+      'https://tgfl.org/logo.png',
+      '//tgfl.org/logo.png',
       'data:image/png;base64,AAAA',
       '/brand/partners/tgfl.svg',
       '/brand/smartremit-mark.png',
