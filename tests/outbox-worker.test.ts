@@ -20,6 +20,8 @@ import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
+import { env } from '@/lib/env';
+import { seedLiveEvidence } from './helpers-sanctions';
 
 // R17: the AI notice and its durable marker are covered by
 // tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
@@ -117,12 +119,14 @@ beforeEach(async () => {
 });
 
 describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { retry: 0 }, () => {
+  // Fix pack 2 T10: only an 'http' rail POSTs to its stored URL (a simulator
+  // goes to the hosted rail), so the external-URL fixtures here are http rails.
   beforeEach(async () => {
     await store.saveTransfer(transferFixture());
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -346,7 +350,7 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { ret
     it('a missing settlement URL counts as rail failing; last_error is unchanged', async () => {
       await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
         kyc: {},
-        payment: { providerType: 'simulator', credentials: {}, webhookSecret: 'whk' },
+        payment: { providerType: 'http', credentials: {}, webhookSecret: 'whk' },
         whatsapp: {},
       });
       await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
@@ -405,7 +409,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -508,7 +512,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
         webhookSecret: 'railp_whk',
       },
@@ -540,7 +544,7 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await repo.saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://owner.example/settle', signingSecret: 'owner_sgn' },
         webhookSecret: 'owner_whk',
       },
@@ -549,7 +553,7 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await repo.saveIntegrations('railp', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
         webhookSecret: 'railp_whk',
       },
@@ -1281,7 +1285,7 @@ describe('drainOnce — after a rail failure (fix 8)', () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -1346,7 +1350,7 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -1688,7 +1692,7 @@ describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -3115,5 +3119,139 @@ describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { r
     const [r] = ((await db.execute(sql`SELECT status, payload FROM outbox WHERE id = ${row.id}`)) as unknown as { rows: Array<{ status: string; payload: Record<string, unknown> }> }).rows;
     expect(r.status).toBe('done');
     expect(r.payload).toEqual({ phone: '1', turn: {} });
+  });
+});
+
+// Fix pack 2 T10 (R02): the instruct chokepoint. A simulator rail POSTs only
+// to the hosted reference rail (never a stored URL), and a paid row on an http
+// rail is not instructed when its newest sanctions screen was not on a live list.
+describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
+  const STORED = 'https://rail.partner.example/settle';
+  const hosted = () => `${env.appBaseUrl}/api/partner-rail`;
+  type Row = { dedupe_key: string; status: string; last_error: string | null; payload: unknown };
+  const rowsOf = async (kind: string) =>
+    ((await db.execute(sql`SELECT dedupe_key, status, last_error, payload FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as {
+      rows: Row[];
+    }).rows;
+  async function rail(providerType: string) {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType, credentials: { settlementUrl: STORED, signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+  }
+  // createdAt = now, so listScreenEvidence's window holds the seeded evidence.
+  const liveTransfer = (over: Partial<Transfer> = {}): Transfer =>
+    ({ ...transferFixture(), createdAt: new Date().toISOString(), ...over }) as Transfer;
+
+  it('simulator rail with an external stored URL: POST goes to the hosted rail, the stored URL is never fetched', async () => {
+    await rail('simulator');
+    await store.saveTransfer(liveTransfer());
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('sim-1');
+  });
+
+  it('http rail: stored URL', async () => {
+    await rail('http');
+    await store.saveTransfer(liveTransfer());
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+  });
+
+  it('partner-pulled reverse on simulator: hosted URL', async () => {
+    await rail('simulator');
+    await store.saveTransfer(
+      liveTransfer({ fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x', refundStatus: 'pending' } as Partial<Transfer>),
+    );
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rev-1' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    expect((await store.getTransfer('wk_t1'))!.refundStatus).toBe('completed');
+  });
+
+  it('paid on simulator with mock-list evidence, rail switched to http: not POSTed, one instructnotlive alert, row retried', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    // Screened while the rail was a simulator (mock list), then the rail goes live.
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+
+    let r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    // Retried again: still refused, still ONE alert (deduped per transfer).
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed');
+    expect(instruct.last_error).toBe('Last screen not on a live list.');
+    const alerts = (await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('instructnotlive:'));
+    expect(alerts.map((a) => a.dedupe_key)).toEqual(['instructnotlive:wk_t1']);
+    const msg = JSON.stringify(alerts[0].payload);
+    expect(msg).toContain('transfer wk_t1 (rail acme)');
+    expect(msg).toContain('not on a live list');
+    // Ids only: no names, phones or account numbers.
+    for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('http + newest evidence live: POSTed', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live', at: new Date(Date.now() - 60_000) });
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+    expect((await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('instructnotlive:'))).toHaveLength(0);
+  });
+
+  it('http + evidence without listFitness: POSTed (pre-PR2)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: null });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-3' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+  });
+
+  it('simulator rail with mock-list evidence: POSTed to the hosted rail (no list gate on a demo rail)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('simulator');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+  });
+
+  it('sandbox row: unchanged', async () => {
+    const t = liveTransfer({ environment: 'test' } as Partial<Transfer>);
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
+    expect((await rowsOf('ops.alert')).map((x) => x.dedupe_key)).toEqual(['sandboxinstruct:wk_t1']);
   });
 });

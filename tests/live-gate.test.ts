@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { realMoneyRail, railPartnerOf, readRailProviderType, realMoneyFor } from '@/lib/live-gate';
+import { realMoneyRail, railPartnerOf, readRailProviderType, realMoneyFor, settlementTargetUrl } from '@/lib/live-gate';
+import { env } from '@/lib/env';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { Db, DbOrTx } from '@/db/client';
 import type { PartnerId } from '@/lib/types';
@@ -82,5 +83,20 @@ describe('readRailProviderType / realMoneyFor', () => {
     expect(await realMoneyFor(db, { partnerId: pid('acme'), settlementPartnerId: pid('sim'), environment: 'live' })).toBe(false);
     expect(await realMoneyFor(db, { partnerId: pid('acme'), environment: undefined })).toBe(true);
     expect(await realMoneyFor(db, { partnerId: pid('sim'), environment: 'live' })).toBe(false);
+  });
+});
+
+describe('settlementTargetUrl (T10)', () => {
+  it('settlementTargetUrl: http stored; simulator, mock, undefined hosted', () => {
+    const hosted = `${env.appBaseUrl}/api/partner-rail`;
+    const creds = { settlementUrl: 'https://rail.partner.example/settle', signingSecret: 's' };
+    expect(settlementTargetUrl({ providerType: 'http', credentials: creds })).toBe('https://rail.partner.example/settle');
+    expect(settlementTargetUrl({ providerType: 'http' })).toBe('');
+    expect(settlementTargetUrl({ providerType: 'http', credentials: {} })).toBe('');
+    expect(settlementTargetUrl({ providerType: 'simulator', credentials: creds })).toBe(hosted);
+    expect(settlementTargetUrl({ providerType: 'simulator' })).toBe(hosted);
+    expect(settlementTargetUrl({ providerType: 'mock', credentials: creds })).toBe(hosted);
+    expect(settlementTargetUrl({ credentials: creds })).toBe(hosted);
+    expect(settlementTargetUrl({})).toBe(hosted);
   });
 });

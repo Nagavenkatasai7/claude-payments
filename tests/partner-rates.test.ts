@@ -154,6 +154,23 @@ describe('selectSettlementRoute (PGlite)', () => {
     expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
+  it('a simulator contender is routable on the hosted URL', async () => {
+    // Fix pack 2 T10: a simulator instruct always goes to the hosted rail, so
+    // routability checks that URL, never the stored one (empty or off-origin).
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db,
+      stubIntegrations({
+        p1: { providerType: 'simulator', credentials: { signingSecret: 's' } },
+        p2: { providerType: 'simulator', credentials: { settlementUrl: 'https://10.1.1.1/x', signingSecret: 's' } },
+      }),
+      'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
   it('a rate merely EQUAL to mid never wins (strictly better required)', async () => {
     const repo = createPartnerRateRepo(db);
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: MID, expiresAt: inHours(1) });

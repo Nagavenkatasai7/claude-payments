@@ -50,6 +50,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
+import { settlementTargetUrl } from '@/lib/live-gate';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
   assertPhoneNumberIdFree,
@@ -428,8 +429,11 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
     // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
     // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
     // rail exercises the exact signed instruction→callback loop a real rail would.
+    // Fix pack 2 T10 (R02): ALWAYS the hosted rail (a kept or submitted URL is
+    // ignored): the worker POSTs a simulator instruct nowhere else. Switching
+    // back to 'http' needs the partner's URL submitted again.
     if (providerType === 'simulator') {
-      if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+      credentials.settlementUrl = settlementTargetUrl({ providerType });
       if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
       if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
     }
@@ -853,7 +857,8 @@ export async function wizardCreatePartnerAction(
   let webhookSecret = clean(pay.webhookSecret);
   if (providerType === 'simulator') {
     // Zero-hassle reference rail: auto-provision endpoint + both HMAC secrets.
-    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+    // Fix pack 2 T10 (R02): always the hosted rail; a submitted URL is ignored.
+    credentials.settlementUrl = settlementTargetUrl({ providerType });
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }

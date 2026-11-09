@@ -3,7 +3,9 @@
  * Gate #2 of the ruling-7 route contract: an `http` / `simulator` rail (owner
  * OR routed) whose settlement URL fails the sync rule answers 400 "Payment
  * failed" BEFORE captureFunding, and the transfer stays awaiting_payment. A
- * mock owner rail is unaffected.
+ * mock owner rail is unaffected. Fix pack 2 T10: the URL checked is the one
+ * the worker POSTs to (settlementTargetUrl): a simulator rail's is always the
+ * hosted rail, whatever is stored.
  */
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
@@ -133,12 +135,25 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     expect(await outboxCount()).toBe(0);
   });
 
-  it('OWNER rail simulator with an empty URL → 400 before capture (today it charges, then dead-letters)', async () => {
+  it('OWNER rail simulator with an empty stored URL is charged: it settles on the hosted rail (fix pack 2 T10)', async () => {
     rails.byPartner.default = { providerType: 'simulator', credentials: { signingSecret: 's' } };
     await store.saveTransfer(makeTransfer({ id: 'u2' }));
-    expect((await post('u2')).status).toBe(400);
-    expect(capture).not.toHaveBeenCalled();
-    expect((await store.getTransfer('u2'))?.status).toBe('awaiting_payment');
+    expect((await post('u2')).status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('u2'))?.status).toBe('paid');
+  });
+
+  it('a routed simulator rail with an off-origin stored URL is not refused (the hosted URL is what is checked)', async () => {
+    // Fix pack 2 T10: the worker POSTs a simulator instruct only to the hosted
+    // rail, so the stored URL (refused by the sync rule) is never the target.
+    rails.byPartner.railp = { providerType: 'simulator', credentials: { settlementUrl: 'http://10.0.0.5/settle', signingSecret: 's' } };
+    await store.saveTransfer(makeTransfer({ id: 'r2', settlementPartnerId: 'railp' }));
+    const res = await post('r2');
+    expect(res.status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('r2'))?.status).toBe('paid');
+    const kinds = ((await db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((r) => r.kind);
+    expect(kinds).toContain('settlement.instruct');
   });
 
   it.each(BAD_URLS)('ROUTED rail http with %j → 400 before capture', async (url) => {

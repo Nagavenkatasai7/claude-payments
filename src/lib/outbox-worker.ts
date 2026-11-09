@@ -16,6 +16,8 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
+import { realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
@@ -817,13 +819,38 @@ async function handle(
         throw new SettlementPausedError();
       }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-      const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+      // Pack 2 T10 (R02): only an 'http' rail reaches the stored URL; a simulator
+      // (or any other) rail POSTs to the hosted reference rail, whatever is stored.
+      const settlementUrl = settlementTargetUrl(integrations.payment);
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new RailInstructError(railPartnerId, 'Settlement endpoint not configured.');
       try {
         assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       } catch (e) {
         throw new RailInstructError(railPartnerId, e);
+      }
+      // Pack 2 T10 (R02): the live-list gate at the instruct chokepoint. A row
+      // paid while the rail was a demo rail (screened on the mock list), then
+      // retried, re-instructed or dead-letter-retried after the rail went 'http',
+      // is NOT sent: its newest screen must have been on a live list. Evidence
+      // with no listFitness (written before pack 2), or no evidence at all,
+      // passes (in-flight rows keep today's behaviour). The gate only ever stops
+      // a POST; it never moves money. Retried like any rail error.
+      if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
+        const newest = (await listScreenEvidence(deps.db, transfer, new Date())).at(-1);
+        if (newest?.listFitness !== undefined && newest.listFitness !== 'live') {
+          logWarn('outbox.instruct-not-live', 'last sanctions screen not on a live list; instruction not sent', { transferId });
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message:
+                `transfer ${transferId} (rail ${railPartnerId}) is paid but its last sanctions screen was not on a live list; ` +
+                'not instructed. Reject and refund it, or re-screen it.',
+            },
+            { dedupeKey: `instructnotlive:${transferId}` },
+          );
+          throw new RailInstructError(railPartnerId, 'Last screen not on a live list.');
+        }
       }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it. Built after the fail-closed URL
@@ -928,7 +955,8 @@ async function handle(
         if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
         const railPartnerId = full.settlementPartnerId ?? full.partnerId;
         const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-        const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+        // Pack 2 T10: same target rule as settlement.instruct. No list gate on a reverse (it returns money).
+        const settlementUrl = settlementTargetUrl(integrations.payment);
         const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
         assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct

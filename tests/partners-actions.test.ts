@@ -970,7 +970,9 @@ describe('settlement URL is validated at save time (Program-Fix 22, acceptance t
     });
     currentStaff = staff({ role: 'admin' });
     await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: '' }))).rejects.toThrow(MSG);
-    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }))).rejects.toThrow(MSG);
+    // Fix pack 2 T10: simulator never keeps a stored URL; it always saves the hosted rail.
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }))).resolves.toBeUndefined();
+    expect((await integrations.getIntegrations('acme')).payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
     // mock does not require a URL: the blank field passes and the kept value is not the gate.
     await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'mock', settlementUrl: '' }))).resolves.toBeUndefined();
     // ...but a SUBMITTED bad value is still refused for mock.
@@ -987,6 +989,37 @@ describe('settlement URL is validated at save time (Program-Fix 22, acceptance t
     currentStaff = staff({ role: 'admin' });
     await savePaymentConfigAction(form({ id: 'beta', providerType: 'simulator', settlementUrl: '' }));
     const after = await integrations.getIntegrations('beta');
+    expect(after.payment.providerType).toBe('simulator');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+  });
+
+  // Fix pack 2 T10 (R02): a simulator rail only ever POSTs to the hosted rail,
+  // so its stored URL is always that one: a kept or submitted URL is ignored.
+  it('switching http -> simulator rewrites the URL to /api/partner-rail', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }));
+    const after = await integrations.getIntegrations('acme');
+    expect(after.payment.providerType).toBe('simulator');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+    expect(after.payment.credentials?.signingSecret).toBe('sgn'); // secrets are kept, not re-minted
+  });
+
+  it('simulator with a submitted external URL stores the hosted URL', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await savePaymentConfigAction(form({ id: 'beta', providerType: 'simulator', settlementUrl: 'https://rail.elsewhere-test.com/settle' }));
+    const after = await integrations.getIntegrations('beta');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+    expect(after.payment.credentials?.signingSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(after.payment.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('wizard simulator with an external URL stores the hosted URL', async () => {
+    currentStaff = staff({ role: 'admin' });
+    const r = await wizardCreatePartnerAction({
+      name: 'Sim Ext', countries: ['US'], payment: { providerType: 'simulator', settlementUrl: 'https://rail.elsewhere-test.com/settle' },
+    });
+    expect(r.settlementConfigured).toBe(true);
+    const after = await integrations.getIntegrations(r.id);
     expect(after.payment.providerType).toBe('simulator');
     expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
   });

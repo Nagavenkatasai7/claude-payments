@@ -12,7 +12,9 @@
 
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import type { DbOrTx } from '@/db/client';
+import { env } from './env';
 import { logWarn } from './log';
+import type { PartnerIntegrations } from './partner-integrations';
 import type { PartnerId, Transfer, TransferEnvironment } from './types';
 
 /** 'test' -> false; undefined (read failed) -> true; 'http' -> true; else false. */
@@ -55,3 +57,15 @@ export async function realMoneyFor(
   return realMoneyRail({ environment: t.environment, railProviderType });
 }
 
+
+/**
+ * Fix pack 2 T10 (R02): the ONE URL a settlement instruct or reverse is POSTed
+ * to. Only an 'http' rail reaches the partner's stored URL; every other rail
+ * (simulator, mock, absent) goes to the hosted reference rail in this app, so
+ * a demo rail can never send money out. This is what makes realMoneyRail's
+ * "'http' only" sound. Pure.
+ */
+export function settlementTargetUrl(p: PartnerIntegrations['payment']): string {
+  if (p.providerType === 'http') return p.credentials?.settlementUrl ?? '';
+  return `${env.appBaseUrl}/api/partner-rail`;
+}
