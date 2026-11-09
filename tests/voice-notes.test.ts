@@ -166,7 +166,6 @@ describe('VOICE_INPUT_NOTE and the tool classification tripwire', () => {
     'create_invoice',
     'cancel_bill',
     'dispute_bill',
-    'create_transfer',
     'generate_payment_link',
     'request_refund',
     'open_recall_dispute',

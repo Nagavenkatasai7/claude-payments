@@ -43,6 +43,9 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['transfer_search', ctx.purpose('transfer_search'), 'v2|k0|purpose|transfer_search|'],
     // UI redesign M3-16: the sealed partner report CSV, bound to its tenant and job id.
     ['partner report', ctx.partnerReport('acme', '0b7c2f7e-1a2b-4c3d-8e9f-001122334455'), 'v2|k0|partner_report_jobs|content_enc|acme|0b7c2f7e-1a2b-4c3d-8e9f-001122334455'],
+    // R49: the sealed Redis chat history (keyed by tenant + thread HMAC) and pay-link draft (by draft id).
+    ['redis conversation', ctx.redisConversation('acme', 'ab'.repeat(32)), `v2|k0|redis|conversation|acme|${'ab'.repeat(32)}`],
+    ['redis draft', ctx.redisDraft('4f9Xk2_mQ8sLp0aZr1bC3w'), 'v2|k0|redis|draft|4f9Xk2_mQ8sLp0aZr1bC3w'],
     // Partner-Demo R3b: the sealed conversation log. The row parts bind the
     // tenant, the row id, the thread (hex of the 32-byte thread_key), the
     // channel and the direction, so a body re-attributed to another thread,

@@ -1,5 +1,6 @@
 import { env } from './env';
 import { scrub } from './log';
+import { aiNoticeText } from './ai-notice';
 import type { UnsupportedMediaType } from './types';
 
 // telegram — the Telegram Bot API for the Telegram TEST channel (owner request
@@ -135,7 +136,8 @@ export const SHARE_PHONE_PROMPT =
   'Welcome to SmartRemit. To start, tap "Share my phone number" below. We use it to find your SmartRemit account. ' +
   'This Telegram bot is a test version.';
 export const SHARE_OWN_PHONE_PROMPT = 'Please share your own phone number with the button below.';
-export const PHONE_LINKED_REPLY = 'Thank you. Your number is linked. Now type your message, for example: Send $100 to Mom.';
+// R17: the customer learns they are chatting with an AI before their first message.
+export const PHONE_LINKED_REPLY = `${aiNoticeText('en', 'telegram')}\n\nThank you. Your number is linked. Now type your message, for example: Send $100 to Mom.`;
 export const NOT_AVAILABLE_REPLY = 'The SmartRemit Telegram bot is a test version. It is not available for this phone number yet.';
 
 /** The webhook-answer form of sendMessage with the one-time "Share my phone number" keyboard. Pure. */

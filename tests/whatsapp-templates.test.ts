@@ -4,7 +4,7 @@ import {
   TEMPLATE_TRANSFER_DELIVERED_SENDER,
   TEMPLATE_SCHEDULED_PAYMENT_READY,
   TEMPLATE_PAYMENT_REMINDER,
-  TEMPLATE_TRANSFER_IN_REVIEW,
+  TEMPLATE_TRANSFER_PROCESSING,
   TEMPLATE_TRANSFER_RELEASED,
   TEMPLATE_TRANSFER_CANCELLED,
   TEMPLATE_VERIFICATION_REMINDER,
@@ -17,7 +17,7 @@ import {
   scheduledPaymentReadyText,
   scheduleSetUpDay,
   paymentReminderParams,
-  transferInReviewParams,
+  transferProcessingParams,
   transferReleasedParams,
   transferCancelledParams,
   verificationReminderParams,
@@ -79,7 +79,7 @@ describe('template constants (docs/meta-whatsapp-config.md §3)', () => {
     expect(TEMPLATE_TRANSFER_DELIVERED_SENDER).toBe('transfer_delivered_sender'); // §3.2
     expect(TEMPLATE_SCHEDULED_PAYMENT_READY).toBe('scheduled_payment_ready');     // §3.3
     expect(TEMPLATE_PAYMENT_REMINDER).toBe('payment_reminder');                   // §3.4
-    expect(TEMPLATE_TRANSFER_IN_REVIEW).toBe('transfer_in_review');               // §3.5
+    expect(TEMPLATE_TRANSFER_PROCESSING).toBe('transfer_processing');             // §3.5 (R30: replaces transfer_in_review)
     expect(TEMPLATE_TRANSFER_RELEASED).toBe('transfer_released');                 // §3.6
     expect(TEMPLATE_TRANSFER_CANCELLED).toBe('transfer_cancelled');               // §3.7
     expect(TEMPLATE_VERIFICATION_REMINDER).toBe('verification_reminder');         // §3.8
@@ -201,7 +201,7 @@ describe('paymentReminderParams (§3.4 — body [name, amount, recipient] + URL 
 });
 
 describe.each([
-  ['transferInReviewParams §3.5', transferInReviewParams],
+  ['transferProcessingParams §3.5', transferProcessingParams],
   ['transferReleasedParams §3.6', transferReleasedParams],
   ['transferCancelledParams §3.7', transferCancelledParams],
 ])('%s — [name, amount, recipient]', (_label, builder) => {

@@ -29,6 +29,7 @@ import { decidePurpose, type PurposeDetailCode } from '@/lib/purpose-detail';
 import { payUrlFor, prepareSendDraft, type PrepareSendInput } from '@/lib/send-seam';
 import { executeTool, maskAccount, rateLockMinutes } from '@/lib/tools';
 import { boundUntrustedText, NAME_MAX } from '@/lib/untrusted-text';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 import type { RedisLike } from '@/lib/store';
 import type { CountryCode, Draft } from '@/lib/types';
 import type { ToolOutcome } from './guard';
@@ -134,12 +135,13 @@ export function refusalMessage(c: SendCopy): string {
       return 'The customer must verify their identity first, in SmartRemit on WhatsApp or the SmartRemit portal.';
     case 'portal.send.contact_partner':
       return 'SmartRemit cannot accept transfers from this account. The customer should contact SmartRemit support.';
+    // R30 (no tipping-off): the fixed hold-replies.ts texts, never a figure or a remaining amount.
     case 'portal.send.cap_daily':
-      return `This is more than the customer can send today. They can still send ${c.vars?.remaining ?? 'less'} today.`;
+      return FIXED_REPLIES.cap_daily;
     case 'portal.send.cap_per_transfer':
-      return `This is more than one transfer allows. The most is ${c.vars?.max ?? 'lower'}.`;
+      return FIXED_REPLIES.cap_per_transfer;
     case 'portal.send.edd_whatsapp':
-      return 'SmartRemit needs a few more details before this transfer. The customer can give them in SmartRemit on WhatsApp.';
+      return FIXED_REPLIES.edd_elsewhere;
     case 'portal.send.name_needed':
       return "SmartRemit needs the customer's full legal name first. They can add it in SmartRemit on WhatsApp or on the portal's Send page.";
     case 'portal.send.fx_unavailable':

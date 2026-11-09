@@ -53,7 +53,7 @@ async function seedVerifiedCustomer(
   });
 }
 
-// R6b (A7L-1): no chat channel dispatches create_transfer, so every flow mints
+// R6b (A7L-1), R30: no chat tool mints (the old one is deleted), so every flow mints
 // the way production does: the approve card's draft is finalized by the secure
 // pay page (finalizeDraftPayment), with the bank details the sender enters there.
 function draftIdIn(redis: ReturnType<typeof fakeRedis>): string {
@@ -91,8 +91,9 @@ describe('end-to-end happy path', () => {
     const draftStore = createDraftStore(redis);
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
-    // Scripted model: quote -> approve card (a draft). A stale create_transfer /
-    // generate_payment_link pair (e.g. from old history) is refused at dispatch.
+    // Scripted model: quote -> approve card (a draft). A stale call to the
+    // deleted create_transfer (R30: an unknown tool) and a generate_payment_link
+    // (refused at dispatch on WhatsApp), e.g. from old history, run nothing.
     const script: ChatMessage[] = [
       toolCall('c1', 'get_quote', {
         amount_usd: 500,
@@ -143,11 +144,12 @@ describe('end-to-end happy path', () => {
       PHONE,
       'send $500 to my mom on UPI mom@upi',
     );
-    // The chat minted nothing: both hidden tools were refused at dispatch.
+    // The chat minted nothing: the deleted tool is unknown and the hidden one is refused at dispatch.
     expect(await store.listTransfers()).toHaveLength(0);
     const history = await store.getConversation('default', PHONE);
-    const refused = history.filter((m) => m.role === 'tool' && m.content === JSON.stringify({ error: 'not available here' }));
-    expect(refused).toHaveLength(2);
+    const toolContents = history.filter((m) => m.role === 'tool').map((m) => m.content);
+    expect(toolContents).toContain(JSON.stringify({ error: 'Unknown tool: create_transfer' }));
+    expect(toolContents.filter((c) => c === JSON.stringify({ error: 'not available here' }))).toHaveLength(1);
 
     // The pay page mints from the approve card's draft.
     const paid = await finalizeDraftPayment(
@@ -315,7 +317,7 @@ describe('end-to-end new customer with cap', () => {
     const scheduleStore = createScheduleStore(db);
     const draftStore = createDraftStore(redis);
     // Phase 3: a verified sender (still T0 within the 3-day window, so the cap UX
-    // below is unchanged) — required for send_approve_picker/create_transfer to
+    // below is unchanged) — required for send_approve_picker to
     // pass the verify-before-send gate. The observation invariant (verified
     // mid-window stays T0/$500) is still asserted at the end of this test.
     await seedVerifiedCustomer(customerStore, PHONE);

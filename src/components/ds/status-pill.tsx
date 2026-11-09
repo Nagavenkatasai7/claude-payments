@@ -1,7 +1,7 @@
 import { Check, Clock, RotateCcw, TriangleAlert, X } from 'lucide-react';
 import type { RefundStatus, TransferStatus } from '@/lib/types';
 import { t } from '@/lib/i18n';
-import { transferStatusView, type StatusIcon } from '@/lib/ui/transfer-status';
+import { transferStatusView, type StatusAudience, type StatusIcon } from '@/lib/ui/transfer-status';
 import { Badge } from './badge';
 
 const ICONS: Record<StatusIcon, typeof Check> = {
@@ -12,9 +12,12 @@ const ICONS: Record<StatusIcon, typeof Check> = {
   refund: RotateCcw,
 };
 
-/** A transfer's status: icon + text label (never colour alone), from the one mapping. */
-export function StatusPill({ status, refundStatus }: { status: TransferStatus; refundStatus?: RefundStatus }) {
-  const view = transferStatusView({ status, refundStatus });
+/**
+ * A transfer's status: icon + text label (never colour alone), from the one mapping.
+ * Customer pages pass audience="customer" (R30: a held transfer reads "Processing").
+ */
+export function StatusPill({ status, refundStatus, audience = 'staff' }: { status: TransferStatus; refundStatus?: RefundStatus; audience?: StatusAudience }) {
+  const view = transferStatusView({ status, refundStatus }, audience);
   const Icon = ICONS[view.icon];
   return (
     <Badge tone={view.tone}>

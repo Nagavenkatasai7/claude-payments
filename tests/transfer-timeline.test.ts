@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { transferTimeline } from '@/lib/portal-transfers';
 import { t as msg } from '@/lib/i18n';
 import type { Transfer } from '@/lib/types';
+import { BLOCK_REPLY, FIXED_REPLIES } from '@/lib/hold-replies';
 
 // UI redesign M2-7, Task 7.1: the customer portal's transfer timeline. A pure function over the
 // forward-only status machine plus the refund overlay. It never invents timestamps (a step carries
@@ -47,11 +48,17 @@ describe('transferTimeline', () => {
       'portal.timeline.delivered:upcoming',
     ]);
   });
-  it('blocked (never charged): the same neutral review step, stopped, and nothing after it', () => {
+  it('blocked (never charged): its own final step, stopped, and nothing after it', () => {
     expect(shape(base({ status: 'blocked', complianceReasons: ['sanctions_match'] }))).toEqual([
       'portal.timeline.created:done',
-      'portal.timeline.under_review:stopped',
+      'portal.timeline.not_completed:stopped',
     ]);
+  });
+  it('review fix: a blocked transfer reads the fixed block text, a held one the fixed hold text', () => {
+    // A blocked customer must not wait for an update that never comes (the bot and the receipt say BLOCK_REPLY).
+    expect(msg('portal.timeline.not_completed')).toBe(BLOCK_REPLY);
+    expect(msg('portal.timeline.under_review')).toBe(FIXED_REPLIES.timeline_held);
+    expect(msg('portal.timeline.not_completed')).not.toMatch(/update|processing/i);
   });
   it('the review copy carries no sanctions or compliance detail', () => {
     const text = transferTimeline(base({ status: 'blocked' }))

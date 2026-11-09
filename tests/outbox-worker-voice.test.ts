@@ -26,6 +26,14 @@ import type { Db } from '@/db/client';
 // (reply:<row id>) and the row is done: no row-level retry, so the customer's
 // later turns are never held. Phones are obvious fakes; no key is real.
 
+// R17: the AI notice and its durable marker are covered by
+// tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
+// shown, so these suites keep checking the exact reply text of each path.
+vi.mock('@/lib/ai-notice-marker', async (orig) => ({
+  ...(await orig<typeof import('@/lib/ai-notice-marker')>()),
+  aiNoticeDueFor: async () => false,
+}));
+
 const P = '15550000001';
 const MEDIA = { id: '4242', mimeType: 'audio/ogg; codecs=opus' };
 

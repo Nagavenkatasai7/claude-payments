@@ -151,6 +151,14 @@ describe('a linked chat runs the WhatsApp pipeline', () => {
     expect((await outboxRows()).filter((r) => r.kind === 'agent.turn')).toHaveLength(1);
   });
 
+  it('R49: a card or account number typed on Telegram is hidden before the row is written', async () => {
+    await linkPhone();
+    await handleTelegramUpdate(msg(9, { text: 'my card 4111 1111 1111 1111 and aadhaar 2345 6789 0125' }));
+    const payload = (await outboxRows())[0].payload as { messageText: string; turn: { redacted?: boolean } };
+    expect(payload.messageText).toBe('my card [card number hidden] and aadhaar [Aadhaar number hidden]');
+    expect(payload.turn.redacted).toBe(true);
+  });
+
   it('/start reads as a greeting', async () => {
     await linkPhone();
     await handleTelegramUpdate(msg(7, { text: '/start' }));

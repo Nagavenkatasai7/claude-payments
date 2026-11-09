@@ -326,6 +326,77 @@ jobs:
             *) echo "::warning title=osv-scanner::scanner did not complete (exit $rc); report-only, not blocking" ;;
           esac
 
+  # R31 (Q10): the real-model bot eval (scripts/eval-bot.ts, docs/BOT-EVAL.md)
+  # on a pull request that changes what the bot model is told or how it is
+  # called: scripts/ci/eval-scope.mjs lists the prompt, tool, agent and model
+  # files, the eval itself and the @anthropic-ai/sdk version. It runs the
+  # 20-case PR subset on every model staff can select, 3 runs each (about 120
+  # calls; the nightly runs every case). REPORT-ONLY until the repository
+  # variable BOT_EVAL_ENFORCE is '1' (set after a green nightly baseline):
+  # until then a failing eval only warns and the job succeeds. Out of scope,
+  # the job succeeds in seconds, so the required `ci` check never sees it
+  # skipped. The only secret in this file is the dedicated, spend-capped eval
+  # key, in the eval step alone. pull_request (never pull_request_target): a
+  # fork PR gets no secret, so its eval skips while report-only and fails once
+  # enforced (a maintainer re-pushes it as a branch).
+  bot-eval:
+    name: bot eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # Full history: the scope check diffs the PR against its merge base.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      # Always exits 0; writes in_scope=true|false to GITHUB_OUTPUT.
+      - name: Does this change touch the bot model?
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: node scripts/ci/eval-scope.mjs
+
+      - name: Install
+        if: steps.scope.outputs.in_scope == 'true'
+        run: npm ci
+
+      # 20 cases x 2 models x 3 runs; the script stops starting calls after
+      # EVAL_TIME_BUDGET_MIN so the report is still written inside the timeout.
+      - name: Bot eval (PR subset, real models)
+        id: eval
+        if: steps.scope.outputs.in_scope == 'true'
+        continue-on-error: ${{ vars.BOT_EVAL_ENFORCE != '1' }}
+        timeout-minutes: 18
+        env:
+          EVAL_ANTHROPIC_API_KEY: ${{ secrets.EVAL_ANTHROPIC_API_KEY }}
+          EVAL_SUBSET: pr
+          EVAL_REQUIRED: ${{ vars.BOT_EVAL_ENFORCE == '1' && '1' || '0' }}
+          EVAL_TIME_BUDGET_MIN: '15'
+          EVAL_REPORT_DIR: ${{ runner.temp }}/bot-eval-report
+        run: npx tsx scripts/eval-bot.ts
+
+      - name: Report-only result
+        if: steps.eval.outcome == 'failure' && vars.BOT_EVAL_ENFORCE != '1'
+        run: echo "::warning title=Bot eval (report-only)::The bot eval failed on this change. It does not block while BOT_EVAL_ENFORCE is not 1; read the bot-eval-report-pr artifact."
+
+      - name: Upload the eval report
+        if: ${{ !cancelled() && steps.scope.outputs.in_scope == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bot-eval-report-pr
+          path: ${{ runner.temp }}/bot-eval-report/
+          retention-days: 90
+          if-no-files-found: ignore
+
   # The REQUIRED status check. Keep the job name exactly `ci`, and let no other
   # job use that name. `if: always()` makes it run (and report) even when a
   # job above failed or was cancelled; it then passes only when every needed
@@ -333,7 +404,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [drift, migrations, typecheck, lint, test, build, audit, security]
+    needs: [drift, migrations, typecheck, lint, test, build, audit, security, bot-eval]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

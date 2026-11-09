@@ -98,7 +98,7 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
       <div className="flex flex-col gap-5">
         <Card className="flex flex-col gap-4 p-5 sm:p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <StatusPill status={transfer.status} refundStatus={transfer.refundStatus} />
+            <StatusPill status={transfer.status} refundStatus={transfer.refundStatus} audience="customer" />
             <span className="text-[13.5px] text-ds-ink-muted">{when(transfer.createdAt)}</span>
           </div>
           <dl className="divide-y divide-ds-border">

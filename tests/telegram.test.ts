@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { aiNoticeText } from '@/lib/ai-notice';
 import {
   askPhonePayload,
   buttonsPayload,
@@ -75,6 +76,11 @@ describe('parseTelegramUpdate', () => {
 });
 
 describe('payloads', () => {
+  it('R17: the linked-phone reply starts with the AI notice', () => {
+    expect(PHONE_LINKED_REPLY.startsWith(`${aiNoticeText('en', 'telegram')}\n\n`)).toBe(true);
+    expect(PHONE_LINKED_REPLY).toContain('Your number is linked.');
+  });
+
   it('the bot texts a Telegram customer sees do not mention WhatsApp', () => {
     for (const text of [SHARE_PHONE_PROMPT, SHARE_OWN_PHONE_PROMPT, PHONE_LINKED_REPLY, NOT_AVAILABLE_REPLY]) {
       expect(text).not.toMatch(/whatsapp/i);

@@ -16,7 +16,14 @@ const BASE: Record<TransferStatus, { tone: Tone; icon: StatusIcon }> = {
   blocked: { tone: 'danger', icon: 'alert' },
 };
 
-export function transferStatusView(t: Pick<Transfer, 'status' | 'refundStatus'>): TransferStatusView {
+/**
+ * Who reads the label. Staff (partner and admin pages) see "Under review" for a
+ * held transfer; a customer (the portal, its receipt, /account) sees the fixed
+ * processing label from hold-replies.ts with a neutral tone (R30, no tipping-off).
+ */
+export type StatusAudience = 'staff' | 'customer';
+
+export function transferStatusView(t: Pick<Transfer, 'status' | 'refundStatus'>, audience: StatusAudience = 'staff'): TransferStatusView {
   const r = t.refundStatus;
   // An active or settled refund replaces the base label; 'none' / 'failed' fall through (as in the portal).
   if (r === 'requested' || r === 'pending' || r === 'completed') {
@@ -24,5 +31,6 @@ export function transferStatusView(t: Pick<Transfer, 'status' | 'refundStatus'>)
   }
   const base = Object.hasOwn(BASE, t.status) ? BASE[t.status] : undefined;
   if (!base) return { labelKey: 'status.transfer.unknown', tone: 'neutral', icon: 'clock' };
+  if (audience === 'customer' && t.status === 'in_review') return { labelKey: 'status.customer.in_review', tone: 'info', icon: 'clock' };
   return { labelKey: `status.transfer.${t.status}`, ...base };
 }

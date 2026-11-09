@@ -396,12 +396,12 @@ describe('continueToPayAction — refusals before the seam', () => {
     expect(prepareSpy).not.toHaveBeenCalled();
   });
 
-  it('(10) over the cap on a direct POST → the cap copy with the limit, the seam is NOT called', async () => {
+  it('(10) over the cap on a direct POST → the fixed cap copy with no figure (R30), the seam is NOT called', async () => {
     const rv = await review('pa', { ...newRecipient, amountSource: 2800 });
     await seedLedgerSpend(db, { partnerId: 'pa', phone, amountUsd: 500, status: 'paid' });
     const r = await continueToPayAction({ requestKey: '' }, fd({ rv }));
     expect(r.error).toBe('portal.send.cap_daily');
-    expect(r.vars?.remaining).toMatch(/\$/);
+    expect(r.vars).toBeUndefined(); // never how much is left today
     expect(prepareSpy).not.toHaveBeenCalled();
   });
 
