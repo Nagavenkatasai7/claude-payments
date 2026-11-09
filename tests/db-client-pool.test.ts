@@ -6,7 +6,15 @@ import { describe, it, expect, vi } from 'vitest';
 // node_modules/@neondatabase/serverless/index.d.ts:287 (connectionTimeoutMillis)
 // and :1035-1043 (PoolConfig: max, idleTimeoutMillis, maxUses), v1.1.0.
 
-const Pool = vi.hoisted(() => vi.fn(function PoolMock() {}));
+// getDb() also guards the Pool (src/db/pool-guard.ts, pinned against the real
+// driver in tests/db-pool-guard.test.ts): the guard reads `pool.options` and
+// adds listeners, so the stand-in carries both.
+const Pool = vi.hoisted(() =>
+  vi.fn(function PoolMock(this: { options: object; on: () => void }, options: object) {
+    this.options = { ...options };
+    this.on = () => {};
+  }),
+);
 vi.mock('@neondatabase/serverless', () => ({ Pool, neonConfig: {} }));
 vi.mock('drizzle-orm/neon-serverless', () => ({ drizzle: vi.fn(() => ({})) }));
 vi.mock('@/lib/env', () => ({ env: { databaseUrl: 'postgres://pool-test.invalid/db' } }));

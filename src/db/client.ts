@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/neon-serverless';
 import ws from 'ws';
 import { env } from '@/lib/env';
 import * as schema from './schema';
+import { guardPool } from './pool-guard';
 
 // db/client — the cached Drizzle handle over Neon's serverless WebSocket Pool.
 //
@@ -37,6 +38,9 @@ export function getDb() {
       connectionTimeoutMillis: 5_000,
       maxUses: 500,
     });
+    // A dropped connection must not crash the instance or print DATABASE_URL
+    // (2026-10-17 and 2026-11-09 password leaks): see ./pool-guard.
+    guardPool(pool);
     cached = drizzle(pool, { schema });
   }
   return cached;

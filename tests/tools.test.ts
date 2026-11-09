@@ -1246,6 +1246,62 @@ describe('get_quote: receive-first (amount_inr) branch', () => {
   });
 });
 
+// Weekly reliability 2026-11-09: two saved recipients with the same number gave
+// two buttons with the same id, and WhatsApp rejects that send with a 400.
+describe('send_recipient_picker — unique button ids', () => {
+  function captureSends() {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      if (body?.interactive) bodies.push(body);
+      return { ok: true, text: async () => '' };
+    }));
+    return bodies;
+  }
+
+  it('dedupes recipients by normalized phone so every button id is unique', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const bodies = captureSends();
+    const r = await executeTool('send_recipient_picker', {
+      recipients: [
+        { name: 'Mom', recipient_phone: '+91 98765 43210' },
+        { name: 'Amma', recipient_phone: '919876543210' },
+      ],
+    }, ctx);
+    expect(r.sent).toBe(true);
+    expect(bodies).toHaveLength(1);
+    const buttons = ((bodies[0].interactive as Record<string, unknown>).action as { buttons: { reply: { id: string } }[] }).buttons;
+    const ids = buttons.map((b) => b.reply.id);
+    expect(ids).toHaveLength(2); // one recipient + "Someone new"
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('a duplicate does not use up the two-recipient cap', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const bodies = captureSends();
+    await executeTool('send_recipient_picker', {
+      recipients: [
+        { name: 'Mom', recipient_phone: '919876543210' },
+        { name: 'Mom', recipient_phone: '+919876543210' },
+        { name: 'Raj', recipient_phone: '919811112222' },
+      ],
+    }, ctx);
+    const buttons = ((bodies[0].interactive as Record<string, unknown>).action as { buttons: { reply: { id: string } }[] }).buttons;
+    expect(buttons).toHaveLength(3);
+    expect(new Set(buttons.map((b) => b.reply.id)).size).toBe(3);
+  });
+
+  it('recipients with no phone are dropped; none left returns the error and sends nothing', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const bodies = captureSends();
+    const r = await executeTool('send_recipient_picker', {
+      recipients: [{ name: 'Mom', recipient_phone: '' }, { name: 'Dad' }],
+    }, ctx);
+    expect(r.error).toMatch(/at least 1 recipient/);
+    expect(bodies).toHaveLength(0);
+  });
+});
+
 describe('send_approve_picker — cap enforcement', () => {
   it('refuses to send buttons and returns error when over cap', async () => {
     const redis = fakeRedis();

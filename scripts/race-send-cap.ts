@@ -38,6 +38,7 @@ import { createTransfer, type CreateTransferInput } from '@/lib/transfer-create'
 import { SendCapError } from '@/lib/send-limits';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Db } from '@/db/client';
+import { guardPool } from '@/db/pool-guard';
 import type { RedisLike } from '@/lib/store';
 import type { Transfer } from '@/lib/types';
 
@@ -77,6 +78,7 @@ const noRedis: RedisLike = {
 
 function conn(): { db: Db; pool: Pool } {
   const pool = new Pool({ connectionString: url });
+  guardPool(pool); // a dropped connection must not print the branch URL (see src/db/pool-guard.ts)
   return { db: drizzle(pool, { schema }) as unknown as Db, pool };
 }
 

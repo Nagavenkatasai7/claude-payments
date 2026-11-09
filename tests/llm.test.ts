@@ -203,3 +203,68 @@ describe('chat (Claude adapter)', () => {
     info.mockRestore();
   });
 });
+
+// Report item 3 (2026-11-09): a passive proof that the Claude API answers in
+// production. onSuccess fires once per good reply, never on a refusal or an
+// error, and a throwing marker never costs the customer their reply.
+describe('chat onSuccess marker', () => {
+  it('fires once after a good reply', async () => {
+    const { client } = fakeClient(async () => reply([{ type: 'text', text: 'ok', citations: null }]));
+    const onSuccess = vi.fn();
+    const out = await createChat({ client: () => client, onSuccess })(USER, []);
+    expect(out).toMatchObject({ content: 'ok' });
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire on a refusal or a provider error', async () => {
+    const onSuccess = vi.fn();
+    const refused = fakeClient(async () =>
+      reply([], { stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'general_harms', explanation: null } }),
+    );
+    await expect(createChat({ client: () => refused.client, onSuccess })(USER, [])).rejects.toThrow(/declined/);
+    const failed = fakeClient(async () => { throw apiError(500, 'api_error'); });
+    await expect(createChat({ client: () => failed.client, onSuccess })(USER, [])).rejects.toBeInstanceOf(ProviderHttpError);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('does not fire on an empty reply (no text, no tool call); fires on a tool-call reply', async () => {
+    const onSuccess = vi.fn();
+    const empty = fakeClient(async () => reply([{ type: 'thinking', thinking: '', signature: 'sig' }]));
+    await createChat({ client: () => empty.client, onSuccess })(USER, []);
+    const blank = fakeClient(async () => reply([{ type: 'text', text: '   ', citations: null }]));
+    await createChat({ client: () => blank.client, onSuccess })(USER, []);
+    expect(onSuccess).not.toHaveBeenCalled();
+    const tool = fakeClient(async () => reply([{ type: 'tool_use', id: 'tu_1', name: 'get_quote', input: { amount_usd: 100 } }], { stop_reason: 'tool_use' }));
+    const out = await createChat({ client: () => tool.client, onSuccess })(USER, toolSchemas);
+    expect(out.tool_calls).toHaveLength(1);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires once when the overload fallback model returns a usable reply, not when it returns an empty one', async () => {
+    const onSuccess = vi.fn();
+    let n = 0;
+    const good = fakeClient(async () => {
+      n += 1;
+      if (n === 1) throw apiError(529, 'overloaded_error');
+      return reply([{ type: 'text', text: 'from sonnet', citations: null }]);
+    });
+    await createChat({ client: () => good.client, onSuccess })(USER, []);
+    expect(good.create.mock.calls.map((c) => c[0].model)).toEqual([HAIKU, SONNET]);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    let m = 0;
+    const empty = fakeClient(async () => {
+      m += 1;
+      if (m === 1) throw apiError(529, 'overloaded_error');
+      return reply([]);
+    });
+    await createChat({ client: () => empty.client, onSuccess })(USER, []);
+    expect(empty.create).toHaveBeenCalledTimes(2);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('a throwing marker does not break the reply', async () => {
+    const { client } = fakeClient(async () => reply([{ type: 'text', text: 'still here', citations: null }]));
+    const onSuccess = vi.fn(() => { throw new Error('marker blew up'); });
+    await expect(createChat({ client: () => client, onSuccess })(USER, [])).resolves.toMatchObject({ content: 'still here' });
+  });
+});
