@@ -10,6 +10,7 @@ import {
   parseDisclosureForm,
   parseSupportPortal,
   setAlertEmail,
+  setComplianceAlertEmail,
   setDisclosure,
   setSupportKnobs,
   setSupportPortal,
@@ -152,6 +153,22 @@ describe('the support_config writers (PGlite)', () => {
       { set: false, hadPrevious: true, actorScope: 'partner' },
     ]);
     expect(JSON.stringify(rows)).not.toContain('@');
+  });
+
+  it('setComplianceAlertEmail audits without the address', async () => {
+    // Fix pack 2 T5 (R04): where sanctions-block notices go; the alert email is kept.
+    expect(await setComplianceAlertEmail(db, 'pa', actor, 'compliance@acme.example')).toEqual({ ok: true });
+    expect(await sc()).toEqual({ enableSupportPortal: true, autoAssign: 'round_robin', alertEmail: 'ops@acme.example', complianceAlertEmail: 'compliance@acme.example', disclosure: DISCLOSURE });
+    expect(await setComplianceAlertEmail(db, 'pa', actor, null)).toEqual({ ok: true });
+    expect(await sc()).toEqual({ enableSupportPortal: true, autoAssign: 'round_robin', alertEmail: 'ops@acme.example', disclosure: DISCLOSURE });
+    const rows = await audits();
+    expect(rows.map((r) => r.action)).toEqual(['partner.compliance_email.update', 'partner.compliance_email.update']);
+    expect(rows.map((r) => r.meta)).toEqual([
+      { set: true, hadPrevious: false, actorScope: 'partner' },
+      { set: false, hadPrevious: true, actorScope: 'partner' },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('@');
+    expect(await setComplianceAlertEmail(db, 'ghost', actor, 'x@y.example')).toEqual({ ok: false, reason: 'not_found' });
   });
 
   it('setDisclosure replaces and clears ONLY the disclosure block, auditing old and new', async () => {

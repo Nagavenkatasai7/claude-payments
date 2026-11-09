@@ -5,7 +5,7 @@ import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPho
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { recordBlockedAttempt } from './transfer-create';
+import { recordBlockedAttempt, type BlockedAttemptInput } from './transfer-create';
 import { resolveQuoteReward } from './rewards/resolver';
 import { rewardFeeLine } from './rewards/engine';
 import { isFundedRewardKind, type QuotedReward } from './rewards/types';
@@ -35,6 +35,8 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
+import { realMoneyRail } from './live-gate';
+import { sanctionsBlockUnrecordedKey } from './sanctions/notices';
 import { getDb, type Db } from '@/db/client';
 import { openRecallTicketLocked } from './receipt-cores';
 import { refundDisposition } from './refund-policy';
@@ -1971,6 +1973,7 @@ async function registerSellerTool(
   // never flag), and closed for the list screener. The screen's evidence (or
   // decision 'error' when the screener threw) is recorded on the seller id below.
   let cleared: boolean;
+  let blocked = false;
   let screenEvidence: ScreeningEvidence;
   // Program-Fix 14 PR C: refresh the OFAC list before the screen (a no-op
   // unless SANCTIONS_LIST=ofac-sdn; never throws; no transaction is open here).
@@ -1983,6 +1986,7 @@ async function registerSellerTool(
       sourceCountry: country,
     });
     cleared = screen.status === 'cleared';
+    blocked = screen.status === 'blocked';
     screenEvidence = screen.evidence ?? errorEvidence();
   } catch (err) {
     console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
@@ -2014,8 +2018,24 @@ async function registerSellerTool(
   // Program-Fix 14 step 6: the screen's evidence on the new seller id. Best-
   // effort (the seller row and its fail-closed review state are already
   // committed); a lost row is logged without the business name.
+  //
+  // Fix pack 2 T5 (R04): a BLOCKED screen writes its evidence and the block
+  // notices in one transaction (the seller's rail is the owner; environment
+  // 'live', a seller is never sandbox).
   try {
-    await ctx.store.recordAudit(sanctionsAuditEvent(partnerId, sellerId, screenEvidence));
+    if (blocked) {
+      const realMoney = realMoneyRail({ environment: 'live', railProviderType: await ctx.store.railProviderType(partnerId) });
+      await ctx.store.recordScreenEvidenceWithBlock(sanctionsAuditEvent(partnerId, sellerId, screenEvidence), {
+        partnerId,
+        subjectId: sellerId,
+        stage: 'seller',
+        environment: 'live',
+        realMoney,
+        evidence: screenEvidence,
+      });
+    } else {
+      await ctx.store.recordAudit(sanctionsAuditEvent(partnerId, sellerId, screenEvidence));
+    }
   } catch (err) {
     logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId });
   }
@@ -3955,43 +3975,75 @@ export async function prepareSendDraft(
       senderName: (b2b ? b2b.senderBusinessName : undefined) ?? customer.fullName,
     });
     if (screen.status === 'blocked') {
+      // Fix pack 2 T5 (R04): the block notices ride the blocked row's transaction.
+      // The card rail is the route's settlement partner, else the owner; the bot
+      // never mints sandbox, so the environment is 'live'.
+      const realMoney = realMoneyRail({
+        environment: 'live',
+        railProviderType: await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId),
+      });
       // Record an auditable, never-charged blocked row (no velocity/volume bump).
-      try {
-        await recordBlockedAttempt(ctx.store, {
-          phone: ctx.phone,
-          partnerCountries: partner?.countries,
-          recipientName: input.recipientName,
-          recipientPhone,
-          payoutMethod,
-          // fix 6: the sender's stored destination for this number, or '' — never a
-          // model-supplied value (the screener matches on name, not the account).
-          payoutDestination,
-          fundingMethod,
-          amountUsd: q.amountUsd,
-          amountSource: q.amountSource,
-          sourceCurrency: q.sourceCurrency,
-          feeUsd: q.feeUsd,
-          feeSource: q.feeSource,
-          fxRate: q.fxRate,
-          amountInr: q.amountInr,
-          totalChargeUsd: q.totalChargeUsd,
-          totalChargeSource: q.totalChargeSource,
-          destinationCountry,
-          destinationCurrency,
-          partnerId: ctx.partnerId,
-          reasons: screen.reasons,
-          // Program-Fix 14: the blocked row and its sanctions.screen evidence
-          // commit together (recordBlockedWithEvidence, one transaction).
-          evidence: screen.evidence,
-          // Step 0 FX-7: the quote-time rate provenance.
-          fxOrigin, fxAsOf, fxFetchedAt, fxProvider,
-        });
-      } catch (err) {
-        // Still best-effort: the customer gets the blocked reply either way.
-        // Only the error NAME is logged — a driver error can echo the insert's
-        // parameters (recipient name) in its message (drizzle-orm
-        // DrizzleQueryError carries query + params, errors.d.ts:9-14).
-        logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+      const blockedInput: BlockedAttemptInput = {
+        phone: ctx.phone,
+        partnerCountries: partner?.countries,
+        recipientName: input.recipientName,
+        recipientPhone,
+        payoutMethod,
+        // fix 6: the sender's stored destination for this number, or '' — never a
+        // model-supplied value (the screener matches on name, not the account).
+        payoutDestination,
+        fundingMethod,
+        amountUsd: q.amountUsd,
+        amountSource: q.amountSource,
+        sourceCurrency: q.sourceCurrency,
+        feeUsd: q.feeUsd,
+        feeSource: q.feeSource,
+        fxRate: q.fxRate,
+        amountInr: q.amountInr,
+        totalChargeUsd: q.totalChargeUsd,
+        totalChargeSource: q.totalChargeSource,
+        destinationCountry,
+        destinationCurrency,
+        partnerId: ctx.partnerId,
+        reasons: screen.reasons,
+        // Program-Fix 14: the blocked row and its sanctions.screen evidence
+        // commit together (recordBlockedWithEvidence, one transaction).
+        evidence: screen.evidence,
+        // Step 0 FX-7: the quote-time rate provenance.
+        fxOrigin, fxAsOf, fxFetchedAt, fxProvider,
+        notice: { realMoney, railPartnerId: settlementPartnerId },
+      };
+      let recorded = false;
+      for (let attempt = 0; attempt < 2 && !recorded; attempt++) {
+        try {
+          await recordBlockedAttempt(ctx.store, blockedInput);
+          recorded = true;
+        } catch (err) {
+          // Retried once (each attempt is its own transaction, so a failed one
+          // left nothing). Still best-effort: the customer gets the blocked reply
+          // either way. Only the error NAME is logged — a driver error can echo
+          // the insert's parameters (recipient name) in its message (drizzle-orm
+          // DrizzleQueryError carries query + params, errors.d.ts:9-14).
+          if (attempt === 1) logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+        }
+      }
+      if (!recorded) {
+        // Fix pack 2 T5: the block left no row, evidence or notice. One root
+        // ops alert per partner per hour (ids only; inline literal payload).
+        try {
+          await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+            'ops.alert',
+            {
+              message:
+                `⚠️ SmartRemit ops: a sanctions block for partner ${ctx.partnerId} could not be recorded (no blocked row, evidence or notice). ` +
+                `The customer was refused; check the database and the logs.`,
+            },
+            { dedupeKey: sanctionsBlockUnrecordedKey(ctx.partnerId, Math.floor(Date.now() / 3_600_000)) },
+          );
+          pokeWorker();
+        } catch (err) {
+          logWarn('sanctions.block-unrecorded', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+        }
       }
       return { kind: 'blocked' };
     }

@@ -12,6 +12,9 @@ import {
 } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
 import { listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { railPartnerOf } from './live-gate';
+import { pokeWorker } from './outbox';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createPartnerStore } from './partner-store';
 import type { Transfer } from './types';
@@ -106,7 +109,7 @@ export async function rescreenBeforePay(
   }
   const reasons = [...new Set([...(transfer.complianceReasons ?? []), ...added])];
 
-  return db.transaction(async (tx): Promise<RescreenOutcome> => {
+  const outcome = await db.transaction(async (tx): Promise<RescreenOutcome> => {
     let updated: Transfer | null = transfer;
     if (verdict) {
       updated = await createTransferRepo(tx).applyRescreenIfAwaiting(
@@ -120,10 +123,26 @@ export async function rescreenBeforePay(
     if (result.evidence) {
       await createAuditRepo(tx).record(sanctionsAuditEvent(transfer.partnerId, transfer.id, result.evidence));
     }
-    if (verdict === 'blocked') return { kind: 'blocked' };
+    if (verdict === 'blocked') {
+      // Fix pack 2 T5 (R04): the block notices, in this transaction with the
+      // blocked status and its evidence.
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId: transfer.partnerId,
+        railPartnerId: railPartnerOf(transfer),
+        subjectId: transfer.id,
+        stage: opts.stage ?? 'pay',
+        environment: transfer.environment ?? 'live',
+        realMoney,
+        evidence: result.evidence,
+      });
+      return { kind: 'blocked' };
+    }
     if (verdict === 'flagged') return { kind: 'flagged', transfer: updated };
     return { kind: 'cleared', transfer };
   });
+  // partner-demo R4: the notices are committed; mark the worker due.
+  if (outcome.kind === 'blocked') pokeWorker();
+  return outcome;
 }
 
 /**

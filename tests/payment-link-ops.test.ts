@@ -76,6 +76,40 @@ describe('payees', () => {
     expect(await rows(`SELECT 1 FROM audit_events WHERE action = 'payee.refused'`)).toHaveLength(1);
   });
 
+  it('payee match -> evidence + sanctions.block + notices in one tx (add, on an http rail)', async () => {
+    // Fix pack 2 T5 (R04): the refusal, its evidence and the block notices commit together.
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    expect(await code(addPayee(db, ACME, { ...PAYEE, legalName: 'Testa Fixturelli' }))).toBe('refused');
+    const audits = await rows<{ action: string; subject_id: string; meta: Record<string, unknown> }>(`SELECT action, subject_id, meta FROM audit_events ORDER BY id`);
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen', 'payee.refused', 'sanctions.block']);
+    const id = audits[0].subject_id;
+    expect(audits[2].meta).toMatchObject({ stage: 'payee', realMoney: true, quiet: false, partnerNotified: true });
+    const ob = await rows<{ kind: string; dedupe_key: string }>(`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
+    expect(ob).toEqual([
+      { kind: 'ops.alert', dedupe_key: `sanctionsblock:${id}` },
+      { kind: 'email.send', dedupe_key: `sanctionsblockmail:${id}:acme` },
+    ]);
+    expect(JSON.stringify(ob)).not.toMatch(/testa|fixturelli/i);
+  });
+
+  it('payee match on approve -> evidence + sanctions.block + notices in one tx', async () => {
+    const p = await addPayee(db, ACME, PAYEE);
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    const real = screenPayee.fn!.getMockImplementation()!;
+    screenPayee.fn!.mockImplementationOnce((_n, rules, opts) => real({ legalName: 'Testa Fixturelli', accountHolder: 'Sunrise School Trust' }, rules, opts));
+    expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('refused');
+    const audits = await rows<{ action: string; meta: Record<string, unknown> }>(`SELECT action, meta FROM audit_events WHERE subject_id = '${p.id}' ORDER BY id`);
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen', 'payee.create', 'sanctions.screen', 'sanctions.block', 'payee.decide']);
+    expect(audits[3].meta).toMatchObject({ stage: 'payee', environment: 'live', realMoney: false, quiet: false });
+    expect(await rows(`SELECT 1 FROM outbox WHERE kind = 'ops.alert' AND dedupe_key = 'sanctionsblock:${p.id}'`)).toHaveLength(1);
+  });
+
   it('approve re-screens: clear approves; a possible match refuses the approval; suspend and re-approve; reject is final', async () => {
     const p = await addPayee(db, ACME, PAYEE);
     screenPayee.fn!.mockResolvedValueOnce({ verdict: 'review', listUnavailable: false });

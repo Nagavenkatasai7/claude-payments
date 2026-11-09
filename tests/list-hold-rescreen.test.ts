@@ -311,6 +311,20 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     expect(await outbox()).toEqual(ob);
   });
 
+  it('hold re-screen match -> notices stage hold_rescreen', async () => {
+    // Fix pack 2 T5 (R04): the sanctions.block audit, the ops alert and the
+    // partner email, in the block's transaction.
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldRow({ id: 'lh_notice', recipientName: 'Testa Fixturelli' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
+    expect((await keys()).filter((k) => k?.startsWith('sanctionsblock'))).toEqual(['sanctionsblock:lh_notice', 'sanctionsblockmail:lh_notice:acme']);
+    const block = (await auditRows('lh_notice')).filter((r) => r.action === 'sanctions.block');
+    expect(block).toHaveLength(1);
+    expect(block[0].meta).toMatchObject({ stage: 'hold_rescreen', environment: 'live', realMoney: true, quiet: false, alerted: true, partnerNotified: true });
+  });
+
   it('30 blocked rows and 30 waiting http rows (stale list) do not stop a newer mock-rail hold being released', async () => {
     primeOfacSource({ checkedAgoMs: 37 * H });
     await setRailProviderType(db, 'acme', 'http');

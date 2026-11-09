@@ -840,6 +840,16 @@ async function mintLocked(
       ? { ...transfer, payoutDestination: '' }
       : transfer;
     await ops.insertTransfer(blockedRow, { screening: compliance.evidence });
+    // Fix pack 2 T5 (R04): the sanctions.block audit and (unless quiet) the ops
+    // alert and partner emails, in this transaction with the blocked row.
+    await ops.recordSanctionsBlock({
+      subjectId: blockedRow.id,
+      railPartnerId: railPartnerOf(blockedRow),
+      stage: 'mint',
+      environment: blockedRow.environment ?? 'live',
+      realMoney: p.realMoney,
+      evidence: compliance.evidence,
+    });
     return { transfer: blockedRow, replayed: false };
   }
 
@@ -916,6 +926,12 @@ export interface BlockedAttemptInput {
   reasons: string[];
   /** Program-Fix 14: the quote-time screen's evidence (screen.evidence). */
   evidence?: ScreeningEvidence;
+  /**
+   * Fix pack 2 T5 (R04): the card-time block notices (sanctions/notices.ts),
+   * written in the blocked row's transaction. Honoured with `evidence` only
+   * (a blocked screen always carries it).
+   */
+  notice?: { realMoney: boolean; railPartnerId?: PartnerId };
   /** Step 0 FX-7: the quote-time rate provenance (absent ⇒ none stamped). */
   fxOrigin?: FxRateOrigin;
   fxAsOf?: string;
@@ -971,6 +987,17 @@ export async function recordBlockedAttempt(
     await store.recordBlockedWithEvidence(
       transfer,
       sanctionsAuditEvent(input.partnerId, transfer.id, input.evidence),
+      input.notice
+        ? {
+            partnerId: input.partnerId,
+            railPartnerId: input.notice.railPartnerId,
+            subjectId: transfer.id,
+            stage: 'card',
+            environment: 'live', // the bot never mints sandbox
+            realMoney: input.notice.realMoney,
+            evidence: input.evidence,
+          }
+        : undefined,
     );
   } else {
     // No evidence supplied (a caller that predates Program-Fix 14): today's

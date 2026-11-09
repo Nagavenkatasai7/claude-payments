@@ -12,7 +12,7 @@ import { logWarn } from '@/lib/log';
 import type { PartnerDisclosureConfig } from '@/lib/types';
 import { Badge, Card, EmptyState, ErrorState, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
-import { AlertEmailForm, DisclosureForm, SupportPortalForm, type DisclosureValues } from './settings-forms';
+import { AlertEmailForm, ComplianceAlertEmailForm, DisclosureForm, SupportPortalForm, type DisclosureValues } from './settings-forms';
 
 export const metadata: Metadata = { title: t('partner.settings.title'), robots: { index: false, follow: false } };
 
@@ -134,6 +134,9 @@ export default async function PartnerSettingsPage() {
           <h2 className={H2}>{t('partner.settings.alert.title')}</h2>
           <p className={INTRO}>{t('partner.settings.alert.intro')}</p>
           <AlertEmailForm current={sc.alertEmail ?? ''} />
+          <div className="mt-6">
+            <ComplianceAlertEmailForm current={sc.complianceAlertEmail ?? ''} />
+          </div>
         </Card>
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.settings.disclosure.title')}</h2>

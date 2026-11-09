@@ -1335,6 +1335,23 @@ describe('saveAlertEmailAction / testWhatsappConnectionAction (R2a)', () => {
     expect(JSON.stringify(rows)).not.toContain('ops@acme.example');
   });
 
+  it('fix pack 2 T5: saveComplianceAlertEmailAction saves, clears and refuses like the alert email; audit has no address', async () => {
+    const { saveComplianceAlertEmailAction } = await import('@/app/admin-dashboard/partners/actions');
+    await saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: ' compliance@acme.example ' }));
+    expect((await ps.getPartner('acme'))!.supportConfig?.complianceAlertEmail).toBe('compliance@acme.example');
+    for (const bad of ['nope', 'a@b.example\r\nBcc: x@y.example']) {
+      await expect(saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: bad }))).rejects.toThrow(/valid email/i);
+    }
+    await saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: '' }));
+    expect((await ps.getPartner('acme'))!.supportConfig).not.toHaveProperty('complianceAlertEmail');
+    const rows = (await auditRows()).filter((r) => r.action === 'partner.compliance_email.update');
+    expect(rows.map((r) => r.meta)).toMatchObject([{ set: true, hadPrevious: false }, { set: false, hadPrevious: true }]);
+    expect(JSON.stringify(rows)).not.toContain('@');
+    currentStaff = { username: 'beta-admin', role: 'admin', partnerId: 'beta' };
+    await expect(saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: 'evil@x.example' }))).rejects.toThrow(/^NEXT_REDIRECT:\/partner$/);
+    expect((await ps.getPartner('acme'))!.supportConfig).not.toHaveProperty('complianceAlertEmail');
+  });
+
   it('a blank address clears it', async () => {
     const { saveAlertEmailAction } = await import('@/app/admin-dashboard/partners/actions');
     await saveAlertEmailAction(form({ id: 'acme', alertEmail: 'ops@acme.example' }));

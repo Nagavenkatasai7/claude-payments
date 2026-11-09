@@ -6,6 +6,8 @@ import { createPaymentLinkRepo, type PaymentLink } from '@/db/repos/payment-link
 import { createPartnerStore } from './partner-store';
 import { resolveCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { pokeWorker } from './outbox';
 import { nextPayeeStatus, parsePayeeInput, screenPayee, type PayeeDecision, type PayeeRawField } from './payees';
 import { linkExpiresAt, newLinkToken, parseLinkInput, type LinkField, type LinkRaw } from './payment-links';
 import { buildBulkReport, type BulkReport } from './payment-link-bulk';
@@ -101,10 +103,11 @@ export async function addPayee(
   const parsed = parsePayeeInput(raw);
   if (!parsed.ok) throw new PaymentLinkOpsError('invalid', parsed.errors);
   const id = newId('pye');
+  const realMoney = await payeeRealMoney(db, actor.partnerId);
   const screen = await screenPayee(
     { legalName: parsed.value.legalName, accountHolder: parsed.value.accountHolder },
     await rulesFor(db, actor.partnerId),
-    { realMoney: await payeeRealMoney(db, actor.partnerId) },
+    { realMoney },
   );
   if (screen.listUnavailable) {
     if (screen.evidence) {
@@ -122,7 +125,12 @@ export async function addPayee(
       await audit.record({
         partnerId: actor.partnerId, actor: actor.username, actorType: 'staff', action: 'payee.refused', subjectId: id,
       });
+      // Fix pack 2 T5 (R04): the block notices, in the refusal's transaction.
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId: actor.partnerId, subjectId: id, stage: 'payee', environment: 'live', realMoney, evidence: screen.evidence,
+      });
     });
+    pokeWorker(); // partner-demo R4: after the notices commit
     throw new PaymentLinkOpsError('refused');
   }
   const screening = screen.verdict; // 'clear' | 'review' here
@@ -173,12 +181,24 @@ export async function decidePayee(
   if (decision === 'approve') {
     const bank = await repo.getBankDetails(payee.id);
     if (!bank) throw new PaymentLinkOpsError('not_found');
+    const realMoney = await payeeRealMoney(db, payee.partnerId);
     const screen = await screenPayee(
       { legalName: payee.legalName, accountHolder: bank.accountHolder },
       await rulesFor(db, payee.partnerId),
-      { realMoney: await payeeRealMoney(db, payee.partnerId) },
+      { realMoney },
     );
-    if (screen.evidence) await createAuditRepo(db).record(sanctionsAuditEvent(payee.partnerId, payee.id, screen.evidence));
+    if (screen.verdict === 'match') {
+      // Fix pack 2 T5 (R04): the evidence and the block notices in ONE transaction.
+      await db.transaction(async (tx) => {
+        if (screen.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(payee.partnerId, payee.id, screen.evidence));
+        await enqueueSanctionsBlockNotices(tx, {
+          partnerId: payee.partnerId, subjectId: payee.id, stage: 'payee', environment: 'live', realMoney, evidence: screen.evidence,
+        });
+      });
+      pokeWorker(); // partner-demo R4: after the notices commit
+    } else if (screen.evidence) {
+      await createAuditRepo(db).record(sanctionsAuditEvent(payee.partnerId, payee.id, screen.evidence));
+    }
     // Fix pack 2 T3 (R02): a list outage refuses the approval but says nothing
     // about the payee, so its screening is left as it is.
     if (screen.listUnavailable) throw new PaymentLinkOpsError('review');

@@ -13,6 +13,7 @@ import { conversationSealCtx, openJson, sealedConversationKey } from './redis-se
 import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { readRailProviderType } from './live-gate';
 import { listNotLiveDedupeKey } from './sanctions/list-health';
+import { enqueueSanctionsBlockNotices, type SanctionsBlockNotice } from './sanctions/notices';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
@@ -93,6 +94,13 @@ export interface SenderLedgerOps {
    * mint; the partner id only, never a name, phone or amount.
    */
   enqueueListNotLiveAlert(): Promise<void>;
+  /**
+   * Fix pack 2 T5 (R04): the `sanctions.block` audit row and (unless quiet) the
+   * ops alert and partner emails for a blocked mint, in the SAME transaction
+   * as the blocked row (sanctions/notices.ts). The lock's tenant is the owner.
+   * Deliberately NOT named like the helper (tests/outbox-poke-coverage.test.ts).
+   */
+  recordSanctionsBlock(n: Omit<SanctionsBlockNotice, 'partnerId'>): Promise<void>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -351,7 +359,7 @@ export function createStore(redis: RedisLike, db: Db) {
      * sanctions.screen evidence row in ONE transaction — both land or neither
      * does. recordBlockedAttempt uses it whenever it has evidence.
      */
-    async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent): Promise<void> {
+    async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent, notice?: SanctionsBlockNotice): Promise<void> {
       await db.transaction(async (tx) => {
         // PR C: the same evidence (the audit row's meta) is stored on the new
         // row's transfers.screening column.
@@ -362,7 +370,22 @@ export function createStore(redis: RedisLike, db: Db) {
             : {},
         );
         await createAuditRepo(tx).record(audit);
+        // Fix pack 2 T5 (R04): the block notices commit with the row and its evidence.
+        if (notice) await enqueueSanctionsBlockNotices(tx, notice);
       });
+      if (notice) pokeWorker();
+    },
+    /**
+     * Fix pack 2 T5 (R04): a blocked screen that has no transfer row (a seller
+     * registration): its sanctions.screen evidence row and the block notices
+     * (sanctions/notices.ts) in ONE transaction, then a worker poke.
+     */
+    async recordScreenEvidenceWithBlock(audit: AuditEvent, notice: SanctionsBlockNotice): Promise<void> {
+      await db.transaction(async (tx) => {
+        await createAuditRepo(tx).record(audit);
+        await enqueueSanctionsBlockNotices(tx, notice);
+      });
+      pokeWorker();
     },
     /**
      * Program-Fix 14 (step 6): a standalone audit_events row on the root handle
@@ -570,6 +593,11 @@ export function createStore(redis: RedisLike, db: Db) {
                   },
                   { dedupeKey: listNotLiveDedupeKey(new Date()) },
                 );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
+              recordSanctionsBlock: async (n) => {
+                await enqueueSanctionsBlockNotices(tx, { ...n, partnerId });
                 // partner-demo R4: after() runs post-response, after the mint commits.
                 pokeWorker();
               },

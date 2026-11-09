@@ -29,6 +29,7 @@ const ACTION_LABELS = Object.freeze({
   'partner.whatsapp.test': 'partner.audit.action.whatsappTest',
   'partner.support_config': 'partner.audit.action.supportConfig',
   'partner.alert_email.update': 'partner.audit.action.alertEmail',
+  'partner.compliance_email.update': 'partner.audit.action.complianceEmail',
   'partner.disclosure_config': 'partner.audit.action.disclosureConfig',
   'partner.persona.update': 'partner.audit.action.persona',
   'partner.display_name.update': 'partner.audit.action.displayName', // 2f: meta { oldLength, newLength, actorScope }, not shown

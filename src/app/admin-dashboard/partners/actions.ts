@@ -42,6 +42,7 @@ import {
   parseDisclosureForm,
   parseSupportPortal,
   setAlertEmail,
+  setComplianceAlertEmail,
   setDisclosure,
   setSupportKnobs,
   type DisclosureParseReason,
@@ -631,6 +632,20 @@ export async function saveAlertEmailAction(formData: FormData): Promise<void> {
   const parsed = parseAlertEmail(String(formData.get('alertEmail') ?? ''));
   if (!parsed.ok) throw new Error('Enter one valid email address (or leave it blank to turn alert emails off).');
   const r = await setAlertEmail(getDb(), id, supportActor(staff), parsed.value);
+  if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Fix pack 2 T5 (R04): where sanctions-block notices are emailed ─────────
+// Same shape as saveAlertEmailAction: its own action, merged under the row
+// lock, audited WITHOUT the address. Blank ⇒ notices go to the alert email.
+export async function saveComplianceAlertEmailAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const id = String(formData.get('id') ?? '').trim();
+  const staff = await gatePartnerConfig(id);
+  const parsed = parseAlertEmail(String(formData.get('complianceAlertEmail') ?? ''));
+  if (!parsed.ok) throw new Error('Enter one valid email address (or leave it blank to use the alert email).');
+  const r = await setComplianceAlertEmail(getDb(), id, supportActor(staff), parsed.value);
   if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }

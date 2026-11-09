@@ -374,6 +374,34 @@ describe('finalizeLinkPayment — the payee screen on a real-money rail (fix pac
     expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${p}'`)).toBe(1);
   });
 
+  it('payee match -> evidence + sanctions.block + notices in one tx', async () => {
+    // Fix pack 2 T5 (R04).
+    await setRailProviderType(db, 'default', 'http');
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    const p = await payee({ legalName: 'Testa Fixturelli' });
+    const l = await link({ payeeId: p });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'blocked' });
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${p}'`)).toBe(1);
+    const block = ((await db.execute(sql.raw(`SELECT meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = '${p}'`))) as unknown as {
+      rows: Array<{ meta: Record<string, unknown> }>;
+    }).rows;
+    expect(block.map((r) => r.meta)).toMatchObject([{ stage: 'payee', environment: 'live', realMoney: true, quiet: false, partnerNotified: false }]);
+    // The default owner is never emailed; the ops alert is queued.
+    expect(await count(`SELECT count(*)::int AS n FROM outbox WHERE kind = 'ops.alert' AND dedupe_key = 'sanctionsblock:${p}'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM outbox WHERE kind = 'email.send'`)).toBe(0);
+    await expectNothingSaved(l.id);
+  });
+
+  it('a demo payee name on the mock rail -> a quiet audit, no alert', async () => {
+    const p = await payee({ legalName: 'Test Blocked' });
+    const l = await link({ payeeId: p });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'blocked' });
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.block' AND subject_id = '${p}'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM outbox`)).toBe(0);
+  });
+
   it('a mock rail is unchanged: the mock list clears the payee and the link mints', async () => {
     await setRailProviderType(db, 'default', 'mock');
     const p = await payee();

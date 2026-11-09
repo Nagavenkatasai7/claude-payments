@@ -425,6 +425,10 @@ export interface PartnerSupportConfig {
   // the dashboard banner only. Optional jsonb key: an older build ignores it and
   // its support save spreads `prev`, so it survives a rolling-release overlap.
   alertEmail?: string;
+  // Fix pack 2 T5 (R04): where sanctions-block notices are emailed (the licensed
+  // partner's blocking-report duty). Absent ⇒ alertEmail. Staff-set, validated
+  // like alertEmail and audited by saveComplianceAlertEmailAction.
+  complianceAlertEmail?: string;
 }
 
 /** Program-Fix 15 PR B — staff-entered, never invented. Every field optional in storage. */

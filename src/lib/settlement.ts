@@ -7,7 +7,8 @@ import { buildStage1Message } from '@/lib/payment';
 import { processingTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { PartnerId, Transfer } from '@/lib/types';
-import { realMoneyRail } from '@/lib/live-gate';
+import { railPartnerOf, realMoneyRail } from '@/lib/live-gate';
+import { enqueueSanctionsBlockNotices } from '@/lib/sanctions/notices';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import {
   LIST_UNAVAILABLE_REASON,
@@ -415,6 +416,17 @@ export async function releaseRescreenedHold(
         },
         { dedupeKey: `listrescreenblock:${t.id}` },
       );
+      // Fix pack 2 T5 (R04): the sanctions.block audit and notices, in this
+      // transaction (the sweep pokes after a block).
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId: t.partnerId,
+        railPartnerId: railPartnerOf(t),
+        subjectId: t.id,
+        stage: 'hold_rescreen',
+        environment: t.environment ?? 'live',
+        realMoney: input.realMoney,
+        evidence: result.evidence,
+      });
       return { kind: 'blocked' };
     }
 

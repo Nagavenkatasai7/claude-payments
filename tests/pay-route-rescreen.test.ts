@@ -380,6 +380,38 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     expect(await kinds()).not.toContain('settlement.instruct');
   });
 
+  it('pay-time block writes notices', async () => {
+    // Fix pack 2 T5 (R04): the routed rail partner is emailed; the default owner is not.
+    await seedOwner('Alex Sender');
+    await httpRail('railp');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ alertEmail: 'ops@railp.example' })}::jsonb WHERE id = 'railp'`);
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-block', settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
+    expect((await post('lv-block')).status).toBe(400);
+    expect((await store.getTransfer('lv-block'))?.status).toBe('blocked');
+    expect(await outboxKinds()).toEqual([
+      ['ops.alert', 'sanctionsblock:lv-block'],
+      ['email.send', 'sanctionsblockmail:lv-block:railp'],
+    ]);
+    const r = (await db.execute(sql`SELECT partner_id, meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-block'`)) as unknown as {
+      rows: Array<{ partner_id: string; meta: Record<string, unknown> }>;
+    };
+    expect(r.rows).toMatchObject([{ partner_id: 'default', meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
+  });
+
+  it('demo name on simulator -> audit only', async () => {
+    await seedOwner('Alex Sender');
+    await setRailProviderType(db, 'default', 'simulator');
+    await store.saveTransfer(makeTransfer({ id: 'lv-demo', recipientLegalName: 'John Doe' }));
+    expect((await post('lv-demo')).status).toBe(400);
+    expect((await store.getTransfer('lv-demo'))?.status).toBe('blocked');
+    expect(await outboxKinds()).toEqual([]);
+    const r = (await db.execute(sql`SELECT meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-demo'`)) as unknown as {
+      rows: Array<{ meta: Record<string, unknown> }>;
+    };
+    expect(r.rows.map((x) => x.meta)).toMatchObject([{ stage: 'pay', quiet: true, realMoney: false }]);
+  });
+
   it('a mock rail with a stale list → paid (demo unchanged)', async () => {
     await seedOwner('Alex Sender');
     await setRailProviderType(db, 'default', 'mock');

@@ -211,6 +211,52 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
     expect(await listAlerts(db)).toEqual([]);
   });
 
+  it('blocked http mint writes notices in the mint tx; a later throw in the mint rolls them back', async () => {
+    // Fix pack 2 T5 (R04): the sanctions.block audit, the ops alert and the
+    // partner email commit with the blocked row, or not at all.
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    primeOfacSource({ checkedAgoMs: HOUR });
+    const notices = async () => (await db.execute(sql`
+      SELECT kind, dedupe_key FROM outbox WHERE dedupe_key LIKE 'sanctionsblock%' ORDER BY id`)).rows as Array<{ kind: string; dedupe_key: string }>;
+    const blockAudits = async () => (await db.execute(sql`
+      SELECT subject_id, meta FROM audit_events WHERE action = 'sanctions.block' ORDER BY id`)).rows as Array<{ subject_id: string; meta: Record<string, unknown> }>;
+
+    const real = store.mintUnderSenderLock.bind(store);
+    const spy = vi.spyOn(store, 'mintUnderSenderLock').mockImplementation(((p: string, ph: string, fn: (ops: SenderLedgerOps) => Promise<unknown>) =>
+      real(p, ph, async (ops) => {
+        await fn(ops);
+        throw new Error('later step failed');
+      })) as typeof store.mintUnderSenderLock);
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', id: 'tr_block_rb', recipientName: 'Testa Fixturelli' }))
+      .rejects.toThrow('later step failed');
+    expect(await notices()).toEqual([]);
+    expect(await blockAudits()).toEqual([]);
+    spy.mockRestore();
+
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', id: 'tr_block_ok', recipientName: 'Testa Fixturelli' });
+    expect(t.complianceStatus).toBe('blocked');
+    expect(await notices()).toEqual([
+      { kind: 'ops.alert', dedupe_key: 'sanctionsblock:tr_block_ok' },
+      { kind: 'email.send', dedupe_key: 'sanctionsblockmail:tr_block_ok:acme' },
+    ]);
+    const audits = await blockAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ subject_id: 'tr_block_ok', meta: { stage: 'mint', environment: 'live', realMoney: true, quiet: false } });
+  });
+
+  it("'test blocked' on a simulator mint -> a quiet sanctions.block audit only", async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'simco', 'simulator');
+    const before = await outboxCount(db);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'simco', recipientName: 'test blocked' });
+    expect(t.complianceStatus).toBe('blocked');
+    expect(await outboxCount(db)).toBe(before);
+    const r = await db.execute(sql`SELECT meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = ${t.id}`);
+    expect((r.rows as Array<{ meta: Record<string, unknown> }>).map((x) => x.meta)).toMatchObject([{ stage: 'mint', quiet: true, realMoney: false }]);
+  });
+
   it('a same-id replay -> no second evidence row, no alert', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');

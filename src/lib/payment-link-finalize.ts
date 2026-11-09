@@ -8,6 +8,8 @@ import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-
 import { evaluateCap } from './tier-rules';
 import { resolveCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { pokeWorker } from './outbox';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
@@ -150,7 +152,23 @@ export async function finalizeLinkPayment(
     resolveCorridorRules(partner, 'US'),
     { realMoney: payeeRealMoney },
   );
-  if (screen.evidence) await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  if (screen.verdict === 'match') {
+    // Fix pack 2 T5 (R04): the evidence and the block notices in ONE transaction.
+    await db.transaction(async (tx) => {
+      if (screen.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId,
+        subjectId: payee.id,
+        stage: 'payee',
+        environment: 'live',
+        realMoney: payeeRealMoney,
+        evidence: screen.evidence,
+      });
+    });
+    pokeWorker(); // partner-demo R4: after the notices commit
+  } else if (screen.evidence) {
+    await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  }
   if (screen.verdict !== 'clear') {
     if (screen.verdict === 'review' && !screen.listUnavailable) await createPayeeRepo(db).setScreening(payee.id, 'review');
     return { ok: false, error: screen.verdict === 'match' ? 'blocked' : 'payee_unavailable' };
