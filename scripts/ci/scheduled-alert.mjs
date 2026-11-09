@@ -6,9 +6,12 @@
  *
  * A failed run opens ONE issue per workflow, titled
  * "Scheduled workflow failing: <workflow>", or comments on it if it is already
- * open. The next fully green run comments and closes it. Cancelled or skipped
- * jobs change nothing. The repo is public: the issue carries only job names and
- * the run link, never logs.
+ * open. The next fully green run comments and closes it. A "cancelled" job
+ * counts as a failure: a job that hits its timeout-minutes reaches this script
+ * as "cancelled" (the Nightly suite timed out silently Nov 2-9, 2026), and the
+ * workflows skip this step with `!cancelled()` when a person cancels the run.
+ * Skipped jobs change nothing. The repo is public: the issue carries only job
+ * names and the run link, never logs.
  *
  *   node scripts/ci/scheduled-alert.mjs
  *
@@ -26,7 +29,12 @@ import { pathToFileURL } from 'node:url';
 /** @param {Record<string, {result?: string}>} needs */
 export function summarizeNeeds(needs) {
   const entries = Object.entries(needs ?? {});
-  const failed = entries.filter(([, v]) => v?.result === 'failure').map(([k]) => k);
+  const failed = entries.flatMap(([k, v]) => {
+    if (v?.result === 'failure') return [k];
+    // The jobs API cannot tell a timeout from a cancel, so the text names both.
+    if (v?.result === 'cancelled') return [`${k} (timed out or cancelled)`];
+    return [];
+  });
   if (failed.length > 0) return { result: 'failure', failed };
   if (entries.length > 0 && entries.every(([, v]) => v?.result === 'success')) return { result: 'success', failed: [] };
   return { result: 'inconclusive', failed: [] };

@@ -56,8 +56,12 @@ jobs:
 
   # Alert (scripts/ci/scheduled-alert.mjs): a failed drain opens one issue,
   # "Scheduled workflow failing: worker-heartbeat", or comments on the open
-  # one; the next green drain closes it. Only this job can write, and only
-  # to issues.
+  # one; the next green drain closes it. A drain that hits timeout-minutes
+  # reaches the script as "cancelled" and alerts too. A run a person cancels
+  # changes nothing: the step's !cancelled() is false then (cancelled() is true
+  # when the workflow was canceled, docs.github.com expressions page; that a
+  # job timeout does not cancel the workflow is inferred). Only this job can
+  # write, and only to issues.
   alert:
     needs: [drain]
     if: ${{ always() }}
@@ -76,6 +80,7 @@ jobs:
           node-version: '24'
 
       - name: Open, update or close the failure issue
+        if: ${{ !cancelled() }}
         env:
           WORKFLOW_NAME: ${{ github.workflow }}
           NEEDS: ${{ toJSON(needs) }}

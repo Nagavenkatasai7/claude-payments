@@ -18,8 +18,19 @@ describe('summarizeNeeds', () => {
     expect(summarizeNeeds({ a: { result: 'success' }, b: { result: 'success' } })).toEqual({ result: 'success', failed: [] });
   });
 
-  it('is inconclusive for cancelled or skipped jobs without a failure', () => {
-    expect(summarizeNeeds({ a: { result: 'success' }, b: { result: 'cancelled' } }).result).toBe('inconclusive');
+  // A job that hits timeout-minutes reaches the alert as "cancelled" (the
+  // Nightly full suite timed out silently Nov 2-9, 2026). The workflows guard
+  // the alert step with !cancelled(), so a run a person cancels never gets here.
+  it('is failure for a cancelled (timed-out) job, naming it', () => {
+    expect(summarizeNeeds({ a: { result: 'cancelled' } })).toEqual({ result: 'failure', failed: ['a (timed out or cancelled)'] });
+    expect(summarizeNeeds({ a: { result: 'success' }, b: { result: 'cancelled' }, c: { result: 'failure' } })).toEqual({
+      result: 'failure',
+      failed: ['b (timed out or cancelled)', 'c'],
+    });
+  });
+
+  it('is inconclusive for skipped jobs without a failure, or no jobs', () => {
+    expect(summarizeNeeds({ a: { result: 'success' }, b: { result: 'skipped' } }).result).toBe('inconclusive');
     expect(summarizeNeeds({}).result).toBe('inconclusive');
   });
 });
@@ -101,12 +112,28 @@ describe('runAlert', () => {
     expect(writes[1].body).toEqual({ state: 'closed', state_reason: 'completed' });
   });
 
-  it('writes nothing for a green run with no open issue, or a cancelled run', async () => {
-    for (const needs of [{ a: { result: 'success' } }, { a: { result: 'cancelled' } }]) {
-      const gh = fakeGitHub([{ number: 7, title: 'Scheduled workflow failing: Nightly' }].filter(() => needs.a.result === 'cancelled'));
+  it('writes nothing for a green run with no open issue, or a skipped run', async () => {
+    for (const needs of [{ a: { result: 'success' } }, { a: { result: 'skipped' } }]) {
+      const gh = fakeGitHub([{ number: 7, title: 'Scheduled workflow failing: Nightly' }].filter(() => needs.a.result === 'skipped'));
       await runAlert({ env: env(needs), fetchImpl: gh.impl, out });
       expect(gh.calls.filter((c) => c.method !== 'GET')).toEqual([]);
     }
+  });
+
+  it('opens an issue for a timed-out (cancelled) job', async () => {
+    const gh = fakeGitHub([]);
+    expect(await runAlert({ env: env({ 'full-tests': { result: 'cancelled' } }), fetchImpl: gh.impl, out })).toBe(0);
+    const writes = gh.calls.filter((c) => c.method !== 'GET');
+    expect(writes.map((c) => `${c.method} ${c.url}`)).toEqual(['POST https://api.github.com/repos/o/r/issues']);
+    expect(writes[0].body?.title).toBe('Scheduled workflow failing: Nightly');
+    expect(String(writes[0].body?.body)).toMatch(/full-tests \(timed out or cancelled\)/);
+  });
+
+  it('comments on the open issue for a timed-out job instead of opening a second one', async () => {
+    const gh = fakeGitHub([{ number: 7, title: 'Scheduled workflow failing: Nightly' }]);
+    await runAlert({ env: env({ 'full-tests': { result: 'cancelled' } }), fetchImpl: gh.impl, out });
+    const writes = gh.calls.filter((c) => c.method !== 'GET');
+    expect(writes.map((c) => `${c.method} ${c.url}`)).toEqual(['POST https://api.github.com/repos/o/r/issues/7/comments']);
   });
 
   it('exits 1 when the GitHub API refuses, so the alert job itself shows red', async () => {
