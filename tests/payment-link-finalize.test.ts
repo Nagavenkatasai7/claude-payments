@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { finalizeLinkPayment, resolvePayableLink } from '@/lib/payment-link-finalize';
 import { createStore } from '@/lib/store';
@@ -16,6 +16,8 @@ import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { Db } from '@/db/client';
 
 // Batch B2 money path: a payment link becomes ONE transfer (claim-first). The
@@ -325,5 +327,58 @@ describe('finalizeLinkPayment — a retry on the minted transfer (the charge fai
     expect(await pay(l.token)).toEqual({ ok: true, transferId: first.transferId });
     expect(await evidence()).toBe(before + 1);
     expect(await transfersN()).toBe(1);
+  });
+
+  // Fix pack 2 T3 (R02): the resume re-screen is a real-money screen when the
+  // transfer's RAIL partner (routed, else owner) is http.
+  it('resumeMinted on a routed http rail with a list that is not live → flagged LIST_UNAVAILABLE (held after the charge)', async () => {
+    await seedPartner(db, 'railp');
+    await setRailProviderType(db, 'railp', 'http');
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    await db.execute(sql.raw(`UPDATE transfers SET settlement_partner_id = 'railp' WHERE id = '${first.transferId}'`));
+    expect(await pay(l.token)).toEqual({ ok: true, transferId: first.transferId });
+    const t = await stores.store.getTransfer(first.transferId);
+    expect(t?.status).toBe('awaiting_payment');
+    expect(t?.complianceStatus).toBe('flagged');
+    expect(t?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+  });
+
+  it('a link.customerName-only mint (fullName still empty) is covered on resume and clears on a fresh list', async () => {
+    await setRailProviderType(db, 'default', 'http');
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    expect((await stores.customerStore.getCustomer('default', PHONE))?.fullName ?? '').toBe('');
+    expect(await pay(l.token)).toEqual({ ok: true, transferId: first.transferId });
+    expect(await status(first.transferId)).toEqual({ status: 'awaiting_payment', compliance_status: 'cleared', funding_ref: null });
+  });
+});
+
+describe('finalizeLinkPayment — the payee screen on a real-money rail (fix pack 2 T3)', { retry: 0 }, () => {
+  const screening = async (id: string) =>
+    ((await db.execute(sql.raw(`SELECT screening FROM payees WHERE id = '${id}'`))) as unknown as { rows: Array<{ screening: string }> }).rows[0].screening;
+
+  it('http rail, list not live → payee_unavailable, the payee keeps its screening, nothing saved', async () => {
+    await setRailProviderType(db, 'default', 'http'); // the mock list is never live
+    const p = await payee();
+    const l = await link({ payeeId: p });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'payee_unavailable' });
+    expect(await screening(p)).toBe('clear');
+    await expectNothingSaved(l.id);
+    // The evidence of the attempt is still recorded.
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${p}'`)).toBe(1);
+  });
+
+  it('a mock rail is unchanged: the mock list clears the payee and the link mints', async () => {
+    await setRailProviderType(db, 'default', 'mock');
+    const p = await payee();
+    const l = await link({ payeeId: p });
+    expect((await pay(l.token)).ok).toBe(true);
+    expect(await screening(p)).toBe('clear');
   });
 });

@@ -2,7 +2,7 @@ import { isCleanName, NAME_MAX } from './untrusted-text';
 import { accountLast4, isMaskedDestination, validatePayoutFields } from './payout-format';
 import { screenTransfer } from './compliance';
 import { warmSanctionsList } from './providers/sanctions-provider';
-import { GLOBAL_DEFAULTS, type ResolvedCorridorRules } from './compliance-config';
+import { GLOBAL_DEFAULTS, LIST_UNAVAILABLE_REASON, type ResolvedCorridorRules } from './compliance-config';
 import type { ScreeningEvidence } from './sanctions/evidence';
 
 // payees — Batch B2. A payee is a company in India a partner works with (a
@@ -76,11 +76,17 @@ export type PayeeScreenVerdict = 'clear' | 'review' | 'match';
  * the legal name as the recipient, the account holder in the second slot). A
  * list that cannot load is 'review', never 'clear'. The evidence carries input
  * hashes only, never a name; the caller records it as a sanctions.screen row.
+ *
+ * Fix pack 2 T3 (R02): `realMoney` (the payee's partner settles on an http
+ * rail, live-gate.ts) requires a LIVE list; a list that cannot load or is not
+ * live sets `listUnavailable` (verdict still 'review'). The callers never
+ * persist 'review' for a list outage: it says nothing about the payee.
  */
 export async function screenPayee(
   names: { legalName: string; accountHolder: string },
   rules: ResolvedCorridorRules = GLOBAL_DEFAULTS,
-): Promise<{ verdict: PayeeScreenVerdict; evidence?: ScreeningEvidence }> {
+  opts: { realMoney?: boolean } = {},
+): Promise<{ verdict: PayeeScreenVerdict; evidence?: ScreeningEvidence; listUnavailable: boolean }> {
   await warmSanctionsList();
   const r = await screenTransfer({
     amountUsd: 0,
@@ -89,11 +95,14 @@ export async function screenPayee(
     transfersToday: 0,
     sourceCountry: 'US',
     rules,
+    requireLiveList: opts.realMoney === true,
   });
   const decision = r.evidence?.decision;
   const verdict: PayeeScreenVerdict =
     r.status === 'blocked' ? 'match' : decision === 'possible_match' || decision === 'list_unavailable' ? 'review' : 'clear';
-  return { verdict, evidence: r.evidence };
+  const listUnavailable =
+    verdict === 'review' && (decision === 'list_unavailable' || r.reasons.includes(LIST_UNAVAILABLE_REASON));
+  return { verdict, evidence: r.evidence, listUnavailable };
 }
 
 /** The status an admin decision moves a payee to, or null when it does not apply. Rejected is final. */

@@ -7,6 +7,7 @@ import type { ActiveSanctionsVersion } from '@/db/repos/sanctions-list-repo';
 import type { SanctionsList, SanctionsListSource } from '@/lib/sanctions/list-source';
 import { inputHash, sanctionsAuditEvent, type ScreeningEvidence } from '@/lib/sanctions/evidence';
 import type { ListFitness } from '@/lib/sanctions/list-policy';
+import { sql } from 'drizzle-orm';
 import { auditEvents } from '@/db/schema';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
@@ -113,4 +114,15 @@ export function restoreOfacSource(original: string | undefined): void {
   if (original === undefined) delete process.env.SANCTIONS_LIST;
   else process.env.SANCTIONS_LIST = original;
   setOfacListSourceForTests(null);
+}
+
+/**
+ * Fix pack 2 T3 (R02): set a partner's rail type in partner_integrations (the
+ * row live-gate.ts readRailProviderType reads). 'http' makes the partner's
+ * transfers and payees real money.
+ */
+export async function setRailProviderType(db: Db, partnerId: string, providerType: string): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES (${partnerId}, ${providerType})
+    ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = ${providerType}`);
 }

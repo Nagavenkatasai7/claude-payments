@@ -60,6 +60,20 @@ describe('screenPayee (both names, the mock watchlist)', () => {
     const r = await screenPayee({ legalName: good.legalName, accountHolder: good.accountHolder });
     expect(JSON.stringify(r.evidence)).not.toContain('Sunrise');
   });
+
+  // Fix pack 2 T3 (R02): a payee on a real-money (http) rail needs the LIVE list.
+  it('realMoney on the mock list → review, listUnavailable', async () => {
+    const r = await screenPayee({ legalName: good.legalName, accountHolder: good.accountHolder }, undefined, { realMoney: true });
+    expect(r.verdict).toBe('review');
+    expect(r.listUnavailable).toBe(true);
+    expect(r.evidence?.decision).toBe('list_unavailable');
+  });
+  it('default opts unchanged: clear, listUnavailable false', async () => {
+    const r = await screenPayee({ legalName: good.legalName, accountHolder: good.accountHolder });
+    expect(r.verdict).toBe('clear');
+    expect(r.listUnavailable).toBe(false);
+    expect((await screenPayee({ legalName: 'Test Blocked', accountHolder: good.accountHolder })).listUnavailable).toBe(false);
+  });
 });
 
 describe('nextPayeeStatus', () => {

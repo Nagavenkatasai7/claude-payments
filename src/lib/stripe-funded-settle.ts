@@ -2,11 +2,8 @@ import type { Db } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { settleOrHold } from '@/lib/settlement';
-import { rescreenBeforePay, type RescreenOutcome } from '@/lib/pay-rescreen';
-import { resolveCorridorRules } from '@/lib/compliance-config';
-import { getStore } from '@/lib/store';
-import { getCustomerStore } from '@/lib/customer-store';
-import { getPartnerStore } from '@/lib/partner-store';
+import { rescreenOnFile, type RescreenOutcome } from '@/lib/pay-rescreen';
+import { railPartnerOf, realMoneyRail } from '@/lib/live-gate';
 import type { Transfer } from '@/lib/types';
 
 // stripe-funded-settle — Program-Fix 7 (review M2): the ONE way a
@@ -25,28 +22,18 @@ import type { Transfer } from '@/lib/types';
 export type FundedSettleResult = 'started' | 'held' | 'already' | 'blocked' | 'moved' | 'refused';
 
 export interface FundedSettleDeps {
-  rescreen?: (t: Transfer) => Promise<RescreenOutcome>;
-}
-
-/** The pay route's re-screen inputs, resolved server-side (names never logged). */
-async function defaultRescreen(db: Db, t: Transfer): Promise<RescreenOutcome> {
-  const store = getStore();
-  const owner = await getCustomerStore(store).getCustomer(t.partnerId, t.phone);
-  const partner = (await getPartnerStore().getPartner(t.partnerId)) ?? (await getPartnerStore().ensureDefaultPartner());
-  const decrypted = await store.getTransferDecrypted(t.id);
-  return rescreenBeforePay(
-    db,
-    t,
-    {
-      senderName: (owner?.fullName ?? '').trim(),
-      recipientName: (decrypted?.recipientLegalName ?? '').trim() || t.recipientName,
-    },
-    resolveCorridorRules(partner, t.sourceCountry ?? 'US'),
-  );
+  rescreen?: (t: Transfer, opts: { realMoney: boolean }) => Promise<RescreenOutcome>;
 }
 
 export async function settleFundedTransfer(db: Db, t: Transfer, deps: FundedSettleDeps = {}): Promise<FundedSettleResult> {
-  const outcome = await (deps.rescreen ?? ((x: Transfer) => defaultRescreen(db, x)))(t);
+  // Fix pack 2 T3 (R02): the RAIL partner's config (routed, else owner) is read
+  // FIRST — a read that throws propagates before anything is screened or
+  // moved — and decides real money: an http rail re-screens on a live list
+  // with full name coverage (pay-rescreen.ts).
+  const rail = await createIntegrationsRepo(db).getIntegrations(railPartnerOf(t));
+  const realMoney = realMoneyRail({ environment: t.environment, railProviderType: rail.payment.providerType ?? null });
+  const rescreen = deps.rescreen ?? ((x: Transfer, opts: { realMoney: boolean }) => rescreenOnFile(db, x, { ...opts, stage: 'pay' }));
+  const outcome = await rescreen(t, { realMoney });
   if (outcome.kind === 'moved') return 'moved';
   if (outcome.kind === 'blocked') {
     await createOutboxRepo(db).enqueue(
@@ -60,7 +47,6 @@ export async function settleFundedTransfer(db: Db, t: Transfer, deps: FundedSett
     );
     return 'blocked';
   }
-  const rail = await createIntegrationsRepo(db).getIntegrations(t.settlementPartnerId ?? t.partnerId);
   const settled = await settleOrHold(db, outcome.transfer, rail);
   if (settled.kind === 'refused') {
     await createOutboxRepo(db).enqueue(

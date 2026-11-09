@@ -9,6 +9,10 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import { isFlagOn } from '@/lib/flags';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { realMoneyRail } from '@/lib/live-gate';
+import { rescreenOnFile } from '@/lib/pay-rescreen';
+import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every FULL /api/worker
@@ -43,6 +47,18 @@ export const STALE_FUNDING_INTENT_DAYS = 7;
  * drain is not running (cron / heartbeat / poke down) — alert per row, deduped.
  */
 export const STALE_LOCK_MINUTES = 15;
+
+/**
+ * Fix pack 2 T3 (R02): the ops copy for a hold that is waiting on the
+ * sanctions list (LIST_UNAVAILABLE): no person can release it; an automatic
+ * re-screen on a fresh list does.
+ */
+const LIST_WAIT_COPY =
+  'it is waiting for a fresh sanctions list (LIST_UNAVAILABLE) and is released automatically after a re-screen against a fresh list. ' +
+  'Check the sanctions list loader if the list is not refreshing.';
+
+const waitsForList = (t: Pick<Transfer, 'complianceReasons'> | null | undefined): boolean =>
+  Array.isArray(t?.complianceReasons) && t.complianceReasons.includes(LIST_UNAVAILABLE_REASON);
 
 export interface SweepResult {
   stuckPaid: number;
@@ -171,7 +187,8 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       {
         message:
           `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) has been ` +
-          `in compliance review for >${STALE_REVIEW_HOURS}h — release or refund it.`,
+          `in compliance review for >${STALE_REVIEW_HOURS}h — ` +
+          (waitsForList(t) ? LIST_WAIT_COPY : 'release or refund it.'),
       },
       { dedupeKey: `review:${t.id}` },
     );
@@ -203,7 +220,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     // settles (its debit may have confirmed days after the pay-time screen).
     // blocked / moved / a re-screen error ⇒ nothing settles here (a blocked
     // row's fundblocked alert is raised inside); the next sweep retries.
-    let kind: 'started' | 'held' | 'refused' | 'already';
+    let kind: 'started' | 'held' | 'refused' | 'already' | undefined;
     if (t.fundingProvider === 'stripe') {
       let funded: Awaited<ReturnType<typeof settleFundedTransfer>>;
       try {
@@ -215,7 +232,29 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       if (funded === 'blocked' || funded === 'moved') continue;
       kind = funded;
     } else {
-      kind = (await settleOrHold(db, t, railIntegrations)).kind;
+      // Fix pack 2 T3 (R02): a real-money row (the RAIL partner is http, env
+      // not 'test') settles only on a LIVE, fresh screen. When the newest
+      // evidence is not one, re-screen first with the names on file. An error
+      // (evidence read, list, names) moves nothing; the next sweep retries.
+      let resumable: Transfer = t;
+      if (realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null })) {
+        let outcome: Awaited<ReturnType<typeof rescreenOnFile>> | null = null;
+        try {
+          if (!liveFresh((await listScreenEvidence(db, t, now)).at(-1), now)) {
+            outcome = await rescreenOnFile(db, t, { realMoney: true, stage: 'resume' });
+          }
+        } catch (err) {
+          logWarn('reconcile.resume-rescreen', err, { transferId: t.id });
+          continue;
+        }
+        if (outcome?.kind === 'moved') continue;
+        if (outcome?.kind === 'blocked') {
+          kind = 'refused';
+        } else if (outcome) {
+          resumable = outcome.transfer;
+        }
+      }
+      kind ??= (await settleOrHold(db, resumable, railIntegrations)).kind;
     }
     const prefix = `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged (${t.fundingRef}) but never settled — `;
     switch (kind) {
@@ -232,9 +271,17 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
         // (settlement.releaseHold, Step 2) — otherwise "held" would be a
         // charged row the rail is never told about.
         fundingResumed++;
+        // Fix pack 2 T3: the LEDGER row's reasons (re-read after the hold)
+        // decide the copy: a hold waiting on the list is not a staff release.
         await outbox.enqueue(
           'ops.alert',
-          { message: prefix + 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.' },
+          {
+            message:
+              prefix +
+              (waitsForList(await transfers.getTransfer(t.id))
+                ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
+                : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
+          },
           { dedupeKey: `fundhold:${t.id}` },
         );
         break;

@@ -45,6 +45,9 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
+import { railPartnerOf, realMoneyFor } from './live-gate';
+import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
+import { rescreenOnFile } from './pay-rescreen';
 import { parseClientReference } from './order-references';
 import { parsePurpose, TRANSFER_PURPOSES } from './purpose-codes';
 import { decidePurpose, PURPOSE_DETAIL_MAX, PURPOSE_DETAIL_MIN, type PurposeDetailCode } from './purpose-detail';
@@ -792,12 +795,38 @@ export async function confirmTransaction(
   }
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
 
-  if (t.complianceStatus !== 'cleared') {
+  // Fix pack 2 T3 (R02): on a real-money rail (the RAIL partner is http, env
+  // not 'test'), settle only on a LIVE, fresh screen. When the newest evidence
+  // is not one (a stale list, a rail switched from simulator to http after the
+  // mint, a confirm long after the mint), re-screen first with the names on
+  // file. A Partner-API body sender name is never stored, so it comes out
+  // uncovered and the transfer is held for a person (fail closed). Every read
+  // here runs outside any transaction; the real clock (deps.now is a display
+  // clock) measures the evidence age.
+  let current: Transfer = t;
+  if (await realMoneyFor(deps.db, t)) {
+    const now = new Date();
+    if (!liveFresh((await listScreenEvidence(deps.db, t, now)).at(-1), now)) {
+      const r = await rescreenOnFile(deps.db as Db, t, { realMoney: true, stage: 'confirm' });
+      if (r.kind === 'blocked') return err(422, 'This transfer was blocked by compliance screening.');
+      if (r.kind === 'moved') {
+        // A concurrent confirm / pay / cancel moved it: report current truth.
+        const moved = await deps.store.getTransfer(id);
+        if (!moved || moved.complianceStatus === 'blocked' || moved.status === 'blocked') {
+          return err(422, 'This transfer was blocked by compliance screening.');
+        }
+        return ok(200, await transferViewWithName(deps, moved));
+      }
+      current = r.transfer;
+    }
+  }
+
+  if (current.complianceStatus !== 'cleared') {
     // FLAGGED: hold, never settle. beginHold is ONE transaction (in_review
     // flip + held stage-1 outbox row, dedupe stage1:<id>); NO rail effect.
     // Partner-scoped: ownership was checked above; the held row names the
     // OWNER (t.partnerId) and the worker resolves its creds at drain (fix 11).
-    const hold = await beginHold(deps.db as Db, t);
+    const hold = await beginHold(deps.db as Db, current);
     if (hold.kind === 'held') {
       pokeWorker(); // the held "payment received / under review" message is READY now
       // Audit ONLY a real transition (mirrors the settle path below): on the
@@ -806,7 +835,7 @@ export async function confirmTransaction(
       await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
     }
     const held = await deps.store.getTransfer(id);
-    return ok(200, await transferViewWithName(deps, held ?? t));
+    return ok(200, await transferViewWithName(deps, held ?? current));
   }
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
@@ -815,7 +844,8 @@ export async function confirmTransaction(
     // the customer message names the OWNING partner (creds resolve at drain —
     // fix 11). settleOrHold re-checks the LEDGER: if the row was re-screened
     // to flagged since the read above, it is held instead of instructed.
-    const integrations = await deps.integrationsStore.getIntegrations(partner.id);
+    // Fix pack 2 T3: the RAIL partner's integrations (routed, else owner).
+    const integrations = await deps.integrationsStore.getIntegrations(railPartnerOf(tr));
     const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its
@@ -827,10 +857,10 @@ export async function confirmTransaction(
     // 'held' / 'already' / 'refused' need no further effect here: the re-read
     // below returns the ledger's current truth (in_review / paid / awaiting).
   });
-  await initiate(t);
+  await initiate(current);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
   const after = await deps.store.getTransfer(id);
-  return ok(200, await transferViewWithName(deps, after ?? t));
+  return ok(200, await transferViewWithName(deps, after ?? current));
 }
 
 // ── PUT /rates (push ONE corridor's wholesale rate) ───────────────────────

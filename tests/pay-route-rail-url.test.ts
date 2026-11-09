@@ -12,8 +12,9 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
-import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
 vi.mock('next/server', async (orig) => {
@@ -151,6 +152,8 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
 
   it('a PUBLIC https owner rail is charged and settles (the gate lets good config through)', async () => {
     rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    // Fix pack 2 T3: live-gate.ts reads the rail type from partner_integrations.
+    await setRailProviderType(db, 'default', 'http');
     await store.saveTransfer(makeTransfer({ id: 'g1' }));
     // Fix pack 2 T9: an http rail settles only on a live, fresh screen; the
     // pay-time re-screen runs on a live OFAC list (checked an hour ago).
@@ -161,6 +164,22 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('g1'))?.status).toBe('paid');
+  });
+
+  it('a PUBLIC https owner rail with a STALE list → charged, held in_review, never instructed (fix pack 2 T3)', async () => {
+    rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    await setRailProviderType(db, 'default', 'http');
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
+    await store.saveTransfer(makeTransfer({ id: 's1' }));
+    const res = await post('s1');
+    expect(res.status).toBe(200);
+    const t = await store.getTransfer('s1');
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    const kinds = ((await db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((r) => r.kind);
+    expect(kinds).not.toContain('settlement.instruct');
   });
 
   it('a MOCK owner rail is unaffected (no URL required)', async () => {

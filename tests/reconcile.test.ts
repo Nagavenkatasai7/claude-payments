@@ -14,6 +14,21 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
+import { seedLiveEvidence } from './helpers-sanctions';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+
+// Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
+const rescreenThrows = vi.hoisted(() => ({ value: false }));
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-rescreen')>();
+  return {
+    ...real,
+    rescreenOnFile: async (...a: Parameters<typeof real.rescreenOnFile>) => {
+      if (rescreenThrows.value) throw new Error('screening unavailable');
+      return real.rescreenOnFile(...a);
+    },
+  };
+});
 
 // Program-Fix 15 PR C: a switch that makes findStuckPaid return a STALE
 // snapshot (read before a concurrent sender cancel committed). Off (null) by
@@ -64,6 +79,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
   stuckSnapshot.rows = null;
+  rescreenThrows.value = false;
 });
 
 describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
@@ -704,5 +720,82 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
     await overdueTicket('tk_fresh', 1);
     await reconcileSweep(db);
     expect(await digestRows()).toHaveLength(0);
+  });
+});
+
+// Fix pack 2 T3 (R02): the non-Stripe crash-resume of a real-money (http rail)
+// row re-screens when its newest evidence is not a live, fresh screen; a hold
+// waiting on the list says so in the ops copy.
+describe('reconcileSweep — real-money resume needs a live, fresh screen (fix pack 2 T3)', { retry: 0 }, () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  const victim = (over: Partial<Transfer> = {}) =>
+    fixture({ id: 'rc_lv1', status: 'awaiting_payment', fundingRef: 'mockfund-rc_lv1', createdAt: minutesAgo(20), paidAt: undefined, ...over });
+  async function rail(providerType: 'http' | 'mock') {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: providerType === 'http'
+        ? { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' }
+        : { providerType: 'mock' },
+      whatsapp: {},
+    });
+  }
+  const message = async (key: string) =>
+    ((await db.execute(sql`SELECT payload->>'message' AS message FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {
+      rows: Array<{ message: string }>;
+    }).rows[0]?.message;
+  const screens = async (id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+
+  it('a charged http row whose evidence is stale is re-screened and HELD (LIST_UNAVAILABLE), with the list copy in the fundhold alert', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    const after = await store.getTransfer('rc_lv1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    const keys = (await outboxRows()).map((x) => x.dedupe_key);
+    expect(keys).not.toContain('instruct:rc_lv1');
+    expect(keys).toContain('fundhold:rc_lv1');
+    const m = await message('fundhold:rc_lv1');
+    expect(m).toContain('fresh sanctions list');
+    expect(m).toContain('released automatically');
+    expect(m).toContain('list loader');
+    expect(await screens('rc_lv1')).toBe(2);
+  });
+
+  it('a mock rail resumes as before: no re-screen, paid', async () => {
+    await rail('mock');
+    await store.saveTransfer(victim());
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('paid');
+    expect(await screens('rc_lv1')).toBe(0);
+  });
+
+  it('a re-screen that throws leaves the row untouched (the next sweep retries)', async () => {
+    await rail('http');
+    rescreenThrows.value = true;
+    await store.saveTransfer(victim());
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(0);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toEqual([]);
+  });
+
+  it('a stale review waiting on the list says so; any other stale review keeps the usual copy', async () => {
+    await store.saveTransfer(fixture({ id: 'rc_lvrev', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON] }));
+    await store.saveTransfer(fixture({ id: 'rc_rev2', status: 'in_review', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] }));
+    await reconcileSweep(db);
+    const listCopy = await message('review:rc_lvrev');
+    expect(listCopy).toContain('fresh sanctions list');
+    expect(listCopy).toContain('released automatically');
+    expect(listCopy).toContain('list loader');
+    const usual = await message('review:rc_rev2');
+    expect(usual).toContain('release or refund it');
+    expect(usual).not.toContain('sanctions list');
   });
 });

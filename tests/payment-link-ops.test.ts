@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, onTestFinished } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -19,6 +19,7 @@ import {
   type PartnerActor, type PlatformActor,
 } from '@/lib/payment-link-ops';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 
 const ACME: PartnerActor = { partnerId: 'acme', username: 'acme-admin', role: 'admin' };
 const OTHER: PartnerActor = { partnerId: 'other', username: 'other-admin', role: 'admin' };
@@ -77,7 +78,7 @@ describe('payees', () => {
 
   it('approve re-screens: clear approves; a possible match refuses the approval; suspend and re-approve; reject is final', async () => {
     const p = await addPayee(db, ACME, PAYEE);
-    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'review' });
+    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'review', listUnavailable: false });
     expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('review');
     const [r1] = await rows<{ status: string; screening: string }>(`SELECT status, screening FROM payees WHERE id = '${p.id}'`);
     expect(r1).toEqual({ status: 'pending', screening: 'review' });
@@ -92,9 +93,43 @@ describe('payees', () => {
 
   it('an approve that now matches the watchlist rejects the payee', async () => {
     const p = await addPayee(db, ACME, PAYEE);
-    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'match' });
+    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'match', listUnavailable: false });
     expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('refused');
     expect((await rows<{ status: string }>(`SELECT status FROM payees WHERE id = '${p.id}'`))[0].status).toBe('rejected');
+  });
+
+  // Fix pack 2 T3 (R02): a payee of an http-rail (real-money) partner needs the
+  // LIVE list; an outage says nothing about the payee, so nothing is persisted.
+  it('add on an http rail with a stale list → list_unavailable, no payee row, evidence recorded', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    expect(await code(addPayee(db, ACME, PAYEE))).toBe('list_unavailable');
+    expect(await rows(`SELECT id FROM payees`)).toEqual([]);
+    const audits = await rows<{ action: string; meta: { decision: string; listFitness: string } }>(
+      `SELECT action, meta FROM audit_events ORDER BY id`,
+    );
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen']);
+    expect(audits[0].meta).toMatchObject({ decision: 'list_unavailable', listFitness: 'stale' });
+    expect(JSON.stringify(audits[0].meta)).not.toContain('Sunrise');
+  });
+
+  it('add on a mock rail is unchanged (the mock list clears)', async () => {
+    await setRailProviderType(db, 'acme', 'mock');
+    expect((await addPayee(db, ACME, PAYEE)).screening).toBe('clear');
+  });
+
+  it('approve on an http rail with a list that is not live → review, screening and status unchanged', async () => {
+    const p = await addPayee(db, ACME, PAYEE); // mock rail: clear
+    await setRailProviderType(db, 'acme', 'http'); // the mock list is never live
+    expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('review');
+    const [r] = await rows<{ status: string; screening: string }>(`SELECT status, screening FROM payees WHERE id = '${p.id}'`);
+    expect(r).toEqual({ status: 'pending', screening: 'clear' });
+    const screens = await rows<{ meta: { decision: string } }>(
+      `SELECT meta FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${p.id}' ORDER BY id`,
+    );
+    expect(screens.map((x) => x.meta.decision)).toEqual(['clear', 'list_unavailable']);
   });
 
   it('only a platform admin decides or reveals; a partner-scoped admin is forbidden', async () => {
