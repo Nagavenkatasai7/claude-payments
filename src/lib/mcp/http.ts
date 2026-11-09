@@ -18,7 +18,9 @@ import { buildMcpServer, type McpServerDeps } from './server';
 // default (`legacy: 'stateless'`, :3947; dist/index.mjs:1046), answers every 2025-era request (initialize with
 // 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05) from a fresh instance over a stateless
 // streamable HTTP transport; GET and DELETE (2025 session operations) get 405 there. It does no
-// token verification: authInfo is passed through as given (:4161).
+// token verification: authInfo is passed through as given (:4161). No stream outlives its request:
+// the server does not advertise tools.listChanged (server.ts), so 2026-07-28 subscriptions/listen is
+// not offered and an explicit listen POST is acknowledged and closed at once.
 
 export interface McpSite {
   partnerId: PartnerId;

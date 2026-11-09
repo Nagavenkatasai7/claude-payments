@@ -57,6 +57,18 @@ export function isAuthErrorCode(code: number | undefined): boolean {
   return code !== undefined && AUTH_CODES.has(code);
 }
 
+/**
+ * Telegram has no Meta templates: the callers' own text fallback sends the message there.
+ * It lives here (re-exported by whatsapp.ts) so the outbox worker can test for it
+ * without a value import of whatsapp.ts, which many specs replace with a mock.
+ */
+export class TelegramNoTemplateError extends Error {
+  constructor() {
+    super('Telegram chat: templates are not sent; use the text fallback');
+    this.name = 'TelegramNoTemplateError';
+  }
+}
+
 /** Unknown / absent code ⇒ retryable: an unparseable reply is never terminal. */
 export function classifyGraphCode(code: number | undefined): GraphErrorKind {
   if (code === undefined) return 'retryable';

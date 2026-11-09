@@ -1,6 +1,6 @@
 import { env } from './env';
 import { logError, logWarn } from './log';
-import { WhatsAppSendError, isSendOutcome, sendOutcomeFromError, type SendOutcome } from './whatsapp-errors';
+import { TelegramNoTemplateError, WhatsAppSendError, isSendOutcome, sendOutcomeFromError, type SendOutcome } from './whatsapp-errors';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
@@ -38,13 +38,8 @@ async function telegramChat(to: string, creds?: WaCreds): Promise<string | null>
   return telegramChatFor(to, creds?.phoneNumberId);
 }
 
-/** Telegram has no Meta templates: the callers' own text fallback sends the message there. */
-export class TelegramNoTemplateError extends Error {
-  constructor() {
-    super('Telegram chat: templates are not sent; use the text fallback');
-    this.name = 'TelegramNoTemplateError';
-  }
-}
+// Telegram has no Meta templates: the callers' own text fallback sends the message there.
+export { TelegramNoTemplateError };
 
 /**
  * WL2 per-partner WhatsApp credentials. Every send function accepts an optional

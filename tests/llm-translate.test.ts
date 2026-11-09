@@ -141,6 +141,88 @@ describe('toAnthropicRequest', () => {
     expect(result.tool_use_id).toBe('functions_get_quote_0');
   });
 
+  // Stored history can hold the same id twice once safeToolId has mapped it
+  // (an empty id, or old ids that differ only in replaced characters). Claude
+  // wants every tool_use id unique in one request, so repeats get _2, _3, …
+  // and each result still pairs with its own call.
+  const toolUses = (req: ReturnType<typeof toAnthropicRequest>) =>
+    req.messages.flatMap((m) => (m.content as Anthropic.ContentBlockParam[]).filter((b) => b.type === 'tool_use')) as Anthropic.ToolUseBlockParam[];
+  const toolResults = (req: ReturnType<typeof toAnthropicRequest>) =>
+    req.messages.flatMap((m) => (m.content as Anthropic.ContentBlockParam[]).filter((b) => b.type === 'tool_result')) as Anthropic.ToolResultBlockParam[];
+
+  it('two calls in different rounds that both have an empty id get unique ids, each with its own result', () => {
+    const req = toAnthropicRequest(
+      [
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: '', tool_calls: [call('')] },
+        { role: 'tool', tool_call_id: '', content: 'first' },
+        { role: 'assistant', content: '', tool_calls: [call('')] },
+        { role: 'tool', tool_call_id: '', content: 'second' },
+        { role: 'user', content: 'ok' },
+      ],
+      [],
+    );
+    expect(toolUses(req).map((b) => b.id)).toEqual(['tool', 'tool_2']);
+    expect(toolResults(req).map((r) => [r.tool_use_id, r.content])).toEqual([
+      ['tool', 'first'],
+      ['tool_2', 'second'],
+    ]);
+  });
+
+  it('ids that differ only in replaced characters stay distinct, and results pair by their own id', () => {
+    const req = toAnthropicRequest(
+      [
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: '', tool_calls: [call('a.b'), call('a:b')] },
+        // results arrive in the other order: each must still find its own call
+        { role: 'tool', tool_call_id: 'a:b', content: 'colon' },
+        { role: 'tool', tool_call_id: 'a.b', content: 'dot' },
+      ],
+      [],
+    );
+    expect(toolUses(req).map((b) => b.id)).toEqual(['a_b', 'a_b_2']);
+    expect(toolResults(req).map((r) => [r.tool_use_id, r.content])).toEqual([
+      ['a_b_2', 'colon'],
+      ['a_b', 'dot'],
+    ]);
+  });
+
+  it('two empty ids in ONE round pair with their results in order; a missing one gets the error result', () => {
+    const req = toAnthropicRequest(
+      [
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: '', tool_calls: [call(''), call(''), call('')] },
+        { role: 'tool', tool_call_id: '', content: 'one' },
+        { role: 'tool', tool_call_id: '', content: 'two' },
+      ],
+      [],
+    );
+    expect(toolUses(req).map((b) => b.id)).toEqual(['tool', 'tool_2', 'tool_3']);
+    expect(toolResults(req).map((r) => [r.tool_use_id, r.content])).toEqual([
+      ['tool', 'one'],
+      ['tool_2', 'two'],
+      ['tool_3', MISSING_RESULT_TEXT],
+    ]);
+  });
+
+  it('a suffix never collides with a real id already named like one', () => {
+    const req = toAnthropicRequest(
+      [
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: '', tool_calls: [call('x'), call('x_2'), call('x')] },
+        { role: 'tool', tool_call_id: 'x', content: 'a' },
+        { role: 'tool', tool_call_id: 'x_2', content: 'b' },
+        { role: 'tool', tool_call_id: 'x', content: 'c' },
+      ],
+      [],
+    );
+    const ids = toolUses(req).map((b) => b.id);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids.slice(0, 2)).toEqual(['x', 'x_2']);
+    expect(toolResults(req).map((r) => r.content)).toEqual(['a', 'b', 'c']);
+    expect(toolResults(req).map((r) => r.tool_use_id)).toEqual(ids);
+  });
+
   it('bad tool-call JSON becomes {} input, never a throw', () => {
     const req = toAnthropicRequest(
       [
