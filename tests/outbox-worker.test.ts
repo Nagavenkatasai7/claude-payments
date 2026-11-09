@@ -19,6 +19,7 @@ import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { TelegramNoTemplateError } from '@/lib/whatsapp';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
 
 // R17: the AI notice and its durable marker are covered by
@@ -2645,6 +2646,20 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
     const r = await drainOnce(deps(), 'w1');
     expect(r).toMatchObject({ dead: 1, failed: 0 });
     expect((await alerts())[0].payload.message).toContain('DEAD (terminal: WhatsApp #132001)');
+  });
+
+  // Weekly reliability 2026-11-09: a template row to a Telegram chat has no text
+  // to fall back to, so a retry can never send it; it is terminal like a permanent code.
+  it('a whatsapp.template row that throws TelegramNoTemplateError is dead at attempt 1 with one dead:<id> alert', async () => {
+    sendTemplate.mockRejectedValueOnce(new TelegramNoTemplateError());
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    expect(await statusOf('whatsapp.template')).toMatchObject({ status: 'dead', attempts: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toMatch(/^dead:\d+$/);
+    expect(a[0].payload.message).toContain('DEAD (terminal: Telegram chat');
   });
 
   it('a 131030 ops.alert row is dead at attempt 1 and never alerts about itself', async () => {
