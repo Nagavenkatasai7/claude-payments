@@ -1116,6 +1116,10 @@ export const en = {
   'portal.schedules.recipient_unusable': 'This recipient cannot be used for a scheduled payment.',
   'portal.skip': 'Skip to content',
   'portal.signout': 'Sign out',
+  // Site skins (src/lib/site-skins.ts): shown only on a skin host such as tgfl.smartremit.ai.
+  // {name} is the skin's name; {brand} is always SmartRemit, the company that runs the portal.
+  'portal.skin.demo': '{name} demo, run by {brand}. No real money moves.',
+  'portal.skin.poweredBy': 'Powered by {brand}',
   // ── M2-13: Devices + Privacy (one block) ──
   'portal.devices.title': 'Devices',
   'portal.devices.sub': 'Where you are signed in. Sign out of any device you do not recognise.',

@@ -36,7 +36,8 @@ export type FlagKey =
   | 'paylinks.enabled'
   | 'telegram.bot'
   | 'agent.tools'
-  | 'agent.reply_guard';
+  | 'agent.reply_guard'
+  | 'portal.skins';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -184,6 +185,22 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
       'On: the reply is also replaced with the fixed "please send that again, or reply HELP" line.',
     bannerText: 'The bot reply guard replaces mismatched replies',
     scopes: ['global', 'partner', 'corridor'],
+    killSwitch: false,
+  },
+  // Site skins (owner go 2026-11-09, src/lib/site-skins.ts): tgfl.smartremit.ai shows SmartRemit's
+  // own customer portal with the TGFL name. Global only: it is one address, not a per-partner or
+  // per-corridor feature. FAILS CLOSED: off, unreadable or slow ⇒ the address shows the generic
+  // "This link is no longer active" sheet (site-tenant-resolver.ts reads it on every request to a
+  // skin host, never for another host). A real partner that holds the slug is not affected.
+  'portal.skins': {
+    key: 'portal.skins',
+    label: 'TGFL demo portal',
+    description:
+      'The address tgfl.smartremit.ai opens the SmartRemit customer portal with the TGFL name in the header, a demo line and "Powered by SmartRemit". ' +
+      'It uses SmartRemit\'s own accounts: the same sign-in, recipients and transfers as send.smartremit.ai. ' +
+      'Off: the address shows "This link is no longer active". A change takes up to 15 seconds.',
+    bannerText: 'The TGFL demo portal is on',
+    scopes: ['global'],
     killSwitch: false,
   },
 };

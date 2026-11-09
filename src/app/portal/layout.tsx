@@ -1,19 +1,22 @@
 import type { ReactNode } from 'react';
 import { requirePortalSite } from '@/lib/portal-site';
-import { portalMetadata } from '@/lib/portal-metadata';
+import { portalLayoutMetadata } from '@/lib/portal-metadata';
+import { skinLogoSrc } from '@/lib/site-skins';
 import { getPortalCustomer } from '@/lib/portal-auth';
 import { env } from '@/lib/env';
 import { t } from '@/lib/i18n';
 import { portalNavItems } from '@/lib/portal-nav';
 import { agentPortal } from '@/lib/agent-auth/portal-wiring';
 import { Sidebar, Button } from '@/components/ds';
+import { SiteThemeStyle } from '@/components/ds/site-theme-style';
 import Link from 'next/link';
 import BrandLogo from '@/app/landing/BrandLogo';
 import { signOutAction } from './signout/actions';
 import { APEX_URL, companyFooterLine } from '@/lib/company';
 
 // Site-only (L8): on the apex the whole tree is the root 404, whose head must match any unmatched URL.
-export const generateMetadata = () => portalMetadata(null, { robots: { index: false, follow: false } });
+// On a skin host the tab title of each page also names the skin ("Sign in · TGFL").
+export const generateMetadata = () => portalLayoutMetadata({ robots: { index: false, follow: false } });
 // Per-request only (Host, flag, per-partner enablement, session): never prerendered.
 export const dynamic = 'force-dynamic';
 
@@ -23,9 +26,19 @@ export const dynamic = 'force-dynamic';
  * SmartRemit's, never the partner's. The gate runs FIRST, so on the apex (or with the portal off) the whole tree
  * falls through to the brand-neutral root 404. It does not require a customer (sign-in lives
  * under it); the nav and sign-out show only for a signed-in customer.
+ *
+ * The ONE exception (owner go 2026-11-09): a site skin (src/lib/site-skins.ts, e.g. tgfl.smartremit.ai).
+ * There the header shows the skin's name (or its logo file) in place of the SmartRemit logo, a demo
+ * line sits under the header on every page, the footer adds "Powered by SmartRemit", and the skin's
+ * colours apply when it has any (validated again by SiteThemeStyle). Nothing else changes: the pages,
+ * the company line and the legal links are SmartRemit's, and `site.brand` stays SmartRemit. A
+ * PARTNER's name, logo and colours are still never shown. Without a skin the markup is unchanged.
  */
 export default async function PortalLayout({ children }: { children: ReactNode }) {
   const site = await requirePortalSite();
+  const skin = site.skin ?? null;
+  // Only a file under /brand/partners/ renders; anything else falls back to the name as text.
+  const skinLogo = skin ? skinLogoSrc(skin) : null;
   const customer = await getPortalCustomer();
   // Stage C1: "Connected AI apps" shows while the gate is open or the customer has a live grant
   // (fails closed and time-bounded; the page gates itself as well).
@@ -33,6 +46,7 @@ export default async function PortalLayout({ children }: { children: ReactNode }
   return (
     <>
       <div className="ds-site" lang="en">
+        {skin?.theme ? <SiteThemeStyle theme={skin.theme} /> : null}
         <div className="min-h-dvh bg-ds-ground text-ds-ink">
           <a
             href="#main"
@@ -42,7 +56,17 @@ export default async function PortalLayout({ children }: { children: ReactNode }
           </a>
           <header className="flex items-center justify-between gap-4 border-b border-ds-border bg-ds-surface px-4 py-3 sm:px-6 print:hidden">
             <Link href="/portal" className="inline-flex rounded-ds-focus">
-              <BrandLogo height={36} eager className="h-8 sm:h-9" />
+              {!skin ? (
+                <BrandLogo height={36} eager className="h-8 sm:h-9" />
+              ) : skinLogo ? (
+                // A same-origin file under /brand/partners/ of unknown size; next/image needs fixed dimensions.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={skinLogo} alt={skin.name} className="h-8 w-auto sm:h-9" />
+              ) : (
+                <span data-skin-brand className="text-xl font-extrabold tracking-tight text-ds-ink sm:text-2xl">
+                  {skin.name}
+                </span>
+              )}
             </Link>
             {customer ? (
               <form action={signOutAction}>
@@ -52,6 +76,15 @@ export default async function PortalLayout({ children }: { children: ReactNode }
               </form>
             ) : null}
           </header>
+          {skin?.demo ? (
+            <p
+              data-skin-demo
+              role="note"
+              className="border-b border-ds-border bg-ds-surface px-4 py-2 text-center text-[13px] text-ds-ink-muted sm:px-6 print:hidden"
+            >
+              {t('portal.skin.demo', { name: skin.name, brand: site.brand })}
+            </p>
+          ) : null}
           <div className={customer ? 'md:grid md:grid-cols-[240px_1fr] print:block' : undefined}>
             {customer ? (
               <div className="print:hidden">
@@ -78,6 +111,11 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                 {t('portal.footer.licensing')}
               </a>
             </nav>
+            {skin ? (
+              <p data-skin-powered className="mt-3 font-semibold text-ds-ink">
+                {t('portal.skin.poweredBy', { brand: site.brand })}
+              </p>
+            ) : null}
             <p className="mt-3">{companyFooterLine(new Date().getFullYear())}</p>
           </footer>
         </div>
