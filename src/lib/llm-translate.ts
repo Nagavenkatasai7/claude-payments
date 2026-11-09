@@ -44,17 +44,22 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
   }
 }
 
-function assistantBlocks(m: ChatMessage): Block[] {
+/** The blocks, and the id each tool_use had before safeToolId (a result names that id). */
+function assistantBlocks(m: ChatMessage): { blocks: Block[]; rawIds: string[] } {
   if (Array.isArray(m.providerContent) && m.providerContent.length > 0) {
-    return m.providerContent as Block[];
+    const blocks = m.providerContent as Block[];
+    const rawIds = blocks.filter((b): b is Anthropic.ToolUseBlockParam => b.type === 'tool_use').map((b) => b.id);
+    return { blocks, rawIds };
   }
   const blocks: Block[] = [];
+  const rawIds: string[] = [];
   const text = (m.content ?? '').trim();
   if (text) blocks.push({ type: 'text', text });
   for (const call of m.tool_calls ?? []) {
     blocks.push({ type: 'tool_use', id: safeToolId(call.id), name: call.function.name, input: parseArgs(call.function.arguments) });
+    rawIds.push(call.id);
   }
-  return blocks;
+  return { blocks, rawIds };
 }
 
 /**
@@ -65,14 +70,26 @@ function assistantBlocks(m: ChatMessage): Block[] {
 export function toAnthropicRequest(messages: ChatMessage[], tools: ChatTool[]): AnthropicChatRequest {
   const system: Anthropic.TextBlockParam[] = [];
   const out: Anthropic.MessageParam[] = [];
-  let pending: string[] = []; // tool_use ids awaiting a result
+  // The open round's tool_use ids awaiting a result: `id` as sent, `raw` as
+  // the history names it, `base` after safeToolId.
+  let pending: { id: string; raw: string; base: string; answered: boolean }[] = [];
   let results: ToolResult[] = [];
+  // Every tool_use id in this request. Claude wants them unique, but stored
+  // history can repeat one after safeToolId (two empty ids, or 'a.b' and
+  // 'a:b'): a repeat gets _2, _3, … so one bad old message cannot fail every
+  // turn of the chat. A well-formed history never hits a repeat.
+  const used = new Set<string>();
+  const uniqueId = (base: string): string => {
+    let id = base;
+    for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
+    used.add(id);
+    return id;
+  };
 
   const takeResults = (): ToolResult[] => {
-    const have = new Set(results.map((r) => r.tool_use_id));
     const all = [...results];
-    for (const id of pending) {
-      if (!have.has(id)) all.push({ type: 'tool_result', tool_use_id: id, content: MISSING_RESULT_TEXT, is_error: true });
+    for (const p of pending) {
+      if (!p.answered) all.push({ type: 'tool_result', tool_use_id: p.id, content: MISSING_RESULT_TEXT, is_error: true });
     }
     pending = [];
     results = [];
@@ -86,10 +103,14 @@ export function toAnthropicRequest(messages: ChatMessage[], tools: ChatTool[]): 
       continue;
     }
     if (m.role === 'tool') {
-      const id = safeToolId(m.tool_call_id ?? '');
-      // A result with no open tool_use (or a second one for the same id) is dropped.
-      if (pending.includes(id) && !results.some((r) => r.tool_use_id === id)) {
-        results.push({ type: 'tool_result', tool_use_id: id, content: m.content || '(no output)' });
+      const raw = m.tool_call_id ?? '';
+      const base = safeToolId(raw);
+      // The first unanswered call with this exact id, else with the same safe
+      // id. A result with no open tool_use (or one more than its calls) is dropped.
+      const open = pending.find((p) => !p.answered && p.raw === raw) ?? pending.find((p) => !p.answered && p.base === base);
+      if (open) {
+        open.answered = true;
+        results.push({ type: 'tool_result', tool_use_id: open.id, content: m.content || '(no output)' });
       }
       continue;
     }
@@ -102,10 +123,16 @@ export function toAnthropicRequest(messages: ChatMessage[], tools: ChatTool[]): 
     }
     // assistant
     if (pending.length > 0) out.push({ role: 'user', content: takeResults() });
-    const blocks = assistantBlocks(m);
-    if (blocks.length === 0) continue;
+    const { blocks: built, rawIds } = assistantBlocks(m);
+    if (built.length === 0) continue;
+    let call = 0;
+    const blocks = built.map((b) => {
+      if (b.type !== 'tool_use') return b;
+      const id = uniqueId(b.id);
+      pending.push({ id, raw: rawIds[call++] ?? b.id, base: b.id, answered: false });
+      return id === b.id ? b : { ...b, id };
+    });
     out.push({ role: 'assistant', content: blocks });
-    pending = blocks.filter((b): b is Anthropic.ToolUseBlockParam => b.type === 'tool_use').map((b) => b.id);
   }
   if (pending.length > 0) out.push({ role: 'user', content: takeResults() });
 

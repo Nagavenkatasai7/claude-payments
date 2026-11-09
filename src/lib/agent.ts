@@ -23,7 +23,7 @@ import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { env } from './env';
 import { BRAND_MAX, boundUntrustedText, hasModelHost, hasWebAddress, stripModelHosts } from './untrusted-text';
-import { isPermanentProviderError } from './llm-provider-error';
+import { isPermanentProviderError, ProviderHttpError } from './llm-provider-error';
 
 const MAX_TOOL_ROUNDS = 6;
 // fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
@@ -133,16 +133,32 @@ export function createAgent(deps: AgentDeps) {
   // ran, so the retry re-sends the identical messages cleanly.
   // Never retry once the caller's row deadline (fix 7) has fired: the retry
   // would be a second LLM call past the deadline.
+  // A 400 is the provider rejecting the request itself; the same request fails
+  // again. The usual cause is a stored history it cannot read, which would fail
+  // every turn of that chat until the message ages out, so the one retry goes
+  // without that history (`withoutHistory`; absent when there is none) and
+  // calls `onHistoryDropped` once it succeeds. The spend cap's 400 is permanent
+  // (llm-provider-error.ts) and never reaches this branch.
   async function chatWithRetry(
     messages: ChatMessage[],
     tools: ChatTool[],
     signal?: AbortSignal,
+    noHistory?: { withoutHistory: ChatMessage[]; onHistoryDropped: () => void },
   ): Promise<ChatMessage> {
     try {
       return await deps.chat(messages, tools, { signal });
     } catch (err) {
       // A 401/402/403 can never succeed on retry: one provider call, not two.
       if (signal?.aborted || isPermanentProviderError(err)) throw err;
+      if (noHistory && err instanceof ProviderHttpError && err.status === 400 && !err.spendCap) {
+        // Counted by the weekly check. No message text or phone in the line.
+        logWarn('agent.history', 'provider 400: retrying this turn without the stored history', {
+          dropped: messages.length - noHistory.withoutHistory.length,
+        });
+        const reply = await deps.chat(noHistory.withoutHistory, tools, { signal });
+        noHistory.onHistoryDropped();
+        return reply;
+      }
       console.warn('chat() failed once — retrying:', err);
       return await deps.chat(messages, tools, { signal });
     }
@@ -389,6 +405,10 @@ export function createAgent(deps: AgentDeps) {
           'Do not claim their verification is complete or in progress — just ask them to finish verifying.',
       });
     }
+    // The stored history's place in the prefix (everything before this turn's
+    // message), so a 400 retry can send the prefix without it.
+    const historyStart = prefix.length;
+    const storedCount = historyAtTurnStart - 1;
     prefix.push(...history);
     // fix 5: the customer context as a tool RESULT, after the new user
     // message — the same assistant-tool_calls + tool shape the history
@@ -408,14 +428,27 @@ export function createAgent(deps: AgentDeps) {
       );
     }
 
+    let historyInPrefix = true;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Cooperative row deadline (fix 7): the worker aborts this signal at
       // ROW_DEADLINE_MS. Stop BEFORE starting another LLM call / tool round so
       // no tool runs after the worker has given up on us; the catch in
       // runAgentTurn turns this into FALLBACK_REPLY with history preserved.
       if (signal?.aborted) throw new Error('agent turn aborted: row deadline');
-      const messages: ChatMessage[] = [...prefix, ...history.slice(historyAtTurnStart)];
-      const assistant = await chatWithRetry(messages, channelTools, signal);
+      const thisTurn = history.slice(historyAtTurnStart);
+      const messages: ChatMessage[] = [...prefix, ...thisTurn];
+      // Once a 400 retry has dropped the stored history, the prefix stays
+      // without it for the rest of the turn (a turn only ever appends).
+      const noHistory = historyInPrefix && storedCount > 0
+        ? {
+            withoutHistory: [...prefix.slice(0, historyStart), ...prefix.slice(historyStart + storedCount), ...thisTurn],
+            onHistoryDropped: () => {
+              prefix.splice(historyStart, storedCount);
+              historyInPrefix = false;
+            },
+          }
+        : undefined;
+      const assistant = await chatWithRetry(messages, channelTools, signal, noHistory);
       history.push(assistant);
 
       if (assistant.tool_calls && assistant.tool_calls.length > 0) {
