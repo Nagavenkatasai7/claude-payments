@@ -10,6 +10,12 @@
  * record is still bound to the partner (portal-session-store resolve), so a
  * replayed cookie is refused on the wrong host too.
  *
+ * Site skins (src/lib/site-skins.ts): a skin host (tgfl.smartremit.ai) is served by
+ * an existing tenant, so it shares that tenant's accounts with the tenant's own host
+ * (send.smartremit.ai). The browser still keeps one cookie per host (a customer
+ * signs in on each), but the server record is bound to the TENANT, not the host:
+ * the two hosts are two doors to the same account, by design.
+ *
  * SameSite=Lax: a WhatsApp link opening the portal is a top-level cross-site GET
  * and must arrive signed in. POSTs from other sites carry no cookie.
  *

@@ -42,11 +42,26 @@ async function setFlag(db: Db, key: string, scopeType: 'global' | 'partner' | 'c
 
 describe('flag definitions', () => {
   it('defines the two kill switches with every scope', () => {
-    expect([...FLAG_KEYS].sort()).toEqual(['agent.tools', 'paylinks.enabled', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'telegram.bot', 'voice.notes']);
+    expect([...FLAG_KEYS].sort()).toEqual(['agent.tools', 'paylinks.enabled', 'portal.skins', 'purpose.detect', 'rewards.enabled', 'sends.paused', 'settlement.paused', 'telegram.bot', 'voice.notes']);
     for (const k of ['sends.paused', 'settlement.paused'] as const) {
       expect(FLAG_DEFINITIONS[k].killSwitch).toBe(true);
       expect(FLAG_DEFINITIONS[k].scopes).toEqual(['global', 'partner', 'corridor']);
     }
+  });
+
+  // Site skins (owner go 2026-11-09): the switch of tgfl.smartremit.ai. One address, so global only.
+  it('portal.skins is a global-only feature switch, off with no row, on with the global row', async () => {
+    const def = FLAG_DEFINITIONS['portal.skins'];
+    expect(def.killSwitch).toBe(false);
+    expect(def.scopes).toEqual(['global']);
+    expect(def.label).toBe('TGFL demo portal');
+    const db = await freshDb();
+    invalidateFlagCache(db);
+    expect(await isFlagOn(db, 'portal.skins')).toBe(false);
+    await setFlag(db, 'portal.skins', 'global', '');
+    expect(await isFlagOn(db, 'portal.skins')).toBe(true);
+    await setFlag(db, 'portal.skins', 'global', '', false);
+    expect(await isFlagOn(db, 'portal.skins')).toBe(false);
   });
 
   it('B2: paylinks.enabled is an ordinary feature switch (global or one partner), off with no row', async () => {

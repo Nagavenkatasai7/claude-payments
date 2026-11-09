@@ -27,7 +27,7 @@ vi.mock('@/lib/env', async (orig) => {
   };
 });
 
-import { portalMetadata, portalNotFoundMetadata } from '@/lib/portal-metadata';
+import { portalMetadata, portalLayoutMetadata, portalNotFoundMetadata } from '@/lib/portal-metadata';
 import { NOT_FOUND_METADATA } from '@/lib/not-found-metadata';
 import { metadata as rootNotFoundMetadata } from '@/app/not-found';
 
@@ -51,6 +51,24 @@ describe('portalMetadata()', () => {
     expect(await portalMetadata('portal.login.title')).toEqual({ title: 'Sign in' });
     expect(await portalMetadata('portal.detail.title', { referrer: 'no-referrer' })).toMatchObject({ referrer: 'no-referrer' });
     expect(await portalMetadata(null, { robots: { index: false, follow: false } })).toEqual({ robots: { index: false, follow: false } });
+  });
+});
+
+// Site skins (owner go 2026-11-09): on a skin host the tab title names the skin ("Sign in · TGFL").
+describe('portalLayoutMetadata()', () => {
+  const ROBOTS = { robots: { index: false, follow: false } };
+  it('apex (no portal site) → exactly the root 404 metadata', async () => {
+    expect(await portalLayoutMetadata(ROBOTS)).toEqual(NOT_FOUND_METADATA);
+  });
+  it('a portal site without a skin → the extra fields only (unchanged: the root title applies)', async () => {
+    h.site = SITE;
+    expect(await portalLayoutMetadata(ROBOTS)).toEqual(ROBOTS);
+    h.site = { ...SITE, skin: null };
+    expect(await portalLayoutMetadata(ROBOTS)).toEqual(ROBOTS);
+  });
+  it('a skin → a title template and default with the skin name, plus the extra fields', async () => {
+    h.site = { ...SITE, brand: 'SmartRemit', skin: { name: 'TGFL', logoSrc: null, theme: null, demo: true } };
+    expect(await portalLayoutMetadata(ROBOTS)).toEqual({ title: { template: '%s · TGFL', default: 'TGFL' }, ...ROBOTS });
   });
 });
 

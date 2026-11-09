@@ -7,6 +7,7 @@ import { getPartnerStore } from './partner-store';
 import { resolvePartnerBranding } from './partner-config';
 import { env } from './env';
 import { resolveSiteTheme, type SiteTheme } from './ui/theme';
+import { siteSkinFor } from './site-skins';
 import type { PartnerId } from './types';
 
 /**
@@ -25,17 +26,39 @@ import type { PartnerId } from './types';
  * (node_modules/next/dist/docs/01-app/03-api-reference/04-functions/not-found.md:15).
  *
  * `cache()` dedupes the reads within one server render (layout + page).
+ *
+ * Site skins (owner go 2026-11-09, src/lib/site-skins.ts): on a skin host (tgfl.smartremit.ai) the
+ * tenant is the skin's EXISTING tenant, and the same four checks apply to that tenant. The site then
+ * carries `skin`, which only the portal chrome reads (layout header, demo line, footer line, tab
+ * title). `brand`, `logo` and `theme` do not change: every text that names the sender of a code, a
+ * message or a receipt keeps saying SmartRemit.
  */
+
+/** What a skin host shows in the portal chrome. Display only: never a tenant, never a sender name. */
+export interface PortalSkin {
+  name: string;
+  /** A path under /brand/partners/ (the layout re-checks it with skinLogoSrc), or null for text. */
+  logoSrc: string | null;
+  /** Skin colours (the layout re-validates them), or null for SmartRemit's. */
+  theme: { primary: string; accent: string } | null;
+  /** true shows the demo line on every portal page. */
+  demo: boolean;
+}
 
 export interface PortalSite {
   partnerId: PartnerId;
   slug: string;
-  /** The end-customer brand: always SmartRemit (resolvePartnerBranding, 2026-10-04). */
+  /** The end-customer brand: always SmartRemit (resolvePartnerBranding, 2026-10-04), on a skin host too. */
   brand: string;
-  /** Always null: the portal header shows the SmartRemit logo, never a partner's (2026-10-04). */
+  /** Always null: a PARTNER's logo is never shown (2026-10-04). A skin's logo lives in `skin`. */
   logo: unknown;
   /** Always the SmartRemit default colours: a partner's colours are not applied (2026-10-04). */
   theme: SiteTheme;
+  /**
+   * The skin of this host, or null. getPortalSite() always sets it; it is optional only so objects
+   * built elsewhere (tests) need not name it. Read it as "no skin" when absent.
+   */
+  skin?: PortalSkin | null;
 }
 
 async function loadPortalSite(): Promise<PortalSite | null> {
@@ -49,12 +72,15 @@ async function loadPortalSite(): Promise<PortalSite | null> {
     if (!settings.portalEnabledAt) return null;
     const partner = await getPartnerStore().getPartner(tenant.partnerId);
     if (!partner || partner.status !== 'active') return null;
+    // Only when the host resolved to the skin's own tenant: a real partner on that slug gets none.
+    const skin = siteSkinFor(tenant.slug, tenant.partnerId);
     return {
       partnerId: tenant.partnerId,
       slug: tenant.slug,
       brand: resolvePartnerBranding(partner).brand,
       logo: null,
       theme: resolveSiteTheme({}),
+      skin: skin ? { name: skin.name, logoSrc: skin.logoSrc, theme: skin.theme, demo: skin.demo } : null,
     };
   } catch {
     return null;

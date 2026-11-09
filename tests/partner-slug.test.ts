@@ -4,7 +4,7 @@ import { freshDb } from './helpers-db';
 import { fakeRedis } from './helpers';
 import { partners, partnerSites, auditEvents, partnerSlugTombstones } from '@/db/schema';
 import type { Db } from '@/db/client';
-import { setPartnerSlug, getPartnerSite, savePartnerTheme } from '@/db/repos/partner-site-repo';
+import { setPartnerSlug, getPartnerSite, savePartnerTheme, readSkinSlugStatus } from '@/db/repos/partner-site-repo';
 import { siteCacheKey } from '@/lib/site-tenant-resolver';
 
 describe('setPartnerSlug', () => {
@@ -188,5 +188,55 @@ describe('setPartnerSlug', () => {
     await setPartnerSlug(db, 'pa', 'acme-two', 'u', { redis, mode: 'change' });
     expect(lock.mock.calls.map((c) => c[0])).toEqual(['no key update', 'no key update']);
     lock.mockRestore();
+  });
+});
+
+// Site skins (owner go 2026-11-09, src/lib/site-skins.ts): a skin slug is served by an existing
+// tenant, so no partner may ever claim it, and the resolver must know if one ever did.
+describe('skin slugs', () => {
+  let db: Db; let redis: ReturnType<typeof fakeRedis>;
+  beforeEach(async () => {
+    db = await freshDb(); redis = fakeRedis();
+    await db.insert(partners).values([{ id: 'pa', name: 'A' }, { id: 'ps', name: 'S', status: 'suspended' }]);
+  });
+
+  it.each(['claim', 'change'] as const)('setPartnerSlug (%s) refuses a skin slug with the same "unavailable" as every other refusal, and writes nothing', async (mode) => {
+    expect(await setPartnerSlug(db, 'pa', 'tgfl', 'u', { redis, mode })).toEqual({ ok: false, reason: 'unavailable' });
+    expect(await getPartnerSite(db, 'pa')).toBeNull();
+    expect(await db.select().from(auditEvents).where(inArray(auditEvents.action, ['partner.slug.update', 'partner.slug.claim']))).toEqual([]);
+  });
+
+  it('readSkinSlugStatus: a slug nobody ever held, tenant active', async () => {
+    expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: false, tenantActive: true });
+  });
+  it.each(['pa', 'ps'])('readSkinSlugStatus: held when partner %s has it (ANY status: a suspended partner keeps its slug)', async (id) => {
+    await db.insert(partnerSites).values({ partnerId: id, slug: 'tgfl' });
+    expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: true, tenantActive: true });
+  });
+  it('readSkinSlugStatus: held when the slug is tombstoned', async () => {
+    await db.insert(partnerSlugTombstones).values({ slug: 'tgfl', partnerId: 'pa', releasedBy: 'admin', releasedAt: new Date() });
+    expect((await readSkinSlugStatus(db, 'tgfl', 'default')).held).toBe(true);
+  });
+  it.each([
+    ['partner.slug.claim', { slug: 'tgfl', previousSlug: null }],
+    ['partner.slug.update', { slug: 'tgfl', previousSlug: 'old' }],
+    ['partner.slug.update', { slug: 'new', previousSlug: 'tgfl' }],
+  ])('readSkinSlugStatus: held when the slug audit history names it (%s %o)', async (action, meta) => {
+    await db.insert(auditEvents).values({ partnerId: 'pa', actor: 'u', actorType: 'staff', action, subjectId: 'pa', meta });
+    expect((await readSkinSlugStatus(db, 'tgfl', 'default')).held).toBe(true);
+  });
+  it('readSkinSlugStatus: another audit action or another slug does not count', async () => {
+    await db.insert(auditEvents).values([
+      { partnerId: 'pa', actor: 'u', actorType: 'staff', action: 'partner.theme.update', subjectId: 'pa', meta: { slug: 'tgfl' } },
+      { partnerId: 'pa', actor: 'u', actorType: 'staff', action: 'partner.slug.claim', subjectId: 'pa', meta: { slug: 'tgfl2', previousSlug: null } },
+    ]);
+    await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'tgfl2' });
+    expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: false, tenantActive: true });
+  });
+  it('readSkinSlugStatus: the tenant is not active when it is suspended or does not exist', async () => {
+    expect(await readSkinSlugStatus(db, 'tgfl', 'ps')).toEqual({ held: false, tenantActive: false });
+    expect(await readSkinSlugStatus(db, 'tgfl', 'nobody')).toEqual({ held: false, tenantActive: false });
+    await db.update(partners).set({ status: 'suspended' }).where(eq(partners.id, 'default'));
+    expect(await readSkinSlugStatus(db, 'tgfl', 'default')).toEqual({ held: false, tenantActive: false });
   });
 });
