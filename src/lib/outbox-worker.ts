@@ -41,7 +41,7 @@ import { suppressForOptOut } from '@/lib/consent-gate';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
-import { WhatsAppSendError, isAuthErrorCode } from '@/lib/whatsapp-errors';
+import { TelegramNoTemplateError, WhatsAppSendError, isAuthErrorCode } from '@/lib/whatsapp-errors';
 import { resolveWaChannel, WaChannelIncompleteError, type WaChannel } from '@/lib/whatsapp-creds';
 import { recordChannelHealth } from '@/lib/channel-health';
 import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-worker';
@@ -1541,7 +1541,10 @@ export async function drainOnce(
           : undefined;
       // R2a: an incomplete channel is terminal too (a retry cannot fix config).
       const incomplete = err instanceof WaChannelIncompleteError;
-      const terminal = terminalDeadline || permanentCode !== undefined || incomplete;
+      // A template row to a Telegram chat has no text to fall back to (the other
+      // template callers send text instead), so no retry can ever send it.
+      const noTemplate = err instanceof TelegramNoTemplateError && row.kind === 'whatsapp.template';
+      const terminal = terminalDeadline || permanentCode !== undefined || incomplete || noTemplate;
       // A RETRYABLE deadline: the abandoned handler may still be running in this
       // invocation (withRowDeadline cannot cancel it). Park the row for a full
       // LEASE_MS — past maxDuration — so no other worker runs it concurrently
@@ -1572,6 +1575,8 @@ export async function drainOnce(
                 ? 'DEAD (terminal: the partner WhatsApp channel is incomplete — not sent from any number; further rows for this partner this hour are coalesced into this alert; fix or disconnect the channel, then retry)'
               : permanentCode !== undefined
                 ? `DEAD (terminal: WhatsApp #${permanentCode})`
+              : noTemplate
+                ? 'DEAD (terminal: Telegram chat has no templates)'
                 : `DEAD after ${row.attempts} attempts`
           }: ${message.slice(0, 140)}${
             permanentCode !== undefined

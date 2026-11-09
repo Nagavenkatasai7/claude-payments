@@ -38,7 +38,8 @@ describe('classifyGraphCode', () => {
     expect(classifyGraphCode(131047)).toBe('window');
   });
 
-  it.each([131030, 131026, 132000, 132001, 133010])('%i → permanent', (code) => {
+  // 131009 "Parameter value is not valid" (e.g. a duplicate button id): the same payload fails every retry.
+  it.each([131030, 131026, 132000, 132001, 133010, 131009])('%i → permanent', (code) => {
     expect(classifyGraphCode(code)).toBe('permanent');
   });
 

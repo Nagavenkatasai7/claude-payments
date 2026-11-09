@@ -24,7 +24,13 @@ const WINDOW_CODES: ReadonlySet<number> = new Set([131047]);
  * API, per the error-codes page above) joins the set, so the ops-diagnosis
  * Retry-disable and the worker share ONE list.
  */
-export const PERMANENT_GRAPH_CODES: readonly number[] = [131030, 131031, 131026, 132000, 132001, 133010];
+/*
+ * 131009 "Parameter value is not valid" (400, "One or more parameter values are
+ * invalid"; https://developers.facebook.com/documentation/business-messaging/whatsapp/support/error-codes):
+ * the request body itself is wrong (seen in production as a duplicate button
+ * id), so the same payload fails every retry.
+ */
+export const PERMANENT_GRAPH_CODES: readonly number[] = [131030, 131031, 131026, 132000, 132001, 133010, 131009];
 const PERMANENT_CODES: ReadonlySet<number> = new Set(PERMANENT_GRAPH_CODES);
 
 /** Read `error.code` / `error.message` from a Graph JSON body. Garbage ⇒ {}. */
@@ -55,6 +61,18 @@ export function parseGraphError(_status: number, body: string): { code?: number;
 const AUTH_CODES: ReadonlySet<number> = new Set([190, 0]);
 export function isAuthErrorCode(code: number | undefined): boolean {
   return code !== undefined && AUTH_CODES.has(code);
+}
+
+/**
+ * Telegram has no Meta templates: the callers' own text fallback sends the message there.
+ * It lives here (re-exported by whatsapp.ts) so the outbox worker can test for it
+ * without a value import of whatsapp.ts, which many specs replace with a mock.
+ */
+export class TelegramNoTemplateError extends Error {
+  constructor() {
+    super('Telegram chat: templates are not sent; use the text fallback');
+    this.name = 'TelegramNoTemplateError';
+  }
 }
 
 /** Unknown / absent code ⇒ retryable: an unparseable reply is never terminal. */
