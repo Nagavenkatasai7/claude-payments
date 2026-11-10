@@ -196,7 +196,7 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     // Pack 3: the owner is a certified non-default partner (the default tenant may never own a
     // real-money transfer, and an uncertified rail is refused at pay time).
     await acmeOnHttp();
-    await store.saveTransfer(makeTransfer({ id: 'g1', partnerId: 'acme' }));
+    await store.saveTransfer(makeTransfer({ id: 'g1', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
     // Fix pack 2 T9: an http rail settles only on a live, fresh screen; the
     // pay-time re-screen runs on a live OFAC list (checked an hour ago).
     const originalList = process.env.SANCTIONS_LIST;
@@ -213,7 +213,7 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     const originalList = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
-    await store.saveTransfer(makeTransfer({ id: 's1', partnerId: 'acme' }));
+    await store.saveTransfer(makeTransfer({ id: 's1', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
     const res = await post('s1', realMoneyPayBody());
     expect(res.status).toBe(200);
     const t = await store.getTransfer('s1');
@@ -262,7 +262,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
   it('the same owner certified -> charged and settles', async () => {
     await acmeOnHttp();
     liveList();
-    await store.saveTransfer(makeTransfer({ id: 'lc2', partnerId: 'acme' }));
+    await store.saveTransfer(makeTransfer({ id: 'lc2', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
     const res = await post('lc2', realMoneyPayBody());
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);

@@ -14,6 +14,7 @@ import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import {
   LIST_UNAVAILABLE_REASON,
   POSSIBLE_MATCH_REASON,
+  RECIPIENT_IDENTITY_MISSING_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
   isRescreenOnlyHold,
@@ -121,7 +122,8 @@ export type SettleOrHoldResult =
 export type ReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid committed + the rail effect enqueued
   | { kind: 'already' } // not in_review anymore — idempotent no-op, never resurrects
-  | { kind: 'sender_hold' }; // platform release on a real-money rail: the sender's screening hold is active (locked re-check); nothing written
+  | { kind: 'sender_hold' } // platform release on a real-money rail: the sender's screening hold is active (locked re-check); nothing written
+  | { kind: 'identity_missing' }; // fix pack 4 (C19): real money, b2c, not Partner-API / payment link, no legal name on file: nothing written
 
 /**
  * The ONE rail-effect enqueue, shared by beginSettlement (cleared money) and
@@ -302,6 +304,9 @@ async function holdInTx(tx: DbOrTx, transfer: Transfer, addReasons: string[]): P
  * handle before any transaction; a read error throws (nothing settles). A
  * blocked transfer is refused first. Not real money: unchanged, zero reads.
  * This only ever ADDS a hold: sanctions screening is never skipped.
+ * Fix pack 4 (R03, C19): on real money a consumer row with no account-holder
+ * (legal) name on file also gains RECIPIENT_IDENTITY_MISSING (Partner-API and
+ * payment-link rows are exempt in the SQL; a B2B row makes no read).
  */
 export async function settleOrHold(
   db: Db,
@@ -328,6 +333,11 @@ export async function settleOrHold(
     // reviewer sees it. A read error throws (nothing paid).
     if (senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))) {
       add.push(SENDER_SCREENING_REASON);
+    }
+    // Fix pack 4 (R03, C19): a consumer row with no account-holder name on file. Root handle, before any
+    // transaction; a read error throws (nothing settles). Partner-API and payment-link rows are exempt in the SQL.
+    if (transfer.transferType !== 'b2b' && (await createTransferRepo(db).recipientIdentityMissing(transfer.id, transfer.partnerId))) {
+      add.push(RECIPIENT_IDENTITY_MISSING_REASON);
     }
     if (add.length > 0) return beginHold(db, transfer, { addReasons: add });
   }
@@ -370,6 +380,8 @@ export async function releaseHold(
   partnerRelease?: { partnerId: PartnerId },
 ): Promise<ReleaseResult> {
   return db.transaction(async (tx): Promise<ReleaseResult> => {
+    // Fix pack 4 (C19, critic P4): first, before any lock (transfer -> customer order unchanged).
+    if (await identityMissingForRelease(tx, transfer, integrations)) return { kind: 'identity_missing' };
     if (await platformSenderHoldLocked(tx, transfer, integrations, partnerRelease)) return { kind: 'sender_hold' };
     const paid = await createTransferRepo(tx).markPaidIfInReview(transfer.id, partnerRelease);
     if (!paid) return { kind: 'already' }; // nothing moved ⇒ nothing audited
@@ -409,8 +421,28 @@ async function platformSenderHoldLocked(
   return senderScreeningHoldActive(await readSenderScreeningFlags(tx, transfer.partnerId, transfer.phone, { forUpdate: true }));
 }
 
+/**
+ * Fix pack 4 (R03, C19, critic P4): true when a release would send a
+ * real-money consumer row to the rail with no account-holder (legal) name on
+ * file, WHETHER OR NOT the row carries RECIPIENT_IDENTITY_MISSING (a row held
+ * before deploy, or while its rail was not yet real money). Partner-API and
+ * payment-link rows are exempt in the SQL; a B2B row is never missing. No
+ * reason tag and no lock: a legal name is only ever written while
+ * awaiting_payment, so an in_review row cannot gain one under the release.
+ * Not real money: no query. A NULL test only (no decrypt); logs nothing.
+ */
+async function identityMissingForRelease(
+  tx: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'environment'>,
+  railIntegrations: PartnerIntegrations,
+): Promise<boolean> {
+  if (!realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null })) return false;
+  return createTransferRepo(tx).recipientIdentityMissing(t.id, t.partnerId);
+}
+
 export type StaffRescreenReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid + the rail effect, after a live, fresh, clear re-screen
+  | { kind: 'identity_missing' } // fix pack 4 (C19): real money, b2c, not exempt, no legal name: the re-screen's evidence stays, nothing else written
   | { kind: 'sender_hold' } // platform release: the sender's screening hold is active (locked re-check); the re-screen's evidence stays, nothing else written
   // the re-screen did not clear: still in_review, reasons updated. Review R2 (J2): `cause` is
   // 'list_not_live' when the row now carries LIST_UNAVAILABLE (only the automatic sweep may
@@ -436,6 +468,8 @@ export type StaffRescreenReleaseResult =
  *      (with LIST_UNAVAILABLE the automatic sweep owns the row: cause
  *      'list_not_live'; otherwise cause 'review': never released
  *      automatically, a later platform release is the human decision);
+ *   4b. (fix pack 4, C19) a real-money consumer row with no account-holder
+ *      name on file ⇒ 'identity_missing' (the evidence row stays);
  *   5. otherwise the claim and rail effect releaseHold commits (the same
  *      markPaidIfInReview, with `partnerRelease`), audited as the staff
  *      transfer.release ⇒ 'released'. A refused claim ⇒ 'already' (the
@@ -507,6 +541,9 @@ export async function releaseHoldAfterRescreen(
       return { kind: 'held', cause: newReasons.includes(LIST_UNAVAILABLE_REASON) ? 'list_not_live' : 'review' };
     }
 
+    // Fix pack 4 (C19, critic C2): after the evidence, the block and the held
+    // branches, right before the claim; the evidence row stays (a true record).
+    if (await identityMissingForRelease(tx, t, input.railIntegrations)) return { kind: 'identity_missing' };
     // Review R1 (H2): the row is already locked (getTransferForUpdate above).
     if (await platformSenderHoldLocked(tx, t, input.railIntegrations, partnerRelease)) return { kind: 'sender_hold' };
     const paid = await repo.markPaidIfInReview(t.id, partnerRelease);
@@ -543,7 +580,8 @@ export type RescreenReleaseResult = { kind: 'released' | 'still_held' | 'blocked
  *      and never tells anyone to refund (the compliance officer decides).
  *   4. any reason left — the row's other reasons, the screen's (a possible
  *      match, LARGE re-derived), a sender hold (on real money re-read here
- *      under the lock, review round 3 M1), an uncovered name ⇒ 'flagged'
+ *      under the lock, review round 3 M1), an uncovered name, or (fix pack 4,
+ *      C19) a real-money consumer row with no account-holder name ⇒ 'flagged'
  *      with them (LIST_UNAVAILABLE dropped, so the row leaves the sweep) and a
  *      `transfer.rescreen` audit row: a person decides.
  *   5. none ⇒ the same claim and rail effect a staff release commits
@@ -624,6 +662,9 @@ export async function releaseRescreenedHold(
     const senderHold =
       input.senderHold ||
       (input.realMoney && senderScreeningHoldActive(await readSenderScreeningFlags(tx, t.partnerId, t.phone, { forUpdate: true })));
+    // Fix pack 4 (C19, P4): a real-money consumer row with no account-holder
+    // name on file is flagged, never released. Not real money: no query.
+    const identityMissing = input.realMoney && (await repo.recipientIdentityMissing(t.id, t.partnerId));
     const newReasons = [
       ...new Set([
         ...kept,
@@ -631,6 +672,7 @@ export async function releaseRescreenedHold(
         ...(senderHold ? [SENDER_SCREENING_REASON] : []),
         ...(uncovered.includes('sender') ? [SENDER_IDENTITY_MISSING_REASON] : []),
         ...(uncovered.includes('recipient') ? [POSSIBLE_MATCH_REASON] : []),
+        ...(identityMissing ? [RECIPIENT_IDENTITY_MISSING_REASON] : []),
       ]),
     ];
     if (newReasons.length > 0) {

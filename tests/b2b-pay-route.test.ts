@@ -174,6 +174,8 @@ async function liveB2bOnHttp(o: { owner?: string; certify?: boolean; id?: string
     createdAt: new Date().toISOString(), partnerId: owner, environment: 'live',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'US', destinationCurrency: 'USD',
     amountSource: 500, feeSource: 1.99, totalChargeSource: 501.99,
+    // Pack 4 T14: a B2B bill mints a 'b2b' row (the ledger default is 'b2c', which the identity hold would catch).
+    transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
   } as Transfer;
   await ledger.saveTransfer(t);
   await seedLiveEvidence(db, t, { listFitness: 'not_live' }); // the mint screened on the mock list

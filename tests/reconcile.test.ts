@@ -16,7 +16,7 @@ import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
 import { certifyPartnerForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
-import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
@@ -903,7 +903,8 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
 describe('reconcileSweep — real-money resume needs a live, fresh screen (fix pack 2 T3)', { retry: 0 }, () => {
   const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
   const victim = (over: Partial<Transfer> = {}) =>
-    fixture({ id: 'rc_lv1', status: 'awaiting_payment', fundingRef: 'mockfund-rc_lv1', createdAt: minutesAgo(20), paidAt: undefined, ...over });
+    // Fix pack 4 T14 (C19): a real-money resume needs the account-holder name on file.
+    fixture({ id: 'rc_lv1', status: 'awaiting_payment', fundingRef: 'mockfund-rc_lv1', createdAt: minutesAgo(20), paidAt: undefined, recipientLegalName: 'Anita Legal', ...over });
   async function rail(providerType: 'http' | 'mock') {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
@@ -966,6 +967,26 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     } finally {
       restoreOfacSource(originalList);
     }
+  });
+
+  // Fix pack 4 T14 (C19, critic M6): a charged http row resumed with no
+  // account-holder name on file is held, and the alert says it cannot be released.
+  it('a charged http row resumed without a legal name is HELD and the fundhold alert says the account holder name is missing (no "Release or reject")', async () => {
+    await rail('http');
+    await store.saveTransfer(victim({ recipientLegalName: undefined }));
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' });
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    const after = await store.getTransfer('rc_lv1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([RECIPIENT_IDENTITY_MISSING_REASON]);
+    const keys = (await outboxRows()).map((x) => x.dedupe_key);
+    expect(keys).not.toContain('instruct:rc_lv1');
+    const m = await message('fundhold:rc_lv1');
+    expect(m).toContain(
+      'HELD for compliance review (in_review), not instructed: the account holder name is missing, so it cannot be released. Reject or refund it in the dashboard.',
+    );
+    expect(m).not.toContain('Release or reject');
   });
 
   it('a mock rail resumes as before: no re-screen, paid', async () => {

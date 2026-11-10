@@ -482,7 +482,7 @@ const HTTP: PartnerIntegrations = {
 const H = 3_600_000;
 
 describe('settleOrHold — settle-time live-list backstop (fix pack 2 T9)', { retry: 0 }, () => {
-  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', recipientLegalName: 'Anita Legal', ...over } as Transfer); // pack 4 T14 (C19): the name on file
 
   it('http rail, cleared, newest evidence live and fresh -> started', async () => {
     await store.saveTransfer(live());
@@ -621,7 +621,7 @@ import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { seedSender } from './helpers-db';
 
 describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 }, () => {
-  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', recipientLegalName: 'Anita Legal', ...over } as Transfer); // pack 4 T14 (C19): the name on file
   const PHONE = fixture().phone;
   const flagNow = async () => {
     await seedSender(db, { partnerId: 'acme', phone: PHONE });
@@ -800,7 +800,7 @@ function expectTransferThenCustomerThenClaim(qs: Array<{ sql: string }>): void {
 }
 
 describe('lock order on a real-money rail: transfer, then customer, then the claim (review round 3 M5)', { retry: 0 }, () => {
-  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', recipientLegalName: 'Anita Legal', ...over } as Transfer); // pack 4 T14 (C19): the name on file
   const inReview = () => live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
 
   beforeEach(async () => {

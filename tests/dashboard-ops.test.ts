@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
   cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
-  SENDER_SCREENING_RELEASE_REFUSAL,
+  SENDER_SCREENING_RELEASE_REFUSAL, RECIPIENT_IDENTITY_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -19,9 +19,9 @@ import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
-import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
-import { seedLiveEvidence } from './helpers-sanctions';
+import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -899,6 +899,57 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     expect(await beginHold(db, t)).toEqual({ kind: 'already' });
     expect((await store.getTransfer('rej_again'))?.status).toBe('cancelled');
   });
+
+  // Fix pack 4 T14 (R03, C19): a real-money consumer row with no account-holder
+  // name on file is never released (until PR7 only Reject or Refund ends it).
+  describe('a RECIPIENT_IDENTITY_MISSING hold with no name on file (pack 4 T14, C19)', () => {
+    const originalList = process.env.SANCTIONS_LIST;
+    afterEach(() => restoreOfacSource(originalList));
+    async function identityHeld(id: string): Promise<ReturnType<typeof createStore>> {
+      await db.execute(sql`INSERT INTO partners (id, name) VALUES ('rp', 'Rail Partner') ON CONFLICT DO NOTHING`);
+      await createIntegrationsRepo(db).saveIntegrations('rp', {
+        kyc: {},
+        payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+        whatsapp: {},
+      });
+      const store = createStore(fakeRedis(), db);
+      await store.saveTransfer(makeTransfer({
+        id, partnerId: 'rp', environment: 'live', status: 'in_review', complianceStatus: 'flagged',
+        complianceReasons: [RECIPIENT_IDENTITY_MISSING_REASON], fundingRef: `mockfund-${id}`,
+        paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+      }));
+      return store;
+    }
+
+    it('http rail, live fresh screen (the releaseHold path): throws RECIPIENT_IDENTITY_RELEASE_REFUSAL, nothing written; rejectTransfer still works', async () => {
+      const store = await identityHeld('rel_noname');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noname'))!);
+      const auditBefore = (await auditRows()).length;
+      await expect(releaseTransfer(store, db, 'rel_noname', REL)).rejects.toThrow(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+      expect(RECIPIENT_IDENTITY_RELEASE_REFUSAL).toBe('This transfer cannot be released: the account holder name is missing. Reject or refund it.');
+      expect((await store.getTransfer('rel_noname'))?.status).toBe('in_review');
+      expect(await outboxRows()).toEqual([]);
+      expect(await auditRows()).toHaveLength(auditBefore);
+      // A partner release is refused the same way.
+      await expect(releaseTransfer(store, db, 'rel_noname', REL, { partnerId: 'rp' })).rejects.toThrow(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+      // Reject is the way out: cancelled, the charge refunded.
+      await rejectTransfer(store, db, 'rel_noname', REL);
+      const after = await store.getTransfer('rel_noname');
+      expect(after?.status).toBe('cancelled');
+      expect(after?.refundStatus).toBe('pending');
+    });
+
+    it('http rail, stale screen (the re-screen path): a live clear re-screen still refuses; only its evidence row is written', async () => {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const store = await identityHeld('rel_noname2');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noname2'))!, { screenedAgoMs: 40 * 3_600_000, at: new Date(Date.now() - 40 * 3_600_000) });
+      await expect(releaseTransfer(store, db, 'rel_noname2', REL)).rejects.toThrow(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+      expect((await store.getTransfer('rel_noname2'))?.status).toBe('in_review');
+      expect((await store.getTransfer('rel_noname2'))?.complianceReasons).toEqual([RECIPIENT_IDENTITY_MISSING_REASON]);
+      expect(await outboxRows()).toEqual([]);
+      expect((await auditRows()).map((r) => r.action)).toEqual(['sanctions.screen', 'sanctions.screen']);
+    });
+  });
 });
 
 describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
@@ -1037,6 +1088,7 @@ describe('sender screening hold — platform release refusal (fix pack 2 T6)', (
     await store.saveTransfer(makeTransfer({
       id: 'rel_sender', partnerId: 'rp', environment, status: 'in_review', complianceStatus: 'flagged',
       complianceReasons: ['Large transfer amount.', SENDER_SCREENING_REASON],
+      recipientLegalName: 'Anita Legal', // fix pack 4 T14 (C19): a real-money release needs the name on file
       paidAt: new Date(Date.now() - 3_600_000).toISOString(),
     }));
     return store;
