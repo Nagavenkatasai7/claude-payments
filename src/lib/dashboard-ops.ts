@@ -353,7 +353,9 @@ export async function releaseTransfer(
   // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
   // sender's screening hold first (the audited clearSenderScreeningHoldAction
   // on the customer page), then release. The flags are the OWNING tenant's
-  // row; a read error throws (nothing released). The partner path is already
+  // row; a read error throws (nothing released). This unlocked read is the
+  // fast refusal; review R1 (H2): the release transaction re-reads it locked
+  // right before the claim ('sender_hold' below), so a stamp in between refuses. The partner path is already
   // refused in markPaidIfInReview (partnerRelease) for a flagged sender, a
   // stamp-only hold included (pack 2 review F2: senderClearForPartnerRelease).
   if (
@@ -384,6 +386,8 @@ export async function releaseTransfer(
       pokeWorker();
       return;
     }
+    // Review R1 (H2): a stamp that landed after the pre-read above (platform only).
+    if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
         partnerRelease
@@ -396,6 +400,7 @@ export async function releaseTransfer(
   }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
+  if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'already') {
     throw new Error(
       partnerRelease

@@ -146,8 +146,10 @@ export type PaidHealOutcome = 'cleared' | 'blocked' | 'review' | 'skipped';
  *     'skipped', nothing written (the gate keeps refusing: fail closed);
  *   • a live, clear screen that covers every name screened before ⇒ its
  *     sanctions.screen evidence row ⇒ 'cleared' (the next instruct passes);
- *   • a match ⇒ the evidence row and the sanctions block notices (stage
- *     'resume') in ONE transaction ⇒ 'blocked' (the gate refuses a match);
+ *   • a match ⇒ the evidence row, the sanctions block notices (stage
+ *     'resume', charged) and, on the locked row still paid with no refund
+ *     started, compliance_status 'blocked' plus one paidmatch:<id> alert, in
+ *     ONE transaction ⇒ 'blocked' (instruct and reinstruct refuse it);
  *   • anything else (a possible match, an uncovered name) ⇒ NO evidence (a
  *     fresh live row would unlock the gate on an unreviewed result) and one
  *     deduped `instructrescreen:<id>` ops alert, ids only ⇒ 'review'.
@@ -166,6 +168,13 @@ export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise
   const evidence = result.evidence;
   if (result.status === 'blocked') {
     await db.transaction(async (tx) => {
+      // Pack 2 review R1 (E2): the row, locked (tenant-pinned). Still paid with
+      // no refund started ⇒ compliance_status 'blocked' with the matched
+      // reasons (the compliance page lists it; instruct and reinstruct refuse
+      // it; the refund paths still claim it) and ONE paidmatch:<id> alert.
+      // Moved meanwhile (cancelled, refunding) ⇒ the evidence and notices only.
+      const repo = createTransferRepo(tx);
+      const locked = await repo.getTransferForUpdate(t.id, { partnerId: t.partnerId });
       await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, evidence));
       await enqueueSanctionsBlockNotices(tx, {
         partnerId: t.partnerId,
@@ -175,7 +184,21 @@ export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise
         environment: t.environment ?? 'live',
         realMoney: true,
         evidence,
+        charged: true,
       });
+      if (!locked || locked.status !== 'paid' || (locked.refundStatus ?? 'none') !== 'none') return;
+      const reasons = [...new Set([...(locked.complianceReasons ?? []), ...result.reasons])];
+      if (!(await repo.blockPaidOnMatch(t.id, t.partnerId, reasons))) return;
+      await createOutboxRepo(tx).enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and the sender was CHARGED, but it was not instructed: ` +
+            'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
+            'Follow the block and refund procedure; evidence on the compliance page.',
+        },
+        { dedupeKey: `paidmatch:${t.id}` },
+      );
     });
     pokeWorker();
     return 'blocked';

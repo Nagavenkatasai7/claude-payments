@@ -26,7 +26,7 @@ import {
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { beginHold, settleOrHold } from './settlement';
+import { settleOrHold } from './settlement';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
@@ -826,7 +826,12 @@ export async function confirmTransaction(
     // flip + held stage-1 outbox row, dedupe stage1:<id>); NO rail effect.
     // Partner-scoped: ownership was checked above; the held row names the
     // OWNER (t.partnerId) and the worker resolves its creds at drain (fix 11).
-    const hold = await beginHold(deps.db as Db, current);
+    // Pack 2 review R1 (G2): through settleOrHold, which holds a flagged row
+    // (beginHold) and, on a real-money rail, adds the same reasons as on every
+    // other entry point (LIST_UNAVAILABLE when the newest screen is not live
+    // and fresh, SENDER_SCREENING when the sender's hold is active). Not real
+    // money: the same beginHold as before. Still never deps.initiatePayment.
+    const hold = await settleOrHold(deps.db as Db, current, await deps.integrationsStore.getIntegrations(railPartnerOf(current)));
     if (hold.kind === 'held') {
       pokeWorker(); // the held "payment received / under review" message is READY now
       // Audit ONLY a real transition (mirrors the settle path below): on the

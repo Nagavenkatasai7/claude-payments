@@ -974,6 +974,31 @@ export function createTransferRepo(
     },
 
     /**
+     * Pack 2 review R1 (E2): a sanctions MATCH found by the re-screen of a PAID
+     * (charged, not yet instructed) real-money row. compliance_status → blocked
+     * with `reasons`; status stays 'paid' (the ledger mirrors the charge the
+     * rail captured) and refund_status is untouched, so the staff refund paths
+     * still claim it. The settlement.instruct handler and reinstructLocked refuse
+     * a blocked row. Guarded: this tenant, still paid, refund not started, not
+     * already blocked. Call in the caller's transaction with the row locked.
+     * Null ⇒ a guard failed; nothing written.
+     */
+    async blockPaidOnMatch(id: string, partnerId: PartnerId, reasons: string[]): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ complianceStatus: 'blocked', complianceReasons: reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'paid'),
+          eq(transfers.refundStatus, 'none'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Merge plan 2c (owner D4): the PARTNER reject claim — in_review → cancelled with the same
      * predicates a partner release carries (markPaidIfInReview with `partnerRelease`): the row is
      * in `partnerId`'s tenant, not sanctions-blocked, and the SENDER's customer row there EXISTS

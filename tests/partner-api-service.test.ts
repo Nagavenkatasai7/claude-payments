@@ -18,6 +18,7 @@ import {
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
 import { LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Partner } from '@/lib/types';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
@@ -704,6 +705,39 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
     expect(t?.complianceStatus).toBe('blocked');
     const kinds = ((await h.db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((x) => x.kind);
     expect(kinds).not.toContain('settlement.instruct');
+  });
+
+  // Pack 2 review R1 (G2): the flagged branch adds the same real-money hold
+  // reasons settleOrHold adds (the platform reviewer sees them).
+  it('flagged LARGE, fresh live evidence, sender stamped after the mint → held with LARGE + SENDER_SCREENING', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2');
+    const cur = await h.store.getTransferDecrypted(id);
+    expect(cur?.complianceStatus).toBe('cleared');
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.', SENDER_SCREENING_REASON]);
+  });
+
+  it('flagged LARGE on a simulator rail, sender stamped → held with LARGE only (not real money, unchanged)', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2s');
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.']);
   });
 
   it('a sandbox transfer is never real money: no re-screen, settles as before', async () => {

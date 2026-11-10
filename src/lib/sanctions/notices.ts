@@ -39,6 +39,13 @@ export interface SanctionsBlockNotice {
   /** live-gate.ts realMoneyRail for the subject. */
   realMoney: boolean;
   evidence?: ScreeningEvidence;
+  /**
+   * Pack 2 review R1 (E2): the sender was already CHARGED (a paid row blocked
+   * by its re-screen). The notices then say so: the recipient was not paid,
+   * the sender was charged and must be handled by the block and refund
+   * procedure. Omitted ⇒ the usual "nothing paid out" text.
+   */
+  charged?: boolean;
 }
 
 export const SANCTIONS_BLOCK_AUDIT_ACTION = 'sanctions.block';
@@ -99,7 +106,9 @@ export async function enqueueSanctionsBlockNotices(
     await outbox.enqueue(
       'ops.alert',
       {
-        message: `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing paid out; evidence on the compliance page.`,
+        message: n.charged
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged: follow the block and refund procedure; evidence on the compliance page.`
+          : `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing paid out; evidence on the compliance page.`,
       },
       { dedupeKey: `sanctionsblock:${subjectId}` },
     );
@@ -115,7 +124,9 @@ export async function enqueueSanctionsBlockNotices(
         {
           to: [addr],
           subject: 'SmartRemit: a transfer was stopped by sanctions screening',
-          text: `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`,
+          text: n.charged
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Follow your block and refund procedure. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            : `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`,
         },
         { dedupeKey: `sanctionsblockmail:${subjectId}:${toPartnerId}` },
       );

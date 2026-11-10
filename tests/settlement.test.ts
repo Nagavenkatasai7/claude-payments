@@ -649,6 +649,28 @@ describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 },
     expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
   });
 
+  // Pack 2 review R1 (H2): the platform release re-checks the hold inside its transaction.
+  it("releaseHold, platform, http, sender stamped: 'sender_hold', still in_review, nothing enqueued or audited", async () => {
+    const t = live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await flagNow();
+    expect(await releaseHold(db, t, HTTP, { actor: 'plat', reason: 'ok' })).toEqual({ kind: 'sender_hold' });
+    expect((await store.getTransfer('st_t1'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('releaseHold, platform, simulator, sender stamped: released, no customers read (not real money)', async () => {
+    const t = live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await flagNow();
+    const stop = captureQueries();
+    const r = await releaseHold(db, t, SIMULATOR);
+    const qs = stop();
+    expect(r).toEqual({ kind: 'released', webhookDriven: true });
+    expect(qs.filter((q) => q.sql.includes('"customers"') && q.sql.toLowerCase().includes('for update'))).toEqual([]);
+  });
+
   it('simulator -> settles, no customers read', async () => {
     const t = live();
     await store.saveTransfer(t);

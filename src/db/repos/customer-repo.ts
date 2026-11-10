@@ -639,13 +639,24 @@ const SCREENING_FLAG_COLUMNS = {
  * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns and
  * (fix pack 2, R06) the two hold times: no PII column, no decrypt. null when this tenant has no row
  * for the phone. Throws on a DB error: lib/sender-screening.ts turns that into a fail-closed null;
- * the fix pack 2 mint / pay / sweep callers let it throw (nothing paid).
+ * the fix pack 2 mint / pay / sweep callers let it throw (nothing paid). `opts.forUpdate` locks
+ * the row (the platform release's in-transaction re-check, settlement.ts).
  */
-export async function readSenderScreeningFlags(db: DbOrTx, partnerId: PartnerId, phone: string): Promise<SenderScreeningFlags | null> {
-  const rows = await db
+export async function readSenderScreeningFlags(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  opts: { forUpdate?: boolean } = {},
+): Promise<SenderScreeningFlags | null> {
+  const q = db
     .select(SCREENING_FLAG_COLUMNS)
     .from(customers)
     .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
     .limit(1);
+  // Pack 2 review R1 (H2): `forUpdate` (inside a transaction) locks the row, so a
+  // concurrent stampScreeningFlagged either committed (seen) or waits for the
+  // caller's commit. Drizzle select().for('update'):
+  // node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+  const rows = opts.forUpdate ? await q.for('update') : await q;
   return rows[0] ?? null;
 }

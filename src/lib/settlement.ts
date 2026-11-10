@@ -118,7 +118,8 @@ export type SettleOrHoldResult =
 
 export type ReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid committed + the rail effect enqueued
-  | { kind: 'already' }; // not in_review anymore — idempotent no-op, never resurrects
+  | { kind: 'already' } // not in_review anymore — idempotent no-op, never resurrects
+  | { kind: 'sender_hold' }; // platform release on a real-money rail: the sender's screening hold is active (locked re-check); nothing written
 
 /**
  * The ONE rail-effect enqueue, shared by beginSettlement (cleared money) and
@@ -348,6 +349,7 @@ export async function releaseHold(
   partnerRelease?: { partnerId: PartnerId },
 ): Promise<ReleaseResult> {
   return db.transaction(async (tx): Promise<ReleaseResult> => {
+    if (await platformSenderHoldLocked(tx, transfer, integrations, partnerRelease)) return { kind: 'sender_hold' };
     const paid = await createTransferRepo(tx).markPaidIfInReview(transfer.id, partnerRelease);
     if (!paid) return { kind: 'already' }; // nothing moved ⇒ nothing audited
     // Program-Fix 28: the staff decision's durable row, keyed on the OWNING
@@ -363,8 +365,32 @@ export async function releaseHold(
   });
 }
 
+/**
+ * Pack 2 review R1 (H2): a PLATFORM release (no `partnerRelease`) on a
+ * real-money rail re-checks the sender's screening hold INSIDE the release
+ * transaction, right before the claim: the transfer row is locked first, then
+ * the owning tenant's customer row (FOR UPDATE; transfer → customer, the same
+ * order in both release paths), so a stamp that committed after the caller's
+ * unlocked pre-read (dashboard-ops releaseTransfer) is seen, and one that has
+ * not committed waits for this release. A partner release needs no read here:
+ * its claim carries senderClearForPartnerRelease. Not real money: no read.
+ * A read error throws (the transaction rolls back, nothing released).
+ */
+async function platformSenderHoldLocked(
+  tx: DbOrTx,
+  transfer: Pick<Transfer, 'id' | 'partnerId' | 'phone' | 'environment'>,
+  railIntegrations: PartnerIntegrations,
+  partnerRelease: { partnerId: PartnerId } | undefined,
+): Promise<boolean> {
+  if (partnerRelease) return false;
+  if (!realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null })) return false;
+  await createTransferRepo(tx).getTransferForUpdate(transfer.id);
+  return senderScreeningHoldActive(await readSenderScreeningFlags(tx, transfer.partnerId, transfer.phone, { forUpdate: true }));
+}
+
 export type StaffRescreenReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid + the rail effect, after a live, fresh, clear re-screen
+  | { kind: 'sender_hold' } // platform release: the sender's screening hold is active (locked re-check); the re-screen's evidence stays, nothing else written
   | { kind: 'held' } // the re-screen did not clear: still in_review, reasons updated (LIST_UNAVAILABLE when the list is not live)
   | { kind: 'blocked' } // a match: blocked, notices enqueued, never paid out
   | { kind: 'already' }; // not in_review anymore (or now blocked / rescreen-only): nothing written
@@ -452,6 +478,8 @@ export async function releaseHoldAfterRescreen(
       return { kind: 'held' };
     }
 
+    // Review R1 (H2): the row is already locked (getTransferForUpdate above).
+    if (await platformSenderHoldLocked(tx, t, input.railIntegrations, partnerRelease)) return { kind: 'sender_hold' };
     const paid = await repo.markPaidIfInReview(t.id, partnerRelease);
     if (!paid) return { kind: 'already' };
     await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {

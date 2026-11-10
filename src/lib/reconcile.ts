@@ -100,7 +100,8 @@ export async function enqueueReinstructLocked(db: Db, transferId: string): Promi
 export async function reinstructLocked(db: Db, transferId: string): Promise<'enqueued' | 'not_payable' | 'in_flight' | 'exists'> {
   return db.transaction(async (tx) => {
     const cur = await createTransferRepo(tx).getTransferForUpdate(transferId);
-    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return 'not_payable';
+    // Pack 2 review R1 (E2): a sanctions-blocked paid row is never re-instructed.
+    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none' || cur.complianceStatus === 'blocked') return 'not_payable';
     const outbox = createOutboxRepo(tx);
     if (await outbox.hasLiveInstruction(transferId)) return 'in_flight';
     return (await outbox.enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` })) ? 'enqueued' : 'exists';
@@ -211,7 +212,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
                 ? ' Re-instructed the partner rail once.'
                 : inFlight
                   ? ' Not re-instructed: an instruction for it is still queued or retrying. A later sweep re-instructs once if that instruction fails for good.'
-                  : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, or a refund requested/in flight).'
+                  : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, sanctions-blocked, or a refund requested/in flight).'
               : ''),
       },
       { dedupeKey: `recon:${t.id}` },

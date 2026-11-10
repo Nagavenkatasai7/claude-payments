@@ -92,6 +92,20 @@ describe('enqueueSanctionsBlockNotices', () => {
     });
   });
 
+  // Pack 2 review R1 (E2): a paid row blocked by its re-screen: the sender was charged.
+  it('charged (a paid row): the alert and the email say the sender was charged and name the block and refund procedure', async () => {
+    await run(notice({ stage: 'resume', charged: true }));
+    const rows = await outboxRows();
+    expect(rows[0].payload).toEqual({
+      message:
+        '⚠️ SmartRemit ops: sanctions block (resume) on tr_block_1, partner acme, live. The recipient was not paid, but the sender was charged: follow the block and refund procedure; evidence on the compliance page.',
+    });
+    expect((rows[1].payload as { text: string }).text).toBe(
+      'Reference tr_block_1 (resume, live) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Follow your block and refund procedure. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.',
+    );
+    for (const r of rows) expect(JSON.stringify(r.payload)).not.toMatch(/Nothing paid out|; nothing was paid out\./);
+  });
+
   it('falls back to alertEmail', async () => {
     await setSupport('acme', { alertEmail: 'ops@acme.example' });
     await run(notice());

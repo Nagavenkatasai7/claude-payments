@@ -4,6 +4,7 @@ import { createStore } from '@/lib/store';
 import {
   cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
+  SENDER_SCREENING_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -43,10 +44,32 @@ vi.mock('@/db/repos/aux-repos', async (orig) => {
   };
 });
 
+// Pack 2 review R1 (H2): a sender screening stamp that commits right AFTER the
+// release's unlocked pre-read (readSenderScreeningFlags without forUpdate). Off
+// by default; the locked in-transaction read is always the real one.
+const senderRace = vi.hoisted(() => ({ stampAfterPreRead: null as null | { partnerId: string; phone: string } }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
+  return {
+    ...real,
+    readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
+      const flags = await real.readSenderScreeningFlags(...a);
+      const race = senderRace.stampAfterPreRead;
+      if (race && !a[3]?.forUpdate) {
+        senderRace.stampAfterPreRead = null;
+        await a[0].execute(q`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = ${race.partnerId} AND phone = ${race.phone}`);
+      }
+      return flags;
+    },
+  };
+});
+
 let db: Db;
 beforeEach(async () => {
   db = await freshDb();
   failAudit = false;
+  senderRace.stampAfterPreRead = null;
 });
 
 async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
@@ -1031,6 +1054,26 @@ describe('sender screening hold — platform release refusal (fix pack 2 T6)', (
     await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
     await releaseTransfer(store, db, 'rel_sender', REL);
     expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
+  });
+
+  // Pack 2 review R1 (H2): the platform release re-reads the hold, locked, inside its transaction.
+  it('a stamp that commits between the pre-read and the claim: refused, still in_review, no instruct, no release audit', async () => {
+    const store = await heldOn('http');
+    await createCustomerRepo(db, async () => null).clearScreeningHold('rp', PHONE, new Date());
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
+    senderRace.stampAfterPreRead = { partnerId: 'rp', phone: PHONE };
+    await expect(releaseTransfer(store, db, 'rel_sender', REL)).rejects.toThrow(SENDER_SCREENING_RELEASE_REFUSAL);
+    expect(senderRace.stampAfterPreRead).toBeNull(); // the pre-read ran, then the stamp landed
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
+    expect((await outboxRows()).filter((r) => r.kind === 'settlement.instruct')).toEqual([]);
+    expect((await auditRows()).filter((r) => r.action === 'transfer.release')).toEqual([]);
+  });
+
+  it('partner-scoped release keeps its claim predicate (no platform in-transaction read needed): refused as before', async () => {
+    const store = await heldOn('http');
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
+    await expect(releaseTransfer(store, db, 'rel_sender', REL, { partnerId: 'rp' })).rejects.toThrow(/Cannot release/);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
   });
 
   it('simulator rail: platform release unchanged', async () => {

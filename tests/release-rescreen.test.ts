@@ -21,17 +21,37 @@ import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { beginHold } from '@/lib/settlement';
-import { canReleaseHeld, releaseTransfer, RESCREEN_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
+import { canReleaseHeld, issueRefund, releaseTransfer, RESCREEN_RELEASE_REFUSAL, SENDER_SCREENING_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
 import { LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
-import { reconcileSweep } from '@/lib/reconcile';
+import { reconcileSweep, reinstructLocked } from '@/lib/reconcile';
+import { healPaidRowScreen } from '@/lib/list-hold-rescreen';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 
 vi.mock('@/lib/outbox', async (orig) => {
   const real = await orig<typeof import('@/lib/outbox')>();
   return { ...real, pokeWorker: () => {} };
+});
+
+// Pack 2 review R1 (H2): a sender screening stamp that commits right AFTER the
+// release's unlocked pre-read; the locked in-transaction read is the real one.
+const senderRace = vi.hoisted(() => ({ stampAfterPreRead: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
+  return {
+    ...real,
+    readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
+      const flags = await real.readSenderScreeningFlags(...a);
+      if (senderRace.stampAfterPreRead && !a[3]?.forUpdate) {
+        senderRace.stampAfterPreRead = false;
+        await a[0].execute(q`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = ${a[1]} AND phone = ${a[2]}`);
+      }
+      return flags;
+    },
+  };
 });
 
 const H = 3_600_000;
@@ -97,6 +117,7 @@ async function keys(): Promise<Array<string | null>> {
 }
 
 beforeEach(async () => {
+  senderRace.stampAfterPreRead = false;
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
@@ -215,6 +236,20 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     expect((await auditRows('rr_none')).filter((a) => a.action === 'sanctions.screen')).toHaveLength(before + 1);
   });
 
+  it('H2: a sender stamp that commits after the pre-read: the re-screen release refuses in its transaction, evidence kept, no instruct', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_race' });
+    senderRace.stampAfterPreRead = true;
+    await expect(releaseTransfer(store, db, 'rr_race', REL)).rejects.toThrow(SENDER_SCREENING_RELEASE_REFUSAL);
+    expect(senderRace.stampAfterPreRead).toBe(false);
+    expect((await store.getTransfer('rr_race'))?.status).toBe('in_review');
+    const rows = await auditRows('rr_race');
+    expect(rows.filter((a) => a.action === 'sanctions.screen')).toHaveLength(2); // the re-screen is a true record
+    expect(rows.filter((a) => a.action === 'transfer.release')).toEqual([]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+  });
+
   it('http, newest evidence live and fresh: released with no re-screen', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
@@ -287,11 +322,17 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect((await store.getTransfer(t.id))?.paymentProviderRef).toBe('heal-1');
   });
 
-  it('the sweep re-screen finds a match: evidence + block notices, and the next instruct is still refused', async () => {
+  // Pack 2 review R1 (E2): a heal match on a PAID (charged) row blocks the ledger
+  // row in the same transaction as the evidence and the notices, tells a person
+  // it is paid and charged, and the row is never instructed but can be refunded.
+  it('the sweep re-screen finds a match: the paid row is BLOCKED (on the compliance list), one paidmatch alert, never instructed, still refundable', async () => {
     fetchFn.mockReset();
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
     await rail('acme', 'http');
-    const t = base({ id: 'rr_heal_m', status: 'paid', recipientName: 'Testa Fixturelli', paidAt: new Date(Date.now() - 20 * 60_000).toISOString() });
+    const t = base({
+      id: 'rr_heal_m', status: 'paid', recipientName: 'Testa Fixturelli', fundingRef: 'pi_heal_m',
+      paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    });
     await store.saveTransfer(t);
     await seedLiveEvidence(
       db,
@@ -304,14 +345,74 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     const rows = await auditRows(t.id);
     expect(rows.filter((a) => a.action === 'sanctions.screen').at(-1)?.meta).toMatchObject({ decision: 'match', listFitness: 'live' });
     expect(rows.map((a) => a.action)).toContain('sanctions.block');
-    expect(await keys()).toContain('sanctionsblock:rr_heal_m');
+
+    // The ledger row: still paid (the sender WAS charged), now blocked with the matched reason.
+    const after = await store.getTransfer(t.id);
+    expect(after?.status).toBe('paid');
+    expect(after?.refundStatus ?? 'none').toBe('none');
+    expect(after?.complianceStatus).toBe('blocked');
+    expect(after?.complianceReasons).toContain(RECIPIENT_WATCHLIST_REASON);
+    expect((await store.listTransfersByCompliance('blocked', {})).map((x) => x.id)).toContain(t.id);
+
+    // ONE dedicated alert: paid, charged, not instructed, block and refund. Ids only.
+    type A = { dedupe_key: string; payload: { message: string } };
+    const alerts = ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as { rows: A[] }).rows;
+    const paidmatch = alerts.filter((a) => a.dedupe_key.startsWith('paidmatch:'));
+    expect(paidmatch.map((a) => a.dedupe_key)).toEqual(['paidmatch:rr_heal_m']);
+    const msg = paidmatch[0].payload.message;
+    expect(msg).toContain('rr_heal_m');
+    expect(msg).toContain('PAID');
+    expect(msg).toContain('CHARGED');
+    expect(msg).toContain('not instructed');
+    expect(msg).toContain('block and refund procedure');
+    // The sanctions block alert never says the sender was not charged.
+    const block = alerts.find((a) => a.dedupe_key === 'sanctionsblock:rr_heal_m')!.payload.message;
+    expect(block).not.toContain('Nothing paid out');
+    expect(block).toContain('the sender was charged');
+    for (const m of [msg, block]) {
+      for (const pii of ['Testa', 'Fixturelli', SENDER, SENDER_PHONE, '919876543210', '123456789012']) expect(m).not.toContain(pii);
+    }
+
+    // Never instructed: the queued instruct is skipped (done), no POST.
     await drainOnce(deps(), 'w1');
-    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
-    const r = await db.execute(sql`SELECT status, last_error FROM outbox WHERE kind = 'settlement.instruct'`);
-    expect((r as unknown as { rows: Array<{ status: string; last_error: string }> }).rows[0]).toMatchObject({
-      status: 'failed',
-      last_error: 'Last screen was a sanctions match.',
+    expect(fetchFn).not.toHaveBeenCalled();
+    const ins = await db.execute(sql`SELECT status FROM outbox WHERE kind = 'settlement.instruct'`);
+    expect((ins as unknown as { rows: Array<{ status: string }> }).rows.map((r) => r.status)).toEqual(['done']);
+    // The stuck-paid sweep never re-instructs it, and does not screen it again.
+    await reconcileSweep(db, new Date());
+    expect((await keys()).filter((k) => k === 'reinstruct:rr_heal_m')).toEqual([]);
+    expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(2);
+    expect(await reinstructLocked(db, t.id)).toBe('not_payable');
+    await drainOnce(deps(), 'w2');
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    // Still refundable: the staff refund claims it (none -> pending + funding.refund).
+    await issueRefund(db, t.id, REL);
+    expect((await store.getTransfer(t.id))?.refundStatus).toBe('pending');
+    expect(await keys()).toContain('refund:rr_heal_m');
+  });
+
+  it('a heal match on a row whose refund already started: evidence and notices, the row is NOT rewritten, no paidmatch alert', async () => {
+    await rail('acme', 'http');
+    const t = base({
+      id: 'rr_heal_r', status: 'paid', recipientName: 'Testa Fixturelli', fundingRef: 'pi_heal_r',
+      paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
     });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(
+      db,
+      { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
+      { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
+    );
+    primeOfacSource({ checkedAgoMs: H });
+    // The refund lands between the heal's reads and its transaction.
+    const fresh = (await store.getTransfer(t.id))!;
+    await db.execute(sql`UPDATE transfers SET refund_status = 'requested' WHERE id = ${t.id}`);
+    expect(await healPaidRowScreen(db, fresh, new Date())).toBe('blocked');
+    const after = await store.getTransfer(t.id);
+    expect(after?.complianceStatus).toBe('cleared');
+    expect((await auditRows(t.id)).map((a) => a.action)).toContain('sanctions.block');
+    expect((await keys()).filter((k) => k?.startsWith('paidmatch:'))).toEqual([]);
   });
 
   it('the sweep re-screen cannot cover a name screened before: NO evidence (the gate keeps refusing), one review alert, not screened again', async () => {
