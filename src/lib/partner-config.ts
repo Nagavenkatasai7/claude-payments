@@ -1,6 +1,7 @@
 import type { KycMode, Partner } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { PartnerIntegrations } from './partner-integrations';
+import { postureSigned } from './live-controls';
 import { EMPTY_PARTNER_INTEGRATIONS } from './partner-integrations';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
 
@@ -160,24 +161,27 @@ export interface ResolvedKyc {
 }
 
 /**
- * Resolve a partner's KYC posture. The verify-before-send gate is OPT-IN:
- * active ONLY when the partner explicitly configured
- * `requireKycBeforeSend: true` — in EITHER mode. `kycMode` decides WHO runs
- * verification when it happens ('ours' = SmartRemit's flow, 'delegated' = the
- * partner attests); `requireKycBeforeSend` decides WHETHER sends are blocked
- * until verified. The default/unconfigured partner has NO gate — customers
- * can quote and send immediately.
+ * Resolve a partner's KYC posture. `kycMode` decides WHO runs verification
+ * when it happens ('ours' = SmartRemit's flow, 'delegated' = the partner
+ * attests); `requireKyc` decides WHETHER sends are blocked until verified, in
+ * EITHER mode. The gate is on when the platform set
+ * `requireKycBeforeSend: true` OR (fix pack 3, R27) the partner has a signed
+ * compliance posture in `liveControls` (postureSigned): a signed posture
+ * always forces verify-before-send. The stored column is never rewritten; a
+ * malformed posture is dropped by the parser and reads as unsigned. The
+ * default/unconfigured partner (no column, no posture) has NO gate —
+ * customers can quote and send immediately.
  *
  * INVARIANT UNCHANGED: sanctions screening is untouched by any of this — it
  * has no toggle anywhere and runs on every transfer (see screenTransfer).
  */
 export function resolveKycMode(
-  // Fix pack 3 T2: widened to the fields it reads (+ liveControls for T9's
-  // posture term) so pure callers (live-certification.ts) can pass a Pick.
+  // Fix pack 3 T2: widened to the fields it reads (+ liveControls for the
+  // posture term, T9) so pure callers (live-certification.ts) can pass a Pick.
   partner: Pick<Partner, 'kycMode' | 'requireKycBeforeSend' | 'liveControls'> | null | undefined,
 ): ResolvedKyc {
   const mode: KycMode = partner?.kycMode ?? 'ours';
-  return { mode, requireKyc: partner?.requireKycBeforeSend === true };
+  return { mode, requireKyc: partner?.requireKycBeforeSend === true || postureSigned(partner?.liveControls) };
 }
 
 /**

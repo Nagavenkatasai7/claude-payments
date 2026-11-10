@@ -98,6 +98,9 @@ const ACTION_LABELS = Object.freeze({
   'customer.mfa.recovery.request': 'partner.audit.action.mfaRecoveryRequest',
   'customer.mfa.recovery.approve': 'partner.audit.action.mfaRecoveryApprove',
   'customer.mfa.recovery.decline': 'partner.audit.action.mfaRecoveryDecline',
+  // Fix pack 3 T9 (R27): the partner's own live-controls writes (subject = the partner id).
+  'partner.live.posture.sign': 'partner.audit.action.postureSign',
+  'partner.live.compliance_user.set': 'partner.audit.action.complianceUserSet',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -140,6 +143,9 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   // Closed enums only (the recovery module's RECOVERY_CHECKS and decline reasons).
   'customer.mfa.recovery.approve': ['checks'],
   'customer.mfa.recovery.decline': ['reason'],
+  // Fix pack 3 T9: closed enums and booleans, plus the listed member's username (never a reason or ref).
+  'partner.live.posture.sign': ['kycDecider', 'holdDecider', 'fourEyesNonSanctions'],
+  'partner.live.compliance_user.set': ['target', 'on'],
 });
 
 const MASK = '••••'; // ••••

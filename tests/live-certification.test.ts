@@ -143,10 +143,15 @@ describe('liveReadiness: built lines', () => {
     expect(okOf(passingPartner({ kycMode: 'delegated', liveControls: lc }), allPassFacts(), 'posture')).toBe(false);
   });
 
-  // pack 3 T2 only: T9 inverts this exact case to pass, because a signed posture then forces requireKyc.
-  it('posture: requireKycBeforeSend false (no forcing yet) fails', () => {
-    expect(okOf(passingPartner({ requireKycBeforeSend: false }), allPassFacts(), 'posture')).toBe(false);
-    expect(okOf(passingPartner({ requireKycBeforeSend: undefined }), allPassFacts(), 'posture')).toBe(false);
+  // pack 3 T9 inverted T2's 'no forcing yet' case: a signed posture now forces requireKyc itself.
+  it('posture: a signed, matching posture passes the posture line even with requireKycBeforeSend false (T9 forcing)', () => {
+    expect(okOf(passingPartner({ requireKycBeforeSend: false }), allPassFacts(), 'posture')).toBe(true);
+    expect(okOf(passingPartner({ requireKycBeforeSend: undefined }), allPassFacts(), 'posture')).toBe(true);
+  });
+
+  it('posture: an unsigned posture with requireKycBeforeSend true still fails', () => {
+    const p = passingPartner({ requireKycBeforeSend: true, liveControls: certifiedLiveControls({ complianceUsers: USERS }) });
+    expect(okOf(p, allPassFacts(), 'posture')).toBe(false);
   });
 
   it('compliance_users: two listed, same tenant, admin or agent, active, MFA -> pass; one -> fail', () => {

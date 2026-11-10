@@ -13,6 +13,9 @@ import { Badge, Card, EmptyState, PageHeader, Table, type TableColumn } from '@/
 import { PARTNER_ROUTES } from '../../routes';
 import { InviteForm } from './invite-form';
 import { RemoveMember, RevokeInvite } from './row-actions';
+import { ComplianceUserToggle } from './compliance-user-toggle';
+import { getPartnerStore } from '@/lib/partner-store';
+import { logWarn } from '@/lib/log';
 
 export const metadata: Metadata = { title: t('partner.staff.title'), robots: { index: false, follow: false } };
 
@@ -24,12 +27,17 @@ export const metadata: Metadata = { title: t('partner.staff.title'), robots: { i
 // There is no MFA-reset control (plan O3: MFA reset stays platform-only).
 // Lost-features A13: an agent gets a read-only roster (active members: name, username, role). Its
 // branch returns before the MFA and invite reads, so none of that is even loaded for an agent.
+// Fix pack 3 T9 (R15): the admin view adds a compliance-user column (the people named for live
+// money: active admins and agents). A listed name that is no longer on the roster gets a
+// remove-only line under the table. A failed partner read shows the column without controls.
 
 const BASE = PARTNER_ROUTES.staff.href;
 const TABLE_PARAMS = { page: 1, sort: 'name', dir: 'asc' as const, offset: 0, limit: 500 };
 const ymdhm = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 
 type MemberRow = Staff & { mfaOn: boolean; self: boolean };
+
+const complianceEligible = (m: Staff) => m.status !== 'suspended' && (m.role === 'admin' || m.role === 'agent');
 type InviteRow = StaffInvite & { id: string };
 
 export default async function PartnerStaffPage() {
@@ -43,6 +51,14 @@ export default async function PartnerStaffPage() {
   const enrolled = await getStaffMfaStore().enrolledAmong(members.map((m) => m.username));
   const rows: MemberRow[] = members.map((m) => ({ ...m, mfaOn: enrolled.has(m.username), self: m.username === ctx.username }));
   const invites: InviteRow[] = await getStaffInviteStore().listForPartner(ctx.partnerId);
+  let compliance: readonly string[] | null = null;
+  try {
+    compliance = (await getPartnerStore().getPartner(ctx.partnerId))?.liveControls?.complianceUsers ?? [];
+  } catch (err) {
+    logWarn('partner.staff.compliance-read', err instanceof Error ? err.name : 'error', { partnerId: ctx.partnerId });
+  }
+  const listed = new Set(compliance ?? []);
+  const former = (compliance ?? []).filter((u) => !members.some((m) => m.username === u));
 
   const memberColumns: TableColumn<MemberRow>[] = [
     {
@@ -112,6 +128,22 @@ export default async function PartnerStaffPage() {
       },
     },
     {
+      key: 'compliance',
+      header: t('partner.staff.complianceUser.col'),
+      cell: (r) => {
+        if (compliance === null) return <span className="text-ds-ink-muted">—</span>;
+        if (listed.has(r.username)) {
+          return (
+            <span className="flex flex-col items-start gap-1">
+              <Badge tone="info">{t('partner.staff.complianceUser.on')}</Badge>
+              <ComplianceUserToggle username={r.username} on />
+            </span>
+          );
+        }
+        return complianceEligible(r) ? <ComplianceUserToggle username={r.username} on={false} /> : <span className="text-ds-ink-muted">—</span>;
+      },
+    },
+    {
       key: 'actions',
       header: t('partner.staff.colActions'),
       cell: (r) => (r.self ? null : <RemoveMember username={r.username} name={r.name} />),
@@ -157,6 +189,19 @@ export default async function PartnerStaffPage() {
             />
           )}
           <p className="text-[13px] text-ds-ink-muted">{t('partner.staff.permNote')}</p>
+          {former.length > 0 ? (
+            <div className="flex flex-col gap-2" data-compliance-former="">
+              <p className="text-[14px] font-semibold text-ds-ink">{t('partner.staff.complianceUser.formerTitle')}</p>
+              <ul className="flex flex-col gap-2">
+                {former.map((u) => (
+                  <li key={u} className="flex flex-wrap items-center gap-3 text-[14px] text-ds-ink">
+                    <span className="break-all">{u}</span>
+                    <ComplianceUserToggle username={u} on />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </section>
 
         <section aria-labelledby="staff-invites" className="flex flex-col gap-3">

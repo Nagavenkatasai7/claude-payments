@@ -10,6 +10,8 @@ import { EnvKeyProvider } from '@/lib/field-crypto';
 import { EMPTY_PARTNER_INTEGRATIONS } from '@/lib/partner-integrations';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Partner } from '@/lib/types';
+import { parseLiveControls } from '@/lib/live-controls';
+import { certifiedLiveControls } from './helpers-live';
 
 const now = '2026-06-08T00:00:00Z';
 function partner(overrides: Partial<Partner>): Partner {
@@ -74,6 +76,24 @@ describe('resolveKycMode', () => {
 
   it('delegated + requireKycBeforeSend=true ⇒ gate ON (partner opts back in)', () => {
     expect(resolveKycMode(partner({ kycMode: 'delegated', requireKycBeforeSend: true }))).toEqual({ mode: 'delegated', requireKyc: true });
+  });
+
+  // Fix pack 3 T9 (R27, contract 14): a signed compliance posture forces verify-before-send; the
+  // stored column is never rewritten, and the mode (who verifies) is unchanged.
+  it('a signed posture forces requireKyc in both modes, mode unchanged', () => {
+    const signed = certifiedLiveControls({ posture: true });
+    expect(resolveKycMode(partner({ kycMode: 'ours', requireKycBeforeSend: false, liveControls: signed }))).toEqual({ mode: 'ours', requireKyc: true });
+    expect(resolveKycMode(partner({ kycMode: 'delegated', liveControls: signed }))).toEqual({ mode: 'delegated', requireKyc: true });
+    expect(resolveKycMode(partner({ liveControls: signed }))).toEqual({ mode: 'ours', requireKyc: true });
+  });
+
+  it('no posture (or a malformed one dropped by the parser) -> the column decides, as today', () => {
+    const unsigned = certifiedLiveControls();
+    expect(resolveKycMode(partner({ kycMode: 'ours', liveControls: unsigned }))).toEqual({ mode: 'ours', requireKyc: false });
+    expect(resolveKycMode(partner({ kycMode: 'delegated', requireKycBeforeSend: true, liveControls: unsigned }))).toEqual({ mode: 'delegated', requireKyc: true });
+    const malformed = parseLiveControls({ posture: { version: 2, signedBy: 'x' } });
+    expect(malformed.posture).toBeUndefined();
+    expect(resolveKycMode(partner({ kycMode: 'delegated', liveControls: malformed }))).toEqual({ mode: 'delegated', requireKyc: false });
   });
 });
 

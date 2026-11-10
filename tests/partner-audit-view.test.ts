@@ -213,6 +213,20 @@ describe('lost-features audit labels (BL-4)', () => {
     expect(projectAuditRow(row({ action: 'customer.mfa.recovery.approve', meta: { checks: ['id_document', 'recent_transfer'], ticketId: 'tk_1' } }), tenant).detail).toBe('checks=id_document recent_transfer');
     expect(projectAuditRow(row({ action: 'customer.mfa.recovery.decline', meta: { reason: 'not_verified', ticketId: 'tk_1' } }), tenant).detail).toBe('reason=not_verified');
   });
+  it('partner.live.posture.sign and partner.live.compliance_user.set are labelled and show only their safe keys (fix pack 3 T9)', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.posture.sign');
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.compliance_user.set');
+    expect(t(actionLabelKey('partner.live.posture.sign'))).toBe('Compliance posture signed');
+    expect(t(actionLabelKey('partner.live.compliance_user.set'))).toBe('Compliance users changed');
+    const sign = projectAuditRow(
+      row({ action: 'partner.live.posture.sign', subjectId: 'pa', meta: { version: 1, kycDecider: 'partner', holdDecider: 'smartremit_delegated', fourEyesNonSanctions: true, actorScope: 'partner', reason: 'SECRET_REASON' } }),
+      tenant,
+    );
+    expect(sign.detail).toBe('kycDecider=partner, holdDecider=smartremit_delegated, fourEyesNonSanctions=true');
+    const set = projectAuditRow(row({ action: 'partner.live.compliance_user.set', subjectId: 'pa', meta: { target: 'pa-ops', on: false, actorScope: 'partner', ref: 'SECRET_REF' } }), tenant);
+    expect(set.detail).toBe('target=pa-ops, on=false');
+    for (const p of [sign, set]) for (const v of ['SECRET_REASON', 'SECRET_REF', 'actorScope']) expect(JSON.stringify(p)).not.toContain(v);
+  });
 });
 
 describe('parseAuditFilters', () => {

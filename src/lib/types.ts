@@ -841,7 +841,7 @@ export interface Partner {
   adminNote?: string;                 // internal staff annotation
   // KYC delegation (WL1). Absent ⇒ 'ours' ⇒ full SmartRemit KYC (default flow).
   kycMode?: KycMode;
-  requireKycBeforeSend?: boolean;     // only consulted when kycMode==='delegated' (absent ⇒ false = skip our gate)
+  requireKycBeforeSend?: boolean;     // the opt-in verify-before-send gate, either kycMode (absent ⇒ false); a signed liveControls posture forces it on (resolveKycMode)
   corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
   // Program fix 16: a partner's send-limit override (tighten-only in fix 16).
   // Mapped in rowToPartner only, NEVER in partnerToRow — updatePartnerAction's

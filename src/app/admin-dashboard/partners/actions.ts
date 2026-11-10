@@ -120,8 +120,9 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const submittedCountries = formData.getAll('countries').map(String).filter(isSupportedDestination);
   // WL: KYC posture. 'delegated' = the partner runs KYC on their side, so our
   // verify-gate steps aside (sanctions still always run). Absent/anything-else ⇒
-  // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend only matters when
-  // delegated (resolveKycMode forces it true under 'ours' regardless).
+  // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend is the opt-in
+  // verify-before-send gate in EITHER mode; a partner's signed compliance
+  // posture forces it on in resolveKycMode (fix pack 3) without rewriting it.
   // PLATFORM-GOVERNED (owner decision 2026-09-16): kycMode decides whether a
   // partner-scoped admin may release a compliance hold (canReleaseHeld), so a
   // partner admin must not be able to flip it (or the send gate) for their own

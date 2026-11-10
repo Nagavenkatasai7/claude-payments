@@ -37,16 +37,30 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+// `afterFacts`: getPartner starts failing once the onboarding facts are loaded (the facts read
+// goes through the same store), so only the posture card's own read fails.
+const partnerFail = vi.hoisted(() => ({ on: false, afterFacts: false }));
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(db) };
+  return {
+    ...actual,
+    getPartnerStore: () => {
+      const real = actual.createPartnerStore(db);
+      return { ...real, getPartner: (id: string) => (partnerFail.on ? Promise.reject(new Error('db down')) : real.getPartner(id)) };
+    },
+  };
 });
 const factsFail = vi.hoisted(() => ({ on: false }));
 vi.mock('@/db/repos/partner-onboarding-facts', async (orig) => {
   const actual = await orig<typeof import('@/db/repos/partner-onboarding-facts')>();
   return {
     ...actual,
-    loadOnboardingFacts: (...a: Parameters<typeof actual.loadOnboardingFacts>) => (factsFail.on ? Promise.reject(new Error('db down')) : actual.loadOnboardingFacts(...a)),
+    loadOnboardingFacts: async (...a: Parameters<typeof actual.loadOnboardingFacts>) => {
+      if (factsFail.on) throw new Error('db down');
+      const facts = await actual.loadOnboardingFacts(...a);
+      if (partnerFail.afterFacts) partnerFail.on = true;
+      return facts;
+    },
   };
 });
 
@@ -56,6 +70,8 @@ import { auditEvents, outbox, partnerGoLive } from '@/db/schema';
 import { t } from '@/lib/i18n';
 import OnboardingPage from '@/app/partner/(app)/onboarding/page';
 import { ONBOARDING_SECRETS, seedOnboardingComplete } from './helpers-partner-onboarding';
+import { certifyPartnerForTest } from './helpers-live';
+import { sql } from 'drizzle-orm';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 async function signInAs(o: Partial<Staff>): Promise<void> {
@@ -65,12 +81,19 @@ async function signInAs(o: Partial<Staff>): Promise<void> {
 }
 const render = async () => renderToStaticMarkup(await OnboardingPage());
 const decode = (html: string) => html.replaceAll('&amp;', '&').replaceAll('&#x27;', "'").replaceAll('&quot;', '"');
+const radios = (html: string, name: string) =>
+  [...html.matchAll(/<input[^>]*>/g)]
+    .map((m) => m[0])
+    .filter((tag) => tag.includes(`name="${name}"`))
+    .map((tag) => [/value="([^"]*)"/.exec(tag)?.[1], / checked=""/.test(tag)]);
 const stepStates = (html: string) => [...html.matchAll(/data-step="(\d)" data-done="(true|false)"/g)].map((m) => [Number(m[1]), m[2] === 'true']);
 
 beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   factsFail.on = false;
+  partnerFail.on = false;
+  partnerFail.afterFacts = false;
   db = await freshDb();
   await seedPartner(db, 'pa', 'Partner A');
   await seedPartner(db, 'pb', 'Partner B');
@@ -155,5 +178,59 @@ describe('/partner/onboarding: the checklist', () => {
     const before = [(await db.select().from(auditEvents)).length, (await db.select().from(outbox)).length, (await db.select().from(partnerGoLive)).length];
     await render();
     expect([(await db.select().from(auditEvents)).length, (await db.select().from(outbox)).length, (await db.select().from(partnerGoLive)).length]).toEqual(before);
+  });
+});
+
+// Fix pack 3 T9 (R27): the compliance posture card. It follows the steps list (it is NOT an eighth
+// step: no data-step), shows the form until signed, then who signed and when plus the forced-KYC note.
+describe('/partner/onboarding: the posture card', () => {
+  const POSTURE = 'data-testid="partner-live-posture"';
+  it('the posture card follows the steps list; the seven data-step entries are unchanged', async () => {
+    await signInAs({});
+    const html = decode(await render());
+    expect(stepStates(html).map(([n]) => n)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    const card = html.indexOf(POSTURE);
+    expect(card).toBeGreaterThan(html.indexOf('</ol>'));
+    expect(html.slice(card)).not.toContain('data-step=');
+    expect(html).toContain(t('partner.live.posture.title'));
+  });
+  it('unsigned -> the form, with the radio matching the platform kycMode pre-checked', async () => {
+    await signInAs({});
+    const html = decode(await render());
+    const card = html.slice(html.indexOf(POSTURE));
+    expect(card).toContain('data-testid="partner-live-posture-form"');
+    expect(radios(card, 'kycDecider')).toEqual([['smartremit_procedures', true], ['partner', false]]);
+    expect(radios(card, 'holdDecider')).toEqual([['partner', false], ['smartremit_delegated', false]]);
+    expect(card).toContain('name="fourEyesNonSanctions"');
+    expect(card).toContain(t('partner.live.posture.sign'));
+    expect(card).not.toContain(t('partner.live.posture.forcedNote'));
+  });
+  it("a delegated partner's form pre-checks 'partner'", async () => {
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'pa'`);
+    await signInAs({});
+    const html = decode(await render());
+    expect(radios(html.slice(html.indexOf(POSTURE)), 'kycDecider')).toEqual([['smartremit_procedures', false], ['partner', true]]);
+  });
+  it('signed -> who and when, the forced-KYC note, no form', async () => {
+    await certifyPartnerForTest(db, 'pa', { posture: true });
+    await signInAs({});
+    const html = decode(await render());
+    const card = html.slice(html.indexOf(POSTURE));
+    expect(card).toContain(t('partner.live.posture.signed', { who: 'test-partner-admin', date: new Date(Date.now() - 240_000).toISOString().slice(0, 10) }));
+    expect(card).toContain(t('partner.live.posture.forcedNote'));
+    expect(card).toContain(t('partner.live.posture.kycDecider.smartremit_procedures'));
+    expect(card).toContain(t('partner.live.posture.holdDecider.partner'));
+    expect(card).not.toContain('data-testid="partner-live-posture-form"');
+    expect(card).not.toContain('test-contract');
+    expect(card).not.toContain('test-counsel');
+  });
+  it('a partner read failure -> the card shows unavailable, the checklist still renders', async () => {
+    partnerFail.afterFacts = true;
+    await signInAs({});
+    const html = decode(await render());
+    expect(stepStates(html)).toHaveLength(7);
+    const card = html.slice(html.indexOf(POSTURE));
+    expect(card).toContain(t('partner.live.posture.unavailable'));
+    expect(card).not.toContain('data-testid="partner-live-posture-form"');
   });
 });
