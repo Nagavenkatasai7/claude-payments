@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
-import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
+import { createHash } from 'node:crypto';
+import { parseOfacSdnXml, canonicalLines, hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
 import type { SanctionsList } from '@/lib/sanctions/list-source';
 import {
   createSanctionsListRepo,
@@ -25,6 +26,23 @@ function variant(n: number, extraEntries = 0): SanctionsList {
     entries.push({ id: `sdn:${9000 + n * 100 + i}`, names: [`Synthetic Party ${n} ${i}`], type: 'Entity', programs: ['SDGT'] });
   }
   return { ...LIST, version: `2026-09-${String(18 + n).padStart(2, '0')}`, hash: `${String(n).padStart(2, '0')}${'a'.repeat(62)}`, entries };
+}
+
+/** Fix pack 2 T7: a variant whose hash is REAL (hashEntries), so the archive's hash check holds. */
+function realVariant(n: number): SanctionsList {
+  const entries = [
+    ...LIST.entries,
+    { id: `sdn:${8000 + n}`, names: [`Synthetic Real Party ${n}`], type: 'Entity', programs: ['SDGT'] },
+  ];
+  return { ...LIST, version: `2026-09-${String(18 + n).padStart(2, '0')}`, hash: hashEntries(entries), entries };
+}
+
+async function entryCounts(db: Db): Promise<Map<number, number>> {
+  const r = await db.execute(
+    sql`SELECT v.id, count(e.entry_id)::int AS n FROM sanctions_list_versions v
+        LEFT JOIN sanctions_list_entries e ON e.version_id = v.id GROUP BY v.id ORDER BY v.id`,
+  );
+  return new Map((r as unknown as { rows: Array<{ id: number | string; n: number }> }).rows.map((x) => [Number(x.id), x.n]));
 }
 
 async function versions(db: Db) {
@@ -109,18 +127,118 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect((n as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(5);
   });
 
-  it(`keeps at most ${KEEP_INACTIVE_VERSIONS} superseded versions (the entries cascade away)`, async () => {
+  // Fix pack 2 T7 (R07): storeList deletes nothing; entries go only after a verified archive.
+  it('keeps every version row and all entries when nothing is archived', async () => {
     const repo = createSanctionsListRepo(db);
-    for (let i = 1; i <= KEEP_INACTIVE_VERSIONS + 3; i++) await repo.storeList(variant(i));
+    for (let i = 1; i <= KEEP_INACTIVE_VERSIONS + 3; i++) await repo.storeList(realVariant(i));
     const rows = await versions(db);
-    expect(rows).toHaveLength(KEEP_INACTIVE_VERSIONS + 1);
+    expect(rows).toHaveLength(KEEP_INACTIVE_VERSIONS + 3);
     expect(rows.filter((r) => r.active)).toHaveLength(1);
-    const ids = rows.map((r) => r.id);
-    const orphans = await db.execute(
-      sql`SELECT count(*)::int AS n FROM sanctions_list_entries WHERE version_id NOT IN (SELECT id FROM sanctions_list_versions)`,
-    );
-    expect((orphans as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(0);
-    expect(ids.length).toBe(KEEP_INACTIVE_VERSIONS + 1);
+    const counts = await entryCounts(db);
+    for (const r of rows) expect(counts.get(Number(r.id))).toBe(Number(r.entry_count));
+    expect(await repo.pruneArchivedEntries('ofac-sdn')).toBe(0);
+    expect(await entryCounts(db)).toEqual(counts);
+  });
+
+  it('pruneArchivedEntries deletes only entries of archived versions beyond KEEP; rows, hashes, active entries remain', async () => {
+    const repo = createSanctionsListRepo(db);
+    const lists = [1, 2, 3, 4, 5].map(realVariant);
+    for (const l of lists) await repo.storeList(l);
+    const at = new Date();
+    for (const v of await repo.pendingArchive('ofac-sdn', 10)) {
+      expect(await repo.markArchived(v.id, v.hash, `sanctions-archive/ofac-sdn/${v.version}-${v.hash}.jsonl.gz`, 'f'.repeat(64), at)).toBe(true);
+    }
+    const before = await versions(db);
+    const deleted = await repo.pruneArchivedEntries('ofac-sdn');
+    expect(deleted).toBe(2 * 6); // versions 1 and 2: inactive beyond the newest KEEP (4, 3)
+    const after = await versions(db);
+    expect(after).toEqual(before); // rows and hashes untouched
+    const counts = await entryCounts(db);
+    const idOf = (n: number) => Number(before.find((r) => r.hash === lists[n - 1].hash)!.id);
+    expect(counts.get(idOf(1))).toBe(0);
+    expect(counts.get(idOf(2))).toBe(0);
+    expect(counts.get(idOf(3))).toBe(6);
+    expect(counts.get(idOf(4))).toBe(6);
+    expect(counts.get(idOf(5))).toBe(6); // active
+    const active = (await repo.activeVersion('ofac-sdn'))!;
+    expect((await repo.loadList(active)).entries).toHaveLength(6);
+    expect(await repo.pruneArchivedEntries('ofac-sdn')).toBe(0); // idempotent
+  });
+
+  it('never prunes an unarchived version beyond KEEP', async () => {
+    const repo = createSanctionsListRepo(db);
+    const lists = [1, 2, 3, 4, 5].map(realVariant);
+    for (const l of lists) await repo.storeList(l);
+    const pending = await repo.pendingArchive('ofac-sdn', 10);
+    const v2 = pending.find((v) => v.hash === lists[1].hash)!;
+    await repo.markArchived(v2.id, v2.hash, 'sanctions-archive/x', 'f'.repeat(64), new Date());
+    expect(await repo.pruneArchivedEntries('ofac-sdn')).toBe(6);
+    const counts = await entryCounts(db);
+    const v1 = pending.find((v) => v.hash === lists[0].hash)!;
+    expect(counts.get(v1.id)).toBe(6); // beyond KEEP but not archived: kept
+    expect(counts.get(v2.id)).toBe(0);
+  });
+
+  it('re-activating a pruned version re-inserts its entries; loadList count check passes', async () => {
+    const repo = createSanctionsListRepo(db);
+    const lists = [1, 2, 3, 4].map(realVariant);
+    for (const l of lists) await repo.storeList(l);
+    for (const v of await repo.pendingArchive('ofac-sdn', 10)) {
+      await repo.markArchived(v.id, v.hash, 'sanctions-archive/x', 'f'.repeat(64), new Date());
+    }
+    expect(await repo.pruneArchivedEntries('ofac-sdn')).toBe(6); // version 1
+    const res = await repo.storeList({ ...lists[0], version: '2026-09-30' });
+    expect(res.status).toBe('activated');
+    const active = (await repo.activeVersion('ofac-sdn'))!;
+    expect(active.hash).toBe(lists[0].hash);
+    const loaded = await repo.loadList(active);
+    expect(loaded.entries).toHaveLength(6);
+    expect(hashEntries(loaded.entries)).toBe(lists[0].hash);
+    expect(await versions(db)).toHaveLength(4);
+  });
+
+  it('markArchived stamps once; a hash mismatch never stamps', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(realVariant(1));
+    const [v] = await repo.pendingArchive('ofac-sdn', 10);
+    const at = new Date();
+    expect(await repo.markArchived(v.id, 'b'.repeat(64), 'p', 's', at)).toBe(false);
+    expect(await repo.pendingArchive('ofac-sdn', 10)).toHaveLength(1);
+    expect(await repo.markArchived(v.id, v.hash, 'sanctions-archive/p', 's1', at)).toBe(true);
+    expect(await repo.markArchived(v.id, v.hash, 'sanctions-archive/q', 's2', at)).toBe(false);
+    const r = await db.execute(sql`SELECT archive_path, archive_sha256, archived_at FROM sanctions_list_versions`);
+    const row = (r as unknown as { rows: Array<Record<string, unknown>> }).rows[0];
+    expect(row.archive_path).toBe('sanctions-archive/p');
+    expect(row.archive_sha256).toBe('s1');
+    expect(row.archived_at).not.toBeNull();
+    expect(await repo.pendingArchive('ofac-sdn', 10)).toEqual([]);
+  });
+
+  it('entriesOf -> canonicalLines hashes to versions.hash', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    await repo.storeList(realVariant(2));
+    const pending = await repo.pendingArchive('ofac-sdn', 10);
+    expect(pending.map((v) => v.version)).toEqual(['2026-09-18', '2026-09-20']); // oldest first
+    for (const v of pending) {
+      expect(v).toMatchObject({ source: 'ofac-sdn' });
+      const entries = await repo.entriesOf(v.id);
+      expect(entries).toHaveLength(v.entryCount);
+      expect(createHash('sha256').update(canonicalLines(entries), 'utf8').digest('hex')).toBe(v.hash);
+    }
+    expect(await repo.pendingArchive('ofac-sdn', 1)).toHaveLength(1);
+  });
+
+  it('archiveSummary counts', async () => {
+    const repo = createSanctionsListRepo(db);
+    expect(await repo.archiveSummary('ofac-sdn')).toEqual({ versions: 0, archived: 0, pending: 0, withEntries: 0 });
+    for (const n of [1, 2, 3, 4]) await repo.storeList(realVariant(n));
+    for (const v of (await repo.pendingArchive('ofac-sdn', 10)).slice(0, 3)) {
+      await repo.markArchived(v.id, v.hash, 'sanctions-archive/x', 's', new Date());
+    }
+    await repo.pruneArchivedEntries('ofac-sdn');
+    expect(await repo.archiveSummary('ofac-sdn')).toEqual({ versions: 4, archived: 3, pending: 1, withEntries: 3 });
+    expect(await repo.archiveSummary('other')).toEqual({ versions: 0, archived: 0, pending: 0, withEntries: 0 });
   });
 
   it('an OLDER publication (a replayed or stale export) is refused: the list only moves forward', async () => {

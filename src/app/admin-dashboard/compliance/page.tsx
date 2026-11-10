@@ -30,6 +30,42 @@ import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
 import { readPurposeDetailsForStaff, type StaffPurposeDetail } from '@/lib/purpose-detail-staff';
+import { sanctionsListStatus, type SanctionsListStatus } from '@/lib/sanctions/list-health';
+import { SANCTIONS_LIST_MAX_AGE_MS } from '@/lib/sanctions/list-policy';
+import { createSanctionsListRepo, type ArchiveSummary } from '@/db/repos/sanctions-list-repo';
+import { isBlobConfigured } from '@/lib/blob';
+import { logError } from '@/lib/log';
+
+/** "3 h ago" / "2 d ago" from an ISO time (read-only display). */
+function ageText(iso: string, nowMs: number): string {
+  const h = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 3_600_000));
+  return h < 48 ? `${h} h ago` : `${Math.floor(h / 24)} d ago`;
+}
+
+/**
+ * Fix pack 2 (R07): the read-only sanctions list card (platform staff only).
+ * Each read fails soft to "unavailable"; the Blob row is yes/no only, never a
+ * path, URL or token.
+ */
+async function loadSanctionsListCard(now: Date): Promise<{
+  status: SanctionsListStatus | null;
+  archive: ArchiveSummary | null;
+  blobConfigured: boolean;
+}> {
+  let status: SanctionsListStatus | null = null;
+  let archive: ArchiveSummary | null = null;
+  try {
+    status = await sanctionsListStatus(getDb(), now);
+  } catch (err) {
+    logError('compliance.sanctions-list-status', err instanceof Error ? err.name : 'unknown');
+  }
+  try {
+    archive = await createSanctionsListRepo(getDb()).archiveSummary('ofac-sdn');
+  } catch (err) {
+    logError('compliance.sanctions-archive-summary', err instanceof Error ? err.name : 'unknown');
+  }
+  return { status, archive, blobConfigured: isBlobConfigured() };
+}
 
 const REVIEW_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
@@ -200,6 +236,8 @@ export default async function CompliancePage() {
   // holds (setAmlHoldsAction re-checks — the action is the authority).
   const canSetAmlHolds = staff.role === 'admin' && scoped.scope.kind !== 'partner';
   corridorRows.sort((a, b) => (a.partnerName + a.corridor).localeCompare(b.partnerName + b.corridor));
+  const listNow = new Date();
+  const listCard = scoped.scope.kind !== 'partner' ? await loadSanctionsListCard(listNow) : null;
 
   return (
     <>
@@ -398,6 +436,61 @@ export default async function CompliancePage() {
             ))}
           </CardContent>
         </Card>
+
+        {listCard && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>Sanctions list</CardTitle>
+              <CardDescription>
+                The list a real-money screen uses, and its verified archive (read-only)
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
+                {listCard.status ? (
+                  <>
+                    <dt className="text-muted-foreground">List setting</dt>
+                    <dd>{listCard.status.listSetting}</dd>
+                    <dt className="text-muted-foreground">Active version</dt>
+                    <dd>{listCard.status.version ?? 'none loaded'}</dd>
+                    <dt className="text-muted-foreground">Entries</dt>
+                    <dd>{listCard.status.entryCount ?? '—'}</dd>
+                    <dt className="text-muted-foreground">Last checked</dt>
+                    <dd>
+                      {listCard.status.checkedAt ? ageText(listCard.status.checkedAt, listNow.getTime()) : 'never'}
+                      {listCard.status.checkedAt &&
+                        listNow.getTime() - Date.parse(listCard.status.checkedAt) > SANCTIONS_LIST_MAX_AGE_MS && (
+                          <Badge variant="destructive" className="ml-1.5">stale</Badge>
+                        )}
+                    </dd>
+                    <dt className="text-muted-foreground">Fitness</dt>
+                    <dd>
+                      <Badge variant={listCard.status.fitness === 'live' ? 'outline' : 'destructive'}>
+                        {listCard.status.fitness}
+                      </Badge>
+                    </dd>
+                    <dt className="text-muted-foreground">Partners on a real-money rail</dt>
+                    <dd>{listCard.status.httpPartners}</dd>
+                  </>
+                ) : (
+                  <>
+                    <dt className="text-muted-foreground">List status</dt>
+                    <dd>unavailable</dd>
+                  </>
+                )}
+                <dt className="text-muted-foreground">Archive</dt>
+                <dd>
+                  {listCard.archive
+                    ? `${listCard.archive.archived} archived · ${listCard.archive.pending} pending · ` +
+                      `${listCard.archive.withEntries} of ${listCard.archive.versions} versions hold entries`
+                    : 'unavailable'}
+                </dd>
+                <dt className="text-muted-foreground">Blob store configured</dt>
+                <dd>{listCard.blobConfigured ? 'yes' : 'no'}</dd>
+              </dl>
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="mb-6">
           <CardHeader>

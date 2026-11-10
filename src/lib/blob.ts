@@ -2,10 +2,14 @@ import { get, put } from '@vercel/blob';
 import { env } from './env';
 
 // blob — partner licence / KYB / AML documents in a PRIVATE Vercel Blob store
-// (Program-Fix 24). The only file-upload path in the app.
+// (Program-Fix 24). The only path that writes to Blob: the partner-application
+// upload route, and (Fix pack 2, R07) the sanctions list archive
+// (src/lib/sanctions/list-archive.ts, objects under `sanctions-archive/`,
+// through putPrivateObject / readPrivateObject below).
 //
 // A stored document URL is NOT a capability: objects are written with
-// `access: 'private'` (SDK 2.6.1, node_modules/@vercel/blob/dist/create-folder-DAlHaCQ2.d.ts:37-44),
+// `access: 'private'` (SDK 2.8.0, node_modules/@vercel/blob/dist/create-folder-BM6BTlko.d.ts:38-79
+// CommonCreateBlobOptions; put at dist/index.d.ts:472),
 // live on `<store>.private.blob.vercel-storage.com`, and need the store token on
 // every read. The only read path is the audited staff route
 // (admin-dashboard/partner-requests/[id]/documents/[index]/route.ts), which
@@ -13,7 +17,7 @@ import { env } from './env';
 //
 // The token is ALWAYS passed explicitly (`env.partnerDocsBlobToken`): the SDK
 // resolves an explicit `token` before any OIDC / BLOB_STORE_ID / env branch
-// (dist/chunk-CIIQSN42.js:169-172 `resolveBlobAuth`), so the old public store's
+// (dist/chunk-YYMLUMXS.js:169-172 `resolveBlobAuth`), so the old public store's
 // still-connected BLOB_READ_WRITE_TOKEN can never be picked up by accident. If
 // the private token is unset the helpers throw a FRIENDLY "not configured"
 // error so callers degrade gracefully (uploads 503; the text application still
@@ -138,7 +142,7 @@ function parseBareHttpsUrl(url: string): URL | null {
  * The ONE host our private token may ever be sent to, derived from the token
  * itself: a read-write token is `vercel_blob_rw_<storeId>_<secret>` and the SDK
  * builds `https://<storeId>.<access>.blob.vercel-storage.com/…` from it
- * (dist/chunk-CIIQSN42.js:119-122 `parseStoreIdFromReadWriteToken`, :338-339
+ * (dist/chunk-YYMLUMXS.js:119-122 `parseStoreIdFromReadWriteToken`, :338-339
  * `constructBlobUrl`). Null when the token is unset or not of that shape — then
  * no host is "ours" and nothing is read. Hostnames compare lower-case (the URL
  * parser lower-cases them).
@@ -183,8 +187,8 @@ export interface PartnerDocStream {
 
 /**
  * Read one private object for the audited staff route. Wraps
- * `get(url, { access: 'private', token })` (dist/index.d.ts:221; result union on
- * `statusCode` at :167-193) and returns null unless the store answered 200 with
+ * `get(url, { access: 'private', token })` (dist/index.d.ts:228; result union on
+ * `statusCode` at :174-197) and returns null unless the store answered 200 with
  * a body. Throws the friendly error when unconfigured — never a fallback token.
  * Refuses (null, no SDK call) any url that is not on OUR store's host: the
  * token is sent to that host and nowhere else.
@@ -195,4 +199,59 @@ export async function streamPartnerDoc(url: string): Promise<PartnerDocStream | 
   const res = await get(url, { access: 'private', token });
   if (!res || res.statusCode !== 200 || !res.stream) return null;
   return { stream: res.stream, contentType: res.blob.contentType, size: res.blob.size };
+}
+
+// ---- Fix pack 2 (R07): generic private objects (the sanctions list archive) ----
+
+/** Put / read time limit for one archive object. */
+const OBJECT_TIMEOUT_MS = 60_000;
+
+/** True when the private store's token is set (never says anything about the token itself). */
+export function isBlobConfigured(): boolean {
+  return env.partnerDocsBlobToken !== '';
+}
+
+/** A store-relative pathname only: never a URL (the token would follow it to that host) or a rooted path. */
+function requirePathname(pathname: string): void {
+  if (pathname === '' || pathname.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(pathname) || pathname.includes('..')) {
+    throw new Error('blob: a store-relative pathname is required');
+  }
+}
+
+/**
+ * Write one PRIVATE object at exactly `pathname`: no random suffix, and never
+ * over an existing object (`allowOverwrite: false`; the SDK throws if one is
+ * there). Explicit token, 60 s abort. Throws the friendly error when unconfigured.
+ */
+export async function putPrivateObject(pathname: string, body: Buffer, contentType: string): Promise<{ pathname: string }> {
+  const token = requireToken();
+  requirePathname(pathname);
+  const result = await put(pathname, body, {
+    access: 'private',
+    addRandomSuffix: false,
+    allowOverwrite: false,
+    contentType,
+    token,
+    abortSignal: AbortSignal.timeout(OBJECT_TIMEOUT_MS),
+  });
+  return { pathname: result.pathname };
+}
+
+/**
+ * Read one PRIVATE object by pathname from origin (`useCache: false`, so a
+ * read-back right after the put sees the stored bytes). Null unless the store
+ * answers 200 with a body (missing object: the SDK resolves null). A transport
+ * error throws; so does the friendly error when unconfigured.
+ */
+export async function readPrivateObject(pathname: string): Promise<Buffer | null> {
+  const token = requireToken();
+  requirePathname(pathname);
+  const res = await get(pathname, {
+    access: 'private',
+    token,
+    useCache: false,
+    abortSignal: AbortSignal.timeout(OBJECT_TIMEOUT_MS),
+  });
+  if (!res || res.statusCode !== 200 || !res.stream) return null;
+  return Buffer.from(await new Response(res.stream).arrayBuffer());
 }

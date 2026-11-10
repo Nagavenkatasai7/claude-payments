@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
+import { createHash } from 'node:crypto';
+import { parseOfacSdnXml, canonicalLines, hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
 import {
   ListSanctionsScreener,
   SanctionsListUnavailableError,
@@ -155,5 +156,17 @@ describe('ListSanctionsScreener', () => {
     await expect(s.screen({ name: 'Mom', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
     expect(s.listInfo()).toMatchObject({ source: 'ofac-sdn', version: 'unavailable' });
     await expect(s.screen({ name: 'Testa Fixturelli', sourceCountry: 'US' })).resolves.toMatchObject({ matched: true });
+  });
+});
+
+// Fix pack 2 T7 (R07): the archive stores canonicalLines; its sha256 IS the version hash.
+describe('canonicalLines', () => {
+  it('canonicalLines of the sample XML hashes to the parsed list hash (pin)', () => {
+    const lines = canonicalLines(LIST.entries);
+    expect(lines.split('\n')).toHaveLength(LIST.entries.length);
+    expect(createHash('sha256').update(lines, 'utf8').digest('hex')).toBe(LIST.hash);
+    expect(hashEntries(LIST.entries)).toBe(LIST.hash);
+    // order-insensitive: a reversed entry list gives the same lines
+    expect(canonicalLines([...LIST.entries].reverse())).toBe(lines);
   });
 });

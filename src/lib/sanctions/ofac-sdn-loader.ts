@@ -62,9 +62,13 @@ function toIsoDate(publishDate: string): string {
   return `${m[3]}-${m[1]}-${m[2]}`;
 }
 
-/** sha256 over the canonical entries — insensitive to XML layout, sensitive to content. */
-export function hashEntries(entries: SanctionsListEntry[]): string {
-  const canonical = entries
+/**
+ * The canonical text of a list: one JSON line per entry, sorted, joined by
+ * '\n' (no trailing newline). Fix pack 2 (R07): the Blob archive stores
+ * exactly this text, so its sha256 is the version hash.
+ */
+export function canonicalLines(entries: SanctionsListEntry[]): string {
+  return entries
     .map((e) =>
       JSON.stringify(
         e.weakNames && e.weakNames.length > 0
@@ -74,7 +78,11 @@ export function hashEntries(entries: SanctionsListEntry[]): string {
     )
     .sort()
     .join('\n');
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}
+
+/** sha256 over the canonical entries — insensitive to XML layout, sensitive to content. */
+export function hashEntries(entries: SanctionsListEntry[]): string {
+  return createHash('sha256').update(canonicalLines(entries), 'utf8').digest('hex');
 }
 
 /** Pure parser. Throws ('OFAC SDN: …') on a truncated document, or one without a publish date or entries. */

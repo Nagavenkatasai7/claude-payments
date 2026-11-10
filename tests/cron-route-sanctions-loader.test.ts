@@ -28,6 +28,9 @@ vi.mock('@/lib/sanctions/list-loader', () => ({ runOfacSdnLoad }));
 // Fix pack 2 (R02): the list health check runs on every daily run.
 const checkSanctionsListHealth = vi.hoisted(() => vi.fn(async () => ({ alerted: false })));
 vi.mock('@/lib/sanctions/list-health', () => ({ checkSanctionsListHealth }));
+// Fix pack 2 T7 (R07): the verified Blob archive runs after a load.
+const archivePending = vi.hoisted(() => vi.fn(async () => ({ status: 'done', archived: 1, failed: 0, pruned: 0 })));
+vi.mock('@/lib/sanctions/list-archive', () => ({ archivePending }));
 
 import { GET } from '@/app/api/cron/route';
 
@@ -39,6 +42,7 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
   beforeEach(() => {
     runOfacSdnLoad.mockClear();
     checkSanctionsListHealth.mockClear();
+    archivePending.mockClear();
   });
   afterEach(() => {
     if (original === undefined) delete process.env.SANCTIONS_LOADER_ENABLED;
@@ -102,6 +106,34 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
     expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-list-health'))).toBe(true);
+    err.mockRestore();
+  });
+
+  it('ON: archivePending runs after the load with the same db', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    await GET(req());
+    expect(archivePending).toHaveBeenCalledTimes(1);
+    expect((archivePending.mock.calls[0] as unknown as [unknown])[0]).toBe(fakeDb);
+    expect(runOfacSdnLoad.mock.invocationCallOrder[0]).toBeLessThan(archivePending.mock.invocationCallOrder[0]);
+    expect(archivePending.mock.invocationCallOrder[0]).toBeLessThan(checkSanctionsListHealth.mock.invocationCallOrder[0]);
+  });
+
+  it('OFF: never runs; response unchanged', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    const res = await GET(req());
+    expect(archivePending).not.toHaveBeenCalled();
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
+  });
+
+  it('an archive throw fails soft; response unchanged', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    archivePending.mockRejectedValueOnce(new Error('boom'));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7, sanctionsList: 'activated' });
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-archive'))).toBe(true);
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
     err.mockRestore();
   });
 });

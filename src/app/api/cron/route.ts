@@ -12,6 +12,7 @@ import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
 import { checkSanctionsListHealth } from '@/lib/sanctions/list-health';
+import { archivePending } from '@/lib/sanctions/list-archive';
 import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
 import { pokeWorker } from '@/lib/outbox';
@@ -209,6 +210,15 @@ export async function GET(req: NextRequest) {
       sanctionsList = null;
       logError('cron.sanctions-list', err);
     }
+    // Fix pack 2 (R07): archive each list version to the private Blob store
+    // (verified read-back) before its entries may be pruned. After the load,
+    // before the health check. Fail-soft (archivePending never throws by
+    // contract); no response field.
+    try {
+      await archivePending(getDb());
+    } catch (err) {
+      logError('cron.sanctions-archive', err);
+    }
   }
 
   // Fix pack 2 (R02): the sanctions list health check, ALWAYS (even with the
@@ -222,7 +232,7 @@ export async function GET(req: NextRequest) {
   }
 
   // partner-demo R4: schedules, link expiry, the sanctions-list loader, the
-  // list health check and the storage cap-watch commit outbox rows above — poke so the gated worker cron drains them now
+  // list archive, the list health check and the storage cap-watch commit outbox rows above — poke so the gated worker cron drains them now
   // rather than at the next :17/:47 backstop.
   pokeWorker();
   return NextResponse.json({
