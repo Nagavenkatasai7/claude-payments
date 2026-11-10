@@ -14,7 +14,7 @@ import { sanctionsAuditEvent } from './sanctions/evidence';
 import { listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
 import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { railPartnerOf } from './live-gate';
-import { senderWasCharged } from './funding-method';
+import { senderChargeState } from './funding-method';
 import { pokeWorker } from './outbox';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createPartnerStore } from './partner-store';
@@ -135,8 +135,11 @@ export async function rescreenBeforePay(
         environment: transfer.environment ?? 'live',
         realMoney,
         evidence: result.evidence,
-        // Review round 3 (M2): a charged row (the crash-resume) says so.
-        charged: senderWasCharged(updated ?? transfer),
+        // Review round 3 (M2), round 4 (S4: N1, P1): the row's money state (a
+        // charged crash-resume says so). At 'confirm' the Partner-API confirm
+        // call itself is the partner's attestation that it collected the
+        // sender's funds (the row is still awaiting, with no charge reference).
+        charge: senderChargeState(updated ?? transfer, { partnerConfirmed: opts.stage === 'confirm' }),
       });
       return { kind: 'blocked' };
     }

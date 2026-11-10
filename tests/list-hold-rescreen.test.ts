@@ -298,7 +298,12 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     const alerts = (await outbox()).filter((r) => r.dedupe_key === 'listrescreenblock:lh_match');
     expect(alerts).toHaveLength(1);
     expect(alerts[0].kind).toBe('ops.alert');
-    expect(String(alerts[0].payload.message)).toMatch(/charged, blocked by the re-screen, not paid out; reject and refund it/);
+    // Review round 4 (S4): the charged copy never says "reject it" or tells anyone to refund.
+    expect(String(alerts[0].payload.message)).toBe(
+      '⚠️ SmartRemit ops: transfer lh_match (partner acme) was held because the sanctions list was not live; ' +
+        'the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen and not paid out, and the sender was charged. ' +
+        "Leave the transfer as it is: do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned (Reject refunds the sender).",
+    );
     expect(String(alerts[0].payload.message).toLowerCase()).not.toContain('testa');
     expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual([]);
     expect(poke.calls).toBe(1);
@@ -326,10 +331,41 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     expect(alert).not.toContain('It is charged');
     expect(alert).not.toMatch(/refund/i);
     expect(alert).toContain('Nothing was charged or paid out; reject it.');
-    // The block notices keep the uncharged copy too.
-    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblock:lh_pull')?.payload.message)).toContain('Nothing paid out');
-    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_pull:acme')?.payload.text)).not.toContain('charged');
+    // The block notices say nothing was charged too (review round 4, S4).
+    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblock:lh_pull')?.payload.message)).toContain('Nothing was charged or paid out');
+    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_pull:acme')?.payload.text)).toContain('nothing was charged or paid out');
+    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_pull:acme')?.payload.text)).not.toMatch(/sender was charged|refund/);
     for (const m of [alert]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+  });
+
+  // Review round 4 (S4: N1, P1): a Partner-API-shaped hold (bank_transfer, no
+  // fundingRef: the partner's confirm attested the capture, nothing wrote a
+  // charge reference) matches. Nothing may say "Nothing was charged" or tell
+  // ops to reject it (or anyone to refund): the partner holds the funds and
+  // the compliance officer decides.
+  it('N1/P1: a Partner-API-shaped hold (bank_transfer, no fundingRef) matches: the partner collected the funds, never "Nothing was charged"', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldRow({ id: 'lh_papi', recipientName: 'Testa Fixturelli', fundingMethod: 'bank_transfer' });
+    expect((await store.getTransfer('lh_papi'))?.fundingRef ?? null).toBeNull();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
+    const rows = await outbox();
+    const alert = String(rows.find((r) => r.dedupe_key === 'listrescreenblock:lh_papi')?.payload.message);
+    const block = String(rows.find((r) => r.dedupe_key === 'sanctionsblock:lh_papi')?.payload.message);
+    const mail = String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_papi:acme')?.payload.text);
+    expect(alert).toBe(
+      '⚠️ SmartRemit ops: transfer lh_papi (partner acme) was held because the sanctions list was not live; ' +
+        "the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen and not paid out, and the partner confirmed that it collected the sender's funds. " +
+        "Leave the transfer as it is: do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned (Reject cancels it; the partner holds the sender's funds).",
+    );
+    expect(block).toContain("The recipient was not paid, but the partner confirmed that it collected the sender's funds.");
+    expect(mail).toContain("after the partner confirmed that it collected the sender's funds");
+    for (const m of [alert, block, mail]) {
+      expect(m).not.toMatch(/nothing was charged/i);
+      expect(m).not.toMatch(/reject it|refund it|refund procedure|before any refund/i);
+      expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+    }
   });
 
   // Review round 3 (M2): a charged hold's block notices say the sender was charged.

@@ -4,7 +4,10 @@
 //  - the section 10 A1 line states the instruct gate's pre-pack pass-through;
 //  - section 10 lists every round 2 finding id, one line each, and (review
 //    round 3) every round 3 finding id fixed;
-//  - the instructnotlive row says the heal does not follow a match (M8);
+//  - the instructnotlive row says the heal does not follow a match (M8) and
+//    that the generic recon: and dead: alerts still do (P3);
+//  - (after the last check) the N1/P1, P3 and refund wording lines, and no
+//    match text in the table tells anyone to refund;
 //  - the ops-alert table names every new dedupe key of the pack, every key it
 //    names exists in src/, and every literal piece of each quoted alert text
 //    (the parts between <placeholders>) is in the code.
@@ -79,14 +82,23 @@ describe('sanctions screening spec says what the code does', () => {
     }
   });
 
-  // Review round 3 (M8): the heal follows a not-live or too-old refusal only;
-  // after a match no further alert follows and a person must act.
-  it('the instructnotlive row names the match case separately (M8)', () => {
+  // Review round 3 (M8): the heal follows a not-live or too-old refusal only.
+  // After the last check (P3): after a match no HEAL alert follows, but the
+  // generic recon: and dead: alerts still fire; no refund before the compliance
+  // officer decides (refund wording).
+  it('the instructnotlive row names the match case separately (M8, P3)', () => {
     const row = section('## 11.').split('\n').find((l) => l.startsWith('| `instructnotlive:'))!;
     const meaning = row.split(' | ').at(-1)!;
     expect(meaning).toContain('Only for "not on a live list" and "older than the list age limit": once the list is live the stuck-paid heal re-screens it');
-    expect(meaning).toContain('For "a sanctions match" the heal does not re-screen it, so no further alert follows');
-    expect(meaning).toContain('a person must block and refund the transfer');
+    expect(meaning).toContain(
+      'For "a sanctions match" the heal does not re-screen it, so no heal alert follows (`instructrescreen:`, `paidmatch:`, `paidmatchinstructed:`); ' +
+        'the generic `recon:<id>` alert of the stuck-paid sweep and, once the instruct is dead-lettered, the `dead:` alert still fire',
+    );
+    expect(meaning).toContain(
+      "A person must not pay it out and must not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned",
+    );
+    expect(spec).not.toContain('no further alert follows');
+    expect(meaning).not.toContain('block and refund the transfer');
     expect(meaning).not.toMatch(/Once the list is live the stuck-paid heal re-screens it: a clear sends it; otherwise `instructrescreen:` or `paidmatch:` follows\./);
   });
 
@@ -98,13 +110,37 @@ describe('sanctions screening spec says what the code does', () => {
     expect(spec).not.toContain('releases it if that screen clears it');
   });
 
-  // Review round 3 (M6): the listrescreenblock row quotes the charged and the uncharged text.
-  it('the listrescreenblock row quotes both texts (M6)', () => {
+  // Review round 3 (M6), after the last check (N1/P1): the listrescreenblock
+  // row quotes the charged, the partner-collected and the uncharged text.
+  it('the listrescreenblock row quotes the three money texts (M6, N1/P1)', () => {
     const row = section('## 11.').split('\n').find((l) => l.startsWith('| `listrescreenblock:'))!;
     const texts = [...row.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
-    expect(texts).toHaveLength(2);
-    expect(texts[0]).toContain('It is charged, blocked by the re-screen, not paid out; reject and refund it.');
-    expect(texts[1]).toContain('Nothing was charged or paid out; reject it.');
+    expect(texts).toHaveLength(3);
+    expect(texts[0]).toContain('and the sender was charged. Leave the transfer as it is: do not pay it out');
+    expect(texts[0]).toContain('(Reject refunds the sender).');
+    expect(texts[1]).toContain("and the partner confirmed that it collected the sender's funds. Leave the transfer as it is");
+    expect(texts[2]).toContain('Nothing was charged or paid out; reject it.');
+    for (const t of texts.slice(0, 2)) expect(t).not.toMatch(/reject it|refund it/);
+  });
+
+  // After the last check: one line each, after the round 3 list; no match
+  // text quoted in section 11 tells anyone to refund (refund wording).
+  it('section 10 lists the last check (N1/P1, P3, refund wording) after round 3, and no match text says to refund', () => {
+    const s10 = section('## 10.');
+    const r3 = s10.indexOf('### Changes after review round 3');
+    const last = s10.indexOf('### Changes after the last check');
+    expect(last).toBeGreaterThan(r3);
+    const lines = s10.slice(last).split('\n');
+    for (const id of ['N1/P1', 'P3', 'refund wording']) expect(lines.filter((l) => l.startsWith(`- **${id}**`)), id).toHaveLength(1);
+    const table = section('## 11.').split('\n');
+    for (const key of ['sanctionsblock:', 'sanctionsblockmail:', 'paidmatch:', 'paidmatchinstructed:', 'listrescreenblock:']) {
+      const row = table.find((l) => l.startsWith(`| \`${key}`))!;
+      for (const [, text] of row.matchAll(/«`([^`]+)`»/g)) {
+        expect(text, key).not.toMatch(/refund it|refund procedure|before any refund|reject and refund/i);
+      }
+    }
+    const rescreen = table.find((l) => l.startsWith('| `instructrescreen:'))!;
+    expect(rescreen).toContain('review it on the compliance page before any refund.');
   });
 
   it('the ops-alert table names every new key, and its keys and texts are in the code', () => {

@@ -23,6 +23,7 @@ import { normalizeAlertEmail } from '../channel-health';
 import { WATCHLIST } from '../compliance-config';
 import { DEFAULT_PARTNER_ID } from '../defaults';
 import type { PartnerId, PartnerSupportConfig, TransferEnvironment } from '../types';
+import type { SenderChargeState } from '../funding-method';
 import { SANCTIONS_AUDIT_ACTOR, type ScreeningEvidence } from './evidence';
 
 export type SanctionsBlockStage = 'card' | 'mint' | 'pay' | 'confirm' | 'resume' | 'hold_rescreen' | 'payee' | 'seller';
@@ -40,17 +41,25 @@ export interface SanctionsBlockNotice {
   realMoney: boolean;
   evidence?: ScreeningEvidence;
   /**
-   * Pack 2 review R1 (E2): the sender was already CHARGED (a paid row blocked
-   * by its re-screen). The notices then say so: the recipient was not paid,
-   * the sender was charged and must be handled by the block and refund
-   * procedure. Omitted ⇒ the usual "nothing paid out" text.
+   * Pack 2 review round 4 (S4: N1, P1): what happened to the sender's money,
+   * from funding-method.ts senderChargeState on the row. Set ⇒ the texts say
+   * it truthfully ('charged': the sender was charged; 'partner_collected': the
+   * partner confirmed that it collected the sender's funds; 'none': nothing
+   * was charged) and, for a charged or partner-collected row, say not to pay
+   * it out and not to refund or return the funds until the licensed partner's
+   * compliance officer decides whether they must be blocked (frozen) or can be
+   * returned. Never an instruction to refund. Omitted ⇒ the usual "nothing
+   * paid out" text (the blocks decided before any charge).
    */
-  charged?: boolean;
+  charge?: SenderChargeState;
   /**
-   * Pack 2 review round 3 (K1): with `charged`, the paid row was (or may have
+   * Pack 2 review round 3 (K1): with `charge`, the paid row was (or may have
    * been) instructed to the rail. The notices then say the payout may be in
-   * progress with the rail: stop or recall it there and confirm no payout
-   * before any refund. Never "nothing paid out". Staff and partners only.
+   * progress with the rail: stop or recall it there and confirm with the rail
+   * what happened, and not to refund or return the funds before the
+   * compliance officer decides. A partner-pulled ('none') row says the rail
+   * may have pulled the sender's funds. Never "nothing paid out". Staff and
+   * partners only.
    */
   instructed?: boolean;
 }
@@ -105,7 +114,16 @@ export async function enqueueSanctionsBlockNotices(
   n: SanctionsBlockNotice,
 ): Promise<{ alerted: boolean; partnerNotified: boolean }> {
   const quiet = !n.realMoney && (n.environment === 'test' || isDemoWatchlistBlock(n.evidence));
-  const { subjectId, stage, environment, partnerId } = n;
+  const { subjectId, stage, environment, partnerId, charge } = n;
+  const instructed = Boolean(charge && n.instructed);
+  // Review round 4 (S4: N1, P1): the sender's money on a possibly instructed
+  // row (a partner-pulled row: the rail may have pulled it).
+  const instructedMoney =
+    charge === 'charged'
+      ? 'The sender was charged'
+      : charge === 'partner_collected'
+        ? "The partner confirmed that it collected the sender's funds"
+        : "The rail may have pulled the sender's funds";
   let alerted = false;
   let partnerNotified = false;
   if (!quiet) {
@@ -113,10 +131,17 @@ export async function enqueueSanctionsBlockNotices(
     await outbox.enqueue(
       'ops.alert',
       {
-        message: n.charged && n.instructed
-          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The sender was charged and the payout may be in progress with the rail: contact the rail to stop or recall it, and confirm with the rail that no payout happened before any refund; evidence on the compliance page.`
-          : n.charged
-          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged: follow the block and refund procedure; evidence on the compliance page.`
+        // Review round 4 (S4, refund wording): on a match the funds can have to
+        // be BLOCKED (frozen and reported) and then must not be returned, so no
+        // text tells anyone to refund: the compliance officer decides first.
+        message: instructed
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. ${instructedMoney} and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          : charge === 'charged'
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          : charge === 'partner_collected'
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the partner confirmed that it collected the sender's funds. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          : charge === 'none'
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing was charged or paid out; evidence on the compliance page.`
           : `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing paid out; evidence on the compliance page.`,
       },
       { dedupeKey: `sanctionsblock:${subjectId}` },
@@ -133,10 +158,14 @@ export async function enqueueSanctionsBlockNotices(
         {
           to: [addr],
           subject: 'SmartRemit: a transfer was stopped by sanctions screening',
-          text: n.charged && n.instructed
-            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall it, and confirm no payout happened before any refund. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
-            : n.charged
-            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Follow your block and refund procedure. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+          text: instructed
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening. ${instructedMoney}. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            : charge === 'charged'
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            : charge === 'partner_collected'
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the partner confirmed that it collected the sender's funds; nothing was paid out to the recipient. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            : charge === 'none'
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was charged or paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`,
         },
         { dedupeKey: `sanctionsblockmail:${subjectId}:${toPartnerId}` },

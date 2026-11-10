@@ -42,6 +42,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { sanctionsAuditEvent } from './sanctions/evidence';
 import { instructGateRefuses, listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
 import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { senderChargeState } from './funding-method';
 import { sanctionsListFitnessNow } from './sanctions/list-health';
 import type { ListFitness } from './sanctions/list-policy';
 import { releaseRescreenedHold } from './settlement';
@@ -168,13 +169,16 @@ export async function paidRowNeedsHeal(db: Db, t: Transfer, now: Date): Promise<
  *   • a live, clear screen that covers every name screened before ⇒ its
  *     sanctions.screen evidence row ⇒ 'cleared' (the next instruct passes);
  *   • a match ⇒ the evidence row, the sanctions block notices (stage
- *     'resume', charged) and, on the locked row still paid with no refund
- *     started, compliance_status 'blocked' plus one paidmatch:<id> alert, in
- *     ONE transaction ⇒ 'blocked' (instruct and reinstruct refuse it).
- *     Review round 3 (K1): a row possibly instructed (a rail ref, or a
- *     settlement.instruct row claimed or done) is blocked too, but gets one
- *     `paidmatchinstructed:<id>` alert (recall it with the rail, confirm no
- *     payout before any refund) and the instructed notices instead;
+ *     'resume', the row's senderChargeState, review round 4 S4) and, on the
+ *     locked row still paid with no refund started, compliance_status
+ *     'blocked' plus one paidmatch:<id> alert, in ONE transaction ⇒ 'blocked'
+ *     (instruct and reinstruct refuse it). Review round 3 (K1): a row
+ *     possibly instructed (a rail ref, or a settlement.instruct row claimed or
+ *     done) is blocked too, but gets one `paidmatchinstructed:<id>` alert
+ *     (recall it with the rail and confirm with the rail what happened) and
+ *     the instructed notices instead. No match text tells anyone to refund:
+ *     the licensed partner's compliance officer decides whether the funds
+ *     must be blocked (frozen) or can be returned;
  *   • anything else (a possible match, an uncovered name) ⇒ NO evidence (a
  *     fresh live row would unlock the gate on an unreviewed result) and one
  *     deduped `instructrescreen:<id>` ops alert, ids only ⇒ 'review'.
@@ -210,6 +214,12 @@ export async function healPaidRowScreen(
       // timed out leaves no ref, yet the rail may hold the instruction. Then
       // nobody is told it was never sent or that nothing was paid out.
       const instructed = Boolean(locked?.paymentProviderRef) || (await outbox.hasStartedInstruction(t.id));
+      // Review round 4 (S4: N1, P1): the money state of the paid row (`t` is
+      // paid; its method and charge reference do not change), never a
+      // hard-coded "charged": a Partner-API row has no charge reference (the
+      // partner collected the funds) and a partner-pulled row was charged by
+      // nobody here (once possibly instructed, the rail may have pulled it).
+      const charge = senderChargeState(t);
       await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, evidence));
       await enqueueSanctionsBlockNotices(tx, {
         partnerId: t.partnerId,
@@ -219,7 +229,7 @@ export async function healPaidRowScreen(
         environment: t.environment ?? 'live',
         realMoney: true,
         evidence,
-        charged: true,
+        charge,
         ...(instructed ? { instructed: true } : {}),
       });
       if (!locked || locked.status !== 'paid' || (locked.refundStatus ?? 'none') !== 'none') return;
@@ -227,14 +237,19 @@ export async function healPaidRowScreen(
       // Blocked in BOTH cases, so the row is never instructed again.
       if (!(await repo.blockPaidOnMatch(t.id, t.partnerId, reasons))) return;
       if (instructed) {
+        const instructedMoney =
+          charge === 'charged'
+            ? 'the sender was CHARGED'
+            : charge === 'partner_collected'
+              ? "the partner confirmed that it collected the sender's funds"
+              : "the rail may have pulled the sender's funds";
         await outbox.enqueue(
           'ops.alert',
           {
             message:
-              `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and the sender was CHARGED, and its re-screen on a live list is a sanctions match. ` +
-              'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, ' +
-              'and confirm with the rail that no payout happened BEFORE any refund. It is now blocked, so it will never be instructed again; ' +
-              'then follow the block procedure; evidence on the compliance page.',
+              `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and ${instructedMoney}, and its re-screen on a live list is a sanctions match. ` +
+              'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, and confirm with the rail what happened. ' +
+              `It is now blocked, so it will never be instructed again. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
           },
           { dedupeKey: `paidmatchinstructed:${t.id}` },
         );
@@ -244,9 +259,12 @@ export async function healPaidRowScreen(
         'ops.alert',
         {
           message:
-            `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and the sender was CHARGED, but it was not instructed: ` +
-            'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
-            'Follow the block and refund procedure; evidence on the compliance page.',
+            charge === 'none'
+              ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and nothing was charged, but it was not instructed: ` +
+                'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. Do not pay it out; evidence on the compliance page.'
+              : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and ${charge === 'charged' ? 'the sender was CHARGED' : "the partner confirmed that it collected the sender's funds"}, but it was not instructed: ` +
+                'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
+                `Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
         },
         { dedupeKey: `paidmatch:${t.id}` },
       );
@@ -263,7 +281,7 @@ export async function healPaidRowScreen(
     {
       message:
         `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is paid but not instructed: its re-screen on a live list did not clear ` +
-        '(a possible match or a name that cannot be screened again). It stays uninstructed; review it on the compliance page and refund it.',
+        '(a possible match or a name that cannot be screened again). It stays uninstructed; review it on the compliance page before any refund.',
     },
     { dedupeKey: reviewKey },
   );

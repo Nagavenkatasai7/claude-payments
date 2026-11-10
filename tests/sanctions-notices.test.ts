@@ -92,18 +92,62 @@ describe('enqueueSanctionsBlockNotices', () => {
     });
   });
 
-  // Pack 2 review R1 (E2): a paid row blocked by its re-screen: the sender was charged.
-  it('charged (a paid row): the alert and the email say the sender was charged and name the block and refund procedure', async () => {
-    await run(notice({ stage: 'resume', charged: true }));
+  // Pack 2 review round 4 (S4: N1, P1, refund wording): the notices state
+  // the sender's money by its state, and never tell anyone to refund on a
+  // match: the licensed partner's compliance officer decides first whether
+  // the funds must be blocked (frozen) or can be returned.
+  const HEAD = '⚠️ SmartRemit ops: sanctions block (resume) on tr_block_1, partner acme, live. ';
+  const DECIDE = "do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned";
+  const TAIL = ' Evidence is in your SmartRemit workspace. Do not share this notice with the customer.';
+  it.each([
+    [
+      'charged',
+      false,
+      `${HEAD}The recipient was not paid, but the sender was charged. Do not pay it out, and ${DECIDE}; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Do not pay it out, and ${DECIDE}.${TAIL}`,
+    ],
+    [
+      'partner_collected',
+      false,
+      `${HEAD}The recipient was not paid, but the partner confirmed that it collected the sender's funds. Do not pay it out, and ${DECIDE}; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening after the partner confirmed that it collected the sender's funds; nothing was paid out to the recipient. Do not pay it out, and ${DECIDE}.${TAIL}`,
+    ],
+    [
+      'none',
+      false,
+      `${HEAD}Nothing was charged or paid out; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening; nothing was charged or paid out.${TAIL}`,
+    ],
+    [
+      'charged',
+      true,
+      `${HEAD}The sender was charged and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening. The sender was charged. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned.${TAIL}`,
+    ],
+    [
+      'partner_collected',
+      true,
+      `${HEAD}The partner confirmed that it collected the sender's funds and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening. The partner confirmed that it collected the sender's funds. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned.${TAIL}`,
+    ],
+    [
+      'none',
+      true,
+      `${HEAD}The rail may have pulled the sender's funds and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
+      `Reference tr_block_1 (resume, live) was stopped by sanctions screening. The rail may have pulled the sender's funds. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned.${TAIL}`,
+    ],
+  ] as const)('charge %s, instructed %s: the exact alert and email', async (charge, instructed, message, text) => {
+    await run(notice({ stage: 'resume', charge, ...(instructed ? { instructed: true } : {}) }));
     const rows = await outboxRows();
-    expect(rows[0].payload).toEqual({
-      message:
-        '⚠️ SmartRemit ops: sanctions block (resume) on tr_block_1, partner acme, live. The recipient was not paid, but the sender was charged: follow the block and refund procedure; evidence on the compliance page.',
-    });
-    expect((rows[1].payload as { text: string }).text).toBe(
-      'Reference tr_block_1 (resume, live) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Follow your block and refund procedure. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.',
-    );
-    for (const r of rows) expect(JSON.stringify(r.payload)).not.toMatch(/Nothing paid out|; nothing was paid out\./);
+    expect(rows[0].payload).toEqual({ message });
+    expect((rows[1].payload as { text: string }).text).toBe(text);
+    for (const r of rows) {
+      const body = JSON.stringify(r.payload);
+      // No instruction to refund on a match.
+      expect(body).not.toMatch(/refund procedure|before any refund|refund it/i);
+      if (charge !== 'none') expect(body).not.toMatch(/Nothing was charged|nothing was charged/);
+      if (instructed) expect(body).not.toMatch(/nothing was paid out|Nothing paid out/i);
+    }
   });
 
   it('falls back to alertEmail', async () => {

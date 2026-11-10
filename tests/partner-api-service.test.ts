@@ -708,6 +708,28 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
     expect(kinds).not.toContain('settlement.instruct');
   });
 
+  // Pack 2 review round 4 (S4: N1, P1): the confirm call is the partner's
+  // attestation that it collected the funds, so a confirm-stage block never
+  // says nothing was charged, and tells nobody to refund.
+  it('re-screened to blocked at confirm → the block alert says the partner collected the funds', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-4b', {
+      beneficiary: { name: 'Testa Fixturelli', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    });
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    const t = await h.store.getTransfer(id);
+    expect(t?.fundingRef ?? null).toBeNull();
+    const msgs = ((await h.db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = ${'sanctionsblock:' + id}`)) as unknown as {
+      rows: Array<{ payload: { message: string } }>;
+    }).rows.map((x) => x.payload.message);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain("The recipient was not paid, but the partner confirmed that it collected the sender's funds.");
+    expect(msgs[0]).not.toMatch(/nothing was charged|nothing paid out|refund procedure|refund it|before any refund/i);
+  });
+
   // Pack 2 review R1 (G2): the flagged branch adds the same real-money hold
   // reasons settleOrHold adds (the platform reviewer sees them).
   it('flagged LARGE, fresh live evidence, sender stamped after the mint → held with LARGE + SENDER_SCREENING', async () => {

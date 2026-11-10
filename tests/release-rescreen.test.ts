@@ -220,7 +220,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     expect((await auditRows('rr_match')).map((a) => a.action)).toContain('sanctions.block');
   });
 
-  // Review round 3 (M2): the block notices of a charged row say so; an uncharged row keeps "Nothing paid out".
+  // Review round 3 (M2), round 4 (S4): the block notices state the sender's money by its state.
   it('M2: re-screen at release matches a CARD-charged hold: the block alert and the partner email say the sender was charged', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
@@ -238,15 +238,39 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     for (const m of [alert, mail]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
   });
 
-  it('M2: re-screen at release matches an UNCHARGED hold (no fundingRef): the old "nothing paid out" copy', async () => {
+  // Review round 4 (S4): an in-review row with no charge reference on a
+  // custodial method is a Partner-API confirm (partner_collected), so the
+  // uncharged case is a partner-pulled hold: nothing was charged.
+  it('M2: re-screen at release matches a partner-pulled hold (ach_pull, no fundingRef): nothing was charged or paid out', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
-    await heldLarge({ id: 'rr_m2_none', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
+    await heldLarge({ id: 'rr_m2_none', recipientName: 'Testa Fixturelli', fundingMethod: 'ach_pull', transferType: 'b2b' }, { recipientName: 'Testa Fixturelli' });
     await expect(releaseTransfer(store, db, 'rr_m2_none', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
-    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).toContain('Nothing paid out');
-    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).not.toContain('charged');
-    expect(await outboxText('sanctionsblockmail:rr_m2_none:acme', 'text')).not.toContain('charged');
+    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).toContain('Nothing was charged or paid out');
+    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).not.toMatch(/the sender was charged|refund/);
+    expect(await outboxText('sanctionsblockmail:rr_m2_none:acme', 'text')).toContain('nothing was charged or paid out');
+  });
+
+  // Review round 4 (S4: N1, P1): a Partner-API-shaped hold (bank_transfer, no
+  // fundingRef, held after the partner's confirm) matches at release.
+  it('N1/P1: re-screen at release matches a Partner-API-shaped hold: the partner collected the funds, never "Nothing was charged", no refund instruction', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldLarge({ id: 'rr_m2_pc', recipientName: 'Testa Fixturelli', fundingMethod: 'bank_transfer' }, { recipientName: 'Testa Fixturelli' });
+    await expect(releaseTransfer(store, db, 'rr_m2_pc', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    const alert = await outboxText('sanctionsblock:rr_m2_pc', 'message');
+    const mail = await outboxText('sanctionsblockmail:rr_m2_pc:acme', 'text');
+    expect(alert).toBe(
+      "⚠️ SmartRemit ops: sanctions block (hold_rescreen) on rr_m2_pc, partner acme, live. The recipient was not paid, but the partner confirmed that it collected the sender's funds. " +
+        "Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.",
+    );
+    expect(mail).toContain("after the partner confirmed that it collected the sender's funds; nothing was paid out to the recipient.");
+    for (const m of [alert, mail]) {
+      expect(m).not.toMatch(/nothing was charged|refund procedure|refund it|before any refund/i);
+      expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+    }
   });
 
   it('http, 40 h old screen, a name screened before cannot be screened again: held with SENDER_IDENTITY_MISSING, the review platform text', async () => {
@@ -575,7 +599,7 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect(after?.complianceReasons).toContain(RECIPIENT_WATCHLIST_REASON);
     expect((await store.listTransfersByCompliance('blocked', {})).map((x) => x.id)).toContain(t.id);
 
-    // ONE dedicated alert: paid, charged, not instructed, block and refund. Ids only.
+    // ONE dedicated alert: paid, charged, not instructed, no refund before the compliance officer decides. Ids only.
     type A = { dedupe_key: string; payload: { message: string } };
     const alerts = ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as { rows: A[] }).rows;
     const paidmatch = alerts.filter((a) => a.dedupe_key.startsWith('paidmatch:'));
@@ -585,7 +609,12 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect(msg).toContain('PAID');
     expect(msg).toContain('CHARGED');
     expect(msg).toContain('not instructed');
-    expect(msg).toContain('block and refund procedure');
+    // Review round 4 (S4, refund wording): no instruction to refund on a match.
+    expect(msg).toBe(
+      '⚠️ SmartRemit ops: transfer rr_heal_m (partner acme) is PAID and the sender was CHARGED, but it was not instructed: ' +
+        'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
+        "Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.",
+    );
     // The sanctions block alert never says the sender was not charged.
     const block = alerts.find((a) => a.dedupe_key === 'sanctionsblock:rr_heal_m')!.payload.message;
     expect(block).not.toContain('Nothing paid out');
@@ -620,8 +649,9 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
   // have been) instructed to the rail. The row is blocked (never instructed
   // again), but nobody is told it was never sent or that nothing was paid out:
   // one paidmatchinstructed:<id> alert says to recall it with the rail and to
-  // confirm no payout before any refund, and the notices say the payout may be
-  // in progress with the rail.
+  // confirm with the rail what happened (round 4: no refund before the
+  // compliance officer decides), and the notices say the payout may be in
+  // progress with the rail.
   type OutRow = { kind: string; dedupe_key: string; payload: { message?: string; text?: string; to?: string[] } };
   async function outRows(): Promise<OutRow[]> {
     return ((await db.execute(sql`SELECT kind, dedupe_key, payload FROM outbox ORDER BY id`)) as unknown as { rows: OutRow[] }).rows;
@@ -674,7 +704,13 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect(msg).toContain('CHARGED');
     expect(msg).toMatch(/may have been sent/);
     expect(msg).toMatch(/stop or recall/);
-    expect(msg).toMatch(/BEFORE any refund/);
+    // Review round 4 (S4, refund wording): recall with the rail, then the compliance officer decides.
+    expect(msg).toBe(
+      `⚠️ SmartRemit ops: transfer ${id} (partner acme) is PAID and the sender was CHARGED, and its re-screen on a live list is a sanctions match. ` +
+        'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, and confirm with the rail what happened. ' +
+        "It is now blocked, so it will never be instructed again. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.",
+    );
+    expect(msg).not.toMatch(/before any refund/i);
     const block = rows.find((r) => r.dedupe_key === `sanctionsblock:${id}`)!;
     expect(String(block.payload.message)).toContain('may be in progress with the rail');
     const mail = rows.find((r) => r.dedupe_key === `sanctionsblockmail:${id}:acme`)!;
@@ -684,6 +720,64 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     }
     // Never instructed again.
     expect(await reinstructLocked(db, t.id)).toBe('not_payable');
+  });
+
+  // Review round 4 (S4: N1, P1): the heal states the sender's money by its
+  // state (senderChargeState), it is never hard-coded "charged".
+  it.each([
+    [
+      'a Partner-API-shaped paid row (bank_transfer, no fundingRef), not instructed',
+      'rr_heal_pc', 'bank_transfer', null, 'paidmatch',
+      "⚠️ SmartRemit ops: transfer rr_heal_pc (partner acme) is PAID and the partner confirmed that it collected the sender's funds, but it was not instructed: " +
+        'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
+        "Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.",
+      "The recipient was not paid, but the partner confirmed that it collected the sender's funds.",
+    ],
+    [
+      'a partner-pulled paid row (ach_pull), not instructed',
+      'rr_heal_np', 'ach_pull', null, 'paidmatch',
+      '⚠️ SmartRemit ops: transfer rr_heal_np (partner acme) is PAID and nothing was charged, but it was not instructed: ' +
+        'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. Do not pay it out; evidence on the compliance page.',
+      'Nothing was charged or paid out',
+    ],
+    [
+      'a partner-pulled paid row (ach_pull), instructed (rail ref set)',
+      'rr_heal_ip', 'ach_pull', 'rail-ref-ip', 'paidmatchinstructed',
+      "⚠️ SmartRemit ops: transfer rr_heal_ip (partner acme) is PAID and the rail may have pulled the sender's funds, and its re-screen on a live list is a sanctions match. " +
+        'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, and confirm with the rail what happened. ' +
+        "It is now blocked, so it will never be instructed again. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.",
+      "The rail may have pulled the sender's funds and the payout may be in progress with the rail",
+    ],
+  ] as const)('S4: %s: the heal alert and the block notice state the money truthfully', async (_l, id, fundingMethod, providerRef, key, want, blockPiece) => {
+    fetchFn.mockReset();
+    await rail('acme', 'http');
+    const t = base({
+      id, status: 'paid', recipientName: 'Testa Fixturelli', fundingMethod,
+      ...(fundingMethod === 'ach_pull' ? { transferType: 'b2b' as const } : {}),
+      paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(
+      db,
+      { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
+      { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
+    );
+    if (providerRef) await db.execute(sql`UPDATE transfers SET payment_provider_ref = ${providerRef} WHERE id = ${t.id}`);
+    primeOfacSource({ checkedAgoMs: H });
+    const fresh = (await store.getTransfer(t.id))!;
+    expect(fresh.fundingRef ?? null).toBeNull();
+    expect(await healPaidRowScreen(db, fresh, new Date())).toBe('blocked');
+    expect((await store.getTransfer(t.id))?.complianceStatus).toBe('blocked');
+    const rows = await outRows();
+    const alert = rows.filter((r) => r.dedupe_key === `${key}:${id}`);
+    expect(alert).toHaveLength(1);
+    expect(String(alert[0].payload.message)).toBe(want);
+    const block = String(rows.find((r) => r.dedupe_key === `sanctionsblock:${id}`)?.payload.message);
+    expect(block).toContain(blockPiece);
+    for (const m of [String(alert[0].payload.message), block]) {
+      expect(m).not.toMatch(/CHARGED|the sender was charged|refund procedure|refund it|before any refund/);
+      expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+    }
   });
 
   it('a heal match on a row whose refund already started: evidence and notices, the row is NOT rewritten, no paidmatch alert', async () => {
@@ -730,6 +824,11 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     const payload = (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
     expect(Object.keys(payload)).toEqual(['message']);
     expect(String(payload.message)).toContain('rr_heal_u');
+    // Review round 4 (S4): a possible match, not a confirmed one: review before any refund.
+    expect(String(payload.message)).toBe(
+      '⚠️ SmartRemit ops: transfer rr_heal_u (partner acme) is paid but not instructed: its re-screen on a live list did not clear ' +
+        '(a possible match or a name that cannot be screened again). It stays uninstructed; review it on the compliance page before any refund.',
+    );
     for (const pii of ['Body Only Name', SENDER, 'Anita', SENDER_PHONE, '919876543210', '123456789012', 'HDFC']) {
       expect(JSON.stringify(payload)).not.toContain(pii);
     }
