@@ -23,7 +23,10 @@ import { pokeWorker } from '@/lib/outbox';
 import { logError, logWarn } from '@/lib/log';
 import { liveRefusalForRail } from '@/lib/live-gate';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payNotAvailable } from '@/lib/pay-not-available';
+import { payApprovalNotRecorded, payNotAvailable } from '@/lib/pay-not-available';
+import { parsePayBody } from '@/lib/pay-body';
+import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
+import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult } from '@/lib/payment-evidence';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
 
 // Cross-border B2B bill checkout (Plan 4) — the country-aware sibling of
@@ -66,12 +69,14 @@ export async function POST(
   try {
     const store = getStore();
 
-    let body: { action?: unknown; otp?: unknown; country?: unknown; fields?: unknown } = {};
+    // Fix pack 4 (C13): the one pay-body parser. A JSON error reads as {}.
+    let raw: unknown = {};
     try {
-      body = (await req.json()) as typeof body;
+      raw = await req.json();
     } catch {
-      body = {};
+      raw = {};
     }
+    const body = parsePayBody(raw, 'b2b');
 
     const invoice = await store.getB2bInvoice(invoiceId);
     // A cross-border bill carries the obligation FIXED in the seller currency.
@@ -100,7 +105,7 @@ export async function POST(
 
     // ── OTP step-up (keyed on the invoice; the code is bound to this bill) ─────
     const otpStore = getTransactionOtpStore();
-    if (typeof body.action === 'string' && body.action === 'request_otp') {
+    if (body.action === 'request_otp') {
       // The sending number is resolved BEFORE a code is minted and FAILS CLOSED: a partner whose own
       // channel is half-configured or whose creds read throws never falls back to the shared number
       // (the buyer is paying the partner's brand). Nothing is minted, so no issue budget is spent.
@@ -113,8 +118,11 @@ export async function POST(
         return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
       }
       if (issued.ok) {
+        let sentOn: 'wa' | 'tg' | undefined;
         try {
-          await sendTransactionOtp(buyerPhone, issued.code, channel.creds);
+          // Fix pack 4 (C5): a payment code (a Telegram chat gets the transaction
+          // text). Never a provider line: a bill has no Reg E disclosure.
+          sentOn = await sendTransactionOtp(buyerPhone, issued.code, channel.creds, undefined, undefined, { purpose: 'payment' });
         } catch {
           // Program-Fix 25 PR B: honest — shorten the cooldown to a ~10-s floor
           // (Resend works soon, never hammered), and say so. Never log the code.
@@ -125,6 +133,12 @@ export async function POST(
           }
           return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
         }
+        // Fix pack 4 (C5): which channel carried THIS code (for the otp.verified
+        // row). Best-effort: a store without the method (a test mock) or a
+        // failure here never blocks the code that was sent.
+        try {
+          await otpStore.noteDelivery(invoiceId, issued.issuedAt, sentOn ?? null);
+        } catch { /* never blocks the code */ }
       }
       return NextResponse.json({ ok: true, sent: true });
     }
@@ -171,9 +185,7 @@ export async function POST(
     }
 
     // ── Buyer's LOCAL bank fields (their country's schema) → opaque token ─────
-    const rawFields =
-      body.fields && typeof body.fields === 'object' ? (body.fields as Record<string, unknown>) : undefined;
-    const tokenized = validateAndTokenizeBuyerBank(buyerCountry, rawFields);
+    const tokenized = validateAndTokenizeBuyerBank(buyerCountry, body.fields ?? undefined);
     if (!tokenized.ok) {
       return NextResponse.json(
         { ok: false, error: 'Please check your bank details.', fieldErrors: tokenized.fieldErrors },
@@ -218,14 +230,17 @@ export async function POST(
     // failure above (bad bank fields, expired quote, seller deactivated) never
     // BURNS the single-use code. Nothing below this line is reachable without a
     // valid code, and the mint+settle is the only money movement.
-    const otpCode = String(body.otp ?? '').replace(/\D/g, '');
-    const otpCheck = await otpStore.verify(invoiceId, buyerPhone, otpCode);
+    const otpCheck = await otpStore.verify(invoiceId, buyerPhone, body.otp);
     if (!otpCheck.ok) {
       return NextResponse.json(
         { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
         { status: 403 },
       );
     }
+    // Fix pack 4 (C9 B2B, R41): the buyer's authorisation evidence, built right
+    // after the code passed (ids and hashes only). Committed below on the locked
+    // awaiting row before settleOrHold. Auth only: no ack, no snapshot.
+    const auth = buildPaymentAuthEvidence({ otp: otpCheck, headers: req.headers, surface: 'b2b', routeId: invoiceId, now: Date.now() });
 
     // ── Claim-first mint (seller payout pulled from the PROFILE inside) ───────
     const minted = await finalizeCrossBorderBillPayment(
@@ -304,6 +319,25 @@ export async function POST(
     if (live) {
       logWarn('pay.b2b.live-refused', 'live B2B payment refused before settlement', { transferId: transfer.id, code: live });
       return payNotAvailable();
+    }
+
+    // Fix pack 4 (C8, C9 B2B): authorise, then settle. The buyer's otp.verified
+    // row is committed on the LOCKED awaiting row before settleOrHold; a write
+    // failure settles nothing (503, one deduped ops alert), and a row that is no
+    // longer awaiting answers its current truth (the replay arm above).
+    let committed: EvidenceCommitResult;
+    try {
+      committed = await commitPaymentEvidence(getDb(), transfer, { auth, disclosureAck: null, disclosureSnapshot: null }, null);
+    } catch (err) {
+      // The error NAME only: a query error's message carries its params.
+      logWarn('pay.evidence-unavailable', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+      await alertPayEvidenceUnavailable(getDb(), 'b2b'); // never throws
+      pokeWorker(); // the ops.alert row is ready now
+      return payApprovalNotRecorded();
+    }
+    if (committed.kind === 'not_awaiting') {
+      const current = await store.getTransfer(transfer.id);
+      return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
     }
 
     const result = await settleOrHold(getDb(), transfer, railIntegrations);

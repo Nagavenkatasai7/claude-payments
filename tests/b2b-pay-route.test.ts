@@ -23,6 +23,10 @@ const state = vi.hoisted(() => ({
   db: null as unknown,
   transfer: null as unknown,
   integrations: null as unknown,
+  // Fix pack 4 T10: from the SECOND store read on, read through this (the ledger), so a
+  // row flipped under the route answers its current truth.
+  reread: null as null | ((id: string) => Promise<unknown>),
+  reads: 0,
 }));
 vi.mock('@/lib/store', () => ({
   getStore: () => ({
@@ -32,7 +36,7 @@ vi.mock('@/lib/store', () => ({
       invoicedAmount: 500, invoicedCurrency: 'USD', status: 'unpaid', createdAt,
     }),
     getSellerById: async () => ({ id: 's_1', partnerId: 'default', status: 'active', currency: 'USD' }),
-    getTransfer: async () => state.transfer,
+    getTransfer: async (id: string) => (state.reads++ > 0 && state.reread ? state.reread(id) : state.transfer),
   }),
 }));
 vi.mock('@/lib/b2b-quote-store', () => ({
@@ -83,6 +87,8 @@ beforeEach(() => {
   state.db = null;
   state.transfer = null;
   state.integrations = null;
+  state.reread = null;
+  state.reads = 0;
   verify.mockReset().mockResolvedValue({ ok: true });
   issue.mockReset().mockResolvedValue({ ok: true, code: '123456' });
   sendTransactionOtp.mockReset().mockResolvedValue(undefined);
@@ -229,5 +235,84 @@ describe('POST /api/pay/b2b/[invoiceId] — pay-time live gate (pack 3)', { retr
     expect((await res.json()).reason).toBe('not_available');
     expect((await ledger.getTransfer('b2b_t1'))?.status).toBe('awaiting_payment');
     expect(await outbox()).toEqual([]);
+  });
+});
+
+// ── Fix pack 4 T10 (C9 B2B order, C5, C17): the bill route commits an auth-only
+// evidence row between its live gate and settleOrHold (no R18 gate, no ack, no snapshot).
+import { onTestFinished } from 'vitest';
+import { PAY_APPROVAL_NOT_RECORDED_COPY } from '@/lib/pay-outcome';
+
+type EvRow = { action: string; actor: string; partner_id: string | null; subject_id: string | null; meta: Record<string, unknown> };
+const evidenceRowsIn = async (db: Awaited<ReturnType<typeof freshDb>>): Promise<EvRow[]> =>
+  ((await db.execute(sql`SELECT action, actor, partner_id, subject_id, meta FROM audit_events
+    WHERE action IN ('otp.verified', 'remittance.disclosure_ack') ORDER BY id`)) as unknown as { rows: EvRow[] }).rows;
+
+describe('POST /api/pay/b2b/[invoiceId] — payment evidence (fix pack 4)', { retry: 0 }, () => {
+  it('certified http rail -> 200 in_review and ONE otp.verified row (b2b surface, invoice route id); no ack row; no snapshot', async () => {
+    const { db, ledger } = await liveB2bOnHttp();
+    const res = await pay();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: 'in_review' });
+    const rows = await evidenceRowsIn(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'otp.verified', actor: 'pay-page', subject_id: 'b2b_t1', partner_id: 'acme' });
+    expect(rows[0].meta).toMatchObject({ surface: 'b2b', routeId: 'inv_1', disclosureVersion: null });
+    expect(await ledger.getDisclosureSnapshot('b2b_t1', 'acme')).toBeNull();
+  });
+
+  it('the auth write fails -> 503 approval_not_recorded, settleOrHold never runs, the row stays awaiting_payment; the only outbox row is the payevidence alert', async () => {
+    const { db, ledger, outbox } = await liveB2bOnHttp();
+    await db.execute(sql.raw(`CREATE FUNCTION fail_b2b_auth() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'auth-leak %', NEW.subject_id; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_b2b_auth BEFORE INSERT ON audit_events FOR EACH ROW
+      WHEN (NEW.action = 'otp.verified') EXECUTE FUNCTION fail_b2b_auth()`));
+    // freshDb keeps triggers on the shared PGlite: drop them (one statement per call).
+    onTestFinished(async () => {
+      await db.execute(sql.raw('DROP TRIGGER IF EXISTS fail_b2b_auth ON audit_events'));
+      await db.execute(sql.raw('DROP FUNCTION IF EXISTS fail_b2b_auth()'));
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const res = await pay();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
+    const after = await ledger.getTransfer('b2b_t1');
+    expect(after?.status).toBe('awaiting_payment');
+    expect(after?.complianceReasons).toEqual([]);
+    const rows = await outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('ops.alert');
+    expect(rows[0].dedupe_key).toMatch(/^payevidence:\d{4}-\d{2}-\d{2}T\d{2}$/);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.evidence-unavailable'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('auth-leak');
+  });
+
+  it("request_otp passes hooks { purpose: 'payment' } (6th argument) to sendTransactionOtp", async () => {
+    createdAt = new Date().toISOString();
+    const res = await call({ action: 'request_otp' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledWith('15550001111', '123456', undefined, undefined, undefined, { purpose: 'payment' });
+  });
+
+  it('the commit finds the row no longer awaiting (flipped after the replay check) -> 200 current truth, no settle', async () => {
+    const { db, ledger, outbox } = await liveB2bOnHttp();
+    // The route's replay check reads the (stale) awaiting copy; the ledger row is already paid.
+    await db.execute(sql`UPDATE transfers SET status = 'paid' WHERE id = 'b2b_t1'`);
+    state.reread = (id) => ledger.getTransfer(id);
+    const res = await pay();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: 'paid' });
+    expect(await evidenceRowsIn(db)).toEqual([]);
+    expect(await outbox()).toEqual([]);
+  });
+
+  it('an uncertified rail is still refused by the live gate BEFORE the commit: no otp.verified row', async () => {
+    const { db } = await liveB2bOnHttp({ certify: false });
+    const res = await pay();
+    expect(res.status).toBe(PAY_NOT_AVAILABLE.status);
+    expect(await evidenceRowsIn(db)).toEqual([]);
   });
 });

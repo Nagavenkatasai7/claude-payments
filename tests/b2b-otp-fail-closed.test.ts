@@ -94,14 +94,14 @@ describe('B2B bill code: fail closed on a partner channel that cannot be used', 
     const res = await requestOtp();
     expect(res.status).toBe(200);
     expect(issue).toHaveBeenCalledWith('inv_1', '15551112222', { kind: 'b2b', partnerId: 'pa' });
-    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', { phoneNumberId: '1234567', token: 'tok' });
+    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', { phoneNumberId: '1234567', token: 'tok' }, undefined, undefined, { purpose: 'payment' });
   });
 
   it('a partner with no WhatsApp config (deliberately shared) → the shared number, as before', async () => {
     getIntegrations.mockResolvedValue(cfg({}));
     const res = await requestOtp();
     expect(res.status).toBe(200);
-    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', undefined);
+    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', undefined, undefined, undefined, { purpose: 'payment' });
   });
 
   it('the default tenant whose read throws → the shared number, as before', async () => {
@@ -110,6 +110,6 @@ describe('B2B bill code: fail closed on a partner channel that cannot be used', 
     const res = await requestOtp();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, sent: true });
-    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', undefined);
+    expect(sendTransactionOtp).toHaveBeenCalledWith('15551112222', '123456', undefined, undefined, undefined, { purpose: 'payment' });
   });
 });
