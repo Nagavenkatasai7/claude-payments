@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { signInAs } from './helpers-partner-app';
 import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
@@ -368,6 +368,30 @@ describe('certifyLiveAction', () => {
     expect((await lcOf()).certification).toBeUndefined();
     expect(await liveAudits()).toEqual([]);
     expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
+  // Review E4: the re-read that readiness is recomputed on must come AFTER the partners row lock
+  // (FOR NO KEY UPDATE), so a partner-side live-controls write cannot land between them.
+  it('the certify transaction locks the partners row before the re-read and the certification write', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'notBuiltPass';
+    await readyAcme();
+    factsHook.override = async () => passingFacts();
+    const stop = captureQueries();
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const write = qs.findIndex((q) => q.startsWith('update "partners"') && q.includes('jsonb_set'));
+    expect(write).toBeGreaterThan(-1);
+    const onPartners = (q: string) => q.startsWith('select') && q.includes('from "partners"');
+    const lastBefore = (end: number, ok: (q: string) => boolean) => {
+      for (let i = end - 1; i >= 0; i--) if (ok(qs[i])) return i;
+      return -1;
+    };
+    // The re-read: the last plain partners read before the write (getPartner on the tx).
+    const reRead = lastBefore(write, (q) => onPartners(q) && !q.includes('for no key update'));
+    expect(reRead).toBeGreaterThan(-1);
+    const lock = lastBefore(reRead, (q) => onPartners(q) && q.includes('for no key update'));
+    expect(lock).toBeGreaterThan(-1);
   });
 
   it('a partner suspended between the facts read and the lock -> not_ready on the locked row', async () => {

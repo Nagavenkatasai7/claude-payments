@@ -174,6 +174,20 @@ describe('updateLiveControlsKey', () => {
     expect(after.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
   });
 
+  // Pack 3 review C5: NOT NULL still allows a JSON array, scalar or JSON null (manual SQL only).
+  // The parser reads those as EMPTY; the writer must treat them as {} too instead of throwing.
+  it("a non-object column ('[]', 'null', '\"x\"', 7) is written over as {}; a sibling key write keeps both", async () => {
+    const posture = { version: 1, signedBy: 'acme-admin', signedAt: new Date().toISOString(), kycDecider: 'partner' };
+    for (const raw of ['[]', 'null', '"x"', '7']) {
+      await setRaw(db, 'acme', raw);
+      const r = await updateLiveControlsKey(pid('acme'), 'posture', posture, db);
+      expect(r, raw).toEqual({ found: true, previousRaw: undefined });
+      expect(JSON.parse((await rawColumn(db, 'acme')).raw), raw).toEqual({ posture });
+      await updateLiveControlsKey(pid('acme'), 'complianceUsers', ['a'], db);
+      expect(JSON.parse((await rawColumn(db, 'acme')).raw), raw).toEqual({ posture, complianceUsers: ['a'] });
+    }
+  });
+
   it('runs inside a caller transaction and rolls back with it', async () => {
     await expect(
       db.transaction(async (tx) => {

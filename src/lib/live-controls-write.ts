@@ -252,6 +252,12 @@ export async function writeContract(
   return { ok: true };
 }
 
+/** Now, or 1 ms after `after` when that is a parseable timestamp at or past now (ISO string). */
+function stampAfter(after: unknown): string {
+  const floor = typeof after === 'string' ? Date.parse(after) + 1 : Number.NaN;
+  return new Date(Number.isNaN(floor) ? Date.now() : Math.max(Date.now(), floor)).toISOString();
+}
+
 /**
  * Certify (a fresh record: any earlier revoke is gone) or revoke the partner for live money.
  * Certify needs `readiness.ok` (the caller recomputes it on the LOCKED row); in pack 3 that is
@@ -267,8 +273,18 @@ export async function writeCertification(
 ): Promise<LiveWriteResult> {
   if (c.kind === 'certify') {
     if (!c.readiness.ok) return { ok: false, code: 'not_ready' };
-    const record: CertificationRecord = { certifiedAt: new Date().toISOString(), certifiedBy: actor.username };
-    const w = await updateLiveControlsKey(partnerId, 'certification', record, tx);
+    // Pack 3 review C4: a fresh record, stamped after any earlier revoke (even one stamped by an
+    // instance whose clock runs ahead), so isLiveCertified's revokedAt >= certifiedAt rule can
+    // never read this certification as already revoked.
+    const w = await updateLiveControlsKey(
+      partnerId,
+      'certification',
+      (prev: unknown): CertificationRecord => ({
+        certifiedAt: stampAfter(isPlainObject(prev) ? prev.revokedAt : undefined),
+        certifiedBy: actor.username,
+      }),
+      tx,
+    );
     if (!w.found) return { ok: false, code: 'not_found' };
     await recordLiveChange(tx, partnerId, actor, {
       key: 'certification',
@@ -285,7 +301,9 @@ export async function writeCertification(
   const revoked =
     cur?.revokedAt !== undefined && !(Date.parse(cur.revokedAt) < Date.parse(cur.certifiedAt)); // as isLiveCertified
   if (!cur || revoked) return { ok: false, code: 'not_certified' };
-  const revokedAt = new Date().toISOString();
+  // Pack 3 review C4: never earlier than certifiedAt + 1 ms (clock skew, or a certifiedAt in the
+  // future), or isLiveCertified would still read the partner as certified after a reported revoke.
+  const revokedAt = stampAfter(cur.certifiedAt);
   await updateLiveControlsKey(
     partnerId,
     'certification',

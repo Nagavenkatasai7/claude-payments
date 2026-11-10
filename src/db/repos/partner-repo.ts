@@ -227,8 +227,12 @@ export async function updateLiveControlsKey(
     throw new TypeError(`updateLiveControlsKey: unknown key ${String(key)}`);
   }
   if (value === undefined) throw new TypeError('updateLiveControlsKey: value is undefined');
+  // Pack 3 review C5: NOT NULL still admits a JSON array, scalar or JSON null (manual SQL only).
+  // Both the locked read and the write treat such a root as {}, as the parser does, so no
+  // live-controls writer (withdraw and revoke included) fails for that partner.
+  const base = sql`(CASE WHEN jsonb_typeof(${partners.liveControls}) = 'object' THEN ${partners.liveControls} ELSE '{}'::jsonb END)`;
   const rows = await tx
-    .select({ v: sql<unknown>`${partners.liveControls} -> ${key}` })
+    .select({ v: sql<unknown>`${base} -> ${key}` })
     .from(partners)
     .where(eq(partners.id, partnerId))
     .limit(1)
@@ -241,7 +245,7 @@ export async function updateLiveControlsKey(
   await tx
     .update(partners)
     .set({
-      liveControls: sql`jsonb_set(${partners.liveControls}, ARRAY[${key}]::text[], ${JSON.stringify(next)}::jsonb, true)`,
+      liveControls: sql`jsonb_set(${base}, ARRAY[${key}]::text[], ${JSON.stringify(next)}::jsonb, true)`,
       updatedAt: new Date(),
     })
     .where(eq(partners.id, partnerId));

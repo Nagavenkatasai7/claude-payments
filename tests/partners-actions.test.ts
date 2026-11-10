@@ -1653,3 +1653,79 @@ describe('updatePartnerAction: KYC lock while a posture is signed (fix pack 3 T1
     }
   });
 });
+
+describe('updatePartnerAction: kycMode under a signed posture or a live certification (pack 3 review C3)', () => {
+  const POSTURE = () => ({
+    version: 1, signedBy: 'kay-admin', signedAt: new Date().toISOString(), kycDecider: 'smartremit_procedures',
+    holdDecider: 'partner', requireKycBeforeSend: true, fourEyesNonSanctions: false,
+  });
+  const kycAudits = async () =>
+    (await db.execute(rawSql`SELECT partner_id, actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'partner.kyc_mode.change' ORDER BY id`)).rows as Array<{
+      partner_id: string; actor: string; actor_type: string; subject_id: string; meta: Record<string, unknown>;
+    }>;
+  const seedKay = async (id: string) => {
+    const now = new Date().toISOString();
+    await ps.savePartner({ id, name: 'Kay', countries: ['US'], status: 'active', kycMode: 'ours', createdAt: now, updatedAt: now });
+  };
+  const kycForm = (id: string, kycMode: 'ours' | 'delegated', name = 'Kay') => {
+    const fd = new FormData();
+    fd.set('id', id);
+    fd.set('name', name);
+    fd.append('countries', 'US');
+    fd.set('kycMode', kycMode);
+    return fd;
+  };
+
+  it('a certified partner: a kycMode flip is refused (revoke first), the row and the audit log are unchanged', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { isLiveCertified } = await import('@/lib/live-gate');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk1');
+    await certifyPartnerForTest(db, 'pk1', { posture: true });
+    expect(isLiveCertified((await ps.getPartner('pk1'))!)).toBe(true);
+    const before = await ps.getPartner('pk1');
+    await expect(updatePartnerAction(kycForm('pk1', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    const after = await ps.getPartner('pk1');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay'); // the whole submit is refused, nothing half-saved
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  it('an uncertified partner with a signed posture: the flip is saved with one audit row, and the readiness posture line fails', async () => {
+    const { updateLiveControlsKey } = await import('@/db/repos/partner-repo');
+    const { liveReadiness } = await import('@/lib/live-certification');
+    await seedKay('pk2');
+    await updateLiveControlsKey('pk2', 'posture', POSTURE(), db);
+    const facts = { goLiveApproved: true, listFitness: 'live' as const, ownWhatsapp: true, complianceStaff: [] };
+    expect(liveReadiness((await ps.getPartner('pk2'))!, facts).lines.find((l) => l.id === 'posture')?.ok).toBe(true);
+
+    await updatePartnerAction(kycForm('pk2', 'delegated'));
+    const got = (await ps.getPartner('pk2'))!;
+    expect(got.kycMode).toBe('delegated');
+    const a = await kycAudits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ partner_id: 'pk2', actor: 'admin', actor_type: 'staff', subject_id: 'pk2' });
+    expect(a[0].meta).toEqual({ from: 'ours', to: 'delegated', postureSigned: true });
+    expect(liveReadiness(got, facts).lines.find((l) => l.id === 'posture')?.ok).toBe(false);
+  });
+
+  it('an uncertified partner with no posture: the flip is audited with postureSigned false', async () => {
+    await seedKay('pk3');
+    await updatePartnerAction(kycForm('pk3', 'delegated'));
+    expect((await ps.getPartner('pk3'))?.kycMode).toBe('delegated');
+    expect((await kycAudits()).map((r) => r.meta)).toEqual([{ from: 'ours', to: 'delegated', postureSigned: false }]);
+  });
+
+  it('no kycMode change -> saved with no kyc audit row (also on a certified partner)', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    await seedKay('pk4');
+    await seedKay('pk5');
+    await certifyPartnerForTest(db, 'pk5', { posture: true });
+    for (const id of ['pk4', 'pk5']) {
+      await updatePartnerAction(kycForm(id, 'ours', 'Kay Renamed'));
+      expect((await ps.getPartner(id))?.name).toBe('Kay Renamed');
+    }
+    expect(await kycAudits()).toEqual([]);
+  });
+});

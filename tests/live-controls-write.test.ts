@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import {
@@ -369,6 +369,45 @@ describe('writeCertification', () => {
     const c = (await column()).certification as Record<string, unknown>;
     expect(Object.keys(c).sort()).toEqual(['certifiedAt', 'certifiedBy']);
     expect(isLiveCertified(await partner())).toBe(true);
+  });
+
+  // Pack 3 review C4: isLiveCertified counts a revoke only when revokedAt >= certifiedAt, so a
+  // stamp from a clock behind the certifying instance (or a certifiedAt in the future) must still win.
+  it('revoke of a certification stamped 5 s in the future -> revokedAt after it, isLiveCertified false', async () => {
+    const future = new Date(Date.now() + 5_000).toISOString();
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_build_object('certification', jsonb_build_object('certifiedAt', ${future}::text, 'certifiedBy', 'other-admin')) WHERE id = 'acme'`);
+    expect(isLiveCertified(await partner())).toBe(true);
+    expect(await revoke()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(c.certifiedAt).toBe(future);
+    expect(Date.parse(String(c.revokedAt))).toBeGreaterThan(Date.parse(future));
+    expect(isLiveCertified(await partner())).toBe(false);
+  });
+
+  it('certify over a revoke stamped 5 s in the future -> certifiedAt later than that revokedAt, certified', async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 5_000).toISOString();
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_build_object('certification', jsonb_build_object('certifiedAt', ${past}::text, 'certifiedBy', 'other-admin', 'revokedAt', ${future}::text, 'revokedBy', 'other-admin')) WHERE id = 'acme'`);
+    expect(isLiveCertified(await partner())).toBe(false);
+    expect(await certify()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(Object.keys(c).sort()).toEqual(['certifiedAt', 'certifiedBy']);
+    expect(Date.parse(String(c.certifiedAt))).toBeGreaterThan(Date.parse(future));
+    expect(isLiveCertified(await partner())).toBe(true);
+  });
+
+  // Review E4: revoke decides on a read taken AFTER the row lock (lockPartner), never before it.
+  it('revoke takes the partners row lock before its read of the partner', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    const stop = captureQueries();
+    expect(await revoke()).toEqual({ ok: true });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const onPartners = (q: string) => q.startsWith('select') && q.includes('from "partners"');
+    const firstRead = qs.findIndex((q) => onPartners(q) && !q.includes('for no key update'));
+    const firstLock = qs.findIndex((q) => onPartners(q) && q.includes('for no key update'));
+    expect(firstRead).toBeGreaterThan(-1);
+    expect(firstLock).toBeGreaterThan(-1);
+    expect(firstLock).toBeLessThan(firstRead);
   });
 
   it('an unknown partner -> not_found for certify and revoke', async () => {

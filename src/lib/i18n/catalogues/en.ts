@@ -290,6 +290,7 @@ export const en = {
   'partner.audit.action.complianceUserSet': 'Compliance users changed',
   'partner.audit.action.flagChange': 'Switch changed',
   'partner.audit.action.optinApprove': 'Live feature approval changed',
+  'partner.audit.action.kycModeChange': 'KYC handling changed',
   'partner.audit.action.disclosureConfig': 'Disclosure details changed',
   'partner.audit.action.persona': 'Assistant persona changed',
   'partner.audit.action.displayName': 'Display name changed',
@@ -1688,6 +1689,8 @@ export const en = {
   'partner.live.state.pass': 'Done',
   'partner.live.state.fail': 'Not yet',
   'partner.live.state.notBuilt': 'Not built yet',
+  // Pack 3 review C3: the admin partner save refuses a KYC handling change on a live-certified partner.
+  'partner.live.kycModeLocked': 'This partner is approved for live money, so KYC handling cannot change. Revoke the live certification first, then change KYC handling. Nothing was saved.',
   'partner.shell.paused': 'A pause is on',
   'partner.shell.pausedOpen': 'Open Controls',
   'partner.onboarding.title': 'Onboarding',

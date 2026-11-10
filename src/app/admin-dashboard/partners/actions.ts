@@ -52,7 +52,8 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
-import { settlementTargetUrl } from '@/lib/live-gate';
+import { isLiveCertified, settlementTargetUrl } from '@/lib/live-gate';
+import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
   assertPhoneNumberIdFree,
@@ -132,6 +133,13 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const kycMode: KycMode = isPlatform
     ? (formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours')
     : (existing.kycMode ?? 'ours');
+  // Pack 3 review C3: kycMode names the KYC decider a signed posture was signed against, and a
+  // live certification rests on that posture. While the partner is certified, a kycMode change
+  // is refused (the whole submit, before any write): revoke the certification first. Every
+  // accepted change is audited below, in the save's transaction.
+  const previousKycMode: KycMode = existing.kycMode ?? 'ours';
+  const kycModeChanged = kycMode !== previousKycMode;
+  if (kycModeChanged && isLiveCertified(existing)) throw new Error(t('partner.live.kycModeLocked'));
   // Fix pack 3 (contract 14): while the partner's compliance posture is signed the admin
   // checkbox is rendered disabled (a disabled box posts nothing), so the stored column is
   // kept as is; the posture forces the gate on in resolveKycMode regardless.
@@ -169,6 +177,16 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     await createPartnerStore(tx).savePartner(updated);
     if (personaChanged) {
       await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, existing.botPersona, botPersona));
+    }
+    if (kycModeChanged) {
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.kyc_mode.change',
+        subjectId: id,
+        meta: { from: previousKycMode, to: kycMode, postureSigned: postureSigned(existing.liveControls) },
+      });
     }
   });
   revalidatePath('/admin-dashboard/partners');

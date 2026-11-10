@@ -107,6 +107,9 @@ const ACTION_LABELS = Object.freeze({
   // approvals. partner.live.optin.counsel (SmartRemit's counsel record) stays OUT of the feed.
   'flag.change': 'partner.audit.action.flagChange',
   'partner.live.optin.approve': 'partner.audit.action.optinApprove',
+  // Pack 3 review C3: SmartRemit changed who runs KYC (subject = the partner id). Meta
+  // { from, to, postureSigned } stays out of DETAIL_KEYS; the row reads as "SmartRemit".
+  'partner.kyc_mode.change': 'partner.audit.action.kycModeChange',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;

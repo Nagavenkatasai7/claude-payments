@@ -324,3 +324,17 @@ describe('the keyset cursor', () => {
     expect(parseAuditCursor(['1726000000000.5', 'junk'])).toEqual({ at: new Date(1726000000000), id: 5 });
   });
 });
+
+describe('partner.kyc_mode.change (pack 3 review C3)', () => {
+  it('is in the tenant feed with its own label, as SmartRemit, and never shows its meta', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.kyc_mode.change');
+    expect(t(actionLabelKey('partner.kyc_mode.change'))).toBe('KYC handling changed');
+    const p = projectAuditRow(
+      row({ action: 'partner.kyc_mode.change', actor: 'owner-admin', subjectId: 'pa', meta: { from: 'ours', to: 'delegated', postureSigned: true } }),
+      tenant,
+      platform,
+    );
+    expect(p.actor).toBe(t('partner.audit.smartremit'));
+    expect(p.detail).toBeNull();
+  });
+});
