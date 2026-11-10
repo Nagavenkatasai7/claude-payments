@@ -12,6 +12,7 @@ import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
+import { providerLineFor } from './legal/provider-line';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_DESTINATIONS } from './destination-country';
@@ -438,8 +439,12 @@ export function buildApproveSummary(
   // B3 rewards v1: a SmartRemit-funded reward on this quote (its fee is already
   // lowered). Absent, or first transfer free ⇒ the fee line is unchanged.
   reward?: QuotedReward,
+  // Fix pack 4 (C22 e): the owner's approved provider line, the card's LAST
+  // line (flattened, bounded). Absent or blank ⇒ the card is byte-identical.
+  providerLine?: string,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
+  const line = boundUntrustedText(providerLine, 200).replace(/\s+/g, ' ').trim();
   return [
     // fix 5: the name may be a pre-fix outsider-written value, and on the web
     // channel this summary is returned to the model — clamp it (a clean name
@@ -448,6 +453,7 @@ export function buildApproveSummary(
     ...quoteFigureLines(q, fundingMethod, destinationCurrency, rateDate, reward),
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     rateLockLine(lockMinutes),
+    ...(line ? [line] : []),
   ].join('\n');
 }
 
@@ -1254,6 +1260,10 @@ export interface ToolContext {
   // model to ask). The agent sets it from the purpose.detect switch; the portal
   // always sets it. Absent ⇒ purpose optional, exactly as before.
   purposeRequired?: boolean;
+  // Fix pack 4 (C22 d, R16): the owner's approved provider line, set by the
+  // agent from providerLineFor(resolvePartnerDisclosure(owner)). Held replies
+  // carry it. Absent on the portal and MCP contexts and without an approved line.
+  providerLine?: string;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
@@ -2476,7 +2486,12 @@ async function checkPaymentStatusTool(
       transfer_id: transfer.id,
       status: transferSummaryFields(transfer).status,
       // R43: every dead end says how to reach a person.
-      reply_to_customer: fixedReply(transfer.status === 'in_review' ? 'hold' : 'block', { help: true }),
+      // Fix pack 4 (C22 d): a HELD transfer's reply ends with the owner's
+      // approved provider line (none without one); a block never carries it.
+      reply_to_customer: fixedReply(
+        transfer.status === 'in_review' ? 'hold' : 'block',
+        transfer.status === 'in_review' ? { help: true, providerLine: ctx.providerLine } : { help: true },
+      ),
     };
   }
   return { transfer_id: transfer.id, status: transfer.status };
@@ -2727,7 +2742,8 @@ async function requestRefundTool(
       }
       return {
         error_code: 'not_refundable_yet',
-        message: fixedReply('refund_while_held', { help: true }), // R30: no review wording
+        // R30: no review wording; pack 4 (C22 d): the owner's approved provider line, when there is one.
+        message: fixedReply('refund_while_held', { help: true, providerLine: ctx.providerLine }),
       };
     }
     case 'cancellable': {
@@ -3237,7 +3253,8 @@ async function cancelBillTool(
           return {
             deferred: true,
             transfer_id: active.id,
-            reply_hint: fixedReply('payment_held', { help: true }), // R30: no review wording; R43: HELP
+            // R30: no review wording; R43: HELP; pack 4 (C22 d): the owner's approved provider line.
+            reply_hint: fixedReply('payment_held', { help: true, providerLine: ctx.providerLine }),
           };
         case 'paid': {
           // Reuse request_refund's guarded none→requested flag — a REQUEST only.
@@ -4211,6 +4228,7 @@ export async function prepareSendDraft(
       rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
       fxOrigin === 'platform' ? fxAsOf : undefined, // Step 0 §3.6
       offer?.reward, // B3: the reward fee line
+      providerLineFor(resolvePartnerDisclosure(partner)) ?? undefined, // pack 4 (C22 e): the owner's approved line
     );
     const payUrl = payUrlFor(draftId);
     return {

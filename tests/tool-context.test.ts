@@ -80,3 +80,20 @@ describe('buildToolContext', () => {
     expect(selectSettlementRoute).toHaveBeenCalledWith('db', 'integrations-store', 'USD', 'INR', 85);
   });
 });
+
+describe('buildToolContext provider line (pack 4 C22 d)', () => {
+  it('providerLine given -> ctx.providerLine set (last key)', () => {
+    const ctx = buildToolContext({
+      partnerId: 'pa', phone: '1', channel: 'whatsapp', turn: { isNewConversation: false }, deps: fullDeps(),
+      purposeRequired: true, providerLine: 'Payments by Acme, licensed by X',
+    });
+    expect(ctx.providerLine).toBe('Payments by Acme, licensed by X');
+    expect(Object.keys(ctx).at(-1)).toBe('providerLine');
+  });
+  it('absent or empty -> no providerLine key', () => {
+    for (const providerLine of [undefined, '']) {
+      const ctx = buildToolContext({ partnerId: 'pa', phone: '1', channel: 'whatsapp', turn: { isNewConversation: false }, deps: fullDeps(), providerLine });
+      expect('providerLine' in ctx).toBe(false);
+    }
+  });
+});

@@ -49,6 +49,14 @@ export interface SystemPromptBrand {
    * byte-for-byte what it was and purpose stays optional.
    */
   purposeRequired?: boolean;
+  /**
+   * Fix pack 4 (C22 d, R16): the owner's approved provider line, from
+   * `providerLineFor(resolvePartnerDisclosure(owner))`. Present ⇒ one PROVIDER
+   * section (after PURPOSE, before BRAND VOICE) tells the bot the exact words to
+   * use when asked who provides or holds the money. Absent, empty or blank ⇒ the
+   * prompt is byte-for-byte what it was.
+   */
+  providerLine?: string;
 }
 
 /**
@@ -371,9 +379,15 @@ ENHANCED VERIFICATION
   // Program-Fix 38: the partner-written voice is framed as tone only and is
   // never the last thing the model reads — the fixed VOICE_TRAILER follows it.
   const withPurpose = b.purposeRequired ? `${base}\n\n${purposeSection()}` : base;
-  return persona
-    ? `${withPurpose}\n\nBRAND VOICE (tone only)\n- ${persona}\n${VOICE_TRAILER}`
+  // Fix pack 4 (C22 d): the approved provider line, flattened and bounded; no
+  // line ⇒ no section, so the prompt stays byte-identical.
+  const providerLine = boundUntrustedText(b.providerLine, 200).replace(/\s+/g, ' ').trim();
+  const withProvider = providerLine
+    ? `${withPurpose}\n\nPROVIDER\n- When a customer asks who provides or holds the money, say: "${providerLine}"`
     : withPurpose;
+  return persona
+    ? `${withProvider}\n\nBRAND VOICE (tone only)\n- ${persona}\n${VOICE_TRAILER}`
+    : withProvider;
 }
 
 // Back-compat default export — the SmartRemit-branded prompt, byte-for-byte the

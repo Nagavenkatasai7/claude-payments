@@ -1257,3 +1257,56 @@ describe('SYSTEM_PROMPT — R49 hidden numbers', () => {
     expect(SYSTEM_PROMPT).toContain(REDACTION_LABELS.account);
   });
 });
+
+describe('provider line (pack 4 C22 d)', () => {
+  const LINE = 'Payments by Acme Money Services LLC, licensed by State Department of Financial Services';
+  const brands = [
+    { brand: 'SmartRemit' },
+    { brand: 'SmartRemit', kycGateActive: false },
+    { brand: 'SmartRemit', purposeRequired: true },
+    { brand: 'SmartRemit', botPersona: 'Warm and brief.' },
+  ];
+
+  it('absent, undefined, empty or whitespace -> byte-identical to the prompt without the field', () => {
+    for (const b of brands) {
+      const without = buildSystemPrompt(b);
+      for (const providerLine of [undefined, '', '   \n\t ']) {
+        expect(buildSystemPrompt({ ...b, providerLine })).toBe(without);
+      }
+    }
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({ brand: 'SmartRemit' }));
+    expect(SYSTEM_PROMPT).not.toContain('\nPROVIDER\n');
+  });
+
+  it('present -> exactly one PROVIDER section with the fixed sentence', () => {
+    const p = buildSystemPrompt({ brand: 'SmartRemit', providerLine: LINE });
+    expect(p.split('\n\nPROVIDER\n').length).toBe(2);
+    expect(p).toContain(
+      `\n\nPROVIDER\n- When a customer asks who provides or holds the money, say: "${LINE}"`,
+    );
+    expect(p.endsWith(`PROVIDER\n- When a customer asks who provides or holds the money, say: "${LINE}"`)).toBe(true);
+  });
+
+  it('comes after the PURPOSE section', () => {
+    const p = buildSystemPrompt({ brand: 'SmartRemit', purposeRequired: true, providerLine: LINE });
+    expect(p.indexOf('\n\nPURPOSE\n')).toBeGreaterThan(0);
+    expect(p.indexOf('\n\nPROVIDER\n')).toBeGreaterThan(p.indexOf('\n\nPURPOSE\n'));
+  });
+
+  it('with a persona, the section comes before BRAND VOICE and VOICE_TRAILER is still the last text', () => {
+    const p = buildSystemPrompt({ brand: 'SmartRemit', botPersona: 'Warm and brief.', providerLine: LINE });
+    expect(p.indexOf('\n\nPROVIDER\n')).toBeGreaterThan(0);
+    expect(p.indexOf('\n\nPROVIDER\n')).toBeLessThan(p.indexOf('BRAND VOICE (tone only)'));
+    expect(p.endsWith(VOICE_TRAILER)).toBe(true);
+  });
+
+  it('a line with newlines or 300 characters is flattened to one line and bounded to 200', () => {
+    const p = buildSystemPrompt({ brand: 'SmartRemit', providerLine: 'Payments by Acme\n\nLLC,\tlicensed by X' });
+    expect(p).toContain('say: "Payments by Acme LLC, licensed by X"');
+    const long = buildSystemPrompt({ brand: 'SmartRemit', providerLine: 'A'.repeat(300) });
+    const m = /say: "([^"]*)"$/.exec(long);
+    expect(m).not.toBeNull();
+    expect([...m![1]].length).toBe(200);
+    expect(m![1]).not.toContain('\n');
+  });
+});

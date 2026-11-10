@@ -13,7 +13,11 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import { normalizePhone } from '@/lib/phone';
 import { RATE_LOCK_MINUTES } from '@/lib/tools';
-import type { CountryCode, Recipient } from '@/lib/types';
+import type { CountryCode, PartnerId, Recipient } from '@/lib/types';
+import { getPartnerStore } from '@/lib/partner-store';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { providerLineFor } from '@/lib/legal/provider-line';
+import { logWarn } from '@/lib/log';
 import type { ToolOutcome } from './guard';
 
 // Stage C1: the five READ tools an AI app can call for a signed-in customer (Stage C2's
@@ -46,6 +50,21 @@ export interface McpDataDeps {
   toolDeps?: Partial<ToolContextDeps>;
   /** The database the portal's transfer read uses (absent ⇒ getDb()). */
   db?: DbOrTx;
+}
+
+/**
+ * Fix pack 4 (C22 f, R16): the owner's approved provider line for an MCP result, read per request.
+ * null for the default tenant, demo and an unapproved block, and on a read error (logged with the
+ * partner id only), so a result without a line stays byte-identical (no `provider_line` key).
+ */
+export async function mcpProviderLine(partnerId: PartnerId, deps: McpDataDeps = {}): Promise<string | null> {
+  try {
+    const store = deps.toolDeps?.partnerStore ?? getPartnerStore();
+    return providerLineFor(resolvePartnerDisclosure(await store.getPartner(partnerId)));
+  } catch {
+    logWarn('mcp.provider-line', 'partner read failed', { partnerId });
+    return null;
+  }
 }
 
 export interface McpToolSpec {
@@ -276,8 +295,15 @@ export async function getTransferStatusTool(
   // R30 (no tipping-off): a held or blocked transfer also carries the fixed note the bot relays
   // (hold-replies.ts HOLD_REPLY / BLOCK_REPLY), so an AI app says the same words and never a reason.
   const note = t.status === 'in_review' ? fixedReply('hold') : t.status === 'blocked' ? fixedReply('block') : undefined;
+  // Pack 4 (C22 f): the row's owner (= the token's tenant) names its approved provider; the key is
+  // present only with a line.
+  const line = await mcpProviderLine(t.partnerId, deps);
   return {
     ok: true,
-    data: { transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName, ...(note ? { status_note: note } : {}) },
+    data: {
+      transfer_id: f.id, status: f.status, date: f.date, amount: f.amount, recipient_name: f.recipientName,
+      ...(note ? { status_note: note } : {}),
+      ...(line ? { provider_line: line } : {}),
+    },
   };
 }

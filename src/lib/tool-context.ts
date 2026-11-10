@@ -47,6 +47,8 @@ export function buildToolContext(args: {
   webStepUp?: WebStepUp;
   /** Required purpose: the send tools refuse a send without one. Absent ⇒ the field is left off (optional, as before). */
   purposeRequired?: boolean;
+  /** Fix pack 4 (C22 d): the owner's approved provider line. Absent or empty ⇒ the field is left off (portal and MCP pass none). */
+  providerLine?: string;
 }): ToolContext {
   const { partnerId, phone, channel, turn } = args;
   const deps = args.deps ?? {};
@@ -73,5 +75,6 @@ export function buildToolContext(args: {
       selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
     ...(args.webStepUp ? { webStepUp: args.webStepUp } : {}),
     ...(args.purposeRequired ? { purposeRequired: true } : {}),
+    ...(args.providerLine ? { providerLine: args.providerLine } : {}),
   };
 }

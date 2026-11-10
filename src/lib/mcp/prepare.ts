@@ -33,7 +33,7 @@ import { FIXED_REPLIES } from '@/lib/hold-replies';
 import type { RedisLike } from '@/lib/store';
 import type { CountryCode, Draft } from '@/lib/types';
 import type { ToolOutcome } from './guard';
-import { CANNOT_PAY, type McpDataDeps, type McpToolSpec } from './tools';
+import { CANNOT_PAY, mcpProviderLine, type McpDataDeps, type McpToolSpec } from './tools';
 
 // Stage C2: the two tools that let an AI app PREPARE a transfer, never pay it. prepare_transfer
 // makes ONE draft through the bot's own seam (send-seam.ts prepareSendDraft, the same path the
@@ -322,7 +322,9 @@ export async function prepareTransferTool(principal: AgentPrincipal, args: Prepa
       message: 'This same transfer was prepared a moment ago and is no longer open (paid, cancelled or expired). Check list_recent_transfers.',
     };
   }
-  return { ok: true, data: preparedView(draftId, draft, now), draftId };
+  // Pack 4 (C22 f): the owner's approved provider line, present only when there is one.
+  const line = await mcpProviderLine(principal.partnerId, deps);
+  return { ok: true, data: { ...preparedView(draftId, draft, now), ...(line ? { provider_line: line } : {}) }, draftId };
 }
 
 // ── cancel_prepared_transfer ─────────────────────────────────────────────────

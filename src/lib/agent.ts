@@ -39,6 +39,7 @@ import { PURPOSE_SCAM_WARNING } from './purpose-detail';
 import { modelVisibleResult } from './model-visible-result';
 import { composeReply } from './compose-reply';
 import { MIN_USD } from './fx';
+import { providerLineFor } from './legal/provider-line';
 import {
   addPolicyFacts,
   addTextFacts,
@@ -279,6 +280,10 @@ export function createAgent(deps: AgentDeps) {
     const notePartner =
       (await deps.partnerStore.getPartner(partnerId)) ?? (await deps.partnerStore.ensureDefaultPartner());
     const sendCurrencies = allowedSendCurrencies(notePartner);
+    // Fix pack 4 (C22 d, R16): the routed tenant's approved provider line (no
+    // new read). None for the default tenant, demo or an unapproved block, so the
+    // prompt and the tool context stay byte-identical there.
+    const providerLine = providerLineFor(resolvePartnerDisclosure(notePartner)) ?? undefined;
     // Scheduled-send name nudge (2026-10-02): an active schedule that cannot run
     // for want of the owner's legal name. Fail-soft: a read error injects nothing.
     let scheduleNeedsName = false;
@@ -346,6 +351,7 @@ export function createAgent(deps: AgentDeps) {
       },
       webStepUp: deps.webStepUp,
       purposeRequired,
+      providerLine,
     });
 
     // Customer context (fix 5 / F43): the customer's OWN recent sends and, after
@@ -391,7 +397,7 @@ export function createAgent(deps: AgentDeps) {
     // the front of `history`, which moves where this turn starts.
     let historyAtTurnStart = history.length;
     const prefix: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired }) },
+      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired, providerLine }) },
     ];
     // Web channel: in the prefix, so the model still knows the channel's limits
     // after tool results arrive. Never persisted.
