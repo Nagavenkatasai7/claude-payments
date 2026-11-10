@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
-import { captureQueries, freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
 import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -21,6 +21,10 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { TelegramNoTemplateError } from '@/lib/whatsapp';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
+import { env } from '@/lib/env';
+import { seedLiveEvidence } from './helpers-sanctions';
+import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
+import { recentlyFailingRails } from '@/lib/rail-health';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 // R17: the AI notice and its durable marker are covered by
@@ -119,12 +123,14 @@ beforeEach(async () => {
 });
 
 describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { retry: 0 }, () => {
+  // Fix pack 2 T10: only an 'http' rail POSTs to its stored URL (a simulator
+  // goes to the hosted rail), so the external-URL fixtures here are http rails.
   beforeEach(async () => {
     await store.saveTransfer(transferFixture());
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -348,7 +354,7 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { ret
     it('a missing settlement URL counts as rail failing; last_error is unchanged', async () => {
       await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
         kyc: {},
-        payment: { providerType: 'simulator', credentials: {}, webhookSecret: 'whk' },
+        payment: { providerType: 'http', credentials: {}, webhookSecret: 'whk' },
         whatsapp: {},
       });
       await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
@@ -407,7 +413,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -510,7 +516,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
         webhookSecret: 'railp_whk',
       },
@@ -542,7 +548,7 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await repo.saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://owner.example/settle', signingSecret: 'owner_sgn' },
         webhookSecret: 'owner_whk',
       },
@@ -551,7 +557,7 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await repo.saveIntegrations('railp', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
         webhookSecret: 'railp_whk',
       },
@@ -1283,7 +1289,7 @@ describe('drainOnce — after a rail failure (fix 8)', () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -1348,7 +1354,7 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -1690,7 +1696,7 @@ describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
       payment: {
-        providerType: 'simulator',
+        providerType: 'http',
         credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
         webhookSecret: 'whk',
       },
@@ -3131,6 +3137,415 @@ describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { r
     const [r] = ((await db.execute(sql`SELECT status, payload FROM outbox WHERE id = ${row.id}`)) as unknown as { rows: Array<{ status: string; payload: Record<string, unknown> }> }).rows;
     expect(r.status).toBe('done');
     expect(r.payload).toEqual({ phone: '1', turn: {} });
+  });
+});
+
+// Fix pack 2 T10 (R02): the instruct chokepoint. A simulator rail POSTs only
+// to the hosted reference rail (never a stored URL), and a paid row on an http
+// rail is not instructed when its newest sanctions screen was not on a live list.
+describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
+  const STORED = 'https://rail.partner.example/settle';
+  const hosted = () => `${env.appBaseUrl}/api/partner-rail`;
+  type Row = { dedupe_key: string; status: string; last_error: string | null; payload: unknown };
+  const rowsOf = async (kind: string) =>
+    ((await db.execute(sql`SELECT dedupe_key, status, last_error, payload FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as {
+      rows: Row[];
+    }).rows;
+  async function rail(providerType: string) {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType, credentials: { settlementUrl: STORED, signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+  }
+  // createdAt = now, so listScreenEvidence's window holds the seeded evidence.
+  const liveTransfer = (over: Partial<Transfer> = {}): Transfer =>
+    ({ ...transferFixture(), createdAt: new Date().toISOString(), ...over }) as Transfer;
+
+  it('simulator rail with an external stored URL: POST goes to the hosted rail, the stored URL is never fetched', async () => {
+    await rail('simulator');
+    await store.saveTransfer(liveTransfer());
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('sim-1');
+  });
+
+  it('http rail: stored URL', async () => {
+    await rail('http');
+    await store.saveTransfer(liveTransfer());
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+  });
+
+  it('partner-pulled reverse on simulator: hosted URL', async () => {
+    await rail('simulator');
+    await store.saveTransfer(
+      liveTransfer({ fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x', refundStatus: 'pending' } as Partial<Transfer>),
+    );
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rev-1' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    expect((await store.getTransfer('wk_t1'))!.refundStatus).toBe('completed');
+  });
+
+  it('paid on simulator with mock-list evidence, rail switched to http: not POSTed, one instructnotlive alert, row retried', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    // Screened while the rail was a simulator (mock list), then the rail goes live.
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+
+    let r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    // Retried again: still refused, still ONE alert (deduped per transfer).
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+
+    expect(fetchFn).not.toHaveBeenCalledWith(STORED, expect.anything());
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed');
+    expect(instruct.last_error).toBe('Last screen not on a live list.');
+    const alerts = (await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('instructnotlive:'));
+    expect(alerts.map((a) => a.dedupe_key)).toEqual(['instructnotlive:wk_t1']);
+    const msg = JSON.stringify(alerts[0].payload);
+    expect(msg).toContain('transfer wk_t1 (rail acme)');
+    expect(msg).toContain('not on a live list');
+    // Ids only: no names, phones or account numbers.
+    for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  // Review S5 (W2a): a sanctions match never gets "otherwise refund it": no
+  // automatic re-screen follows, and the compliance officer decides first.
+  it('S5 W2a: newest screen a live, fresh MATCH: instructnotlive says no re-screen follows and the no-refund rule (ids only)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', decision: 'match' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct'))[0].last_error).toBe('Last screen was a sanctions match.');
+    const alerts = await rowsOf('ops.alert');
+    expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+      'instructnotlive:wk_t1',
+      'transfer wk_t1 (rail acme) is paid but was not instructed: Last screen was a sanctions match. No automatic re-screen follows. ' +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
+  });
+
+  it.each([
+    ['not on a live list', { listFitness: 'not_live' as const }, 'Last screen not on a live list.'],
+    ['older than the list age limit', { listFitness: 'live' as const, screenedAgoMs: 40 * 3_600_000 }, 'Last screen older than the list age limit.'],
+  ])('S5 W2a: %s keeps the re-screen tail unchanged', async (_l, ev, why) => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, ev);
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect((await rowsOf('ops.alert')).map((a) => (a.payload as { message: string }).message)).toEqual([
+      `transfer wk_t1 (rail acme) is paid but was not instructed: ${why} The reconcile sweep re-screens it once a live list is served; otherwise refund it.`,
+    ]);
+  });
+
+  it('F1 C1: the not-live refusal at attempt 3+ is NOT a rail failure: no railfail alert, routing unchanged, row stays retryable', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = ${RAILFAIL_ALERT_MIN_ATTEMPT + 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const keys = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+    expect(keys.filter((k) => k.startsWith('railfail:'))).toEqual([]);
+    expect(keys).toEqual(['instructnotlive:wk_t1']);
+    expect([...(await recentlyFailingRails(db, ['acme'], new Date()))]).toEqual([]);
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed'); // retryable (a re-screen can heal it), not dead
+    expect(instruct.last_error).toBe('Last screen not on a live list.');
+  });
+
+  it('F1 A1: http + newest evidence live but screened 40 h ago: not POSTed, one instructnotlive alert, retryable', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', screenedAgoMs: 40 * 3_600_000 });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed');
+    expect(instruct.last_error).toBe('Last screen older than the list age limit.');
+    expect((await rowsOf('ops.alert')).map((a) => a.dedupe_key)).toEqual(['instructnotlive:wk_t1']);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  // Review R2 (J4c): the gate refusal dead-letters at the instruct ceiling like
+  // any failure: dead, the usual dead:<id> alert, and still no railfail.
+  it('R2 J4c: the not-live refusal at INSTRUCT_MAX_ATTEMPTS: dead, one dead:<id> alert, no railfail, never POSTed', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', screenedAgoMs: 40 * 3_600_000 });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = ${INSTRUCT_MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, dead: 1 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('dead');
+    const keys = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+    expect(keys.filter((k) => k.startsWith('railfail:'))).toEqual([]);
+    expect(keys.filter((k) => /^dead:\d+$/.test(k))).toHaveLength(1);
+    expect(keys).toContain('instructnotlive:wk_t1');
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('F1 A1: no evidence at all on http: POSTed (pre-pack pass-through)', async () => {
+    await store.saveTransfer(liveTransfer());
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-4' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+  });
+
+  it('http + newest evidence live: POSTed', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live', at: new Date(Date.now() - 60_000) });
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+    expect((await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('instructnotlive:'))).toHaveLength(0);
+  });
+
+  it('http + evidence without listFitness: POSTed (pre-PR2)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: null });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-3' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+  });
+
+  it('simulator rail with mock-list evidence: POSTed to the hosted rail (no list gate on a demo rail)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('simulator');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+  });
+
+  // Pack 2 review R1 (G1): the sender screening hold at the instruct gate. A row
+  // can reach the rail without settleOrHold (a signed rail 'funded' callback, the
+  // reconcile reinstruct, a dead-letter Retry); the gate re-checks the hold.
+  describe('sender screening hold (review R1 / G1)', () => {
+    const stampSender = async (sql0 = sql`now()`) => {
+      await seedSender(db, { partnerId: 'acme', phone: '15551230000' });
+      await db.execute(sql`UPDATE customers SET screening_flagged_at = ${sql0} WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    };
+
+    it.each([['instruct:wk_t1'], ['reinstruct:wk_t1']])(
+      'http, fresh live clear evidence, sender stamped after the mint (%s): not POSTed, ONE instructsenderhold alert (ids only), row retryable',
+      async (key) => {
+        const t = liveTransfer();
+        await store.saveTransfer(t);
+        await seedLiveEvidence(db, t, { listFitness: 'live' });
+        await stampSender();
+        await rail('http');
+        fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+        await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: key });
+        expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+        await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+        expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+        expect(fetchFn).not.toHaveBeenCalled();
+        const [instruct] = await rowsOf('settlement.instruct');
+        expect(instruct.status).toBe('failed');
+        expect(instruct.last_error).toBe('Sender under an active screening hold.');
+        const alerts = await rowsOf('ops.alert');
+        expect(alerts.map((a) => a.dedupe_key)).toEqual(['instructsenderhold:wk_t1']);
+        const msg = JSON.stringify(alerts[0].payload);
+        expect(msg).toContain('wk_t1');
+        expect(msg).toContain('PAID');
+        // Review S6 (Y2): the clause speaks about THIS instruction only.
+        expect(msg).toContain('this instruction was not sent to the rail');
+        expect(msg).not.toContain('nothing was sent to the rail');
+        // Review S5 (X1): the fixture is a paid bank_transfer row with no
+        // charge reference (senderChargeState 'partner_collected'), and the
+        // text never says to refund the transfer.
+        expect((alerts[0].payload as { message: string }).message).toBe(
+          "⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (the partner confirmed that it collected the sender's funds) " +
+            'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
+            `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+        );
+        expect(msg).not.toMatch(/refund the transfer/);
+        for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
+        expect((await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('railfail:'))).toEqual([]);
+        expect((await store.getTransfer('wk_t1'))!.status).toBe('paid');
+      },
+    );
+
+    // Review S5 (X1): the money by senderChargeState, never always "charged".
+    // Review S6 (Y2): a partner-pulled row has its own text (below).
+    it.each([
+      ['charged (a charge reference)', { fundingRef: 'ch_wk' }, 'the sender was charged'],
+    ])('S5 X1: instructsenderhold states the money (%s), ids only', async (_l, over, money) => {
+      const t = liveTransfer(over as Partial<Transfer>);
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await stampSender();
+      await rail('http');
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      const alerts = await rowsOf('ops.alert');
+      expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+        'instructsenderhold:wk_t1',
+        `⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (${money}) ` +
+          'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
+          `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+      ]]);
+    });
+
+    // Review S6 (Y2): a partner-pulled (ach_pull / bank_pull) row is never told
+    // "nothing was charged": the partner's rail pulls the sender's funds on an
+    // instruction, and an earlier one (the first instruct before a reconcile
+    // reinstruct or a dead-letter Retry) may have reached the rail.
+    it.each([
+      ['ach_pull, first instruct', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'instruct:wk_t1', false],
+      ['bank_pull, first instruct', { fundingMethod: 'bank_pull', transferType: 'b2b', achTokenRef: 'bankpull_x' }, 'instruct:wk_t1', false],
+      ['ach_pull, reconcile reinstruct after a done instruct', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'reinstruct:wk_t1', true],
+    ])('S6 Y2: partner-pulled instructsenderhold (%s): never "nothing was charged", says the rail may have pulled the funds', async (_l, over, key, earlierDone) => {
+      const t = liveTransfer(over as Partial<Transfer>);
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await stampSender();
+      await rail('http');
+      if (earlierDone) {
+        await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+        await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:wk_t1'`);
+      }
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: key });
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      const alerts = await rowsOf('ops.alert');
+      expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+        'instructsenderhold:wk_t1',
+        '⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID ' +
+          'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
+          "The partner's rail pulls the sender's funds only on an instruction; if an earlier instruction reached the rail, the rail may have pulled the sender's funds: check with the rail. " +
+          `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+      ]]);
+      const msg = (alerts[0].payload as { message: string }).message;
+      expect(msg).not.toMatch(/nothing was charged|nothing was sent to the rail/);
+      for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
+    });
+
+    it('a platform clear later than the stamp: POSTed', async () => {
+      const t = liveTransfer();
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await stampSender(sql`now() - interval '2 hours'`);
+      await db.execute(sql`UPDATE customers SET screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme'`);
+      await rail('http');
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-sh' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+      expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
+    });
+
+    it('the flags read fails: refused (fail closed), not POSTed, retryable', async () => {
+      const t = liveTransfer();
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await rail('http');
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      await db.execute(sql`ALTER TABLE customers RENAME TO customers_gone`);
+      try {
+        expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+      } finally {
+        await db.execute(sql`ALTER TABLE customers_gone RENAME TO customers`);
+      }
+      expect(fetchFn).not.toHaveBeenCalled();
+      const [instruct] = await rowsOf('settlement.instruct');
+      expect(instruct.status).toBe('failed');
+      expect(instruct.last_error).toBe('Sender screening hold could not be checked.');
+      expect((await rowsOf('ops.alert')).map((a) => a.dedupe_key)).toEqual(['instructsenderhold:wk_t1']);
+    });
+
+    it.each([
+      ['simulator rail', 'simulator', 'live'],
+      ["env 'test' on an http rail", 'http', 'test'],
+    ])('not real money (%s), sender stamped: unchanged (no hold check)', async (_l, type, environment) => {
+      const t = liveTransfer({ environment } as Partial<Transfer>);
+      await store.saveTransfer(t);
+      await stampSender();
+      await rail(type);
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-sh' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+      expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
+      const alerts = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+      expect(alerts.filter((k) => k.startsWith('instructsenderhold:'))).toEqual([]);
+      if (environment === 'live') {
+        // The simulator row reaches the gate and is POSTed (the gate is what this proves).
+        expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+        expect(alerts).toEqual([]);
+      } else {
+        // Review round 3 (M5): a sandbox row never reaches the hold gate: the
+        // sandbox chokepoint refuses it first (nothing POSTed, one sandboxinstruct alert).
+        expect(fetchFn).not.toHaveBeenCalled();
+        expect(alerts).toEqual(['sandboxinstruct:wk_t1']);
+      }
+    });
+  });
+
+  // Pack 2 review R1 (E2): a sanctions-blocked paid row is never instructed, on any rail.
+  it.each([['http'], ['simulator']])('a paid row with compliance_status blocked (%s rail): never POSTed, row done', async (type) => {
+    const t = liveTransfer({ complianceStatus: 'blocked', complianceReasons: ['Recipient on watchlist.'] });
+    await store.saveTransfer(t);
+    await rail(type);
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('sandbox row: unchanged', async () => {
+    const t = liveTransfer({ environment: 'test' } as Partial<Transfer>);
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
+    expect((await rowsOf('ops.alert')).map((x) => x.dedupe_key)).toEqual(['sandboxinstruct:wk_t1']);
   });
 });
 

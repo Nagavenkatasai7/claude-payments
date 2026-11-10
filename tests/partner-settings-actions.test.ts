@@ -56,7 +56,7 @@ import { t } from '@/lib/i18n';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import type { PartnerSupportConfig, Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '@/app/partner/routes';
-import { saveAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from '@/app/partner/(app)/settings/actions';
+import { saveAlertEmailAction, saveComplianceAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from '@/app/partner/(app)/settings/actions';
 
 const DISCLOSURE = {
   licensedEntity: 'Acme Money Services LLC',
@@ -129,6 +129,12 @@ const RUNNERS: Array<{ name: string; action: Act; form: (id: string) => FormData
     action: saveAlertEmailAction,
     form: (id) => form({ alertEmail: id === 'pa' ? 'ops@acme.example' : 'alerts@acme.example' }),
     auditAction: 'partner.alert_email.update',
+  },
+  {
+    name: 'saveComplianceAlertEmailAction',
+    action: saveComplianceAlertEmailAction,
+    form: (id) => form({ complianceAlertEmail: id === 'pa' ? 'compliance@acme.example' : 'kyc@acme.example' }),
+    auditAction: 'partner.compliance_email.update',
   },
   {
     name: 'saveDisclosureAction',
@@ -243,6 +249,34 @@ describe('saveAlertEmailAction', () => {
     await saveAlertEmailAction(form({ alertEmail: 'ops@acme.example' }));
     const before = await snapshot();
     expect(await saveAlertEmailAction(form())).toEqual({ ok: false, error: t('partner.settings.alert.invalid') });
+    expect(await snapshot()).toEqual(before);
+  });
+});
+
+describe('saveComplianceAlertEmailAction (fix pack 2 T5)', () => {
+  beforeEach(async () => {
+    await signInAdmin();
+  });
+  it('saves a trimmed address and clears on blank; the alert email is kept; the audit rows hold no address', async () => {
+    await db.update(partners).set({ supportConfig: { alertEmail: 'ops@acme.example' } }).where(eq(partners.id, 'pa'));
+    expect(await saveComplianceAlertEmailAction(form({ complianceAlertEmail: ' compliance@acme.example ' }))).toEqual({ ok: true });
+    expect(await sc('pa')).toEqual({ alertEmail: 'ops@acme.example', complianceAlertEmail: 'compliance@acme.example' });
+    expect(await saveComplianceAlertEmailAction(form({ complianceAlertEmail: '' }))).toEqual({ ok: true });
+    expect(await sc('pa')).toEqual({ alertEmail: 'ops@acme.example' });
+    expect(JSON.stringify(await audits())).not.toContain('@');
+  });
+  it.each(['not an email', 'a@b.example, c@d.example', 'a@b.example\r\nBcc: x@y.example'])(
+    'refuses %j with the fixed copy and writes nothing',
+    async (bad) => {
+      const before = await snapshot();
+      expect(await saveComplianceAlertEmailAction(form({ complianceAlertEmail: bad }))).toEqual({ ok: false, error: t('partner.settings.compliance.invalid') });
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+  it('a missing field never clears a stored address', async () => {
+    await saveComplianceAlertEmailAction(form({ complianceAlertEmail: 'compliance@acme.example' }));
+    const before = await snapshot();
+    expect(await saveComplianceAlertEmailAction(form())).toEqual({ ok: false, error: t('partner.settings.compliance.invalid') });
     expect(await snapshot()).toEqual(before);
   });
 });

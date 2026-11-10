@@ -55,6 +55,20 @@ export function createIntegrationsRepo(
       };
     },
 
+    /**
+     * Fix pack 2 (R02): only the rail selector, for the real-money gate
+     * (live-gate.ts). Plain column, no decrypt. No row -> null. May throw:
+     * readRailProviderType is the never-throwing wrapper.
+     */
+    async paymentProviderType(id: PartnerId): Promise<string | null> {
+      const rows = await db
+        .select({ providerType: partnerIntegrations.paymentProviderType })
+        .from(partnerIntegrations)
+        .where(eq(partnerIntegrations.partnerId, id))
+        .limit(1);
+      return rows[0]?.providerType ?? null;
+    },
+
     async saveIntegrations(id: PartnerId, config: PartnerIntegrations): Promise<void> {
       const partnerId = id; // the row key AS WRITTEN (conflict target) — every sealed column binds to it
       const row = {

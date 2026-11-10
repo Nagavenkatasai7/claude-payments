@@ -271,7 +271,8 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
   it('ROUTED transfer whose settlement partner lost its settlementUrl → 400 fail-closed before charge', async () => {
     // providerType survives but the endpoint is gone — charging would only
     // feed an instruct that dead-letters. Same quote-time pair, both checked.
-    integrationsByPartner['railp'] = { kyc: {}, payment: { providerType: 'simulator' }, whatsapp: {} };
+    // Fix pack 2 T10: an http rail (a simulator's target is always the hosted rail).
+    integrationsByPartner['railp'] = { kyc: {}, payment: { providerType: 'http' }, whatsapp: {} };
     await seedPartner(db, 'railp');
     await store.saveTransfer(makeTransfer({ id: 'd7', settlementPartnerId: 'railp' }));
 

@@ -182,6 +182,26 @@ export function setAlertEmail(db: DbOrTx, partnerId: PartnerId, actor: SupportSe
   );
 }
 
+/**
+ * Fix pack 2 T5 (R04): set (a parsed address) or clear (null) the compliance
+ * alert email, where sanctions-block notices go (blank ⇒ the alert email).
+ * Audited WITHOUT the address.
+ */
+export function setComplianceAlertEmail(db: DbOrTx, partnerId: PartnerId, actor: SupportSettingsActor, next: string | null): Promise<SupportWriteResult> {
+  return mergeAndAudit(
+    db,
+    partnerId,
+    actor,
+    'partner.compliance_email.update',
+    (prev) => {
+      const { complianceAlertEmail: _old, ...rest } = prev;
+      void _old;
+      return next ? { ...rest, complianceAlertEmail: next } : rest;
+    },
+    (prev) => ({ set: next !== null, hadPrevious: Boolean(prev.complianceAlertEmail) }),
+  );
+}
+
 /** Replace (a parsed config) or clear (undefined) the Reg E disclosure block. */
 export function setDisclosure(
   db: DbOrTx,

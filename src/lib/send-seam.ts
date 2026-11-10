@@ -125,7 +125,12 @@ export type PrepareSendResult =
   | { kind: 'bill_refused'; message: string; payUrl?: string }
   | { kind: 'cap'; evaluation: CapEvaluation }
   /** A sanctions hit. Reasonless by design: the screening detail never leaves the server. */
-  | { kind: 'blocked' };
+  | { kind: 'blocked' }
+  /**
+   * Fix pack 2 T6 (R06): the sender's screening hold is active on a real-money
+   * rail. Reasonless like `blocked`: the customer sees neutral fixed text.
+   */
+  | { kind: 'sender_unavailable' };
 
 /** The inputs get_quote reads. */
 export interface QuoteTypedInput {

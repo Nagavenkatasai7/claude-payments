@@ -12,6 +12,8 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import type { Db } from '@/db/client';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 
 // Program-Fix 43 PR B: the optional per-partner AML hold inside mintLocked.
 // Owner decision (binding): AML rules raise alerts only; a hard hold comes ONLY
@@ -22,11 +24,16 @@ import type { Db } from '@/db/client';
 
 const PHONE = '15550100043';
 
+// Fix pack 2 T2 (R02): a live http mint clears only on a live OFAC list, so
+// every test here screens against a fresh one (checked an hour ago).
+const ORIGINAL_LIST = process.env.SANCTIONS_LIST;
 beforeEach(() => {
   resetRateCacheForTests();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }));
+  primeOfacSource({ checkedAgoMs: 3_600_000 });
 });
 afterEach(() => {
+  restoreOfacSource(ORIGINAL_LIST);
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -73,8 +80,21 @@ const base = {
   senderKycStatus: 'verified' as const,
 };
 
+/** Split at the sender lock: statements before it ran on the root handle. */
+function atLock(log: Array<{ sql: string }>): { pre: string[]; locked: string[] } {
+  const sqls = log.map((q) => q.sql.toLowerCase());
+  const lock = sqls.findIndex((q) => q.includes('set local lock_timeout'));
+  return { pre: sqls.slice(0, lock), locked: sqls.slice(lock) };
+}
+
+/** The AML hold's statements: savepoints and rail reads INSIDE the lock. */
 function amlStatements(log: Array<{ sql: string }>): string[] {
-  return log.map((q) => q.sql.toLowerCase()).filter((s) => s.includes('partner_integrations') || s.includes('savepoint'));
+  return atLock(log).locked.filter((s) => s.includes('partner_integrations') || s.includes('savepoint'));
+}
+
+/** Fix pack 2 (R02): the one real-money rail read, on the root handle ABOVE the lock. */
+function preLockRailReads(log: Array<{ sql: string }>): string[] {
+  return atLock(log).pre.filter((s) => s.includes('partner_integrations'));
 }
 
 async function alerts(db: Db) {
@@ -92,6 +112,7 @@ describe('AML hold — setting OFF (the default)', { retry: 0 }, () => {
     expect(t.complianceStatus).toBe('cleared');
     expect(t.complianceReasons).toEqual([]);
     expect(amlStatements(log)).toEqual([]);
+    expect(preLockRailReads(log)).toHaveLength(1);
   });
 
   it('a partner with no corridor config at all is untouched', async () => {
@@ -102,7 +123,9 @@ describe('AML hold — setting OFF (the default)', { retry: 0 }, () => {
     const stop = captureQueries();
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'plain' });
     expect(t.complianceStatus).toBe('cleared');
-    expect(amlStatements(stop())).toEqual([]);
+    const log = stop();
+    expect(amlStatements(log)).toEqual([]);
+    expect(preLockRailReads(log)).toHaveLength(1);
   });
 });
 
@@ -116,7 +139,9 @@ describe('AML hold — demo is NEVER held (structural)', { retry: 0 }, () => {
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default' });
     expect(t.complianceStatus).toBe('cleared');
     expect(t.status).toBe('awaiting_payment');
-    expect(amlStatements(stop())).toEqual([]);
+    const log = stop();
+    expect(amlStatements(log)).toEqual([]);
+    expect(preLockRailReads(log)).toHaveLength(1);
   });
 
   it('setting ON on a simulator rail: cleared', async () => {
@@ -244,6 +269,26 @@ describe('AML hold — the check never throws out of the mint', { retry: 0 }, ()
     expect(a[0].payload.message).toContain('AML hold check');
     expect(a[0].payload.message).not.toContain(PHONE);
     expect(Object.keys(a[0].payload)).toEqual(['message']);
+  });
+
+  // Fix pack 2 T2 (R02): the same rename also fails the pre-lock rail read,
+  // which counts as real money: held on a stale list, cleared on a fresh one.
+  it('the renamed table also fails the pre-lock rail read: held LIST_UNAVAILABLE on a stale list, cleared on a fresh one', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', { holds: true, rail: 'http' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
+    try {
+      primeOfacSource({ checkedAgoMs: 40 * 3_600_000 });
+      const stale = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+      expect(stale.complianceStatus).toBe('flagged');
+      expect(stale.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const fresh = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+      expect(fresh.complianceStatus).toBe('cleared');
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    }
   });
 
   it('an ops method that throws is absorbed: no hold, the transfer is minted', async () => {

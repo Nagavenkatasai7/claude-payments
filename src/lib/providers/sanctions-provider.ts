@@ -27,6 +27,13 @@ export interface SanctionsListInfo {
   source: string;
   version: string;
   hash: string;
+  /**
+   * Fix pack 2 (R02): when the list was last confirmed current (ISO). Absent
+   * means unknown, which list-policy.ts listFitness reads as stale.
+   */
+  checkedAt?: string;
+  /** Fix pack 2 (R02): the base list's hash before corridor additions. */
+  baseHash?: string;
 }
 
 /**
@@ -140,6 +147,27 @@ export async function warmSanctionsList(): Promise<void> {
   } catch {
     // warm() is contractually non-throwing; a custom source is guarded here.
   }
+}
+
+/**
+ * Fix pack 2 (R02): the OFAC list served right now (refreshed first, like a
+ * mint does), as list info with its live checkedAt. Rejects when no list can
+ * load; list-health.ts reads that as 'not_live'. Never a name: ids and hashes.
+ */
+export async function servedOfacListInfo(): Promise<SanctionsListInfo> {
+  await warmSanctionsList();
+  const list = await ofacSource.load();
+  if (!list || !Array.isArray(list.entries) || list.entries.length === 0) {
+    throw new Error('empty sanctions list');
+  }
+  const checkedAt = ofacSource.checkedAt?.()?.toISOString();
+  return {
+    source: list.source,
+    version: list.version,
+    hash: list.hash,
+    baseHash: list.hash,
+    ...(checkedAt ? { checkedAt } : {}),
+  };
 }
 
 function ofacScreener(baseList: string[]): ListSanctionsScreener {

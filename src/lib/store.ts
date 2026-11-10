@@ -11,12 +11,15 @@ import { pokeWorker } from './outbox';
 import { logError, logWarn } from './log';
 import { conversationSealCtx, openJson, sealedConversationKey } from './redis-seal';
 import { isFlagOn, type FlagContext, type FlagKey } from './flags';
+import { readRailProviderType } from './live-gate';
+import { listNotLiveDedupeKey } from './sanctions/list-health';
+import { enqueueSanctionsBlockNotices, type SanctionsBlockNotice } from './sanctions/notices';
 import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
-import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createCustomerRepo, readSenderScreeningFlags, type SenderScreeningFlags } from '@/db/repos/customer-repo';
 import { createRewardRepo, type RedemptionWrite } from '@/db/repos/reward-repo';
 import type { Catalog, PartnerRewardSettings, PartnerRewardTerms, SenderRewardUsage } from './rewards/types';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
@@ -84,6 +87,27 @@ export interface SenderLedgerOps {
    * SAME transaction as the held transfer's insert. Ids and the category only.
    */
   enqueuePurposeFlagAlert(transferId: string, category: string): Promise<void>;
+  /**
+   * Fix pack 2 (R02): ONE ops.alert per Eastern day (listNotLiveDedupeKey, the
+   * key the daily health check uses too) when a real-money mint was held
+   * because the sanctions list is not live. In the SAME transaction as the
+   * mint; the partner id only, never a name, phone or amount.
+   */
+  enqueueListNotLiveAlert(): Promise<void>;
+  /**
+   * Fix pack 2 T5 (R04): the `sanctions.block` audit row and (unless quiet) the
+   * ops alert and partner emails for a blocked mint, in the SAME transaction
+   * as the blocked row (sanctions/notices.ts). The lock's tenant is the owner.
+   * Deliberately NOT named like the helper (tests/outbox-poke-coverage.test.ts).
+   */
+  recordSanctionsBlock(n: Omit<SanctionsBlockNotice, 'partnerId'>): Promise<void>;
+  /**
+   * Fix pack 2 T6 (R06): the lock sender's screening flags and hold times
+   * (customer-repo readSenderScreeningFlags, tenant-scoped, no PII column), in
+   * the mint transaction. THROWS on a read error (the mint fails, nothing is
+   * written). mintLocked calls it on a real-money rail only.
+   */
+  senderScreeningFlags(): Promise<SenderScreeningFlags | null>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -283,6 +307,15 @@ export function createStore(redis: RedisLike, db: Db) {
       return isFlagOn(db, key, ctx);
     },
 
+    /**
+     * Fix pack 2 (R02): the rail partner's payment provider type, for the
+     * real-money gate (live-gate.ts). Never throws: null = no row, undefined =
+     * the read failed (counts as real money). Read on the ROOT handle.
+     */
+    railProviderType(partnerId: PartnerId): Promise<string | null | undefined> {
+      return readRailProviderType(db, partnerId);
+    },
+
     // ── Conversations (Redis — hot, trimmed, ephemeral; keyed by TENANT + phone, fix 1 D12) ──
     // TRANSITIONAL (one 30-day window): a tenant key that does not exist reads
     // through to the pre-fix `conv:{phone}` ONLY for the phone's pre-fix tenant,
@@ -333,7 +366,7 @@ export function createStore(redis: RedisLike, db: Db) {
      * sanctions.screen evidence row in ONE transaction — both land or neither
      * does. recordBlockedAttempt uses it whenever it has evidence.
      */
-    async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent): Promise<void> {
+    async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent, notice?: SanctionsBlockNotice): Promise<void> {
       await db.transaction(async (tx) => {
         // PR C: the same evidence (the audit row's meta) is stored on the new
         // row's transfers.screening column.
@@ -344,7 +377,22 @@ export function createStore(redis: RedisLike, db: Db) {
             : {},
         );
         await createAuditRepo(tx).record(audit);
+        // Fix pack 2 T5 (R04): the block notices commit with the row and its evidence.
+        if (notice) await enqueueSanctionsBlockNotices(tx, notice);
       });
+      if (notice) pokeWorker();
+    },
+    /**
+     * Fix pack 2 T5 (R04): a blocked screen that has no transfer row (a seller
+     * registration): its sanctions.screen evidence row and the block notices
+     * (sanctions/notices.ts) in ONE transaction, then a worker poke.
+     */
+    async recordScreenEvidenceWithBlock(audit: AuditEvent, notice: SanctionsBlockNotice): Promise<void> {
+      await db.transaction(async (tx) => {
+        await createAuditRepo(tx).record(audit);
+        await enqueueSanctionsBlockNotices(tx, notice);
+      });
+      pokeWorker();
     },
     /**
      * Program-Fix 14 (step 6): a standalone audit_events row on the root handle
@@ -538,6 +586,26 @@ export function createStore(redis: RedisLike, db: Db) {
                   },
                   { dedupeKey: `purposeflag:${transferId}` },
                 );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
+              enqueueListNotLiveAlert: async () => {
+                // Inline literal payload (tests/outbox-payload-secrets.test.ts). The partner id only.
+                await createOutboxRepo(tx).enqueue(
+                  'ops.alert',
+                  {
+                    message:
+                      `⚠️ SmartRemit ops: a real-money transfer was held because the sanctions list is not live (partner ${partnerId}). ` +
+                      `Check the sanctions list card on the compliance page and the loader.`,
+                  },
+                  { dedupeKey: listNotLiveDedupeKey(new Date()) },
+                );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
+              senderScreeningFlags: () => readSenderScreeningFlags(tx, partnerId, phone),
+              recordSanctionsBlock: async (n) => {
+                await enqueueSanctionsBlockNotices(tx, { ...n, partnerId });
                 // partner-demo R4: after() runs post-response, after the mint commits.
                 pokeWorker();
               },

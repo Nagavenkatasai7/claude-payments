@@ -5,6 +5,7 @@ import type { CurrencyCode, PartnerRate, SettlementRoute } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
+import { settlementTargetUrl } from './live-gate';
 import { recentlyFailingRails } from './rail-health';
 import { logWarn } from './log';
 
@@ -20,7 +21,8 @@ import { logWarn } from './log';
 //   • a FRESH pushed rate (effectiveRate with expiresAt in the future), else a
 //     standing marginBps off mid (signed; positive ⇒ better for the customer)
 //   • a routable rail: payment.providerType 'http' | 'simulator' AND a
-//     non-empty credentials.settlementUrl — anything else dead-letters money
+//     passing target URL (settlementTargetUrl: an http rail's stored URL, a
+//     simulator's hosted rail) — anything else dead-letters money
 //     in `paid` (the settlement.instruct handler throws on a missing URL).
 //   • a PLAUSIBLE rate: at most MAX_ROUTE_PREMIUM above mid (smart-routing R0
 //     fix A). A pushed typo (850 for 85.0) or a fat-fingered margin would
@@ -122,7 +124,8 @@ export async function selectSettlementRoute(
     try {
       const integrations = await integrationsStore.getIntegrations(c.partnerId);
       const providerType = integrations.payment.providerType ?? '';
-      const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+      // Fix pack 2 T10: the URL the worker POSTs to (a simulator's is the hosted rail).
+      const settlementUrl = settlementTargetUrl(integrations.payment);
       // Fix 22: routable only when the endpoint passes the same sync URL rule
       // the worker applies before any fetch — never route money into a rail
       // whose instruct could only be refused.

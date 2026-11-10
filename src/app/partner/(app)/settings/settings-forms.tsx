@@ -5,7 +5,7 @@ import { useActionState } from 'react';
 import { t } from '@/lib/i18n';
 import { Button, Checkbox, Field, Input } from '@/components/ds';
 import type { ActionResult } from '../../action-result';
-import { saveAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from './actions';
+import { saveAlertEmailAction, saveComplianceAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from './actions';
 import { StepUpPrompt, useStepUpAction } from '../integrations/step-up';
 
 // The /partner/settings forms (partner-dashboard merge, 2f). Plain forms: nothing here is trusted.
@@ -69,6 +69,37 @@ export function AlertEmailForm({ current }: { current: string }) {
           <Input
             id={ids.id}
             name="alertEmail"
+            type="email"
+            defaultValue={current}
+            aria-describedby={ids.describedBy}
+            maxLength={254}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        )}
+      </Field>
+      <div>
+        <SaveButton pending={pending} />
+      </div>
+      <Status state={state} />
+    </form>
+  );
+}
+
+async function submitCompliance(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | null> {
+  return saveComplianceAlertEmailAction(formData);
+}
+
+/** Fix pack 2 T5 (R04): where sanctions-block notices go (blank ⇒ the alert email). */
+export function ComplianceAlertEmailForm({ current }: { current: string }) {
+  const [state, formAction, pending] = useActionState(submitCompliance, null);
+  return (
+    <form action={formAction} className="flex flex-col gap-4" data-testid="settings-compliance-form">
+      <Field name="complianceAlertEmail" label={t('partner.settings.compliance.label')} hint={t('partner.settings.compliance.help')}>
+        {(ids) => (
+          <Input
+            id={ids.id}
+            name="complianceAlertEmail"
             type="email"
             defaultValue={current}
             aria-describedby={ids.describedBy}

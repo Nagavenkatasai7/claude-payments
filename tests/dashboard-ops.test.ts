@@ -4,6 +4,7 @@ import { createStore } from '@/lib/store';
 import {
   cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
+  SENDER_SCREENING_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -18,6 +19,9 @@ import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { seedLiveEvidence } from './helpers-sanctions';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -40,10 +44,32 @@ vi.mock('@/db/repos/aux-repos', async (orig) => {
   };
 });
 
+// Pack 2 review R1 (H2): a sender screening stamp that commits right AFTER the
+// release's unlocked pre-read (readSenderScreeningFlags without forUpdate). Off
+// by default; the locked in-transaction read is always the real one.
+const senderRace = vi.hoisted(() => ({ stampAfterPreRead: null as null | { partnerId: string; phone: string } }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
+  return {
+    ...real,
+    readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
+      const flags = await real.readSenderScreeningFlags(...a);
+      const race = senderRace.stampAfterPreRead;
+      if (race && !a[3]?.forUpdate) {
+        senderRace.stampAfterPreRead = null;
+        await a[0].execute(q`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = ${race.partnerId} AND phone = ${race.phone}`);
+      }
+      return flags;
+    },
+  };
+});
+
 let db: Db;
 beforeEach(async () => {
   db = await freshDb();
   failAudit = false;
+  senderRace.stampAfterPreRead = null;
 });
 
 async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
@@ -944,6 +970,122 @@ describe('canReleaseHeld — who may release a compliance hold (owner decision 2
     expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, held([]), CLEAR)).toBe(false); // fail closed
     expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, SCREEN, CLEAR)).toBe(true);
     expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, SCREEN, CLEAR)).toBe(true);
+  });
+});
+
+// Fix pack 2 T4 (R02): a hold waiting on a fresh sanctions list (LIST_UNAVAILABLE)
+// lifts ONLY by the automatic re-screen (list-hold-rescreen.ts). No person,
+// platform staff included, may release it; Reject is unchanged.
+describe('LIST_UNAVAILABLE holds — no person can release them (fix pack 2 T4)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+  type Held = Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>;
+  const held = (complianceReasons: string[]): Held => ({ status: 'in_review', complianceStatus: 'flagged', complianceReasons });
+  const CLEAR = { watchlistHit: null, pepHit: null };
+
+  it('platform may NOT release a LIST_UNAVAILABLE hold (alone or with LARGE)', () => {
+    for (const reasons of [[LIST_UNAVAILABLE_REASON], ['Large transfer amount.', LIST_UNAVAILABLE_REASON]]) {
+      for (const owner of [{ kycMode: 'ours' as const }, { kycMode: 'delegated' as const }, null]) {
+        expect(canReleaseHeld(PLATFORM, owner, held(reasons), CLEAR)).toBe(false);
+        expect(canReleaseHeld(PARTNER, owner, held(reasons), CLEAR)).toBe(false);
+      }
+    }
+  });
+
+  it('platform may still release POSSIBLE_MATCH', () => {
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, held([POSSIBLE_MATCH_REASON]), null)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, held(['Large transfer amount.', POSSIBLE_MATCH_REASON]), CLEAR)).toBe(true);
+  });
+
+  it('releaseTransfer throws the pinned text, writes nothing', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rel_list', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON],
+      paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+    }));
+    await expect(releaseTransfer(store, db, 'rel_list', REL)).rejects.toThrow(
+      'Cannot release: this hold lifts only by an automatic re-screen against a fresh sanctions list.',
+    );
+    expect((await store.getTransfer('rel_list'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+    // Reject is unchanged: it still cancels the hold.
+    await rejectTransfer(store, db, 'rel_list', REL);
+    expect((await store.getTransfer('rel_list'))?.status).toBe('cancelled');
+  });
+});
+
+// Fix pack 2 T6 (R06): platform staff may not release a hold on a real-money
+// rail while the SENDER's screening hold is active: the audited clear
+// (clearSenderScreeningHoldAction) comes first. Simulator / mock rails unchanged.
+describe('sender screening hold — platform release refusal (fix pack 2 T6)', () => {
+  const HTTP_RAIL = {
+    kyc: {},
+    payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+    whatsapp: {},
+  };
+  const PHONE = '15551234567';
+  async function heldOn(rail: 'http' | 'simulator', environment: 'live' | 'test' = 'live') {
+    await db.execute(sql`INSERT INTO partners (id, name) VALUES ('rp', 'Rail Partner') ON CONFLICT DO NOTHING`);
+    await createIntegrationsRepo(db).saveIntegrations('rp', {
+      ...HTTP_RAIL,
+      payment: { ...HTTP_RAIL.payment, providerType: rail },
+    });
+    await db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country, kyc_status, pep_hit, screening_flagged_at)
+      VALUES (${PHONE}, 'rp', now() - interval '10 days', 'US', 'verified', true, now() - interval '1 hour')`);
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rel_sender', partnerId: 'rp', environment, status: 'in_review', complianceStatus: 'flagged',
+      complianceReasons: ['Large transfer amount.', SENDER_SCREENING_REASON],
+      paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+    }));
+    return store;
+  }
+
+  it('platform release refused while the sender hold is active on an http rail, allowed after the clear', async () => {
+    const store = await heldOn('http');
+    await expect(releaseTransfer(store, db, 'rel_sender', REL)).rejects.toThrow('Cannot release: clear the sender screening hold first.');
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+    // The audited clear lifts the hold (the repo writer the action calls).
+    await createCustomerRepo(db, async () => null).clearScreeningHold('rp', PHONE, new Date());
+    // Review F1/A1: a real-money release needs a live, fresh newest screen (else it re-screens first).
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
+  });
+
+  // Pack 2 review R1 (H2): the platform release re-reads the hold, locked, inside its transaction.
+  it('a stamp that commits between the pre-read and the claim: refused, still in_review, no instruct, no release audit', async () => {
+    const store = await heldOn('http');
+    await createCustomerRepo(db, async () => null).clearScreeningHold('rp', PHONE, new Date());
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
+    senderRace.stampAfterPreRead = { partnerId: 'rp', phone: PHONE };
+    await expect(releaseTransfer(store, db, 'rel_sender', REL)).rejects.toThrow(SENDER_SCREENING_RELEASE_REFUSAL);
+    expect(senderRace.stampAfterPreRead).toBeNull(); // the pre-read ran, then the stamp landed
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
+    expect((await outboxRows()).filter((r) => r.kind === 'settlement.instruct')).toEqual([]);
+    expect((await auditRows()).filter((r) => r.action === 'transfer.release')).toEqual([]);
+  });
+
+  it('partner-scoped release keeps its claim predicate (no platform in-transaction read needed): refused as before', async () => {
+    const store = await heldOn('http');
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
+    await expect(releaseTransfer(store, db, 'rel_sender', REL, { partnerId: 'rp' })).rejects.toThrow(/Cannot release/);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('in_review');
+  });
+
+  it('simulator rail: platform release unchanged', async () => {
+    const store = await heldOn('simulator');
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
+  });
+
+  it("env 'test' on an http rail: platform release unchanged", async () => {
+    const store = await heldOn('http', 'test');
+    await releaseTransfer(store, db, 'rel_sender', REL);
+    expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
   });
 });
 

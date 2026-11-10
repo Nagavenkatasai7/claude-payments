@@ -1,0 +1,42 @@
+{
+  "asOf": "2026-11-10",
+  "threshold": 0.9,
+  "screener": "ListSanctionsScreener (src/lib/sanctions/list-screener.ts) over normalizeName/tokenKey (src/lib/sanctions/normalize.ts)",
+  "note": "Invented names only, on an invented in-memory list. Scores are Jaro-Winkler on the WHOLE token key (sorted normalised tokens), so the same spelling pair scores differently next to other tokens: a pin holds for this exact pair only.",
+  "list": {
+    "source": "ofac-sdn",
+    "version": "fixture-2026-11",
+    "hash": "match-quality-fixture-2026-11",
+    "entries": [
+      { "id": "sdn:9001", "names": ["Zayn Husain"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9002", "names": ["Rashid Chaudhry"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9003", "names": ["Abbas Abdul Rahman"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9004", "names": ["Idris Yusuf"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9005", "names": ["Mohammed Samir"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9006", "names": ["Aram Zeller"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9007", "names": ["Dmitri Volkov"], "type": "Individual", "programs": ["FIXTURE"] },
+      { "id": "sdn:9008", "names": ["Testa"], "type": "Entity", "programs": ["FIXTURE"] },
+      { "id": "sdn:9009", "names": ["Corvina Fixture Shipping Holdings"], "weakNames": ["CFSH"], "type": "Entity", "programs": ["FIXTURE"] },
+      { "id": "sdn:9010", "names": ["Abdul Rahman"], "type": "Individual", "programs": ["FIXTURE"] }
+    ]
+  },
+  "cases": [
+    { "id": "exact", "query": "Zayn Husain", "tag": "block", "listedAs": "Zayn Husain", "entryId": "sdn:9001", "note": "exact strong name" },
+    { "id": "word-order-comma", "query": "HUSAIN, Zayn", "tag": "block", "listedAs": "Zayn Husain", "entryId": "sdn:9001", "note": "case, comma and word order do not change the token key" },
+    { "id": "diacritics-spacing", "query": "  Ráshid   Cháudhry ", "tag": "block", "listedAs": "Rashid Chaudhry", "entryId": "sdn:9002", "note": "diacritics fold, spacing collapses" },
+    { "id": "punctuation", "query": "Abbas Abdul-Rahman", "tag": "block", "listedAs": "Abbas Abdul Rahman", "entryId": "sdn:9003", "note": "a hyphen is a separator" },
+    { "id": "weak-aka-exact", "query": "cfsh", "tag": "review", "listedAs": "CFSH", "entryId": "sdn:9009", "note": "a weak a.k.a. matched exactly is review at score 1, never a block" },
+    { "id": "husain-hussein", "query": "Zayn Hussein", "tag": "review", "listedAs": "Zayn Husain", "entryId": "sdn:9001", "score": 0.94, "note": "transliteration variant reaches review" },
+    { "id": "chaudhry-choudhury", "query": "Rashid Choudhury", "tag": "review", "listedAs": "Rashid Chaudhry", "entryId": "sdn:9002", "score": 0.949, "note": "transliteration variant reaches review" },
+    { "id": "abdul-rahman", "query": "Abbas Abd al-Rahman", "tag": "review", "listedAs": "Abbas Abdul Rahman", "entryId": "sdn:9003", "score": 0.927, "note": "split article reaches review ONLY with the extra given name 'Abbas' on both sides; the bare pair misses (case abdul-rahman-bare)" },
+    { "id": "yusuf-yousef", "query": "Idris Yousef", "tag": "review", "listedAs": "Idris Yusuf", "entryId": "sdn:9004", "score": 0.948, "note": "transliteration variant reaches review" },
+    { "id": "testo-testa", "query": "Testo", "tag": "review", "listedAs": "Testa", "entryId": "sdn:9008", "score": 0.92, "note": "short-name false positive: one letter off a five-letter name is review" },
+    { "id": "mohammed-muhammad", "query": "Muhammad Samir", "tag": "known_gap", "listedAs": "Mohammed Samir", "score": 0.864, "note": "two vowel changes in the first token miss review (R08 to tune)" },
+    { "id": "added-middle-name", "query": "Aram Benedikt Zeller", "tag": "known_gap", "listedAs": "Aram Zeller", "score": 0.883, "note": "an added middle name misses review (R08 to tune)" },
+    { "id": "cyrillic-latin", "query": "Дмитрий Волков", "tag": "known_gap", "listedAs": "Dmitri Volkov", "score": 0.383, "note": "no transliteration: Cyrillic never matches the Latin listing (R08)" },
+    { "id": "abdul-rahman-bare", "query": "Abd al-Rahman", "tag": "known_gap", "listedAs": "Abdul Rahman", "score": 0.87, "note": "split article on a two-token listing misses review: Abd al-Rahman against Abdul Rahman is cleared today (R08 to tune)" },
+    { "id": "unrelated-person", "query": "Priya Raman", "tag": "clear", "note": "unrelated name" },
+    { "id": "unrelated-word", "query": "Mom", "tag": "clear", "note": "a nickname is clear" },
+    { "id": "empty", "query": "   ", "tag": "clear", "note": "an empty name is clear (callers refuse empty names before the screen)" }
+  ]
+}

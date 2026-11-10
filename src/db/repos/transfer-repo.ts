@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import { auditEvents, customers, idempotencyKeys, transfers } from '@/db/schema';
+import { auditEvents, customers, idempotencyKeys, partnerIntegrations, transfers } from '@/db/schema';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, openOptional, rowToTransfer, transferToRow, type TransferRow } from './mappers';
@@ -104,10 +105,13 @@ const fundingGate = () =>
 /**
  * M3-10 follow-up: the partner-release predicates for markPaidIfInReview — the transfer is in
  * `partnerId`'s tenant AND its sender's customer row there exists with no PEP / watchlist hit.
+ * Fix pack 2 review F2 (A2, B1): AND no stamped screening hold that a LATER clear does not cover
+ * (a tie stays held) — the SQL twin of isScreeningCustomerHold (compliance-config.ts), pinned
+ * equal by tests/sender-screening-hold-parity.test.ts. Also guards cancelInReviewForPartner.
  */
 const senderClearForPartnerRelease = (partnerId: PartnerId) => [
   eq(transfers.partnerId, partnerId),
-  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE)`,
+  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
 ];
 
 /**
@@ -877,7 +881,8 @@ export function createTransferRepo(
      * the row belongs to that tenant, and the SENDER's customer row (same
      * tenant, same phone; PK (partner_id, phone)) EXISTS with pep_hit and
      * watchlist_hit both NOT TRUE (NULL = never flagged, as in
-     * isScreeningCustomerHold). A flag raised after the caller's pre-check
+     * isScreeningCustomerHold) and, fix pack 2 review F2, no uncleared
+     * screening_flagged_at stamp. A flag raised after the caller's pre-check
      * (loadSenderScreening) but before this statement therefore refuses the
      * claim, and a missing row refuses it (fail closed). Deliberately no
      * FOR SHARE on the customer row: a flag write committing after this
@@ -901,6 +906,93 @@ export function createTransferRepo(
           ne(transfers.complianceStatus, 'blocked'),
           fundingGate(),
           ...(partnerRelease ? senderClearForPartnerRelease(partnerRelease.partnerId) : []),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Fix pack 2 T4 (R02): the held rows waiting on a fresh sanctions list —
+     * in_review, NOT blocked, reasons containing LIST_UNAVAILABLE (jsonb @>).
+     * Cross-tenant by design (a system sweep, list-hold-rescreen.ts); every
+     * write the caller makes is tenant-scoped (applyListRescreenInReview) or a
+     * guarded claim. Ordered by the hold time then id (transfers_status_paid
+     * serves the status filter); the key is coalesce(paid_at, created_at)
+     * truncated to the millisecond, compared IN SQL, so a JS ms cursor
+     * (`after`, the last row's paidAt ?? createdAt and id) never repeats or
+     * skips a row sharing a millisecond. `demoOnly` (the list is not live)
+     * keeps only rows that need no live list: a sandbox row, or a rail partner
+     * (settlement_partner_id ?? partner_id) whose payment provider is not http.
+     */
+    async listListUnavailableHolds(
+      limit: number,
+      opts: { demoOnly?: boolean; after?: { paidAt: string; id: string } } = {},
+    ): Promise<Transfer[]> {
+      const key = sql`date_trunc('milliseconds', coalesce(${transfers.paidAt}, ${transfers.createdAt}))`;
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.status, 'in_review'),
+          ne(transfers.complianceStatus, 'blocked'),
+          sql`${transfers.complianceReasons} @> ${JSON.stringify([LIST_UNAVAILABLE_REASON])}::jsonb`,
+          opts.demoOnly
+            ? sql`(${transfers.environment} = 'test' OR NOT EXISTS (SELECT 1 FROM ${partnerIntegrations} WHERE ${partnerIntegrations.partnerId} = coalesce(${transfers.settlementPartnerId}, ${transfers.partnerId}) AND ${partnerIntegrations.paymentProviderType} = 'http'))`
+            : undefined,
+          opts.after
+            ? sql`(${key} > ${opts.after.paidAt}::timestamptz OR (${key} = ${opts.after.paidAt}::timestamptz AND ${transfers.id} > ${opts.after.id}))`
+            : undefined,
+        ))
+        .orderBy(key, asc(transfers.id))
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * Fix pack 2 T4 (R02): record the list re-screen verdict on a held row —
+     * compliance_status and compliance_reasons only, status stays in_review (a
+     * blocked row was charged: markPaidIfInReview refuses it, Reject cancels
+     * and refunds it). Guarded: still in_review, not blocked, this tenant.
+     * Null ⇒ a guard failed; the caller's transaction writes nothing else.
+     */
+    async applyListRescreenInReview(
+      id: string,
+      partnerId: PartnerId,
+      v: { complianceStatus: 'flagged' | 'blocked'; reasons: string[] },
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ complianceStatus: v.complianceStatus, complianceReasons: v.reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'in_review'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Pack 2 review R1 (E2): a sanctions MATCH found by the re-screen of a PAID
+     * (charged, not yet instructed) real-money row. compliance_status → blocked
+     * with `reasons`; status stays 'paid' (the ledger mirrors the charge the
+     * rail captured) and refund_status is untouched, so the staff refund paths
+     * still claim it. The settlement.instruct handler and reinstructLocked refuse
+     * a blocked row. Guarded: this tenant, still paid, refund not started, not
+     * already blocked. Call in the caller's transaction with the row locked.
+     * Null ⇒ a guard failed; nothing written.
+     */
+    async blockPaidOnMatch(id: string, partnerId: PartnerId, reasons: string[]): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ complianceStatus: 'blocked', complianceReasons: reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'paid'),
+          eq(transfers.refundStatus, 'none'),
+          ne(transfers.complianceStatus, 'blocked'),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;

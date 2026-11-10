@@ -109,6 +109,7 @@ function indexList(list: SanctionsList): ListIndex {
 
 interface Indexed {
   list: SanctionsList;
+  /** source, version and the screened hash (list + extras); checkedAt is added live by listInfo(). */
   info: SanctionsListInfo;
   idx: ListIndex;
 }
@@ -165,7 +166,16 @@ export class ListSanctionsScreener implements SanctionsScreener {
   }
 
   listInfo(): SanctionsListInfo {
-    if (this.indexed && !this.lastError) return this.indexed.info;
+    if (this.indexed && !this.lastError) {
+      // Fix pack 2 (R02): the age is read from the source on EVERY call (never
+      // bound when the list was indexed), so an old list reads as old.
+      const checkedAt = this.source.checkedAt?.()?.toISOString();
+      return {
+        ...this.indexed.info,
+        baseHash: this.indexed.list.hash,
+        ...(checkedAt ? { checkedAt } : {}),
+      };
+    }
     return { source: this.sourceName, version: this.lastError ? 'unavailable' : 'unloaded', hash: '' };
   }
 

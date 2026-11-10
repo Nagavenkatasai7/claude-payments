@@ -3,16 +3,20 @@
  * Gate #2 of the ruling-7 route contract: an `http` / `simulator` rail (owner
  * OR routed) whose settlement URL fails the sync rule answers 400 "Payment
  * failed" BEFORE captureFunding, and the transfer stays awaiting_payment. A
- * mock owner rail is unaffected.
+ * mock owner rail is unaffected. Fix pack 2 T10: the URL checked is the one
+ * the worker POSTs to (settlementTargetUrl): a simulator rail's is always the
+ * hosted rail, whatever is stored.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
 vi.mock('next/server', async (orig) => {
@@ -131,12 +135,25 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     expect(await outboxCount()).toBe(0);
   });
 
-  it('OWNER rail simulator with an empty URL → 400 before capture (today it charges, then dead-letters)', async () => {
+  it('OWNER rail simulator with an empty stored URL is charged: it settles on the hosted rail (fix pack 2 T10)', async () => {
     rails.byPartner.default = { providerType: 'simulator', credentials: { signingSecret: 's' } };
     await store.saveTransfer(makeTransfer({ id: 'u2' }));
-    expect((await post('u2')).status).toBe(400);
-    expect(capture).not.toHaveBeenCalled();
-    expect((await store.getTransfer('u2'))?.status).toBe('awaiting_payment');
+    expect((await post('u2')).status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('u2'))?.status).toBe('paid');
+  });
+
+  it('a routed simulator rail with an off-origin stored URL is not refused (the hosted URL is what is checked)', async () => {
+    // Fix pack 2 T10: the worker POSTs a simulator instruct only to the hosted
+    // rail, so the stored URL (refused by the sync rule) is never the target.
+    rails.byPartner.railp = { providerType: 'simulator', credentials: { settlementUrl: 'http://10.0.0.5/settle', signingSecret: 's' } };
+    await store.saveTransfer(makeTransfer({ id: 'r2', settlementPartnerId: 'railp' }));
+    const res = await post('r2');
+    expect(res.status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('r2'))?.status).toBe('paid');
+    const kinds = ((await db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((r) => r.kind);
+    expect(kinds).toContain('settlement.instruct');
   });
 
   it.each(BAD_URLS)('ROUTED rail http with %j → 400 before capture', async (url) => {
@@ -150,11 +167,34 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
 
   it('a PUBLIC https owner rail is charged and settles (the gate lets good config through)', async () => {
     rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    // Fix pack 2 T3: live-gate.ts reads the rail type from partner_integrations.
+    await setRailProviderType(db, 'default', 'http');
     await store.saveTransfer(makeTransfer({ id: 'g1' }));
+    // Fix pack 2 T9: an http rail settles only on a live, fresh screen; the
+    // pay-time re-screen runs on a live OFAC list (checked an hour ago).
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
     const res = await post('g1');
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('g1'))?.status).toBe('paid');
+  });
+
+  it('a PUBLIC https owner rail with a STALE list → charged, held in_review, never instructed (fix pack 2 T3)', async () => {
+    rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    await setRailProviderType(db, 'default', 'http');
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
+    await store.saveTransfer(makeTransfer({ id: 's1' }));
+    const res = await post('s1');
+    expect(res.status).toBe(200);
+    const t = await store.getTransfer('s1');
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    const kinds = ((await db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((r) => r.kind);
+    expect(kinds).not.toContain('settlement.instruct');
   });
 
   it('a MOCK owner rail is unaffected (no URL required)', async () => {

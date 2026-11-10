@@ -35,6 +35,7 @@ import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE, RateUnavailableError } from '@/lib/rate';
 import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
+import { realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
@@ -589,6 +590,11 @@ export async function POST(
             { status: 400 },
           );
         }
+        // Fix pack 2 T3 (R02): real money is decided by the transfer's RAIL
+        // partner (routed, else owner) and its environment — never by the
+        // owning partner — and then needs a live list and full name coverage.
+        // The corridor rules stay the owner's.
+        const realMoney = await realMoneyFor(getDb(), transfer);
         const rescreen = await rescreenBeforePay(
           getDb(),
           transfer,
@@ -597,6 +603,7 @@ export async function POST(
             recipientName: (decrypted?.recipientLegalName ?? '').trim() || transfer.recipientName,
           },
           resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
+          { realMoney, stage: 'pay' },
         );
         switch (rescreen.kind) {
           case 'blocked':

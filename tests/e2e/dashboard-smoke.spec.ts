@@ -113,6 +113,13 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
   await expect(
     page.getByRole('table').or(page.getByText(/no partners yet/i)).first(),
   ).toBeVisible();
+
+  // Fix pack 2 T8 (R07): the platform compliance page renders, with the
+  // sanctions list status card (platform staff only; partner staff are
+  // redirected, see the partner test below).
+  await page.goto('/admin-dashboard/compliance');
+  await expect(page.locator('.sh-page-title')).toContainText(/compliance/i);
+  await expect(page.getByText('Sanctions list', { exact: true })).toBeVisible();
 });
 
 // UI redesign M3-2: the partner app is for partner-scoped staff only. The smoke account is a

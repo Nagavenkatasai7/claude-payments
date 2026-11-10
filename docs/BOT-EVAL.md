@@ -31,7 +31,7 @@ the eval itself) or the `@anthropic-ai/sdk` version. Any other pull request
 finishes the job in seconds, so the required `ci` check never sees it skipped.
 Push runs on `main` are out of scope, because the nightly run covers `main`.
 
-Cost: about 350 calls a night (58 cases x 2 models x 3 runs) and about 120
+Cost: about 354 calls a night (59 cases x 2 models x 3 runs) and about 120
 calls for each in-scope pull request.
 
 ## Pass policy (Q-R31.1)

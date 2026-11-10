@@ -234,3 +234,201 @@ describe('screenTransfer — evidence', () => {
     await expect(screenTransfer({ amountUsd: 10, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US', screener })).rejects.toThrow('boom');
   });
 });
+
+// ── Fix pack 2 T2 (R02): requireLiveList — a real-money screen clears only on
+// a live OFAC SDN list; otherwise it is held (flagged, LIST_UNAVAILABLE first).
+import { afterEach } from 'vitest';
+import {
+  LIST_UNAVAILABLE_REASON,
+  POSSIBLE_MATCH_REASON,
+  LARGE_AMOUNT_REASON,
+  VELOCITY_REASON,
+  RECIPIENT_WATCHLIST_REASON,
+} from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+
+describe('screenTransfer — requireLiveList (fix pack 2 R02)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(original));
+  const HOUR = 3_600_000;
+  const base = { amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' as const };
+
+  it('mock + clean -> flagged [LIST_UNAVAILABLE], list_unavailable, not_live', async () => {
+    const r = await screenTransfer({ ...base, requireLiveList: true });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(r.evidence).toMatchObject({ decision: 'list_unavailable', listFitness: 'not_live', listSource: 'mock-watchlist' });
+  });
+
+  it('mock + \'John Doe\' -> blocked, block reasons only', async () => {
+    const r = await screenTransfer({ ...base, amountUsd: 5000, recipientName: 'John Doe', requireLiveList: true });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+    expect(r.evidence).toMatchObject({ decision: 'match', listFitness: 'not_live' });
+  });
+
+  it('fresh source -> cleared, live', async () => {
+    primeOfacSource({ checkedAgoMs: HOUR });
+    const now = new Date();
+    const r = await screenTransfer({ ...base, requireLiveList: true, now });
+    expect(r.status).toBe('cleared');
+    expect(r.reasons).toEqual([]);
+    expect(r.evidence).toMatchObject({ decision: 'clear', listFitness: 'live', listSource: 'ofac-sdn' });
+    expect(r.evidence!.listCheckedAt).toBeDefined();
+    expect(r.evidence!.listBaseHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.evidence!.listBaseHash).not.toBe(r.evidence!.listHash);
+  });
+
+  it('stale source -> flagged, stale, listCheckedAt set', async () => {
+    primeOfacSource({ checkedAgoMs: 37 * HOUR });
+    const r = await screenTransfer({ ...base, requireLiveList: true });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(r.evidence).toMatchObject({ decision: 'list_unavailable', listFitness: 'stale' });
+    expect(Date.now() - Date.parse(r.evidence!.listCheckedAt!)).toBeGreaterThan(36 * HOUR);
+  });
+
+  it('`now` decides the age: a list live now is stale 37 h later', async () => {
+    primeOfacSource({ checkedAgoMs: HOUR });
+    const later = new Date(Date.now() + 37 * HOUR);
+    const r = await screenTransfer({ ...base, requireLiveList: true, now: later });
+    expect(r.status).toBe('flagged');
+    expect(r.evidence!.listFitness).toBe('stale');
+  });
+
+  it('possible match -> [LIST_UNAVAILABLE, POSSIBLE_MATCH], possible_match', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'mock-watchlist', version: 'static', hash: 'h' }),
+      screen: async () => ({ matched: false, possibleMatch: true, matchScore: 0.93, entryId: 'mock:1' }),
+    };
+    const r = await screenTransfer({ ...base, screener, requireLiveList: true });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON, POSSIBLE_MATCH_REASON]);
+    expect(r.evidence).toMatchObject({ decision: 'possible_match', listFitness: 'not_live' });
+  });
+
+  it('amount >= 1000 -> [LIST_UNAVAILABLE, LARGE]', async () => {
+    const r = await screenTransfer({ ...base, amountUsd: 1000, requireLiveList: true });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON, LARGE_AMOUNT_REASON]);
+  });
+
+  it('throw branch keeps LARGE and VELOCITY', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'ofac-sdn', version: 'unavailable', hash: '' }),
+      screen: async () => { throw new SanctionsListUnavailableError(); },
+    };
+    for (const requireLiveList of [undefined, true]) {
+      const r = await screenTransfer({ ...base, amountUsd: 1500, transfersToday: 5, screener, requireLiveList });
+      expect(r.status).toBe('flagged');
+      expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON, LARGE_AMOUNT_REASON, VELOCITY_REASON]);
+      expect(r.evidence).toMatchObject({ decision: 'list_unavailable', listFitness: 'not_live' });
+    }
+    const small = await screenTransfer({ ...base, screener });
+    expect(small.reasons).toEqual([LIST_UNAVAILABLE_REASON]);
+  });
+
+  it('without requireLiveList: clear/match/possible/amount results equal today\'s (demo pin)', async () => {
+    const possible: SanctionsScreener = {
+      listInfo: () => ({ source: 'mock-watchlist', version: 'static', hash: 'h' }),
+      screen: async () => ({ matched: false, possibleMatch: true, matchScore: 0.93, entryId: 'mock:1' }),
+    };
+    const cases: Array<[Parameters<typeof screenTransfer>[0], string, string[]]> = [
+      [base, 'cleared', []],
+      [{ ...base, recipientName: 'John Doe' }, 'blocked', [RECIPIENT_WATCHLIST_REASON]],
+      [{ ...base, screener: possible }, 'flagged', [POSSIBLE_MATCH_REASON]],
+      [{ ...base, amountUsd: 1500 }, 'flagged', [LARGE_AMOUNT_REASON]],
+      [{ ...base, requireLiveList: false }, 'cleared', []],
+    ];
+    for (const [input, status, reasons] of cases) {
+      const r = await screenTransfer(input);
+      expect(r.status).toBe(status);
+      expect(r.reasons).toEqual(reasons);
+      expect(r.evidence!.decision).not.toBe('list_unavailable');
+    }
+    // A stale OFAC list still clears a demo screen.
+    primeOfacSource({ checkedAgoMs: 40 * HOUR });
+    const stale = await screenTransfer(base);
+    expect(stale.status).toBe('cleared');
+    expect(stale.evidence).toMatchObject({ decision: 'clear', listFitness: 'stale' });
+  });
+});
+
+// ── Fix pack 2 T9 (R02): alsoRecipientNames — every further name the payee is
+// known by is screened as a 'recipient' party with the same screener.
+describe('screenTransfer — alsoRecipientNames (fix pack 2 T9)', () => {
+  const base = { amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' as const };
+
+  it('a match on the second name blocks with RECIPIENT_WATCHLIST', async () => {
+    const r = await screenTransfer({ ...base, senderName: 'Clean Person', alsoRecipientNames: ['John Doe'] });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+    expect(r.evidence!.decision).toBe('match');
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('Mom'), matched: false, matchScore: 0 },
+      { role: 'sender', inputHash: inputHash('Clean Person'), matched: false, matchScore: 0 },
+      { role: 'recipient', inputHash: inputHash('John Doe'), matched: true, matchScore: 1, matchedEntryId: 'mock:0' },
+    ]);
+    // A live-list screen still blocks first.
+    const live = await screenTransfer({ ...base, requireLiveList: true, alsoRecipientNames: ['John Doe'] });
+    expect(live.status).toBe('blocked');
+    expect(live.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+  });
+
+  it('possible on it -> POSSIBLE_MATCH', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'test-list', version: 'v1', hash: 'h' }),
+      screen: async ({ name }) => name === 'Holder Name'
+        ? { matched: false, possibleMatch: true, matchScore: 0.92, entryId: 'sdn:9' }
+        : { matched: false },
+    };
+    const r = await screenTransfer({ ...base, screener, alsoRecipientNames: ['Holder Name'] });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([POSSIBLE_MATCH_REASON]);
+    expect(r.evidence!.decision).toBe('possible_match');
+    expect(r.evidence!.parties[1]).toMatchObject({ role: 'recipient', matchScore: 0.92, matchedEntryId: 'sdn:9' });
+  });
+
+  it('duplicates and empties ignored; evidence gains one party per distinct name', async () => {
+    const seen: string[] = [];
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'test-list', version: 'v1', hash: 'h' }),
+      screen: async ({ name }) => { seen.push(name); return { matched: false }; },
+    };
+    const r = await screenTransfer({ ...base, screener, alsoRecipientNames: ['', '  ', 'mom', 'Anita Rao', 'anita  rao', 'Second Holder'] });
+    expect(r.status).toBe('cleared');
+    expect(seen).toEqual(['Mom', 'Anita Rao', 'Second Holder']);
+    expect(r.evidence!.parties.map((p) => p.inputHash)).toEqual([inputHash('Mom'), inputHash('Anita Rao'), inputHash('Second Holder')]);
+    expect(r.evidence!.parties.every((p) => p.role === 'recipient')).toBe(true);
+  });
+
+  it('the list-unavailable branch records each further name as an unscreened recipient party', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'ofac-sdn', version: 'unavailable', hash: '' }),
+      screen: async () => { throw new SanctionsListUnavailableError(); },
+    };
+    const r = await screenTransfer({ ...base, screener, senderName: 'Clean Person', alsoRecipientNames: ['Second Holder'] });
+    expect(r.status).toBe('flagged');
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('Mom'), matched: false, matchScore: 0 },
+      { role: 'sender', inputHash: inputHash('Clean Person'), matched: false, matchScore: 0 },
+      { role: 'recipient', inputHash: inputHash('Second Holder'), matched: false, matchScore: 0 },
+    ]);
+  });
+
+  it('absent -> unchanged (demo pin)', async () => {
+    for (const input of [
+      base,
+      { ...base, senderName: 'Clean Person' },
+      { ...base, recipientName: 'John Doe' },
+      { ...base, amountUsd: 1500 },
+    ]) {
+      const a = await screenTransfer(input);
+      const b = await screenTransfer({ ...input, alsoRecipientNames: [] });
+      expect(b.status).toBe(a.status);
+      expect(b.reasons).toEqual(a.reasons);
+      expect(b.evidence!.parties).toEqual(a.evidence!.parties);
+      expect(b.evidence!.decision).toBe(a.evidence!.decision);
+    }
+  });
+});

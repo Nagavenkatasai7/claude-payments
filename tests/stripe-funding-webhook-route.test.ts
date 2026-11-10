@@ -22,8 +22,11 @@ let db: Awaited<ReturnType<typeof freshDb>>;
 // Review M2: the pre-settlement re-screen reads Redis-backed stores in
 // production; here it is stubbed to 'cleared' (its own suite covers the
 // blocked / flagged / error branches: tests/stripe-funded-settle.test.ts).
-vi.mock('@/lib/pay-rescreen', () => ({
+vi.mock('@/lib/pay-rescreen', async (orig) => ({
+  ...(await orig<typeof import('@/lib/pay-rescreen')>()),
   rescreenBeforePay: async (_db: unknown, t: unknown) => ({ kind: 'cleared', transfer: t }),
+  // Fix pack 2 T3: the funded settle's default re-screen is rescreenOnFile.
+  rescreenOnFile: async (_db: unknown, t: unknown) => ({ kind: 'cleared', transfer: t }),
 }));
 vi.mock('@/lib/store', () => ({ getStore: () => ({ getTransferDecrypted: async () => null }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({ getCustomer: async () => ({ fullName: 'Test Sender' }) }) }));

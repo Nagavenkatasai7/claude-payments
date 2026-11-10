@@ -425,6 +425,10 @@ export interface PartnerSupportConfig {
   // the dashboard banner only. Optional jsonb key: an older build ignores it and
   // its support save spreads `prev`, so it survives a rolling-release overlap.
   alertEmail?: string;
+  // Fix pack 2 T5 (R04): where sanctions-block notices are emailed (the licensed
+  // partner's blocking-report duty). Absent ⇒ alertEmail. Staff-set, validated
+  // like alertEmail and audited by saveComplianceAlertEmailAction.
+  complianceAlertEmail?: string;
 }
 
 /** Program-Fix 15 PR B — staff-entered, never invented. Every field optional in storage. */
@@ -671,8 +675,17 @@ export interface Customer {
   kycReviewState?: KycReviewState;
   idLast4?: string;          // last 4 of the verified government ID (display only; full number never stored)
   idDocType?: GovIdType;     // verified document class (mirrors the Persona result)
-  watchlistHit?: boolean;    // a Persona watchlist/sanctions report matched → hard hold
+  // A Persona watchlist / PEP report matched. Not a hold by itself: on a
+  // real-money rail it is the sender screening hold (compliance-config.ts
+  // senderScreeningHoldActive) until a platform admin clears it.
+  watchlistHit?: boolean;    // a Persona watchlist/sanctions report matched
   pepHit?: boolean;          // a Persona PEP report matched
+  // Fix pack 2 (R06): ISO times of the last screening hit seen and of the
+  // audited platform clear. READ-ONLY here (mapped in rowToCustomer only, never
+  // in customerToRow): stampScreeningFlagged / clearScreeningHold own them, so
+  // a stale whole-row saveCustomer can never rewrite them.
+  screeningFlaggedAt?: string;
+  screeningClearedAt?: string;
   kycSubmittedAt?: string;   // ISO — inquiry created / customer entered the hosted flow
   kycApprovedBy?: string;    // staff username who approved (audit)
   kycApprovedAt?: string;    // ISO

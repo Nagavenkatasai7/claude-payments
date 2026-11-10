@@ -60,6 +60,26 @@ vi.mock('@/db/repos/aux-repos', async (orig) => {
   };
 });
 
+// Pack 2 review round 3 (M1): a sender screening stamp that commits right
+// AFTER settleOrHold's unlocked flags read; the locked read inside the settle
+// transaction is the one that decides.
+const senderRace = vi.hoisted(() => ({ stampAfterPreRead: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
+  return {
+    ...real,
+    readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
+      const flags = await real.readSenderScreeningFlags(...a);
+      if (senderRace.stampAfterPreRead && !a[3]?.forUpdate) {
+        senderRace.stampAfterPreRead = false;
+        await a[0].execute(q`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = ${a[1]} AND phone = ${a[2]}`);
+      }
+      return flags;
+    },
+  };
+});
+
 async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
   const r = await db.execute(sql`SELECT partner_id, actor, action, subject_id, meta FROM audit_events ORDER BY id`);
   return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
@@ -75,6 +95,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
   failAudit = false;
+  senderRace.stampAfterPreRead = false;
 });
 
 describe('beginSettlement — webhook-driven rail (http/simulator)', { retry: 0 }, () => {
@@ -439,5 +460,384 @@ describe('releaseHold — staff audit context (Program-Fix 28)', { retry: 0 }, (
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
     await releaseHold(db, (await store.getTransfer('st_t1'))!, SIMULATOR);
     expect(await auditRows()).toHaveLength(0);
+  });
+});
+
+// ── Fix pack 2 T9 (R02): the settle-time live-list backstop. A real-money rail
+// (http, env not 'test') settles only on a newest screen that is live and fresh;
+// otherwise the transfer is HELD with LIST_UNAVAILABLE added. Nothing else changes.
+import { LIST_UNAVAILABLE_REASON, LARGE_AMOUNT_REASON } from '@/lib/compliance-config';
+import { captureQueries } from './helpers-db';
+import { seedLiveEvidence } from './helpers-sanctions';
+
+const HTTP: PartnerIntegrations = {
+  kyc: {},
+  payment: {
+    providerType: 'http',
+    credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+    webhookSecret: 'w',
+  },
+  whatsapp: {},
+};
+const H = 3_600_000;
+
+describe('settleOrHold — settle-time live-list backstop (fix pack 2 T9)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+
+  it('http rail, cleared, newest evidence live and fresh -> started', async () => {
+    await store.saveTransfer(live());
+    await seedLiveEvidence(db, live(), { listFitness: 'not_live', at: new Date(Date.now() - 60_000) });
+    await seedLiveEvidence(db, live());
+    expect(await settleOrHold(db, live(), HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1', 'instruct:st_t1']);
+  });
+
+  it('evidence stale / mock (not_live) / absent -> held, LIST_UNAVAILABLE added, no settlement.instruct', async () => {
+    const cases: Array<[string, ((t: Transfer) => Promise<unknown>) | null]> = [
+      ['st_stale', (t) => seedLiveEvidence(db, t, { screenedAgoMs: 37 * H })],
+      ['st_staleList', (t) => seedLiveEvidence(db, t, { listFitness: 'stale' })],
+      ['st_mock', (t) => seedLiveEvidence(db, t, { listFitness: 'not_live' })],
+      ['st_old', (t) => seedLiveEvidence(db, t, { listFitness: null })],
+      ['st_none', null],
+      // the newest row decides: a live screen followed by a mock-list re-screen
+      ['st_newest', async (t) => {
+        await seedLiveEvidence(db, t, { at: new Date(Date.now() - 60_000) });
+        await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+      }],
+    ];
+    for (const [id, seed] of cases) {
+      const t = live({ id });
+      await store.saveTransfer(t);
+      if (seed) await seed(t);
+      expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+      const after = await store.getTransfer(id);
+      expect(after?.status).toBe('in_review');
+      expect(after?.complianceStatus).toBe('flagged');
+      expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    }
+    const keys = (await outboxRows()).map((r) => r.dedupe_key);
+    expect(keys.filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+    expect(keys).toHaveLength(cases.length); // one held stage-1 each
+  });
+
+  it('flagged LARGE + not live -> held with [LARGE, LIST_UNAVAILABLE]', async () => {
+    const t = live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
+  });
+
+  it('the LEDGER reasons are kept, never the caller\'s stale copy, and never duplicated', async () => {
+    await store.saveTransfer(live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON] }));
+    expect(await settleOrHold(db, live(), HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+  });
+
+  it("simulator / mock / env 'test' -> unchanged, zero audit reads", async () => {
+    const runs: Array<[string, Transfer, PartnerIntegrations]> = [
+      ['st_sim', live({ id: 'st_sim' }), SIMULATOR],
+      ['st_mockrail', live({ id: 'st_mockrail' }), MOCK],
+      ['st_sandbox', live({ id: 'st_sandbox', environment: 'test' }), HTTP],
+    ];
+    for (const [id, t, integrations] of runs) {
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'not_live' }); // a mock-list screen
+      const stop = captureQueries();
+      const r = await settleOrHold(db, t, integrations);
+      const qs = stop();
+      expect(r.kind).toBe('started');
+      expect(qs.filter((q) => q.sql.includes('audit_events'))).toEqual([]);
+      expect((await store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    }
+  });
+
+  it('rail switched simulator -> http after a mock-list clear -> held', async () => {
+    // Minted on a simulator rail: the mock list cleared it (not_live evidence).
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    // The rail partner switched to http before the settlement.
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1']);
+  });
+
+  it('a blocked transfer is still refused first (no read, no hold)', async () => {
+    const t = live({ complianceStatus: 'blocked' });
+    await store.saveTransfer(t);
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'refused', complianceStatus: 'blocked' });
+    expect((await store.getTransfer('st_t1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('beginHold — addReasons (fix pack 2 T9)', { retry: 0 }, () => {
+  it('beginHold without opts unchanged: compliance status and reasons untouched', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    expect(await beginHold(db, { ...fixture(), complianceStatus: 'flagged' })).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON]);
+  });
+
+  it('addReasons on a cleared row flags it with the reasons and holds it, in one transaction', async () => {
+    await store.saveTransfer(fixture());
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:st_t1' }]);
+  });
+
+  it("addReasons on a row no longer awaiting -> 'already', nothing written", async () => {
+    await store.saveTransfer({ ...fixture(), status: 'paid' });
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'already' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('paid');
+    expect(after?.complianceStatus).toBe('cleared');
+    expect(after?.complianceReasons).toEqual([]);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it("addReasons on a blocked row -> 'already', never downgraded", async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'blocked', complianceReasons: ['x'] });
+    expect(await beginHold(db, fixture(), { addReasons: [LIST_UNAVAILABLE_REASON] })).toEqual({ kind: 'already' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.complianceStatus).toBe('blocked');
+    expect(after?.complianceReasons).toEqual(['x']);
+  });
+});
+
+// ── Fix pack 2 T6 (R06): the sender screening hold at pay. On a real-money rail
+// a not-blocked transfer whose SENDER (owning tenant) has an active screening
+// hold is held with SENDER_SCREENING_REASON added — both branches (a cleared
+// row and one already flagged LARGE / VELOCITY / EDD / AML).
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { seedSender } from './helpers-db';
+
+describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const PHONE = fixture().phone;
+  const flagNow = async () => {
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${PHONE}`);
+  };
+
+  it('cleared + http + now flagged -> in_review, reason added, no settlement.instruct', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1']);
+  });
+
+  it('flagged LARGE + active sender hold at pay -> reasons gain SENDER_SCREENING', async () => {
+    const t = live({ complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, SENDER_SCREENING_REASON]);
+  });
+
+  it('stale list + active sender hold -> both reasons', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await flagNow();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect((await store.getTransfer('st_t1'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON, SENDER_SCREENING_REASON]);
+  });
+
+  it('a cleared hold settles; another tenant\'s flagged row for the same phone is never read', async () => {
+    await seedPartner(db, 'other');
+    await seedSender(db, { partnerId: 'other', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true WHERE partner_id = 'other' AND phone = ${PHONE}`);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() - interval '2 hours', screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme' AND phone = ${PHONE}`);
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+  });
+
+  // Pack 2 review R1 (H2): the platform release re-checks the hold inside its transaction.
+  it("releaseHold, platform, http, sender stamped: 'sender_hold', still in_review, nothing enqueued or audited", async () => {
+    const t = live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await flagNow();
+    expect(await releaseHold(db, t, HTTP, { actor: 'plat', reason: 'ok' })).toEqual({ kind: 'sender_hold' });
+    expect((await store.getTransfer('st_t1'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('releaseHold, platform, simulator, sender stamped: released, no customers read (not real money)', async () => {
+    const t = live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+    await store.saveTransfer(t);
+    await flagNow();
+    const stop = captureQueries();
+    const r = await releaseHold(db, t, SIMULATOR);
+    const qs = stop();
+    expect(r).toEqual({ kind: 'released', webhookDriven: true });
+    expect(qs.filter((q) => q.sql.includes('"customers"') && q.sql.toLowerCase().includes('for update'))).toEqual([]);
+  });
+
+  it('simulator -> settles, no customers read', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await flagNow();
+    const stop = captureQueries();
+    const r = await settleOrHold(db, t, SIMULATOR);
+    const qs = stop();
+    expect(r.kind).toBe('started');
+    expect(qs.filter((q) => q.sql.includes('"customers"'))).toEqual([]);
+  });
+
+  // Pack 2 review round 3 (M1): the window between the unlocked flags read and
+  // the paid flip is closed on real money: the settle transaction locks the
+  // transfer, then the customer row, and re-reads the flags.
+  it('M1: http, a stamp commits after the unlocked read -> held (SENDER_SCREENING), no instruct, customers read FOR UPDATE in the settle', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    senderRace.stampAfterPreRead = true;
+    const stop = captureQueries();
+    const r = await settleOrHold(db, t, HTTP);
+    const qs = stop();
+    expect(senderRace.stampAfterPreRead).toBe(false); // the stamp landed
+    expect(r).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await outboxRows()).map((r2) => r2.dedupe_key)).toEqual(['stage1:st_t1']);
+    const lower = qs.map((q) => q.sql.toLowerCase());
+    const tLock = lower.findIndex((q) => q.includes('"transfers"') && q.includes('for update'));
+    const cLock = lower.findIndex((q) => q.includes('"customers"') && q.includes('for update'));
+    expect(tLock).toBeGreaterThanOrEqual(0);
+    expect(cLock).toBeGreaterThan(tLock); // transfer first, then customer
+  });
+
+  it('M1: http, no stamp -> started; the locked re-read runs and finds no hold', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    const stop = captureQueries();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    const qs = stop();
+    expect(qs.filter((q) => q.sql.includes('"customers"') && q.sql.toLowerCase().includes('for update'))).toHaveLength(1);
+    expect((await outboxRows()).map((r2) => r2.dedupe_key)).toEqual(['stage1:st_t1', 'instruct:st_t1']);
+  });
+
+  it("M1: simulator / mock / env 'test' -> no customers read and no transfer lock in the settle", async () => {
+    const runs: Array<[Transfer, PartnerIntegrations]> = [
+      [live({ id: 'st_m1sim' }), SIMULATOR],
+      [live({ id: 'st_m1mock' }), MOCK],
+      [live({ id: 'st_m1test', environment: 'test' }), HTTP],
+    ];
+    await flagNow();
+    for (const [t, integrations] of runs) {
+      await store.saveTransfer(t);
+      const stop = captureQueries();
+      const r = await settleOrHold(db, t, integrations);
+      const qs = stop();
+      expect(r.kind).toBe('started');
+      expect(qs.filter((q) => q.sql.includes('"customers"'))).toEqual([]);
+      expect(qs.filter((q) => q.sql.toLowerCase().includes('for update'))).toEqual([]);
+    }
+  });
+
+  it('flags read error -> throws, nothing paid', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    // The flags read fails (the table is unreadable); nothing else in the pay path reads it.
+    await db.execute(sql`ALTER TABLE customers RENAME TO customers_gone`);
+    try {
+      await expect(settleOrHold(db, t, HTTP)).rejects.toThrow();
+    } finally {
+      await db.execute(sql`ALTER TABLE customers_gone RENAME TO customers`);
+    }
+    expect((await store.getTransfer('st_t1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toEqual([]);
+  });
+});
+
+// ── Pack 2 review round 3 (M5): the lock order on a real-money rail. Where a
+// path locks both rows, the transfer row is locked first, then the sender's
+// customer row (FOR UPDATE), and only then is the transfer claimed (UPDATE).
+// Dropping a lock (e.g. { forUpdate: true } in platformSenderHoldLocked) fails
+// these: a sequential stamp test cannot tell a locked read from a plain one.
+import { releaseHoldAfterRescreen } from '@/lib/settlement';
+import type { ComplianceResult } from '@/lib/compliance';
+
+function lockOrder(qs: Array<{ sql: string }>): { tLock: number; cLock: number; claim: number } {
+  const lower = qs.map((q) => q.sql.toLowerCase());
+  return {
+    tLock: lower.findIndex((q) => q.includes('"transfers"') && q.includes('for update')),
+    cLock: lower.findIndex((q) => q.includes('"customers"') && q.includes('for update')),
+    claim: lower.findIndex((q) => q.startsWith('update "transfers"')),
+  };
+}
+
+function expectTransferThenCustomerThenClaim(qs: Array<{ sql: string }>): void {
+  const { tLock, cLock, claim } = lockOrder(qs);
+  expect(tLock).toBeGreaterThanOrEqual(0);
+  expect(cLock).toBeGreaterThan(tLock);
+  expect(claim).toBeGreaterThan(cLock);
+}
+
+describe('lock order on a real-money rail: transfer, then customer, then the claim (review round 3 M5)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const inReview = () => live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+
+  beforeEach(async () => {
+    await seedSender(db, { partnerId: 'acme', phone: fixture().phone }); // a clear sender
+  });
+
+  it('releaseHold, platform, http, clear sender -> released; the customer lock sits between the transfer lock and the claim', async () => {
+    const t = inReview();
+    await store.saveTransfer(t);
+    const stop = captureQueries();
+    expect(await releaseHold(db, t, HTTP, { actor: 'plat', reason: 'ok' })).toEqual({ kind: 'released', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(stop());
+  });
+
+  it('releaseHoldAfterRescreen, platform, http, live clear re-screen, clear sender -> released; same order', async () => {
+    const t = inReview();
+    await store.saveTransfer(t);
+    const result: ComplianceResult = {
+      status: 'cleared',
+      reasons: [],
+      evidence: {
+        listSource: 'ofac-sdn', listVersion: 'v1', listHash: 'h', screenedAt: new Date().toISOString(),
+        decision: 'clear', parties: [], listFitness: 'live', listCheckedAt: new Date().toISOString(),
+      },
+    };
+    const stop = captureQueries();
+    const r = await releaseHoldAfterRescreen(db, t.id, { result, uncovered: [], railIntegrations: HTTP, audit: { actor: 'plat', reason: 'ok' } });
+    const qs = stop();
+    expect(r).toEqual({ kind: 'released', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(qs);
+  });
+
+  it('beginSettlement, http, clear sender -> started; same order before the paid flip', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    const stop = captureQueries();
+    expect(await beginSettlement(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(stop());
   });
 });

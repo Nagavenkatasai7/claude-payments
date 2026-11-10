@@ -11,6 +11,7 @@ import {
   parseDisclosureForm,
   parseSupportPortal,
   setAlertEmail,
+  setComplianceAlertEmail,
   setDisclosure,
   setSupportPortal,
   type DisclosureParseReason,
@@ -91,6 +92,19 @@ export async function saveAlertEmailAction(formData: FormData): Promise<ActionRe
   if (!parsed.ok) return refused('partner.settings.alert.invalid');
   if (!(await tenantExists(ctx))) return refused('partner.settings.notFound');
   return write('partner.settings.alert_email', ctx, () => setAlertEmail(getDb(), ctx.partnerId, actorOf(ctx), parsed.value));
+}
+
+// Fix pack 2 T5 (R04): where sanctions-block notices go (blank ⇒ the alert email). Same rules.
+export async function saveComplianceAlertEmailAction(formData: FormData): Promise<ActionResult> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(POLICY);
+  const raw = formData.get('complianceAlertEmail');
+  // A missing field never clears the address: only an explicit blank does.
+  if (typeof raw !== 'string') return refused('partner.settings.compliance.invalid');
+  const parsed = parseAlertEmail(raw);
+  if (!parsed.ok) return refused('partner.settings.compliance.invalid');
+  if (!(await tenantExists(ctx))) return refused('partner.settings.notFound');
+  return write('partner.settings.compliance_email', ctx, () => setComplianceAlertEmail(getDb(), ctx.partnerId, actorOf(ctx), parsed.value));
 }
 
 export async function saveDisclosureAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {

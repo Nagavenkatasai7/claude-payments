@@ -3,7 +3,8 @@ import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRate
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
-import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
+import { railPartnerOf, realMoneyRail } from './live-gate';
+import { resolveCorridorRules, senderScreeningHoldActive, SENDER_SCREENING_REASON, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
@@ -448,6 +449,18 @@ export async function createTransferWithOutcome(
   const settlementPartnerId =
     input.quote && input.environment !== 'test' ? input.settlementPartnerId : undefined;
 
+  // ── Fix pack 2 (R02): is this mint real money? ────────────────────────────
+  // The RAIL partner's provider type (the COMPUTED route above, else the
+  // owner), read ONCE on the root handle ABOVE the lock (never through `ops`:
+  // PGlite has one connection, and on Neon it would hold a second pool
+  // connection per mint). Never throws: a failed read is real money (the
+  // stricter path). A sandbox ('test') mint is never real money and reads nothing.
+  const railProviderType =
+    input.environment === 'test'
+      ? null
+      : await store.railProviderType(railPartnerOf({ partnerId: input.partnerId, settlementPartnerId }));
+  const realMoney = realMoneyRail({ environment: input.environment ?? 'live', railProviderType });
+
   // ── ONE locked mint per (partner, phone) ──────────────────────────────────
   // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all
   // on ledger totals read under the lock, so two concurrent mints can never
@@ -464,7 +477,7 @@ export async function createTransferWithOutcome(
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
-      requote, quotedCount, rewardPlan,
+      requote, quotedCount, rewardPlan, railProviderType, realMoney,
     }),
   );
   const transfer = minted.transfer;
@@ -519,6 +532,10 @@ interface PreparedMint {
   quotedCount?: number;
   /** B3: the approved quote's reward, cleared by the pre-lock checks (absent ⇒ none). */
   rewardPlan?: RewardPlan;
+  /** Fix pack 2 (R02): the rail partner's payment provider type (null: none / sandbox; undefined: the read failed). */
+  railProviderType: string | null | undefined;
+  /** Fix pack 2 (R02): realMoneyRail — the screen then requires a live sanctions list. */
+  realMoney: boolean;
 }
 
 /** B3: a reward the mint will re-check under the lock and record. */
@@ -684,6 +701,8 @@ async function mintLocked(
     sourceCountry: p.sourceCountry,    // NEW (P5)
     rules: p.rules,                    // NEW (P5)
     senderName: input.senderName,      // NEW (KYC) — screened via the same seam (undefined ⇒ no-op)
+    requireLiveList: p.realMoney,      // Fix pack 2 (R02): real money clears only on a live list
+    now,
   });
 
   // EDD merge: a watchlist BLOCK always wins; EDD only ever ADDS a flag.
@@ -728,6 +747,15 @@ async function mintLocked(
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
     }
+  }
+  // ── Sender screening hold (fix pack 2 T6, R06) ────────────────────────────
+  // Real-money rails only (no read otherwise): a sender with a Persona
+  // watchlist / PEP hit (or a stamped flaggedAt) and no later platform clear
+  // is held. A read error throws out of the lock (the mint fails, nothing is
+  // written). A watchlist BLOCK still wins.
+  if (p.realMoney && complianceStatus !== 'blocked' && senderScreeningHoldActive(await ops.senderScreeningFlags())) {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, SENDER_SCREENING_REASON];
   }
   // ── Missing sender identity (Program-Fix 14 follow-up) ────────────────────
   // AFTER screening, EDD and the AML gate so their verdicts are unchanged; it
@@ -800,6 +828,12 @@ async function mintLocked(
   if (compliance.evidence) {
     await ops.recordAudit(sanctionsAuditEvent(input.partnerId, transfer.id, compliance.evidence));
   }
+  // Fix pack 2 (R02): a real-money mint screened on a list that is not live
+  // was held for it: ONE ops.alert per Eastern day, in this transaction (a
+  // later refusal rolls it back with the row). A block needs no list alert.
+  if (p.realMoney && compliance.evidence?.listFitness !== 'live' && complianceStatus !== 'blocked') {
+    await ops.enqueueListNotLiveAlert();
+  }
 
   // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────
   // complianceStatus is FINAL here (screenTransfer + the EDD merge above). A
@@ -815,6 +849,16 @@ async function mintLocked(
       ? { ...transfer, payoutDestination: '' }
       : transfer;
     await ops.insertTransfer(blockedRow, { screening: compliance.evidence });
+    // Fix pack 2 T5 (R04): the sanctions.block audit and (unless quiet) the ops
+    // alert and partner emails, in this transaction with the blocked row.
+    await ops.recordSanctionsBlock({
+      subjectId: blockedRow.id,
+      railPartnerId: railPartnerOf(blockedRow),
+      stage: 'mint',
+      environment: blockedRow.environment ?? 'live',
+      realMoney: p.realMoney,
+      evidence: compliance.evidence,
+    });
     return { transfer: blockedRow, replayed: false };
   }
 
@@ -891,6 +935,12 @@ export interface BlockedAttemptInput {
   reasons: string[];
   /** Program-Fix 14: the quote-time screen's evidence (screen.evidence). */
   evidence?: ScreeningEvidence;
+  /**
+   * Fix pack 2 T5 (R04): the card-time block notices (sanctions/notices.ts),
+   * written in the blocked row's transaction. Honoured with `evidence` only
+   * (a blocked screen always carries it).
+   */
+  notice?: { realMoney: boolean; railPartnerId?: PartnerId };
   /** Step 0 FX-7: the quote-time rate provenance (absent ⇒ none stamped). */
   fxOrigin?: FxRateOrigin;
   fxAsOf?: string;
@@ -946,6 +996,17 @@ export async function recordBlockedAttempt(
     await store.recordBlockedWithEvidence(
       transfer,
       sanctionsAuditEvent(input.partnerId, transfer.id, input.evidence),
+      input.notice
+        ? {
+            partnerId: input.partnerId,
+            railPartnerId: input.notice.railPartnerId,
+            subjectId: transfer.id,
+            stage: 'card',
+            environment: 'live', // the bot never mints sandbox
+            realMoney: input.notice.realMoney,
+            evidence: input.evidence,
+          }
+        : undefined,
     );
   } else {
     // No evidence supplied (a caller that predates Program-Fix 14): today's

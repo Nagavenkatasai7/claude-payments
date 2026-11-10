@@ -16,9 +16,14 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
+import { realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
+import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
-import { isPartnerPulled } from '@/lib/funding-method';
+import { isPartnerPulled, senderChargeState } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
 import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
@@ -300,6 +305,23 @@ export class UnknownOutboxKindError extends Error {
 /** A row's kind as it may appear in an alert or a dedupe key: bounded, one line, a safe alphabet. */
 function safeKindLabel(kind: string): string {
   return kind.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) || '_';
+}
+
+/**
+ * Pack 2 review F1 (C1): the instruct live-list gate refused a real-money
+ * instruction because the newest screen is not on a live list, is older than
+ * SANCTIONS_LIST_MAX_AGE_MS, or was a match; or (review R1 / G1) the sender's
+ * screening hold is active or could not be read. A COMPLIANCE refusal, never a rail
+ * failure: deliberately NOT a RailInstructError, so it never raises
+ * railfail:<partner> and never touches rail health or best-rate routing.
+ * Retryable under the settlement.instruct policy: the reconcile stuck-paid
+ * heal (healPaidRowScreen) re-screens the row on a live list.
+ */
+export class InstructNotLiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InstructNotLiveError';
+  }
 }
 
 /**
@@ -754,16 +776,21 @@ async function handle(
       //    other unexpected status ⇒ THROW (retryable): the row backs off and,
       //    if it dies, the dead-row ops alert fires. Never silently done — a
       //    request staff later dismiss must still be paid out.
+      //  • pack 2 review R1 (E2): a SANCTIONS-BLOCKED row (a paid row whose
+      //    re-screen matched: list-hold-rescreen healPaidRowScreen) is never
+      //    paid out, on any rail ⇒ skip; its paidmatch:<id> alert owns it.
       const refund = transfer.refundStatus ?? 'none';
       if (
         transfer.status === 'cancelled' ||
         transfer.status === 'delivered' ||
+        transfer.complianceStatus === 'blocked' ||
         refund === 'pending' ||
         refund === 'completed'
       ) {
         logWarn('outbox.instruct-skipped', 'transfer not payable; instruction not sent', {
           transferId,
           status: transfer.status,
+          complianceStatus: transfer.complianceStatus,
           refundStatus: refund,
         });
         return;
@@ -820,13 +847,110 @@ async function handle(
         throw new SettlementPausedError();
       }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-      const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+      // Pack 2 T10 (R02): only an 'http' rail reaches the stored URL; a simulator
+      // (or any other) rail POSTs to the hosted reference rail, whatever is stored.
+      const settlementUrl = settlementTargetUrl(integrations.payment);
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new RailInstructError(railPartnerId, 'Settlement endpoint not configured.');
       try {
         assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       } catch (e) {
         throw new RailInstructError(railPartnerId, e);
+      }
+      // Pack 2 T10 (R02): the live-list gate at the instruct chokepoint. A row
+      // paid while the rail was a demo rail (screened on the mock list), then
+      // retried, re-instructed or dead-letter-retried after the rail went 'http',
+      // is NOT sent: its newest screen must have been on a live list. Evidence
+      // with no listFitness (written before pack 2), or no evidence at all,
+      // passes (in-flight rows keep today's behaviour). Evidence that carries a
+      // listFitness must be liveFresh: a live list AND screened within
+      // SANCTIONS_LIST_MAX_AGE_MS (review F1/A1: a release or a dead-letter
+      // Retry days later never POSTs on an old screen), and not a match. The
+      // gate only ever stops a POST; it never moves money. InstructNotLiveError,
+      // not a rail failure (review F1/C1): retried under the instruct policy, no
+      // railfail alert; the reconcile stuck-paid heal re-screens the row.
+      if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
+        const gateNow = new Date();
+        const newest = (await listScreenEvidence(deps.db, transfer, gateNow)).at(-1);
+        if (newest && instructGateRefuses(newest, gateNow)) {
+          const why =
+            newest.decision === 'match'
+              ? 'Last screen was a sanctions match.'
+              : newest.listFitness !== 'live'
+                ? 'Last screen not on a live list.'
+                : 'Last screen older than the list age limit.';
+          logWarn('outbox.instruct-not-live', 'last sanctions screen not live, too old or a match; instruction not sent', { transferId });
+          // Review S5 (W2a): after a sanctions MATCH the heal does not
+          // re-screen the row, and its funds can have to be blocked (frozen):
+          // no "otherwise refund it", the compliance officer decides first.
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message:
+                newest.decision === 'match'
+                  ? `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: Last screen was a sanctions match. No automatic re-screen follows. ` +
+                    `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+                  : `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: ${why} ` +
+                    'The reconcile sweep re-screens it once a live list is served; otherwise refund it.',
+            },
+            { dedupeKey: `instructnotlive:${transferId}` },
+          );
+          throw new InstructNotLiveError(why);
+        }
+        // Pack 2 review R1 (G1): the SENDER's screening hold (R06), which
+        // settleOrHold checks at pay, re-checked here because a row can become
+        // paid without it (a signed rail 'funded' callback) and reach this POST
+        // through the instruct, the reconcile reinstruct or a dead-letter Retry.
+        // Owning tenant's row; a read error refuses (fail closed). The ledger
+        // keeps 'paid' (the sender was charged); the row stays retryable, so a
+        // platform clear lets the next attempt send it.
+        let senderWhy: string | null = null;
+        try {
+          if (senderScreeningHoldActive(await readSenderScreeningFlags(deps.db, transfer.partnerId, transfer.phone))) {
+            senderWhy = 'Sender under an active screening hold.';
+          }
+        } catch (err) {
+          // The error NAME only: a failed query's message carries its bound params (the phone).
+          logWarn('outbox.instruct-sender-hold', err instanceof Error ? err.name : 'error', { transferId });
+          senderWhy = 'Sender screening hold could not be checked.';
+        }
+        if (senderWhy) {
+          logWarn('outbox.instruct-sender-hold', 'sender screening hold; instruction not sent', { transferId });
+          // Review S5 (X1): the money by senderChargeState (a Partner-API row
+          // has no charge reference; a partner-pulled row was charged by
+          // nobody here), and no "or refund the transfer": a sender who stays
+          // held may be a sanctions match, whose funds the compliance officer
+          // decides about first.
+          // Review S6 (Y2): a partner-pulled row (ach_pull / bank_pull) is never
+          // "nothing was charged": the partner's rail pulls on an instruction,
+          // and an earlier one (before a reconcile reinstruct or a dead-letter
+          // Retry) may have reached the rail. The claim already counted THIS
+          // row's attempt, so hasStartedInstruction cannot tell; the text
+          // says "may" and sends ops to the rail. The clause speaks about THIS
+          // instruction only.
+          const charge = senderChargeState(transfer);
+          const money =
+            charge === 'charged'
+              ? 'the sender was charged'
+              : charge === 'partner_collected'
+                ? "the partner confirmed that it collected the sender's funds"
+                : 'nothing was charged';
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message: isPartnerPulled(transfer.fundingMethod)
+                ? `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `The partner's rail pulls the sender's funds only on an instruction; if an earlier instruction reached the rail, the rail may have pulled the sender's funds: check with the rail. ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`
+                : `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (${money}) ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+            },
+            { dedupeKey: `instructsenderhold:${transferId}` },
+          );
+          throw new InstructNotLiveError(senderWhy);
+        }
       }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it. Built after the fail-closed URL
@@ -931,7 +1055,8 @@ async function handle(
         if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
         const railPartnerId = full.settlementPartnerId ?? full.partnerId;
         const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-        const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+        // Pack 2 T10: same target rule as settlement.instruct. No list gate on a reverse (it returns money).
+        const settlementUrl = settlementTargetUrl(integrations.payment);
         const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
         assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct

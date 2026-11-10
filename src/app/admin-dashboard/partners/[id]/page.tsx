@@ -44,6 +44,7 @@ import {
   saveSupportConfigAction,
   saveDisclosureConfigAction,
   saveAlertEmailAction,
+  saveComplianceAlertEmailAction,
   testWhatsappConnectionAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
@@ -926,6 +927,22 @@ export default async function PartnerDetailPage({
                       />
                     </div>
                     <Button type="submit">Save alert email</Button>
+                  </form>
+                  <form action={saveComplianceAlertEmailAction} className="mt-6 space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="p-compliance-email">Compliance alert email</Label>
+                      <Input
+                        id="p-compliance-email"
+                        name="complianceAlertEmail"
+                        type="email"
+                        autoComplete="off"
+                        defaultValue={partner.supportConfig?.complianceAlertEmail ?? ''}
+                        placeholder="compliance@partner.example"
+                      />
+                      <p className="text-sm text-muted-foreground">Where sanctions-block notices go. Leave blank to use the alert email.</p>
+                    </div>
+                    <Button type="submit">Save compliance email</Button>
                   </form>
                 </CardContent>
               </Card>

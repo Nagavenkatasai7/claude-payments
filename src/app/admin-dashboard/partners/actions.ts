@@ -42,6 +42,7 @@ import {
   parseDisclosureForm,
   parseSupportPortal,
   setAlertEmail,
+  setComplianceAlertEmail,
   setDisclosure,
   setSupportKnobs,
   type DisclosureParseReason,
@@ -50,6 +51,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
+import { settlementTargetUrl } from '@/lib/live-gate';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
   assertPhoneNumberIdFree,
@@ -428,8 +430,11 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
     // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
     // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
     // rail exercises the exact signed instruction→callback loop a real rail would.
+    // Fix pack 2 T10 (R02): ALWAYS the hosted rail (a kept or submitted URL is
+    // ignored): the worker POSTs a simulator instruct nowhere else. Switching
+    // back to 'http' needs the partner's URL submitted again.
     if (providerType === 'simulator') {
-      if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+      credentials.settlementUrl = settlementTargetUrl({ providerType });
       if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
       if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
     }
@@ -627,6 +632,20 @@ export async function saveAlertEmailAction(formData: FormData): Promise<void> {
   const parsed = parseAlertEmail(String(formData.get('alertEmail') ?? ''));
   if (!parsed.ok) throw new Error('Enter one valid email address (or leave it blank to turn alert emails off).');
   const r = await setAlertEmail(getDb(), id, supportActor(staff), parsed.value);
+  if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Fix pack 2 T5 (R04): where sanctions-block notices are emailed ─────────
+// Same shape as saveAlertEmailAction: its own action, merged under the row
+// lock, audited WITHOUT the address. Blank ⇒ notices go to the alert email.
+export async function saveComplianceAlertEmailAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const id = String(formData.get('id') ?? '').trim();
+  const staff = await gatePartnerConfig(id);
+  const parsed = parseAlertEmail(String(formData.get('complianceAlertEmail') ?? ''));
+  if (!parsed.ok) throw new Error('Enter one valid email address (or leave it blank to use the alert email).');
+  const r = await setComplianceAlertEmail(getDb(), id, supportActor(staff), parsed.value);
   if (!r.ok) throw new Error('Partner not found.'); // gate raced a delete ⇒ nothing written
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
@@ -853,7 +872,8 @@ export async function wizardCreatePartnerAction(
   let webhookSecret = clean(pay.webhookSecret);
   if (providerType === 'simulator') {
     // Zero-hassle reference rail: auto-provision endpoint + both HMAC secrets.
-    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+    // Fix pack 2 T10 (R02): always the hosted rail; a submitted URL is ignored.
+    credentials.settlementUrl = settlementTargetUrl({ providerType });
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }

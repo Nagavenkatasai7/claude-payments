@@ -9,6 +9,12 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import { isFlagOn } from '@/lib/flags';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { realMoneyRail } from '@/lib/live-gate';
+import { rescreenOnFile } from '@/lib/pay-rescreen';
+import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
+import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every FULL /api/worker
@@ -20,6 +26,8 @@ import type { Transfer } from '@/lib/types';
 // still strand:
 //   • a webhook-driven transfer stuck in 'paid' too long (the partner's rail
 //     never called back, or the instruction died) → re-instruct ONCE + alert,
+//     (on a real-money rail, first re-screened on a live list when the
+//     instruct gate refuses its newest screen: pack 2 review F1),
 //   • a compliance hold ('in_review') nobody has touched in 24h → alert,
 //   • a CHARGED transfer still awaiting_payment (fundingRef set; the process
 //     died between capture and settleOrHold) → resume settlement (cleared) or
@@ -27,7 +35,9 @@ import type { Transfer } from '@/lib/types';
 //   • cancelled + charged + unrefunded → alert (`cancelcharged:`),
 //   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
 //   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert,
-//   • customer tickets past their first-response target (fix 49C) → ONE digest a day.
+//   • customer tickets past their first-response target (fix 49C) → ONE digest a day,
+//   • an in_review hold waiting on a fresh sanctions list (LIST_UNAVAILABLE) →
+//     re-screened and released automatically when clean (fix pack 2 T4).
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing on every
 // full run can never spam: one re-instruction and one alert per stuck transfer, ever.
 
@@ -44,6 +54,18 @@ export const STALE_FUNDING_INTENT_DAYS = 7;
  */
 export const STALE_LOCK_MINUTES = 15;
 
+/**
+ * Fix pack 2 T3 (R02): the ops copy for a hold that is waiting on the
+ * sanctions list (LIST_UNAVAILABLE): no person can release it; an automatic
+ * re-screen on a fresh list does.
+ */
+const LIST_WAIT_COPY =
+  'it is waiting for a fresh sanctions list (LIST_UNAVAILABLE) and is released automatically after a re-screen against a fresh list. ' +
+  'Check the sanctions list loader if the list is not refreshing.';
+
+const waitsForList = (t: Pick<Transfer, 'complianceReasons'> | null | undefined): boolean =>
+  Array.isArray(t?.complianceReasons) && t.complianceReasons.includes(LIST_UNAVAILABLE_REASON);
+
 export interface SweepResult {
   stuckPaid: number;
   reinstructed: number;
@@ -53,6 +75,8 @@ export interface SweepResult {
   fundingResumed?: number;
   stuckRefunds?: number;
   staleLocks?: number;
+  /** Fix pack 2 T4: LIST_UNAVAILABLE holds released by the automatic re-screen (0 when none). */
+  listHoldsReleased?: number;
 }
 
 /**
@@ -77,14 +101,51 @@ export async function enqueueReinstructLocked(db: Db, transferId: string): Promi
 export async function reinstructLocked(db: Db, transferId: string): Promise<'enqueued' | 'not_payable' | 'in_flight' | 'exists'> {
   return db.transaction(async (tx) => {
     const cur = await createTransferRepo(tx).getTransferForUpdate(transferId);
-    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return 'not_payable';
+    // Pack 2 review R1 (E2): a sanctions-blocked paid row is never re-instructed.
+    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none' || cur.complianceStatus === 'blocked') return 'not_payable';
     const outbox = createOutboxRepo(tx);
     if (await outbox.hasLiveInstruction(transferId)) return 'in_flight';
     return (await outbox.enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` })) ? 'enqueued' : 'exists';
   });
 }
 
-export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<SweepResult> {
+/**
+ * Pack 2 review F3 (C2): the wall-clock budget shared by this sweep's
+ * re-screens (the stuck-paid heal and the crash-resume re-screen). The sweep
+ * runs before the worker drain on every full run, so once the budget is spent
+ * no further re-screen STARTS; that row is left as it is for the next sweep.
+ * Review R2 (E4): only the time spent INSIDE healPaidRowScreen and
+ * rescreenOnFile is charged, so the stuck-paid bookkeeping (any size of
+ * backlog) never uses it up. A sweep that defers a re-screen logs the counts.
+ * Review round 3 (K3): a blocked paid row is not healed at all, and the
+ * heal's "needs a heal?" reads (paidRowNeedsHeal) are not charged either.
+ * The list-hold sweep has its own budget (LIST_RESCREEN_BUDGET_MS).
+ */
+export const RESCREEN_BUDGET_MS = 5_000;
+
+export interface ReconcileSweepOptions {
+  /** Re-screen budget (default RESCREEN_BUDGET_MS). */
+  rescreenBudgetMs?: number;
+  /** Injectable wall clock (default Date.now), also handed to the list-hold sweep. */
+  clock?: () => number;
+}
+
+export async function reconcileSweep(db: Db, now: Date = new Date(), opts: ReconcileSweepOptions = {}): Promise<SweepResult> {
+  const clock = opts.clock ?? Date.now;
+  const rescreenBudgetMs = opts.rescreenBudgetMs ?? RESCREEN_BUDGET_MS;
+  // Review R2 (E4): time charged to the budget (re-screens only, see above).
+  let rescreenSpentMs = 0;
+  const rescreenTimeLeft = (): boolean => rescreenSpentMs < rescreenBudgetMs;
+  const timedRescreen = async <T>(run: () => Promise<T>): Promise<T> => {
+    const started = clock();
+    try {
+      return await run();
+    } finally {
+      rescreenSpentMs += Math.max(0, clock() - started);
+    }
+  };
+  let healDeferred = 0;
+  let resumeDeferred = 0;
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
   const integrationsRepo = createIntegrationsRepo(db);
@@ -129,6 +190,29 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     let reinstructedNow = false;
     let inFlight = false;
     if (webhookDriven && !held) {
+      // Pack 2 review F1 (A1): a real-money row whose instruct the worker's
+      // live-list gate refuses (its newest screen is too old or not live) is
+      // re-screened on a live list first, so the retrying instruct (or the
+      // re-instruction below) can pass. Isolated: an error costs nothing else.
+      // F3 (C2): not started once the re-screen budget is spent (the next sweep heals it).
+      // Review round 3 (K3): a sanctions-blocked paid row (the heal's own match)
+      // is never healed: skipped here with no read. The heal's cheap "needs a
+      // heal?" checks run OUTSIDE the budget (paidRowNeedsHeal), so only a row
+      // that really re-screens spends it; the re-instruct and the recon alert
+      // below run for every row as before.
+      if (t.complianceStatus !== 'blocked' && realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
+        try {
+          if (await paidRowNeedsHeal(db, t, now)) {
+            if (!rescreenTimeLeft()) {
+              healDeferred++;
+            } else {
+              await timedRescreen(() => healPaidRowScreen(db, t, now, { prechecked: true }));
+            }
+          }
+        } catch (err) {
+          logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
+        }
+      }
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —
@@ -150,14 +234,19 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
           (t.settlementPartnerId ? `, settles via ${t.settlementPartnerId}` : '') +
           `) has been ` +
           `'paid' for >${STUCK_PAID_MINUTES}min with no delivery confirmation.` +
+          // Review S5 (inventory): a held row that is also sanctions-blocked
+          // is never told to be cancelled or refunded: the compliance officer
+          // decides about its funds first.
           (held
-            ? ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
+            ? t.complianceStatus === 'blocked'
+              ? ` The rail reported a different amount — held, not re-instructed. It is blocked by sanctions screening: investigate with the rail, and ${SANCTIONS_FUNDS_RULE}.`
+              : ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
             : webhookDriven
               ? reinstructedNow
                 ? ' Re-instructed the partner rail once.'
                 : inFlight
                   ? ' Not re-instructed: an instruction for it is still queued or retrying. A later sweep re-instructs once if that instruction fails for good.'
-                  : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, or a refund requested/in flight).'
+                  : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, sanctions-blocked, or a refund requested/in flight).'
               : ''),
       },
       { dedupeKey: `recon:${t.id}` },
@@ -171,7 +260,15 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       {
         message:
           `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) has been ` +
-          `in compliance review for >${STALE_REVIEW_HOURS}h — release or refund it.`,
+          `in compliance review for >${STALE_REVIEW_HOURS}h — ` +
+          // Review S5 (W2b): a row blocked by sanctions screening (the list-hold
+          // sweep or the release re-screen matched it; it stays in review) can
+          // never be released, and its funds wait for the compliance officer.
+          (t.complianceStatus === 'blocked'
+            ? `it is blocked by sanctions screening, so it can never be released. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+            : waitsForList(t)
+              ? LIST_WAIT_COPY
+              : 'release or refund it.'),
       },
       { dedupeKey: `review:${t.id}` },
     );
@@ -184,9 +281,9 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
   // firing every minute moves each victim EXACTLY once and a victim racing its
   // own resurrected pay request is still a clean no-op. COMPLIANCE: a charged
   // FLAGGED victim is HELD (in_review + held stage-1 message, one transaction)
-  // and never instructed; a charged BLOCKED victim (should not exist — blocked
-  // rows are never charged) is left untouched with its own alert for ops to
-  // refund. Both count as "resumed": the charged row reached its correct next
+  // and never instructed; a charged BLOCKED victim (a resume re-screen match,
+  // or a row already blocked) is left untouched with its own alert, which
+  // never says to refund (review S5). Both count as "resumed": the charged row reached its correct next
   // state. NEVER add a compliance predicate to listAwaitingWithFunding — that
   // would abandon charged flagged rows instead of holding them.
   const victims = await transfers.listAwaitingWithFunding(FUNDING_RESUME_MINUTES * 60_000);
@@ -203,7 +300,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     // settles (its debit may have confirmed days after the pay-time screen).
     // blocked / moved / a re-screen error ⇒ nothing settles here (a blocked
     // row's fundblocked alert is raised inside); the next sweep retries.
-    let kind: 'started' | 'held' | 'refused' | 'already';
+    let kind: 'started' | 'held' | 'refused' | 'already' | undefined;
     if (t.fundingProvider === 'stripe') {
       let funded: Awaited<ReturnType<typeof settleFundedTransfer>>;
       try {
@@ -215,7 +312,34 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       if (funded === 'blocked' || funded === 'moved') continue;
       kind = funded;
     } else {
-      kind = (await settleOrHold(db, t, railIntegrations)).kind;
+      // Fix pack 2 T3 (R02): a real-money row (the RAIL partner is http, env
+      // not 'test') settles only on a LIVE, fresh screen. When the newest
+      // evidence is not one, re-screen first with the names on file. An error
+      // (evidence read, list, names) moves nothing; the next sweep retries.
+      let resumable: Transfer = t;
+      if (realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null })) {
+        let outcome: Awaited<ReturnType<typeof rescreenOnFile>> | null = null;
+        try {
+          if (!liveFresh((await listScreenEvidence(db, t, now)).at(-1), now)) {
+            // F3 (C2): the budget is spent: leave this victim untouched (the next sweep resumes it).
+            if (!rescreenTimeLeft()) {
+              resumeDeferred++;
+              continue;
+            }
+            outcome = await timedRescreen(() => rescreenOnFile(db, t, { realMoney: true, stage: 'resume' }));
+          }
+        } catch (err) {
+          logWarn('reconcile.resume-rescreen', err, { transferId: t.id });
+          continue;
+        }
+        if (outcome?.kind === 'moved') continue;
+        if (outcome?.kind === 'blocked') {
+          kind = 'refused';
+        } else if (outcome) {
+          resumable = outcome.transfer;
+        }
+      }
+      kind ??= (await settleOrHold(db, resumable, railIntegrations)).kind;
     }
     const prefix = `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged (${t.fundingRef}) but never settled — `;
     switch (kind) {
@@ -232,24 +356,37 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
         // (settlement.releaseHold, Step 2) — otherwise "held" would be a
         // charged row the rail is never told about.
         fundingResumed++;
+        // Fix pack 2 T3: the LEDGER row's reasons (re-read after the hold)
+        // decide the copy: a hold waiting on the list is not a staff release.
         await outbox.enqueue(
           'ops.alert',
-          { message: prefix + 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.' },
+          {
+            message:
+              prefix +
+              (waitsForList(await transfers.getTransfer(t.id))
+                ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
+                : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
+          },
           { dedupeKey: `fundhold:${t.id}` },
         );
         break;
       case 'refused':
-        // Charged AND blocked: nothing may move. Practically unreachable (a
-        // sanctions hit lands as status 'blocked' at mint, before any charge,
-        // and nothing re-screens a row after mint) — but the tests construct
-        // it, so name the escalation honestly: there is NO in-app remedy for a
-        // charged blocked row (fix 5's Cancel refuses a charged row, Refund
-        // accepts only paid|delivered), so it is a change-ticket: refund at the
-        // funding provider, then record the outcome with a direct ledger edit
-        // (status 'cancelled', refund_status 'completed', refund_ref).
+        // Charged AND blocked: nothing may move. Reached by a resume re-screen
+        // that matches (fix pack 2 T3) or a row already compliance-blocked
+        // (settleOrHold refuses it); 'blocked' is set only by a sanctions
+        // match. There is NO in-app remedy for a charged blocked row (fix 5's
+        // Cancel refuses a charged row, Refund accepts only paid|delivered), so
+        // the outcome is a change-ticket ledger edit. Review S5 (inventory): it
+        // never says to refund: the funds can have to be blocked (frozen) and
+        // the licensed partner's compliance officer decides first.
         await outbox.enqueue(
           'ops.alert',
-          { message: prefix + 'it is BLOCKED by compliance and was CHARGED. NOT settled. No dashboard action applies — refund at the funding provider and close it with a direct ledger edit under a change ticket.' },
+          {
+            message:
+              prefix +
+              `it is BLOCKED by sanctions screening and was CHARGED. NOT settled. ${SANCTIONS_NO_PAYOUT_SENTENCE}. ` +
+              'No dashboard action applies: once the compliance officer has decided, record the outcome with a direct ledger edit under a change ticket.',
+          },
           { dedupeKey: `fundblocked:${t.id}` },
         );
         break;
@@ -263,6 +400,12 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
         );
         break;
     }
+  }
+
+  // Review R2 (E4): a re-screen left for the next sweep (budget spent) is
+  // logged, counts only (no id, no name); the rows are untouched.
+  if (healDeferred > 0 || resumeDeferred > 0) {
+    logWarn('reconcile.rescreen-deferred', 'the re-screen budget was spent; the next sweep takes these rows', { resumeDeferred, healDeferred });
   }
 
   // Program-Fix 7 (review M1): STALE STRIPE INTENTS — bound, still pending /
@@ -288,10 +431,18 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
   // refunds. No sweep watched that state. Alert once per row; ops refund it by
   // hand (issueRefund accepts paid|delivered only — by design, the remedy is a
   // human decision). Rows already refunding are Task 5's reject path at work.
+  // Review S6 (Y3): a sanctions-blocked row (e.g. the change-ticket ledger
+  // edit after a fundblocked:<id> freeze) is never told to refund: the
+  // compliance officer decides about the funds. Same key, alert only.
   for (const t of await transfers.findCancelledCharged()) {
     await outbox.enqueue(
       'ops.alert',
-      { message: `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.` },
+      {
+        message:
+          t.complianceStatus === 'blocked'
+            ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED, was CHARGED (${t.fundingRef}) and is blocked by sanctions screening; ${SANCTIONS_FUNDS_RULE}.`
+            : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.`,
+      },
       { dedupeKey: `cancelcharged:${t.id}` },
     );
   }
@@ -343,6 +494,17 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     );
   }
 
+  // LIST-OUTAGE HOLDS (fix pack 2 T4): re-screen the in_review rows held
+  // because the sanctions list was not live, and release the clean ones
+  // (list-hold-rescreen.ts, the only release path for them). Isolated: it
+  // never throws, and a failure here never costs the sweeps above.
+  let listHoldsReleased = 0;
+  try {
+    listHoldsReleased = (await sweepListUnavailableHolds(db, now, opts.clock ? { clock: opts.clock } : {})).released;
+  } catch (e) {
+    logWarn('reconcile', 'list-hold re-screen skipped', { error: e instanceof Error ? e.message : String(e) });
+  }
+
   // TICKET SLA DIGEST (Program-Fix 49C): staff-facing, never customer-facing.
   // Last, and isolated: a failed ticket read must never cost the money sweeps
   // above their result. SweepResult is deliberately unchanged.
@@ -359,6 +521,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     fundingResumed,
     stuckRefunds,
     staleLocks: staleLocks.length,
+    listHoldsReleased,
   };
 }
 

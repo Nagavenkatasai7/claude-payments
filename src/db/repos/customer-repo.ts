@@ -97,6 +97,11 @@ export function createCustomerRepo(
     set('idDocType', (row.idDocType ?? undefined) as GovIdType | undefined);
     set('watchlistHit', row.watchlistHit ?? undefined);
     set('pepHit', row.pepHit ?? undefined);
+    // Fix pack 2 (R06): READ-ONLY here (never in customerToRow, like
+    // sendLimitOverride): stampScreeningFlagged / clearScreeningHold are the
+    // single-column writers, so saveCustomer's whole-row upsert cannot touch them.
+    set('screeningFlaggedAt', isoOpt(row.screeningFlaggedAt));
+    set('screeningClearedAt', isoOpt(row.screeningClearedAt));
     set('kycSubmittedAt', isoOpt(row.kycSubmittedAt));
     set('kycApprovedBy', row.kycApprovedBy);
     set('kycApprovedAt', isoOpt(row.kycApprovedAt));
@@ -423,6 +428,66 @@ export function createCustomerRepo(
     },
 
     /**
+     * Fix pack 2 (R06): stamp the sender screening hold — a single-column
+     * UPDATE of screening_flagged_at keyed (partner_id, phone), so no other
+     * column moves. Called in the Persona apply transaction when a watchlist /
+     * PEP report matches. Returns whether a row was updated.
+     * Pack 2 review R3 (H1 b): the stamp is never earlier than 1 ms after the
+     * clear on the row the UPDATE locks (greatest() reads the latest committed
+     * screening_cleared_at), so a match committed after a clear always re-arms
+     * the hold, whatever clock `at` came from. GREATEST skips a NULL clear.
+     * Pack 2 review round 3 (L1): it is also at least 1 ms after the flag on
+     * the locked row, so every committed stamp strictly raises the flag and
+     * never moves it back: two matches never share a flag time, and a clear
+     * posting an older reviewed time is refused (ScreeningChanged).
+     */
+    async stampScreeningFlagged(partnerId: PartnerId, senderPhone: string, at: Date): Promise<boolean> {
+      const rows = await db
+        .update(customers)
+        .set({
+          screeningFlaggedAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond', ${customers.screeningFlaggedAt} + interval '1 millisecond')`,
+          updatedAt: new Date(),
+        })
+        .where(tenantKey(partnerId, senderPhone))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 2 (R06): the audited platform clear's write — reads the flags
+     * FOR UPDATE (the caller re-checks the hold on that locked value and audits
+     * it in the same transaction), then sets screening_cleared_at only.
+     * A missing row ⇒ { found: false } and nothing written.
+     * Pack 2 review R3 (H1 b): the clear time is taken AFTER the FOR UPDATE
+     * (`at` only for tests) and is never earlier than 1 ms after the flag it
+     * locked, so it lifts exactly that flag; a stamp committed later re-arms
+     * (stampScreeningFlagged). A caller that refuses on `previous` throws, and
+     * the transaction rollback undoes this write.
+     */
+    async clearScreeningHold(
+      partnerId: PartnerId,
+      senderPhone: string,
+      at?: Date,
+    ): Promise<{ found: boolean; previous: SenderScreeningFlags | null }> {
+      const rows = await db
+        .select(SCREENING_FLAG_COLUMNS)
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: null };
+      const clearedAt = at ?? new Date(); // taken after the lock
+      await db
+        .update(customers)
+        .set({
+          screeningClearedAt: sql`greatest(${clearedAt.toISOString()}::timestamptz, ${customers.screeningFlaggedAt} + interval '1 millisecond')`,
+          updatedAt: new Date(),
+        })
+        .where(tenantKey(partnerId, senderPhone));
+      return { found: true, previous: rows[0] };
+    },
+
+    /**
      * Program-Fix 14: the set-once writer of a customer's own legal name — a
      * single-column conditional UPDATE keyed (partner_id, phone) that lands
      * only while no name is on file (NULL, or the '' sealOptional keeps for an
@@ -570,23 +635,48 @@ export function createCustomerRepo(
 
 export type CustomerRepo = ReturnType<typeof createCustomerRepo>;
 
-/** The two customer-level screening flags (kyc-state-machine sets them from Persona reports). */
+/**
+ * The customer-level screening flags (kyc-state-machine sets the two booleans
+ * from Persona reports) and, fix pack 2 (R06), the times of the last hit seen
+ * and of the platform clear (compliance-config.ts senderScreeningHoldActive).
+ */
 export interface SenderScreeningFlags {
   watchlistHit: boolean | null;
   pepHit: boolean | null;
+  screeningFlaggedAt: Date | null;
+  screeningClearedAt: Date | null;
 }
+
+const SCREENING_FLAG_COLUMNS = {
+  watchlistHit: customers.watchlistHit,
+  pepHit: customers.pepHit,
+  screeningFlaggedAt: customers.screeningFlaggedAt,
+  screeningClearedAt: customers.screeningClearedAt,
+};
 
 /**
  * M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release.
- * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns (no
- * PII column, no decrypt). null when this tenant has no row for the phone. Throws on a DB error:
- * the caller (lib/sender-screening.ts) turns that into a fail-closed null.
+ * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns and
+ * (fix pack 2, R06) the two hold times: no PII column, no decrypt. null when this tenant has no row
+ * for the phone. Throws on a DB error: lib/sender-screening.ts turns that into a fail-closed null;
+ * the fix pack 2 mint / pay / sweep callers let it throw (nothing paid). `opts.forUpdate` locks
+ * the row (the platform release's in-transaction re-check, settlement.ts).
  */
-export async function readSenderScreeningFlags(db: DbOrTx, partnerId: PartnerId, phone: string): Promise<SenderScreeningFlags | null> {
-  const rows = await db
-    .select({ watchlistHit: customers.watchlistHit, pepHit: customers.pepHit })
+export async function readSenderScreeningFlags(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  opts: { forUpdate?: boolean } = {},
+): Promise<SenderScreeningFlags | null> {
+  const q = db
+    .select(SCREENING_FLAG_COLUMNS)
     .from(customers)
     .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
     .limit(1);
+  // Pack 2 review R1 (H2): `forUpdate` (inside a transaction) locks the row, so a
+  // concurrent stampScreeningFlagged either committed (seen) or waits for the
+  // caller's commit. Drizzle select().for('update'):
+  // node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+  const rows = opts.forUpdate ? await q.for('update') : await q;
   return rows[0] ?? null;
 }

@@ -521,6 +521,7 @@ export function prepareResultCopy(r: Exclude<PrepareSendResult, { kind: 'draft' 
       return capCopy(r.evaluation.reason, brand);
     case 'bill_refused':
     case 'blocked':
+    case 'sender_unavailable': // fix pack 2 T6 (R06): neutral, like blocked
       return { error: 'portal.send.cannot_complete' };
   }
 }

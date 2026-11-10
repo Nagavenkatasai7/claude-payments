@@ -17,7 +17,9 @@ import {
   resetSenderNameDeprecationLogForTests,
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
-import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Partner } from '@/lib/types';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
@@ -617,6 +619,160 @@ describe('partner-api-service: confirmTransaction enforces the compliance hold (
     expect(await confirmTransaction(h.deps, partner({ id: 'rival' }), 'pk_r', id)).toMatchObject({ ok: false, status: 404 });
     expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
     expect(await outboxRows(h.db)).toHaveLength(0);
+  });
+});
+
+// Fix pack 2 T3 (R02): confirm on a real-money rail re-screens unless the
+// newest evidence is a LIVE, fresh screen — an evidence test, not a mint-age
+// test, so a rail switched from simulator to http after the mint is caught.
+describe('partner-api-service: confirmTransaction re-screens on a real-money rail (fix pack 2 T3)', { retry: 0 }, () => {
+  const originalList = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(originalList));
+  type View = { id: string; status: string; compliance_status: string };
+  const screens = async (db: Awaited<ReturnType<typeof harness>>['db'], id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+  async function mint(h: Awaited<ReturnType<typeof harness>>, idem: string, over: Record<string, unknown> = {}) {
+    const r = await createTransaction(h.deps, DELEGATED, 'pk_1', idem, txBody(over));
+    if (!r.ok) throw new Error('unexpected: ' + r.error);
+    return (r.data as View).id;
+  }
+
+  it('minted on a simulator rail, rail switched to http, confirmed 1 h later on a list that is not live → re-screened and held', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-1');
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    await setRailProviderType(h.db, 'acme', 'http');
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const later = new Date(Date.now() + 3_600_000);
+    h.deps.now = () => later.toISOString();
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect(r.data as View).toMatchObject({ status: 'in_review', compliance_status: 'flagged' });
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    expect(await screens(h.db, id)).toBe(2);
+  });
+
+  it('live, fresh evidence → no re-screen; settles', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-2');
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    const before = await screens(h.db, id);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(await screens(h.db, id)).toBe(before);
+  });
+
+  it('a body sender name (never stored) cannot be re-screened → held SENDER_IDENTITY_MISSING, never settled', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-3');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 }); // a live list: only the coverage rule holds it
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
+  });
+
+  it('re-screened to blocked → 422, nothing settled', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    // Not on the mock list at mint; on the OFAC fixture at confirm.
+    const id = await mint(h, 'idem-lv-4', {
+      beneficiary: { name: 'Testa Fixturelli', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    });
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.complianceStatus).toBe('blocked');
+    const kinds = ((await h.db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((x) => x.kind);
+    expect(kinds).not.toContain('settlement.instruct');
+  });
+
+  // Pack 2 review round 4 (S4: N1, P1): the confirm call is the partner's
+  // attestation that it collected the funds, so a confirm-stage block never
+  // says nothing was charged, and tells nobody to refund.
+  it('re-screened to blocked at confirm → the block alert says the partner collected the funds', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-4b', {
+      beneficiary: { name: 'Testa Fixturelli', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    });
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    const t = await h.store.getTransfer(id);
+    expect(t?.fundingRef ?? null).toBeNull();
+    const msgs = ((await h.db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = ${'sanctionsblock:' + id}`)) as unknown as {
+      rows: Array<{ payload: { message: string } }>;
+    }).rows.map((x) => x.payload.message);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain("The recipient was not paid, but the partner confirmed that it collected the sender's funds.");
+    expect(msgs[0]).not.toMatch(/nothing was charged|nothing paid out|refund procedure|refund it|before any refund/i);
+  });
+
+  // Pack 2 review R1 (G2): the flagged branch adds the same real-money hold
+  // reasons settleOrHold adds (the platform reviewer sees them).
+  it('flagged LARGE, fresh live evidence, sender stamped after the mint → held with LARGE + SENDER_SCREENING', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2');
+    const cur = await h.store.getTransferDecrypted(id);
+    expect(cur?.complianceStatus).toBe('cleared');
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.', SENDER_SCREENING_REASON]);
+  });
+
+  it('flagged LARGE on a simulator rail, sender stamped → held with LARGE only (not real money, unchanged)', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2s');
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.']);
+  });
+
+  it('a sandbox transfer is never real money: no re-screen, settles as before', async () => {
+    const h = await harness();
+    h.deps.keyMode = 'test';
+    await setRailProviderType(h.db, 'acme', 'http');
+    const id = await mint(h, 'idem-lv-5');
+    const before = await screens(h.db, id);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(await screens(h.db, id)).toBe(before);
   });
 });
 

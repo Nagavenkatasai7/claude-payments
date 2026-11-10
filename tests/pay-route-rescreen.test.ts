@@ -6,7 +6,7 @@
  *   clear              → today's path unchanged (plus one evidence row)
  * A consumer sender with no legal name on file is refused (sender_name_required).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
@@ -22,6 +22,9 @@ import {
   SENDER_WATCHLIST_REASON,
 } from '@/lib/compliance-config';
 import type { Transfer } from '@/lib/types';
+import type { PartnerIntegrations } from '@/lib/partner-integrations';
+import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
+import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -68,9 +71,12 @@ vi.mock('@/lib/partner-store', () => ({
     }),
   }),
 }));
+// Per-partner rail config the route reads (fix pack 2 T3 tests set an http
+// rail here AND in partner_integrations, which live-gate.ts reads).
+const rails = vi.hoisted(() => ({ byPartner: {} as Record<string, PartnerIntegrations['payment']> }));
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
-    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+    getIntegrations: async (id: string) => ({ kyc: {}, payment: rails.byPartner[id] ?? {}, whatsapp: {} }),
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
@@ -144,8 +150,10 @@ async function outboxKinds() {
   return r.rows.map((x) => [x.kind, x.dedupe_key]);
 }
 
+const originalList = process.env.SANCTIONS_LIST;
 beforeEach(async () => {
   screenerMode = 'real';
+  rails.byPartner = {};
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   customerStore = createCustomerStore(db, store);
@@ -288,5 +296,138 @@ describe('pay route — existing transfer is re-screened before payment (Program
     expect(t?.complianceStatus).toBe('cleared');
     expect(await screenRows('rs-noname')).toEqual([]);
     expect(await outboxKinds()).toEqual([]);
+  });
+});
+
+// Fix pack 2 T3 (R02): the pay-time re-screen of a transfer whose RAIL partner
+// (routed, else owner) settles on http is a real-money screen: it clears only
+// on a LIVE list and must cover every name screened before.
+describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)', { retry: 0 }, () => {
+  const HTTP_RAIL: PartnerIntegrations['payment'] = {
+    providerType: 'http',
+    credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' },
+  };
+  const H = 3_600_000;
+  async function httpRail(partnerId: string) {
+    if (partnerId !== 'default') {
+      await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
+        VALUES (${partnerId}, ${partnerId}, 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
+    }
+    await setRailProviderType(db, partnerId, 'http');
+    rails.byPartner[partnerId] = HTTP_RAIL;
+  }
+  const kinds = async () => (await outboxKinds()).map(([k]) => k);
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    restoreOfacSource(originalList);
+  });
+
+  it('http rail on the mock list (never live) → in_review LIST_UNAVAILABLE, not instructed', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('default');
+    await store.saveTransfer(makeTransfer({ id: 'lv-mock' }));
+    expect(await (await post('lv-mock')).json()).toEqual({ ok: true, status: 'in_review' });
+    const t = await store.getTransfer('lv-mock');
+    expect(t?.complianceStatus).toBe('flagged');
+    expect(t?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('http rail, OFAC list checked 35 h ago (live) → paid and instructed', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('default');
+    primeOfacSource({ checkedAgoMs: 35 * H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-35' }));
+    // A webhook-driven rail answers 'processing'; the ledger row is paid.
+    expect(await (await post('lv-35')).json()).toEqual({ ok: true, status: 'processing' });
+    expect((await store.getTransfer('lv-35'))?.status).toBe('paid');
+    expect(await kinds()).toContain('settlement.instruct');
+  });
+
+  it('http rail, OFAC list checked 37 h ago (stale) → in_review LIST_UNAVAILABLE', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('default');
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-37' }));
+    expect(await (await post('lv-37')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect((await store.getTransfer('lv-37'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('a default-tenant transfer ROUTED to an http partner, stale list → in_review (the rail partner decides)', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('railp');
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-routed', settlementPartnerId: 'railp' }));
+    expect(await (await post('lv-routed')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+  });
+
+  it('the sender legal name changed since the mint → in_review SENDER_IDENTITY_MISSING (the old name is uncovered)', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('default');
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-renamed' }));
+    await seedLiveEvidence(db, { id: 'lv-renamed', partnerId: 'default', recipientName: 'Mom', senderName: 'Alexandra Previous' });
+    expect(await (await post('lv-renamed')).json()).toEqual({ ok: true, status: 'in_review' });
+    const t = await store.getTransfer('lv-renamed');
+    expect(t?.complianceStatus).toBe('flagged');
+    expect(t?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('pay-time block writes notices', async () => {
+    // Fix pack 2 T5 (R04): the routed rail partner is emailed; the default owner is not.
+    await seedOwner('Alex Sender');
+    await httpRail('railp');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ alertEmail: 'ops@railp.example' })}::jsonb WHERE id = 'railp'`);
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-block', settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
+    expect((await post('lv-block')).status).toBe(400);
+    expect((await store.getTransfer('lv-block'))?.status).toBe('blocked');
+    expect(await outboxKinds()).toEqual([
+      ['ops.alert', 'sanctionsblock:lv-block'],
+      ['email.send', 'sanctionsblockmail:lv-block:railp'],
+    ]);
+    const r = (await db.execute(sql`SELECT partner_id, meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-block'`)) as unknown as {
+      rows: Array<{ partner_id: string; meta: Record<string, unknown> }>;
+    };
+    expect(r.rows).toMatchObject([{ partner_id: 'default', meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
+  });
+
+  it('demo name on simulator -> audit only', async () => {
+    await seedOwner('Alex Sender');
+    await setRailProviderType(db, 'default', 'simulator');
+    await store.saveTransfer(makeTransfer({ id: 'lv-demo', recipientLegalName: 'John Doe' }));
+    expect((await post('lv-demo')).status).toBe(400);
+    expect((await store.getTransfer('lv-demo'))?.status).toBe('blocked');
+    expect(await outboxKinds()).toEqual([]);
+    const r = (await db.execute(sql`SELECT meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-demo'`)) as unknown as {
+      rows: Array<{ meta: Record<string, unknown> }>;
+    };
+    expect(r.rows.map((x) => x.meta)).toMatchObject([{ stage: 'pay', quiet: true, realMoney: false }]);
+  });
+
+  it('a mock rail with a stale list → paid (demo unchanged)', async () => {
+    await seedOwner('Alex Sender');
+    await setRailProviderType(db, 'default', 'mock');
+    primeOfacSource({ checkedAgoMs: 37 * H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-mockrail' }));
+    expect(await (await post('lv-mockrail')).json()).toEqual({ ok: true, status: 'paid' });
+  });
+
+  it('a sandbox transfer is never paid on the hosted page (unchanged): 404, nothing screened or written', async () => {
+    await seedOwner('Alex Sender');
+    await httpRail('default');
+    await store.saveTransfer(makeTransfer({ id: 'lv-sandbox', environment: 'test' }));
+    const res = await post('lv-sandbox');
+    expect(res.status).toBe(404);
+    expect((await store.getTransfer('lv-sandbox'))?.status).toBe('awaiting_payment');
+    expect(await screenRows('lv-sandbox')).toEqual([]);
+    expect(await kinds()).toEqual([]);
   });
 });

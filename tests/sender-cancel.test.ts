@@ -13,6 +13,7 @@ import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Transfer } from '@/lib/types';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 
 // Program-Fix 15 PR C — the Reg E 30-minute sender cancel (12 CFR 1005.34),
 // race-free. The locked claim takes the transfer FOR UPDATE, then a BLOCKING
@@ -435,5 +436,83 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'ineligible' });
     expect((await outboxRows()).length).toBe(before);
     expect(await auditActions()).toHaveLength(1);
+  });
+});
+
+// Review S5 (inventory): a sender's Reg E cancel of a transfer BLOCKED by
+// sanctions screening never tells ops to refund or return the funds: the
+// licensed partner's compliance officer decides first. No behaviour changes
+// (the same escalation, refund flag and auto-cancel as before); only the ops
+// texts. Every unblocked row keeps its text.
+describe('cancelWithinWindow — ops texts for a sanctions-blocked row (review S5)', { retry: 0 }, () => {
+  const blockRow = () => db.execute(sql`UPDATE transfers SET compliance_status = 'blocked' WHERE id = ${ID}`);
+  const message = async (k: string) => String((await byKey(k))!.payload.message);
+
+  it('in review and blocked: regecancel says it can never be released and the no-refund rule', async () => {
+    await store.saveTransfer(fixture({ complianceStatus: 'flagged' }));
+    await createTransferRepo(db).setFundingRef(ID, 'fund-1');
+    await beginHold(db, fixture({ complianceStatus: 'flagged' }));
+    await blockRow();
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated', held: true });
+    expect((await store.getTransfer(ID))?.refundStatus).toBe('requested');
+    expect(await message(`regecancel:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender of transfer ${ID} (partner acme) asked to cancel within 30 minutes of payment (Reg E) while it is held for review. ` +
+        `Not auto-cancelled (C4). It is blocked by sanctions screening, so it can never be released. The refund is marked requested, but ${SANCTIONS_FUNDS_RULE}.`,
+    );
+  });
+
+  it('in review, not blocked: regecancel keeps "decide it in the review (reject refunds; ...)"', async () => {
+    await store.saveTransfer(fixture({ complianceStatus: 'flagged' }));
+    await createTransferRepo(db).setFundingRef(ID, 'fund-1');
+    await beginHold(db, fixture({ complianceStatus: 'flagged' }));
+    await cancelWithinWindow(db, 'acme', ID, { via: 'bot' });
+    expect(await message(`regecancel:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender of transfer ${ID} (partner acme) asked to cancel within 30 minutes of payment (Reg E) while it is held for review. ` +
+        'Not auto-cancelled (C4). The refund is marked requested: decide it in the review (reject refunds; release keeps the request open until dismissed on Refunds).',
+    );
+  });
+
+  it('paid, rail claimed, blocked: regecancel says recall it from the rail and the no-refund rule, never "approve the refund"', async () => {
+    await paidOnSimulator();
+    await createOutboxRepo(db).claimBatch(10, 'w1');
+    await blockRow();
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated' });
+    expect(await message(`regecancel:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender of transfer ${ID} (partner acme) asked to cancel within 30 minutes of payment (Reg E), ` +
+        'but the rail may already hold the instruction (rail_claimed). Not auto-cancelled. It is blocked by sanctions screening: recall it from the rail if it was sent. ' +
+        `The refund is marked requested, but ${SANCTIONS_FUNDS_RULE}.`,
+    );
+  });
+
+  it('paid, rail claimed, not blocked: regecancel keeps "approve the refund on Refunds"', async () => {
+    await paidOnSimulator();
+    await createOutboxRepo(db).claimBatch(10, 'w1');
+    await cancelWithinWindow(db, 'acme', ID, { via: 'bot' });
+    expect(await message(`regecancel:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender of transfer ${ID} (partner acme) asked to cancel within 30 minutes of payment (Reg E), ` +
+        'but the rail may already hold the instruction (rail_claimed). Not auto-cancelled. The refund is marked requested, so a not-yet-sent ' +
+        'instruction is held. Recall it from the rail and approve the refund on Refunds, or dismiss the request so the instruction can go out.',
+    );
+  });
+
+  it('partner-funded, cancelled, blocked: sendercancelfunds has the no-refund rule, never "have the partner return the payment"', async () => {
+    await store.saveTransfer(fixture());
+    await beginSettlement(db, fixture(), SIMULATOR); // no funding_ref
+    await blockRow();
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'cancelled', refundQueued: false });
+    expect(await message(`sendercancelfunds:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender cancelled transfer ${ID} (partner acme) within 30 minutes of payment (Reg E). ` +
+        `No refund was queued here (funds not captured by SmartRemit). It is blocked by sanctions screening: ${SANCTIONS_FUNDS_RULE}.`,
+    );
+  });
+
+  it('partner-funded, cancelled, not blocked: sendercancelfunds keeps "have the partner return the payment in full"', async () => {
+    await store.saveTransfer(fixture());
+    await beginSettlement(db, fixture(), SIMULATOR);
+    await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' });
+    expect(await message(`sendercancelfunds:${ID}`)).toBe(
+      `⚠️ SmartRemit ops: the sender cancelled transfer ${ID} (partner acme) within 30 minutes of payment (Reg E). ` +
+        'No refund was queued here (funds not captured by SmartRemit) — have the partner return the payment in full, including fees, within 3 business days, and contact the customer.',
+    );
   });
 });

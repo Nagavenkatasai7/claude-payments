@@ -8,10 +8,13 @@ import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-
 import { evaluateCap } from './tier-rules';
 import { resolveCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { pokeWorker } from './outbox';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
 import { rescreenBeforePay } from './pay-rescreen';
+import { readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
 import type { LockedLinkRate } from './payment-link-quote';
 import { createIdempotencyRepo, createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo, type PaymentLink } from '@/db/repos/payment-link-repo';
@@ -140,13 +143,34 @@ export async function finalizeLinkPayment(
   if (!bank || bank.partnerId !== partnerId || bank.payoutDestination.trim() === '') {
     return { ok: false, error: 'payee_unavailable' };
   }
+  // Fix pack 2 T3 (R02): the payee is paid through its partner's rail; an
+  // http rail (real money) needs the LIVE list. A list outage refuses this
+  // payment but says nothing about the payee: its screening is not touched.
+  const payeeRealMoney = realMoneyRail({ environment: 'live', railProviderType: await readRailProviderType(db, partnerId) });
   const screen = await screenPayee(
     { legalName: payee.legalName, accountHolder: bank.accountHolder },
     resolveCorridorRules(partner, 'US'),
+    { realMoney: payeeRealMoney },
   );
-  if (screen.evidence) await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  if (screen.verdict === 'match') {
+    // Fix pack 2 T5 (R04): the evidence and the block notices in ONE transaction.
+    await db.transaction(async (tx) => {
+      if (screen.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId,
+        subjectId: payee.id,
+        stage: 'payee',
+        environment: 'live',
+        realMoney: payeeRealMoney,
+        evidence: screen.evidence,
+      });
+    });
+    pokeWorker(); // partner-demo R4: after the notices commit
+  } else if (screen.evidence) {
+    await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  }
   if (screen.verdict !== 'clear') {
-    if (screen.verdict === 'review') await createPayeeRepo(db).setScreening(payee.id, 'review');
+    if (screen.verdict === 'review' && !screen.listUnavailable) await createPayeeRepo(db).setScreening(payee.id, 'review');
     return { ok: false, error: screen.verdict === 'match' ? 'blocked' : 'payee_unavailable' };
   }
 
@@ -285,11 +309,15 @@ async function resumeMinted(
 ): Promise<LinkFinalizeResult> {
   const customer = await stores.customerStore.ensureCustomer(link.partnerId, link.customerPhone);
   if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // Fix pack 2 T3 (R02): the transfer's RAIL partner (routed, else owner) and
+  // its own environment decide real money; rescreenBeforePay then needs a live
+  // list and also screens the stored recipient name (the payee's legal name).
   const rescreen = await rescreenBeforePay(
     stores.db,
     transfer,
     { senderName: (customer.fullName ?? '').trim() || link.customerName, recipientName: accountHolder },
     resolveCorridorRules(partner, transfer.sourceCountry ?? 'US'),
+    { realMoney: await realMoneyFor(stores.db, transfer), stage: 'pay' },
   );
   switch (rescreen.kind) {
     case 'blocked':

@@ -8,6 +8,7 @@ import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import { logError } from './log';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
+import { settlementTargetUrl } from './live-gate';
 import { settleOrHold } from './settlement';
 import { isPartnerPulled } from './funding-method';
 import type { Store } from './store';
@@ -175,8 +176,11 @@ export async function processTransferPayment(
   // money that can still be charged.)
   const railProviderType = railIntegrations.payment.providerType;
   const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
+  // Fix pack 2 T10: the URL the worker will POST to (a simulator rail's is
+  // always the hosted rail), never the stored one as such.
+  const railUrl = settlementTargetUrl(railIntegrations.payment);
   if (transfer.settlementPartnerId) {
-    if (!railWebhookDriven || !railIntegrations.payment.credentials?.settlementUrl) {
+    if (!railWebhookDriven || !railUrl) {
       logError(
         'pay.routed-rail-unavailable',
         new Error('routed settlement partner has no usable webhook-driven rail'),
@@ -192,7 +196,6 @@ export async function processTransferPayment(
   // (settlement_url_refused), so charging here could only dead-letter. The
   // log carries the reason code, never the URL.
   if (railWebhookDriven) {
-    const railUrl = railIntegrations.payment.credentials?.settlementUrl ?? '';
     const check = checkSettlementUrl(railUrl, { appOrigin: env.appBaseUrl, production: env.isProduction });
     if (!check.ok) {
       logError('pay.rail-url-refused', new Error(`settlement url refused: ${check.reason}`), {

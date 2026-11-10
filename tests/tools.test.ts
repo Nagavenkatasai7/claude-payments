@@ -28,7 +28,7 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
-import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
+import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
   resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
@@ -1534,10 +1534,13 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(r.draft_id).toBeUndefined();
   });
 
-  it('BLOCKED whose evidence write fails: the customer still gets the blocked reply, and a name-free sanctions.evidence-lost warning is logged', async () => {
+  it('BLOCKED whose evidence write fails twice: the customer still gets the blocked reply, and a name-free sanctions.evidence-lost warning is logged', async () => {
     const ctx = await buildClearedCtx();
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
-    vi.spyOn(ctx.store, 'recordBlockedWithEvidence').mockRejectedValueOnce(new Error('insert failed for John Doe'));
+    // Fix pack 2 T5: the record is retried once, so it must fail twice to be lost.
+    vi.spyOn(ctx.store, 'recordBlockedWithEvidence')
+      .mockRejectedValueOnce(new Error('insert failed for John Doe'))
+      .mockRejectedValueOnce(new Error('insert failed for John Doe'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const r = await executeTool('send_approve_picker', {
       amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John Doe',
@@ -1549,6 +1552,185 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(lost).toHaveLength(1);
     expect(lost[0]).not.toMatch(/john|doe/i);
     expect(lost[0]).toContain('default');
+  });
+});
+
+describe('sanctions block notices at card time (fix pack 2 T5, R04)', () => {
+  const ACME_PHONE = '15550007711';
+  async function acmeHttpCtx() {
+    await seedPartner(db, 'acme');
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('acme', 'http')
+      ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = 'http'`);
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    const ctx = await buildCtx(fakeRedis(), ACME_PHONE, 'acme');
+    await ctx.customerStore.upsertOnFirstInbound('acme', ACME_PHONE);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    return ctx;
+  }
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John Doe',
+    recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'john@upi',
+  };
+  const noticeRows = async () => ((await db.execute(sql`
+    SELECT kind, dedupe_key, payload FROM outbox WHERE dedupe_key LIKE 'sanctions%' ORDER BY id`)) as unknown as {
+    rows: Array<{ kind: string; dedupe_key: string; payload: Record<string, unknown> }>;
+  }).rows;
+  const blockAudits = async () => ((await db.execute(sql`
+    SELECT partner_id, subject_id, meta FROM audit_events WHERE action = 'sanctions.block' ORDER BY id`)) as unknown as {
+    rows: Array<{ partner_id: string; subject_id: string; meta: Record<string, unknown> }>;
+  }).rows;
+
+  it('card block writes notices', async () => {
+    const ctx = await acmeHttpCtx();
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.blocked).toBe(true);
+    const [row] = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect((await noticeRows()).map((x) => [x.kind, x.dedupe_key])).toEqual([
+      ['ops.alert', `sanctionsblock:${row.id}`],
+      ['email.send', `sanctionsblockmail:${row.id}:acme`],
+    ]);
+    const audits = await blockAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ partner_id: 'acme', subject_id: row.id, meta: { stage: 'card', environment: 'live', realMoney: true, quiet: false } });
+    expect(JSON.stringify(await noticeRows())).not.toMatch(/john|doe/i);
+  });
+
+  it('a demo name on the default tenant -> a quiet audit, no alert or email', async () => {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis, '15550003334');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550003334');
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    expect((await executeTool('send_approve_picker', PICK, ctx)).blocked).toBe(true);
+    expect(await noticeRows()).toEqual([]);
+    expect((await blockAudits()).map((x) => x.meta)).toMatchObject([{ stage: 'card', quiet: true, realMoney: false }]);
+  });
+
+  it('two record failures -> one unrecorded alert, still blocked', async () => {
+    const ctx = await acmeHttpCtx();
+    const spy = vi.spyOn(ctx.store, 'recordBlockedWithEvidence').mockRejectedValue(new Error('insert failed for John Doe'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await executeTool('send_approve_picker', PICK, ctx)).blocked).toBe(true);
+    expect((await executeTool('send_approve_picker', PICK, ctx)).blocked).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(4);
+    const rows = await noticeRows();
+    expect(rows.map((x) => x.dedupe_key)).toEqual([`sanctions-block-unrecorded:acme:${Math.floor(Date.now() / 3_600_000)}`]);
+    expect(rows[0].kind).toBe('ops.alert');
+    expect(Object.keys(rows[0].payload)).toEqual(['message']);
+    expect(String(rows[0].payload.message)).not.toMatch(/john|doe|15550007711|919876543210/i);
+    expect((await ctx.store.listTransfers()).filter((t) => t.status === 'blocked')).toEqual([]);
+  });
+
+  it('one record failure is retried: the row, evidence and notices land once', async () => {
+    const ctx = await acmeHttpCtx();
+    const real = ctx.store.recordBlockedWithEvidence.bind(ctx.store);
+    vi.spyOn(ctx.store, 'recordBlockedWithEvidence')
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockImplementation(real);
+    expect((await executeTool('send_approve_picker', PICK, ctx)).blocked).toBe(true);
+    expect((await ctx.store.listTransfers()).filter((t) => t.status === 'blocked')).toHaveLength(1);
+    expect((await noticeRows()).map((x) => x.kind)).toEqual(['ops.alert', 'email.send']);
+  });
+
+  it('seller block writes notices', async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    const ctx = await acmeHttpCtx();
+    const r = await executeTool('register_seller', { business_name: 'Test Blocked' }, ctx);
+    expect(r.registered).toBe(false);
+    const seller = await ctx.store.getSeller(ACME_PHONE, 'acme');
+    expect(seller?.kycReviewState).toBe('needs_review');
+    // On an http rail a demo name is still real money: alerted and emailed.
+    expect((await noticeRows()).map((x) => [x.kind, x.dedupe_key])).toEqual([
+      ['ops.alert', `sanctionsblock:${seller!.id}`],
+      ['email.send', `sanctionsblockmail:${seller!.id}:acme`],
+    ]);
+    const audits = await blockAudits();
+    expect(audits).toMatchObject([{ partner_id: 'acme', subject_id: seller!.id, meta: { stage: 'seller', environment: 'live', realMoney: true } }]);
+    const ev = (await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${seller!.id}`)) as unknown as { rows: Array<{ n: number }> };
+    expect(Number(ev.rows[0].n)).toBe(1);
+  });
+
+  it('a clean seller writes no sanctions.block row', async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    const ctx = await acmeHttpCtx();
+    await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    expect(await blockAudits()).toEqual([]);
+  });
+});
+
+// Fix pack 2 T6 (R06): a sender with an active screening hold is refused at
+// card time on a real-money rail, with the neutral fixed text (no review or
+// screening wording). The default tenant and demo rails are unchanged.
+describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
+  const ACME_PHONE = '15550007722';
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Anita Sharma',
+    recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'anita@upi',
+  };
+  const flag = (partnerId: string, phone: string) =>
+    db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = ${partnerId} AND phone = ${phone}`);
+  async function ctxOn(partnerId: string, phone: string, rail?: string) {
+    if (partnerId !== 'default') await seedPartner(db, partnerId);
+    if (rail) {
+      await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES (${partnerId}, ${rail})
+        ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = ${rail}`);
+    }
+    const ctx = await buildCtx(fakeRedis(), phone, partnerId);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    return ctx;
+  }
+  /** A customers statement naming the hold times but not the whole row (a new flags-only read). */
+  const flagOnlyReads = (log: Array<{ sql: string }>) =>
+    log.map((q) => q.sql.toLowerCase()).filter((q) => q.includes('"customers"') && q.includes('screening_flagged_at') && !q.includes('first_seen_at'));
+
+  it("sender_unavailable on an http rail with fixedReply('cap_unavailable', { help: true })", async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await flag('acme', ACME_PHONE);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r).toEqual({
+      error: 'Sending is not available for this account.',
+      unavailable: true,
+      reply_to_customer: fixedReply('cap_unavailable', { help: true }),
+    });
+    expect(await ctx.store.listTransfers()).toEqual([]);
+    expect(await ctx.draftStore.getActiveDraftId('acme', ACME_PHONE)).toBeNull();
+  });
+
+  it('a cleared hold -> the card as usual', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() - interval '2 hours', screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme' AND phone = ${ACME_PHONE}`);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+    expect(r.error).toBeUndefined();
+  });
+
+  it('not on the default tenant', async () => {
+    const ctx = await ctxOn('default', '15550007733');
+    await flag('default', '15550007733');
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+    expect(r.error).toBeUndefined();
+  });
+
+  it('not on a simulator rail', async () => {
+    const ctx = await ctxOn('simco', ACME_PHONE, 'simulator');
+    await flag('simco', ACME_PHONE);
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r.unavailable).toBeUndefined();
+  });
+
+  it('no new customer read', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await flag('acme', ACME_PHONE);
+    const spy = vi.spyOn(ctx.customerStore, 'getCustomer');
+    const stop = captureQueries();
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    const log = stop();
+    expect(r.unavailable).toBe(true);
+    expect(flagOnlyReads(log)).toEqual([]);
+    expect(spy).toHaveBeenCalledTimes(1); // the KYC-gate read only
   });
 });
 
