@@ -10,6 +10,9 @@
 //    match text in the table tells anyone to refund;
 //  - (review S5) the S5 line, the no-refund alerts quoted in section 6 (each
 //    in src/), the exact no-state blocks of Money copy and the section 9 gap;
+//  - (review S6) the S6 line, the railfail: (partner-funded) and
+//    cancelcharged: quotes, the instructsenderhold texts and the section 9
+//    list of the alerts that follow the rule;
 //  - the ops-alert table names every new dedupe key of the pack, every key it
 //    names exists in src/, and every literal piece of each quoted alert text
 //    (the parts between <placeholders>) is in the code.
@@ -181,11 +184,12 @@ describe('sanctions screening spec says what the code does', () => {
     expect(start).toBeGreaterThanOrEqual(0);
     const block = s6.slice(start, s6.indexOf('\nWho is told:', start));
     const src = srcText();
-    for (const key of ['fundblocked:', 'stripechargedmoved:', 'instructnotlive:', 'review:', 'instructsenderhold:', 'recon:', 'railamount:', 'railfail:', 'regecancel:', 'sendercancelfunds:']) {
+    for (const key of ['fundblocked:', 'stripechargedmoved:', 'instructnotlive:', 'review:', 'instructsenderhold:', 'recon:', 'railamount:', 'railfail:', 'cancelcharged:', 'regecancel:', 'sendercancelfunds:']) {
       expect(block, key).toContain(`\`${key}<id>\``);
     }
     const quoted = [...block.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
-    expect(quoted.length).toBe(11);
+    // 11 from S5, plus railfail: (partner-funded) and cancelcharged: (S6).
+    expect(quoted.length).toBe(13);
     for (const text of quoted) {
       expect(text).toContain(SANCTIONS_FUNDS_RULE);
       expect(text).not.toMatch(/refund it|refund at|retry it from Refunds|cancel\/refund/i);
@@ -220,11 +224,43 @@ describe('sanctions screening spec says what the code does', () => {
     expect(sh[0]).not.toMatch(/or refund the transfer/);
   });
 
-  it('S5: section 9 says every alert for a blocked transfer tells staff not to refund, and names the rail-failure auto refund', () => {
+  it('S5/S6: section 9 names the alerts that follow the no-refund rule, says static labels do not, and names the rail-failure auto refund', () => {
     const gap = /^- \*\*Reject and Refund on a blocked transfer\*\*(.*)$/m.exec(section('## 9.'))?.[1] ?? '';
-    expect(gap).toContain('no such text tells anyone to refund (review S5)');
+    expect(gap).toContain('none of these texts tells anyone to refund (review S5, S6)');
+    for (const key of ['fundblocked:', 'stripechargedmoved:', 'instructnotlive:', 'review:', 'instructsenderhold:', 'recon:', 'railamount:', 'railfail:', 'cancelcharged:', 'regecancel:', 'sendercancelfunds:', 'paidmatch:', 'listrescreenblock:']) {
+      expect(gap, key).toContain(`\`${key}\``);
+    }
+    expect(gap).toContain('Static dashboard labels and buttons do not follow the rule');
+    expect(gap).toContain('"release or refund on the Compliance page"');
+    expect(gap).not.toMatch(/Every ops alert and partner notice that can fire/);
     expect(gap).toContain('`failPaidFromRail`');
     expect(gap).not.toContain('The alerts tell them not to before');
+  });
+
+  // Review S6 (Y1, Y2, Y3).
+  it('S6: section 10 has one S6 line after the S5 line', () => {
+    const s10 = section('## 10.');
+    const last = s10.slice(s10.indexOf('### Changes after the last check')).split('\n');
+    const s5 = last.findIndex((l) => l.startsWith('- **S5**'));
+    const s6 = last.findIndex((l) => l.startsWith('- **S6**'));
+    expect(last.filter((l) => l.startsWith('- **S6**'))).toHaveLength(1);
+    expect(s6).toBeGreaterThan(s5);
+  });
+
+  it('S6: instructsenderhold speaks about THIS instruction, and its partner-pulled text never says "nothing was charged"', () => {
+    const row = section('## 11.').split('\n').find((l) => l.startsWith('| `instructsenderhold:'))!;
+    const texts = [...row.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    const full = texts.filter((t) => t.startsWith('⚠️'));
+    expect(full).toHaveLength(2);
+    for (const t of full) {
+      expect(t).toContain('but this instruction was not sent to the rail:');
+      expect(t).not.toContain('nothing was sent to the rail');
+    }
+    const pulled = full.find((t) => t.includes("The partner's rail pulls the sender's funds only on an instruction"))!;
+    expect(pulled).toContain("the rail may have pulled the sender's funds: check with the rail.");
+    expect(pulled).not.toMatch(/nothing was charged/);
+    expect(texts).not.toContain('nothing was charged');
+    expect(section('## 4.')).not.toContain('nothing was sent to the rail');
   });
 
   it('the ops-alert table names every new key, and its keys and texts are in the code', () => {

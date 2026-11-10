@@ -431,10 +431,18 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
   // refunds. No sweep watched that state. Alert once per row; ops refund it by
   // hand (issueRefund accepts paid|delivered only — by design, the remedy is a
   // human decision). Rows already refunding are Task 5's reject path at work.
+  // Review S6 (Y3): a sanctions-blocked row (e.g. the change-ticket ledger
+  // edit after a fundblocked:<id> freeze) is never told to refund: the
+  // compliance officer decides about the funds. Same key, alert only.
   for (const t of await transfers.findCancelledCharged()) {
     await outbox.enqueue(
       'ops.alert',
-      { message: `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.` },
+      {
+        message:
+          t.complianceStatus === 'blocked'
+            ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED, was CHARGED (${t.fundingRef}) and is blocked by sanctions screening; ${SANCTIONS_FUNDS_RULE}.`
+            : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.`,
+      },
       { dedupeKey: `cancelcharged:${t.id}` },
     );
   }

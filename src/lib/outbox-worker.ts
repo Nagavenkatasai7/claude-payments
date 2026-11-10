@@ -918,6 +918,13 @@ async function handle(
           // nobody here), and no "or refund the transfer": a sender who stays
           // held may be a sanctions match, whose funds the compliance officer
           // decides about first.
+          // Review S6 (Y2): a partner-pulled row (ach_pull / bank_pull) is never
+          // "nothing was charged": the partner's rail pulls on an instruction,
+          // and an earlier one (before a reconcile reinstruct or a dead-letter
+          // Retry) may have reached the rail. The claim already counted THIS
+          // row's attempt, so hasStartedInstruction cannot tell; the text
+          // says "may" and sends ops to the rail. The clause speaks about THIS
+          // instruction only.
           const charge = senderChargeState(transfer);
           const money =
             charge === 'charged'
@@ -928,10 +935,14 @@ async function handle(
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
             {
-              message:
-                `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (${money}) ` +
-                `but nothing was sent to the rail: ${senderWhy} ` +
-                `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+              message: isPartnerPulled(transfer.fundingMethod)
+                ? `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `The partner's rail pulls the sender's funds only on an instruction; if an earlier instruction reached the rail, the rail may have pulled the sender's funds: check with the rail. ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`
+                : `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (${money}) ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
             },
             { dedupeKey: `instructsenderhold:${transferId}` },
           );

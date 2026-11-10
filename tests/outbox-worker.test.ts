@@ -3388,13 +3388,15 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
         const msg = JSON.stringify(alerts[0].payload);
         expect(msg).toContain('wk_t1');
         expect(msg).toContain('PAID');
-        expect(msg).toContain('nothing was sent to the rail');
+        // Review S6 (Y2): the clause speaks about THIS instruction only.
+        expect(msg).toContain('this instruction was not sent to the rail');
+        expect(msg).not.toContain('nothing was sent to the rail');
         // Review S5 (X1): the fixture is a paid bank_transfer row with no
         // charge reference (senderChargeState 'partner_collected'), and the
         // text never says to refund the transfer.
         expect((alerts[0].payload as { message: string }).message).toBe(
           "⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (the partner confirmed that it collected the sender's funds) " +
-            'but nothing was sent to the rail: Sender under an active screening hold. ' +
+            'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
             `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
         );
         expect(msg).not.toMatch(/refund the transfer/);
@@ -3405,9 +3407,9 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
     );
 
     // Review S5 (X1): the money by senderChargeState, never always "charged".
+    // Review S6 (Y2): a partner-pulled row has its own text (below).
     it.each([
       ['charged (a charge reference)', { fundingRef: 'ch_wk' }, 'the sender was charged'],
-      ['partner-pulled (nothing charged here)', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'nothing was charged'],
     ])('S5 X1: instructsenderhold states the money (%s), ids only', async (_l, over, money) => {
       const t = liveTransfer(over as Partial<Transfer>);
       await store.saveTransfer(t);
@@ -3421,9 +3423,43 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
       expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
         'instructsenderhold:wk_t1',
         `⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (${money}) ` +
-          'but nothing was sent to the rail: Sender under an active screening hold. ' +
+          'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
           `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
       ]]);
+    });
+
+    // Review S6 (Y2): a partner-pulled (ach_pull / bank_pull) row is never told
+    // "nothing was charged": the partner's rail pulls the sender's funds on an
+    // instruction, and an earlier one (the first instruct before a reconcile
+    // reinstruct or a dead-letter Retry) may have reached the rail.
+    it.each([
+      ['ach_pull, first instruct', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'instruct:wk_t1', false],
+      ['bank_pull, first instruct', { fundingMethod: 'bank_pull', transferType: 'b2b', achTokenRef: 'bankpull_x' }, 'instruct:wk_t1', false],
+      ['ach_pull, reconcile reinstruct after a done instruct', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'reinstruct:wk_t1', true],
+    ])('S6 Y2: partner-pulled instructsenderhold (%s): never "nothing was charged", says the rail may have pulled the funds', async (_l, over, key, earlierDone) => {
+      const t = liveTransfer(over as Partial<Transfer>);
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await stampSender();
+      await rail('http');
+      if (earlierDone) {
+        await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+        await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:wk_t1'`);
+      }
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: key });
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      const alerts = await rowsOf('ops.alert');
+      expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+        'instructsenderhold:wk_t1',
+        '⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID ' +
+          'but this instruction was not sent to the rail: Sender under an active screening hold. ' +
+          "The partner's rail pulls the sender's funds only on an instruction; if an earlier instruction reached the rail, the rail may have pulled the sender's funds: check with the rail. " +
+          `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+      ]]);
+      const msg = (alerts[0].payload as { message: string }).message;
+      expect(msg).not.toMatch(/nothing was charged|nothing was sent to the rail/);
+      for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
     });
 
     it('a platform clear later than the stamp: POSTed', async () => {

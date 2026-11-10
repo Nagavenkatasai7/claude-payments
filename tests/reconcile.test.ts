@@ -615,6 +615,35 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     expect((await outboxRows()).map((x) => x.dedupe_key).filter((k) => k?.startsWith('cancelcharged:'))).toEqual(['cancelcharged:rc_fund1']);
     expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('refundstuck:rc_fund2'); // fresh effect row ⇒ not stuck either
   });
+
+  // Review S6 (Y3): the text of the cancelcharged:<id> alert, by compliance.
+  const cancelChargedText = async (id: string) =>
+    ((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = ${`cancelcharged:${id}`}`)) as unknown as {
+      rows: Array<{ m: string }>;
+    }).rows[0]?.m;
+
+  it('S6: a cancelled, charged row that is NOT blocked keeps the "refund it by hand" text', async () => {
+    await store.saveTransfer(victim({ status: 'cancelled', refundStatus: 'none' }));
+    await reconcileSweep(db);
+    expect(await cancelChargedText('rc_fund1')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED but was CHARGED (mockfund-rc_fund1) and has no refund in flight — refund it by hand.',
+    );
+  });
+
+  it('S6: a cancelled, charged row BLOCKED by sanctions screening: same cancelcharged:<id> key, the no-refund rule, never "refund it by hand"', async () => {
+    await store.saveTransfer(victim({
+      status: 'cancelled', refundStatus: 'none',
+      complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'],
+    }));
+    await reconcileSweep(db);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['cancelcharged:rc_fund1']);
+    const text = await cancelChargedText('rc_fund1');
+    expect(text).toBe(
+      `⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED, was CHARGED (mockfund-rc_fund1) and is blocked by sanctions screening; ${SANCTIONS_FUNDS_RULE}.`,
+    );
+    expect(text).not.toMatch(/refund it by hand/);
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('cancelled');
+  });
 });
 
 describe('reconcileSweep — stuck refunds', () => {

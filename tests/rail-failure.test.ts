@@ -163,6 +163,31 @@ describe('handleRailFailure — funding legs', () => {
     expect(body.toLowerCase()).not.toContain('refund');
     expect(await alertText('railfail:rf_t1')).toMatch(/partner-funded/);
   });
+
+  // Review S6 (Y1): the partner-funded branch keeps its text for every row but
+  // a sanctions-BLOCKED one, which is never told to return the funds.
+  it('S6: PARTNER-FUNDED, not blocked: the railfail alert still says the partner must return the funds', async () => {
+    await store.saveTransfer(fixture({ fundingRef: undefined, fundingMethod: 'bank_transfer' }));
+    await handleRailFailure(db, 'rf_t1', FAILED);
+    expect(await alertText('railfail:rf_t1')).toContain(
+      'Refund none → none: funds were NOT captured by SmartRemit — partner-funded; the partner must return them to the sender. Rail reason:',
+    );
+  });
+
+  it('S6: PARTNER-FUNDED and sanctions-BLOCKED: the railfail alert has the no-refund rule, never "return them"', async () => {
+    await store.saveTransfer(fixture({
+      fundingRef: undefined, fundingMethod: 'bank_transfer',
+      complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'],
+    }));
+    expect(await handleRailFailure(db, 'rf_t1', FAILED)).toEqual({ kind: 'failed', refundStarted: false });
+    expect(await load()).toMatchObject({ status: 'cancelled', refundStatus: 'none' });
+    expect(await keys()).toEqual(['railfailmsg:rf_t1', 'railfail:rf_t1']);
+    const text = await alertText('railfail:rf_t1');
+    expect(text).toContain(
+      `Refund none → none: funds were NOT captured by SmartRemit (partner-funded); the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}. Rail reason:`,
+    );
+    expect(text).not.toMatch(/return them|must return/i);
+  });
 });
 
 describe('handleRailFailure — every prior refund status', () => {
