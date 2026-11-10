@@ -10,11 +10,12 @@ import { resolveCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
 import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { pokeWorker } from './outbox';
+import { logWarn } from './log';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
 import { rescreenBeforePay } from './pay-rescreen';
-import { readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
+import { liveMoneyRefusal, readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
 import type { LockedLinkRate } from './payment-link-quote';
 import { createIdempotencyRepo, createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo, type PaymentLink } from '@/db/repos/payment-link-repo';
@@ -37,6 +38,8 @@ import type { Partner, Transfer } from './types';
 //   → payee sanctions screen (both names; a sanctions.screen evidence row)
 //   → a retry on an already-minted transfer: KYC gate + sender/recipient
 //     re-screen (resumeMinted), then the pay route resumes THAT transfer
+//   → fix pack 3: a real-money link on an uncertified owner (or the default
+//     tenant) is refused with the link still open (nothing written)
 //   → ensureCustomer (NO WhatsApp opt-in) → KYC gate → cap pre-check
 //   → CLAIM, one transaction: the `paylink:<linkId>` idempotency key is bound to
 //     a pre-generated transfer id AND the link moves open → used. A second tab, a
@@ -187,6 +190,16 @@ export async function finalizeLinkPayment(
   // claim; that refusal is the resumable bound-but-unminted shape).
   if (await store.isFlagOn('sends.paused', { partnerId: [partnerId], corridor: 'IN' })) {
     return { ok: false, error: 'sends_paused' };
+  }
+
+  // Fix pack 3 (contract 5): a real-money link whose rail partner (the owner:
+  // a link mint is never routed) is not certified for live money, or the
+  // default tenant on a real-money rail, is refused before anything is
+  // written, so the link stays open. The catch arm below still maps a refusal
+  // raised inside the mint (capability_off, T12, or a race).
+  if (liveMoneyRefusal({ realMoney: payeeRealMoney, ownerId: partnerId, rail: partner })) {
+    logWarn('paylink.live-refused', 'live link refused before the claim', { partnerId });
+    return { ok: false, error: 'not_available' };
   }
 
   // The figures the customer saw: the LOCKED rate, the link's exact rupees. No

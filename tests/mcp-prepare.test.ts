@@ -260,6 +260,19 @@ describe('prepare_transfer — sender screening hold (fix pack 2 T6)', () => {
   });
 });
 
+// Fix pack 3 T4 (contract 5): an uncertified tenant on an http rail is refused
+// at draft time; prepare.ts maps it through prepareResultCopy to
+// refusalMessage's default sentence (the same text as sender_unavailable).
+describe('prepare_transfer — live certification (fix pack 3 T4)', () => {
+  it("not_available -> exactly refusalMessage's default sentence, no draft", async () => {
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('pa', 'http')
+      ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = 'http'`);
+    const r = await prepareTransferTool(principal(), args(), deps);
+    expect(r).toEqual({ ok: false, message: 'This transfer cannot be prepared. The customer can contact SmartRemit support.' });
+    expect(drafts()).toEqual([]);
+  });
+});
+
 describe('cancel_prepared_transfer', () => {
   async function prepared(): Promise<string> {
     const r = await prepareTransferTool(principal(), args(), deps);

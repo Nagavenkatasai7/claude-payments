@@ -4,6 +4,7 @@ import { freshDb } from './helpers-db';
 import { seedTwoTenants } from './helpers-partner-app';
 import { fakeRedis } from './helpers';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import { createCustomerRepo, readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { loadSenderScreening } from '@/lib/sender-screening';
 import { senderScreeningHoldActive, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
@@ -192,6 +193,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     expect(senderScreeningHoldActive(flags)).toBe(true); // the stamp keeps the hold
 
     await setRailProviderType(db, 'pa', 'http');
+    await certifyPartnerForTest(db, 'pa'); // fix pack 3 T4: a live http mint needs a certified rail
     primeOfacSource({ checkedAgoMs: HOUR });
     const redis = fakeRedis();
     const store = createStore(redis, db);

@@ -21,6 +21,7 @@ import {
 import { LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Partner } from '@/lib/types';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
@@ -635,6 +636,9 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
       rows: Array<{ n: number }>;
     }).rows[0].n;
   async function mint(h: Awaited<ReturnType<typeof harness>>, idem: string, over: Record<string, unknown> = {}) {
+    // Fix pack 3 T4: a live mint (and, from T5, a live confirm) on an http
+    // rail needs a certified rail partner; a sandbox mint stays as it was.
+    if (h.deps.keyMode !== 'test') await certifyPartnerForTest(h.db, 'acme');
     const r = await createTransaction(h.deps, DELEGATED, 'pk_1', idem, txBody(over));
     if (!r.ok) throw new Error('unexpected: ' + r.error);
     return (r.data as View).id;
@@ -1398,5 +1402,19 @@ describe('createTransaction: MintRefusedError (pack 3)', () => {
     expect(r2).toMatchObject({ ok: true, status: 201 });
     if (!r2.ok) throw new Error('unexpected');
     expect((r2.data as { id: string }).id).toBe(bound);
+  });
+
+  // Fix pack 3 T4: the real throw (no stub) from the mint's live gate.
+  it("an uncertified http partner's live mint -> 403 partner_not_live, nothing minted", async () => {
+    const { deps, db, store } = await harness();
+    await setRailProviderType(db, 'acme', 'http');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const lock = vi.spyOn(store, 'mintUnderSenderLock');
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-live-real', txBody({ sender: { phone: PHONE, kyc_status: 'not_started' } }));
+    expect(r).toEqual({ ok: false, status: 403, error: NOT_LIVE, code: 'partner_not_live' });
+    expect(lock).not.toHaveBeenCalled();
+    expect(await store.getTransferCount('acme', PHONE)).toBe(0);
+    const n = await db.execute(sql`SELECT count(*)::int AS n FROM transfers`);
+    expect(Number((n.rows[0] as { n: number }).n)).toBe(0);
   });
 });

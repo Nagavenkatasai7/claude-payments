@@ -35,7 +35,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
-import { realMoneyRail } from './live-gate';
+import { liveMoneyRefusal, realMoneyRail } from './live-gate';
 import { sanctionsBlockUnrecordedKey } from './sanctions/notices';
 import { getDb, type Db } from '@/db/client';
 import { openRecallTicketLocked } from './receipt-cores';
@@ -3973,19 +3973,40 @@ export async function prepareSendDraft(
 
     // Fix pack 2 (R04 / R06): is the card rail real money? The rail is the
     // route's settlement partner, else the owner; the bot never mints sandbox,
-    // so the environment is 'live'. Read once, and only when needed (a held
-    // sender or a block); a failed read is real money (the stricter path).
-    let cardRealMoney: boolean | undefined;
+    // so the environment is 'live'. The rail type is read ONCE per card
+    // (memoised; fix pack 3 reads it for every card, below); a failed read
+    // (undefined) is real money for pack 2's checks (the stricter path).
+    let cardRailRead = false;
+    let cardRailType: string | null | undefined;
+    const cardRailProviderType = async (): Promise<string | null | undefined> => {
+      if (!cardRailRead) {
+        cardRailType = await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId);
+        cardRailRead = true;
+      }
+      return cardRailType;
+    };
     const realMoneyCard = async (): Promise<boolean> =>
-      (cardRealMoney ??= realMoneyRail({
-        environment: 'live',
-        railProviderType: await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId),
-      }));
+      realMoneyRail({ environment: 'live', railProviderType: await cardRailProviderType() });
     // Fix pack 2 T6 (R06): a sender with an active screening hold (the
     // customer the KYC gate read; no new read) is refused on a real-money
     // rail with neutral fixed text: no draft, no card, no screen.
     if (senderScreeningHoldActive(customer) && (await realMoneyCard())) {
       return { kind: 'sender_unavailable' };
+    }
+    // Pack 3 (contract 5): only a rail type that was READ as 'http' refuses at draft
+    // time. A failed read (undefined) is left to the mint, the authoritative gate,
+    // so the default tenant's and simulator partners' cards do not change during a
+    // transient read failure (D17). The rail row: none for the default tenant
+    // (refused without a read), the routed partner when routed, else the owner
+    // row already in hand; a failed read counts as not certified.
+    if ((await cardRailProviderType()) === 'http') {
+      const rail =
+        ctx.partnerId === DEFAULT_PARTNER_ID
+          ? null
+          : settlementPartnerId
+            ? await ctx.partnerStore.getPartner(settlementPartnerId).catch(() => null)
+            : partner;
+      if (liveMoneyRefusal({ realMoney: true, ownerId: ctx.partnerId, rail })) return { kind: 'not_available' };
     }
 
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
@@ -4205,6 +4226,9 @@ function prepareRefusalToTool(r: Exclude<PrepareSendResult, { kind: 'draft' }>):
         unavailable: true,
         reply_to_customer: fixedReply('cap_unavailable', { help: true }),
       };
+    case 'not_available':
+      // Fix pack 3 T4 (contract 5): the rail is not certified for live money.
+      return { error: fixedReply('cannot_complete') };
   }
 }
 

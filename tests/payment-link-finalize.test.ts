@@ -18,6 +18,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { Db } from '@/db/client';
 
@@ -347,14 +348,18 @@ describe('finalizeLinkPayment — a retry on the minted transfer (the charge fai
   });
 
   it('a link.customerName-only mint (fullName still empty) is covered on resume and clears on a fresh list', async () => {
-    await setRailProviderType(db, 'default', 'http');
+    // Fix pack 3 T4: a real-money link needs a certified non-default owner
+    // (the default tenant on an http rail is refused before the claim).
+    await seedPartner(db, 'acme');
+    await setRailProviderType(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme');
     const original = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 3_600_000 });
     onTestFinished(() => restoreOfacSource(original));
-    const l = await link({ payeeId: await payee() });
+    const l = await link({ payeeId: await payee({ partnerId: 'acme' }), partnerId: 'acme' });
     const first = await pay(l.token);
     if (!first.ok) throw new Error(`unexpected ${first.error}`);
-    expect((await stores.customerStore.getCustomer('default', PHONE))?.fullName ?? '').toBe('');
+    expect((await stores.customerStore.getCustomer('acme', PHONE))?.fullName ?? '').toBe('');
     expect(await pay(l.token)).toEqual({ ok: true, transferId: first.transferId });
     expect(await status(first.transferId)).toEqual({ status: 'awaiting_payment', compliance_status: 'cleared', funding_ref: null });
   });
@@ -434,4 +439,58 @@ describe('finalizeLinkPayment — MintRefusedError (pack 3)', { retry: 0 }, () =
       expect(await transfersN()).toBe(1);
     },
   );
+});
+
+// Fix pack 3 T4 (contract 5): a real-money link whose owner (the rail: a link
+// mint is never routed) is not certified, or the default tenant on an http
+// rail, is refused BEFORE the claim, so the link stays open and nothing is
+// written. Demo rails are unchanged.
+describe('finalizeLinkPayment — live certification before the claim (pack 3 T4)', { retry: 0 }, () => {
+  const claimAudits = () => count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'paylink.claim'`);
+  beforeEach(() => {
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 }); // the http payee screen needs a live list
+    onTestFinished(() => restoreOfacSource(original));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it("uncertified http link owner -> { ok: false, error: 'not_available' } BEFORE the claim: link still 'open', no idempotency claim, no paylink.claim audit row, no transfer", async () => {
+    await seedPartner(db, 'acme');
+    await setRailProviderType(db, 'acme', 'http');
+    const l = await link({ payeeId: await payee({ partnerId: 'acme' }), partnerId: 'acme' });
+    const lock = vi.spyOn(stores.store, 'mintUnderSenderLock');
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'not_available' });
+    await expectNothingSaved(l.id);
+    expect(await claimAudits()).toBe(0);
+    expect(lock).not.toHaveBeenCalled();
+  });
+
+  it("'default' owner on an http rail -> the same", async () => {
+    await setRailProviderType(db, 'default', 'http');
+    const l = await link({ payeeId: await payee() });
+    expect(await pay(l.token)).toEqual({ ok: false, error: 'not_available' });
+    await expectNothingSaved(l.id);
+    expect(await claimAudits()).toBe(0);
+  });
+
+  it('certified owner -> mints as today', async () => {
+    await seedPartner(db, 'acme');
+    await setRailProviderType(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme');
+    const l = await link({ payeeId: await payee({ partnerId: 'acme' }), partnerId: 'acme' });
+    const r = await pay(l.token);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(await linkStatus(l.id)).toEqual({ status: 'used', transfer_id: r.transferId });
+    expect(await claimAudits()).toBe(1);
+  });
+
+  it.each(['simulator', 'mock'] as const)('%s owner -> unchanged: mints', async (rail) => {
+    await seedPartner(db, 'acme');
+    await setRailProviderType(db, 'acme', rail);
+    const l = await link({ payeeId: await payee({ partnerId: 'acme' }), partnerId: 'acme' });
+    const r = await pay(l.token);
+    expect(r.ok).toBe(true);
+    expect(await transfersN()).toBe(1);
+  });
 });

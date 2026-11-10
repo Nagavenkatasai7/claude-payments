@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { fakeRedis } from './helpers';
 import { apiKeys } from '@/db/schema';
 import type { Db } from '@/db/client';
@@ -128,6 +129,8 @@ beforeEach(async () => {
   const integrations = createPartnerIntegrationsStore(h.db, provider);
   for (const p of ['acme', 'beta']) {
     await seedPartner(h.db, p);
+    // Fix pack 3 T4: 'acme' mints LIVE on an http rail; 'beta' mints sandbox only and stays uncertified.
+    if (p === 'acme') await certifyPartnerForTest(h.db, 'acme');
     await integrations.saveIntegrations(p, {
       kyc: {},
       payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },

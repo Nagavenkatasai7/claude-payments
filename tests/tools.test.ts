@@ -29,6 +29,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { SendBusyError } from '@/lib/send-limits';
 import {
   resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
@@ -1562,6 +1563,7 @@ describe('sanctions block notices at card time (fix pack 2 T5, R04)', () => {
     await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('acme', 'http')
       ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = 'http'`);
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: an http card needs a certified rail
     const ctx = await buildCtx(fakeRedis(), ACME_PHONE, 'acme');
     await ctx.customerStore.upsertOnFirstInbound('acme', ACME_PHONE);
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
@@ -1670,12 +1672,14 @@ describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
   };
   const flag = (partnerId: string, phone: string) =>
     db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = ${partnerId} AND phone = ${phone}`);
-  async function ctxOn(partnerId: string, phone: string, rail?: string) {
+  async function ctxOn(partnerId: string, phone: string, rail?: string, o: { certify?: boolean } = {}) {
     if (partnerId !== 'default') await seedPartner(db, partnerId);
     if (rail) {
       await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES (${partnerId}, ${rail})
         ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = ${rail}`);
     }
+    // Fix pack 3 T4: an http card needs a certified rail (else not_available).
+    if (o.certify) await certifyPartnerForTest(db, partnerId);
     const ctx = await buildCtx(fakeRedis(), phone, partnerId);
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
@@ -1699,7 +1703,7 @@ describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
   });
 
   it('a cleared hold -> the card as usual', async () => {
-    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http', { certify: true });
     await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() - interval '2 hours', screening_cleared_at = now() - interval '1 hour' WHERE partner_id = 'acme' AND phone = ${ACME_PHONE}`);
     const r = await executeTool('send_approve_picker', PICK, ctx);
     expect(r.unavailable).toBeUndefined();
@@ -1722,7 +1726,7 @@ describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
   });
 
   it('no new customer read', async () => {
-    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http', { certify: true });
     await flag('acme', ACME_PHONE);
     const spy = vi.spyOn(ctx.customerStore, 'getCustomer');
     const stop = captureQueries();
@@ -1731,6 +1735,84 @@ describe('sender screening hold at card time (fix pack 2 T6, R06)', () => {
     expect(r.unavailable).toBe(true);
     expect(flagOnlyReads(log)).toEqual([]);
     expect(spy).toHaveBeenCalledTimes(1); // the KYC-gate read only
+  });
+});
+
+// Fix pack 3 T4 (contract 5): a card whose rail type was READ as 'http' is
+// refused at draft time unless the rail partner is certified for live money
+// (neutral fixed text, no draft, no screen). A failed rail-type read is left
+// to the mint. The default tenant and demo rails are unchanged.
+describe('live certification at card time (fix pack 3 T4)', () => {
+  const ACME_PHONE = '15550007744';
+  // 'John Doe' is a watchlist name: a screened card would come back blocked.
+  const PICK = {
+    amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John Doe',
+    recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'john@upi',
+  };
+  const CLEAN = { ...PICK, recipient_name: 'Anita Sharma', payout_destination: 'anita@upi' };
+  async function ctxOn(partnerId: string, phone: string, rail?: string) {
+    if (partnerId !== 'default') await seedPartner(db, partnerId);
+    if (rail) {
+      await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES (${partnerId}, ${rail})
+        ON CONFLICT (partner_id) DO UPDATE SET payment_provider_type = ${rail}`);
+    }
+    const ctx = await buildCtx(fakeRedis(), phone, partnerId);
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    return ctx;
+  }
+  const blockedRows = async () =>
+    Number(((await db.execute(sql`SELECT count(*)::int AS n FROM transfers WHERE status = 'blocked'`)) as unknown as { rows: Array<{ n: number }> }).rows[0].n);
+
+  it("uncertified http rail -> { error: fixedReply('cannot_complete') }, no draft, no screen", async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    const r = await executeTool('send_approve_picker', PICK, ctx);
+    expect(r).toEqual({ error: fixedReply('cannot_complete') });
+    expect(await ctx.draftStore.getActiveDraftId('acme', ACME_PHONE)).toBeNull();
+    expect(await ctx.store.listTransfers()).toEqual([]);
+    expect(await blockedRows()).toBe(0);
+  });
+
+  it('certified -> the card', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await certifyPartnerForTest(db, 'acme');
+    const r = await executeTool('send_approve_picker', CLEAN, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.sent).toBe(true);
+    expect(await ctx.draftStore.getActiveDraftId('acme', ACME_PHONE)).not.toBeNull();
+  });
+
+  it('held sender on uncertified http -> still sender_unavailable (checked first)', async () => {
+    const ctx = await ctxOn('acme', ACME_PHONE, 'http');
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${ACME_PHONE}`);
+    const r = await executeTool('send_approve_picker', CLEAN, ctx);
+    expect(r).toEqual({
+      error: 'Sending is not available for this account.',
+      unavailable: true,
+      reply_to_customer: fixedReply('cap_unavailable', { help: true }),
+    });
+  });
+
+  it.each([
+    ['default tenant', 'default', '15550007755', undefined],
+    ['simulator', 'simco', ACME_PHONE, 'simulator'],
+  ] as const)('%s -> card as before', async (_label, id, phone, rail) => {
+    const ctx = await ctxOn(id, phone, rail);
+    const r = await executeTool('send_approve_picker', CLEAN, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.sent).toBe(true);
+  });
+
+  it.each([
+    ['default tenant', 'default', '15550007766', undefined],
+    ['an uncertified non-default tenant', 'acme', ACME_PHONE, 'http'],
+  ] as const)('rail-type read fails (store.railProviderType -> undefined), %s -> the card as today (no draft-time refusal; the mint decides), exactly one rail-type read', async (_label, id, phone, rail) => {
+    const ctx = await ctxOn(id, phone, rail);
+    const read = vi.spyOn(ctx.store, 'railProviderType').mockResolvedValue(undefined);
+    const r = await executeTool('send_approve_picker', CLEAN, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.sent).toBe(true);
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });
 

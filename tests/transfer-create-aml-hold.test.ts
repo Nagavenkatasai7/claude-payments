@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, MintRefusedError } from '@/lib/transfer-create';
 import { createStore, inSavepoint, type SenderLedgerOps } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -14,6 +14,7 @@ import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } fro
 import type { Db } from '@/db/client';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 
 // Program-Fix 43 PR B: the optional per-partner AML hold inside mintLocked.
 // Owner decision (binding): AML rules raise alerts only; a hard hold comes ONLY
@@ -60,11 +61,16 @@ async function setHolds(db: Db, partnerId: string, on: boolean) {
     UPDATE partners SET corridor_compliance = ${JSON.stringify({ US: { amlHolds: on } })}::jsonb WHERE id = ${partnerId}`);
 }
 
-/** A partner with the setting ON, a rail of `rail`, and a seasoned (T1) sender. */
+/**
+ * A partner with the setting ON, a rail of `rail`, and a seasoned (T1) sender.
+ * Fix pack 3 T4: an http partner is certified for live money (the mint's live
+ * gate refuses an uncertified real-money rail).
+ */
 async function partnerWith(db: Db, id: string, opts: { holds: boolean; rail?: string }) {
   await seedPartner(db, id);
   await setHolds(db, id, opts.holds);
   if (opts.rail) await setRail(db, id, opts.rail);
+  if (opts.rail === 'http') await certifyPartnerForTest(db, id);
   await seedSender(db, { partnerId: id, phone: PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
 }
 
@@ -119,6 +125,7 @@ describe('AML hold — setting OFF (the default)', { retry: 0 }, () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedPartner(db, 'plain');
     await setRail(db, 'plain', 'http');
+    await certifyPartnerForTest(db, 'plain');
     await seedSender(db, { partnerId: 'plain', phone: PHONE, firstSeenDaysAgo: 10 });
     const stop = captureQueries();
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'plain' });
@@ -130,18 +137,22 @@ describe('AML hold — setting OFF (the default)', { retry: 0 }, () => {
 });
 
 describe('AML hold — demo is NEVER held (structural)', { retry: 0 }, () => {
-  it('the default tenant with the setting forced ON and an http rail: cleared, zero AML statements', async () => {
+  // Fix pack 3 T4: the default tenant may not mint real money at all.
+  it('the default tenant with the setting forced ON and an http rail: refused default_on_live_rail, zero AML statements', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await setHolds(db, 'default', true);
     await setRail(db, 'default', 'http');
     await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 10 });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const stop = captureQueries();
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default' });
-    expect(t.complianceStatus).toBe('cleared');
-    expect(t.status).toBe('awaiting_payment');
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default' }).then(() => null, (e: unknown) => e);
     const log = stop();
-    expect(amlStatements(log)).toEqual([]);
-    expect(preLockRailReads(log)).toHaveLength(1);
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('default_on_live_rail');
+    expect(log.some((q) => q.sql.toLowerCase().includes('set local lock_timeout'))).toBe(false);
+    expect(log.filter((q) => q.sql.toLowerCase().includes('savepoint'))).toEqual([]);
+    // No lock was taken, so every statement is pre-lock: the one rail read.
+    expect(log.filter((q) => q.sql.toLowerCase().includes('partner_integrations'))).toHaveLength(1);
   });
 
   it('setting ON on a simulator rail: cleared', async () => {
@@ -227,6 +238,7 @@ describe('AML hold — routed settlement: the RAIL partner\'s provider decides',
     await partnerWith(db, 'acme', { holds: true, rail: 'simulator' });
     await seedPartner(db, 'railco');
     await setRail(db, 'railco', 'http');
+    await certifyPartnerForTest(db, 'railco');
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'railco' });
     expect(t.complianceStatus).toBe('flagged');
   });
@@ -240,12 +252,17 @@ describe('AML hold — routed settlement: the RAIL partner\'s provider decides',
     expect(t.complianceStatus).toBe('cleared');
   });
 
-  it('routed to the default tenant ⇒ never held', async () => {
+  // Fix pack 3 T4: the default tenant is never certified, so a real-money
+  // route to it is refused before the AML hold could run.
+  it('routed to the default tenant on an http rail ⇒ refused live_not_certified', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', { holds: true, rail: 'http' });
     await setRail(db, 'default', 'http');
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'default' });
-    expect(t.complianceStatus).toBe('cleared');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'default' })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('live_not_certified');
   });
 });
 

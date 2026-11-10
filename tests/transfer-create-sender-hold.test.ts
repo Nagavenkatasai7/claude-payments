@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, MintRefusedError } from '@/lib/transfer-create';
 import { createStore, type SenderLedgerOps } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -14,6 +14,7 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 
 // Fix pack 2 T6 (R06): the sender screening hold at mint. A sender whose
@@ -48,9 +49,15 @@ async function makeStores() {
   };
 }
 
-async function senderOn(db: Db, partnerId: string, rail?: string) {
+/**
+ * Fix pack 3 T4: an http partner is certified for live money by default (the
+ * mint's live gate refuses an uncertified real-money rail); a sandbox case
+ * passes certify: false to stay as it was.
+ */
+async function senderOn(db: Db, partnerId: string, rail?: string, o: { certify?: boolean } = {}) {
   if (partnerId !== 'default') await seedPartner(db, partnerId);
   if (rail) await setRailProviderType(db, partnerId, rail);
+  if (o.certify ?? rail === 'http') await certifyPartnerForTest(db, partnerId);
   await seedSender(db, { partnerId, phone: PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
 }
 
@@ -135,7 +142,7 @@ describe('mint sender screening hold (fix pack 2 R06)', { retry: 0 }, () => {
     ["env 'test' on http", 'acme', 'http', 'test'],
   ] as const)('%s -> cleared with ZERO customers flag statements', async (_label, id, rail, environment) => {
     const { db, store, partnerStore, mvs } = await makeStores();
-    await senderOn(db, id, rail);
+    await senderOn(db, id, rail, { certify: false });
     await flagSender(db, id, { flaggedAgoMs: HOUR });
     const stop = captureQueries();
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: id, ...(environment ? { environment } : {}) });
@@ -145,22 +152,26 @@ describe('mint sender screening hold (fix pack 2 R06)', { retry: 0 }, () => {
     expect(flagReads(log)).toEqual([]);
   });
 
-  it('routed default owner -> http partner -> held', async () => {
+  it('routed default owner -> http partner -> refused default_on_live_rail, nothing written (fix pack 3 T4)', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await senderOn(db, 'default');
     await seedPartner(db, 'railco');
     await setRailProviderType(db, 'railco', 'http');
+    await certifyPartnerForTest(db, 'railco');
     await flagSender(db, 'default', { flaggedAgoMs: HOUR });
     primeOfacSource({ checkedAgoMs: HOUR });
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', quote, settlementPartnerId: 'railco' });
-    expect(t.settlementPartnerId).toBe('railco');
-    expect(t.complianceStatus).toBe('flagged');
-    expect(t.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', quote, settlementPartnerId: 'railco' })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('default_on_live_rail');
+    expect((await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)).rows[0]).toEqual({ n: 0 });
   });
 
   it('rail read error -> held', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
-    await senderOn(db, 'simco', 'simulator');
+    // Fix pack 3 T4: a failed rail read is real money, so the owner must be certified to mint.
+    await senderOn(db, 'simco', 'simulator', { certify: true });
     await flagSender(db, 'simco', { flaggedAgoMs: HOUR });
     primeOfacSource({ checkedAgoMs: HOUR });
     vi.spyOn(console, 'warn').mockImplementation(() => {});

@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
@@ -298,6 +299,7 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
   it.each(['ours', 'delegated'] as const)("after the clear an http mint clears, kycMode '%s'", async (kycMode) => {
     await db.execute(sql`UPDATE partners SET kyc_mode = ${kycMode} WHERE id = 'A'`);
     await setRailProviderType(db, 'A', 'http');
+    await certifyPartnerForTest(db, 'A'); // fix pack 3 T4: a live http mint needs a certified rail
     primeOfacSource({ checkedAgoMs: H });
     const mint = (amountSource: number) => createTransfer(store, createPartnerStore(db), createMonthlyVolumeStore(store), {
       partnerId: 'A', phone: PHONE, amountSource, sourceCurrency: 'USD', recipientName: 'Mom',
