@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
@@ -21,7 +22,7 @@ import { seedTwoPartners } from './helpers-portal-two-partner';
 // enrolment behind the 15-minute step-up with the partner's brand as the issuer (owner O7).
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   stale: false,
   db: null as unknown,
@@ -93,7 +94,7 @@ import {
   startPortalVerificationAction,
 } from '@/app/portal/profile/actions';
 
-const SITE = (partnerId: string) => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} });
+const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', host: partnerId === 'pa' ? 'acme.smartremit.ai' : 'bolt.smartremit.ai', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} as PortalSite['theme'] });
 const NAME_A = 'Alice Example';
 const NAME_B = 'Bea Sample';
 

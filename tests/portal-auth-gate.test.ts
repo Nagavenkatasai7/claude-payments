@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents, outbox } from '@/db/schema';
@@ -10,9 +11,10 @@ import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 // Isolation (Review Focus 1): a session cookie minted on partner A's host is "signed out" on B's;
 // a step-up started in one session cannot finish in another; a legacy cookie is never accepted.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
@@ -20,7 +22,7 @@ const SITE = (partnerId: string, slug: string) => ({
 
 const h = vi.hoisted(() => {
   const state = {
-    site: null as null | Record<string, unknown>,
+    site: null as null | PortalSite,
     ip: '203.0.113.1',
     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1',
     jar: new Map<string, string>(),

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -6,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 // verified by the env-gated smoke once DNS exists).
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   customer: null as null | Record<string, unknown>,
 }));
 vi.mock('@/lib/portal-site', () => ({
@@ -34,7 +35,7 @@ import PortalLoginPage from '@/app/portal/login/page';
 import { portalNavItems, showLanguageSwitch } from '@/lib/portal-nav';
 
 const LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-const SITE = { partnerId: 'pa', slug: 'acme', brand: 'Acme Remit', logo: LOGO, theme: { primary: '#0f766e', accent: '#1d4ed8', primaryFromPartner: true, accentFromPartner: true } };
+const SITE: PortalSite = { partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai', brand: 'Acme Remit', logo: LOGO, theme: { primary: '#0f766e', accent: '#1d4ed8', primaryFromPartner: true, accentFromPartner: true } };
 
 async function renderLayout() {
   const el = await PortalLayout({ children: createElement('p', null, 'child') });
@@ -72,7 +73,7 @@ describe('portal layout', () => {
   // Site skins (owner go 2026-11-09): tgfl.smartremit.ai shows the TGFL name over SmartRemit's portal.
   describe('with a skin', () => {
     const SKIN = { name: 'TGFL', logoSrc: null as string | null, theme: null as null | { primary: string; accent: string }, demo: true };
-    const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } });
+    const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } });
 
     it('the header shows the skin name as text, not the SmartRemit logo', async () => {
       h.site = skinned();

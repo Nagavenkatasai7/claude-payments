@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents, outbox, ticketMessages } from '@/db/schema';
@@ -11,9 +12,10 @@ import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-pa
 // Every action is a PUBLIC POST endpoint: host gate first, then the host-bound session; identity is
 // (host partner, session phone), never a form field; foreign and missing ticket ids are the same 404.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
@@ -21,7 +23,7 @@ const SITE = (partnerId: string, slug: string) => ({
 
 const h = vi.hoisted(() => {
   const state = {
-    site: null as null | Record<string, unknown>,
+    site: null as null | PortalSite,
     jar: new Map<string, string>(),
     redis: null as unknown as Record<string, (...a: unknown[]) => unknown>,
     redisProxy: null as unknown,

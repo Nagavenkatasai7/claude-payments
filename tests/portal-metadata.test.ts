@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Metadata } from 'next';
@@ -9,7 +10,7 @@ import type { Metadata } from 'next';
 // portal page and the layout now resolve their metadata through portalMetadata(): the page's own
 // metadata on a portal site, the root 404's on the apex; the portal not-found carries the root 404's title.
 
-const h = vi.hoisted(() => ({ site: null as null | Record<string, unknown>, dataRights: true }));
+const h = vi.hoisted(() => ({ site: null as null | PortalSite, dataRights: true }));
 vi.mock('@/lib/portal-site', () => ({
   getPortalSite: async () => h.site,
   requirePortalSite: async () => {
@@ -31,7 +32,7 @@ import { portalMetadata, portalLayoutMetadata, portalNotFoundMetadata } from '@/
 import { NOT_FOUND_METADATA } from '@/lib/not-found-metadata';
 import { metadata as rootNotFoundMetadata } from '@/app/not-found';
 
-const SITE = { partnerId: 'pa', slug: 'acme', brand: 'Acme Remit', logo: null, theme: {} };
+const SITE: PortalSite = { partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai', brand: 'Acme Remit', logo: null, theme: {} as PortalSite['theme'] };
 
 beforeEach(() => {
   h.site = null;

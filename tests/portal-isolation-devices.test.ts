@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import type { Db } from '@/db/client';
 import { freshDb, seedPartner } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
@@ -8,16 +9,17 @@ import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 // actions act ONLY on (host partner, session phone). The same phone under partner B, and another
 // customer on the same partner, are invisible and unrevocable. Real gate, real store.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
 });
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   jar: new Map<string, string>(),
   redis: null as unknown,
   db: null as unknown,

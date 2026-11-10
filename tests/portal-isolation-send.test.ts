@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import type { Db } from '@/db/client';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -23,7 +24,7 @@ import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-pa
 // never taken as the customer's.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   db: null as unknown,
   redis: null as unknown,
@@ -73,7 +74,7 @@ let B: TwoPartnerFixture;
 let phone: string;
 
 const onHost = (partnerId: string) => {
-  h.site = { partnerId, slug: partnerId, brand: `Brand ${partnerId}`, logo: null, theme: {} };
+  h.site = { partnerId, slug: partnerId, host: `${partnerId}.smartremit.ai`, brand: `Brand ${partnerId}`, logo: null, theme: {} as PortalSite['theme'] };
   h.ctx = { site: h.site, session: { phone, sid: 's' }, token: 't', customer: { partnerId, senderPhone: phone } };
 };
 const fd = (f: Record<string, string> = {}) => {

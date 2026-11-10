@@ -59,13 +59,20 @@ describe('maskEmail', () => {
 });
 
 describe('portalEmailVerifyUrl', () => {
-  it("is on the partner's own host, with the token in the query only", () => {
-    expect(portalEmailVerifyUrl('acme', 'tok_abc')).toBe('https://acme.smartremit.ai/portal/notifications/verify?token=tok_abc');
+  it("is on the partner's own canonical host, with the token in the query only", () => {
+    expect(portalEmailVerifyUrl('acme.smartremit.ai', 'tok_abc')).toBe('https://acme.smartremit.ai/portal/notifications/verify?token=tok_abc');
   });
-  it('refuses an invalid or reserved slug', () => {
-    expect(() => portalEmailVerifyUrl('www', 'x')).toThrow();
-    expect(() => portalEmailVerifyUrl('evil.com/x', 'x')).toThrow();
+  it('is on the custom skin host when the site is served there', () => {
+    expect(portalEmailVerifyUrl('smartremitai.tgfl.org', 'tok_abc')).toBe(
+      'https://smartremitai.tgfl.org/portal/notifications/verify?token=tok_abc',
+    );
   });
+  it.each(['www.smartremit.ai', 'evil.com/x', 'tgfl.org', 'SMARTREMITAI.TGFL.ORG', 'smartremitai.tgfl.org.', 'acme', 'smartremit.ai', ''])(
+    'refuses a host that is not a canonical site host: %s',
+    (host) => {
+      expect(() => portalEmailVerifyUrl(host, 'x')).toThrow('portal-email-verify: invalid site host');
+    },
+  );
 });
 
 describe('verify token', () => {

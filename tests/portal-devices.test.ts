@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents } from '@/db/schema';
@@ -10,16 +11,17 @@ import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 // (portal-auth) and a REAL session store run over an in-memory Redis, so "a revoked session is
 // refused on the next request" is proven end to end, not by a mocked gate.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
 });
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   jar: new Map<string, string>(),
   cookieSets: [] as Array<{ name: string; value: string; opts: Record<string, unknown> | undefined }>,
   redis: null as unknown,

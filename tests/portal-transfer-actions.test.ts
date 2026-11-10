@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents, customerPortalPrefs, outbox, tickets, transfers } from '@/db/schema';
@@ -20,7 +21,7 @@ import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-pa
 // locked sender-cancel service; refund and recall reuse the legacy receipt cores.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   stale: false,
   db: null as unknown,
@@ -84,7 +85,7 @@ import {
 import { filterTransfersAction } from '@/app/portal/transfers/actions';
 import { loadTransferFilter } from '@/lib/portal-transfer-filter';
 
-const SITE = (partnerId: string) => ({ partnerId, slug: partnerId, brand: `Brand ${partnerId}`, logo: null, theme: {} });
+const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId, host: `${partnerId}.smartremit.ai`, brand: `Brand ${partnerId}`, logo: null, theme: {} as PortalSite['theme'] });
 const EMAIL = 'user@example.com';
 
 let db: Db;

@@ -25,6 +25,8 @@ import { buildMcpServer, type McpServerDeps } from './server';
 export interface McpSite {
   partnerId: PartnerId;
   slug: string;
+  /** The site's canonical public host (PortalSite.host), never the raw Host header. */
+  host: string;
 }
 
 export interface McpHttpDeps extends McpServerDeps {
@@ -124,8 +126,8 @@ export async function handleMcpRequest(req: Request, deps: McpHttpDeps): Promise
   const limited = deps.ipLimit ? await deps.ipLimit() : null;
   if (limited) return withCors(limited);
 
-  // The canonical host is rebuilt from the verified site, never copied from the request.
-  const host = `${site.slug}.smartremit.ai`;
+  // The canonical host comes from the verified site (parseSiteHost's table), never from the request.
+  const host = site.host;
   const resource = mcpResourceUrl(host);
   const token = bearerToken(req.headers);
   if (token === null) return unauthorized(host, 'missing');

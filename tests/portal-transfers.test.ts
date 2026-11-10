@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
@@ -28,7 +29,7 @@ import { easternMonth } from '@/lib/dates';
 // a URL), the empty state, and 404 for another customer's or another partner's transfer.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   db: null as unknown,
   redis: null as unknown,
@@ -79,7 +80,7 @@ let B: TwoPartnerFixture;
 let phone: string;
 
 function signIn(partnerId: string, p: string, kycStatus = 'verified') {
-  h.site = { partnerId, slug: partnerId, brand: `Brand ${partnerId}`, logo: null, theme: {} };
+  h.site = { partnerId, slug: partnerId, host: `${partnerId}.smartremit.ai`, brand: `Brand ${partnerId}`, logo: null, theme: {} as PortalSite['theme'] };
   h.ctx = { site: h.site, session: { phone: p, sid: 's1' }, token: 'tok', customer: { partnerId, senderPhone: p, kycStatus } };
 }
 

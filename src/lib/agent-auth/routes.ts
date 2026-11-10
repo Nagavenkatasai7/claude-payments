@@ -6,7 +6,7 @@ import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { raiseLimiterDownAlert } from '@/lib/limiter-alert';
 import { getPortalSite } from '@/lib/portal-site';
 import { getPortalCustomer, isPortalSessionFresh } from '@/lib/portal-auth';
-import { AGENT_IP_LIMITS, siteHostFor } from './config';
+import { AGENT_IP_LIMITS } from './config';
 import { agentGateOpen, agentToolsOn } from './gate';
 import { recordAgentEvent } from './audit';
 import { createAgentTokenStore } from './stores';
@@ -20,11 +20,12 @@ import type { AgentSession, AuthorizeDeps } from './authorize-flow';
 /**
  * The tenant of THIS request, from the Host alone (getPortalSite: the partner site, the portal
  * switched on and enabled for that partner, the partner active). null on the apex, a preview,
- * localhost or any failure, so every route answers 404 there, like /portal/*.
+ * localhost or any failure, so every route answers 404 there, like /portal/*. The host is the
+ * site's canonical one (PortalSite.host: `<slug>.smartremit.ai` or a custom skin host).
  */
 export async function agentHostCtx(): Promise<HostCtx | null> {
   const site = await getPortalSite();
-  return site ? { partnerId: site.partnerId, host: siteHostFor(site.slug) } : null;
+  return site ? { partnerId: site.partnerId, host: site.host } : null;
 }
 
 /** Per-IP limit (checkIpRateLimit). FAILS OPEN on a limiter error, with the deduped limiter-down alert. */
