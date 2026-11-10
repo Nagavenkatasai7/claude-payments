@@ -4,9 +4,10 @@
 // on TGFL's DNS); both serve the same skinned portal.
 //
 // PURE: no I/O, and its only import is DEFAULT_PARTNER_ID from ./defaults (type imports and constants
-// only). site-host.ts (and through it src/proxy.ts) imports it on the hot path; the resolver, the
-// portal loader, the slug writer, the portal sign-in and sign-out code, the referral reader, the agent
-// auth server and the portal layout import it too. It never imports site-host.ts, so there is no cycle.
+// only). site-host.ts (and through it src/proxy.ts) imports it on the hot path; among others, the
+// resolver, the portal loader, the slug writer, the portal sign-in and sign-out code, the portal
+// step-up, profile and devices actions, the referral reader, the agent auth server and the portal
+// layout import it too. It never imports site-host.ts, so there is no cycle.
 //
 // A skin is NOT a partner. It changes only what the portal chrome shows (the logo plus the name in the
 // header, optional colours, the tab title, a demo line, "Powered by SmartRemit"). The tenant, the
