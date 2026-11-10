@@ -3406,8 +3406,19 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
       fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'sim-sh' }) });
       await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
       expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
-      expect((await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('instructsenderhold:'))).toEqual([]);
-      if (environment === 'live') expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+      expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
+      const alerts = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+      expect(alerts.filter((k) => k.startsWith('instructsenderhold:'))).toEqual([]);
+      if (environment === 'live') {
+        // The simulator row reaches the gate and is POSTed (the gate is what this proves).
+        expect((fetchFn.mock.calls[0] as [string])[0]).toBe(hosted());
+        expect(alerts).toEqual([]);
+      } else {
+        // Review round 3 (M5): a sandbox row never reaches the hold gate: the
+        // sandbox chokepoint refuses it first (nothing POSTed, one sandboxinstruct alert).
+        expect(fetchFn).not.toHaveBeenCalled();
+        expect(alerts).toEqual(['sandboxinstruct:wk_t1']);
+      }
     });
   });
 

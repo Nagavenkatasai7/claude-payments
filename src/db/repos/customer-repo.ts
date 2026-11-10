@@ -436,12 +436,16 @@ export function createCustomerRepo(
      * clear on the row the UPDATE locks (greatest() reads the latest committed
      * screening_cleared_at), so a match committed after a clear always re-arms
      * the hold, whatever clock `at` came from. GREATEST skips a NULL clear.
+     * Pack 2 review round 3 (L1): it is also at least 1 ms after the flag on
+     * the locked row, so every committed stamp strictly raises the flag and
+     * never moves it back: two matches never share a flag time, and a clear
+     * posting an older reviewed time is refused (ScreeningChanged).
      */
     async stampScreeningFlagged(partnerId: PartnerId, senderPhone: string, at: Date): Promise<boolean> {
       const rows = await db
         .update(customers)
         .set({
-          screeningFlaggedAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond')`,
+          screeningFlaggedAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond', ${customers.screeningFlaggedAt} + interval '1 millisecond')`,
           updatedAt: new Date(),
         })
         .where(tenantKey(partnerId, senderPhone))

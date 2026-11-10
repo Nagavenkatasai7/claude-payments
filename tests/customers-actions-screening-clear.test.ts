@@ -10,7 +10,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { senderScreeningHoldActive, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
-import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { readSenderScreeningFlags, createCustomerRepo } from '@/db/repos/customer-repo';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Staff, Customer } from '@/lib/types';
 
@@ -237,6 +237,38 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
     expect(await readSenderScreeningFlags(db, 'A', PHONE)).toEqual(before);
     expect(await held()).toBe(true);
     expect(await auditRows()).toEqual([]);
+  });
+
+  // Pack 2 review round 3 (L1): every committed stamp strictly raises the flag,
+  // so two matches never share a flag time, even after a clear floored to a
+  // flag from a clock that ran ahead.
+  it('a second match after a floored clear gets a later flag time, so a clear of the first is refused', async () => {
+    const repo = createCustomerRepo(db, async () => null);
+    const T = Date.now();
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 10_000)); // match 1, a clock 10 s ahead
+    await repo.clearScreeningHold('A', PHONE, new Date(T + 1_000)); // floored to flag1 + 1 ms
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 2_000)); // match 2
+    const f2 = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
+    const stale = await reviewed(); // the admin opens the page on match 2
+    expect(stale.get('screeningFlaggedAt')).toBe(f2.toISOString());
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 3_000)); // match 3, unreviewed
+    const before = await readSenderScreeningFlags(db, 'A', PHONE);
+    expect(before!.screeningFlaggedAt!.getTime()).toBeGreaterThan(f2.getTime());
+    await expect(clearSenderScreeningHoldAction(stale)).rejects.toThrow(
+      'The screening for this customer changed since this page loaded. Reload the page and review it again.',
+    );
+    expect(await readSenderScreeningFlags(db, 'A', PHONE)).toEqual(before);
+    expect(await held()).toBe(true);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('a stamp never moves the flag back', async () => {
+    const repo = createCustomerRepo(db, async () => null);
+    const first = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
+    await repo.stampScreeningFlagged('A', PHONE, new Date(first.getTime() - H)); // a clock running behind
+    const after = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
+    expect(after.getTime()).toBe(first.getTime() + 1);
+    expect(await held()).toBe(true);
   });
 
   it('a form without the reviewed flag time, or with a different one, is refused', async () => {

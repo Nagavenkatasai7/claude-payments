@@ -774,3 +774,70 @@ describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 },
     expect(await outboxRows()).toEqual([]);
   });
 });
+
+// ── Pack 2 review round 3 (M5): the lock order on a real-money rail. Where a
+// path locks both rows, the transfer row is locked first, then the sender's
+// customer row (FOR UPDATE), and only then is the transfer claimed (UPDATE).
+// Dropping a lock (e.g. { forUpdate: true } in platformSenderHoldLocked) fails
+// these: a sequential stamp test cannot tell a locked read from a plain one.
+import { releaseHoldAfterRescreen } from '@/lib/settlement';
+import type { ComplianceResult } from '@/lib/compliance';
+
+function lockOrder(qs: Array<{ sql: string }>): { tLock: number; cLock: number; claim: number } {
+  const lower = qs.map((q) => q.sql.toLowerCase());
+  return {
+    tLock: lower.findIndex((q) => q.includes('"transfers"') && q.includes('for update')),
+    cLock: lower.findIndex((q) => q.includes('"customers"') && q.includes('for update')),
+    claim: lower.findIndex((q) => q.startsWith('update "transfers"')),
+  };
+}
+
+function expectTransferThenCustomerThenClaim(qs: Array<{ sql: string }>): void {
+  const { tLock, cLock, claim } = lockOrder(qs);
+  expect(tLock).toBeGreaterThanOrEqual(0);
+  expect(cLock).toBeGreaterThan(tLock);
+  expect(claim).toBeGreaterThan(cLock);
+}
+
+describe('lock order on a real-money rail: transfer, then customer, then the claim (review round 3 M5)', { retry: 0 }, () => {
+  const live = (over: Partial<Transfer> = {}): Transfer => ({ ...fixture(), environment: 'live', ...over } as Transfer);
+  const inReview = () => live({ status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LARGE_AMOUNT_REASON] });
+
+  beforeEach(async () => {
+    await seedSender(db, { partnerId: 'acme', phone: fixture().phone }); // a clear sender
+  });
+
+  it('releaseHold, platform, http, clear sender -> released; the customer lock sits between the transfer lock and the claim', async () => {
+    const t = inReview();
+    await store.saveTransfer(t);
+    const stop = captureQueries();
+    expect(await releaseHold(db, t, HTTP, { actor: 'plat', reason: 'ok' })).toEqual({ kind: 'released', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(stop());
+  });
+
+  it('releaseHoldAfterRescreen, platform, http, live clear re-screen, clear sender -> released; same order', async () => {
+    const t = inReview();
+    await store.saveTransfer(t);
+    const result: ComplianceResult = {
+      status: 'cleared',
+      reasons: [],
+      evidence: {
+        listSource: 'ofac-sdn', listVersion: 'v1', listHash: 'h', screenedAt: new Date().toISOString(),
+        decision: 'clear', parties: [], listFitness: 'live', listCheckedAt: new Date().toISOString(),
+      },
+    };
+    const stop = captureQueries();
+    const r = await releaseHoldAfterRescreen(db, t.id, { result, uncovered: [], railIntegrations: HTTP, audit: { actor: 'plat', reason: 'ok' } });
+    const qs = stop();
+    expect(r).toEqual({ kind: 'released', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(qs);
+  });
+
+  it('beginSettlement, http, clear sender -> started; same order before the paid flip', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    const stop = captureQueries();
+    expect(await beginSettlement(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    expectTransferThenCustomerThenClaim(stop());
+  });
+});

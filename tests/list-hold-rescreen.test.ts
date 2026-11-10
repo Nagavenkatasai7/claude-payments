@@ -519,6 +519,24 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     expect(cLock).toBeGreaterThan(tLock);
   });
 
+  // Pack 2 review round 3 (M5): the release itself keeps the lock order:
+  // transfer FOR UPDATE, then customer FOR UPDATE, then the UPDATE claim.
+  it('M5: http, clear sender -> released; transfer lock, then customer lock, then the claim', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_lock_order' });
+    const stop = captureQueries();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const tLock = qs.findIndex((q) => q.includes('"transfers"') && q.includes('for update'));
+    const cLock = qs.findIndex((q) => q.includes('"customers"') && q.includes('for update'));
+    const claim = qs.findIndex((q) => q.startsWith('update "transfers"'));
+    expect(tLock).toBeGreaterThanOrEqual(0);
+    expect(cLock).toBeGreaterThan(tLock);
+    expect(claim).toBeGreaterThan(cLock);
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual(['instruct:lh_lock_order']);
+  });
+
   it('M1: a mock rail release takes no customers lock and adds no customers read (not real money)', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await heldRow({ id: 'lh_sender_mock2' });

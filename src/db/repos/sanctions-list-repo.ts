@@ -326,6 +326,25 @@ export function createSanctionsListRepo(db: Db) {
         .limit(limit);
     },
 
+    /**
+     * Review round 3 (M7): ONE grouped count of the stored entries of every
+     * version of a source with no stamped archive, compared with its
+     * entry_count. Returns the ids (oldest first) whose stored count differs:
+     * their entries can never hash to the version hash, so the archive skips
+     * them without a re-hash. A version created after this read is not listed.
+     */
+    async pendingCountMismatches(source: string): Promise<number[]> {
+      const rows = await db
+        .select({ id: sanctionsListVersions.id })
+        .from(sanctionsListVersions)
+        .leftJoin(sanctionsListEntries, eq(sanctionsListEntries.versionId, sanctionsListVersions.id))
+        .where(and(eq(sanctionsListVersions.source, source), isNull(sanctionsListVersions.archivedAt)))
+        .groupBy(sanctionsListVersions.id, sanctionsListVersions.entryCount)
+        .having(sql`count(${sanctionsListEntries.entryId}) <> ${sanctionsListVersions.entryCount}`)
+        .orderBy(asc(sanctionsListVersions.id));
+      return rows.map((r) => Number(r.id));
+    },
+
     /** The stored entries of one version (no count check: the archive re-hashes them). */
     entriesOf,
 

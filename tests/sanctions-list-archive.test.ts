@@ -24,6 +24,27 @@ vi.mock('@vercel/blob', () => ({
   del: vi.fn(),
 }));
 
+// Review round 3 (M7): an injected cost per re-hash (each entriesOf read the
+// archive makes advances the test clock), to show what the run spends where.
+const rehash = vi.hoisted(() => ({ costMs: 0, clock: { t: 0 }, reads: [] as number[] }));
+vi.mock('@/db/repos/sanctions-list-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/sanctions-list-repo')>();
+  return {
+    ...real,
+    createSanctionsListRepo: (d: Parameters<typeof real.createSanctionsListRepo>[0]) => {
+      const r = real.createSanctionsListRepo(d);
+      return {
+        ...r,
+        entriesOf: async (id: number) => {
+          rehash.reads.push(id);
+          rehash.clock.t += rehash.costMs;
+          return r.entriesOf(id);
+        },
+      };
+    },
+  };
+});
+
 import {
   archivePending,
   archivePathOf,
@@ -89,6 +110,9 @@ describe('sanctions list archive (R07)', () => {
     putMock.mockReset().mockImplementation(defaultPut);
     getMock.mockReset().mockImplementation(defaultGet);
     process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN = PRIVATE_TOKEN;
+    rehash.costMs = 0;
+    rehash.clock.t = 0;
+    rehash.reads.length = 0;
   });
   afterEach(() => {
     if (saved === undefined) delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
@@ -287,6 +311,70 @@ describe('sanctions list archive (R07)', () => {
     }
     // The archived ones beyond KEEP are pruned as before.
     expect(await entryCount(db, rows[3].id)).toBe(0);
+  });
+
+  // Review round 3 (M7): a version whose stored entry count differs from its
+  // recorded entry_count can never hash to its version hash. One grouped count
+  // finds it without a re-hash, so the run spends its budget on the real
+  // candidates (archived first, oldest first) and still raises the mismatch alert.
+  async function countMismatched(n: number): Promise<number> {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(realVariant(n));
+    const id = (await versionRows(db)).at(-1)!.id;
+    await db.execute(sql`DELETE FROM sanctions_list_entries WHERE version_id = ${id} AND entry_id = ${'sdn:' + (8000 + n)}`);
+    return id;
+  }
+
+  it('count-mismatched versions at the head are not re-hashed: the good version behind them is archived in the same run', async () => {
+    const bad: number[] = [];
+    for (const n of [1, 2, 3, 4, 5]) bad.push(await countMismatched(n));
+    await createSanctionsListRepo(db).storeList(realVariant(6));
+    rehash.costMs = 10_000; // each re-hash costs 10 s of the 150 s budget
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await archivePending(db, { clock: () => rehash.clock.t });
+    quiet.mockRestore(); // not restoreAllMocks: that also drops the Blob mocks' implementations
+    expect(res).toEqual({ status: 'done', archived: 1, failed: 5, pruned: 0 });
+    const rows = await versionRows(db);
+    expect(rows.map((r) => r.archived_at !== null)).toEqual([false, false, false, false, false, true]);
+    expect(rehash.reads).toEqual([rows[5].id]); // only the real candidate was read and hashed
+    // Never archived, never put, never pruned.
+    for (const id of bad) {
+      expect(await entryCount(db, id)).toBe(5);
+      expect([...objects.keys()].some((k) => k.includes(rows.find((r) => r.id === id)!.hash))).toBe(false);
+    }
+    const a = await alerts(db);
+    expect(a.map((x) => x.dedupe_key)).toEqual([`sanctions-archive-mismatch:ofac-sdn:${easternDay(Date.now())}`]);
+    expect(a[0].payload.message).toMatch(/5 ofac-sdn version/);
+  });
+
+  it('count-mismatched versions do not count toward MAX_ARCHIVES_PER_RUN; real candidates keep the oldest-first order', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(realVariant(1));
+    const bad = [await countMismatched(2), await countMismatched(3)];
+    for (const n of [4, 5, 6]) await repo.storeList(realVariant(n));
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await archivePending(db);
+    quiet.mockRestore(); // not restoreAllMocks: that also drops the Blob mocks' implementations
+    expect(res).toMatchObject({ status: 'done', archived: MAX_ARCHIVES_PER_RUN, failed: 2 });
+    const rows = await versionRows(db);
+    expect(rows.map((r) => r.archived_at !== null)).toEqual([true, false, false, true, true, false]);
+    expect(rehash.reads).toEqual([rows[0].id, rows[3].id, rows[4].id]);
+    for (const id of bad) expect(await entryCount(db, id)).toBe(5);
+  });
+
+  it('a version whose counts agree again is re-hashed and archived on the next run (the check is per run, nothing is remembered)', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(realVariant(1));
+    const id = (await versionRows(db))[0].id;
+    await db.execute(sql`UPDATE sanctions_list_versions SET entry_count = entry_count + 1 WHERE id = ${id}`);
+    await repo.storeList(realVariant(2));
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await archivePending(db)).toMatchObject({ archived: 1, failed: 1 });
+    quiet.mockRestore(); // not restoreAllMocks: that also drops the Blob mocks' implementations
+    expect(rehash.reads).not.toContain(id);
+    await db.execute(sql`UPDATE sanctions_list_versions SET entry_count = entry_count - 1 WHERE id = ${id}`);
+    expect(await archivePending(db)).toMatchObject({ archived: 1, failed: 0 });
+    expect((await versionRows(db))[0].archived_at).not.toBeNull();
   });
 
   it('a mismatch alert says a person must act and that the next run will not repair it (counts and source only)', async () => {

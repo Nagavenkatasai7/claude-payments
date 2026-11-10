@@ -8,7 +8,12 @@
 //      here: the parser hashes the repeat, storeList keeps the first only).
 //      A mismatch is never archived and never pruned, and it does not hold
 //      the queue: the run reads past it (review R4, H3) and raises its own
-//      daily alert that a person must act.
+//      daily alert that a person must act. Before any re-hash, ONE grouped
+//      count per pending version (review round 3, M7): a version whose
+//      stored entry count differs from its entry_count is a mismatch with no
+//      re-hash, so the real candidates get the run's budget. A version with
+//      the right count but a wrong hash (e.g. a repeated uid) is re-hashed on
+//      each run.
 //   2. gzip -> putPrivateObject(archivePathOf(v)) in the PRIVATE partner-docs
 //      store (no suffix, no overwrite);
 //   3. ALWAYS read it back, gunzip, and require sha256 == hash. A put that
@@ -155,6 +160,14 @@ export async function archivePending(
     // person must act on it. It does not count toward MAX_ARCHIVES_PER_RUN:
     // the run reads past it (afterId), so up to that many OTHER versions are
     // still attempted. The time budget bounds the whole loop.
+    //
+    // Review round 3 (M7): first ONE grouped count per pending version. A
+    // version whose stored entry count differs from its entry_count cannot
+    // hash to its version hash: it is a mismatch WITHOUT a re-hash, read past
+    // at no cost (no budget, no attempt), and counted after the real
+    // candidates. A version with the right count but a wrong hash (e.g. a
+    // repeated uid) is still found by the re-hash below, on every run.
+    const countMismatched = new Set(await repo.pendingCountMismatches(source));
     let mismatched = 0;
     let attempted = 0;
     let afterId: number | undefined;
@@ -163,8 +176,12 @@ export async function archivePending(
       if (candidates.length === 0) break;
       for (let i = 0; i < candidates.length; i++) {
         const v = candidates[i];
+        if (countMismatched.has(v.id)) {
+          afterId = v.id;
+          continue;
+        }
         if (budgetMs - (clock() - started) < 2 * OBJECT_TIMEOUT_MS) {
-          result.deferred = candidates.length - i;
+          result.deferred = candidates.slice(i).filter((c) => !countMismatched.has(c.id)).length;
           logWarn('sanctions.archive', 'time budget spent; versions left for the next run', { source, deferred: result.deferred });
           break scan;
         }
@@ -184,6 +201,11 @@ export async function archivePending(
           logError('sanctions.archive-version', outcome, { source, versionId: v.id });
         }
       }
+    }
+    for (const id of countMismatched) {
+      result.failed += 1;
+      mismatched += 1;
+      logError('sanctions.archive-version', 'mismatch', { source, versionId: id, check: 'entry-count' });
     }
     const unverified = result.failed - mismatched;
     if (unverified > 0) {

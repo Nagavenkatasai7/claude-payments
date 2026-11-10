@@ -2,7 +2,9 @@
 // (docs/compliance/sanctions-screening-spec.md) goes to partners and counsel,
 // so a few of its sentences are pinned against the code here:
 //  - the section 10 A1 line states the instruct gate's pre-pack pass-through;
-//  - section 10 lists every round 2 finding id, one line each;
+//  - section 10 lists every round 2 finding id, one line each, and (review
+//    round 3) every round 3 finding id fixed;
+//  - the instructnotlive row says the heal does not follow a match (M8);
 //  - the ops-alert table names every new dedupe key of the pack, every key it
 //    names exists in src/, and every literal piece of each quoted alert text
 //    (the parts between <placeholders>) is in the code.
@@ -63,6 +65,29 @@ describe('sanctions screening spec says what the code does', () => {
     }
     expect(round2).toMatch(/^- \*\*E1\*\*: refuted/m);
     expect(round2).toMatch(/^- \*\*E3\*\*: refuted/m);
+  });
+
+  // Review round 3: the round 3 list sits next to the round 2 list, one line per fixed finding.
+  it('section 10 lists every round 3 finding, one line each, after the round 2 list', () => {
+    const s10 = section('## 10.');
+    const r2 = s10.indexOf('### Changes after review round 2');
+    const r3 = s10.indexOf('### Changes after review round 3');
+    expect(r3).toBeGreaterThan(r2);
+    const round3 = s10.slice(r3);
+    for (const id of ['K1', 'K2', 'K3', 'L1', 'M1', 'M2', 'M3', 'M5', 'M6', 'M7', 'M8']) {
+      expect(round3.split('\n').filter((l) => l.startsWith(`- **${id}**`)), id).toHaveLength(1);
+    }
+  });
+
+  // Review round 3 (M8): the heal follows a not-live or too-old refusal only;
+  // after a match no further alert follows and a person must act.
+  it('the instructnotlive row names the match case separately (M8)', () => {
+    const row = section('## 11.').split('\n').find((l) => l.startsWith('| `instructnotlive:'))!;
+    const meaning = row.split(' | ').at(-1)!;
+    expect(meaning).toContain('Only for "not on a live list" and "older than the list age limit": once the list is live the stuck-paid heal re-screens it');
+    expect(meaning).toContain('For "a sanctions match" the heal does not re-screen it, so no further alert follows');
+    expect(meaning).toContain('a person must block and refund the transfer');
+    expect(meaning).not.toMatch(/Once the list is live the stuck-paid heal re-screens it: a clear sends it; otherwise `instructrescreen:` or `paidmatch:` follows\./);
   });
 
   // Review round 3 (K2): rule 3a quotes the release refusals exactly as the code has them.
