@@ -113,6 +113,9 @@ export async function reinstructLocked(db: Db, transferId: string): Promise<'enq
  * re-screens (the stuck-paid heal and the crash-resume re-screen). The sweep
  * runs before the worker drain on every full run, so once the budget is spent
  * no further re-screen STARTS; that row is left as it is for the next sweep.
+ * Review R2 (E4): only the time spent INSIDE healPaidRowScreen and
+ * rescreenOnFile is charged, so the stuck-paid bookkeeping (any size of
+ * backlog) never uses it up. A sweep that defers a re-screen logs the counts.
  * The list-hold sweep has its own budget (LIST_RESCREEN_BUDGET_MS).
  */
 export const RESCREEN_BUDGET_MS = 5_000;
@@ -126,8 +129,20 @@ export interface ReconcileSweepOptions {
 
 export async function reconcileSweep(db: Db, now: Date = new Date(), opts: ReconcileSweepOptions = {}): Promise<SweepResult> {
   const clock = opts.clock ?? Date.now;
-  const rescreenDeadline = clock() + (opts.rescreenBudgetMs ?? RESCREEN_BUDGET_MS);
-  const rescreenTimeLeft = (): boolean => clock() < rescreenDeadline;
+  const rescreenBudgetMs = opts.rescreenBudgetMs ?? RESCREEN_BUDGET_MS;
+  // Review R2 (E4): time charged to the budget (re-screens only, see above).
+  let rescreenSpentMs = 0;
+  const rescreenTimeLeft = (): boolean => rescreenSpentMs < rescreenBudgetMs;
+  const timedRescreen = async <T>(run: () => Promise<T>): Promise<T> => {
+    const started = clock();
+    try {
+      return await run();
+    } finally {
+      rescreenSpentMs += Math.max(0, clock() - started);
+    }
+  };
+  let healDeferred = 0;
+  let resumeDeferred = 0;
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
   const integrationsRepo = createIntegrationsRepo(db);
@@ -177,11 +192,15 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
       // re-screened on a live list first, so the retrying instruct (or the
       // re-instruction below) can pass. Isolated: an error costs nothing else.
       // F3 (C2): not started once the re-screen budget is spent (the next sweep heals it).
-      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null }) && rescreenTimeLeft()) {
-        try {
-          await healPaidRowScreen(db, t, now);
-        } catch (err) {
-          logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
+      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
+        if (!rescreenTimeLeft()) {
+          healDeferred++;
+        } else {
+          try {
+            await timedRescreen(() => healPaidRowScreen(db, t, now));
+          } catch (err) {
+            logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
+          }
         }
       }
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
@@ -281,8 +300,11 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         try {
           if (!liveFresh((await listScreenEvidence(db, t, now)).at(-1), now)) {
             // F3 (C2): the budget is spent: leave this victim untouched (the next sweep resumes it).
-            if (!rescreenTimeLeft()) continue;
-            outcome = await rescreenOnFile(db, t, { realMoney: true, stage: 'resume' });
+            if (!rescreenTimeLeft()) {
+              resumeDeferred++;
+              continue;
+            }
+            outcome = await timedRescreen(() => rescreenOnFile(db, t, { realMoney: true, stage: 'resume' }));
           }
         } catch (err) {
           logWarn('reconcile.resume-rescreen', err, { transferId: t.id });
@@ -351,6 +373,12 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         );
         break;
     }
+  }
+
+  // Review R2 (E4): a re-screen left for the next sweep (budget spent) is
+  // logged, counts only (no id, no name); the rows are untouched.
+  if (healDeferred > 0 || resumeDeferred > 0) {
+    logWarn('reconcile.rescreen-deferred', 'the re-screen budget was spent; the next sweep takes these rows', { resumeDeferred, healDeferred });
   }
 
   // Program-Fix 7 (review M1): STALE STRIPE INTENTS — bound, still pending /

@@ -668,6 +668,7 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
     expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
     const before = await screens(h.db, id);
     const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
     if (r.ok) expect((r.data as View).status).toBe('paid');
     expect(await screens(h.db, id)).toBe(before);
   });
@@ -747,6 +748,7 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
     const id = await mint(h, 'idem-lv-5');
     const before = await screens(h.db, id);
     const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
     if (r.ok) expect((r.data as View).status).toBe('paid');
     expect(await screens(h.db, id)).toBe(before);
   });

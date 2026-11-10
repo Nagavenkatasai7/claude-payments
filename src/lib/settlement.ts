@@ -391,7 +391,11 @@ async function platformSenderHoldLocked(
 export type StaffRescreenReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid + the rail effect, after a live, fresh, clear re-screen
   | { kind: 'sender_hold' } // platform release: the sender's screening hold is active (locked re-check); the re-screen's evidence stays, nothing else written
-  | { kind: 'held' } // the re-screen did not clear: still in_review, reasons updated (LIST_UNAVAILABLE when the list is not live)
+  // the re-screen did not clear: still in_review, reasons updated. Review R2 (J2): `cause` is
+  // 'list_not_live' when the row now carries LIST_UNAVAILABLE (only the automatic sweep may
+  // release it), else 'review' (a possible match, an uncovered name or another new reason: a
+  // platform person decides; the caller's refusal text says so).
+  | { kind: 'held'; cause: 'list_not_live' | 'review' }
   | { kind: 'blocked' } // a match: blocked, notices enqueued, never paid out
   | { kind: 'already' }; // not in_review anymore (or now blocked / rescreen-only): nothing written
 
@@ -408,7 +412,9 @@ export type StaffRescreenReleaseResult =
  *   4. not a live, clear, fully covered screen, or a reason the row did not
  *      carry (LIST_UNAVAILABLE, a possible match, an uncovered name) ⇒
  *      'flagged' with them and a staff `transfer.rescreen` audit row ⇒ 'held'
- *      (with LIST_UNAVAILABLE the automatic sweep owns the row);
+ *      (with LIST_UNAVAILABLE the automatic sweep owns the row: cause
+ *      'list_not_live'; otherwise cause 'review': never released
+ *      automatically, a later platform release is the human decision);
  *   5. otherwise the claim and rail effect releaseHold commits (the same
  *      markPaidIfInReview, with `partnerRelease`), audited as the staff
  *      transfer.release ⇒ 'released'. A refused claim ⇒ 'already' (the
@@ -475,7 +481,7 @@ export async function releaseHoldAfterRescreen(
         uncovered: [...uncovered],
         trigger: 'release',
       });
-      return { kind: 'held' };
+      return { kind: 'held', cause: newReasons.includes(LIST_UNAVAILABLE_REASON) ? 'list_not_live' : 'review' };
     }
 
     // Review R1 (H2): the row is already locked (getTransferForUpdate above).

@@ -38,11 +38,33 @@ export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sende
 /**
  * Pack 2 review F1 (A1): the refusal when a real-money release re-screened the
  * hold (its newest screen was not live and fresh) and the re-screen did not
- * clear it. ONE text for every outcome (a list outage, a possible match, a
- * match): no name, no match detail, so staff cannot tell them apart from it.
+ * clear it. Review R2 (J2): this is the PARTNER staff text, ONE for every
+ * outcome (a list outage, a possible match, an uncovered name, a match): no
+ * name, no match detail, so partner staff cannot tell them apart from it.
  */
 export const RESCREEN_RELEASE_REFUSAL =
-  'Cannot release: the sanctions re-screen at release did not clear this transfer. It stays held.';
+  'Cannot release: the sanctions re-screen at release did not clear this transfer.';
+
+/**
+ * Review R2 (J2): the same refusal for PLATFORM staff, one text per outcome
+ * class, saying what to do next; none names a person or a list entry.
+ *   • listNotLive: the row now waits on LIST_UNAVAILABLE; only the automatic
+ *     list re-screen may release it (a person's click is refused).
+ *   • review: a possible match or a name that could not be screened again
+ *     added a review reason. The row is never released automatically; a
+ *     second platform click (after reading the reasons) is the human review
+ *     and releases it on the ordinary claim.
+ *   • blocked: a match; the transfer is blocked and never released.
+ */
+export const PLATFORM_RESCREEN_REFUSALS = {
+  listNotLive:
+    'Cannot release: the sanctions list is not live, so the re-screen at release could not clear this transfer. ' +
+    'The system re-screens it automatically once the list is live again and releases it if that screen clears it.',
+  review:
+    'Cannot release yet: the sanctions re-screen at release added a review reason. ' +
+    'Read the reasons on the compliance page, and release again only after that review.',
+  blocked: 'Cannot release: the sanctions re-screen at release blocked this transfer.',
+} as const;
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -372,8 +394,8 @@ export async function releaseTransfer(
   // nothing released), then releaseHoldAfterRescreen decides in ONE
   // transaction: released only on a live, fresh, clear screen; otherwise held
   // (LIST_UNAVAILABLE when the list is not live, so the automatic sweep owns
-  // the row) or blocked (with its notices), and the caller gets ONE fixed text.
-  // Not real money: unchanged.
+  // the row) or blocked (with its notices). Partner staff get ONE fixed text;
+  // platform staff a text per outcome class (review R2, J2). Not real money: unchanged.
   const now = new Date();
   if (
     realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
@@ -396,7 +418,16 @@ export async function releaseTransfer(
       );
     }
     if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
-    throw new Error(RESCREEN_RELEASE_REFUSAL);
+    // Review R2 (J2): partner staff get one text for every outcome; platform
+    // staff get the text for the outcome class (what to do next).
+    if (partnerRelease) throw new Error(RESCREEN_RELEASE_REFUSAL);
+    throw new Error(
+      rr.kind === 'blocked'
+        ? PLATFORM_RESCREEN_REFUSALS.blocked
+        : rr.cause === 'list_not_live'
+          ? PLATFORM_RESCREEN_REFUSALS.listNotLive
+          : PLATFORM_RESCREEN_REFUSALS.review,
+    );
   }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);

@@ -33,6 +33,31 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
+// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one per
+// stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+const flagHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
+vi.mock('@/lib/flags', async (orig) => {
+  const real = await orig<typeof import('@/lib/flags')>();
+  return {
+    ...real,
+    isFlagOn: async (...a: Parameters<typeof real.isFlagOn>) => {
+      flagHook.before?.();
+      return real.isFlagOn(...a);
+    },
+  };
+});
+const logSpy = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('@/lib/log', async (orig) => {
+  const real = await orig<typeof import('@/lib/log')>();
+  return {
+    ...real,
+    logWarn: (...a: Parameters<typeof real.logWarn>) => {
+      logSpy.warn(...a);
+      return real.logWarn(...a);
+    },
+  };
+});
+
 // Fix pack 2 T4: a switch that makes the list-hold sweep throw (off by default).
 const listSweepThrows = vi.hoisted(() => ({ value: false }));
 vi.mock('@/lib/list-hold-rescreen', async (orig) => {
@@ -97,6 +122,8 @@ beforeEach(async () => {
   stuckSnapshot.rows = null;
   rescreenThrows.value = false;
   rescreenHook.before = null;
+  flagHook.before = null;
+  logSpy.warn.mockClear();
   listSweepThrows.value = false;
 });
 
@@ -823,6 +850,38 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     // The next sweep (a fresh budget) takes the row left behind.
     rescreenHook.before = null;
     expect((await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t })).fundingResumed).toBe(1);
+  });
+
+  // Pack 2 review R2 (E4): the budget is charged only for time spent INSIDE a
+  // re-screen, so a long stuck-paid backlog (bookkeeping, no re-screen) never
+  // starves the crash-resume re-screen.
+  it('E4: 200 stuck-paid rows of bookkeeping (~50 ms each) do not spend the budget: the charged victim is still re-screened', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    // 200 long-stuck rows on another tenant's mock rail (alert only, no re-screen).
+    stuckSnapshot.rows = Array.from({ length: 200 }, (_, i) => fixture({ id: `rc_bk${i}`, partnerId: 'bulk' }));
+    const clock = { t: 5_000_000 };
+    flagHook.before = () => { clock.t += 50; };
+    const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+    expect(clock.t - 5_000_000).toBeGreaterThanOrEqual(200 * 50); // the bookkeeping took 10 s of the test clock
+    expect(r.stuckPaid).toBe(200);
+    expect(await screens('rc_lv1')).toBe(2);
+    expect(r.fundingResumed).toBe(1);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('in_review');
+    expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+  });
+
+  it('E4: a victim deferred for lack of budget is logged with counts only (no id, no name)', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    await reconcileSweep(db, new Date(), { rescreenBudgetMs: 0 });
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    const calls = logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][2]).toEqual({ resumeDeferred: 1, healDeferred: 0 });
+    expect(JSON.stringify(calls[0])).not.toMatch(/rc_lv1|Anita|1555/);
   });
 
   it('a stale review waiting on the list says so; any other stale review keeps the usual copy', async () => {

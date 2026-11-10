@@ -3258,6 +3258,26 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
   });
 
+  // Review R2 (J4c): the gate refusal dead-letters at the instruct ceiling like
+  // any failure: dead, the usual dead:<id> alert, and still no railfail.
+  it('R2 J4c: the not-live refusal at INSTRUCT_MAX_ATTEMPTS: dead, one dead:<id> alert, no railfail, never POSTed', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', screenedAgoMs: 40 * 3_600_000 });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = ${INSTRUCT_MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, dead: 1 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('dead');
+    const keys = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+    expect(keys.filter((k) => k.startsWith('railfail:'))).toEqual([]);
+    expect(keys.filter((k) => /^dead:\d+$/.test(k))).toHaveLength(1);
+    expect(keys).toContain('instructnotlive:wk_t1');
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
   it('F1 A1: no evidence at all on http: POSTed (pre-pack pass-through)', async () => {
     await store.saveTransfer(liveTransfer());
     await rail('http');

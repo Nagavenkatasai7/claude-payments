@@ -6,8 +6,10 @@
  *    evidence, or evidence without listFitness) re-screens on file FIRST. The
  *    release goes on only after a live, fresh, clear result; otherwise the row
  *    stays held (LIST_UNAVAILABLE when the list is not live, the block path on
- *    a match) and the caller gets ONE fixed refusal (no name, no match detail,
- *    the same text for a match and a list outage).
+ *    a match). Partner staff get ONE fixed refusal (no name, no match detail,
+ *    the same text for every outcome); platform staff get one text per outcome
+ *    class (review R2, J2), and a second platform click after a review-reason
+ *    hold is the human review that releases it.
  *  • Not real money (simulator, mock, 'test'): unchanged.
  *  • Heal: a PAID real-money row whose instruct was refused for an old screen
  *    is re-screened by the reconcile sweep, and the next instruct attempt passes.
@@ -21,8 +23,12 @@ import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { beginHold } from '@/lib/settlement';
-import { canReleaseHeld, issueRefund, releaseTransfer, RESCREEN_RELEASE_REFUSAL, SENDER_SCREENING_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
-import { LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import {
+  canReleaseHeld, issueRefund, PLATFORM_RESCREEN_REFUSALS, releaseTransfer, RESCREEN_ONLY_RELEASE_REFUSAL, RESCREEN_RELEASE_REFUSAL, SENDER_SCREENING_RELEASE_REFUSAL,
+} from '@/lib/dashboard-ops';
+import {
+  LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, POSSIBLE_MATCH_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_IDENTITY_MISSING_REASON,
+} from '@/lib/compliance-config';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
@@ -106,6 +112,22 @@ async function heldLarge(
   return t;
 }
 
+/** A fuzzy hit on the sample list's 'BANCO EJEMPLO NACIONAL' (a possible match, not a match). */
+const POSSIBLE_NAME = 'Banco Ejemplo Nacionel';
+
+/** A LARGE_AMOUNT hold whose sender was screened 40 h ago under a name that is not on file (uncovered at re-screen). */
+async function heldUncovered(id: string): Promise<Transfer> {
+  const t = base({ id });
+  await store.saveTransfer(t);
+  await seedLiveEvidence(
+    db,
+    { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: 'Body Only Name' },
+    { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
+  );
+  expect(await beginHold(db, t, { addReasons: [LARGE_AMOUNT_REASON] })).toEqual({ kind: 'held' });
+  return t;
+}
+
 type AuditRow = { actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> };
 async function auditRows(subject: string): Promise<AuditRow[]> {
   const r = await db.execute(sql`SELECT actor, actor_type, action, subject_id, meta FROM audit_events WHERE subject_id = ${subject} ORDER BY id`);
@@ -148,11 +170,11 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual(['instruct:rr_old']);
   });
 
-  it('http, 40 h old screen, list NOT live: refused with the fixed text, held with LIST_UNAVAILABLE (sweep owns it), no instruct', async () => {
+  it('http, 40 h old screen, list NOT live: refused with the list-not-live platform text, held with LIST_UNAVAILABLE (sweep owns it), no instruct', async () => {
     primeOfacSource({ checkedAgoMs: 40 * H }); // stale list
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_stale' });
-    await expect(releaseTransfer(store, db, 'rr_stale', REL)).rejects.toThrow(RESCREEN_RELEASE_REFUSAL);
+    await expect(releaseTransfer(store, db, 'rr_stale', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
     const after = await store.getTransfer('rr_stale');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceStatus).toBe('flagged');
@@ -169,7 +191,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     ]);
   });
 
-  it('http, 40 h old screen, re-screen matches: blocked with the notices, the SAME fixed text (no name), no instruct', async () => {
+  it('http, 40 h old screen, re-screen matches: blocked with the notices, the blocked platform text (no name), no instruct', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_match', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
@@ -179,7 +201,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     } catch (e) {
       msg = (e as Error).message;
     }
-    expect(msg).toBe(RESCREEN_RELEASE_REFUSAL);
+    expect(msg).toBe(PLATFORM_RESCREEN_REFUSALS.blocked);
     expect(msg.toLowerCase()).not.toContain('testa');
     expect(msg.toLowerCase()).not.toMatch(/match|watchlist/);
     const after = await store.getTransfer('rr_match');
@@ -192,7 +214,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     expect((await auditRows('rr_match')).map((a) => a.action)).toContain('sanctions.block');
   });
 
-  it('http, 40 h old screen, a name screened before cannot be screened again: held with SENDER_IDENTITY_MISSING, the same text', async () => {
+  it('http, 40 h old screen, a name screened before cannot be screened again: held with SENDER_IDENTITY_MISSING, the review platform text', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     const t = base({ id: 'rr_unc' });
@@ -203,14 +225,16 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
       { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
     );
     expect(await beginHold(db, t, { addReasons: [LARGE_AMOUNT_REASON] })).toEqual({ kind: 'held' });
-    await expect(releaseTransfer(store, db, 'rr_unc', REL)).rejects.toThrow(RESCREEN_RELEASE_REFUSAL);
+    await expect(releaseTransfer(store, db, 'rr_unc', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
     const after = await store.getTransfer('rr_unc');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, SENDER_IDENTITY_MISSING_REASON]);
     expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
   });
 
-  it('partner-scoped release: a match and a list outage give the same refusal text', async () => {
+  // Review R2 (J2): partner staff get ONE text for every outcome (a list
+  // outage, a match, an uncovered name, a possible match): it tells nothing apart.
+  it('partner-scoped release: a list outage, a match, an uncovered name and a possible match give the SAME refusal text', async () => {
     await rail('acme', 'http');
     primeOfacSource({ checkedAgoMs: 40 * H });
     await heldLarge({ id: 'rr_p_list' });
@@ -218,8 +242,23 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: H });
     await heldLarge({ id: 'rr_p_match', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
     const match = await releaseTransfer(store, db, 'rr_p_match', REL, { partnerId: 'acme' }).catch((e: Error) => e.message);
+    await heldUncovered('rr_p_unc');
+    const uncovered = await releaseTransfer(store, db, 'rr_p_unc', REL, { partnerId: 'acme' }).catch((e: Error) => e.message);
+    await heldLarge({ id: 'rr_p_pm', recipientName: POSSIBLE_NAME }, { recipientName: POSSIBLE_NAME });
+    const possible = await releaseTransfer(store, db, 'rr_p_pm', REL, { partnerId: 'acme' }).catch((e: Error) => e.message);
     expect(outage).toBe(RESCREEN_RELEASE_REFUSAL);
-    expect(match).toBe(outage);
+    expect([match, uncovered, possible]).toEqual([outage, outage, outage]);
+    // The outcomes really differ underneath (the text alone hides them).
+    expect((await store.getTransfer('rr_p_list'))?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    expect((await store.getTransfer('rr_p_match'))?.complianceStatus).toBe('blocked');
+    expect((await store.getTransfer('rr_p_unc'))?.complianceReasons).toContain(SENDER_IDENTITY_MISSING_REASON);
+    expect((await store.getTransfer('rr_p_pm'))?.complianceReasons).toContain(POSSIBLE_MATCH_REASON);
+    for (const text of [String(outage), ...Object.values(PLATFORM_RESCREEN_REFUSALS)]) {
+      expect(text.startsWith('Cannot release')).toBe(true); // the partner action maps it to its generic refusal
+      expect(text).not.toContain('It stays held');
+      expect(text.toLowerCase()).not.toMatch(/testa|fixturelli|banco|body only|sdn:|ofac/);
+    }
+    expect(new Set([outage, ...Object.values(PLATFORM_RESCREEN_REFUSALS)]).size).toBe(4);
   });
 
   it.each([
@@ -277,6 +316,101 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     await heldLarge({ id: 'rr_absent' });
     await releaseTransfer(store, db, 'rr_absent', REL);
     expect((await store.getTransfer('rr_absent'))?.status).toBe('paid');
+  });
+});
+
+// Review R2 (J2): a possible match or an uncovered name found by the release
+// re-screen is a hold for a PLATFORM person: never released automatically; a
+// second platform click is the human review and MAY release it, so the first
+// refusal tells platform staff what to do. A list outage or a match does not
+// release on a second click.
+describe('releaseTransfer — the platform refusal per outcome and the second click (review R2/J2)', { retry: 0 }, () => {
+  const screens = async (id: string) => (await auditRows(id)).filter((a) => a.action === 'sanctions.screen').length;
+
+  it.each([
+    ['an uncovered name', 'rr_2_unc', SENDER_IDENTITY_MISSING_REASON],
+    ['a possible match', 'rr_2_pm', POSSIBLE_MATCH_REASON],
+  ])('%s: the first click is refused with the review text; a second platform click releases it with NO new screen, audited', async (_label, id, reason) => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    if (id === 'rr_2_unc') await heldUncovered(id);
+    else await heldLarge({ id, recipientName: POSSIBLE_NAME }, { recipientName: POSSIBLE_NAME });
+    await expect(releaseTransfer(store, db, id, REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
+    const held = await store.getTransfer(id);
+    expect(held?.status).toBe('in_review');
+    expect(held?.complianceReasons).toContain(reason);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+    expect((await auditRows(id)).filter((a) => a.action === 'transfer.release')).toEqual([]);
+    const screened = await screens(id);
+    expect(screened).toBe(2);
+
+    await releaseTransfer(store, db, id, { actor: 'plat2', reason: 'reviewed the reasons' });
+    expect((await store.getTransfer(id))?.status).toBe('paid');
+    expect(await screens(id)).toBe(screened);
+    expect((await auditRows(id)).filter((a) => a.action === 'transfer.release')).toEqual([
+      expect.objectContaining({ actor: 'plat2', actor_type: 'staff', meta: expect.objectContaining({ previousStatus: 'in_review', newStatus: 'paid' }) }),
+    ]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([`instruct:${id}`]);
+  });
+
+  it('a list outage: the list-not-live text; a second platform click (list live again) does not release', async () => {
+    primeOfacSource({ checkedAgoMs: 40 * H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_2_list' });
+    await expect(releaseTransfer(store, db, 'rr_2_list', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
+    primeOfacSource({ checkedAgoMs: H });
+    await expect(releaseTransfer(store, db, 'rr_2_list', REL)).rejects.toThrow(RESCREEN_ONLY_RELEASE_REFUSAL);
+    expect((await store.getTransfer('rr_2_list'))?.status).toBe('in_review');
+    expect((await auditRows('rr_2_list')).filter((a) => a.action === 'transfer.release')).toEqual([]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  it('a match: the blocked text; a second platform click does not release', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_2_m', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
+    await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(/^Cannot release/);
+    const after = await store.getTransfer('rr_2_m');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('blocked');
+    expect((await auditRows('rr_2_m')).filter((a) => a.action === 'transfer.release')).toEqual([]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+  });
+});
+
+// Review R2 (J1): a PARTNER release that reaches the claim after a clear
+// re-screen: the tenant pin on the locked read and the sender re-check in the claim.
+describe('releaseTransfer — partner release through the re-screen claim (review R2/J1)', { retry: 0 }, () => {
+  const PARTNER_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
+
+  it('a stamp-only sender (screening_flagged_at set, flags NULL): the re-screen clears, the claim refuses; evidence kept, no instruct', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_j1_stamp' });
+    await db.execute(sql`UPDATE customers SET screening_flagged_at = now(), pep_hit = NULL, watchlist_hit = NULL WHERE partner_id = 'acme' AND phone = ${SENDER_PHONE}`);
+    await expect(releaseTransfer(store, db, 'rr_j1_stamp', REL, { partnerId: 'acme' })).rejects.toThrow(PARTNER_CHANGED);
+    expect((await store.getTransfer('rr_j1_stamp'))?.status).toBe('in_review');
+    const rows = await auditRows('rr_j1_stamp');
+    const screens = rows.filter((a) => a.action === 'sanctions.screen');
+    expect(screens).toHaveLength(2); // the re-screen is a true record
+    expect(screens[1].meta).toMatchObject({ decision: 'clear', listFitness: 'live' });
+    expect(rows.filter((a) => a.action === 'transfer.release')).toEqual([]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  it("another tenant's partnerId: the same text, the row unchanged, no audit row and no outbox row", async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await seedPartner(db, 'other');
+    await heldLarge({ id: 'rr_j1_x' });
+    const before = await store.getTransfer('rr_j1_x');
+    const auditBefore = (await auditRows('rr_j1_x')).length;
+    const outboxBefore = (await keys()).length;
+    await expect(releaseTransfer(store, db, 'rr_j1_x', REL, { partnerId: 'other' })).rejects.toThrow(PARTNER_CHANGED);
+    expect(await store.getTransfer('rr_j1_x')).toEqual(before);
+    expect((await auditRows('rr_j1_x')).length).toBe(auditBefore);
+    expect((await keys()).length).toBe(outboxBefore);
   });
 });
 
@@ -379,9 +513,12 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     const ins = await db.execute(sql`SELECT status FROM outbox WHERE kind = 'settlement.instruct'`);
     expect((ins as unknown as { rows: Array<{ status: string }> }).rows.map((r) => r.status)).toEqual(['done']);
     // The stuck-paid sweep never re-instructs it, and does not screen it again.
+    const blocksBefore = (await auditRows(t.id)).filter((a) => a.action === 'sanctions.block').length;
     await reconcileSweep(db, new Date());
     expect((await keys()).filter((k) => k === 'reinstruct:rr_heal_m')).toEqual([]);
     expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(2);
+    // Review R2 (J4a): a newest screen that is a match is not screened (or blocked) again.
+    expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.block')).toHaveLength(blocksBefore);
     expect(await reinstructLocked(db, t.id)).toBe('not_payable');
     await drainOnce(deps(), 'w2');
     expect(fetchFn).not.toHaveBeenCalled();
@@ -431,6 +568,38 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     await reconcileSweep(db, new Date());
     expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
     expect((await keys()).filter((k) => k === 'instructrescreen:rr_heal_u')).toHaveLength(1);
+    // Review R2 (J4e): the review alert carries ids only: one message, no name, phone or account.
+    const r = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'instructrescreen:rr_heal_u'`);
+    const payload = (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
+    expect(Object.keys(payload)).toEqual(['message']);
+    expect(String(payload.message)).toContain('rr_heal_u');
+    for (const pii of ['Body Only Name', SENDER, 'Anita', SENDER_PHONE, '919876543210', '123456789012', 'HDFC']) {
+      expect(JSON.stringify(payload)).not.toContain(pii);
+    }
+  });
+
+  // Review R2 (J4d): the heal runs on a real-money rail only. A stuck paid row
+  // on the simulator rail or in sandbox ('test' on http) with not-live
+  // evidence and a live list is never re-screened by the sweep.
+  it.each([
+    ['simulator rail', 'simulator', 'live'],
+    ["env 'test' on an http rail", 'http', 'test'],
+  ])('%s: a stuck paid row with not-live evidence is not re-screened (no new evidence)', async (_label, type, environment) => {
+    fetchFn.mockReset();
+    await rail('acme', type);
+    const t = base({
+      id: 'rr_heal_demo', status: 'paid', environment: environment as Transfer['environment'],
+      paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(
+      db,
+      { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
+      { screenedAgoMs: H, at: new Date(Date.now() - H), listFitness: 'not_live' },
+    );
+    primeOfacSource({ checkedAgoMs: H });
+    await reconcileSweep(db, new Date());
+    expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
   });
 
   // Pack 2 review F3 (C2): the heal shares the sweep's re-screen time budget.
