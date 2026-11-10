@@ -25,6 +25,8 @@ import { transferRewardOrNull } from '@/lib/rewards/read';
 import { rewardPayNote } from '@/lib/rewards/engine';
 import { usdToSource } from '@/lib/rewards/customer';
 import { bankDetailsLocked, preparedByLine } from '@/lib/pay-prepared-by';
+import { readLegalNameView } from '@/lib/recipient-legal-name';
+import { railPartnerOf } from '@/lib/live-gate';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -193,7 +195,14 @@ async function renderPayPage(transferId: string) {
     // only where savedAccountLabel is shown today and only for a bank account
     // (a UPI id's digits can be a phone number). Null: no 'account ending'.
     approvingLast4: string | null;
+    // Fix pack 4 (C18, T16): the account-holder field. Two booleans only; a
+    // stored legal name never reaches the props or the markup.
+    legalNameRequired: boolean;
+    legalNameOnFile: boolean;
   };
+
+  // A row that is no longer payable, b2b or exempt: no field (and no read).
+  const NO_LEGAL_NAME_FIELD = { legalNameRequired: false, legalNameOnFile: true } as const;
 
   let view: View | null = null;
   // WL1: the partner that owns this payment — drives the Reg E disclosure below.
@@ -227,6 +236,18 @@ async function renderPayPage(transferId: string) {
     const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
     const reward =
       transfer.status === 'awaiting_payment' ? await transferRewardOrNull(getDb(), transfer.partnerId, transfer.id) : null;
+    const transferType = transfer.transferType ?? 'b2c';
+    // Fix pack 4 (C18): read only while the row awaits payment (never throws).
+    const legalName =
+      transfer.status === 'awaiting_payment'
+        ? await readLegalNameView(getDb(), {
+            ownerId: transfer.partnerId,
+            railPartnerId: railPartnerOf(transfer),
+            environment: transfer.environment,
+            transferType,
+            transfer: { id: transfer.id, partnerId: transfer.partnerId },
+          })
+        : NO_LEGAL_NAME_FIELD;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -239,7 +260,7 @@ async function renderPayPage(transferId: string) {
       sourceCurrency,
       fundingMethod: transfer.fundingMethod,
       fxRate: transfer.fxRate,
-      transferType: transfer.transferType ?? 'b2c',
+      transferType,
       awaitingPayment: transfer.status === 'awaiting_payment',
       // Usually a re-opened link with the destination already set → skip Step 1.
       // But a SCHEDULED/cron transfer is created with an EMPTY destination (Item
@@ -255,6 +276,8 @@ async function renderPayPage(transferId: string) {
       // A minted transfer has no draft marker (no ledger column, owner decision 2026-10-18).
       preparedByNote: null,
       bankDetailsLocked: false,
+      legalNameRequired: legalName.legalNameRequired,
+      legalNameOnFile: legalName.legalNameOnFile,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -272,6 +295,14 @@ async function renderPayPage(transferId: string) {
     // destination — collect it on Step 1 like a cold start.
     const storedDraftDest = (draft.recipient.payoutDestination ?? '').trim();
     const hasStoredDest = storedDraftDest !== '' && !isMaskedDestination(storedDraftDest);
+    // Fix pack 4 (C18): owner = the draft's tenant, rail = its routed partner (never throws).
+    const legalName = await readLegalNameView(getDb(), {
+      ownerId: brandPartnerId,
+      railPartnerId: draft.settlementPartnerId ?? brandPartnerId,
+      environment: undefined,
+      transferType: draft.transferType ?? 'b2c',
+      draft,
+    });
     view = {
       id: transferId,
       recipientName: draft.recipient.name,
@@ -299,6 +330,8 @@ async function renderPayPage(transferId: string) {
           )
         : null,
       preparedByNote: preparedByLine(draft.preparedBy),
+      legalNameRequired: legalName.legalNameRequired,
+      legalNameOnFile: legalName.legalNameOnFile,
     };
   }
 
@@ -368,6 +401,8 @@ async function renderPayPage(transferId: string) {
               recipientName: view.recipientName,
               accountLast4: view.approvingLast4,
             }}
+            legalNameRequired={view.legalNameRequired}
+            legalNameOnFile={view.legalNameOnFile}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

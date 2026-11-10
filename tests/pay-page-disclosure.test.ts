@@ -60,6 +60,9 @@ vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => editable.value && current.transferType !== 'b2b',
     isPaymentLinkTransfer: async () => false,
+    // Fix pack 4 (T16): read only by the real readLegalNameView (legalView.real).
+    isPartnerApiMinted: async () => false,
+    recipientIdentityMissing: async () => false,
   }),
 }));
 // Fix pack 4 (T11): the real form renders; its props are recorded (as tests/payment-link-page.test.ts does).
@@ -74,6 +77,26 @@ vi.mock('@/app/pay/[transferId]/pay-form', async (orig) => {
     },
   };
 });
+
+// Fix pack 4 (T16, C18): the account-holder view. `legalView.value` answers per
+// case (default: no field, today's page); `legalView.real` runs the real helper
+// over the mocked repos below, whose book read returns a unique marker name.
+const legalView = vi.hoisted(() => ({
+  value: { legalNameRequired: false, legalNameOnFile: true } as { legalNameRequired: boolean; legalNameOnFile: boolean },
+  real: false,
+}));
+vi.mock('@/lib/recipient-legal-name', async (orig) => {
+  const real = await orig<typeof import('@/lib/recipient-legal-name')>();
+  return {
+    ...real,
+    readLegalNameView: async (...a: Parameters<typeof real.readLegalNameView>) =>
+      legalView.real ? real.readLegalNameView(...a) : legalView.value,
+  };
+});
+const STORED_LEGAL_NAME = 'Qx Storedmarker Legalname';
+vi.mock('@/db/repos/aux-repos', () => ({
+  createRecipientRepo: () => ({ getRecipientLegalName: async () => STORED_LEGAL_NAME }),
+}));
 
 // B3 rewards v1: the minted transfer's reward row (none unless a test sets it).
 const transferReward = vi.hoisted(() => vi.fn().mockResolvedValue(null));
@@ -122,6 +145,8 @@ beforeEach(() => {
   decryptedDest = '';
   editable.value = false;
   payFormProps.last = null;
+  legalView.value = { legalNameRequired: false, legalNameOnFile: true };
+  legalView.real = false;
   limiter.dump.clear();
   getTransfer.mockReset();
   getTransferDecrypted.mockReset();
@@ -342,5 +367,135 @@ describe('/pay/[transferId]: fix pack 4 Approving line and disclosure hash', { r
     current = { partnerId: 'default' };
     await render();
     expect(payFormProps.last?.disclosureHash).toBeNull();
+  });
+});
+
+// Fix pack 4 (T16, C18): the account-holder field. The page hands the form two
+// booleans only; the single-step form asks when no name is on file for the
+// stored account, and the bank-details step asks whenever the field counts
+// (a name on file describes the stored account, not a typed one).
+describe('/pay/[transferId]: fix pack 4 account-holder field', { retry: 0 }, () => {
+  const LABEL = 'Account holder name';
+  const HELP = 'As it appears on the recipient&#x27;s bank account.';
+  const holderInput = (html: string) => html.match(/<input[^>]*name="accountHolder"[^>]*>/)?.[0] ?? null;
+  const STORED = 'IFSC:HDFC0001234|ACCT:123456789012';
+
+  it('required, none on file -> the label and help text render on the single-step form; the input is required', async () => {
+    decryptedDest = STORED;
+    editable.value = true;
+    legalView.value = { legalNameRequired: true, legalNameOnFile: false };
+    const html = await render();
+    expect(html).not.toContain('Step 1 of 2');
+    expect(html).toContain(LABEL);
+    expect(html).toContain(HELP);
+    const input = holderInput(html);
+    expect(input).not.toBeNull();
+    expect(input).toContain('required=""');
+    expect(input).toContain('maxLength="80"');
+    expect(input).toContain('autoComplete="off"');
+    expect(input).toContain('value=""');
+    // The page hands the form the two booleans, nothing else about the name.
+    expect(payFormProps.last?.legalNameRequired).toBe(true);
+    expect(payFormProps.last?.legalNameOnFile).toBe(false);
+  });
+
+  it('the field sits above the code box and does not move the Approving line', async () => {
+    decryptedDest = STORED;
+    editable.value = true;
+    legalView.value = { legalNameRequired: true, legalNameOnFile: false };
+    const html = await render();
+    expect(html.indexOf(LABEL)).toBeGreaterThan(-1);
+    expect(html.indexOf(LABEL)).toBeLessThan(html.indexOf('data-testid="approving-line"'));
+    expect(html.indexOf('data-testid="approving-line"')).toBeLessThan(html.indexOf('Send confirmation code to WhatsApp'));
+  });
+
+  it('optional -> the field renders without required', async () => {
+    decryptedDest = STORED;
+    legalView.value = { legalNameRequired: false, legalNameOnFile: false };
+    const input = holderInput(await render());
+    expect(input).not.toBeNull();
+    expect(input).not.toContain('required');
+  });
+
+  it('on file -> no field on the single-step form', async () => {
+    decryptedDest = STORED;
+    legalView.value = { legalNameRequired: true, legalNameOnFile: true };
+    const html = await render();
+    expect(html).not.toContain(LABEL);
+    expect(holderInput(html)).toBeNull();
+  });
+
+  it('on file but the cold-start bank-details step -> the field renders (required when legalNameRequired)', async () => {
+    decryptedDest = '';
+    legalView.value = { legalNameRequired: true, legalNameOnFile: true };
+    const html = await render();
+    expect(html).toContain('Step 1 of 2');
+    expect(html).toContain(LABEL);
+    expect(holderInput(html)).toContain('required=""');
+    // After the bank fields, before Continue.
+    expect(html.indexOf(LABEL)).toBeLessThan(html.indexOf('>Continue<'));
+    expect(html.indexOf('IFSC')).toBeLessThan(html.indexOf(LABEL));
+  });
+
+  it('the cold-start step with an optional field -> rendered, not required', async () => {
+    decryptedDest = '';
+    legalView.value = { legalNameRequired: false, legalNameOnFile: false };
+    const input = holderInput(await render());
+    expect(input).not.toBeNull();
+    expect(input).not.toContain('required');
+  });
+
+  it('an exempt row (required false, on file true) -> no field anywhere', async () => {
+    legalView.value = { legalNameRequired: false, legalNameOnFile: true };
+    decryptedDest = STORED;
+    expect(await render()).not.toContain(LABEL);
+    decryptedDest = '';
+    const cold = await render();
+    expect(cold).toContain('Step 1 of 2');
+    expect(cold).not.toContain(LABEL);
+  });
+
+  it('a paid transfer never reads the view and shows no field', async () => {
+    legalView.value = { legalNameRequired: true, legalNameOnFile: false };
+    current = { status: 'paid' };
+    decryptedDest = STORED;
+    const html = await render();
+    expect(html).not.toContain(LABEL);
+    expect(payFormProps.last).toBeNull();
+  });
+
+  it('the rendered HTML never contains a stored legal name (real helper, book read returns a marker)', async () => {
+    legalView.real = true;
+    getTransfer.mockResolvedValue(null);
+    getTransferDecrypted.mockResolvedValue(null);
+    getDraft.mockResolvedValue({
+      senderPhone: '15551234567',
+      partnerId: 'p_acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: STORED },
+      recipientLegalName: STORED_LEGAL_NAME,
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 2.99, fxRate: 83.2, amountInr: 16640, feeSource: 2.99, totalChargeSource: 202.99 },
+    } as unknown as Draft);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const html = await render();
+      expect(html).not.toContain(STORED_LEGAL_NAME);
+      expect(html).not.toContain('Storedmarker');
+      expect(JSON.stringify(payFormProps.last)).not.toContain(STORED_LEGAL_NAME);
+      expect(payFormProps.last?.legalNameOnFile).toBe(true);
+      expect(Object.keys(payFormProps.last ?? {}).filter((k) => /legal|holder/i.test(k)).sort()).toEqual([
+        'legalNameOnFile',
+        'legalNameRequired',
+      ]);
+      // A minted transfer whose book read is not used: still no marker anywhere.
+      getDraft.mockResolvedValue(null);
+      getTransfer.mockImplementation(async (id) => (id === ID ? makeTransfer({ id }) : null));
+      getTransferDecrypted.mockImplementation(async (id) => (id === ID ? makeTransfer({ id, payoutDestination: STORED }) : null));
+      expect(await render()).not.toContain(STORED_LEGAL_NAME);
+      for (const c of warn.mock.calls) expect(String(c[0])).not.toContain(STORED_LEGAL_NAME);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

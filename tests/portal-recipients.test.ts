@@ -146,6 +146,44 @@ describe('edge validation', () => {
   });
 });
 
+// Fix pack 4 T16 (C18, C13): the optional account-holder name on the add and edit forms.
+describe('the account-holder name (fix pack 4)', () => {
+  const ADD = { name: 'Asha', recipientPhone: RP, country: 'IN', accountNumber: ACCOUNT, accountNumberConfirm: ACCOUNT, ifsc: 'HDFC0001234' };
+  const existing: Recipient = { name: 'Asha', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}`, lastUsedAt: '2026-06-01T00:00:00.000Z' };
+
+  it('validateAddInput: an optional legalName, trimmed; blank -> absent', () => {
+    const r = validateAddInput(fd({ ...ADD, legalName: '  Asha Kumari Sharma  ' }));
+    expect(r.ok && r.value.legalName).toBe('Asha Kumari Sharma');
+    const blank = validateAddInput(fd({ ...ADD, legalName: '   ' }));
+    expect(blank.ok).toBe(true);
+    expect(blank.ok && 'legalName' in blank.value).toBe(false);
+    const none = validateAddInput(fd(ADD));
+    expect(none.ok && 'legalName' in none.value).toBe(false);
+  });
+
+  it("validateAddInput: a control or bidi character or 81 chars -> errors.legalName 'portal.recipients.legal_name_invalid'", () => {
+    for (const legalName of ['Asha\nSharma', 'Asha\u0000', 'Asha\u202e', 'a'.repeat(81)]) {
+      const r = validateAddInput(fd({ ...ADD, legalName }));
+      expect(r.ok === false && r.errors.legalName).toBe('portal.recipients.legal_name_invalid');
+    }
+    const max = validateAddInput(fd({ ...ADD, legalName: 'a'.repeat(80) }));
+    expect(max.ok && max.value.legalName).toBe('a'.repeat(80));
+  });
+
+  it("validateEditInput: a legal name adds 'legal_name' to fields; blank keeps it and adds nothing", () => {
+    expect(validateEditInput(fd({ name: 'Asha', legalName: ' Asha Kumari ' }), existing)).toEqual({
+      ok: true,
+      value: { name: 'Asha', payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}`, fields: ['legal_name'], legalName: 'Asha Kumari' },
+    });
+    expect(validateEditInput(fd({ name: 'Asha', legalName: '  ' }), existing)).toEqual({
+      ok: true,
+      value: { name: 'Asha', payoutMethod: 'bank', payoutDestination: `HDFC0001234 ${ACCOUNT}`, fields: [] },
+    });
+    const bad = validateEditInput(fd({ name: 'Asha', legalName: 'a'.repeat(81) }), existing);
+    expect(bad.ok === false && bad.errors.legalName).toBe('portal.recipients.legal_name_invalid');
+  });
+});
+
 describe('findByRid, delete and audit (Task 8.3 core)', () => {
   let db: Db;
   beforeEach(async () => {
@@ -238,6 +276,15 @@ describe('findByRid, delete and audit (Task 8.3 core)', () => {
       await expect(recordRecipientAudit(db, { partnerId: 'pa', phone: SENDER, action: 'recipient.update', meta: meta as never })).rejects.toThrow();
     }
     await expect(recordRecipientAudit(db, { partnerId: 'pa', phone: SENDER, action: 'recipient.update', meta: { rid, fields: ['name', 'destination'] } })).resolves.toBeUndefined();
+    expect(await db.select().from(auditEvents)).toHaveLength(1);
+  });
+
+  it("recordRecipientAudit accepts fields ['legal_name'] and still refuses any value (fix pack 4)", async () => {
+    const rid = '0'.repeat(32);
+    await expect(recordRecipientAudit(db, { partnerId: 'pa', phone: SENDER, action: 'recipient.update', meta: { rid, fields: ['legal_name'] } })).resolves.toBeUndefined();
+    for (const meta of [{ rid, fields: ['Asha Kumari'] }, { rid, legalName: 'Asha Kumari' }, { rid, fields: ['legal_name', 'Asha'] }]) {
+      await expect(recordRecipientAudit(db, { partnerId: 'pa', phone: SENDER, action: 'recipient.update', meta: meta as never })).rejects.toThrow();
+    }
     expect(await db.select().from(auditEvents)).toHaveLength(1);
   });
 

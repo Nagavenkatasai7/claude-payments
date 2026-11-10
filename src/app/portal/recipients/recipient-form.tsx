@@ -57,6 +57,15 @@ export function RecipientForm(props: Props) {
             required aria-describedby={describedBy} invalid={invalid} />
         )}
       </Field>
+      {/* Fix pack 4 (C18): optional, never pre-filled and never echoed back (no saved name reaches the browser). */}
+      <Field name="legalName" label={t('portal.recipients.legalNameLabel')}
+        hint={t(props.mode === 'edit' ? 'portal.recipients.legalNameEditHint' : 'portal.recipients.legalNameHint')}
+        error={e.legalName ? t(e.legalName) : undefined}>
+        {({ id, describedBy, invalid }) => (
+          <Input id={id} name="legalName" key={`legal-${state.requestKey}`} defaultValue="" maxLength={80} autoComplete="off"
+            spellCheck={false} aria-describedby={describedBy} invalid={invalid} />
+        )}
+      </Field>
       {props.mode === 'add' ? (
         <>
           <Field name="recipientPhone" label={t('portal.recipients.phoneLabel')} hint={t('portal.recipients.phoneHint')}

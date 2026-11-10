@@ -315,6 +315,82 @@ describe('edit', () => {
   });
 });
 
+// Fix pack 4 T16 (C3, C18): the optional account-holder name, sealed through the repo's opts.
+describe('the account-holder name (fix pack 4)', () => {
+  const LEGAL = 'Asha Kumari Holder';
+  const NEW_RP = '919000000077';
+
+  it('add with an account-holder name seals it, audits fields [name, destination, legal_name], and the state echo never carries it', async () => {
+    await signIn('pa');
+    await expectRedirect(addRecipientAction(init(), addForm({ legalName: `  ${LEGAL}  ` })), '/portal/recipients?done=added');
+    expect(await createRecipientRepo(db).getRecipientLegalName('pa', PHONE, NEW_RP)).toBe(LEGAL);
+    const [a] = await audits('recipient.create');
+    expect(a.meta).toEqual({ rid: recipientRid('pa', PHONE, NEW_RP), fields: ['name', 'destination', 'legal_name'] });
+    expect(JSON.stringify(a.meta)).not.toContain('Asha');
+    // A refused form echoes only the non-secret inputs: never the account-holder name.
+    const bad = await addRecipientAction(init(), addForm({ recipientPhone: '+91 90000 00078', ifsc: 'NOPE', legalName: LEGAL }));
+    expect(bad.errors?.bank?.ifsc).toBeTruthy();
+    expect(bad.values).toEqual({ name: 'New Person', recipientPhone: '+91 90000 00078', country: 'IN' });
+    expect(JSON.stringify(bad)).not.toContain(LEGAL);
+  });
+
+  it('add without one stores none and audits [name, destination]; an invalid one is refused with nothing written', async () => {
+    await signIn('pa');
+    const bad = await addRecipientAction(init(), addForm({ legalName: 'a'.repeat(81) }));
+    expect(bad.errors?.legalName).toBe('portal.recipients.legal_name_invalid');
+    expect(await audits()).toEqual([]);
+    await expectRedirect(addRecipientAction(init(), addForm()), '/portal/recipients?done=added');
+    expect(await createRecipientRepo(db).getRecipientLegalName('pa', PHONE, NEW_RP)).toBeNull();
+    expect((await audits('recipient.create'))[0].meta).toEqual({ rid: recipientRid('pa', PHONE, NEW_RP), fields: ['name', 'destination'] });
+  });
+
+  it('edit with only an account-holder name -> done (not unchanged), fields [legal_name]', async () => {
+    await signIn('pa');
+    const rid = recipientRid('pa', PHONE, A_RP);
+    await expectRedirect(
+      editRecipientAction(rid, init(), fd({ requestKey: newRequestKey(), name: 'Recipient PA', legalName: LEGAL })),
+      '/portal/recipients?done=updated',
+    );
+    expect(await createRecipientRepo(db).getRecipientLegalName('pa', PHONE, A_RP)).toBe(LEGAL);
+    const [a] = await audits('recipient.update');
+    expect(a.meta).toEqual({ rid, fields: ['legal_name'] });
+    expect((await createRecipientRepo(db).getRecipient('pa', PHONE, A_RP))?.payoutDestination).toBe(`${A_FULL}|HDFC0001111`);
+  });
+
+  it('edit with a blank one keeps the saved name', async () => {
+    await signIn('pa');
+    const rid = recipientRid('pa', PHONE, A_RP);
+    await expectRedirect(
+      editRecipientAction(rid, init(), fd({ requestKey: newRequestKey(), name: 'Recipient PA', legalName: LEGAL })),
+      '/portal/recipients?done=updated',
+    );
+    await expectRedirect(
+      editRecipientAction(rid, init(), fd({ requestKey: newRequestKey(), name: 'Renamed PA', legalName: '   ' })),
+      '/portal/recipients?done=updated',
+    );
+    expect(await createRecipientRepo(db).getRecipientLegalName('pa', PHONE, A_RP)).toBe(LEGAL);
+    expect((await audits('recipient.update')).map((x) => x.meta)).toEqual([
+      { rid, fields: ['legal_name'] },
+      { rid, fields: ['name'] },
+    ]);
+  });
+
+  it('the edit page never pre-fills the saved account-holder name', async () => {
+    await signIn('pa');
+    await createRecipientRepo(db).updateLiveRecipient(
+      'pa',
+      PHONE,
+      (await createRecipientRepo(db).getRecipient('pa', PHONE, A_RP))!,
+      { legalName: LEGAL },
+    );
+    const html = renderToStaticMarkup(await EditRecipientPage({ params: Promise.resolve({ rid: recipientRid('pa', PHONE, A_RP) }) }));
+    expect(html).toContain('name="legalName"');
+    expect(html).toContain('Account holder name');
+    expect(html).toContain('Leave blank to keep the saved name.');
+    expect(html).not.toContain(LEGAL);
+  });
+});
+
 describe('delete: the tombstone is honoured on the web', () => {
   it('after delete the list no longer shows it and its edit page 404s; the row itself is kept', async () => {
     await signIn('pa');

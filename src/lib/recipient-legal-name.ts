@@ -2,6 +2,7 @@ import type { Db, DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo, createRecipientRepo } from '@/db/repos/aux-repos';
 import { logWarn } from './log';
+import { readPayGateContext } from './pay-gate-context';
 import type { Draft, PartnerId, Transfer } from './types';
 
 /**
@@ -94,5 +95,64 @@ export async function fillRecipientBookLegalName(
     await createRecipientRepo(db).fillRecipientLegalName(t.partnerId, t.phone, t.recipientPhone, name);
   } catch (err) {
     logWarn('pay.legal_name_book', errName(err), { transferId: t.id });
+  }
+}
+
+export interface LegalNameView {
+  legalNameRequired: boolean;
+  legalNameOnFile: boolean;
+}
+
+/**
+ * Fix pack 4 T16 (C18, C12): the pay PAGE's view of the account-holder field.
+ * Two booleans only; a stored name never leaves this helper.
+ * - b2b: never asked (`{ false, true }`, no read);
+ * - a transfer minted through the Partner API or by a payment link: exempt,
+ *   never asked (`{ false, true }`, critic M1);
+ * - otherwise `legalNameOnFile` is C18's "not needed" rule for the STORED
+ *   account (payLegalNameOnFile; a draft assumes no new bank fields), and
+ *   `legalNameRequired` = C12's realMoneyForField ('required WHEN SHOWN').
+ * Never throws: any read error gives onFile false and required from the
+ * context (log `pay.page-legal-name`, error name and ids only).
+ */
+export async function readLegalNameView(
+  db: DbOrTx,
+  i: {
+    ownerId: PartnerId;
+    railPartnerId: PartnerId;
+    environment: 'live' | 'test' | undefined;
+    transferType: 'b2c' | 'b2b';
+    transfer?: Pick<Transfer, 'id' | 'partnerId'>;
+    draft?: Draft;
+  },
+): Promise<LegalNameView> {
+  if (i.transferType === 'b2b') return { legalNameRequired: false, legalNameOnFile: true };
+  // readPayGateContext never throws (a safe context on any unexpected error).
+  const ctx = await readPayGateContext(db, {
+    ownerId: i.ownerId,
+    railPartnerId: i.railPartnerId,
+    environment: i.environment,
+    transferType: i.transferType,
+  });
+  const required = ctx.realMoneyForField === true;
+  try {
+    if (i.transfer) {
+      const repo = createTransferRepo(db);
+      const exempt = (await repo.isPartnerApiMinted(i.transfer.id)) || (await repo.isPaymentLinkTransfer(i.transfer.id));
+      if (exempt) return { legalNameRequired: false, legalNameOnFile: true };
+      const onFile = await payLegalNameOnFile(db, { transfer: { id: i.transfer.id, partnerId: i.transfer.partnerId } });
+      return { legalNameRequired: required, legalNameOnFile: onFile === true };
+    }
+    if (i.draft) {
+      const onFile = await payLegalNameOnFile(db, { draft: i.draft, ownerId: i.ownerId, newBankFields: false });
+      return { legalNameRequired: required, legalNameOnFile: onFile === true };
+    }
+    return { legalNameRequired: required, legalNameOnFile: false };
+  } catch (err) {
+    logWarn('pay.page-legal-name', errName(err), {
+      ...(i.transfer ? { transferId: i.transfer.id } : {}),
+      partnerId: i.ownerId,
+    });
+    return { legalNameRequired: required, legalNameOnFile: false };
   }
 }

@@ -102,7 +102,9 @@ export async function addRecipientAction(_prev: RecipientFormState, formData: Fo
   if (!(await withinLimit(pid, phone))) return refuse(formData, { error: 'portal.recipients.too_many' });
   const v = validateAddInput(formData);
   if (!v.ok) return refuse(formData, { errors: v.errors });
-  const input = v.value;
+  // Fix pack 4 (C3, C18): the optional account-holder name is sealed through the repo's opts only;
+  // it is never echoed back (echo) and never in the audit meta (a field NAME only).
+  const { legalName, ...input } = v.value;
   // The duplicate check runs INSIDE runOnce, so a double submit replays the first run's "done"; an
   // "exists" answer carries a fresh request key, so it is never replayed to a corrected form.
   // M2-14 (PR 398 L5): the check and the write run in ONE transaction under the address-book lock, so
@@ -114,8 +116,13 @@ export async function addRecipientAction(_prev: RecipientFormState, formData: Fo
       const live = await repo.listAllForSender(pid, phone);
       if (live.some((r) => normalizePhone(r.recipientPhone) === input.recipientPhone)) return { kind: 'exists' as const };
       const rid = recipientRid(pid, phone, input.recipientPhone);
-      await repo.upsertRecipient(pid, phone, { ...input, lastUsedAt: new Date().toISOString() });
-      await recordRecipientAudit(tx, { partnerId: pid, phone, action: 'recipient.create', meta: { rid, fields: ['name', 'destination'] } });
+      await repo.upsertRecipient(pid, phone, { ...input, lastUsedAt: new Date().toISOString() }, { legalName });
+      await recordRecipientAudit(tx, {
+        partnerId: pid,
+        phone,
+        action: 'recipient.create',
+        meta: { rid, fields: legalName ? ['name', 'destination', 'legal_name'] : ['name', 'destination'] },
+      });
       return { kind: 'done' as const };
     }),
   );
@@ -150,7 +157,7 @@ export async function editRecipientAction(rid: string, _prev: RecipientFormState
         payoutMethod: change.payoutMethod,
         payoutDestination: change.payoutDestination,
         lastUsedAt: current.lastUsedAt,
-      });
+      }, { legalName: change.legalName }); // fix pack 4 (C3): blank keeps the saved name (a changed account clears it)
       if (!updated) return { kind: 'not_found' };
       await recordRecipientAudit(tx, { partnerId: pid, phone, action: 'recipient.update', meta: { rid: rid, fields: change.fields } });
       return { kind: 'done' };

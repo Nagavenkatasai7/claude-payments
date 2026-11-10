@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { disclosureAckBody, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
 import { approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
@@ -99,6 +99,8 @@ export function PayForm({
   disclosureVersion = null,
   disclosureHash = null,
   approving = null,
+  legalNameRequired = false,
+  legalNameOnFile = true,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -115,6 +117,10 @@ export function PayForm({
   disclosureHash?: string | null;
   /** Fix pack 4 (C15): the 'Approving ...' line's figures; null shows no line. */
   approving?: PayApproving | null;
+  /** Fix pack 4 (C18): the account-holder field is required WHEN SHOWN (real money, not exempt). */
+  legalNameRequired?: boolean;
+  /** Fix pack 4 (C18): a name is on file for the STORED account (or the row is exempt). Defaults: no field. */
+  legalNameOnFile?: boolean;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -143,6 +149,8 @@ export function PayForm({
         disclosureVersion={disclosureVersion}
         disclosureHash={disclosureHash}
         approvingText={approving ? approvingLine(approving) : null}
+        legalNameRequired={legalNameRequired}
+        legalNameOnFile={legalNameOnFile}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -155,6 +163,8 @@ export function PayForm({
       disclosureVersion={disclosureVersion}
       disclosureHash={disclosureHash}
       approving={approving}
+      legalNameRequired={legalNameRequired}
+      legalNameOnFile={legalNameOnFile}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -289,6 +299,43 @@ function DisclosureAck({ checked, onChange }: { checked: boolean; onChange: (v: 
   );
 }
 
+// ── Fix pack 4 (C18, C14): the recipient's account-holder name ──────────────
+// Shown only where the page asks for it; never pre-filled (no stored name ever
+// reaches the browser). Posted as `accountHolder` only when shown.
+
+function AccountHolderField({
+  value,
+  onChange,
+  required,
+  error,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  required: boolean;
+  error?: string;
+}) {
+  return (
+    <label className={labelClasses}>
+      Account holder name
+      <input
+        className={inputClasses}
+        name="accountHolder"
+        required={required}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        maxLength={80}
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
+      />
+      <span data-testid="account-holder-help" className="mt-1 block text-xs leading-normal text-[#8696a0]">
+        As it appears on the recipient&apos;s bank account.
+      </span>
+      {error && <span className={fieldErrorClasses}>{error}</span>}
+    </label>
+  );
+}
+
 // ── Single-step path (scheduled / re-opened links) ──────────────────────────
 
 function SimplePayForm({
@@ -298,6 +345,8 @@ function SimplePayForm({
   disclosureVersion = null,
   disclosureHash = null,
   approvingText = null,
+  legalNameRequired = false,
+  legalNameOnFile = true,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
@@ -305,10 +354,17 @@ function SimplePayForm({
   disclosureVersion?: string | null;
   disclosureHash?: string | null;
   approvingText?: string | null;
+  legalNameRequired?: boolean;
+  legalNameOnFile?: boolean;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
+  // Fix pack 4 (C18): the stored account has no name on file -> ask for it here.
+  const showHolder = !legalNameOnFile;
+  const [holder, setHolder] = useState('');
+  const [holderError, setHolderError] = useState('');
+  const holderMissing = showHolder && legalNameRequired && holder.trim() === '';
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const otp = useOtpRequest(transferId, setSent);
@@ -317,15 +373,20 @@ function SimplePayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing) return; // the button is disabled too; this covers implicit (Enter) submission
+    if (ackMissing || holderMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
+    setHolderError('');
     setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ otp: code, ...disclosureAckBody(disclosureVersion, disclosureHash, acked) }),
+        body: JSON.stringify({
+          otp: code,
+          ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
+          ...(showHolder ? { accountHolder: holder.trim() } : {}),
+        }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
@@ -333,9 +394,11 @@ function SimplePayForm({
         return;
       }
       try {
-        const data = (await res.json()) as { reason?: string };
+        const data = (await res.json()) as { reason?: string; fieldErrors?: { accountHolder?: unknown } };
         setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') setOtpError('That code is incorrect or expired — resend and try again.');
+        // Fix pack 4 (C14): an account-holder 400 shows under the field, not under the code.
+        if (data.fieldErrors?.accountHolder !== undefined) setHolderError(PAY_ACCOUNT_HOLDER_COPY);
         // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
         if (data.reason === 'approval_not_recorded') setCode('');
       } catch {
@@ -387,9 +450,24 @@ function SimplePayForm({
           </div>
         </div>
       )}
+      {showHolder && (
+        <AccountHolderField
+          value={holder}
+          onChange={(v) => {
+            setHolder(v);
+            if (holderError) setHolderError('');
+          }}
+          required={legalNameRequired}
+          error={holderError}
+        />
+      )}
       <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
       {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
-      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
+      <button
+        type="submit"
+        className={primaryBtnClasses}
+        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || holderMissing}
+      >
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
       <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
@@ -398,7 +476,7 @@ function SimplePayForm({
           Edit bank details
         </button>
       )}
-      {status === 'error' && !otpError && (
+      {status === 'error' && !otpError && !holderError && (
         <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}
     </form>
@@ -415,6 +493,8 @@ function BankDetailsPayForm({
   disclosureVersion = null,
   disclosureHash = null,
   approving = null,
+  legalNameRequired = false,
+  legalNameOnFile = true,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -423,6 +503,8 @@ function BankDetailsPayForm({
   disclosureVersion?: string | null;
   disclosureHash?: string | null;
   approving?: PayApproving | null;
+  legalNameRequired?: boolean;
+  legalNameOnFile?: boolean;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
@@ -442,6 +524,16 @@ function BankDetailsPayForm({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
+  // Fix pack 4 (C18): a name on file describes the STORED account, not the one
+  // typed here, so on real money the field shows even with a name on file. An
+  // exempt row ({ required: false, onFile: true }) never shows it.
+  const showHolder = legalNameRequired || !legalNameOnFile;
+  const [holder, setHolder] = useState('');
+
+  function setHolderValue(v: string) {
+    setHolder(v);
+    if (errors.accountHolder) setErrors((prev) => ({ ...prev, accountHolder: '' }));
+  }
 
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -459,8 +551,10 @@ function BankDetailsPayForm({
     e.preventDefault();
     const result = validatePayoutFields(destinationCountry, values);
     const confirmErrors = accountConfirmErrors(destinationCountry, { ...values, ...confirms });
-    if (!result.ok || Object.keys(confirmErrors).length > 0) {
-      setErrors({ ...(result.ok ? {} : result.errors), ...confirmErrors });
+    const holderErrors: Record<string, string> =
+      showHolder && legalNameRequired && holder.trim() === '' ? { accountHolder: PAY_ACCOUNT_HOLDER_COPY } : {};
+    if (!result.ok || Object.keys(confirmErrors).length > 0 || Object.keys(holderErrors).length > 0) {
+      setErrors({ ...(result.ok ? {} : result.errors), ...confirmErrors, ...holderErrors });
       return;
     }
     setErrors({});
@@ -484,6 +578,7 @@ function BankDetailsPayForm({
           fields: values,
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
+          ...(showHolder ? { accountHolder: holder.trim() } : {}),
         }),
       });
       if (res.ok) {
@@ -673,6 +768,14 @@ function BankDetailsPayForm({
           </label>
         );
       })}
+      {showHolder && (
+        <AccountHolderField
+          value={holder}
+          onChange={setHolderValue}
+          required={legalNameRequired}
+          error={errors.accountHolder || undefined}
+        />
+      )}
       <button type="submit" className={primaryBtnClasses}>Continue</button>
     </form>
   );
