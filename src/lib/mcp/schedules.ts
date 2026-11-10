@@ -198,7 +198,7 @@ export const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | Schedule
   corridor: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
   unknown_destination: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
   sender_name:
-    "SmartRemit needs the customer's full legal name first. They can add it in SmartRemit on WhatsApp or on the portal's Repeat payments page.",
+    "SmartRemit needs the customer's full legal name first. They can add it in SmartRemit on WhatsApp or on the portal's Schedules page.",
   amount: 'SmartRemit cannot schedule this amount. Try a different amount.',
   no_payout:
     'This recipient has no saved account. The customer can add one in SmartRemit on WhatsApp or the SmartRemit portal, then set up the repeat payment.',

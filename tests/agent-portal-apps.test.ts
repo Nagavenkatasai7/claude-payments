@@ -117,3 +117,40 @@ describe('disconnectAgentAppAction', () => {
     expect(await disconnectAgentAppAction(null, new FormData())).toEqual({ error: 'portal.agentApps.failed' });
   });
 });
+
+// C7 (2026-11-10): the static line on the Connected AI apps page. Disconnecting an app leaves the
+// repeat payments it set up in place (schedules carry no grant id; the cron never reads grants), and
+// each due day still needs the customer on the pay page. UI pages are not unit-tested here
+// (CLAUDE.md), so the render is pinned at the source; the Playwright smoke cannot sign in.
+describe('the repeat-payments line (C7)', () => {
+  it('names the pay page and the Schedules nav label, in one sentence, with no test wording', async () => {
+    const { t, CATALOGUES } = await import('@/lib/i18n');
+    const key = 'portal.agentApps.repeatPayments';
+    expect(Object.keys(CATALOGUES.en)).toContain(key);
+    const text = t(key);
+    const schedules = portalNavItems(false).find((i) => i.href === '/portal/schedules')?.label;
+    expect(schedules).toBe(t('portal.nav.schedules'));
+    expect(text).toContain('pay page');
+    expect(text).toContain(`under ${schedules}`);
+    expect(text).not.toMatch(/\btest(ing)?\b/i);
+    expect(text.match(/[.!?]/g)).toEqual(['.']);
+    expect(text.endsWith('.')).toBe(true);
+  });
+
+  it('the page renders it beside the unverified line, inside the list branch only', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/app/portal/ai-apps/page.tsx', 'utf8');
+    const line = `<p className="text-[13px] text-ds-ink-muted">{t('portal.agentApps.repeatPayments')}</p>`;
+    expect(src).toContain(line);
+    const at = src.indexOf(line);
+    expect(at).toBeGreaterThan(src.indexOf('</ul>')); // after the list, so not in the empty state
+    expect(src.indexOf("t('portal.agentApps.unverified')")).toBeGreaterThan(at);
+  });
+
+  it('no customer text names a "Repeat payments" page (the portal page is Schedules)', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['src/content/docs/ai-apps.mdx', 'src/lib/mcp/schedules.ts']) {
+      expect(readFileSync(f, 'utf8'), f).not.toMatch(/Repeat payments(\*\*)? page/);
+    }
+  });
+});

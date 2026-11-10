@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, onTestFinished } from 'vitest';
+import { inspect } from 'node:util';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
@@ -221,13 +222,15 @@ describe('registerAction', () => {
     const spy = vi
       .spyOn(authStore, 'registerCustomer')
       .mockRejectedValueOnce(new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes'));
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
     const state = await register();
     expect(state.step).toBe('register');
     expect(state.error).toBe('Could not create your account. Please try again.');
     expect(state.error).not.toMatch(/FIELD_ENCRYPTION_KEY/);
     expect(state.error).not.toMatch(/32 bytes/);
-    spy.mockRestore();
-    errSpy.mockRestore();
   });
 
   it('still surfaces an intentional CustomerInputError message verbatim', async () => {
@@ -983,5 +986,79 @@ describe('one customer portal: passwords end where the partner runs a portal', (
     await verifiedAccount();
     await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow('REDIRECT:/account');
     expect(cookieSet).toHaveBeenCalled();
+  });
+});
+
+// 2026-11-10 (db password and logs review, C6): an unexpected register/reset
+// failure used to print the error object raw (console.error), so a failed
+// customer upsert printed its params (phone, names, the password hash) and the
+// Postgres detail. It now goes through logError: one scrubbed JSON line.
+describe('register/reset unexpected failures are logged without query values', () => {
+  const FAKE_NAME = 'Ravi Traders';
+  const FAKE_HASH = '$argon2id$v=19$m=65536$fakehashvalue';
+  async function queryError() {
+    const { DrizzleQueryError } = await import('drizzle-orm/errors');
+    const cause = Object.assign(new Error('duplicate key value violates unique constraint "customers_pkey"'), {
+      code: '23505',
+      constraint: 'customers_pkey',
+      detail: `Key (partner_id, phone)=(default, ${NORM}) already exists.`,
+    });
+    return new DrizzleQueryError('insert into "customers" ("phone", "full_name", "password_hash") values ($1, $2, $3)', [NORM, FAKE_NAME, FAKE_HASH], cause);
+  }
+  function expectSafe(calls: unknown[][], scope: string) {
+    const out = calls.flat().map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 8 })));
+    for (const text of out) {
+      expect(text).not.toContain(NORM);
+      expect(text).not.toContain(FAKE_NAME);
+      expect(text).not.toContain('fakehashvalue');
+      expect(text.replace(/params: <redacted>/g, '')).not.toMatch(/params/);
+    }
+    const lines = out.flatMap((t) => {
+      try {
+        const j = JSON.parse(t) as Record<string, unknown>;
+        return j.scope === scope ? [j] : [];
+      } catch {
+        return [];
+      }
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0].level).toBe('error');
+    expect(String(lines[0].msg)).toContain('[23505]');
+    // Review 2026-11-10: the stack frames stay (without the header, which
+    // repeats the message with the params).
+    expect(String(lines[0].stack)).toMatch(/^at /);
+    expect(String(lines[0].stack)).not.toContain('Failed query');
+    // The field must not be named `at`: that is the log line's own timestamp.
+    expect(String(lines[0].at)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  }
+
+  it('registerAction', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = vi.spyOn(authStore, 'registerCustomer').mockRejectedValueOnce(await queryError());
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
+    const state = await register();
+    expect(state).toEqual({ step: 'register', error: 'Could not create your account. Please try again.' });
+    expectSafe(errSpy.mock.calls, 'account.register');
+  });
+
+  it('resetAction', async () => {
+    await register();
+    sentCodes.length = 0;
+    otpNowMs += 31_000;
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    await runAfter();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = vi.spyOn(authStore, 'setPassword').mockRejectedValueOnce(await queryError());
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
+    const s = await resetAction(null, form({ pendingToken: req.pendingToken!, code: sentCodes[0].code, password: 'staple battery horse' }));
+    expect(s.step).toBe('otp');
+    expect(s.error).toBe('Could not reset your password. Please try again.');
+    expectSafe(errSpy.mock.calls, 'account.reset');
   });
 });

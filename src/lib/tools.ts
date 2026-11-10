@@ -1454,7 +1454,7 @@ async function selectRouteForQuote(
       return route;
     }
   } catch (err) {
-    console.warn('routeSelector failed — quoting at mid:', err);
+    logWarn('quote.route-select-failed', err, { partnerId: ctx.partnerId });
   }
   return null;
 }
@@ -1861,7 +1861,7 @@ async function presentBillTool(
     const partnerId = ctx.partnerId;
     invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
-    console.warn('present_bill getUnpaidInvoiceByBuyer failed:', err);
+    logWarn('present_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     return { has_bill: false };
   }
   if (!invoice) return { has_bill: false };
@@ -2021,7 +2021,8 @@ async function registerSellerTool(
     blocked = screen.status === 'blocked';
     screenEvidence = screen.evidence ?? errorEvidence();
   } catch (err) {
-    console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
+    // The name only: a screener error can echo the screened business name.
+    logWarn('register_seller.screen-failed', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
     cleared = false;
     screenEvidence = errorEvidence();
   }
@@ -2039,7 +2040,7 @@ async function registerSellerTool(
       kycReviewState: cleared ? 'none' : 'needs_review',
     });
   } catch (err) {
-    console.warn('register_seller createSeller failed:', err);
+    logWarn('register_seller.create-failed', err, { partnerId: ctx.partnerId });
     return {
       registered: false,
       reply_to_customer:
@@ -2346,7 +2347,7 @@ async function createInvoiceTool(
     // Release the claim so the at-least-once retry can actually create the bill
     // (the insert never happened). PII-scrubbed log per the money-path convention.
     await ctx.store.clearBillInvoiceClaim(billKey).catch(() => {});
-    logWarn('create_invoice.save-failed', `saveB2bInvoice failed: ${err instanceof Error ? err.message : 'error'}`, { phone: ctx.phone });
+    logWarn('create_invoice.save-failed', err instanceof Error ? err : 'saveB2bInvoice failed', { phone: ctx.phone });
     return {
       created: false,
       reply_to_customer:
@@ -2516,7 +2517,7 @@ async function listRecentTransfersTool(
   try {
     rows = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, RECENT_SCAN); // newest-first, indexed
   } catch (err) {
-    console.warn('list_recent_transfers listTransfersByPhone failed:', err);
+    logWarn('list_recent_transfers.lookup-failed', err, { partnerId: ctx.partnerId });
     return { transfers: [], count: 0, history_url: historyUrl };
   }
 
@@ -3138,7 +3139,7 @@ async function checkBillStatusTool(
   try {
     transfer = (await listOwnB2bTransfers(ctx))[0];
   } catch (err) {
-    console.warn('check_bill_status listTransfersByPhone failed:', err);
+    logWarn('check_bill_status.lookup-failed', err, { partnerId: ctx.partnerId });
     return { found: false };
   }
   if (!transfer) return { found: false };
@@ -3161,7 +3162,7 @@ async function checkBillStatusTool(
         result.invoice_paid = invoice.status === 'paid';
       }
     } catch (err) {
-      console.warn('check_bill_status getB2bInvoiceScoped failed:', err);
+      logWarn('check_bill_status.invoice-lookup-failed', err, { partnerId: ctx.partnerId });
     }
   }
   return result;
@@ -3193,7 +3194,7 @@ async function cancelBillTool(
   try {
     b2bTransfers = await listOwnB2bTransfers(ctx);
   } catch (err) {
-    console.warn('cancel_bill listTransfersByPhone failed:', err);
+    logWarn('cancel_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     b2bTransfers = [];
   }
 
@@ -3316,7 +3317,7 @@ async function disputeBillTool(
   try {
     invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
-    console.warn('dispute_bill getUnpaidInvoiceByBuyer failed:', err);
+    logWarn('dispute_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     return { error_code: 'no_open_bill', reply_hint: "I don't see an open bill to dispute." };
   }
   if (!invoice) {
@@ -3660,7 +3661,7 @@ async function auditBotSchedule(ctx: ToolContext, action: BotScheduleAuditAction
       botScheduleAuditEvent({ partnerId: ctx.partnerId, phone: ctx.phone, action, scheduleId, channel: ctx.channel ?? 'whatsapp' }),
     );
   } catch (err) {
-    logWarn('schedule.audit', err instanceof Error ? err.message : 'audit write failed', { scheduleId, action });
+    logWarn('schedule.audit', err instanceof Error ? err : 'audit write failed', { scheduleId, action });
   }
 }
 
@@ -3682,7 +3683,7 @@ async function listSavedRecipientsTool(
       })),
     };
   } catch (err) {
-    console.warn('listRecipients failed; returning []:', err);
+    logWarn('list_saved_recipients.lookup-failed', err, { partnerId: ctx.partnerId });
     return { recipients: [] };
   }
 }
@@ -3698,7 +3699,7 @@ async function resolveRecipientTool(
   try {
     all = await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25); // generous cap; own-phone only
   } catch (err) {
-    console.warn('resolve_recipient listRecipients failed:', err);
+    logWarn('resolve_recipient.lookup-failed', err, { partnerId: ctx.partnerId });
     return { match: 'none' };
   }
 

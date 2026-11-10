@@ -144,7 +144,7 @@ export async function handleMcpRequest(req: Request, deps: McpHttpDeps): Promise
   };
   const handler = createMcpHandler(() => buildMcpServer(principal, deps), {
     maxRequestBodySize: MCP_MAX_BODY_BYTES,
-    onerror: (err) => logWarn('mcp.http', err.message, { name: err.name }),
+    onerror: (err) => logWarn('mcp.http', err, { name: err.name }),
   });
   return withCors(await handler.fetch(req, { authInfo }));
 }
