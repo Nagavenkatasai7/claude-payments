@@ -110,6 +110,11 @@ const ACTION_LABELS = Object.freeze({
   // Pack 3 review C3: SmartRemit changed who runs KYC (subject = the partner id). Meta
   // { from, to, postureSigned } stays out of DETAIL_KEYS; the row reads as "SmartRemit".
   'partner.kyc_mode.change': 'partner.audit.action.kycModeChange',
+  // Fix pack 4 T20 (C17): a pay-page payment approved with a code (subject = the minted transfer
+  // id; actor 'pay-page' / 'system', read as the system label). Its meta carries hashes, times and
+  // route ids: only the closed `channel` enum ('wa' | 'tg') is safe, so DETAIL_KEYS lists only that.
+  // remittance.disclosure_ack and transfer.legal_name_set stay OUT of the feed.
+  'otp.verified': 'partner.audit.action.otpVerified',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -159,6 +164,8 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   // the capability and on/off (never a counsel reference).
   'flag.change': ['key', 'enabled', 'corridor'],
   'partner.live.optin.approve': ['capability', 'on'],
+  // Fix pack 4 T20 (C17): the closed channel enum only (never a hash, time, attempt or route id).
+  'otp.verified': ['channel'],
 });
 
 /**

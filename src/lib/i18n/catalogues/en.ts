@@ -291,6 +291,7 @@ export const en = {
   'partner.audit.action.flagChange': 'Switch changed',
   'partner.audit.action.optinApprove': 'Live feature approval changed',
   'partner.audit.action.kycModeChange': 'KYC handling changed',
+  'partner.audit.action.otpVerified': 'Payment approved with a code',
   'partner.audit.action.disclosureConfig': 'Disclosure details changed',
   'partner.audit.action.persona': 'Assistant persona changed',
   'partner.audit.action.displayName': 'Display name changed',

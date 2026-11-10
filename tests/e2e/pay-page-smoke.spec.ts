@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 
 // Program-Fix 23 — hosted pay-page smoke. UNAUTHENTICATED: needs no E2E_*
@@ -29,6 +29,14 @@ test.afterEach(async () => {
   expect(cspLines, 'CSP violations in the console').toEqual([]);
 });
 
+// Fix pack 4 T20 (C22, C18, C15): a dead-link sheet shows none of the pack 4 pay-step text (the
+// provider line, the 'Approving' line, the account-holder field).
+async function expectNoPack4Text(page: Page): Promise<void> {
+  await expect(page.getByTestId('provider-line')).toHaveCount(0);
+  await expect(page.getByText(/^Approving /)).toHaveCount(0);
+  await expect(page.getByText('Account holder name')).toHaveCount(0);
+}
+
 test('/pay carries exactly one enforced CSP, with the Program-Fix 47 additions', async ({ request }) => {
   // headersArray() keeps duplicate headers apart (headers() merges them).
   const res = await request.get(`/pay/${randomBytes(16).toString('base64url')}`);
@@ -52,6 +60,7 @@ test('a random 22-character id renders the generic inactive sheet with a 200', a
   await expect(page.getByRole('heading', { name: 'This link is no longer active' })).toBeVisible();
   await expect(page.getByText('Total charge')).toHaveCount(0);
   await expect(page.getByText('Secure payment')).toHaveCount(0);
+  await expectNoPack4Text(page);
 });
 
 test('a legacy-shape 8-character id renders the same sheet with a 200', async ({ page }) => {
@@ -59,6 +68,7 @@ test('a legacy-shape 8-character id renders the same sheet with a 200', async ({
   expect(res?.status()).toBe(200);
   await expect(page.getByRole('heading', { name: 'This link is no longer active' })).toBeVisible();
   await expect(page.getByText('Total charge')).toHaveCount(0);
+  await expectNoPack4Text(page);
 });
 
 test('a random B2B invoice id renders "This bill is no longer active" with a 200', async ({ page }) => {
@@ -67,4 +77,13 @@ test('a random B2B invoice id renders "This bill is no longer active" with a 200
   await expect(page.getByRole('heading', { name: 'This bill is no longer active' })).toBeVisible();
   await expect(page.getByText('Pay your bill')).toHaveCount(0);
   await expect(page.getByText('Amount due')).toHaveCount(0);
+  await expectNoPack4Text(page);
+});
+
+test('a random payment-link token renders the dead-link sheet with none of the pack 4 text', async ({ page }) => {
+  const res = await page.goto(`/pay/l/${randomBytes(24).toString('base64url')}`);
+  expect(res?.status()).toBe(200);
+  await expect(page.getByRole('heading', { name: 'This link is no longer active' })).toBeVisible();
+  await expect(page.getByText('Total charge')).toHaveCount(0);
+  await expectNoPack4Text(page);
 });
