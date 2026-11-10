@@ -2413,6 +2413,8 @@ export const en = {
   'portal.agentApps.connected': 'Connected {date}',
   'portal.agentApps.lastUsed': 'Last used {date}',
   'portal.agentApps.neverUsed': 'Not used yet',
+  'portal.agentApps.repeatPayments':
+    'Disconnecting an app does not cancel the repeat payments you set up with it: you still pay each one yourself on the pay page, and you can cancel one under Schedules.',
   'portal.agentApps.unverified': 'The name is the app’s own; SmartRemit has not checked it.',
   'portal.agentApps.unnamed': 'Unnamed app',
   'portal.agentApps.disconnect': 'Disconnect',

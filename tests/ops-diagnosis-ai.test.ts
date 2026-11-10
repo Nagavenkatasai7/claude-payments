@@ -289,3 +289,36 @@ describe('isPermanentSendError — deterministic Retry-disable for permanent sen
     expect(isPermanentSendError(undefined)).toBe(false);
   });
 });
+
+// 2026-11-10: rows stored before the query-error fix keep the raw drizzle
+// message (`Failed query: … params: <values>`) in last_error. The copilot
+// scrubs it again before it goes to the model provider.
+describe('diagnoseOps — a stored last_error is scrubbed before it reaches the model', () => {
+  it('drops the params of an old raw query-error text and masks phones and emails', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: {
+        ...deadBundle.deadLetter!,
+        kind: 'agent.turn',
+        lastError:
+          'Failed query: insert into "outbox" ("kind", "payload") values ($1, $2)\nparams: whatsapp.text,{"to":"+15551234567","body":"Ravi Traders jane@example.com"}',
+      },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    for (const v of ['15551234567', 'Ravi Traders', 'jane@example.com']) expect(sent).not.toContain(v);
+    expect(sent).toContain('Last error: Failed query: insert into \\"outbox\\"');
+    expect(sent).toContain('params: <redacted>');
+  });
+
+  it('a permanent Graph code still reaches the prompt after the scrub', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: { ...deadBundle.deadLetter!, kind: 'whatsapp.text', attempts: 1, lastError: 'WhatsApp send failed (400): (#131030) to 15551234567' },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    expect(sent).toContain('Last error: WhatsApp send failed (400): (#131030) to …4567');
+    expect(sent).toContain('permanent WhatsApp rejection (#131030)');
+  });
+});

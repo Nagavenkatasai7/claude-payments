@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { scrub, logError, logWarn, SCRUB_MAX_CHARS } from '@/lib/log';
 
 afterEach(() => vi.restoreAllMocks());
@@ -193,5 +194,67 @@ describe('scrub — the R49 keyword filler cannot backtrack exponentially (revie
     const t = performance.now();
     scrub(seg.repeat(Math.ceil(8192 / seg.length)));
     expect(performance.now() - t).toBeLessThan(250);
+  });
+});
+
+// 2026-11-10: a drizzle DrizzleQueryError carries the bound values (phones,
+// names, emails, password hashes) in `params` and in its message, and the
+// Postgres `detail` echoes key values. scrub() must drop all of them.
+describe('scrub — database query errors keep no params and no detail', () => {
+  const FAKES = ['+15551234567', '15551234567', '1234567', 'Ravi Traders', 'jane@example.com', 'already exists'];
+  function queryError() {
+    const cause = Object.assign(new Error('duplicate key value violates unique constraint "customers_phone_key"'), {
+      code: '23505',
+      detail: 'Key (phone)=(+15551234567) already exists.',
+      constraint: 'customers_phone_key',
+      table: 'customers',
+    });
+    return new DrizzleQueryError(
+      'insert into "customers" ("phone", "name", "email") values ($1, $2, $3)',
+      ['+15551234567', 'Ravi Traders', 'jane@example.com'],
+      cause,
+    );
+  }
+  const clean = (text: string) => {
+    for (const v of FAKES) expect(text).not.toContain(v);
+    expect(text).not.toMatch(/params: (?!<redacted>)/);
+  };
+
+  it('the error object becomes the fixed description with the SQLSTATE', () => {
+    const out = scrub(queryError());
+    clean(out);
+    expect(out).toContain('db query failed [23505]');
+    expect(out).toContain('constraint=customers_phone_key');
+  });
+
+  it('its message, alone, after a prefix, or inside an object', () => {
+    const msg = queryError().message;
+    for (const out of [scrub(msg), scrub(`prefix: ${msg}`), scrub({ note: msg })]) {
+      clean(out);
+      expect(out).toContain('params: <redacted>');
+    }
+  });
+
+  it('a query error nested in an object goes through the same description', () => {
+    const out = scrub({ step: 'mint', err: queryError() });
+    clean(out);
+    expect(out).toContain('db query failed [23505]');
+  });
+
+  it('logWarn with the error as the message and as a field', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = queryError();
+    logWarn('transfer.upsert_recipient', err, { err });
+    const raw = spy.mock.calls[0][0] as string;
+    clean(raw);
+    const line = JSON.parse(raw) as Record<string, string>;
+    expect(line.msg).toContain('[23505]');
+    expect(line.err).toContain('[23505]');
+  });
+
+  it('a non-query Error keeps "name: message", with any params tail cut', () => {
+    expect(scrub(new TypeError('fetch failed'))).toBe('TypeError: fetch failed');
+    const e = new Error('worker: Failed query: select 1\nparams: Ravi Traders');
+    expect(scrub(e)).not.toContain('Ravi');
   });
 });

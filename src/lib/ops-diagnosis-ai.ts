@@ -1,6 +1,7 @@
 import { chat } from '@/lib/llm';
 import type { ChatMessage } from '@/lib/types';
 import { permanentCodeInError } from '@/lib/whatsapp-errors';
+import { scrub } from '@/lib/log';
 
 // ops-diagnosis-ai — the operations copilot's one-shot diagnosis helper (U5).
 // A "Tier-1 quick win": when a transfer is stuck in 'paid' with no delivery
@@ -180,7 +181,9 @@ function bundleText(bundle: OpsDiagnosisBundle): string {
       `Provider type: ${d.providerType}\n` +
       `Attempts: ${d.attempts}\n` +
       `Age: ${d.ageMinutes} minutes\n` +
-      `Last error: ${d.lastError}\n` +
+      // 2026-11-10: scrubbed again, because rows stored by an older build keep
+      // the raw error text (a query error's params, phones, emails).
+      `Last error: ${scrub(d.lastError)}\n` +
       `Sibling dead rows with the same error prefix: ${d.siblingDeadCount} (this row excluded)\n\n` +
       `Diagnose the failure and suggest the next ops action.`
     );
