@@ -13,8 +13,11 @@ import type { CountryCode, PartnerId } from './types';
 // off, so an empty table is exactly the behaviour before this file existed.
 //
 // Reads are cached per server instance for FLAG_CACHE_TTL_MS, so a switch takes
-// effect everywhere within that time without a deploy. The admin action clears
-// the cache of the instance that served it at once.
+// effect everywhere within that time without a deploy. Two writers, both in
+// flag-switch.ts, clear the cache of the instance that served them at once:
+// applyFlagChange (SmartRemit staff, /admin-dashboard/switches: global,
+// partner and corridor rows) and applyPartnerFlagChange (a partner admin,
+// /partner/controls: that tenant's own rows only).
 //
 // A failed read FAILS OPEN (the flag reads as off) with one log line and one
 // hourly `flagread:<key>:<hour>` ops alert (flag-read-alert.ts): every caller
@@ -29,6 +32,11 @@ import type { CountryCode, PartnerId } from './types';
 // tenantScopeId(): `tenant:<id>` or `tenant:<id>:<CC>`. They match only through
 // parseTenantScopeId (an unparsable id never matches) and only the request's
 // TENANTS (ctx.tenants, else its partners), never a platform-set partner row.
+// sends.paused matches the owner only (the mint passes tenants [owner]);
+// settlement.paused the owner or the rail (the instruct and the reconcile
+// sweep pass [owner, rail]); a corridor row also needs ctx.corridor to match.
+// The admin switches page shows tenant rows read-only, and applyFlagChange
+// refuses a `tenant:` scope id.
 //
 // Sanctions screening is NOT a flag and never reads this module: it stays
 // structurally on (CLAUDE.md architecture spine).

@@ -306,7 +306,7 @@ paths:
               schema: { $ref: '#/components/schemas/Transaction' }
         '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; a client_reference that is not 1 to 64 letters, digits and . _ : / # -; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active, or the partner is not yet approved for live transfers on its settlement rail (`partner_not_live`), or the feature is not enabled for live transfers (`capability_off`).' }
         '404': { description: The beneficiary_id was not found for this partner. }
         '409': { description: Idempotency-Key conflict. Retry with a new key. }
         '422': { description: 'Refused: purpose is missing or is not one of family_support, gift, education, medical, savings, bills, business or other, or purpose is other and purpose_detail is missing, not a string, not 10 to 120 characters or does not say what the money is for (all checked before the Idempotency-Key is bound; a corrected retry with the same key succeeds), the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
@@ -393,7 +393,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active, or the partner is not yet approved for live transfers on its settlement rail (`partner_not_live`).' }
         '404': { description: Transaction not found. }
         '409': { description: 'The transaction is not awaiting payment (for example, it was cancelled).' }
         '422': { description: The transfer was blocked by compliance screening. }

@@ -281,3 +281,63 @@ describe('sanctions screening spec says what the code does', () => {
     }
   });
 });
+
+// Fix pack 3 T14 (R15, R26; contracts 6, 7, 10, 20): section 4 rule 3 states
+// the instruct order, the Q5 wait, the live certification gate and the
+// reconcile and escalation skips; section 12 lists pack 3's ops alerts.
+describe('sanctions screening spec says what pack 3 does', () => {
+  const rule3 = (): string => /^3\. \*\*Instruct gate\*\*(.*)$/m.exec(section('## 4.'))?.[1] ?? '';
+
+  it('pack 3: section 4 rule 3 states the instruct order: settlement.paused, then the live certification gate (InstructNotCertifiedError, livegate:), then the endpoint check, the live list, the sender hold and the compliance block', () => {
+    const r = rule3().slice(rule3().indexOf('In order (fix pack 3)'));
+    expect(r.startsWith('In order (fix pack 3)')).toBe(true);
+    const order = ['`settlement.paused`', '`InstructNotCertifiedError`', '`livegate:<id>`', 'endpoint check', '`instructnotlive:<id>`', '`instructsenderhold:<id>`', 'compliance block'];
+    const at = order.map((n) => r.indexOf(n));
+    for (const [i, n] of order.entries()) expect(at[i], n).toBeGreaterThanOrEqual(0);
+    for (let i = 1; i < at.length; i++) expect(at[i], `${order[i - 1]} before ${order[i]}`).toBeGreaterThan(at[i - 1]);
+    expect(r).toContain('deferred uncharged every 15 minutes');
+    expect(r).toContain('never a rail failure');
+  });
+
+  it('pack 3: section 4 says an unreadable settlement.paused waits on a real-money rail (Q5) and the stuck-paid sweep skips a row that is paused, unreadable on real money, or refused by the live gate', () => {
+    const r = rule3();
+    expect(r).toMatch(/cannot be read.{0,120}real-money rail.{0,80}waits/);
+    expect(r).toContain('Q5');
+    expect(r).toContain('and not one it skips: paused, `settlement.paused` unreadable on a real-money rail, or refused by the live gate)');
+    expect(r).not.toContain('not under `settlement.paused`');
+  });
+
+  it('pack 3: section 4 says a signed rail callback on an uncertified real-money rail does not move an awaiting_payment row, and the stuck-paid escalation skips a row the live gate defers', () => {
+    const s4 = section('## 4.');
+    expect(s4).toMatch(/signed rail callback \(`funded` or `paid_out`\).{0,200}never moves an `awaiting_payment` row/);
+    expect(s4).toContain('`{ ok: true, held: true }`');
+    expect(s4).toMatch(/`escalateStuckPaid`.{0,120}skips a row the live gate defers/);
+    expect(s4).not.toContain('nothing was sent to the rail');
+  });
+
+  it('pack 3: section 12 lists livegate: (both texts: the worker\'s and the payment webhook\'s) and flagread: with their texts, each key and every quoted piece in src/', () => {
+    const table = section('## 12.');
+    expect(table.startsWith('## 12. Ops alerts added by fix pack 3')).toBe(true);
+    const src = srcText();
+    for (const k of ['livegate:', 'flagread:', 'livectl:', 'flag:']) expect(table, k).toContain(`| \`${k}`);
+    const rows = table.split('\n').filter((l) => /^\| `[a-z-]+:/.test(l));
+    expect(rows.length).toBe(4);
+    const livegate = [...rows.find((l) => l.startsWith('| `livegate:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(livegate).toHaveLength(2);
+    expect(livegate[0]).toContain('is paid but was not instructed');
+    expect(livegate[1]).toContain('got a signed rail callback that was not applied');
+    const flagread = [...rows.find((l) => l.startsWith('| `flagread:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(flagread).toHaveLength(1);
+    for (const row of rows) {
+      const key = /^\| `([a-z-]+:)/.exec(row)![1];
+      expect(src, key).toContain(key);
+      const texts = [...row.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+      expect(texts.length, key).toBeGreaterThanOrEqual(1);
+      for (const text of texts) {
+        for (const piece of text.split(/<[^>]+>/).map((p) => p.trim()).filter((p) => p.length >= 8)) {
+          expect(src, `${key} text piece "${piece}"`).toContain(piece);
+        }
+      }
+    }
+  });
+});

@@ -171,6 +171,19 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
     partnerId = (await openLink.getAttribute('href'))!.split('/').pop()!;
   }
 
+  // Fix pack 3 T14 (contract 12): the platform admin sees the live money
+  // certification card on the partner page, and the smoke partner (simulator
+  // rail) is never certified. Only the heading and the badge are checked: the
+  // badge comes from the partner's live controls, while the readiness lines
+  // may read as 'The readiness checks could not be read.' on a transient read
+  // failure, which must never fail the post-deploy smoke.
+  await page.goto(`/admin-dashboard/partners/${partnerId}`);
+  const liveCard = page.getByTestId('live-certification-card');
+  await expect(liveCard).toBeVisible({ timeout: 15_000 });
+  // The card title holds the badge too, so its text is 'Live money certification Not certified'.
+  await expect(liveCard).toContainText('Live money certification');
+  await expect(page.getByTestId('live-cert-state')).toHaveText('Not certified');
+
   // Self-heal: remove any stale smoke staff first. Its bound partner may have been
   // deleted between runs (e.g. a demo cleanup), which would orphan its scope and
   // break the isolation assertions below. It is recreated fresh, bound to the
@@ -214,6 +227,10 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   await expect(page).toHaveURL(PARTNER_HOME, { timeout: 15_000 });
   await expect(page.locator('.sh-page-title')).toBeVisible();
   await expect(page.locator('aside.sh-sidebar')).toBeVisible();
+  // Fix pack 3 T14: the Controls page is for partner admins only. The smoke
+  // agent sees no Controls link, and the page sends it home.
+  await expect(page.locator('aside.sh-sidebar').getByRole('link', { name: 'Controls' })).toHaveCount(0);
+  await gotoExpectRedirect(page, '/partner/controls', PARTNER_HOME);
 
   // The legacy dashboard, its partners list, this agent's own partner page and the Team page all
   // redirect to /partner.
