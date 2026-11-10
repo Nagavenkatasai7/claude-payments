@@ -77,6 +77,18 @@ export function controlsView(rows: readonly FlagRow[], partnerId: PartnerId): Co
   return out;
 }
 
+/**
+ * The switch card's state badge (review round 2 H3). 'paused': the tenant's own pause (whole
+ * workspace or any corridor). 'paused_by_smartremit': no own pause, but a platform row (global,
+ * partner or corridor) holds the switch. 'running': neither. The tenant's own toggle is unaffected.
+ */
+export type SwitchBadge = 'paused' | 'paused_by_smartremit' | 'running';
+
+export function switchBadge(s: ControlsSwitch): SwitchBadge {
+  if (s.workspace.on || s.corridors.length > 0) return 'paused';
+  return s.platform.length > 0 ? 'paused_by_smartremit' : 'running';
+}
+
 export interface CapabilityRow {
   cap: LiveCapability;
   /** SmartRemit's counsel review is on record (the reference itself never leaves live_controls). */

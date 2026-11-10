@@ -180,7 +180,10 @@ function PostureCard({ partner }: { partner: Partner | null | undefined }) {
           <dt className="font-semibold">{t('partner.live.posture.holdDecider')}</dt>
           <dd>{t(HOLD_LABEL[posture.holdDecider])}</dd>
         </dl>
-        {posture.fourEyesNonSanctions ? <p>{t('partner.live.posture.fourEyes')}</p> : null}
+        {/* Pack 3 review round 2 (H2): the hold decider and the four-eyes rule are recorded, not
+            enforced (no hold-release path reads them yet), and the copy says so. */}
+        <p className="text-ds-ink-muted">{t('partner.live.posture.holdDecider.recorded')}</p>
+        {posture.fourEyesNonSanctions ? <p>{t('partner.live.posture.fourEyes.signed')}</p> : null}
         <p className="text-ds-ink-muted">{t('partner.live.posture.forcedNote')}</p>
       </div>
     );

@@ -9,7 +9,7 @@ import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { getPartnerStore } from '@/lib/partner-store';
 import { isLiveCertified } from '@/lib/live-gate';
 import { liveReadiness, type LiveReadiness, type LiveReadinessLine } from '@/lib/live-certification';
-import { capabilityRows, controlsView, type CapabilityRow, type ControlsPlatformLine, type ControlsSwitch } from '@/lib/partner-controls-view';
+import { capabilityRows, controlsView, switchBadge, type CapabilityRow, type SwitchBadge, type ControlsPlatformLine, type ControlsSwitch } from '@/lib/partner-controls-view';
 import { Badge, Card, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
 import { CapabilityForm, SwitchForm } from './switch-form';
@@ -68,15 +68,21 @@ function Unavailable({ messageKey }: { messageKey: MessageKey }) {
   );
 }
 
+const BADGE_LABEL: Record<SwitchBadge, MessageKey> = {
+  paused: 'partner.controls.on',
+  paused_by_smartremit: 'partner.controls.pausedBySmartRemit',
+  running: 'partner.controls.off',
+};
+
 function SwitchCard({ s }: { s: ControlsSwitch }) {
   const copy = SWITCH_COPY[s.key];
-  const on = s.workspace.on || s.corridors.length > 0;
+  const badge = switchBadge(s);
   return (
     <Card as="li" className="p-5 sm:p-6">
       <div data-testid="partner-controls-switch" data-key={s.key}>
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-[16px] font-semibold text-ds-ink">{copy ? t(copy.label) : s.key}</h3>
-          <Badge tone={on ? 'danger' : 'neutral'}>{t(on ? 'partner.controls.on' : 'partner.controls.off')}</Badge>
+          <Badge tone={badge === 'running' ? 'neutral' : 'danger'}>{t(BADGE_LABEL[badge])}</Badge>
         </div>
         {copy ? <p className="mt-1 text-[14px] leading-relaxed text-ds-ink-muted">{t(copy.desc)}</p> : null}
         {s.platform.map((p, i) => (

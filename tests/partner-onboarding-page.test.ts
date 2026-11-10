@@ -185,6 +185,7 @@ describe('/partner/onboarding: the checklist', () => {
 // step: no data-step), shows the form until signed, then who signed and when plus the forced-KYC note.
 describe('/partner/onboarding: the posture card', () => {
   const POSTURE = 'data-testid="partner-live-posture"';
+  const html2card = (html: string) => html.slice(html.indexOf(POSTURE));
   it('the posture card follows the steps list; the seven data-step entries are unchanged', async () => {
     await signInAs({});
     const html = decode(await render());
@@ -232,6 +233,24 @@ describe('/partner/onboarding: the posture card', () => {
     expect(card).not.toContain('data-testid="partner-live-posture-form"');
     expect(card).not.toContain('test-contract');
     expect(card).not.toContain('test-counsel');
+  });
+  // Pack 3 review round 2 (H2): the four-eyes rule and the hold decider are RECORDED, not enforced
+  // (no hold-release path reads them; dual control is a later pack). The copy must say so. When the
+  // enforcement ships, flip these assertions on purpose.
+  it('copy truth: the four-eyes box and the signed card call it a recorded commitment SmartRemit does not enforce yet', async () => {
+    await signInAs({});
+    let card = html2card(decode(await render()));
+    const label = /name="fourEyesNonSanctions"[\s\S]*?<\/label>/.exec(card)?.[0] ?? card;
+    expect(label).toMatch(/We commit that a second person approves/);
+    expect(label).toMatch(/does not enforce it yet/);
+    expect(card).not.toMatch(/must approve/);
+
+    await certifyPartnerForTest(db, 'pa', { posture: true });
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{posture,fourEyesNonSanctions}', 'true'::jsonb) WHERE id = 'pa'`);
+    card = html2card(decode(await render()));
+    expect(card).toMatch(/Recorded commitment: a second person approves the release of every hold that is not a sanctions match\. SmartRemit does not enforce this yet\./);
+    expect(card).toMatch(/records this answer on compliance holds and does not enforce it yet/);
+    expect(card).not.toMatch(/must approve/);
   });
   it('a partner read failure -> the card shows unavailable, the checklist still renders', async () => {
     partnerFail.afterFacts = true;

@@ -76,6 +76,13 @@ describe('pack 3 documents say what the code does', () => {
     expect(create403).toContain('(code capability_off)');
     expect(confirm403).toContain('(code partner_not_live)');
     expect(confirm403).not.toContain('capability_off');
+    // Review round 2 (F4): capability_off is refused only AFTER the partner is approved for live
+    // transfers (transfer-create.ts gates on isLiveCertified), as go-live.mdx says; an unapproved
+    // partner's live USDC transaction is not refused with capability_off.
+    const scoped = /after the partner is approved for live transfers, the transaction is live with a USDC payout and that feature is not yet approved \(/;
+    expect(row403).toMatch(scoped);
+    expect(create403).toMatch(scoped);
+    expect(goLive).toContain('After the approval, a live Partner API transaction with a USDC payout is refused with `403` and `code` `capability_off`');
     // The API reference page prints response descriptions as plain text
     // (tests/docs-api-page.test.ts refuses a literal backtick in the page).
     expect(create403).not.toContain("`");

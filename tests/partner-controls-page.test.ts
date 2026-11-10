@@ -86,6 +86,13 @@ async function signInAs(o: Partial<Staff>): Promise<void> {
 const render = async () => renderToStaticMarkup(await ControlsPage());
 const decode = (html: string) => html.replaceAll('&amp;', '&').replaceAll('&#x27;', "'").replaceAll('&quot;', '"');
 const count = (html: string, needle: string) => html.split(needle).length - 1;
+/** One switch card's markup: from its data-key to the next switch card (or the end). */
+const card = (html: string, key: string): string => {
+  const start = html.indexOf(`data-testid="partner-controls-switch" data-key="${key}"`);
+  if (start < 0) throw new Error(`no card ${key}`);
+  const next = html.indexOf('data-testid="partner-controls-switch" data-key=', start + 1);
+  return html.slice(start, next < 0 ? undefined : next);
+};
 const flag = (o: { key: string; scopeType: 'global' | 'partner' | 'corridor'; scopeId: string; updatedBy: string; reason: string }) =>
   createFeatureFlagRepo(db).upsert({ ...o, enabled: true });
 async function rows<T>(q: ReturnType<typeof sql>): Promise<T[]> {
@@ -147,6 +154,34 @@ describe('/partner/controls: the page', () => {
     expect(count(html, 'data-testid="partner-controls-switch-form"')).toBe(5);
     expect(count(html, 'data-enabled="off"')).toBe(2);
     for (const s of ['plat-owner', 'PLATFORM_SECRET_REASON', 'PA_SECRET_REASON']) expect(html).not.toContain(s);
+  });
+
+  it("review H3: a switch that only a SmartRemit row holds reads 'Paused by SmartRemit', never 'Running'; the tenant can still pause it", async () => {
+    await flag({ key: 'agent.paused', scopeType: 'global', scopeId: '', updatedBy: 'plat-owner', reason: 'PLATFORM_SECRET_REASON' });
+    await flag({ key: 'settlement.paused', scopeType: 'partner', scopeId: 'pa', updatedBy: 'plat-owner', reason: 'PLATFORM_SECRET_REASON' });
+    await flag({ key: 'sends.paused', scopeType: 'corridor', scopeId: 'IN', updatedBy: 'plat-owner', reason: 'PLATFORM_SECRET_REASON' });
+    await signInAs({});
+    const html = decode(await render());
+    for (const key of ['agent.paused', 'settlement.paused', 'sends.paused']) {
+      const c = card(html, key);
+      expect(c, key).toContain(t('partner.controls.pausedBySmartRemit'));
+      expect(c, key).not.toContain(t('partner.controls.off'));
+      expect(c, key).toContain('data-enabled="on"'); // the tenant's own Pause form still renders
+    }
+    const tools = card(html, 'agent.tools.paused');
+    expect(tools).toContain(t('partner.controls.off'));
+    expect(tools).not.toContain(t('partner.controls.pausedBySmartRemit'));
+  });
+
+  it("review H3: the tenant's own pause under a SmartRemit pause reads 'Paused' with its Resume form", async () => {
+    await flag({ key: 'agent.paused', scopeType: 'global', scopeId: '', updatedBy: 'plat-owner', reason: 'PLATFORM_SECRET_REASON' });
+    await flag({ key: 'agent.paused', scopeType: 'partner', scopeId: 'tenant:pa', updatedBy: 'pa-ops', reason: 'pausing the agent here' });
+    await signInAs({});
+    const c = card(decode(await render()), 'agent.paused');
+    expect(c).toContain(`>${t('partner.controls.on')}<`);
+    expect(c).not.toContain(t('partner.controls.pausedBySmartRemit'));
+    expect(c).toContain(t('partner.controls.setBySmartRemit', { scope: t('partner.controls.scope.global') }));
+    expect(c).toContain('data-enabled="off"');
   });
 
   it("pb's rows and usernames never render; no ref or reason text renders", async () => {

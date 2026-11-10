@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { controlsView, capabilityRows } from '@/lib/partner-controls-view';
+import { controlsView, capabilityRows, switchBadge } from '@/lib/partner-controls-view';
 import { PARTNER_FLAG_KEYS } from '@/lib/flag-switch';
 import { LIVE_CAPABILITIES, EMPTY_LIVE_CONTROLS, type LiveControls } from '@/lib/live-controls';
 import type { FlagRow } from '@/db/repos/feature-flag-repo';
@@ -87,6 +87,41 @@ describe('controlsView', () => {
     expect(byKey(v, 'agent.tools.paused').workspace).toMatchObject({ on: true, by: 'acme-admin' });
     const json = JSON.stringify(v);
     for (const s of ['owner-admin', 'PLATFORM_SECRET_REASON', 'TENANT_SECRET_REASON']) expect(json).not.toContain(s);
+  });
+});
+
+// Review round 2 H3: the card's badge reads the platform rows too, so a SmartRemit pause never shows
+// 'Running'. The tenant's own pause (workspace or corridor) wins the label; the platform line stays.
+describe('switchBadge', () => {
+  it("no row -> running; only a platform row (global, partner:acme, corridor) -> paused_by_smartremit", () => {
+    for (const s of controlsView([], 'acme')) expect(switchBadge(s), s.key).toBe('running');
+    const v = controlsView(
+      [
+        row({ key: 'agent.paused', scopeType: 'global', scopeId: '' }),
+        row({ key: 'settlement.paused', scopeType: 'partner', scopeId: 'acme' }),
+        row({ key: 'sends.paused', scopeType: 'corridor', scopeId: 'IN' }),
+      ],
+      'acme',
+    );
+    expect(switchBadge(byKey(v, 'agent.paused'))).toBe('paused_by_smartremit');
+    expect(switchBadge(byKey(v, 'settlement.paused'))).toBe('paused_by_smartremit');
+    expect(switchBadge(byKey(v, 'sends.paused'))).toBe('paused_by_smartremit');
+    expect(switchBadge(byKey(v, 'agent.tools.paused'))).toBe('running');
+  });
+
+  it("the tenant's own pause (workspace or corridor) -> paused, with or without a platform row", () => {
+    const v = controlsView(
+      [
+        row({ key: 'agent.paused', scopeType: 'global', scopeId: '' }),
+        row({ key: 'agent.paused', scopeId: 'tenant:acme' }),
+        row({ key: 'settlement.paused', scopeId: 'tenant:acme:IN' }),
+        row({ key: 'sends.paused', scopeId: 'tenant:acme' }),
+      ],
+      'acme',
+    );
+    expect(switchBadge(byKey(v, 'agent.paused'))).toBe('paused');
+    expect(switchBadge(byKey(v, 'settlement.paused'))).toBe('paused');
+    expect(switchBadge(byKey(v, 'sends.paused'))).toBe('paused');
   });
 });
 
