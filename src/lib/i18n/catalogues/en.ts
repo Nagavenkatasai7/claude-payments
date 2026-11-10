@@ -581,7 +581,7 @@ export const en = {
   'partner.settings.disclosure.regulatorPhone': 'Regulator phone',
   'partner.settings.disclosure.regulatorWebsite': 'Regulator website',
   'partner.settings.disclosure.days': 'Delivery estimate (business days)',
-  'partner.settings.disclosure.daysHint': 'A whole number from 0 to {max}. Blank means 1 business day.',
+  'partner.settings.disclosure.daysHint': 'A whole number from 0 to {max}. Blank means 1 business day. It applies to new transfers.',
   // Fix pack 4 T6 (C23): the provider block's approval state; fixed text, flagged for counsel review (O-PR4-c).
   'partner.settings.disclosure.approved': 'Approved by {who} on {date}.',
   'partner.settings.disclosure.notApproved': 'Not approved. A partner admin with two-step sign-in approves it by saving this block.',

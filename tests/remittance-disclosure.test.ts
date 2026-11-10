@@ -339,6 +339,60 @@ describe('buildReceiptDisclosure (§1005.31(b)(2))', () => {
     expect(buildReceiptDisclosure(transfer({ status: 'delivered', paidAt }), r, NOW)!.cancelDeadline).toBeNull();
     expect(buildReceiptDisclosure(transfer({ status: 'in_review', paidAt }), r, NOW)!.cancelDeadline).toBeNull();
   });
+
+  describe('stored delivery days (pack 4 C21)', () => {
+    const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    const dateLine = (d: { lines: { label: string; value: string }[] }) => d.lines.find((l) => l.label === 'Date available')?.value;
+    const partnerDays = (n: number) =>
+      partner({ supportConfig: { disclosure: { ...FULL, deliveryEstimate: { businessDays: n } } } });
+
+    it("stored days win over the partner's: a paid row stored with 3 -> On or about paidAt + 3 business days, partner set to 1", async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const r = resolvePartnerDisclosure(partnerDays(1));
+      expect(r.deliveryBusinessDays).toBe(1);
+      const paidAt = new Date(NOW - 10 * 60_000).toISOString();
+      const d = buildReceiptDisclosure({ ...transfer({ paidAt }), deliveryBusinessDays: 3 }, r, NOW)!;
+      expect(dateLine(d)).toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 3))} (estimate)`);
+      expect(dateLine(d)).not.toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 1))} (estimate)`);
+    });
+
+    it('stored 0 -> the paid day itself (weekend rule as addBusinessDays)', async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const r = resolvePartnerDisclosure(partnerDays(2));
+      // A weekday and a weekend payment, both relative to NOW.
+      for (const back of [0, 1, 2, 3, 4, 5, 6]) {
+        const paidAt = new Date(NOW - back * 86_400_000 - 10 * 60_000).toISOString();
+        const d = buildReceiptDisclosure({ ...transfer({ paidAt, status: 'paid' }), deliveryBusinessDays: 0 }, r, NOW)!;
+        const day = new Date(Date.parse(paidAt)).getUTCDay();
+        const expected = addBusinessDays(Date.parse(paidAt), 0);
+        expect(dateLine(d)).toBe(`On or about ${fmt.format(expected)} (estimate)`);
+        if (day !== 0 && day !== 6) expect(fmt.format(expected)).toBe(fmt.format(new Date(paidAt)));
+      }
+    });
+
+    it("no stored days -> the partner's current value (today's behaviour)", async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const paidAt = new Date(NOW - 10 * 60_000).toISOString();
+      const d = buildReceiptDisclosure(transfer({ paidAt }), resolvePartnerDisclosure(partnerDays(4)), NOW)!;
+      expect(dateLine(d)).toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 4))} (estimate)`);
+      const unpaid = buildReceiptDisclosure(transfer({ status: 'awaiting_payment', paidAt: undefined }), resolvePartnerDisclosure(partnerDays(4)), NOW)!;
+      expect(dateLine(unpaid)).toBe('Within 4 business days of payment (estimate)');
+    });
+
+    it("an unpaid row stored with 2 -> 'Within 2 business days of payment (estimate)'", async () => {
+      const { buildReceiptDisclosure } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const d = buildReceiptDisclosure(
+        { ...transfer({ status: 'awaiting_payment', paidAt: undefined }), deliveryBusinessDays: 2 },
+        resolvePartnerDisclosure(partnerDays(1)),
+        NOW,
+      )!;
+      expect(dateLine(d)).toBe('Within 2 business days of payment (estimate)');
+    });
+  });
 });
 
 describe('isDisclosureAckVersion (the optional pay POST field)', () => {

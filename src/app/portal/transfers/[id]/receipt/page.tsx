@@ -59,6 +59,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
       fxRate: transfer.fxRate,
       paidAt: transfer.paidAt,
       deliveredAt: transfer.deliveredAt,
+      deliveryBusinessDays: transfer.deliveryBusinessDays,
     },
     resolvePartnerDisclosure(await getPartnerStore().getPartner(transfer.partnerId)),
     Date.now(),

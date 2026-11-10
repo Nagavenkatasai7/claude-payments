@@ -208,6 +208,7 @@ export default async function ReceiptPage({
       fxRate: t.fxRate,
       paidAt: t.paidAt,
       deliveredAt: t.deliveredAt,
+      deliveryBusinessDays: t.deliveryBusinessDays,
     },
     resolvePartnerDisclosure(await getPartnerStore().getPartner(t.partnerId)),
     Date.now(),

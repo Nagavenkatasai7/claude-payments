@@ -3,7 +3,7 @@ import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
-import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
+import { buildPrepaymentDisclosure, deliveryDaysFor } from '@/lib/remittance-disclosure';
 import { approvingAmountText } from '@/lib/approving-line';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
@@ -345,8 +345,13 @@ async function renderPayPage(transferId: string) {
   // amounts are the view's own — the card can never disagree with the form.
   // Fix pack 4 (C10): one resolve feeds the card and the hash the form posts.
   const resolvedDisclosure = resolvePartnerDisclosure(partner);
+  // Fix pack 4 (C21): a minted transfer shows the days stored on it at mint
+  // (none stored -> the partner's current value); a draft has none stored.
+  const forPage = transfer
+    ? { ...resolvedDisclosure, deliveryBusinessDays: deliveryDaysFor(transfer, resolvedDisclosure) }
+    : resolvedDisclosure;
   const disclosure = view.awaitingPayment
-    ? buildPrepaymentDisclosure(view, resolvedDisclosure)
+    ? buildPrepaymentDisclosure(view, forPage)
     : null;
 
   const feeLabel =

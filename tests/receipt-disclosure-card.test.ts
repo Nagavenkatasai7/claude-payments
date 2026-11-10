@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Partner } from '@/lib/types';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
-import { buildReceiptDisclosure } from '@/lib/remittance-disclosure';
+import { addBusinessDays, buildReceiptDisclosure } from '@/lib/remittance-disclosure';
 import { ReceiptDisclosureCard } from '@/app/account/receipt/[transferId]/disclosure-card';
 
 // Program-Fix 15 PR B — the receipt's Reg E block (12 CFR 1005.31(b)(2)):
@@ -98,5 +98,15 @@ describe('ReceiptDisclosureCard', { retry: 0 }, () => {
     const out = html(partner({ displayName: 'Bare Remit' }));
     expect(out).toContain('Bare Remit');
     expect(out).toContain('Partner licensing details pending (draft).');
+  });
+
+  it('a stored 4 renders the On or about date four business days after paidAt (pack 4 C21)', () => {
+    const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    const paidAt = new Date(NOW - 5 * 60_000).toISOString();
+    const out = html(partner({ supportConfig: { disclosure: { ...FULL, deliveryEstimate: { businessDays: 1 } } } }), {
+      paidAt,
+      deliveryBusinessDays: 4,
+    });
+    expect(out).toContain(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 4))} (estimate)`);
   });
 });

@@ -274,3 +274,15 @@ describe('disclosure approval state (pack 4)', () => {
     expect(logged).not.toContain('mfa store down');
   });
 });
+
+describe('delivery-days hint (pack 4 C21)', () => {
+  it('the delivery-days hint says it applies to new transfers', async () => {
+    const hint = t('partner.settings.disclosure.daysHint', { max: 10 });
+    expect(hint).toBe('A whole number from 0 to 10. Blank means 1 business day. It applies to new transfers.');
+    expect(hint.endsWith('It applies to new transfers.')).toBe(true);
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain('data-testid="settings-disclosure-form"');
+    expect(html).toContain(hint);
+  });
+});

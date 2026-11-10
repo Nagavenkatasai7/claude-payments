@@ -499,3 +499,47 @@ describe('/pay/[transferId]: fix pack 4 account-holder field', { retry: 0 }, () 
     }
   });
 });
+
+// Fix pack 4 (T17, C21): a minted transfer shows the delivery days stored on
+// it at mint; a row with none (and a draft, which has none) shows the
+// partner's current value.
+describe('/pay/[transferId]: fix pack 4 stored delivery days', { retry: 0 }, () => {
+  const SLOW: Partner = {
+    id: 'p_acme',
+    displayName: 'Acme Money Co',
+    supportConfig: { disclosure: { ...FULL, deliveryEstimate: { businessDays: 5 } } },
+  } as unknown as Partner;
+
+  it("a minted transfer stored with 3 days shows 'Within 3 business days of payment (estimate)' while its partner is set to 1", async () => {
+    current = { deliveryBusinessDays: 3 };
+    const html = await render();
+    expect(html).toContain('Within 3 business days of payment (estimate)');
+    expect(html).not.toContain('Within 1 business day of payment (estimate)');
+  });
+
+  it('a minted transfer stored with 0 shows the same-business-day wording', async () => {
+    current = { deliveryBusinessDays: 0 };
+    expect(await render()).toContain('Same business day as payment (estimate)');
+  });
+
+  it("a minted transfer with no stored days shows the partner's value", async () => {
+    getPartner.mockImplementation(async (id) => (id === 'p_acme' ? SLOW : PARTNERS[id] ?? null));
+    const html = await render();
+    expect(html).toContain('Within 5 business days of payment (estimate)');
+  });
+
+  it("a draft shows the partner's value", async () => {
+    getPartner.mockImplementation(async (id) => (id === 'p_acme' ? SLOW : PARTNERS[id] ?? null));
+    getTransfer.mockResolvedValue(null);
+    getTransferDecrypted.mockResolvedValue(null);
+    getDraft.mockResolvedValue({
+      senderPhone: '15551234567',
+      partnerId: 'p_acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 84.5, amountInr: 8450, feeSource: 0, totalChargeSource: 100 },
+    } as unknown as Draft);
+    expect(await render()).toContain('Within 5 business days of payment (estimate)');
+  });
+});

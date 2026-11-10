@@ -163,18 +163,21 @@ export interface ReceiptTransfer {
   fxRate: number;
   paidAt?: string;
   deliveredAt?: string;
+  /** Fix pack 4 (C21): the days stored on the row at mint; absent -> the partner's current value. */
+  deliveryBusinessDays?: number;
 }
 
 export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure, nowMs: number): ReceiptDisclosure | null {
   if (t.transferType === 'b2b') return null;
   const paidMs = t.paidAt ? Date.parse(t.paidAt) : NaN;
   const deliveredMs = t.deliveredAt ? Date.parse(t.deliveredAt) : NaN;
+  const days = deliveryDaysFor(t, d);
   const dateAvailable =
     t.status === 'delivered' && Number.isFinite(deliveredMs)
       ? `${DATE_AVAILABLE_DELIVERED_PREFIX} ${DATE_FMT.format(new Date(deliveredMs))}`
       : Number.isFinite(paidMs)
-        ? dateAvailableOnOrAbout(DATE_FMT.format(addBusinessDays(paidMs, d.deliveryBusinessDays)))
-        : dateAvailableEstimate(d.deliveryBusinessDays);
+        ? dateAvailableOnOrAbout(DATE_FMT.format(addBusinessDays(paidMs, days)))
+        : dateAvailableEstimate(days);
   // The window is keyed on paid_at, which markPaidIfInReview can move LATER
   // (customer-favourable). Shown only while a paid transfer is inside it.
   const deadlineMs = paidMs + CANCEL_WINDOW_MS;

@@ -83,11 +83,6 @@ export function recipientDisplayName(transfer: Transfer): string {
   return safeDisplayText(transfer.recipientName, NAME_MAX) || 'your recipient';
 }
 
-// R0 fix C: matches the disclosure's default estimate instead of "~10 minutes".
-// The transfer row does not carry its partner's own estimate; a per-rail speed
-// arrives with the Payout setup step.
-const STAGE1_DELIVERY = deliveryEstimatePhrase(DEFAULT_DELIVERY_BUSINESS_DAYS);
-
 /**
  * The customer-facing stage-1 ("payment received") message — pure, so the
  * transactional settlement AND hold paths (settlement.ts beginSettlement /
@@ -112,15 +107,20 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
   );
 
   const heldText = fixedReply('hold', { help: true });
+  // Fix pack 4 (C21): the delivery days stored on the row at mint (C2). A row
+  // with none (minted before 0038 or by an older build) keeps the default
+  // estimate. No partner read here: the caller runs inside the paid-flip
+  // transaction (settlement.ts beginSettlement). 0 is a stored value.
+  const delivery = deliveryEstimatePhrase(transfer.deliveryBusinessDays ?? DEFAULT_DELIVERY_BUSINESS_DAYS);
   if (isBusinessFunded(transfer)) {
     return opts?.held
       ? `✅ Payment received — ${sourceCharge} will be debited from your business account. ${heldText} Transfer ID: ${transfer.id}`
-      : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
+      : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} ${delivery}. Transfer ID: ${transfer.id}`;
   }
 
   return opts?.held
     ? `✅ Payment received — ${sourceCharge} charged. ${heldText} Transfer ID: ${transfer.id}`
-    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${STAGE1_DELIVERY}. Transfer ID: ${transfer.id}`;
+    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${delivery}. Transfer ID: ${transfer.id}`;
 }
 
 /**
