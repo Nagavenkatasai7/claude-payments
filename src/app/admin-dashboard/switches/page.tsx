@@ -130,14 +130,20 @@ export default async function SwitchesPage({
                           <TableCell>{r.updatedBy}</TableCell>
                           <TableCell className="max-w-[280px] break-words">{r.reason}</TableCell>
                           <TableCell>
-                            <form action={changeFlagAction} className="flex min-w-[260px] flex-col gap-2">
-                              <input type="hidden" name="key" value={key} />
-                              <input type="hidden" name="scope" value={`${r.scopeType}:${r.scopeId}`} />
-                              <input type="hidden" name="enabled" value="off" />
-                              <Input name="reason" type="text" required minLength={STAFF_REASON_MIN} maxLength={STAFF_REASON_MAX}
-                                aria-label="Reason for turning it off" placeholder="Reason (at least 10 characters)" />
-                              <Button type="submit" size="sm" variant="outline">Turn off</Button>
-                            </form>
+                            {r.scopeType === 'partner' && r.scopeId.startsWith('tenant:') ? (
+                              // Fix pack 3 T8: a partner-set row is read-only here
+                              // (applyFlagChange refuses tenant: ids).
+                              <span className="text-sm text-muted-foreground">Set by the partner. Only the partner can turn it off.</span>
+                            ) : (
+                              <form action={changeFlagAction} className="flex min-w-[260px] flex-col gap-2">
+                                <input type="hidden" name="key" value={key} />
+                                <input type="hidden" name="scope" value={`${r.scopeType}:${r.scopeId}`} />
+                                <input type="hidden" name="enabled" value="off" />
+                                <Input name="reason" type="text" required minLength={STAFF_REASON_MIN} maxLength={STAFF_REASON_MAX}
+                                  aria-label="Reason for turning it off" placeholder="Reason (at least 10 characters)" />
+                                <Button type="submit" size="sm" variant="outline">Turn off</Button>
+                              </form>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}

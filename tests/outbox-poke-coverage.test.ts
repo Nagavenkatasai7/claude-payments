@@ -53,7 +53,7 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/delivery-receipt.ts': ['deliverTransfer'],
   // Release safety part A: the switch ops alert; its one caller, the
   // /admin-dashboard/switches action, pokes.
-  'src/lib/flag-switch.ts': ['applyFlagChange'],
+  'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };

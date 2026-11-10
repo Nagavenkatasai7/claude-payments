@@ -1,8 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { applyFlagChange, FlagChangeError, FLAG_AUDIT_ACTION, isFlagChangeMessage, killSwitchBannerLines } from '@/lib/flag-switch';
+import {
+  applyFlagChange,
+  FlagChangeError,
+  FLAG_AUDIT_ACTION,
+  isFlagChangeMessage,
+  killSwitchBannerLines,
+  partnerKillSwitchBannerLines,
+  PARTNER_FLAG_KEYS,
+  scopeLabel,
+} from '@/lib/flag-switch';
 import { invalidateFlagCache, isFlagOn } from '@/lib/flags';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 
@@ -76,12 +86,20 @@ describe('applyFlagChange', { retry: 0 }, () => {
     ['a blank reason', ADMIN, { key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: 'on', reason: '   ' }, /reason is required/],
     ['a bad on/off value', ADMIN, { key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: 'maybe', reason: REASON }, /on or off/],
   ];
+  // Fix pack 3 T8: a partner-set (tenant:) row is changed only in the partner
+  // workspace. Refused BEFORE partnerExists (yesDeps would say the id exists).
+  refusals.push(
+    ['a tenant: scope id', ADMIN, { key: 'sends.paused', scopeType: 'partner', scopeId: 'tenant:acme', enabled: 'off', reason: REASON }, /partner workspace/],
+    ['a tenant: scope id with a corridor', ADMIN, { key: 'sends.paused', scopeType: 'partner', scopeId: ' tenant:acme:IN', enabled: 'off', reason: REASON }, /partner workspace/],
+  );
+  const yesDeps = () => ({ db, partnerExists: async (id: string) => id === 'acme' || id.trim().startsWith('tenant:') });
   for (const [name, staff, input, msg] of refusals) {
+    const d = name.startsWith('a tenant:') ? yesDeps : deps;
     it(`refuses ${name} and writes nothing`, async () => {
-      await expect(applyFlagChange(staff, input, deps())).rejects.toThrow(FlagChangeError);
-      await expect(applyFlagChange(staff, input, deps())).rejects.toThrow(msg);
+      await expect(applyFlagChange(staff, input, d())).rejects.toThrow(FlagChangeError);
+      await expect(applyFlagChange(staff, input, d())).rejects.toThrow(msg);
       // The page shows only fixed messages: every refusal text is on the allowlist.
-      const e = await applyFlagChange(staff, input, deps()).catch((x: Error) => x);
+      const e = await applyFlagChange(staff, input, d()).catch((x: Error) => x);
       expect(isFlagChangeMessage((e as Error).message)).toBe(true);
       expect(await createFeatureFlagRepo(db).listAll()).toEqual([]);
       expect(await rows(sql`SELECT 1 FROM audit_events`)).toEqual([]);
@@ -140,5 +158,115 @@ describe('applyFlagChange', { retry: 0 }, () => {
       'New sends are paused for all partners and corridors.',
       'Settlement to partner rails is paused for partner acme.',
     ]);
+  });
+
+  it('a tenant: refusal happens before partnerExists is asked', async () => {
+    let asked = 0;
+    await expect(
+      applyFlagChange(ADMIN, { key: 'sends.paused', scopeType: 'partner', scopeId: 'tenant:acme', enabled: 'off', reason: REASON }, { db, partnerExists: async () => { asked++; return true; } }),
+    ).rejects.toThrow('Partner-set switches are changed in the partner workspace.');
+    expect(asked).toBe(0);
+  });
+});
+
+describe('platform partner rows email the partner (fix pack 3 T8, contract 13)', { retry: 0 }, () => {
+  const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const mails = () => rows<{ p: { to: string[]; subject: string; text: string }; d: string }>(
+    sql`SELECT payload AS p, dedupe_key AS d FROM outbox WHERE kind = 'email.send' ORDER BY id`,
+  );
+  const setAddress = (id: string, sc: { alertEmail?: string; complianceAlertEmail?: string }) =>
+    createPartnerRepo(db).updateSupportConfig(id, (prev) => ({ ...prev, ...sc }));
+  const allDeps = () => ({ db, partnerExists: async () => true });
+
+  it('a changed platform partner row emails that partner (SmartRemit wording), dedupe flagmail:<key>:acme:<uuid>', async () => {
+    await setAddress('acme', { alertEmail: 'ops@acme.example', complianceAlertEmail: 'compliance@acme.example' });
+    await applyFlagChange(ADMIN, { key: 'settlement.paused', scopeType: 'partner', scopeId: 'acme', enabled: 'on', reason: REASON }, deps());
+    await applyFlagChange(ADMIN, { key: 'settlement.paused', scopeType: 'partner', scopeId: 'acme', enabled: 'off', reason: 'The rail is healthy again' }, deps());
+    const m = await mails();
+    expect(m).toHaveLength(2);
+    expect(m[0].d).toMatch(new RegExp(`^flagmail:settlement\\.paused:acme:${UUID}$`));
+    expect(m[0].p).toEqual({
+      to: ['compliance@acme.example'],
+      subject: 'SmartRemit: a live control changed for your workspace',
+      text: 'Pause settlement was changed by SmartRemit (turned on). Details are in your SmartRemit workspace.',
+    });
+    expect(m[1].p.text).toBe('Pause settlement was changed by SmartRemit (turned off). Details are in your SmartRemit workspace.');
+    expect(JSON.stringify(m)).not.toContain(REASON);
+  });
+
+  it("no email for 'default', for no address, for a global or corridor row, or for an unchanged save", async () => {
+    await setAddress('default', { alertEmail: 'ops@default.example' });
+    await applyFlagChange(ADMIN, { key: 'sends.paused', scopeType: 'partner', scopeId: 'default', enabled: 'on', reason: REASON }, allDeps());
+    await seedPartner(db, 'globex');
+    await applyFlagChange(ADMIN, { key: 'sends.paused', scopeType: 'partner', scopeId: 'globex', enabled: 'on', reason: REASON }, allDeps());
+    await setAddress('acme', { alertEmail: 'ops@acme.example' });
+    await applyFlagChange(ADMIN, { key: 'sends.paused', scopeType: 'global', scopeId: '', enabled: 'on', reason: REASON }, allDeps());
+    await applyFlagChange(ADMIN, { key: 'sends.paused', scopeType: 'corridor', scopeId: 'IN', enabled: 'on', reason: REASON }, allDeps());
+    expect(await mails()).toEqual([]);
+    // An unchanged save (off -> off; then on -> on) mails once only, on the change.
+    await applyFlagChange(ADMIN, { key: 'voice.notes', scopeType: 'partner', scopeId: 'acme', enabled: 'off', reason: REASON }, allDeps());
+    expect(await mails()).toEqual([]);
+    await applyFlagChange(ADMIN, { key: 'voice.notes', scopeType: 'partner', scopeId: 'acme', enabled: 'on', reason: REASON }, allDeps());
+    await applyFlagChange(ADMIN, { key: 'voice.notes', scopeType: 'partner', scopeId: 'acme', enabled: 'on', reason: REASON }, allDeps());
+    expect(await mails()).toHaveLength(1);
+  });
+});
+
+describe('labels and banners for partner-set rows (fix pack 3 T8)', { retry: 0 }, () => {
+  const at = new Date();
+  const row = (key: string, scopeType: 'global' | 'partner' | 'corridor', scopeId: string, enabled = true) =>
+    ({ key, scopeType, scopeId, enabled, reason: 'secret reason text', updatedBy: 'someone-secret', updatedAt: at });
+
+  it("scopeLabel: tenant:acme -> 'set by partner acme'; with a corridor; an unparsable tenant: id as today", () => {
+    expect(scopeLabel('partner', 'tenant:acme')).toBe('set by partner acme');
+    expect(scopeLabel('partner', 'tenant:acme:IN')).toBe('set by partner acme for IN');
+    expect(scopeLabel('partner', 'tenant:acme:ZZ')).toBe('partner tenant:acme:ZZ');
+    expect(scopeLabel('partner', 'acme')).toBe('partner acme');
+    expect(scopeLabel('global', '')).toBe('all partners and corridors');
+    expect(scopeLabel('corridor', 'IN')).toBe('corridor IN');
+  });
+
+  it("killSwitchBannerLines: a tenant row reads '<bannerText>, set by partner acme for IN.'", () => {
+    expect(killSwitchBannerLines([
+      row('sends.paused', 'partner', 'tenant:acme:IN'),
+      row('agent.paused', 'partner', 'tenant:acme'),
+      row('settlement.paused', 'partner', 'acme'),
+    ])).toEqual([
+      'New sends are paused, set by partner acme for IN.',
+      'The AI agent is paused, set by partner acme.',
+      'Settlement to partner rails is paused for partner acme.',
+    ]);
+  });
+
+  it("partnerKillSwitchBannerLines(rows, 'acme'): who set it, for this tenant only, no reason or username", () => {
+    const lines = partnerKillSwitchBannerLines([
+      row('sends.paused', 'global', ''),
+      row('sends.paused', 'partner', 'acme'),
+      row('settlement.paused', 'partner', 'tenant:acme'),
+      row('sends.paused', 'partner', 'tenant:acme:IN'),
+      row('settlement.paused', 'corridor', 'IN'),
+      row('sends.paused', 'partner', 'globex'),
+      row('sends.paused', 'partner', 'tenant:globex'),
+      row('sends.paused', 'partner', 'tenant:globex:IN'),
+      row('agent.paused', 'partner', 'tenant:acme', false),
+      row('nope.key', 'global', ''),
+      row('voice.notes', 'partner', 'acme'),
+      row('sends.paused', 'partner', 'tenant:acme:ZZ'),
+    ], 'acme');
+    expect(lines).toEqual([
+      'New sends are paused for every partner (set by SmartRemit).',
+      'New sends are paused for your workspace (set by SmartRemit).',
+      'Settlement to partner rails is paused for your workspace (set by your team).',
+      'New sends are paused for your workspace for IN (set by your team).',
+      'Settlement to partner rails is paused for corridor IN (set by SmartRemit).',
+    ]);
+    for (const l of lines) {
+      expect(l).not.toContain('secret');
+    }
+  });
+
+  it("PARTNER_FLAG_KEYS equals ['sends.paused', 'settlement.paused', 'agent.paused', 'agent.tools.paused'] and is frozen", () => {
+    expect(PARTNER_FLAG_KEYS).toEqual(['sends.paused', 'settlement.paused', 'agent.paused', 'agent.tools.paused']);
+    expect(Object.isFrozen(PARTNER_FLAG_KEYS)).toBe(true);
   });
 });
