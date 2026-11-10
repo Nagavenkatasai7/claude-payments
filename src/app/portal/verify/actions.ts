@@ -11,6 +11,7 @@ import { field, ipAllowed, issueAndSendAfterResponse, portalAudit, PORTAL_VERIFY
 import { getCustomerMfaStore } from '@/lib/customer-mfa';
 import { getPortalTotpBudget } from '@/lib/portal-totp-budget';
 import type { MessageKey } from '@/lib/i18n';
+import { customHostBinding } from '@/lib/site-skins';
 
 /**
  * The 15-minute step-up (UI redesign M2-5, Task 5.5; owner O1; review round 1, M4). The phone is the
@@ -38,7 +39,7 @@ async function sessionPending(token: string, purpose: 'stepup' | 'stepup_totp', 
 }
 
 async function markFresh(ctx: Awaited<ReturnType<typeof requirePortalCustomer>>, totp: boolean, next: string): Promise<never> {
-  const ok = await getPortalSessionStore().markStepUp(ctx.token, ctx.site.partnerId, { totp });
+  const ok = await getPortalSessionStore().markStepUp(ctx.token, ctx.site.partnerId, { totp }, customHostBinding(ctx.site.host));
   if (!ok) redirect('/portal/login');
   await portalAudit(ctx.site.partnerId, ctx.session.phone, 'stepup_success', { totp });
   redirect(next);

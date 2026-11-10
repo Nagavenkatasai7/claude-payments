@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SITE_SKINS, CUSTOM_SKIN_HOSTS, isSkinSlug, skinForSlug, siteSkinFor, skinLogoSrc, type SiteSkin } from '@/lib/site-skins';
+import { SITE_SKINS, CUSTOM_SKIN_HOSTS, customHostBinding, isSkinSlug, skinForSlug, siteSkinFor, skinLogoSrc, type SiteSkin } from '@/lib/site-skins';
 import { isValidSiteSlug } from '@/lib/site-host';
 import { validateThemeColor } from '@/lib/ui/theme';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -64,6 +64,29 @@ describe('custom skin hosts (smartremitai.tgfl.org)', () => {
   it.each(Object.entries(SITE_SKINS))('%s: credentialEpoch is a positive integer', (_key, skin) => {
     expect(Number.isInteger(skin.credentialEpoch)).toBe(true);
     expect(skin.credentialEpoch).toBeGreaterThan(0);
+  });
+});
+
+describe('customHostBinding (D8: credentials minted on a custom host are bound to it)', () => {
+  it('a custom skin host binds to `${host}#${credentialEpoch}`', () => {
+    expect(customHostBinding('smartremitai.tgfl.org')).toBe('smartremitai.tgfl.org#1');
+    expect(customHostBinding('smartremitai.tgfl.org')).toBe(`smartremitai.tgfl.org#${SITE_SKINS.tgfl.credentialEpoch}`);
+  });
+
+  it.each([
+    'send.smartremit.ai',
+    'tgfl.smartremit.ai',
+    'SMARTREMITAI.TGFL.ORG',
+    'smartremitai.tgfl.org.',
+    'smartremitai.tgfl.org:443',
+    'x.smartremitai.tgfl.org',
+    'tgfl.org',
+    'smartremit.ai',
+    '',
+    'constructor',
+    '__proto__',
+  ])('%j has no binding (byte-identical hashes for every smartremit.ai host)', (host) => {
+    expect(customHostBinding(host)).toBeNull();
   });
 });
 

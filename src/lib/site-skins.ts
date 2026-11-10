@@ -59,6 +59,21 @@ export const CUSTOM_SKIN_HOSTS: ReadonlyMap<string, string> = new Map(
   Object.values(SITE_SKINS).flatMap((s) => s.hosts.map((h) => [h, s.slug] as const)),
 );
 
+/**
+ * The credential binding of a CANONICAL host (PortalSite.host / the OAuth ctx.host): `${host}#${epoch}`
+ * for a custom skin host, null for every other host. The match is exact (no case folding, no port, no
+ * trailing dot): callers pass the canonical host from parseSiteHost, never the raw header. The binding
+ * is hashed into portal session keys and AI-app refresh-token hashes, so a credential minted on a custom
+ * host never works on a smartremit.ai host (and the reverse); every smartremit.ai host gets null and
+ * keeps its hashes byte for byte. Bumping the skin's credentialEpoch revokes them all.
+ */
+export function customHostBinding(host: string): string | null {
+  if (typeof host !== 'string') return null;
+  const slug = CUSTOM_SKIN_HOSTS.get(host);
+  const skin = slug === undefined ? null : skinForSlug(slug);
+  return skin ? `${host}#${skin.credentialEpoch}` : null;
+}
+
 /** Own keys only: 'constructor', '__proto__' and friends are never a skin. */
 export function isSkinSlug(slug: string): boolean {
   return typeof slug === 'string' && Object.prototype.hasOwnProperty.call(SITE_SKINS, slug);

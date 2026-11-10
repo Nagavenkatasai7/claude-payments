@@ -92,7 +92,7 @@ const fd = (reason: string) => {
   return f;
 };
 async function signIn(partnerId = 'pa') {
-  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iPhone');
+  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iPhone', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 const auditRows = (partnerId = 'pa') =>

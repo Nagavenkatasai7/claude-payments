@@ -100,8 +100,8 @@ beforeEach(async () => {
 
 describe('devices: same phone, two partners', () => {
   it("B's sessions are never listed on A's host", async () => {
-    const a = await sessions().create('pa', PHONE, 'Safari on iPhone');
-    const b = await sessions().create('pb', PHONE, 'Chrome on Windows');
+    const a = await sessions().create('pa', PHONE, 'Safari on iPhone', null);
+    const b = await sessions().create('pb', PHONE, 'Chrome on Windows', null);
     await signedInOn('pa', 'acme', a.token);
     const sids = (await listPortalDevices(await requirePortalCustomer())).map((d) => d.sid);
     expect(sids).toEqual([a.sid]);
@@ -109,41 +109,41 @@ describe('devices: same phone, two partners', () => {
   });
 
   it("posting B's sid on A's host gets the same copy and B stays signed in", async () => {
-    const a = await sessions().create('pa', PHONE, 'Safari on iPhone');
-    const b = await sessions().create('pb', PHONE, 'Chrome on Windows');
+    const a = await sessions().create('pa', PHONE, 'Safari on iPhone', null);
+    const b = await sessions().create('pb', PHONE, 'Chrome on Windows', null);
     await signedInOn('pa', 'acme', a.token);
     expect(await signOutDeviceAction(null, fd(b.sid))).toEqual({ notice: 'portal.devices.signed_out' });
-    expect(await sessions().resolve(b.token, 'pb')).not.toBeNull();
+    expect(await sessions().resolve(b.token, 'pb', null)).not.toBeNull();
   });
 
   it('signing out everywhere on A leaves the B session alive', async () => {
-    const a = await sessions().create('pa', PHONE, 'Safari on iPhone');
-    const b = await sessions().create('pb', PHONE, 'Chrome on Windows');
+    const a = await sessions().create('pa', PHONE, 'Safari on iPhone', null);
+    const b = await sessions().create('pb', PHONE, 'Chrome on Windows', null);
     await signedInOn('pa', 'acme', a.token);
     await expect(signOutEverywhereAction()).rejects.toThrow('REDIRECT:/portal/login');
-    expect(await sessions().resolve(a.token, 'pa')).toBeNull();
-    expect(await sessions().resolve(b.token, 'pb')).not.toBeNull();
+    expect(await sessions().resolve(a.token, 'pa', null)).toBeNull();
+    expect(await sessions().resolve(b.token, 'pb', null)).not.toBeNull();
   });
 
   it("A's cookie on B's host cannot reach B's devices at all", async () => {
-    const a = await sessions().create('pa', PHONE, 'Safari on iPhone');
-    const b = await sessions().create('pb', PHONE, 'Chrome on Windows');
+    const a = await sessions().create('pa', PHONE, 'Safari on iPhone', null);
+    const b = await sessions().create('pb', PHONE, 'Chrome on Windows', null);
     await signedInOn('pb', 'bravo', a.token);
     await expect(signOutDeviceAction(null, fd(b.sid))).rejects.toThrow('REDIRECT:/portal/login');
     await expect(signOutEverywhereAction()).rejects.toThrow('REDIRECT:/portal/login');
-    expect(await sessions().resolve(b.token, 'pb')).not.toBeNull();
+    expect(await sessions().resolve(b.token, 'pb', null)).not.toBeNull();
   });
 });
 
 describe('devices: two customers, one partner', () => {
   it("customer X never sees or revokes customer Y's sessions", async () => {
-    const x = await sessions().create('pa', PHONE, 'Safari on iPhone');
-    const y = await sessions().create('pa', OTHER_PHONE, 'Chrome on Windows');
+    const x = await sessions().create('pa', PHONE, 'Safari on iPhone', null);
+    const y = await sessions().create('pa', OTHER_PHONE, 'Chrome on Windows', null);
     await signedInOn('pa', 'acme', x.token);
     expect((await listPortalDevices(await requirePortalCustomer())).map((d) => d.sid)).toEqual([x.sid]);
     expect(await signOutDeviceAction(null, fd(y.sid))).toEqual({ notice: 'portal.devices.signed_out' });
-    expect(await sessions().resolve(y.token, 'pa')).not.toBeNull();
+    expect(await sessions().resolve(y.token, 'pa', null)).not.toBeNull();
     await expect(signOutEverywhereAction()).rejects.toThrow('REDIRECT:/portal/login');
-    expect(await sessions().resolve(y.token, 'pa')).not.toBeNull();
+    expect(await sessions().resolve(y.token, 'pa', null)).not.toBeNull();
   });
 });

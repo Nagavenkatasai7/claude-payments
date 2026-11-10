@@ -350,11 +350,19 @@ describe('TOTP enrolment (step-up; partner brand issuer)', () => {
     expect(await cs.isMfaEnrolled('pb', phone)).toBe(false);
     expect(h.sessions.revokeAll).toHaveBeenCalledWith('pa', phone, 'sid-pa');
     expect(legacyAuth.deleteAllSessions).toHaveBeenCalledWith(phone); // M2-14 (#399 L2)
-    expect(h.sessions.markStepUp).toHaveBeenCalledWith('tok-pa', 'pa', { totp: true });
+    expect(h.sessions.markStepUp).toHaveBeenCalledWith('tok-pa', 'pa', { totp: true }, null); // smartremit.ai host: no binding (D8)
     const rows = await db.select().from(auditEvents).where(and(eq(auditEvents.action, 'customer.mfa.enroll'), eq(auditEvents.partnerId, 'pa')));
     expect(rows).toHaveLength(1);
     expect(rows[0].subjectId).toBe(auditSubjectId('pa', phone));
     expect(rows[0].actor).toBe('system:customer-portal'); // M2-14 (#399 L3): the portal actor
+  });
+  it('D8: on the custom host the step-up stamp carries the custom-host binding', async () => {
+    h.site = { ...SITE('pa'), slug: 'tgfl', host: 'smartremitai.tgfl.org' };
+    h.ctx = { ...h.ctx!, site: h.site };
+    const begun = await beginPortalMfaEnrolmentAction({ ok: false }, fd());
+    clock += 31_000;
+    expect(await confirmPortalMfaEnrolmentAction({ ok: false }, fd({ code: totpAt(base32Decode(begun.secret!), clock) }))).toEqual({ ok: true, notice: 'portal.mfa.on' });
+    expect(h.sessions.markStepUp).toHaveBeenCalledWith('tok-pa', 'pa', { totp: true }, 'smartremitai.tgfl.org#1');
   });
   it("M2-14 (#399 L2): a legacy account under ANOTHER partner is left alone; a failed legacy revoke is reported", async () => {
     legacyAuth.partnerId = 'pb';

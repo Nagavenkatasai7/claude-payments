@@ -125,12 +125,13 @@ vi.mock('@/lib/customer-mfa', () => ({
 }));
 
 
-import { getPortalCustomer, isPortalSessionFresh, requireFreshPortalAuth, requirePortalCustomer, safePortalNext } from '@/lib/portal-auth';
+import { completePortalSignIn, getPortalCustomer, isPortalSessionFresh, requireFreshPortalAuth, requirePortalCustomer, safePortalNext } from '@/lib/portal-auth';
 import { stepUpRequestAction, stepUpTotpAction, stepUpVerifyAction, type PortalStepUpState } from '@/app/portal/verify/actions';
 import { signOutAction } from '@/app/portal/signout/actions';
 import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-session-store';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { customHostBinding } from '@/lib/site-skins';
 
 const PHONE = TWO_PARTNER_PHONE;
 let db: Db;
@@ -151,7 +152,7 @@ async function expectRedirect(p: Promise<unknown>, to: string) {
   await expect(p).rejects.toThrow(`REDIRECT:${to}`);
 }
 async function signedIn(partnerId: string): Promise<string> {
-  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iOS');
+  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
   return token;
 }
@@ -202,7 +203,7 @@ describe('requirePortalCustomer', () => {
     await expectRedirect(requirePortalCustomer(), '/portal/login');
   });
   it('a live session whose customer row is gone → null', async () => {
-    const { token } = await sessions().create('pa', '14155559999', 'Safari on iOS');
+    const { token } = await sessions().create('pa', '14155559999', 'Safari on iOS', null);
     h.jar.set(PORTAL_SESSION_COOKIE, token);
     expect(await getPortalCustomer()).toBeNull();
   });
@@ -259,8 +260,8 @@ describe('isPortalSessionFresh', () => {
     h.mfaEnrolled.add(`pa|${PHONE}`);
     const token = await signedIn('pa');
     expect(await isPortalSessionFresh(await requirePortalCustomer())).toBe(false);
-    expect(await sessions().markStepUp(token, 'pa', { totp: true })).toBe(true);
-    const session = await sessions().resolve(token, 'pa');
+    expect(await sessions().markStepUp(token, 'pa', { totp: true }, null)).toBe(true);
+    const session = await sessions().resolve(token, 'pa', null);
     expect(await isPortalSessionFresh({ ...(await requirePortalCustomer()), session: session! })).toBe(true);
   });
   it('an enrolment lookup error fails closed (demands the TOTP proof)', async () => {
@@ -349,7 +350,7 @@ describe('step-up', () => {
     const s = await startStepUp();
     expect(h.sends.map((x) => [x.partnerId, x.phone])).toEqual([['pa', PHONE]]);
     await expectRedirect(stepUpVerifyAction(null, fd({ next: '/portal/send', pending: s.pending!, code: lastCode()! })), '/portal/send');
-    const sess = await sessions().resolve(token, 'pa');
+    const sess = await sessions().resolve(token, 'pa', null);
     expect(sessions().isFresh(sess!)).toBe(true);
     expect(await auditCount('pa', 'portal.auth.stepup_success')).toBe(1);
   });
@@ -405,11 +406,11 @@ describe('step-up', () => {
       const s = await startStepUp();
       const m = await stepUpVerifyAction(null, fd({ next: '/portal/send', pending: s.pending!, code: lastCode()! }));
       expect(m.step).toBe('mfa');
-      let sess = await sessions().resolve(token, 'pa');
+      let sess = await sessions().resolve(token, 'pa', null);
       expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(false);
       expect(sessions().isFresh(sess!)).toBe(false); // authAtMs was not stamped either
       await expectRedirect(stepUpTotpAction(null, fd({ next: '/portal/send', pending: m.pending!, code: h.mfaValid })), '/portal/send');
-      sess = await sessions().resolve(token, 'pa');
+      sess = await sessions().resolve(token, 'pa', null);
       expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(true);
     });
 
@@ -514,7 +515,7 @@ describe('signOutAction', () => {
   it('destroys the session, clears the cookie with its __Host- attributes, audits, redirects', async () => {
     const token = await signedIn('pa');
     await expectRedirect(signOutAction(), '/portal/login');
-    expect(await sessions().resolve(token, 'pa')).toBeNull();
+    expect(await sessions().resolve(token, 'pa', null)).toBeNull();
     const cleared = h.cookieSets.at(-1)!;
     expect(cleared).toEqual({ name: PORTAL_SESSION_COOKIE, value: '', opts: { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 0 } });
     expect(await auditCount('pa', 'portal.auth.signout')).toBe(1);
@@ -523,10 +524,113 @@ describe('signOutAction', () => {
     const token = await signedIn('pa');
     h.site = SITE('pb', 'bravo');
     await expectRedirect(signOutAction(), '/portal/login');
-    expect(await sessions().resolve(token, 'pa')).not.toBeNull();
+    expect(await sessions().resolve(token, 'pa', null)).not.toBeNull();
     expect(await auditCount('pb', 'portal.auth.signout')).toBe(0);
   });
   it('no cookie → still clears and redirects (idempotent)', async () => {
     await expectRedirect(signOutAction(), '/portal/login');
+  });
+});
+
+// D8 + D15 (TGFL custom host): a portal session minted on smartremitai.tgfl.org is bound to that host
+// (customHostBinding(site.host) enters the session hash), so its cookie is signed out on every
+// smartremit.ai host and the reverse; login_success records the canonical host.
+describe('custom host binding (D8) and the login_success host (D15)', () => {
+  const CUSTOM_HOST = 'smartremitai.tgfl.org';
+  const CUSTOM = (partnerId = 'pa'): PortalSite => ({ ...SITE(partnerId, 'tgfl'), host: CUSTOM_HOST });
+  const B = customHostBinding(CUSTOM_HOST)!;
+  const loginMeta = async (partnerId: string) =>
+    (await db.select().from(auditEvents).where(and(eq(auditEvents.partnerId, partnerId), eq(auditEvents.action, 'portal.auth.login_success')))).map((r) => r.meta);
+
+  it('the binding of the custom host is its host and epoch', () => {
+    expect(B).toBe('smartremitai.tgfl.org#1');
+  });
+
+  it('getPortalCustomer on the custom host accepts only a session bound to it', async () => {
+    h.site = CUSTOM();
+    const plain = (await sessions().create('pa', PHONE, 'Safari on iOS', null)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, plain);
+    expect(await getPortalCustomer()).toBeNull();
+    const bound = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, bound);
+    expect((await getPortalCustomer())?.site.host).toBe(CUSTOM_HOST);
+  });
+
+  it('a session bound to the custom host is signed out on tgfl.smartremit.ai (same tenant)', async () => {
+    const bound = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, bound);
+    h.site = SITE('pa', 'tgfl');
+    expect(await getPortalCustomer()).toBeNull();
+    await expectRedirect(requirePortalCustomer(), '/portal/login');
+  });
+
+  it('completePortalSignIn on the custom host mints a bound session and records meta.host', async () => {
+    h.site = CUSTOM();
+    await completePortalSignIn('pa', PHONE);
+    const token = h.jar.get(PORTAL_SESSION_COOKIE)!;
+    expect(await sessions().resolve(token, 'pa', null)).toBeNull();
+    expect(await sessions().resolve(token, 'pa', B)).not.toBeNull();
+    expect(await loginMeta('pa')).toEqual([{ host: CUSTOM_HOST }]);
+  });
+
+  it('completePortalSignIn on a smartremit.ai host mints an unbound session and records that host', async () => {
+    await completePortalSignIn('pa', PHONE);
+    const token = h.jar.get(PORTAL_SESSION_COOKIE)!;
+    expect(await sessions().resolve(token, 'pa', null)).not.toBeNull();
+    expect(await sessions().resolve(token, 'pa', B)).toBeNull();
+    expect(await loginMeta('pa')).toEqual([{ host: 'acme.smartremit.ai' }]);
+  });
+
+  it('completePortalSignIn with a TOTP proof step-ups the bound session', async () => {
+    h.site = CUSTOM();
+    await completePortalSignIn('pa', PHONE, { totp: true });
+    const sess = await sessions().resolve(h.jar.get(PORTAL_SESSION_COOKIE)!, 'pa', B);
+    expect(sess?.totpAtMs).toBeTypeOf('number');
+    expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(true);
+  });
+
+  it('completePortalSignIn rotates the bound cookie presented at sign-in', async () => {
+    h.site = CUSTOM();
+    const old = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, old);
+    await completePortalSignIn('pa', PHONE);
+    expect(await sessions().resolve(old, 'pa', B)).toBeNull();
+  });
+
+  it('completePortalSignIn refuses a partner that is not the host tenant (nothing minted, nothing audited)', async () => {
+    h.site = CUSTOM();
+    await expect(completePortalSignIn('pb', PHONE)).rejects.toThrow();
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+    expect(await auditCount('pb', 'portal.auth.login_success')).toBe(0);
+  });
+
+  it('a step-up on the custom host marks the bound session fresh', async () => {
+    h.site = CUSTOM();
+    const token = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, token);
+    now += 16 * 60_000;
+    const s = await stepUpRequestAction(null, fd({ next: '/portal/send' }));
+    expect(s.step).toBe('code');
+    await flushAfter();
+    await expectRedirect(stepUpVerifyAction(null, fd({ next: '/portal/send', pending: s.pending!, code: lastCode()! })), '/portal/send');
+    expect(sessions().isFresh((await sessions().resolve(token, 'pa', B))!)).toBe(true);
+  });
+
+  it('signOutAction on the custom host destroys the bound session', async () => {
+    h.site = CUSTOM();
+    const token = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, token);
+    await expectRedirect(signOutAction(), '/portal/login');
+    expect(await sessions().resolve(token, 'pa', B)).toBeNull();
+    expect(await auditCount('pa', 'portal.auth.signout')).toBe(1);
+  });
+
+  it('signOutAction on tgfl.smartremit.ai leaves a custom-host session alive', async () => {
+    const token = (await sessions().create('pa', PHONE, 'Safari on iOS', B)).token;
+    h.jar.set(PORTAL_SESSION_COOKIE, token);
+    h.site = SITE('pa', 'tgfl');
+    await expectRedirect(signOutAction(), '/portal/login');
+    expect(await sessions().resolve(token, 'pa', B)).not.toBeNull();
+    expect(await auditCount('pa', 'portal.auth.signout')).toBe(0);
   });
 });

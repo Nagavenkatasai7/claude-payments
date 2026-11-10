@@ -64,12 +64,12 @@ describe('seedTwoPartners', () => {
   it('is the session isolation fixture: A’s cookie is refused on B’s host; one phone = two independent sessions', async () => {
     const { A, B, phone } = await seedTwoPartners(db);
     const s = createPortalSessionStore(fakeRedis());
-    const a = await s.create(A.partnerId, phone, 'Chrome on macOS');
-    const b = await s.create(B.partnerId, phone, 'Safari on iPhone');
-    expect(await s.resolve(a.token, B.partnerId)).toBeNull();
-    expect(await s.resolve(b.token, A.partnerId)).toBeNull();
+    const a = await s.create(A.partnerId, phone, 'Chrome on macOS', null);
+    const b = await s.create(B.partnerId, phone, 'Safari on iPhone', null);
+    expect(await s.resolve(a.token, B.partnerId, null)).toBeNull();
+    expect(await s.resolve(b.token, A.partnerId, null)).toBeNull();
     expect(await s.revokeAll(A.partnerId, phone)).toBe(1);
-    expect(await s.resolve(a.token, A.partnerId)).toBeNull();
-    expect((await s.resolve(b.token, B.partnerId))?.partnerId).toBe(B.partnerId);
+    expect(await s.resolve(a.token, A.partnerId, null)).toBeNull();
+    expect((await s.resolve(b.token, B.partnerId, null))?.partnerId).toBe(B.partnerId);
   });
 });

@@ -6,6 +6,7 @@ import { requirePortalSite } from '@/lib/portal-site';
 import { getPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-session-store';
 import { clearPortalCookie } from '@/lib/portal-auth';
 import { portalAudit } from '@/lib/portal-login-flow';
+import { customHostBinding } from '@/lib/site-skins';
 
 /**
  * Sign out of the customer portal (UI redesign M2-5). A public POST endpoint: host gate first; the
@@ -18,9 +19,10 @@ export async function signOutAction(): Promise<void> {
   if (token) {
     try {
       const store = getPortalSessionStore();
-      const session = await store.resolve(token, site.partnerId);
+      const binding = customHostBinding(site.host); // D8: only a session minted on THIS host
+      const session = await store.resolve(token, site.partnerId, binding);
       if (session) {
-        await store.destroy(token);
+        await store.destroy(token, binding);
         await portalAudit(site.partnerId, session.phone, 'signout');
       }
     } catch {

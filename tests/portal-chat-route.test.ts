@@ -115,7 +115,7 @@ function req(opts: { host?: string; origin?: string | null; body?: string; json?
   return new NextRequest(`https://${host}/api/portal/chat`, { method: 'POST', headers, body });
 }
 async function signIn(partnerId: 'pa' | 'pb') {
-  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS');
+  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 function onHost(partnerId: 'pa' | 'pb') {

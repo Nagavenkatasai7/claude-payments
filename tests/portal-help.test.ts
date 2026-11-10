@@ -110,7 +110,7 @@ const VALID = { subject: 'Where is my money', message: 'My transfer has not arri
 const REDIRECT_TICKET = /^REDIRECT:\/portal\/help\/tickets\/(tk_[A-Za-z0-9_-]+)$/;
 
 async function signIn(partnerId: string) {
-  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS');
+  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 async function createdId(p: Promise<unknown>): Promise<string> {

@@ -100,7 +100,7 @@ async function expectRedirect(p: Promise<unknown>, to: string) {
   await expect(p).rejects.toThrow(`REDIRECT:${to}`);
 }
 async function signIn(partnerId: string, phone = PHONE) {
-  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS');
+  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 const onHost = (partnerId: 'pa' | 'pb') => {
