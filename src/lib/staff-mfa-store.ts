@@ -254,3 +254,17 @@ export function getStaffMfaStore(): StaffMfaStore {
   if (!cached) cached = createStaffMfaStore(getRedis());
   return cached;
 }
+
+/**
+ * Fix pack 3 (contract 12): has this staff account enrolled TOTP? FAIL CLOSED:
+ * an empty username or any read error (Redis down, store build failure) reads
+ * as NOT enrolled, never throws, and logs nothing (no username in any log).
+ */
+export async function staffMfaEnrolled(username: string): Promise<boolean> {
+  if (username === '') return false;
+  try {
+    return await getStaffMfaStore().isEnrolled(username);
+  } catch {
+    return false;
+  }
+}

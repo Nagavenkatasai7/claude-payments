@@ -172,7 +172,9 @@ export interface ResolvedKyc {
  * has no toggle anywhere and runs on every transfer (see screenTransfer).
  */
 export function resolveKycMode(
-  partner: Partner | null | undefined,
+  // Fix pack 3 T2: widened to the fields it reads (+ liveControls for T9's
+  // posture term) so pure callers (live-certification.ts) can pass a Pick.
+  partner: Pick<Partner, 'kycMode' | 'requireKycBeforeSend' | 'liveControls'> | null | undefined,
 ): ResolvedKyc {
   const mode: KycMode = partner?.kycMode ?? 'ours';
   return { mode, requireKyc: partner?.requireKycBeforeSend === true };
