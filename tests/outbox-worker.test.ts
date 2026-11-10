@@ -23,6 +23,7 @@ import { TelegramNoTemplateError } from '@/lib/whatsapp';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
 import { env } from '@/lib/env';
 import { seedLiveEvidence } from './helpers-sanctions';
+import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { recentlyFailingRails } from '@/lib/rail-health';
 
 // R17: the AI notice and its durable marker are covered by
@@ -3224,6 +3225,40 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
   });
 
+  // Review S5 (W2a): a sanctions match never gets "otherwise refund it": no
+  // automatic re-screen follows, and the compliance officer decides first.
+  it('S5 W2a: newest screen a live, fresh MATCH: instructnotlive says no re-screen follows and the no-refund rule (ids only)', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', decision: 'match' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct'))[0].last_error).toBe('Last screen was a sanctions match.');
+    const alerts = await rowsOf('ops.alert');
+    expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+      'instructnotlive:wk_t1',
+      'transfer wk_t1 (rail acme) is paid but was not instructed: Last screen was a sanctions match. No automatic re-screen follows. ' +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
+  });
+
+  it.each([
+    ['not on a live list', { listFitness: 'not_live' as const }, 'Last screen not on a live list.'],
+    ['older than the list age limit', { listFitness: 'live' as const, screenedAgoMs: 40 * 3_600_000 }, 'Last screen older than the list age limit.'],
+  ])('S5 W2a: %s keeps the re-screen tail unchanged', async (_l, ev, why) => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, ev);
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect((await rowsOf('ops.alert')).map((a) => (a.payload as { message: string }).message)).toEqual([
+      `transfer wk_t1 (rail acme) is paid but was not instructed: ${why} The reconcile sweep re-screens it once a live list is served; otherwise refund it.`,
+    ]);
+  });
+
   it('F1 C1: the not-live refusal at attempt 3+ is NOT a rail failure: no railfail alert, routing unchanged, row stays retryable', async () => {
     const t = liveTransfer();
     await store.saveTransfer(t);
@@ -3353,14 +3388,43 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
         const msg = JSON.stringify(alerts[0].payload);
         expect(msg).toContain('wk_t1');
         expect(msg).toContain('PAID');
-        expect(msg).toContain('charged');
         expect(msg).toContain('nothing was sent to the rail');
-        expect(msg).toContain('clear the sender screening hold or refund');
+        // Review S5 (X1): the fixture is a paid bank_transfer row with no
+        // charge reference (senderChargeState 'partner_collected'), and the
+        // text never says to refund the transfer.
+        expect((alerts[0].payload as { message: string }).message).toBe(
+          "⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (the partner confirmed that it collected the sender's funds) " +
+            'but nothing was sent to the rail: Sender under an active screening hold. ' +
+            `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+        );
+        expect(msg).not.toMatch(/refund the transfer/);
         for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
         expect((await rowsOf('ops.alert')).filter((a) => a.dedupe_key.startsWith('railfail:'))).toEqual([]);
         expect((await store.getTransfer('wk_t1'))!.status).toBe('paid');
       },
     );
+
+    // Review S5 (X1): the money by senderChargeState, never always "charged".
+    it.each([
+      ['charged (a charge reference)', { fundingRef: 'ch_wk' }, 'the sender was charged'],
+      ['partner-pulled (nothing charged here)', { fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x' }, 'nothing was charged'],
+    ])('S5 X1: instructsenderhold states the money (%s), ids only', async (_l, over, money) => {
+      const t = liveTransfer(over as Partial<Transfer>);
+      await store.saveTransfer(t);
+      await seedLiveEvidence(db, t, { listFitness: 'live' });
+      await stampSender();
+      await rail('http');
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+      expect(fetchFn).not.toHaveBeenCalled();
+      const alerts = await rowsOf('ops.alert');
+      expect(alerts.map((a) => [a.dedupe_key, (a.payload as { message: string }).message])).toEqual([[
+        'instructsenderhold:wk_t1',
+        `⚠️ SmartRemit ops: transfer wk_t1 (partner acme, rail acme) is PAID (${money}) ` +
+          'but nothing was sent to the rail: Sender under an active screening hold. ' +
+          `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+      ]]);
+    });
 
     it('a platform clear later than the stamp: POSTed', async () => {
       const t = liveTransfer();

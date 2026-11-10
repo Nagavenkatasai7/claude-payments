@@ -22,6 +22,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { freshDb, seedPartner } from './helpers-db';
 import { processStripeFundingEvent } from '@/lib/stripe-funding-webhook';
 import type { StripeFundingEvent } from '@/lib/providers/stripe-funding-provider';
+import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
@@ -158,6 +159,32 @@ describe('payment_intent.succeeded', () => {
     expect(t).toMatchObject({ status: 'awaiting_payment', fundingRef: 'pi_bl1' });
     expect(await outboxRows('mock.settle')).toHaveLength(0);
     expect(await outboxRows('ops.alert')).toHaveLength(1);
+  });
+});
+
+// Review S5 (W1): the charged-but-not-settled alert, by cause.
+describe('stripechargedmoved alert text (review S5, W1)', () => {
+  it('a row BLOCKED by sanctions screening: says charged, not settled, and the no-refund rule; never "Refund it"', async () => {
+    await boundTransfer('w1s');
+    await repo.applyRescreenIfAwaiting('w1s', 'acme', 'blocked', ['sanctions']);
+    expect((await processStripeFundingEvent(db, 'acme', succeeded('w1s'))).outcome).toBe('funded_not_settled');
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.map((a) => [a.dedupe_key, a.payload.message])).toEqual([[
+      'stripechargedmoved:w1s',
+      `⚠️ SmartRemit ops: transfer w1s (partner acme) was CHARGED through Stripe (intent pi_w1s) but is BLOCKED by sanctions screening ('awaiting_payment' / compliance 'blocked') — it will NOT be settled. ` +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
+    expect(String(alerts[0].payload.message)).not.toMatch(/refund it/i);
+  });
+
+  it('a CANCELLED row (not a sanctions block) keeps "Refund it in the partner\'s Stripe dashboard"', async () => {
+    await boundTransfer('w1c');
+    await db.execute(sql`UPDATE transfers SET status = 'cancelled' WHERE id = 'w1c'`);
+    expect((await processStripeFundingEvent(db, 'acme', succeeded('w1c'))).outcome).toBe('funded_not_settled');
+    expect((await outboxRows('ops.alert')).map((a) => [a.dedupe_key, a.payload.message])).toEqual([[
+      'stripechargedmoved:w1c',
+      "⚠️ SmartRemit ops: transfer w1c (partner acme) was CHARGED through Stripe (intent pi_w1c) but is 'cancelled' / compliance 'cleared' — it will NOT be settled. Refund it in the partner's Stripe dashboard and record the outcome.",
+    ]]);
   });
 });
 

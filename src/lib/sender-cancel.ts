@@ -4,6 +4,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CANCEL_WINDOW_MS } from '@/lib/refund-policy';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 import { buildSenderCancelMessage } from '@/lib/legal/cancel-drafts';
 import { isSandbox } from '@/lib/settlement';
 import type { PartnerId, Transfer } from '@/lib/types';
@@ -120,6 +121,23 @@ export async function cancelPaidBySenderLocked(tx: DbOrTx, partnerId: PartnerId,
 
 function escalationAlert(t: Transfer, reason: EscalateReason): string {
   const who = `transfer ${t.id} (partner ${t.partnerId}${t.settlementPartnerId ? `, settles via ${t.settlementPartnerId}` : ''})`;
+  // Review S5 (inventory): a row blocked by sanctions screening is never told
+  // to be refunded: the licensed partner's compliance officer decides about
+  // its funds first (the escalation and the refund flag are unchanged).
+  const blocked = t.complianceStatus === 'blocked';
+  if (reason === 'in_review' && blocked) {
+    return (
+      `⚠️ SmartRemit ops: the sender of ${who} asked to cancel within 30 minutes of payment (Reg E) while it is held for review. ` +
+      `Not auto-cancelled (C4). It is blocked by sanctions screening, so it can never be released. The refund is marked requested, but ${SANCTIONS_FUNDS_RULE}.`
+    );
+  }
+  if (blocked) {
+    return (
+      `⚠️ SmartRemit ops: the sender of ${who} asked to cancel within 30 minutes of payment (Reg E), ` +
+      `but the rail may already hold the instruction (${reason}). Not auto-cancelled. It is blocked by sanctions screening: recall it from the rail if it was sent. ` +
+      `The refund is marked requested, but ${SANCTIONS_FUNDS_RULE}.`
+    );
+  }
   if (reason === 'in_review') {
     return (
       `⚠️ SmartRemit ops: the sender of ${who} asked to cancel within 30 minutes of payment (Reg E) while it is held for review. ` +
@@ -186,9 +204,13 @@ export async function cancelWithinWindow(
           await outbox.enqueue(
             'ops.alert',
             {
+              // Review S5 (inventory): a sanctions-blocked row: no "return the payment".
               message:
-                `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
-                'No refund was queued here (funds not captured by SmartRemit) — have the partner return the payment in full, including fees, within 3 business days, and contact the customer.',
+                updated.complianceStatus === 'blocked'
+                  ? `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
+                    `No refund was queued here (funds not captured by SmartRemit). It is blocked by sanctions screening: ${SANCTIONS_FUNDS_RULE}.`
+                  : `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
+                    'No refund was queued here (funds not captured by SmartRemit) — have the partner return the payment in full, including fees, within 3 business days, and contact the customer.',
             },
             { dedupeKey: `sendercancelfunds:${updated.id}` },
           );

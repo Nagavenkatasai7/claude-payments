@@ -35,6 +35,8 @@ import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, reinstructLocked } from '@/lib/reconcile';
 import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
+import { rescreenOnFile } from '@/lib/pay-rescreen';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 
 vi.mock('@/lib/outbox', async (orig) => {
   const real = await orig<typeof import('@/lib/outbox')>();
@@ -889,5 +891,45 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     primeOfacSource({ checkedAgoMs: 40 * H });
     await reconcileSweep(db, new Date());
     expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
+  });
+});
+
+// Review S5 (W3): a pay-time re-screen that matches a row with a BOUND Stripe
+// intent and no charge reference keeps the row awaiting (the pending intent
+// may still debit). Its notices must not claim "Nothing was charged": they
+// pass no money state, so the neutral "Nothing paid out" text is used.
+describe('pay-time re-screen of a row with a pending PSP intent (review S5, W3)', { retry: 0 }, () => {
+  it('a bound pending intent, no fundingRef: the block notices say "Nothing paid out", never "Nothing was charged"', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    const t = base({ id: 'rr_w3_pi', recipientName: 'Testa Fixturelli', createdAt: new Date().toISOString() });
+    await store.saveTransfer(t);
+    const repo = createTransferRepo(db);
+    await repo.bindFundingIntent('rr_w3_pi', 'acme', 'stripe', 'pi_rr_w3');
+    const bound = (await repo.getTransfer('rr_w3_pi'))!;
+    expect(bound).toMatchObject({ fundingIntentRef: 'pi_rr_w3', fundingState: 'pending' });
+    expect(bound.fundingRef ?? null).toBeNull();
+    expect(await rescreenOnFile(db, bound, { realMoney: true, stage: 'pay' })).toEqual({ kind: 'blocked' });
+    expect((await repo.getTransfer('rr_w3_pi'))?.status).toBe('awaiting_payment');
+    const alert = await outboxText('sanctionsblock:rr_w3_pi', 'message');
+    const mail = await outboxText('sanctionsblockmail:rr_w3_pi:acme', 'text');
+    expect(alert).toBe('⚠️ SmartRemit ops: sanctions block (pay) on rr_w3_pi, partner acme, live. Nothing paid out; evidence on the compliance page.');
+    expect(mail).toBe(
+      'Reference rr_w3_pi (pay, live) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.',
+    );
+    for (const m of [alert, mail]) expect(m).not.toMatch(/nothing was charged/i);
+  });
+
+  it('no intent and no fundingRef (unchanged): the block notices still say "Nothing was charged or paid out"', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    const t = base({ id: 'rr_w3_none', recipientName: 'Testa Fixturelli', createdAt: new Date().toISOString() });
+    await store.saveTransfer(t);
+    expect(await rescreenOnFile(db, t, { realMoney: true, stage: 'pay' })).toEqual({ kind: 'blocked' });
+    expect((await createTransferRepo(db).getTransfer('rr_w3_none'))?.status).toBe('blocked');
+    expect(await outboxText('sanctionsblock:rr_w3_none', 'message')).toBe(
+      '⚠️ SmartRemit ops: sanctions block (pay) on rr_w3_none, partner acme, live. Nothing was charged or paid out; evidence on the compliance page.',
+    );
   });
 });

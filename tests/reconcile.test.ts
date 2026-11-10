@@ -16,6 +16,7 @@ import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
 const rescreenThrows = vi.hoisted(() => ({ value: false }));
@@ -229,6 +230,28 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     expect(msg).toContain('rail reported a different amount');
     expect(msg).toContain('held, not re-instructed');
     expect(msg).not.toContain('Re-instructed');
+  });
+
+  // Inventory (S5): a held row that is also sanctions-BLOCKED (the heal matched
+  // a possibly instructed row; the rail then paid out a different amount)
+  // never gets "cancel/refund it"; any other held row keeps it.
+  it('S5: a HELD (railamount) row that is sanctions-BLOCKED: the recon alert has the no-refund rule; an unblocked held row keeps "cancel/refund it."', async () => {
+    await store.saveTransfer(fixture({ complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    await store.saveTransfer(fixture({ id: 'rc_t2' }));
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'amount mismatch' }, { dedupeKey: 'railamount:rc_t1' });
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'amount mismatch' }, { dedupeKey: 'railamount:rc_t2' });
+    await reconcileSweep(db);
+    const recon = async (id: string) =>
+      ((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = ${`recon:${id}`}`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m;
+    expect(await recon('rc_t1')).toBe(
+      "⚠️ SmartRemit ops: transfer rc_t1 (partner acme) has been 'paid' for >15min with no delivery confirmation." +
+        ' The rail reported a different amount — held, not re-instructed. It is blocked by sanctions screening: investigate with the rail, and ' +
+        `${SANCTIONS_FUNDS_RULE}.`,
+    );
+    expect(await recon('rc_t2')).toBe(
+      "⚠️ SmartRemit ops: transfer rc_t2 (partner acme) has been 'paid' for >15min with no delivery confirmation." +
+        ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.',
+    );
   });
 
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
@@ -983,6 +1006,40 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     const usual = await message('review:rc_rev2');
     expect(usual).toContain('release or refund it');
     expect(usual).not.toContain('sanctions list');
+  });
+
+  // Review S5 (W2b): a stale review of a row BLOCKED by sanctions screening
+  // (the list-hold sweep or the release re-screen matched it; it stays in
+  // review) can never be released, and its funds must not be returned before
+  // the compliance officer decides: no "release or refund it".
+  it('S5 W2b: a stale review of a sanctions-BLOCKED row says so and the no-refund rule; a flagged one keeps "release or refund it."', async () => {
+    await store.saveTransfer(fixture({
+      id: 'rc_blkrev', status: 'in_review', complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'],
+    }));
+    await store.saveTransfer(fixture({ id: 'rc_rev3', status: 'in_review', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] }));
+    await reconcileSweep(db);
+    expect(await message('review:rc_blkrev')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_blkrev (partner acme) has been in compliance review for >24h — ' +
+        `it is blocked by sanctions screening, so it can never be released. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    );
+    expect(await message('review:rc_rev3')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_rev3 (partner acme) has been in compliance review for >24h — release or refund it.',
+    );
+  });
+
+  // Inventory (S5): the crash-resume of a charged row that is BLOCKED (its
+  // resume re-screen matched, or it was already compliance-blocked) never says
+  // to refund it at the funding provider.
+  it('S5: a charged victim already compliance-BLOCKED (settleOrHold refused): fundblocked has the no-refund rule, never "refund at the funding provider"', async () => {
+    await rail('mock');
+    await store.saveTransfer(victim({ complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    await reconcileSweep(db);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    expect(await message('fundblocked:rc_lv1')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_lv1 (partner acme) was charged (mockfund-rc_lv1) but never settled — ' +
+        `it is BLOCKED by sanctions screening and was CHARGED. NOT settled. ${SANCTIONS_NO_PAYOUT_SENTENCE}. ` +
+        'No dashboard action applies: once the compliance officer has decided, record the outcome with a direct ledger edit under a change ticket.',
+    );
   });
 });
 

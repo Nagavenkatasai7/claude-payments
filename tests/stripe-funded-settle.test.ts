@@ -15,6 +15,7 @@ import { settleFundedTransfer } from '@/lib/stripe-funded-settle';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { GLOBAL_DEFAULTS, LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { setRailProviderType } from './helpers-sanctions';
+import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
@@ -37,6 +38,11 @@ async function funded(id: string, o: Partial<Transfer> = {}): Promise<Transfer> 
   await repo.bindFundingIntent(id, 'acme', 'stripe', `pi_${id}`);
   return (await repo.markFundingSucceeded(id, 'acme', `pi_${id}`))!;
 }
+
+const alertMessages = async () => {
+  const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+  return (r as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> }).rows.map((x) => [x.dedupe_key, x.payload.message]);
+};
 
 const kinds = async () => {
   const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
@@ -142,5 +148,36 @@ describe('settleFundedTransfer', () => {
     const seen: boolean[] = [];
     expect(await settleFundedTransfer(db, t, { rescreen: realRescreen(seen) })).toBe('started');
     expect(seen).toEqual([false]);
+  });
+
+  // Review S5 (W1): a sanctions block never tells anyone to refund: the funds
+  // can have to be blocked (frozen); the compliance officer decides first.
+  it('S5 W1: the re-screen BLOCKED it: fundblocked says charged, not settled, and the no-refund rule (ids only)', async () => {
+    const t = await funded('w1b');
+    const block = async (x: Transfer) => {
+      await repo.applyRescreenIfAwaiting(x.id, x.partnerId, 'blocked', ['sanctions_match']);
+      return { kind: 'blocked' as const };
+    };
+    expect(await settleFundedTransfer(db, t, { rescreen: block })).toBe('blocked');
+    expect(await alertMessages()).toEqual([[
+      'fundblocked:w1b',
+      `⚠️ SmartRemit ops: transfer w1b (partner acme) was CHARGED through Stripe (pi_w1b) but the pre-settlement sanctions re-screen BLOCKED it — NOT settled. ` +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
+    expect((await alertMessages())[0][1]).not.toMatch(/refund it/i);
+  });
+
+  it('S5 W1: a row BLOCKED by compliance (settleOrHold refused): fundblocked says charged, not settled, and the no-refund rule', async () => {
+    const t = await funded('w1r');
+    await repo.applyRescreenIfAwaiting('w1r', 'acme', 'blocked', ['sanctions_match']);
+    const blockedRow = (await repo.getTransfer('w1r'))!;
+    expect(blockedRow.complianceStatus).toBe('blocked');
+    expect(await settleFundedTransfer(db, t, { rescreen: async () => ({ kind: 'cleared', transfer: blockedRow }) })).toBe('refused');
+    expect((await repo.getTransfer('w1r'))?.status).toBe('awaiting_payment');
+    expect(await alertMessages()).toEqual([[
+      'fundblocked:w1r',
+      `⚠️ SmartRemit ops: transfer w1r (partner acme) was CHARGED through Stripe but is BLOCKED by sanctions screening — NOT settled. ` +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
   });
 });

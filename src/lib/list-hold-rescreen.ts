@@ -41,7 +41,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { sanctionsAuditEvent } from './sanctions/evidence';
 import { instructGateRefuses, listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
-import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { enqueueSanctionsBlockNotices, SANCTIONS_FUNDS_SENTENCE, SANCTIONS_NO_PAYOUT_SENTENCE } from './sanctions/notices';
 import { senderChargeState } from './funding-method';
 import { sanctionsListFitnessNow } from './sanctions/list-health';
 import type { ListFitness } from './sanctions/list-policy';
@@ -249,7 +249,7 @@ export async function healPaidRowScreen(
             message:
               `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and ${instructedMoney}, and its re-screen on a live list is a sanctions match. ` +
               'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, and confirm with the rail what happened. ' +
-              `It is now blocked, so it will never be instructed again. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
+              `It is now blocked, so it will never be instructed again. ${SANCTIONS_FUNDS_SENTENCE}; evidence on the compliance page.`,
           },
           { dedupeKey: `paidmatchinstructed:${t.id}` },
         );
@@ -264,7 +264,7 @@ export async function healPaidRowScreen(
                 'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. Do not pay it out; evidence on the compliance page.'
               : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and ${charge === 'charged' ? 'the sender was CHARGED' : "the partner confirmed that it collected the sender's funds"}, but it was not instructed: ` +
                 'its re-screen on a live list is a sanctions match. It is now blocked and is never sent to the rail. ' +
-                `Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`,
+                `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
         },
         { dedupeKey: `paidmatch:${t.id}` },
       );

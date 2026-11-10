@@ -121,6 +121,7 @@ vi.mock('@/lib/log', async (orig) => {
 
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 
 const deliveredTransfer = {
   id: 'wh_1', phone: '15551230000', amountInr: 16600, recipientName: 'Mom',
@@ -559,6 +560,28 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
     expect(replay.markCalls).toBe(1);
     await flushAfter();
     expect(sendText).not.toHaveBeenCalled();
+  });
+
+  // Review S5 (inventory): the railamount text by the row's compliance status.
+  it('S5: MISMATCH on an unblocked row keeps "Investigate with the rail, then cancel/refund it."', async () => {
+    const a = withAmount(99999);
+    await post('simulator', a, undefined, v2(a, 'owner_whk'));
+    expect((outboxFake.enqueued[0].payload as { message: string }).message).toBe(
+      "⚠️ SmartRemit ops: transfer wh_1 — the rail's paid_out reported a different amount than the settlement instruction. " +
+        'NOT delivered; held (stays paid, never re-instructed). Investigate with the rail, then cancel/refund it.',
+    );
+  });
+
+  it('S5: MISMATCH on a sanctions-BLOCKED row: the railamount alert has the no-refund rule, never "cancel/refund it"', async () => {
+    fixtures.transfersById['wh_1'] = { ...paidOwner, complianceStatus: 'blocked' };
+    const a = withAmount(99999);
+    await post('simulator', a, undefined, v2(a, 'owner_whk'));
+    expect(outboxFake.enqueued).toHaveLength(1);
+    expect(outboxFake.enqueued[0]).toMatchObject({ kind: 'ops.alert', dedupeKey: 'railamount:wh_1' });
+    expect((outboxFake.enqueued[0].payload as { message: string }).message).toBe(
+      "⚠️ SmartRemit ops: transfer wh_1 — the rail's paid_out reported a different amount than the settlement instruction. " +
+        `NOT delivered; held (stays paid, never re-instructed). It is blocked by sanctions screening: investigate with the rail, and ${SANCTIONS_FUNDS_RULE}.`,
+    );
   });
 
   it('a held row + a later MATCHING paid_out → stays paid (no update), no stage-2 message', async () => {

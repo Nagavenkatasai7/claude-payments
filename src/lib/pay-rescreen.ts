@@ -125,6 +125,13 @@ export async function rescreenBeforePay(
       await createAuditRepo(tx).record(sanctionsAuditEvent(transfer.partnerId, transfer.id, result.evidence));
     }
     if (verdict === 'blocked') {
+      // Review S5 (W3): a row bound to a PSP intent with no charge reference
+      // yet (a pending Stripe debit) stays awaiting because that intent may
+      // still debit the sender (applyRescreenIfAwaiting). "Nothing was
+      // charged" would then be a claim nobody can make: pass no money state,
+      // so the notices use the neutral "Nothing paid out" text.
+      const row = updated ?? transfer;
+      const pendingIntent = Boolean(row.fundingIntentRef) && !row.fundingRef;
       // Fix pack 2 T5 (R04): the block notices, in this transaction with the
       // blocked status and its evidence.
       await enqueueSanctionsBlockNotices(tx, {
@@ -139,7 +146,7 @@ export async function rescreenBeforePay(
         // charged crash-resume says so). At 'confirm' the Partner-API confirm
         // call itself is the partner's attestation that it collected the
         // sender's funds (the row is still awaiting, with no charge reference).
-        charge: senderChargeState(updated ?? transfer, { partnerConfirmed: opts.stage === 'confirm' }),
+        ...(pendingIntent ? {} : { charge: senderChargeState(row, { partnerConfirmed: opts.stage === 'confirm' }) }),
       });
       return { kind: 'blocked' };
     }

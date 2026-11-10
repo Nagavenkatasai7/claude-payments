@@ -26,6 +26,27 @@ import type { PartnerId, PartnerSupportConfig, TransferEnvironment } from '../ty
 import type { SenderChargeState } from '../funding-method';
 import { SANCTIONS_AUDIT_ACTOR, type ScreeningEvidence } from './evidence';
 
+/**
+ * Pack 2 review round 4 (S4) and the check of it (S5: W1, W2): THE one
+ * phrasing of what to do with the funds of a transfer blocked by a sanctions
+ * match. On a confirmed match the funds can have to be BLOCKED (frozen and
+ * reported) and must then not be returned, so no staff, ops or partner text of
+ * a sanctions match or a blocked row tells anyone to refund: the licensed
+ * partner's compliance officer decides first. Every such text uses these
+ * constants (the lower-case clause inside a sentence, the capitalised one to
+ * start a sentence); tests/sanctions-spec-truth.test.ts expands them when it
+ * checks the spec's quoted texts against src/.
+ */
+export const SANCTIONS_FUNDS_RULE =
+  "do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned";
+/** "do not pay it out, and " + SANCTIONS_FUNDS_RULE (an uninstructed row). */
+export const SANCTIONS_NO_PAYOUT_RULE = `do not pay it out, and ${SANCTIONS_FUNDS_RULE}`;
+const sentenceStart = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+/** SANCTIONS_FUNDS_RULE starting a sentence ("Do not refund or return ..."). */
+export const SANCTIONS_FUNDS_SENTENCE = sentenceStart(SANCTIONS_FUNDS_RULE);
+/** SANCTIONS_NO_PAYOUT_RULE starting a sentence ("Do not pay it out, and do not refund ..."). */
+export const SANCTIONS_NO_PAYOUT_SENTENCE = sentenceStart(SANCTIONS_NO_PAYOUT_RULE);
+
 export type SanctionsBlockStage = 'card' | 'mint' | 'pay' | 'confirm' | 'resume' | 'hold_rescreen' | 'payee' | 'seller';
 
 export interface SanctionsBlockNotice {
@@ -135,11 +156,11 @@ export async function enqueueSanctionsBlockNotices(
         // be BLOCKED (frozen and reported) and then must not be returned, so no
         // text tells anyone to refund: the compliance officer decides first.
         message: instructed
-          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. ${instructedMoney} and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. ${instructedMoney} and the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. ${SANCTIONS_FUNDS_SENTENCE}; evidence on the compliance page.`
           : charge === 'charged'
-          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
           : charge === 'partner_collected'
-          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the partner confirmed that it collected the sender's funds. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned; evidence on the compliance page.`
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the partner confirmed that it collected the sender's funds. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
           : charge === 'none'
           ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing was charged or paid out; evidence on the compliance page.`
           : `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing paid out; evidence on the compliance page.`,
@@ -159,11 +180,11 @@ export async function enqueueSanctionsBlockNotices(
           to: [addr],
           subject: 'SmartRemit: a transfer was stopped by sanctions screening',
           text: instructed
-            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening. ${instructedMoney}. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. Do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening. ${instructedMoney}. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall the payout, and confirm with the rail what happened. ${SANCTIONS_FUNDS_SENTENCE}. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : charge === 'charged'
-            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. ${SANCTIONS_NO_PAYOUT_SENTENCE}. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : charge === 'partner_collected'
-            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the partner confirmed that it collected the sender's funds; nothing was paid out to the recipient. Do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the partner confirmed that it collected the sender's funds; nothing was paid out to the recipient. ${SANCTIONS_NO_PAYOUT_SENTENCE}. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : charge === 'none'
             ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was charged or paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`,

@@ -8,7 +8,7 @@ import { processingTemplate } from '@/lib/whatsapp-templates';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { PartnerId, Transfer } from '@/lib/types';
 import { railPartnerOf, realMoneyRail } from '@/lib/live-gate';
-import { enqueueSanctionsBlockNotices } from '@/lib/sanctions/notices';
+import { enqueueSanctionsBlockNotices, SANCTIONS_NO_PAYOUT_RULE } from '@/lib/sanctions/notices';
 import { senderChargeState } from '@/lib/funding-method';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import {
@@ -592,11 +592,11 @@ export async function releaseRescreenedHold(
             charge === 'charged'
               ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
                 'the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen and not paid out, and the sender was charged. ' +
-                `Leave the transfer as it is: do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned (Reject refunds the sender).`
+                `Leave the transfer as it is: ${SANCTIONS_NO_PAYOUT_RULE} (Reject refunds the sender).`
               : charge === 'partner_collected'
                 ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
                   `the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen and not paid out, and the partner confirmed that it collected the sender's funds. ` +
-                  `Leave the transfer as it is: do not pay it out, and do not refund or return the funds until the licensed partner's compliance officer decides whether they must be blocked (frozen) or can be returned (Reject cancels it; the partner holds the sender's funds).`
+                  `Leave the transfer as it is: ${SANCTIONS_NO_PAYOUT_RULE} (Reject cancels it; the partner holds the sender's funds).`
                 : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
                   'the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen. Nothing was charged or paid out; reject it.',
         },

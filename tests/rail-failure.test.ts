@@ -9,6 +9,7 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 
 // Program-Fix 8 (money-02 / rail-02): a signed `failed` / `returned` callback on
 // a PAID transfer commits, in ONE transaction: cancelled + refund pending (when
@@ -196,6 +197,21 @@ describe('handleRailFailure — every prior refund status', () => {
     expect(await handleRailFailure(db, 'rf_t1', FAILED)).toEqual({ kind: 'failed', refundStarted: false });
     expect(await load()).toMatchObject({ status: 'cancelled', refundStatus: 'completed' });
     expect(await keys()).toEqual(['railfail:rf_t1']);
+  });
+
+  // Review S5 (inventory): a sanctions-BLOCKED row whose earlier refund failed
+  // is never told to retry the refund: the compliance officer decides first.
+  it('S5: failed prior refund on a sanctions-BLOCKED row: the railfail alert has the no-refund rule, never "retry it from Refunds"', async () => {
+    await store.saveTransfer(fixture({ complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    const repo = createTransferRepo(db);
+    await repo.updateRefund('rf_t1', { refundStatus: 'pending' });
+    await repo.updateRefund('rf_t1', { refundStatus: 'failed' });
+    expect(await handleRailFailure(db, 'rf_t1', FAILED)).toEqual({ kind: 'failed', refundStarted: false });
+    const text = await alertText('railfail:rf_t1');
+    expect(text).toContain(
+      `Refund failed → failed: the prior refund FAILED; the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}. Rail reason:`,
+    );
+    expect(text).not.toMatch(/retry it from Refunds/);
   });
 
   it('failed → cancelled, refund stays failed, no refund row, NO message; the alert says retry from Refunds, and retryRefund then works', async () => {

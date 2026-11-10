@@ -18,11 +18,12 @@ import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
+import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
-import { isPartnerPulled } from '@/lib/funding-method';
+import { isPartnerPulled, senderChargeState } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
 import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
@@ -876,12 +877,18 @@ async function handle(
                 ? 'Last screen not on a live list.'
                 : 'Last screen older than the list age limit.';
           logWarn('outbox.instruct-not-live', 'last sanctions screen not live, too old or a match; instruction not sent', { transferId });
+          // Review S5 (W2a): after a sanctions MATCH the heal does not
+          // re-screen the row, and its funds can have to be blocked (frozen):
+          // no "otherwise refund it", the compliance officer decides first.
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
             {
               message:
-                `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: ${why} ` +
-                'The reconcile sweep re-screens it once a live list is served; otherwise refund it.',
+                newest.decision === 'match'
+                  ? `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: Last screen was a sanctions match. No automatic re-screen follows. ` +
+                    `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+                  : `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: ${why} ` +
+                    'The reconcile sweep re-screens it once a live list is served; otherwise refund it.',
             },
             { dedupeKey: `instructnotlive:${transferId}` },
           );
@@ -906,13 +913,25 @@ async function handle(
         }
         if (senderWhy) {
           logWarn('outbox.instruct-sender-hold', 'sender screening hold; instruction not sent', { transferId });
+          // Review S5 (X1): the money by senderChargeState (a Partner-API row
+          // has no charge reference; a partner-pulled row was charged by
+          // nobody here), and no "or refund the transfer": a sender who stays
+          // held may be a sanctions match, whose funds the compliance officer
+          // decides about first.
+          const charge = senderChargeState(transfer);
+          const money =
+            charge === 'charged'
+              ? 'the sender was charged'
+              : charge === 'partner_collected'
+                ? "the partner confirmed that it collected the sender's funds"
+                : 'nothing was charged';
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
             {
               message:
-                `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (the sender was charged) ` +
+                `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (${money}) ` +
                 `but nothing was sent to the rail: ${senderWhy} ` +
-                'A platform person must clear the sender screening hold or refund the transfer.',
+                `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
             },
             { dedupeKey: `instructsenderhold:${transferId}` },
           );

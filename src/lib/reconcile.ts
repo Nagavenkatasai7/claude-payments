@@ -14,6 +14,7 @@ import { realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
+import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every FULL /api/worker
@@ -233,8 +234,13 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
           (t.settlementPartnerId ? `, settles via ${t.settlementPartnerId}` : '') +
           `) has been ` +
           `'paid' for >${STUCK_PAID_MINUTES}min with no delivery confirmation.` +
+          // Review S5 (inventory): a held row that is also sanctions-blocked
+          // is never told to be cancelled or refunded: the compliance officer
+          // decides about its funds first.
           (held
-            ? ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
+            ? t.complianceStatus === 'blocked'
+              ? ` The rail reported a different amount — held, not re-instructed. It is blocked by sanctions screening: investigate with the rail, and ${SANCTIONS_FUNDS_RULE}.`
+              : ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
             : webhookDriven
               ? reinstructedNow
                 ? ' Re-instructed the partner rail once.'
@@ -255,7 +261,14 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         message:
           `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) has been ` +
           `in compliance review for >${STALE_REVIEW_HOURS}h — ` +
-          (waitsForList(t) ? LIST_WAIT_COPY : 'release or refund it.'),
+          // Review S5 (W2b): a row blocked by sanctions screening (the list-hold
+          // sweep or the release re-screen matched it; it stays in review) can
+          // never be released, and its funds wait for the compliance officer.
+          (t.complianceStatus === 'blocked'
+            ? `it is blocked by sanctions screening, so it can never be released. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+            : waitsForList(t)
+              ? LIST_WAIT_COPY
+              : 'release or refund it.'),
       },
       { dedupeKey: `review:${t.id}` },
     );
@@ -268,9 +281,9 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
   // firing every minute moves each victim EXACTLY once and a victim racing its
   // own resurrected pay request is still a clean no-op. COMPLIANCE: a charged
   // FLAGGED victim is HELD (in_review + held stage-1 message, one transaction)
-  // and never instructed; a charged BLOCKED victim (should not exist — blocked
-  // rows are never charged) is left untouched with its own alert for ops to
-  // refund. Both count as "resumed": the charged row reached its correct next
+  // and never instructed; a charged BLOCKED victim (a resume re-screen match,
+  // or a row already blocked) is left untouched with its own alert, which
+  // never says to refund (review S5). Both count as "resumed": the charged row reached its correct next
   // state. NEVER add a compliance predicate to listAwaitingWithFunding — that
   // would abandon charged flagged rows instead of holding them.
   const victims = await transfers.listAwaitingWithFunding(FUNDING_RESUME_MINUTES * 60_000);
@@ -358,17 +371,22 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         );
         break;
       case 'refused':
-        // Charged AND blocked: nothing may move. Practically unreachable (a
-        // sanctions hit lands as status 'blocked' at mint, before any charge,
-        // and nothing re-screens a row after mint) — but the tests construct
-        // it, so name the escalation honestly: there is NO in-app remedy for a
-        // charged blocked row (fix 5's Cancel refuses a charged row, Refund
-        // accepts only paid|delivered), so it is a change-ticket: refund at the
-        // funding provider, then record the outcome with a direct ledger edit
-        // (status 'cancelled', refund_status 'completed', refund_ref).
+        // Charged AND blocked: nothing may move. Reached by a resume re-screen
+        // that matches (fix pack 2 T3) or a row already compliance-blocked
+        // (settleOrHold refuses it); 'blocked' is set only by a sanctions
+        // match. There is NO in-app remedy for a charged blocked row (fix 5's
+        // Cancel refuses a charged row, Refund accepts only paid|delivered), so
+        // the outcome is a change-ticket ledger edit. Review S5 (inventory): it
+        // never says to refund: the funds can have to be blocked (frozen) and
+        // the licensed partner's compliance officer decides first.
         await outbox.enqueue(
           'ops.alert',
-          { message: prefix + 'it is BLOCKED by compliance and was CHARGED. NOT settled. No dashboard action applies — refund at the funding provider and close it with a direct ledger edit under a change ticket.' },
+          {
+            message:
+              prefix +
+              `it is BLOCKED by sanctions screening and was CHARGED. NOT settled. ${SANCTIONS_NO_PAYOUT_SENTENCE}. ` +
+              'No dashboard action applies: once the compliance officer has decided, record the outcome with a direct ledger edit under a change ticket.',
+          },
           { dedupeKey: `fundblocked:${t.id}` },
         );
         break;

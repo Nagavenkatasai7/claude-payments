@@ -8,6 +8,8 @@
 //    that the generic recon: and dead: alerts still do (P3);
 //  - (after the last check) the N1/P1, P3 and refund wording lines, and no
 //    match text in the table tells anyone to refund;
+//  - (review S5) the S5 line, the no-refund alerts quoted in section 6 (each
+//    in src/), the exact no-state blocks of Money copy and the section 9 gap;
 //  - the ops-alert table names every new dedupe key of the pack, every key it
 //    names exists in src/, and every literal piece of each quoted alert text
 //    (the parts between <placeholders>) is in the code.
@@ -15,16 +17,37 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLATFORM_RESCREEN_REFUSALS, RESCREEN_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
+import {
+  SANCTIONS_FUNDS_RULE,
+  SANCTIONS_FUNDS_SENTENCE,
+  SANCTIONS_NO_PAYOUT_RULE,
+  SANCTIONS_NO_PAYOUT_SENTENCE,
+} from '@/lib/sanctions/notices';
 
 const ROOT = join(__dirname, '..');
 const spec = readFileSync(join(ROOT, 'docs/compliance/sanctions-screening-spec.md'), 'utf8');
 
-/** Every .ts / .tsx file under src/, concatenated, with string concatenations across lines joined. */
+// Review S5: the one phrasing of the no-refund rule lives in exported
+// constants (src/lib/sanctions/notices.ts); a text that interpolates one is
+// read with the constant's value in its place.
+const RULE_CONSTANTS: Record<string, string> = {
+  SANCTIONS_FUNDS_RULE,
+  SANCTIONS_FUNDS_SENTENCE,
+  SANCTIONS_NO_PAYOUT_RULE,
+  SANCTIONS_NO_PAYOUT_SENTENCE,
+};
+
+/**
+ * Every .ts / .tsx file under src/, concatenated, with string concatenations
+ * across lines joined and the no-refund rule constants expanded.
+ */
 function srcText(): string {
   const files = (readdirSync(join(ROOT, 'src'), { recursive: true }) as string[]).filter((f) => /\.tsx?$/.test(f));
   const all = files.map((f) => readFileSync(join(ROOT, 'src', f), 'utf8')).join('\n');
   // 'a ' +\n   'b' (any mix of ' and `) => 'a b'
-  return all.replace(/['`]\s*\+\s*\n\s*['`]/g, '');
+  return all
+    .replace(/['`]\s*\+\s*\n\s*['`]/g, '')
+    .replace(/\$\{(SANCTIONS_(?:FUNDS|NO_PAYOUT)_(?:RULE|SENTENCE))\}/g, (_, name: string) => RULE_CONSTANTS[name]);
 }
 
 function section(title: string): string {
@@ -141,6 +164,67 @@ describe('sanctions screening spec says what the code does', () => {
     }
     const rescreen = table.find((l) => l.startsWith('| `instructrescreen:'))!;
     expect(rescreen).toContain('review it on the compliance page before any refund.');
+  });
+
+  // Review S5 (W1, W2, W4): the S5 line, the alerts that use the no-refund
+  // sentence (quoted in section 6, each piece in src/), the exact no-state
+  // blocks in Money copy, and section 9 says what is true now.
+  it('S5: section 10 has one S5 line after the last-check lines', () => {
+    const s10 = section('## 10.');
+    const last = s10.slice(s10.indexOf('### Changes after the last check'));
+    expect(last.split('\n').filter((l) => l.startsWith('- **S5**'))).toHaveLength(1);
+  });
+
+  it('S5: section 6 quotes every no-refund alert added by S5, each text is in the code, and none tells anyone to refund', () => {
+    const s6 = section('## 6.');
+    const start = s6.indexOf('- **No refund on a match**');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const block = s6.slice(start, s6.indexOf('\nWho is told:', start));
+    const src = srcText();
+    for (const key of ['fundblocked:', 'stripechargedmoved:', 'instructnotlive:', 'review:', 'instructsenderhold:', 'recon:', 'railamount:', 'railfail:', 'regecancel:', 'sendercancelfunds:']) {
+      expect(block, key).toContain(`\`${key}<id>\``);
+    }
+    const quoted = [...block.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(quoted.length).toBe(11);
+    for (const text of quoted) {
+      expect(text).toContain(SANCTIONS_FUNDS_RULE);
+      expect(text).not.toMatch(/refund it|refund at|retry it from Refunds|cancel\/refund/i);
+      for (const piece of text.split(/<[^>]+>/).map((p) => p.trim()).filter((p) => p.length >= 8)) {
+        expect(src, `section 6 piece "${piece}"`).toContain(piece);
+      }
+    }
+  });
+
+  it('S5 W4: Money copy names the payment-link PAYEE screen (stage payee) as a no-state block, and the stage pay re-screens of a minted row as passing the state', () => {
+    const money = /^- \*\*Money copy\*\*(.*)$/m.exec(section('## 6.'))?.[1] ?? '';
+    expect(money).toContain('Stage `pay` covers the pay page and the payment-link retry of an already minted transfer');
+    expect(money).toContain('the payment-link payee screen, stage `payee`');
+    expect(money).toContain('a row bound to a payment-provider intent with no charge reference yet');
+    expect(money).not.toContain('(card, mint, payment links, payee, seller)');
+    const table = section('## 11.').split('\n');
+    for (const key of ['sanctionsblock:', 'sanctionsblockmail:']) {
+      const row = table.find((l) => l.startsWith(`| \`${key}`))!;
+      expect(row, key).toContain('the payment-link payee screen, stage `payee`');
+      expect(row, key).not.toContain('payment links,');
+    }
+  });
+
+  it('S5: the instructnotlive match text and the instructsenderhold text never say to refund', () => {
+    const table = section('## 11.').split('\n');
+    const inl = [...table.find((l) => l.startsWith('| `instructnotlive:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    const match = inl.find((t) => t.includes('Last screen was a sanctions match.'))!;
+    expect(match).toContain('No automatic re-screen follows.');
+    expect(match).not.toMatch(/refund it/);
+    const sh = [...table.find((l) => l.startsWith('| `instructsenderhold:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(sh[0]).toContain('A platform person must review the sender screening hold.');
+    expect(sh[0]).not.toMatch(/or refund the transfer/);
+  });
+
+  it('S5: section 9 says every alert for a blocked transfer tells staff not to refund, and names the rail-failure auto refund', () => {
+    const gap = /^- \*\*Reject and Refund on a blocked transfer\*\*(.*)$/m.exec(section('## 9.'))?.[1] ?? '';
+    expect(gap).toContain('no such text tells anyone to refund (review S5)');
+    expect(gap).toContain('`failPaidFromRail`');
+    expect(gap).not.toContain('The alerts tell them not to before');
   });
 
   it('the ops-alert table names every new key, and its keys and texts are in the code', () => {

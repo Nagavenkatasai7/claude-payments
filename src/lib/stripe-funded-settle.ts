@@ -4,6 +4,7 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { settleOrHold } from '@/lib/settlement';
 import { rescreenOnFile, type RescreenOutcome } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyRail } from '@/lib/live-gate';
+import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 // stripe-funded-settle — Program-Fix 7 (review M2): the ONE way a
@@ -13,7 +14,11 @@ import type { Transfer } from '@/lib/types';
 // parties are RE-SCREENED immediately before settlement — sanctions always
 // runs — then settleOrHold (the one paid-flip path) decides:
 //   cleared → settle · flagged → hold (in_review) · blocked → never settled +
-//   ONE ops alert (refund in the partner's Stripe dashboard) · moved → no-op.
+//   ONE ops alert · moved → no-op. Review S5 (W1): both fundblocked texts are
+//   sanctions blocks (a re-screen match, or settleOrHold refusing a row whose
+//   compliance status is 'blocked', which only a sanctions match sets), so
+//   they never say to refund: the funds can have to be blocked (frozen) and
+//   the licensed partner's compliance officer decides first.
 // A re-screen error throws BEFORE anything moves; the caller logs it and the
 // reconcile crash-resume sweep retries on its next run.
 // Callers: the Stripe webhook fast path (stripe-funding-webhook.ts) and the
@@ -41,7 +46,7 @@ export async function settleFundedTransfer(db: Db, t: Transfer, deps: FundedSett
       {
         message:
           `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was CHARGED through Stripe (${t.fundingRef ?? t.fundingIntentRef}) ` +
-          `but the pre-settlement sanctions re-screen BLOCKED it — NOT settled. Refund it in the partner's Stripe dashboard and record the outcome.`,
+          `but the pre-settlement sanctions re-screen BLOCKED it — NOT settled. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
       },
       { dedupeKey: `fundblocked:${t.id}` },
     );
@@ -51,7 +56,12 @@ export async function settleFundedTransfer(db: Db, t: Transfer, deps: FundedSett
   if (settled.kind === 'refused') {
     await createOutboxRepo(db).enqueue(
       'ops.alert',
-      { message: `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was CHARGED through Stripe but is BLOCKED by compliance — NOT settled. Refund it in the partner's Stripe dashboard.` },
+      // settleOrHold refuses only a compliance-blocked row (a sanctions match).
+      {
+        message:
+          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was CHARGED through Stripe but is BLOCKED by sanctions screening — NOT settled. ` +
+          `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+      },
       { dedupeKey: `fundblocked:${t.id}` },
     );
     return 'refused';
