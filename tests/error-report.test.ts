@@ -270,6 +270,13 @@ describe('a database query error reaches Sentry and the log without customer dat
       for (const v of FAKES) expect(text, v).not.toContain(v);
       expect(text).toContain('params: <redacted>');
     }
-    expect(body).toContain('Failed query: insert into');
+    // The fixed description (SQLSTATE and reason), not the drizzle message:
+    // `Failed query: <sql>` alone does not say why the query failed.
+    for (const text of [body, line]) {
+      expect(text).toContain('db query failed [23505] duplicate key value violates unique constraint');
+      expect(text).toContain('query: insert into');
+      expect(text).not.toContain('Failed query:');
+    }
+    expect(JSON.parse(line.slice(line.indexOf('{'))).type).toBe('DrizzleQueryError');
   });
 });
