@@ -68,7 +68,7 @@ describe('portalLayoutMetadata()', () => {
     expect(await portalLayoutMetadata(ROBOTS)).toEqual(ROBOTS);
   });
   it('a skin → a title template and default with the skin name, plus the extra fields', async () => {
-    h.site = { ...SITE, brand: 'SmartRemit', skin: { name: 'TGFL', logoSrc: null, theme: null, demo: true } };
+    h.site = { ...SITE, brand: 'SmartRemit', skin: { name: 'TGFL', logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true } };
     expect(await portalLayoutMetadata(ROBOTS)).toEqual({ title: { template: '%s · TGFL', default: 'TGFL' }, ...ROBOTS });
   });
 });

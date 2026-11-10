@@ -63,14 +63,14 @@ describe('getPortalSite', () => {
   it('an ordinary site carries no skin', async () => {
     expect((await getPortalSite())?.skin).toBeNull();
   });
-  it('the skin host served by the skin\'s tenant → the skin (name, no logo, no colours yet), and the brand STAYS SmartRemit', async () => {
+  it('the skin host served by the skin\'s tenant → the skin (name, logo, no colours yet), and the brand STAYS SmartRemit', async () => {
     h.tenant = { partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', custom: false };
     h.partner = { id: 'default', status: 'active' };
     const s = await getPortalSite();
     // brand feeds the sign-in code text, the WhatsApp consent label, receipts and the MFA issuer:
     // they come from SmartRemit's number and mail, so they must keep naming SmartRemit.
     expect(s).toMatchObject({ partnerId: 'default', slug: 'tgfl', brand: 'SmartRemit', logo: null });
-    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: null, theme: null, demo: true });
+    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true });
     expect(s?.theme.primary).toBe('#0c5bd2');
   });
   it('a real partner that holds the skin slug gets NO skin (the partner wins)', async () => {
@@ -102,12 +102,12 @@ describe('getPortalSite', () => {
     expect(s?.host).toBe('send.smartremit.ai');
     expect(s?.skin).toBeNull();
   });
-  it('the custom host → the TGFL skin and host smartremitai.tgfl.org (logo still null)', async () => {
+  it('the custom host → the TGFL skin and host smartremitai.tgfl.org (the same logo)', async () => {
     h.tenant = { partnerId: 'default', slug: 'tgfl', host: 'smartremitai.tgfl.org', custom: true };
     h.partner = { id: 'default', status: 'active' };
     const s = await getPortalSite();
     expect(s).toMatchObject({ partnerId: 'default', slug: 'tgfl', host: 'smartremitai.tgfl.org', brand: 'SmartRemit', logo: null });
-    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: null, theme: null, demo: true });
+    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true });
     // `custom` stays on SiteTenant: PortalSite never carries it (design D2).
     expect(s && 'custom' in s).toBe(false);
   });

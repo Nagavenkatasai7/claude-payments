@@ -28,6 +28,12 @@ export interface SiteSkin {
   name: string;
   /** A file under /public/brand/partners/ (see skinLogoSrc), or null for a text wordmark. */
   logoSrc: string | null;
+  /**
+   * The logo file's natural size in pixels (null exactly when logoSrc is null). The header sizes the
+   * <img> from it, so the layout does not shift and the logo is never stretched above this size;
+   * tests/site-skins.test.ts checks it against the file.
+   */
+  logoSize: { width: number; height: number } | null;
   /** Both colours must pass validateThemeColor; null keeps SmartRemit's colours. */
   theme: { primary: string; accent: string } | null;
   /** true shows the demo line ("… demo, run by SmartRemit. No real money moves.") on every page. */
@@ -45,11 +51,15 @@ export interface SiteSkin {
 
 export const SITE_SKINS: Readonly<Record<string, SiteSkin>> = {
   // TGFL = Telangana Association of Florida, https://tgfl.org (owner, 2026-11-09: the domain is
-  // tgfl.org, not tgfl.com). A community association, not a licensed partner; nothing signed. No
-  // logo file or brand colours in the repo yet, so the header shows the name as text in
-  // SmartRemit's colours. Custom address: smartremitai.tgfl.org (a CNAME on TGFL's DNS).
+  // tgfl.org, not tgfl.com). A community association, not a licensed partner; nothing signed.
+  // Logo: public/brand/partners/tgfl.png (150 x 100 PNG, clear background), the association's
+  // emblem from the header of tgfl.org (Internet Archive capture 2025-07-19). The owner confirms
+  // TGFL agrees to the use of its mark. The header shows the emblem with the name as text next to
+  // it; no brand colours, so SmartRemit's colours apply. Custom address: smartremitai.tgfl.org (a
+  // CNAME on TGFL's DNS).
   tgfl: {
-    slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL', logoSrc: null, theme: null, demo: true,
+    slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL',
+    logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true,
     hosts: ['smartremitai.tgfl.org'], credentialEpoch: 1,
   },
 };

@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { SITE_SKINS, CUSTOM_SKIN_HOSTS, customHostBinding, isSkinSlug, skinForSlug, siteSkinFor, skinLogoSrc, type SiteSkin } from '@/lib/site-skins';
 import { isValidSiteSlug } from '@/lib/site-host';
 import { validateThemeColor } from '@/lib/ui/theme';
@@ -11,6 +13,10 @@ describe('SITE_SKINS', () => {
   it('holds the TGFL demo skin, served by SmartRemit\'s own tenant', () => {
     expect(Object.keys(SITE_SKINS)).toEqual(['tgfl']);
     expect(SITE_SKINS.tgfl).toMatchObject({ slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL', demo: true });
+  });
+
+  it('TGFL shows its emblem (150 x 100 PNG) in SmartRemit\'s colours', () => {
+    expect(SITE_SKINS.tgfl).toMatchObject({ logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null });
   });
 
   it.each(Object.entries(SITE_SKINS))('%s: a valid, unreserved site slug, keyed by its own slug, with a bounded name', (key, skin) => {
@@ -30,6 +36,25 @@ describe('SITE_SKINS', () => {
   it.each(Object.entries(SITE_SKINS))('%s: the logo (when set) is a file under /brand/partners/', (_key, skin) => {
     if (skin.logoSrc === null) return;
     expect(skinLogoSrc(skin)).toBe(skin.logoSrc);
+  });
+
+  it.each(Object.entries(SITE_SKINS))('%s: a logo has its natural size, and a size has a logo', (_key, skin) => {
+    expect(skin.logoSize === null).toBe(skin.logoSrc === null);
+    if (!skin.logoSize) return;
+    expect(Number.isInteger(skin.logoSize.width) && skin.logoSize.width > 0).toBe(true);
+    expect(Number.isInteger(skin.logoSize.height) && skin.logoSize.height > 0).toBe(true);
+  });
+
+  // A missing image would ship a broken header: the file must be in public/ (served same-origin).
+  it.each(Object.entries(SITE_SKINS))('%s: the logo file (when set) exists under public/, and a PNG matches logoSize', (_key, skin) => {
+    if (skin.logoSrc === null) return;
+    const file = join(process.cwd(), 'public', skin.logoSrc);
+    expect(existsSync(file), file).toBe(true);
+    if (!skin.logoSrc.endsWith('.png')) return;
+    const png = readFileSync(file);
+    expect(png.subarray(1, 4).toString('latin1')).toBe('PNG');
+    // IHDR: width and height are the big-endian uint32s at bytes 16 and 20.
+    expect({ width: png.readUInt32BE(16), height: png.readUInt32BE(20) }).toEqual(skin.logoSize);
   });
 });
 

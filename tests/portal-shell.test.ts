@@ -72,7 +72,7 @@ describe('portal layout', () => {
   });
   // Site skins (owner go 2026-11-09): tgfl.smartremit.ai shows the TGFL name over SmartRemit's portal.
   describe('with a skin', () => {
-    const SKIN = { name: 'TGFL', logoSrc: null as string | null, theme: null as null | { primary: string; accent: string }, demo: true };
+    const SKIN = { name: 'TGFL', logoSrc: null as string | null, logoSize: null as null | { width: number; height: number }, theme: null as null | { primary: string; accent: string }, demo: true };
     const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } }) satisfies PortalSite;
 
     it('the header shows the skin name as text, not the SmartRemit logo', async () => {
@@ -104,15 +104,40 @@ describe('portal layout', () => {
       expect(footer).toMatch(/© \d{4} SR Technosolutions Inc\./);
       for (const p of ['terms', 'privacy', 'legal']) expect(footer).toContain(`href="https://smartremit.ai/${p}"`);
     });
-    it('a logo under /brand/partners/ renders as an <img> with the skin name as its alt text', async () => {
+    // T8: the TGFL emblem (150 x 100). Its own lettering is too small to read at header size, so the
+    // name stays next to it as text.
+    it('a logo under /brand/partners/ renders as an <img> with the skin name as its alt text, and the name stays as text', async () => {
+      h.site = skinned({ logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 } });
+      const html = await renderLayout();
+      const header = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+      const img = header.match(/<img[^>]*>/)?.[0] ?? '';
+      expect(img).toMatch(/src="\/brand\/partners\/tgfl\.png"/);
+      expect(img).toContain('alt="TGFL"');
+      // Fixed height that fits the header (never above the natural 100 px), width from the natural
+      // aspect, so the layout does not shift while the file loads.
+      expect(img).toContain('width="54"');
+      expect(img).toContain('height="36"');
+      // CSS only caps the height (max-h): a logo is never stretched above its natural size.
+      expect(img).toMatch(/class="h-auto w-auto max-h-8 sm:max-h-9"/);
+      expect(header).toMatch(/<span[^>]*data-skin-brand[^>]*>TGFL<\/span>/);
+      expect(header.indexOf('<img')).toBeLessThan(header.indexOf('data-skin-brand'));
+      expect(html).not.toContain('smartremit-lockup.png');
+    });
+    it('a small logo is never scaled above its natural height', async () => {
+      h.site = skinned({ logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 30, height: 20 } });
+      const img = (await renderLayout()).match(/<img[^>]*tgfl\.png[^>]*>/)?.[0] ?? '';
+      expect(img).toContain('width="30"');
+      expect(img).toContain('height="20"');
+    });
+    it('a logo without its size is dropped: the name shows as text', async () => {
       h.site = skinned({ logoSrc: '/brand/partners/tgfl.png' });
       const html = await renderLayout();
       const header = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
-      expect(header).toMatch(/<img[^>]*src="\/brand\/partners\/tgfl\.png"[^>]*alt="TGFL"/);
-      expect(header).not.toContain('data-skin-brand');
+      expect(header).not.toContain('<img');
+      expect(header).toMatch(/<span[^>]*data-skin-brand[^>]*>TGFL<\/span>/);
     });
     it('a logo from anywhere else is dropped: the name shows as text', async () => {
-      h.site = skinned({ logoSrc: 'https://tgfl.org/logo.png' });
+      h.site = skinned({ logoSrc: 'https://tgfl.org/logo.png', logoSize: { width: 150, height: 100 } });
       const html = await renderLayout();
       expect(html).not.toContain('tgfl.org');
       expect(html).toContain('data-skin-brand');

@@ -11,7 +11,7 @@ const LEGACY = { matcher: ['/admin-dashboard', '/admin-dashboard/:path*', '/acco
 const PATHS = ['/', '/pay/abc', '/docs', '/login', '/api/worker', '/api/pay/x', '/partners/apply/t', '/robots.txt',
   '/sitemap.xml', '/admin-dashboard', '/admin-dashboard/x', '/account', '/account/login', '/site-inactive',
   '/docs-next', '/trust', '/api/docs/try-it', '/_next/data/x.json', '/about-poster.svgx', '/about-poster.svg/x', '/brandx'];
-const STATIC = ['/_next/static/chunks/a.js', '/_next/image?url=x', '/brand/smartremit-lockup.png', '/flags/in.svg', '/about-poster.svg'];
+const STATIC = ['/_next/static/chunks/a.js', '/_next/image?url=x', '/brand/smartremit-lockup.png', '/brand/partners/tgfl.png', '/flags/in.svg', '/about-poster.svg'];
 const match = (cfg: { matcher: unknown }, host: string, url: string) =>
   unstable_doesMiddlewareMatch({ config: cfg as never, url, headers: { host } });
 

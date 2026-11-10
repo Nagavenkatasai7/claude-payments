@@ -39,6 +39,8 @@ export interface PortalSkin {
   name: string;
   /** A path under /brand/partners/ (the layout re-checks it with skinLogoSrc), or null for text. */
   logoSrc: string | null;
+  /** The logo's natural size in pixels; the header shows no logo without it. */
+  logoSize: { width: number; height: number } | null;
   /** Skin colours (the layout re-validates them), or null for SmartRemit's. */
   theme: { primary: string; accent: string } | null;
   /** true shows the demo line on every portal page. */
@@ -87,7 +89,7 @@ async function loadPortalSite(): Promise<PortalSite | null> {
       brand: resolvePartnerBranding(partner).brand,
       logo: null,
       theme: resolveSiteTheme({}),
-      skin: skin ? { name: skin.name, logoSrc: skin.logoSrc, theme: skin.theme, demo: skin.demo } : null,
+      skin: skin ? { name: skin.name, logoSrc: skin.logoSrc, logoSize: skin.logoSize, theme: skin.theme, demo: skin.demo } : null,
     };
   } catch {
     return null;
