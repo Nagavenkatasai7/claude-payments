@@ -953,7 +953,7 @@ describe('finalizeDraftPayment: sends.paused', { retry: 0 }, () => {
 // MintRefusedError in production yet (T4/T12 do), so the throw is stubbed at
 // the sender lock every mint passes through. Same shape as sends.paused: the
 // claimed id stays bound-but-unminted and the draft is kept.
-describe('finalizeDraftPayment: MintRefusedError (pack 3)', () => {
+describe('finalizeDraftPayment: MintRefusedError (pack 3)', { retry: 0 }, () => {
   it.each<MintRefusalCode>(['live_not_certified', 'default_on_live_rail', 'capability_off'])(
     'a MintRefusedError (%s) ⇒ { ok: false, error: "not_available" }, draft NOT consumed, no transfer; the same link mints once the refusal is gone',
     async (code) => {
