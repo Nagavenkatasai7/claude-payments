@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { outbox } from '@/db/schema';
 import { freshDb, seedPartner } from './helpers-db';
+import { captureConsole, expectSafeLog, fakeQueryError } from './helpers-db-error-log';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
@@ -463,5 +464,21 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
     expect((await post(eventBody('inquiry.completed', 'evt_appr_done'))).status).toBe(200);
     expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('approved');
     expect(await kycAlerts()).toHaveLength(0);
+  });
+});
+
+// 2026-11-10 (C6): a failed post-response notify printed the error object raw
+// (console.error). It now goes through logError; the webhook still answers 200.
+describe('persona webhook notify failure log', () => {
+  it('a failed notify is logged as persona.webhook.notify without the query values', async () => {
+    await seed();
+    notify.mockRejectedValueOnce(fakeQueryError());
+    const c = captureConsole();
+    const body = eventBody('inquiry.completed', 'evt_notify_fail');
+    const res = await POST(req(body, signed(body)));
+    expect(res.status).toBe(200);
+    const line = expectSafeLog(c, 'persona.webhook.notify', 'error', [PHONE]);
+    expect(line).toMatchObject({ name: 'inquiry.completed', partnerId: 'default' });
+    vi.restoreAllMocks();
   });
 });

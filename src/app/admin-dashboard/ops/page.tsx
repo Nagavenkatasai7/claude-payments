@@ -11,7 +11,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
 import { WORKER_BACKSTOP_PERIOD_MIN } from '@/lib/worker-gate';
 import { measureDatabaseBytes, bytesToMb, storageAlarmLevel, STORAGE_ALARMS_MB } from '@/lib/storage-watch';
-import { logError } from '@/lib/log';
+import { logError, scrub } from '@/lib/log';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -235,12 +235,16 @@ export default async function OpsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {snap.deadLetters.map((row) => (
+                  {snap.deadLetters.map((row) => {
+                    // Rows stored before 2026-11-10 keep the raw error text (a
+                    // query error's params, phones, emails): scrub at render.
+                    const lastError = row.lastError ? scrub(row.lastError) : null;
+                    return (
                     <TableRow key={row.id}>
                       <TableCell className="tabular-nums">{row.id}</TableCell>
                       <TableCell><Badge variant="outline">{row.kind}</Badge></TableCell>
-                      <TableCell className="max-w-[360px] truncate text-muted-foreground" title={row.lastError ?? ''}>
-                        {row.lastError ?? '—'}
+                      <TableCell className="max-w-[360px] truncate text-muted-foreground" title={lastError ?? ''}>
+                        {lastError ?? '—'}
                       </TableCell>
                       <TableCell>{age(row.createdAt?.toISOString?.() ?? String(row.createdAt))}</TableCell>
                       <TableCell className="text-right">
@@ -249,7 +253,8 @@ export default async function OpsPage() {
                         <DiagnosePanel subjectId={String(row.id)} kind="dead_letter" />
                       </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                 </TableBody>
               </Table>
             </CardContent>

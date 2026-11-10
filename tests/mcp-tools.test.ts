@@ -36,6 +36,7 @@ import { handleMcpRequest } from '@/lib/mcp/http';
 import { capRefusalReply } from '@/lib/hold-replies';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
+import { captureConsole, expectSafeLog, fakeQueryError } from './helpers-db-error-log';
 
 // Stage C1: the five MCP read tools over a real (PGlite) ledger: the bot's own tools on the portal's
 // non-minting context, projected onto an allow-list. Fixtures carry FULL account numbers, IFSC codes,
@@ -426,5 +427,20 @@ describe('no money path in the MCP server (DoD grep)', () => {
     // check_send_limit runs through the portal's own wrapper (portal-send.ts sendLimitsForPortal).
     expect(src).toContain('sendLimitsForPortal(');
     expect(src).not.toMatch(/buildToolContext\(/);
+  });
+});
+
+// 2026-11-10 (C6): list_recipients' fail-soft branch logs through logWarn
+// (one scrubbed line with the SQLSTATE), never console.warn with the error.
+describe('list_recipients failure log', () => {
+  it('a failed recipients query returns an empty book and logs mcp.list_recipients', async () => {
+    vi.spyOn(store, 'listRecipients').mockRejectedValue(fakeQueryError());
+    const c = captureConsole();
+    const r = await listRecipientsTool(owner, data());
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.data.recipients).toEqual([]);
+    const line = expectSafeLog(c, 'mcp.list_recipients');
+    expect(line.partnerId).toBe('pa');
+    expect(String(line.msg)).toContain('[57P01]');
   });
 });

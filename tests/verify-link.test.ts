@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   looksLikeVerifyHandoff,
   reusableInquiryId,
@@ -9,6 +9,7 @@ import { createStore } from '@/lib/store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { captureConsole, expectSafeLog, fakeQueryError } from './helpers-db-error-log';
 import type { Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
 import type { KycProvider, KycStartResult } from '@/lib/providers/kyc-provider';
@@ -152,5 +153,29 @@ describe('issueVerifyLink', () => {
 
     const url = await issueVerifyLink({ partnerId: 'default', phone: PHONE, customer: customer(), kycProvider: provider, customerStore });
     expect(url).toBeNull();
+  });
+});
+
+// 2026-11-10 (C6): a failed inquiry write was printed raw with console.error
+// (params: phone, inquiry id). It now goes through logError.
+describe('issueVerifyLink failure log', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('a failed recordKycInquiry query is logged as one scrubbed line, and the link is null', async () => {
+    const store = createStore(fakeRedis(), db);
+    const customerStore = createCustomerStore(db, store);
+    await customerStore.saveCustomer(customer());
+    vi.spyOn(customerStore, 'recordKycInquiry').mockRejectedValue(fakeQueryError());
+    const provider: KycProvider = {
+      async startVerification(): Promise<KycStartResult> { return { url: 'https://persona.example/x', providerRef: 'inq_new' }; },
+      async getStatus() { return 'pending'; },
+      async handleWebhook() { return null; },
+    };
+    const c = captureConsole();
+    const url = await issueVerifyLink({ partnerId: 'default', phone: PHONE, customer: customer(), kycProvider: provider, customerStore });
+    expect(url).toBeNull();
+    const line = expectSafeLog(c, 'kyc.verify-link', 'error', [PHONE]);
+    expect(line).toMatchObject({ attempt: 'new', partnerId: 'default' });
+    expect(String(line.msg)).toContain('[57P01]');
   });
 });

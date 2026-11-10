@@ -30,6 +30,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
+import { isQueryError, stripQueryParams } from '@/lib/db-error';
 import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
@@ -704,7 +705,9 @@ async function handle(
             waCreds,
           );
         } catch (err) {
-          console.warn('mock.settle: recipient template failed; falling back to text:', err);
+          // The error can carry Meta's response body; log it through the
+          // scrubbing logger, never the object (2026-11-10).
+          logWarn('mock.settle.recipient_template', err, { id: row.id, transferId, note: 'recipient template failed; falling back to text' });
           await deps.sendText(
             recipientPhone,
             recipientDeliveredFallbackText(stage2.transfer, brand),
@@ -1042,7 +1045,14 @@ async function handle(
       // phone check, so it still goes out when OPS_ALERT_PHONE is empty, and
       // before sendText, so a WhatsApp outage cannot stop it. Its dedupe keys
       // (opsmail:/opshook:<row.id>) make a WhatsApp retry re-enqueue nothing.
-      await enqueueAlertMirror(deps, row, str(p.message));
+      // 2026-11-10: rows queued by an older build can carry a raw query-error
+      // text, so its params are cut again here. Not the full scrub(): its
+      // 7-digit mask would turn `outbox #1234567` and an all-digit short SHA
+      // into `…4567` on the ops phone. New alerts are built from text that is
+      // already scrubbed (see drainOnce); the email and webhook mirror scrub
+      // their own copy.
+      const alertText = stripQueryParams(str(p.message));
+      await enqueueAlertMirror(deps, row, alertText);
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
       // Program-Fix 25: unset ⇒ free-form exactly as before. alertDead skips
@@ -1051,7 +1061,7 @@ async function handle(
       // 2026-10-03: the ops alert comes from the same bot number customers chat
       // with, so a free-form alert is labelled as staff-only. A tester's phone
       // that is also the ops phone can never mistake it for a customer message.
-      const staffText = `${OPS_ALERT_TEXT_PREFIX}${str(p.message)}`;
+      const staffText = `${OPS_ALERT_TEXT_PREFIX}${alertText}`;
       if (!opsTemplate) {
         await deps.sendText(to, staffText);
         return;
@@ -1059,7 +1069,7 @@ async function handle(
       const out = await sendBusinessInitiated(
         to,
         {
-          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(str(p.message))] },
+          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(alertText)] },
           fallbackText: staffText,
         },
         undefined, // the platform number, as the free-form path
@@ -1736,7 +1746,12 @@ export async function drainOnce(
         }
         continue;
       }
-      const message = err instanceof Error ? err.message : 'unknown error';
+      // 2026-11-10: this text goes to outbox.last_error (kept until a retry),
+      // the dead-letter alert and the ops copilot. A query error becomes its
+      // fixed description (no params, no Postgres detail); any other message is
+      // scrubbed (phones, emails, URL credentials). 6-digit Graph codes stay
+      // readable for permanentCodeInError.
+      const message = scrub(isQueryError(err) ? err : err instanceof Error ? err.message : 'unknown error');
       // TERMINAL deadline: an abandoned non-idempotent handler (agent.turn) must
       // never be retried beside its own ghost — force the dead ceiling so the
       // ordinary dead-letter path (one deduped dead:<id> alert) handles it.

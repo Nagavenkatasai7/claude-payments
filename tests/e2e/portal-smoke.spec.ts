@@ -81,6 +81,13 @@ test.describe('customer portal on a partner subdomain', () => {
     await expect(page).toHaveURL(/\/portal\/login$/);
   });
 
+  // C7: requirePortalCustomer('/portal/ai-apps') runs before the page's 404 gate, and 'ai-apps' is on
+  // the safePortalNext allow-list, so the sign-in redirect carries ?next= (src/lib/portal-auth.ts).
+  test('the Connected AI apps page without a cookie lands on the sign-in page (C7)', async ({ page }) => {
+    await page.goto(`${ORIGIN}/portal/ai-apps`);
+    await expect(page).toHaveURL(/\/portal\/login\?next=%2Fportal%2Fai-apps$/);
+  });
+
   test('apex-only surfaces are 404 on the subdomain', async ({ request }) => {
     for (const path of ['/admin-dashboard', '/account', '/login', '/pay/x']) {
       const res = await request.get(`${ORIGIN}${path}`, { maxRedirects: 0 });

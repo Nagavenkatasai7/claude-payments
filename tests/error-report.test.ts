@@ -7,6 +7,7 @@ import {
   logDigest,
 } from '@/lib/error-report';
 import { onRequestError } from '@/instrumentation';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 // Program-Fix 26 (obs-01): server errors go to Sentry by plain fetch, scrubbed,
 // and only when SENTRY_DSN is set. Assertions are made on the EGRESS (the body
@@ -236,5 +237,46 @@ describe('release safety part D', () => {
     expect(f).toHaveBeenCalledTimes(1);
     expect(String(f.mock.calls[0][0])).toBe('https://kv.example.upstash.io/pipeline');
     expect(String((f.mock.calls[0][1] as RequestInit).body)).toContain('builderr:abcdef0');
+  });
+});
+
+// 2026-11-10: an uncaught drizzle query error. Its message carries the bound
+// values after `params:` and its cause the Postgres `detail`; neither may reach
+// Sentry or the request.error log line.
+describe('a database query error reaches Sentry and the log without customer data', () => {
+  const FAKES = ['+15551234567', '15551234567', 'Ravi Traders', 'jane@example.com', 'already exists'];
+  function queryError() {
+    const cause = Object.assign(new Error('duplicate key value violates unique constraint "customers_phone_key"'), {
+      code: '23505',
+      detail: 'Key (phone)=(+15551234567) already exists.',
+    });
+    return new DrizzleQueryError(
+      'insert into "customers" ("phone", "name", "email") values ($1, $2, $3)',
+      ['+15551234567', 'Ravi Traders', 'jane@example.com'],
+      cause,
+    );
+  }
+
+  it('the Sentry envelope and the request.error line hold no param value and no detail', async () => {
+    vi.stubEnv('SENTRY_DSN', DSN);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchFn = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    await onRequestError(queryError(), REQUEST, CONTEXT);
+    const body = sentBody(fetchFn as unknown as ReturnType<typeof vi.fn>);
+    const line = logged.mock.calls.flat().join(' ');
+    expect(line).toContain('request.error');
+    for (const text of [body, line]) {
+      for (const v of FAKES) expect(text, v).not.toContain(v);
+      expect(text).toContain('params: <redacted>');
+    }
+    // The fixed description (SQLSTATE and reason), not the drizzle message:
+    // `Failed query: <sql>` alone does not say why the query failed.
+    for (const text of [body, line]) {
+      expect(text).toContain('db query failed [23505] duplicate key value violates unique constraint');
+      expect(text).toContain('query: insert into');
+      expect(text).not.toContain('Failed query:');
+    }
+    expect(JSON.parse(line.slice(line.indexOf('{'))).type).toBe('DrizzleQueryError');
   });
 });

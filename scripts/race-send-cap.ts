@@ -36,6 +36,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer, type CreateTransferInput } from '@/lib/transfer-create';
 import { SendCapError } from '@/lib/send-limits';
+import { scrub } from '@/lib/log';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Db } from '@/db/client';
 import { guardPool } from '@/db/pool-guard';
@@ -201,6 +202,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error('race-send-cap failed:', e instanceof Error ? e.message : String(e));
+  console.error('race-send-cap failed:', scrub(e));
   process.exit(1);
 });

@@ -12,7 +12,8 @@
 // (node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/instrumentation.md,
 // "Specifying the runtime"). So: fetch, AbortSignal.timeout, globalThis.crypto
 // only; process.env.SENTRY_DSN is read directly (not through env.ts); the only
-// import is the console-only logger/scrubber (log.ts).
+// imports are the console-only logger/scrubber (log.ts) and the pure query-error
+// description (db-error.ts, no imports of its own).
 //
 // Wire format (cited):
 //   - DSN `{PROTOCOL}://{PUBLIC_KEY}:{SECRET_KEY}@{HOST}{PATH}/{PROJECT_ID}`, endpoint
@@ -25,6 +26,7 @@
 //     newline — https://develop.sentry.dev/sdk/data-model/envelopes/
 
 import { logWarn, scrub } from '@/lib/log';
+import { isQueryError, queryErrorText } from '@/lib/db-error';
 
 export interface ErrorReport {
   /** Scrubbed error message with every URL's query string and fragment removed. */
@@ -69,6 +71,10 @@ function token(v: unknown, re: RegExp): string | undefined {
 
 function rawMessage(err: unknown): string {
   if (typeof err === 'string') return err;
+  // A drizzle query failure: the fixed description (SQLSTATE, reason, SQL
+  // head), never its message. The message carries the bound values, and with
+  // the values cut it still does not say why the query failed.
+  if (isQueryError(err)) return queryErrorText(err);
   if (err instanceof Error) return err.message;
   // A thrown non-Error: take `.message` only when it is a string — never
   // stringify the object (it could carry a stack, a cause or a payload).
@@ -89,7 +95,11 @@ export function buildErrorReport(
   // below the 7-digit mask or an email into a bare local part (review r1).
   // scrub() also bounds the input the URL regexes see (SCRUB_MAX_CHARS).
   const message = safe(() => stripUrlQueries(scrub(rawMessage(err))).slice(0, MAX_MESSAGE)) ?? 'unreadable error';
-  const type = safe(() => (err instanceof Error ? scrub(err.name).slice(0, 100) : 'NonError')) ?? 'Unknown';
+  // drizzle never sets `name` on its query error, so it would be a bare "Error".
+  const type =
+    safe(() =>
+      isQueryError(err) ? 'DrizzleQueryError' : err instanceof Error ? scrub(err.name).slice(0, 100) : 'NonError',
+    ) ?? 'Unknown';
   const report: ErrorReport = { message, type };
   const digest = token(
     safe(() => (typeof err === 'object' && err !== null ? (err as { digest?: unknown }).digest : undefined)),

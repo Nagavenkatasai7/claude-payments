@@ -1,5 +1,6 @@
 import type { Pool } from '@neondatabase/serverless';
 import { logError } from '@/lib/log';
+import { isQueryError, queryErrorText, sqlState } from '@/lib/db-error';
 
 // pool-guard — a dropped Neon connection must not crash the instance and must
 // not print the database password.
@@ -77,6 +78,16 @@ export function dbErrorFields(
   err: unknown,
   redact: (text: string) => string = redactorFor(undefined),
 ): Record<string, string> {
+  // A drizzle query error: its message and `params` hold the bound values and
+  // its cause the Postgres `detail`, so only the fixed description goes out,
+  // with the SQLSTATE that sits on the cause (src/lib/db-error.ts).
+  if (isQueryError(err)) {
+    const fields: Record<string, string> = { name: 'DrizzleQueryError' };
+    const code = sqlState(err);
+    if (code) fields.code = code;
+    fields.detail = redact(queryErrorText(err));
+    return fields;
+  }
   const e = (typeof err === 'object' && err !== null ? err : {}) as {
     name?: unknown;
     code?: unknown;

@@ -123,7 +123,7 @@ export async function POST(req: NextRequest) {
         }
       }
     } catch (err) {
-      console.error('persona-webhook notify failed:', err);
+      logError('persona.webhook.notify', err, { name: event.name, partnerId: customer.partnerId });
     }
   });
 
