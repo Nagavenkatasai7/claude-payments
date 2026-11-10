@@ -211,7 +211,7 @@ describe('response objects fail loud on keys they do not understand', () => {
     const ops = loadPartnerOpenApiDocument().operations;
     const confirm = ops.find((o) => o.operationId === 'confirmTransaction')!;
     expect(confirm.responses[403]).toBe(
-      'The key lacks transactions:write, or the partner is not active, or the partner is not yet approved for live transfers on its settlement rail (`partner_not_live`).',
+      'The key lacks transactions:write, or the partner is not active, or the partner is not yet approved for live transfers on its settlement rail (code partner_not_live).',
     );
     expect(confirm.responses[409]).toBe('The transaction is not awaiting payment (for example, it was cancelled).');
   });

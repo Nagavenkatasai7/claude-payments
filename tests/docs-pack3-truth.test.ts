@@ -72,10 +72,14 @@ describe('pack 3 documents say what the code does', () => {
     };
     const create403 = op('createTransaction').split('\n').find((l) => l.includes("'403'"))!;
     const confirm403 = op('confirmTransaction').split('\n').find((l) => l.includes("'403'"))!;
-    expect(create403).toContain('`partner_not_live`');
-    expect(create403).toContain('`capability_off`');
-    expect(confirm403).toContain('`partner_not_live`');
+    expect(create403).toContain('(code partner_not_live)');
+    expect(create403).toContain('(code capability_off)');
+    expect(confirm403).toContain('(code partner_not_live)');
     expect(confirm403).not.toContain('capability_off');
+    // The API reference page prints response descriptions as plain text
+    // (tests/docs-api-page.test.ts refuses a literal backtick in the page).
+    expect(create403).not.toContain("`");
+    expect(confirm403).not.toContain("`");
   });
 
   it('flags.ts header names tenant rows and Q5', () => {
