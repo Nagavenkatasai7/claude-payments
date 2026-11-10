@@ -3685,14 +3685,22 @@ async function sendRecipientPickerTool(
   const rawList = Array.isArray(args.recipients)
     ? (args.recipients as { name?: unknown; recipient_phone?: unknown }[])
     : [];
-  if (rawList.length === 0) {
+  // The button id is built from the normalized phone, so two entries with the
+  // same digits (or no phone) would give two buttons with the same id, and
+  // WhatsApp rejects the whole send (#131009). Keep the first entry per phone.
+  const seen = new Set<string>();
+  const unique: { name: string; recipientPhone: string }[] = [];
+  for (const r of rawList) {
+    const recipientPhone = normalizePhone(r.recipient_phone);
+    if (!recipientPhone || seen.has(recipientPhone)) continue;
+    seen.add(recipientPhone);
+    unique.push({ name: String(r.name ?? '').trim(), recipientPhone });
+  }
+  if (unique.length === 0) {
     return { error: 'send_recipient_picker requires at least 1 recipient.' };
   }
   // Cap server-side at 2; ignore excess silently.
-  const capped = rawList.slice(0, 2).map((r) => ({
-    name: String(r.name ?? '').trim(),
-    recipientPhone: normalizePhone(r.recipient_phone),
-  }));
+  const capped = unique.slice(0, 2);
   const labels = disambiguateNames(capped);
   const buttons: InteractiveButton[] = capped.map((r, i) => ({
     id: recipientButtonId(r.recipientPhone),

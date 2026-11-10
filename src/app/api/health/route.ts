@@ -5,6 +5,7 @@ import { bearerMatches } from '@/lib/cron-auth';
 import { getDb } from '@/db/client';
 import { gateRedis, LAST_FULL_KEY } from '@/lib/worker-gate';
 import { currentBuildErrors } from '@/lib/deploy-error-watch';
+import { LLM_LAST_OK_KEY } from '@/lib/llm-ok-marker';
 import { evaluateHealth, withTimeout, HEALTH_DB_TIMEOUT_MS, HEALTH_MEMO_MS, type LastFullRead } from '@/lib/health';
 
 // GET /api/health — the PULL half of the external dead-man's switch
@@ -18,7 +19,9 @@ import { evaluateHealth, withTimeout, HEALTH_DB_TIMEOUT_MS, HEALTH_MEMO_MS, type
 //     keep it from scaling to zero (partner-demo R4).
 //   • Bearer CRON_SECRET — adds a bounded Neon `select 1`. Fail-closed: any
 //     Authorization header that does not match (or an unset secret) is 401,
-//     never a silent downgrade to the anonymous tier.
+//     never a silent downgrade to the anonymous tier. Its body also carries
+//     `buildErrors` and `llmLastOkAt` (when the Claude API last answered, from
+//     llm-ok-marker.ts; null when unknown). Neither ever moves the status code.
 //
 // Poke full runs also refresh lastFullAt, so this endpoint can stay 200 while
 // the Vercel cron is dead as long as traffic keeps poking. Only the push ping
@@ -53,6 +56,17 @@ async function readBuildErrors(): Promise<number | null> {
   }
 }
 
+async function readLlmLastOk(): Promise<string | null> {
+  try {
+    // Same bounded gate client as readLastFull (retry: false, 2 s abort).
+    const raw = await gateRedis().get(LLM_LAST_OK_KEY);
+    const ms = raw === null ? NaN : Date.parse(raw);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+  } catch {
+    return null; // informational only: a Redis error never changes the status
+  }
+}
+
 async function probeDb(): Promise<'ok' | 'fail'> {
   try {
     await withTimeout(getDb().execute(sql`select 1`), HEALTH_DB_TIMEOUT_MS);
@@ -68,10 +82,16 @@ export async function GET(req: NextRequest): Promise<Response> {
     if (!env.cronSecret || !bearerMatches(authorization, env.cronSecret)) {
       return new Response('Unauthorized', { status: 401, headers: HEADERS });
     }
-    const [lastFull, db, buildErrors] = await Promise.all([readLastFull(), probeDb(), readBuildErrors()]);
+    const [lastFull, db, buildErrors, llmLastOkAt] = await Promise.all([
+      readLastFull(),
+      probeDb(),
+      readBuildErrors(),
+      readLlmLastOk(),
+    ]);
     const r = evaluateHealth({ nowMs: Date.now(), lastFull, db });
     // Release safety part D: this build's server error count (a number, or null).
-    return Response.json({ ...r.body, buildErrors }, { status: r.status, headers: HEADERS });
+    // Report item 3 (2026-11-09): llmLastOkAt is the passive proof the Claude API works.
+    return Response.json({ ...r.body, buildErrors, llmLastOkAt }, { status: r.status, headers: HEADERS });
   }
 
   const nowMs = Date.now();

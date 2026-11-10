@@ -14,9 +14,19 @@ permissions:
   contents: read
 
 jobs:
+  # The full Vitest suite in 4 shards, copied from ci.yml's test job. As one
+  # job it took 16-19 min and hit its 20-min limit on most nights Nov 2-9,
+  # 2026; CI's shards each run in about 3-5 min. `--shard=i/4` runs slice i of
+  # the files, so the 4 shards together run every file exactly once.
   full-tests:
+    name: full-tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    strategy:
+      # One red shard must not cancel the others: every failure is reported.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -28,7 +38,9 @@ jobs:
       - run: npm ci
 
       - name: Full test suite
-        run: npx vitest run
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npx vitest run --shard="${SHARD}/4"
 
   # R31: the full real-model bot eval (scripts/eval-bot.ts, docs/BOT-EVAL.md):
   # every case on every model staff can select, 3 runs each (about 350 calls).
@@ -284,7 +296,17 @@ jobs:
   # "Scheduled workflow failing: Nightly", or comments on the open one; the
   # next fully green run closes it. GitHub emails the repo owner about new
   # issues; before this, only whoever last edited the schedule heard about a
-  # red run. The only job with write access, and only to issues.
+  # red run. The only job with write access, and only to issues. A job that
+  # hits its timeout reaches the script as "cancelled" and counts as a
+  # failure (the RUN's conclusion is "cancelled" then too, e.g. Nightly run
+  # 42624944766). A step-level cancelled() reads this alert job's own status
+  # (actions/runner, src/Runner.Worker/Expressions/CancelledFunction.cs), so
+  # the step's !cancelled() is false only when this alert job itself is being
+  # cancelled. After another job's timeout this job is not cancelled: the step
+  # runs and the alert fires. After a person cancels the whole run mid-job,
+  # this job (always()) starts fresh and is not itself cancelled, so the step
+  # most likely runs too and an issue may open, naming the job "(timed out or
+  # cancelled)"; the next green run closes it.
   alert:
     needs: [full-tests, bot-eval, bot-eval-archive, audit, secret-scan, prod-smoke]
     if: ${{ always() }}
@@ -303,6 +325,7 @@ jobs:
           node-version: '24'
 
       - name: Open, update or close the failure issue
+        if: ${{ !cancelled() }}
         env:
           WORKFLOW_NAME: ${{ github.workflow }}
           NEEDS: ${{ toJSON(needs) }}

@@ -42,7 +42,9 @@ describe('classifyGraphCode', () => {
     expect(classifyGraphCode(code)).toBe('permanent');
   });
 
-  it.each([190, 131049, 131056, 131000, 4, 80007])('%i → retryable', (code) => {
+  // 131009 stays retryable: it can be a number-setup problem ops can fix, and a
+  // permanent code would disable Retry in the ops Diagnose panel.
+  it.each([190, 131049, 131056, 131000, 4, 80007, 131009])('%i → retryable', (code) => {
     expect(classifyGraphCode(code)).toBe('retryable');
   });
 

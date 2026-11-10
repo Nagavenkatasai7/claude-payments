@@ -4,6 +4,7 @@ import type { ChatMessage, ChatTool } from './types';
 import { ProviderHttpError, SPEND_CAP_ERROR_CODE } from './llm-provider-error';
 import { llmTaskConfig, type LlmTask } from './llm-models';
 import { fromAnthropicMessage, toAnthropicRequest } from './llm-translate';
+import { markLlmOk } from './llm-ok-marker';
 
 // llm — the ONE seam every AI call goes through: the customer bot (agent.ts)
 // and the staff helpers. It calls the Claude Messages API with the official
@@ -86,7 +87,15 @@ function logUsage(task: LlmTask, msg: Anthropic.Message, ms: number): void {
   );
 }
 
-export function createChat(deps: { client: () => MessagesClient; agentModel?: () => string | undefined }): ChatFn {
+export function createChat(deps: {
+  client: () => MessagesClient;
+  agentModel?: () => string | undefined;
+  /**
+   * Called when the API returned a usable reply: text or at least one tool call
+   * (not a refusal, an error or an empty reply); must not block.
+   */
+  onSuccess?: () => void;
+}): ChatFn {
   return async function chatImpl(messages, tools, opts = {}) {
     const task: LlmTask = opts.task ?? 'agent';
     const cfg = llmTaskConfig(task, { agentModel: deps.agentModel?.() });
@@ -136,7 +145,21 @@ export function createChat(deps: { client: () => MessagesClient; agentModel?: ()
         // A safety decline is a failed call: the agent retries once, then the fallback line.
         throw new Error(`Model declined the request (refusal: ${res.stop_details?.category ?? 'unknown'})`);
       }
-      return fromAnthropicMessage(res);
+      const out = fromAnthropicMessage(res);
+      // The marker means the API returned a usable reply. An empty one (no
+      // text, no tool call) reaches the customer as the fallback line, so it
+      // does not count.
+      const usable = (out.content ?? '').trim() !== '' || (out.tool_calls?.length ?? 0) > 0;
+      if (usable) {
+        try {
+          // The proof-of-life marker (llm-ok-marker.ts) is best effort: it must
+          // never cost the customer this reply.
+          deps.onSuccess?.();
+        } catch {
+          // ignored on purpose
+        }
+      }
+      return out;
     };
 
     try {
@@ -160,4 +183,8 @@ function defaultClient(): MessagesClient {
 }
 
 /** Production chat: the Claude API with ANTHROPIC_API_KEY. */
-export const chat: ChatFn = createChat({ client: defaultClient, agentModel: () => env.anthropicAgentModel });
+export const chat: ChatFn = createChat({
+  client: defaultClient,
+  agentModel: () => env.anthropicAgentModel,
+  onSuccess: markLlmOk,
+});
