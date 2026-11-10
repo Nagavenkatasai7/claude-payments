@@ -15,7 +15,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
-import { testEvidence } from './helpers-pay-evidence';
+import { realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
@@ -74,16 +74,6 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-// T8 interim: the route threads evidence from T9; T9 deletes this wrapper.
-vi.mock('@/lib/pay-process', async (orig) => {
-  const a = await orig<typeof import('@/lib/pay-process')>();
-  return {
-    ...a,
-    processTransferPayment: (...[s, t, ev]: Parameters<typeof a.processTransferPayment>) =>
-      a.processTransferPayment(s, t, ev ?? testEvidence({ routeId: t.id })),
-  };
-});
-
 const capture = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/providers/funding-provider', async (orig) => {
   const real = await orig<typeof import('@/lib/providers/funding-provider')>();
@@ -108,8 +98,13 @@ function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
     amountSource: 200, feeSource: 0, totalChargeSource: 200, ...o,
   };
 }
-function post(id: string) {
-  const req = new NextRequest('http://localhost/api/pay/' + id, { method: 'POST' });
+// Fix pack 4 T9: a real-money (or certified) b2c payment posts the page's
+// acknowledgement (realMoneyPayBody); every other case stays bodyless.
+function post(id: string, body?: object) {
+  const req = new NextRequest('http://localhost/api/pay/' + id, {
+    method: 'POST',
+    ...(body ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } } : {}),
+  });
   return POST(req, { params: Promise.resolve({ transferId: id }) });
 }
 const outboxCount = async () =>
@@ -207,7 +202,7 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     const originalList = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
-    const res = await post('g1');
+    const res = await post('g1', realMoneyPayBody());
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('g1'))?.status).toBe('paid');
@@ -219,7 +214,7 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
     await store.saveTransfer(makeTransfer({ id: 's1', partnerId: 'acme' }));
-    const res = await post('s1');
+    const res = await post('s1', realMoneyPayBody());
     expect(res.status).toBe(200);
     const t = await store.getTransfer('s1');
     expect(t?.status).toBe('in_review');
@@ -256,7 +251,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await acmeOnHttp({ certify: false });
     liveList();
     await store.saveTransfer(makeTransfer({ id: 'lc1', partnerId: 'acme' }));
-    const res = await post('lc1');
+    const res = await post('lc1', realMoneyPayBody());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(NOT_AVAILABLE);
     expect(capture).not.toHaveBeenCalled();
@@ -268,7 +263,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await acmeOnHttp();
     liveList();
     await store.saveTransfer(makeTransfer({ id: 'lc2', partnerId: 'acme' }));
-    const res = await post('lc2');
+    const res = await post('lc2', realMoneyPayBody());
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('lc2'))?.status).toBe('paid');
@@ -279,7 +274,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await setRailProviderType(db, 'default', 'http');
     liveList();
     await store.saveTransfer(makeTransfer({ id: 'lc3' }));
-    const res = await post('lc3');
+    const res = await post('lc3', realMoneyPayBody());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(NOT_AVAILABLE);
     expect(capture).not.toHaveBeenCalled();
@@ -320,7 +315,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await acmeOnHttp({ certify: false });
     rails.byPartner.acme = { providerType: 'http', credentials: { settlementUrl: 'http://10.0.0.5/settle', signingSecret: 's' } };
     await store.saveTransfer(makeTransfer({ id: 'lc7', partnerId: 'acme' }));
-    const res = await post('lc7');
+    const res = await post('lc7', realMoneyPayBody());
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, error: 'Payment failed' });
     expect(capture).not.toHaveBeenCalled();

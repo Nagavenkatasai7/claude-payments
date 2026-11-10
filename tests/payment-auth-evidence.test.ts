@@ -86,6 +86,12 @@ describe('buildPaymentAuthEvidence', () => {
     expect(ev.uaHash).toBe(payEvidenceHash('a'.repeat(512), PAY_OTP_UA_INFO, KEY));
   });
 
+  it('a header read that throws gives ipHash and uaHash null, never a throw (fix pack 4 T9: the evidence never blocks a payment)', () => {
+    const broken = { get: () => { throw new Error('header read failed'); } } as unknown as Headers;
+    const ev = buildPaymentAuthEvidence({ otp: { ok: true, issuedAt: NOW, attempt: 1, channel: 'wa' }, headers: broken, surface: 'transfer', routeId: 'tx_1', now: NOW, masterRaw: KEY });
+    expect(ev).toMatchObject({ channel: 'wa', issuedAt: NOW, attempt: 1, ipHash: null, uaHash: null });
+  });
+
   it('the evidence holds no raw IP or UA', () => {
     const ev = buildPaymentAuthEvidence({
       otp: { ok: true, issuedAt: NOW, attempt: 1, channel: 'wa' },

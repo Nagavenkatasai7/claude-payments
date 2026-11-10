@@ -17,8 +17,8 @@ import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
 import { isInfraError } from '@/lib/infra-error';
 import { retryOnceOnInfra } from '@/lib/infra-retry';
-import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
-import { resolvePartnerBranding, resolvePartnerDisclosure } from '@/lib/partner-config';
+import { isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { resolvePartnerBranding } from '@/lib/partner-config';
 import { env } from '@/lib/env';
 import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { recordChannelHealth } from '@/lib/channel-health';
@@ -27,17 +27,22 @@ import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
-import type { CountryCode, Transfer } from '@/lib/types';
+import type { CountryCode, PartnerId, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE, RateUnavailableError } from '@/lib/rate';
 import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
-import { realMoneyFor } from '@/lib/live-gate';
+import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payNotAvailable } from '@/lib/pay-not-available';
+import { payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
+import { parsePayBody } from '@/lib/pay-body';
+import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
+import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
+import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
+import type { PaymentEvidence } from '@/lib/payment-evidence';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
 import { QuoteError } from '@/lib/fx';
@@ -122,12 +127,14 @@ const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>(SUPPORTED_
  * raw fields, encrypt them like payout destinations via field-crypto.)
  */
 function validateAndTokenizeAch(
-  raw: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown } | undefined,
+  raw: unknown,
 ): { ok: true; token: string } | { ok: false; fieldErrors: Record<string, string> } {
   const fieldErrors: Record<string, string> = {};
-  const routing = String(raw?.routingNumber ?? '').replace(/\D/g, '');
-  const account = String(raw?.accountNumber ?? '').replace(/\D/g, '');
-  const accountType = String(raw?.accountType ?? '');
+  const o: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown } | undefined =
+    raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : undefined;
+  const routing = String(o?.routingNumber ?? '').replace(/\D/g, '');
+  const account = String(o?.accountNumber ?? '').replace(/\D/g, '');
+  const accountType = String(o?.accountType ?? '');
   if (routing.length !== 9) fieldErrors.routingNumber = 'Enter the 9-digit routing number.';
   if (account.length < 4) fieldErrors.accountNumber = 'Enter a valid account number.';
   if (accountType !== 'checking' && accountType !== 'savings') {
@@ -142,7 +149,7 @@ function validateAndTokenizeAch(
  * Step 0 FX-2 (P1): the pay-time rate check for an EXISTING transfer, behind
  * FX_PAY_RATE_CHECK_ENABLED (default OFF). Runs on EVERY POST to the row —
  * before a code is issued (request_otp), before the OTP is verified (the
- * customer keeps their code budget) and before the disclosure-ack write — so
+ * customer keeps their code budget) and before the evidence commit — so
  * a stale rate never costs a code or a charge. Null ⇒ proceed exactly as today.
  *
  * Only rows we would CHARGE at the minted rate reach checkMintedRate: a live
@@ -228,38 +235,6 @@ async function refuseStaleRate(
   return NextResponse.json({ ok: false, reason: 'rate_expired' }, { status: 409 });
 }
 
-/**
- * Program-Fix 15 PR B: one `remittance.disclosure_ack` audit row — subject the
- * route id (the transfer, or the draft before it is minted), meta the version + provider kind
- * only (no PII). Tenant: the transfer's partner, else the draft's (the same
- * resolution the request_otp branch uses). Never throws.
- */
-async function recordDisclosureAck(
-  store: ReturnType<typeof getStore>,
-  routeId: string,
-  draft: Awaited<ReturnType<ReturnType<typeof getDraftStore>['getDraft']>>,
-  version: string,
-): Promise<void> {
-  try {
-    const partnerId = draft
-      ? await draftTenant(draft, store.legacyTenantOf)
-      : (await store.getTransfer(routeId))?.partnerId ?? DEFAULT_PARTNER_ID;
-    // Which provider block the page showed (demo | pending | configured),
-    // resolved server-side from the tenant's current config — never client input.
-    const providerKind = disclosureProviderKind(resolvePartnerDisclosure(await getPartnerStore().getPartner(partnerId)));
-    await createAuditRepo(getDb()).record({
-      partnerId,
-      actor: 'pay-page',
-      actorType: 'system',
-      action: 'remittance.disclosure_ack',
-      subjectId: routeId,
-      meta: { version, providerKind },
-    });
-  } catch (err) {
-    logWarn('pay.disclosure_ack', err, { transferId: routeId });
-  }
-}
-
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ transferId: string }> },
@@ -278,25 +253,20 @@ export async function POST(
   try {
     const store = getStore();
 
-    // ── Parse + validate the bank-detail body ONCE (shared by both branches) ──
-    // Body shape: { country: CountryCode, fields: Record<string,string> }. We
+    // ── Parse the body ONCE, through the one pay-body parser (fix pack 4, C13) ──
+    // Bank details: { country: CountryCode, fields: Record<string,string> }. We
     // server-validate via the SAME validator the form uses (single source of
     // truth); any 400 here happens BEFORE any charge. A bodyless POST (old
     // in-flight draft, or a re-opened link that already has a destination) skips
-    // validation and falls back to the stored destination.
-    let body: {
-      country?: unknown;
-      fields?: unknown;
-      action?: unknown;
-      otp?: unknown;
-      disclosureVersion?: unknown; // Program-Fix 15 PR B: OPTIONAL (old pages never send it)
-      ach?: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown };
-    } = {};
+    // validation and falls back to the stored destination. A JSON error reads as {}.
+    // disclosureVersion / disclosureHash: OPTIONAL for one release (old pages never send them).
+    let raw: unknown = {};
     try {
-      body = (await req.json()) as typeof body;
+      raw = await req.json();
     } catch {
-      body = {};
+      raw = {};
     }
+    const body = parsePayBody(raw, 'transfer');
 
     // ── Phase 3 Part B: per-transaction OTP step-up ──────────────────────────
     // Resolve the sender phone from the id (draft PEEK — never consumes — else
@@ -331,8 +301,19 @@ export async function POST(
     }
     const otpPhone = otpDraft?.senderPhone ?? otpTransfer?.phone ?? null;
 
+    // Fix pack 4 (C12): the pre-verify R18 gate context for the payment's OWNER
+    // (the draft's tenant, else the transfer's). The rail is the routed partner,
+    // else the owner; a draft has no environment yet (it mints live).
+    const gateContextFor = (ownerId: PartnerId): Promise<PayGateContext> =>
+      readPayGateContext(getDb(), {
+        ownerId,
+        railPartnerId: otpDraft ? (otpDraft.settlementPartnerId ?? ownerId) : railPartnerOf(otpTransfer!),
+        environment: otpDraft ? undefined : otpTransfer!.environment,
+        transferType: (otpDraft ? otpDraft.transferType : otpTransfer!.transferType) ?? 'b2c',
+      });
+
     // (1) "request_otp": issue + deliver a code (free-form, or an auth template). No charge.
-    if (typeof body.action === 'string' && body.action === 'request_otp') {
+    if (body.action === 'request_otp') {
       if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
       // The owning partner scopes the per-phone code budget (Program-Fix 45) and
       // picks the sending number (WL2). The draft carries its tenant (fix 1); a
@@ -359,6 +340,14 @@ export async function POST(
       const channel = await resolveDirectOtpChannel(otpPartnerId, 'pay.otp-channel');
       if (!channel.ok) return otpSendFailed();
       const otpCreds = channel.creds;
+      // Fix pack 4 (C10 c, C12): a mandatory payment (certified owner, or a
+      // real-money rail) whose provider block is not approved gets no code at
+      // all: nothing is issued or sent. The tenant above is reused (no second
+      // resolve), so its fail-closed 502 is unchanged.
+      const requestCtx = await gateContextFor(otpPartnerId);
+      if (disclosureGateAtRequest({ mandatory: requestCtx.mandatory, disclosure: requestCtx.disclosure })) {
+        return payNotAvailable();
+      }
       // Program-Fix 49A: the partner's name on the free-form text, on the partner's
       // OWN number only (the shared number keeps its wording). Best-effort: a read
       // error keeps the neutral default wording.
@@ -398,8 +387,11 @@ export async function POST(
       }
       if (issued.ok) {
         const tenant = otpPartnerId;
+        let sentOn: 'wa' | 'tg' | undefined;
         try {
-          await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
+          sentOn = await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
+            // Fix pack 4 (C5): a payment code (a Telegram chat gets the transaction text).
+            purpose: 'payment',
             // PR 393: outside the window a free-form fallback is accepted, then dropped.
             inWindow: () => isInServiceWindow(store, tenant, otpPhone),
             // PR 393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx
@@ -415,14 +407,41 @@ export async function POST(
           try { await otpStore.shortenCooldown(payId); } catch { /* the 30-s cooldown simply runs out */ }
           return otpSendFailed();
         }
+        // Fix pack 4 (C5): which channel carried THIS code (for the otp.verified
+        // row). Best-effort: a missing channel (a test mock) writes nothing, and a
+        // failure here never blocks the code that was sent.
+        try {
+          await otpStore.noteDelivery(payId, issued.issuedAt, sentOn ?? null);
+        } catch { /* never blocks the code */ }
       }
       return NextResponse.json({ ok: true, sent: true });
     }
 
     // (2) Require a valid code before ANY money movement (covers BOTH branches).
     if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
-    const otpCode = String(body.otp ?? '').replace(/\D/g, '');
-    const otpCheck = await getTransactionOtpStore().verify(payId, otpPhone, otpCode);
+
+    // Fix pack 4 (C10 b, C12 step 3): the R18 refusals come BEFORE the code is
+    // checked, so an old tab or an unapproved block never spends the code. The
+    // owner is resolved in its OWN try (critic M8): a draft whose tenant cannot
+    // be resolved gets the SAFE context (not mandatory) and goes on exactly as
+    // today; pay-process's R18 gate on the minted row is the authoritative one.
+    let payOwnerId: PartnerId | undefined;
+    try {
+      payOwnerId = otpDraft ? await draftTenant(otpDraft, store.legacyTenantOf) : otpTransfer!.partnerId;
+    } catch (err) {
+      logWarn('pay.gate-tenant', err instanceof Error ? err.name : 'error', { transferId });
+    }
+    const payCtx = payOwnerId ? await gateContextFor(payOwnerId) : SAFE_PAY_GATE_CONTEXT;
+    const gateRefusal = disclosureGateRefusal({
+      mandatory: payCtx.mandatory,
+      disclosure: payCtx.disclosure,
+      ackVersion: body.disclosureVersion,
+      postedHash: body.disclosureHash,
+    });
+    if (gateRefusal === 'reload_required') return payReloadRequired();
+    if (gateRefusal === 'not_available') return payNotAvailable();
+
+    const otpCheck = await getTransactionOtpStore().verify(payId, otpPhone, body.otp);
     if (!otpCheck.ok) {
       return NextResponse.json(
         { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
@@ -430,19 +449,32 @@ export async function POST(
       );
     }
 
-    // Program-Fix 15 PR B: the customer ticked "I have read this disclosure" on
-    // the page. Recorded AFTER the OTP passed, best-effort: a failed audit write
-    // never changes the payment outcome, and an absent/junk field records nothing.
-    if (isDisclosureAckVersion(body.disclosureVersion)) {
-      await recordDisclosureAck(store, payId, otpDraft, body.disclosureVersion);
-    }
+    // Fix pack 4 (C7, R41): the customer's evidence, built ONCE right after the
+    // code passed and handed to every processTransferPayment call below, which
+    // commits it on the locked awaiting row BEFORE any charge ("authorise, then
+    // capture"). The ack and the snapshot only when the page posted a known
+    // version AND the row is not b2b (the ROW's type, never the surface: a b2b
+    // payment never gets an ack or snapshot, even from a crafted body). The
+    // route id (draft or transfer) rides in meta.routeId; the rows name the
+    // transfer that is paid.
+    const evidenceAt = Date.now();
+    const acked =
+      (otpTransfer?.transferType ?? otpDraft?.transferType ?? 'b2c') !== 'b2b' && isDisclosureAckVersion(body.disclosureVersion)
+        ? body.disclosureVersion
+        : null;
+    const evidence: PaymentEvidence = {
+      auth: buildPaymentAuthEvidence({ otp: otpCheck, headers: req.headers, surface: 'transfer', routeId: transferId, now: evidenceAt }),
+      disclosureAck: acked ? { version: acked, shownHash: body.disclosureHash, routeId: transferId } : null,
+      disclosureSnapshot: acked
+        ? { surface: 'transfer', version: acked, shownHash: body.disclosureHash, acknowledgedAt: evidenceAt }
+        : null,
+    };
 
     const country =
       typeof body.country === 'string' && VALID_COUNTRY_CODES.has(body.country.toUpperCase())
         ? (body.country.toUpperCase() as CountryCode)
         : undefined;
-    const rawFields =
-      body.fields && typeof body.fields === 'object' ? (body.fields as Record<string, unknown>) : undefined;
+    const rawFields = body.fields ?? undefined;
     const hasSubmittedFields =
       country !== undefined &&
       rawFields !== undefined &&
@@ -549,7 +581,7 @@ export async function POST(
         if (withToken instanceof NextResponse) return withToken;
         // Capture is skipped structurally inside processTransferPayment (keyed on
         // transferType 'b2b' + a partner-pulled fundingMethod — fix 6); no caller flag needed.
-        return await processTransferPayment(store, withToken);
+        return await processTransferPayment(store, withToken, evidence);
       }
 
       if (sendGateActive(owningPartner) && !isSendVerified(owner)) {
@@ -629,7 +661,7 @@ export async function POST(
             { status: 409 },
           );
         }
-        return await processTransferPayment(store, edited);
+        return await processTransferPayment(store, edited, evidence);
       }
       if (!hasDestination) {
         // A SCHEDULED/cron transfer can be created with an empty destination (Item 2:
@@ -642,7 +674,7 @@ export async function POST(
       }
       // Destination already set (re-opened link) → process exactly as before
       // (with the re-screened row: a flagged verdict takes the normal hold).
-      return await processTransferPayment(store, payable);
+      return await processTransferPayment(store, payable, evidence);
     }
 
     // ── Draft branch: treat id as a draftId and finalize at pay time ──────
@@ -756,9 +788,9 @@ export async function POST(
       }
       const withToken = await bindAchToken(store, created, ach.token);
       if (withToken instanceof NextResponse) return withToken;
-      return await processTransferPayment(store, withToken);
+      return await processTransferPayment(store, withToken, evidence);
     }
-    return await processTransferPayment(store, created);
+    return await processTransferPayment(store, created, evidence);
   } catch (err) {
     logError('pay.route', err, { transferId });
     // Fix D: an infrastructure error (Redis / Neon) is retryable, not a refusal.

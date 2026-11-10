@@ -14,7 +14,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
-import { testEvidence } from './helpers-pay-evidence';
+import { realMoneyPayBody } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import {
@@ -82,16 +82,6 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-// T8 interim: the route threads evidence from T9; T9 deletes this wrapper.
-vi.mock('@/lib/pay-process', async (orig) => {
-  const a = await orig<typeof import('@/lib/pay-process')>();
-  return {
-    ...a,
-    processTransferPayment: (...[s, t, ev]: Parameters<typeof a.processTransferPayment>) =>
-      a.processTransferPayment(s, t, ev ?? testEvidence({ routeId: t.id })),
-  };
-});
-
 // The mock list never returns a possible match and never fails to load, so the
 // screener is switchable per test: 'real' is the production mock list.
 let screenerMode: 'real' | 'possible' | 'unavailable' = 'real';
@@ -348,7 +338,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await httpRail(OWNER);
     await seedOwner('Alex Sender', OWNER);
     await store.saveTransfer(makeTransfer({ id: 'lv-mock', partnerId: OWNER }));
-    expect(await (await post('lv-mock')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect(await (await post('lv-mock', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-mock');
     expect(t?.complianceStatus).toBe('flagged');
     expect(t?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
@@ -361,7 +351,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     primeOfacSource({ checkedAgoMs: 35 * H });
     await store.saveTransfer(makeTransfer({ id: 'lv-35', partnerId: OWNER }));
     // A webhook-driven rail answers 'processing'; the ledger row is paid.
-    expect(await (await post('lv-35')).json()).toEqual({ ok: true, status: 'processing' });
+    expect(await (await post('lv-35', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'processing' });
     expect((await store.getTransfer('lv-35'))?.status).toBe('paid');
     expect(await kinds()).toContain('settlement.instruct');
   });
@@ -371,7 +361,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: 37 * H });
     await store.saveTransfer(makeTransfer({ id: 'lv-37', partnerId: OWNER }));
-    expect(await (await post('lv-37')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect(await (await post('lv-37', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-37'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
     expect(await kinds()).not.toContain('settlement.instruct');
   });
@@ -385,19 +375,20 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await setRailProviderType(db, OWNER, 'mock');
     primeOfacSource({ checkedAgoMs: 37 * H });
     await store.saveTransfer(makeTransfer({ id: 'lv-routed', partnerId: OWNER, settlementPartnerId: 'railp' }));
-    expect(await (await post('lv-routed')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect(await (await post('lv-routed', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
   });
 
   it('a default-tenant transfer routed to an http partner -> 409 not_available, never charged, nothing written to the outbox', async () => {
     // Pack 3 (contract 6): the default tenant may never own a real-money transfer, even on a
-    // certified routed rail. The pay-time re-screen (sanctions always runs) comes BEFORE the
-    // gate, which sits in pay-process right before the capture; it leaves the row awaiting_payment.
+    // certified routed rail. Fix pack 4 T9: the route's R18 pre-verify gate (C12) now gives the
+    // same 409 before the code is checked (the default block is never approved); pay-process's
+    // live gate stays the authoritative one. The row is left awaiting_payment.
     await seedOwner('Alex Sender');
     await httpRail('railp');
     primeOfacSource({ checkedAgoMs: H });
     await store.saveTransfer(makeTransfer({ id: 'lv-default-routed', settlementPartnerId: 'railp' }));
-    const res = await post('lv-default-routed');
+    const res = await post('lv-default-routed', realMoneyPayBody({ otp: '000000' }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ ok: false, error: expect.any(String), reason: 'not_available' });
     const t = await store.getTransfer('lv-default-routed');
@@ -412,7 +403,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     primeOfacSource({ checkedAgoMs: H });
     await store.saveTransfer(makeTransfer({ id: 'lv-renamed', partnerId: OWNER }));
     await seedLiveEvidence(db, { id: 'lv-renamed', partnerId: OWNER, recipientName: 'Mom', senderName: 'Alexandra Previous' });
-    expect(await (await post('lv-renamed')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect(await (await post('lv-renamed', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-renamed');
     expect(t?.complianceStatus).toBe('flagged');
     expect(t?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
@@ -420,13 +411,18 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
   });
 
   it('pay-time block writes notices', async () => {
-    // Fix pack 2 T5 (R04): the routed rail partner is emailed; the default owner is not.
-    await seedOwner('Alex Sender');
+    // Fix pack 2 T5 (R04): the routed rail partner is emailed; an owner with no alert address is not.
+    // Fix pack 4 T9: the owner is a certified, approved non-default partner on a mock rail (a
+    // default-tenant transfer on a real-money rail is now refused before the code is checked, C12).
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    rails.byPartner[OWNER] = { providerType: 'mock' };
+    await setRailProviderType(db, OWNER, 'mock');
     await httpRail('railp');
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ alertEmail: 'ops@railp.example' })}::jsonb WHERE id = 'railp'`);
     primeOfacSource({ checkedAgoMs: H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-block', settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
-    expect((await post('lv-block')).status).toBe(400);
+    await store.saveTransfer(makeTransfer({ id: 'lv-block', partnerId: OWNER, settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
+    expect((await post('lv-block', realMoneyPayBody({ otp: '000000' }))).status).toBe(400);
     expect((await store.getTransfer('lv-block'))?.status).toBe('blocked');
     expect(await outboxKinds()).toEqual([
       ['ops.alert', 'sanctionsblock:lv-block'],
@@ -435,7 +431,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     const r = (await db.execute(sql`SELECT partner_id, meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-block'`)) as unknown as {
       rows: Array<{ partner_id: string; meta: Record<string, unknown> }>;
     };
-    expect(r.rows).toMatchObject([{ partner_id: 'default', meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
+    expect(r.rows).toMatchObject([{ partner_id: OWNER, meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
   });
 
   it('demo name on simulator -> audit only', async () => {

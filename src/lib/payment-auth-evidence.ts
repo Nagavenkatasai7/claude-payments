@@ -71,9 +71,21 @@ export function buildPaymentAuthEvidence(i: {
   masterRaw?: string;
 }): PaymentAuthEvidence {
   const master = i.masterRaw ?? defaultMaster();
-  const rawIp = clientIpFrom(i.headers);
-  const ip = rawIp === 'unknown' ? '' : rawIp;
-  const ua = (i.headers.get('user-agent') ?? '').slice(0, UA_MAX);
+  // A header read that throws only loses the hash (null), never the payment
+  // (like enforceIpRateLimit's own guarded clientIpFrom read).
+  let ip = '';
+  try {
+    const rawIp = clientIpFrom(i.headers);
+    ip = rawIp === 'unknown' ? '' : rawIp;
+  } catch {
+    ip = '';
+  }
+  let ua = '';
+  try {
+    ua = (i.headers.get('user-agent') ?? '').slice(0, UA_MAX);
+  } catch {
+    ua = '';
+  }
   return {
     surface: i.surface,
     routeId: i.routeId,
