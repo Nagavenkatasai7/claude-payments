@@ -19,12 +19,15 @@ import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
 const rescreenThrows = vi.hoisted(() => ({ value: false }));
+// Pack 2 review F3 (C2): a hook run before each resume re-screen (advances a test clock).
+const rescreenHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
 vi.mock('@/lib/pay-rescreen', async (orig) => {
   const real = await orig<typeof import('@/lib/pay-rescreen')>();
   return {
     ...real,
     rescreenOnFile: async (...a: Parameters<typeof real.rescreenOnFile>) => {
       if (rescreenThrows.value) throw new Error('screening unavailable');
+      rescreenHook.before?.();
       return real.rescreenOnFile(...a);
     },
   };
@@ -93,6 +96,7 @@ beforeEach(async () => {
   await seedPartner(db, 'acme');
   stuckSnapshot.rows = null;
   rescreenThrows.value = false;
+  rescreenHook.before = null;
   listSweepThrows.value = false;
 });
 
@@ -798,6 +802,27 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     expect(r.fundingResumed).toBe(0);
     expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
     expect(await outboxRows()).toEqual([]);
+  });
+
+  // Pack 2 review F3 (C2): the resume re-screens run before the worker drain,
+  // so they share a time budget: once it is spent no further re-screen starts
+  // (that row is left untouched for the next sweep).
+  it('time budget: a re-screen that spends the budget -> the next victim is not re-screened this sweep', async () => {
+    await rail('http');
+    for (const id of ['rc_lvb1', 'rc_lvb2']) {
+      await store.saveTransfer(victim({ id, fundingRef: `mockfund-${id}` }));
+      await seedLiveEvidence(db, { id, partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    }
+    const clock = { t: 5_000_000 };
+    rescreenHook.before = () => { clock.t += 10_000; };
+    const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+    expect(r.fundingResumed).toBe(1);
+    const statuses = [(await store.getTransfer('rc_lvb1'))?.status, (await store.getTransfer('rc_lvb2'))?.status].sort();
+    expect(statuses).toEqual(['awaiting_payment', 'in_review']);
+    expect((await screens('rc_lvb1')) + (await screens('rc_lvb2'))).toBe(3);
+    // The next sweep (a fresh budget) takes the row left behind.
+    rescreenHook.before = null;
+    expect((await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t })).fundingResumed).toBe(1);
   });
 
   it('a stale review waiting on the list says so; any other stale review keeps the usual copy', async () => {

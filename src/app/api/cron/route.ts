@@ -12,7 +12,8 @@ import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
 import { checkSanctionsListHealth } from '@/lib/sanctions/list-health';
-import { archivePending } from '@/lib/sanctions/list-archive';
+import { archivePending, ARCHIVE_BUDGET_MS } from '@/lib/sanctions/list-archive';
+import { withTimeout } from '@/lib/health';
 import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
 import { pokeWorker } from '@/lib/outbox';
@@ -36,7 +37,16 @@ import type { PartnerId } from '@/lib/types';
 
 export const maxDuration = 300;
 
+// Pack 2 review F3 (C3): the list archive runs after the list health check and
+// before the poke, inside what is left of maxDuration minus this tail (the
+// poke and the response). Its own budget stops it starting a version too late;
+// the route also stops WAITING for it at budget + ARCHIVE_GRACE_MS, so a hung
+// store or database never costs the poke.
+const CRON_TAIL_MS = 20_000;
+const ARCHIVE_GRACE_MS = 10_000;
+
 export async function GET(req: NextRequest) {
+  const invocationStart = Date.now();
   // When CRON_SECRET is configured, Vercel sends it as a Bearer token.
   // Constant-time, fail-closed (src/lib/cron-auth.ts).
   if (env.cronSecret && !bearerMatches(req.headers.get('authorization'), env.cronSecret)) {
@@ -210,25 +220,31 @@ export async function GET(req: NextRequest) {
       sanctionsList = null;
       logError('cron.sanctions-list', err);
     }
-    // Fix pack 2 (R07): archive each list version to the private Blob store
-    // (verified read-back) before its entries may be pruned. After the load,
-    // before the health check. Fail-soft (archivePending never throws by
-    // contract); no response field.
-    try {
-      await archivePending(getDb());
-    } catch (err) {
-      logError('cron.sanctions-archive', err);
-    }
   }
 
   // Fix pack 2 (R02): the sanctions list health check, ALWAYS (even with the
   // loader OFF): one deduped ops.alert per Eastern day when the list is not
   // live and a partner settles on an http rail (every such mint is held).
-  // After the loader, so a fresh load counts. Fail-soft; no response field.
+  // After the loader, so a fresh load counts; before the archive (review F3,
+  // C3), so a slow archive never costs it. Fail-soft; no response field.
   try {
     await checkSanctionsListHealth(getDb(), new Date());
   } catch (err) {
     logError('cron.sanctions-list-health', err);
+  }
+
+  // Fix pack 2 (R07): archive each list version to the private Blob store
+  // (verified read-back) before its entries may be pruned. After the load and
+  // the health check, before the poke, time-boxed (see CRON_TAIL_MS). Fail-soft
+  // (archivePending never throws by contract; a timeout is logged); no
+  // response field. A run cut short is healed by the next one (idempotent).
+  if (env.sanctionsLoaderEnabled) {
+    const budgetMs = Math.max(0, Math.min(ARCHIVE_BUDGET_MS, invocationStart + maxDuration * 1000 - CRON_TAIL_MS - ARCHIVE_GRACE_MS - Date.now()));
+    try {
+      await withTimeout(archivePending(getDb(), { budgetMs }), budgetMs + ARCHIVE_GRACE_MS);
+    } catch (err) {
+      logError('cron.sanctions-archive', err);
+    }
   }
 
   // partner-demo R4: schedules, link expiry, the sanctions-list loader, the

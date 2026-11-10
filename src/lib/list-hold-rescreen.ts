@@ -21,6 +21,8 @@
 //     SENDER_SCREENING_REASON (a platform clear, then a person, decides).
 // Reads, the list warm and decryption stay OUTSIDE the transaction. A row that
 // throws is logged (id only) and costs a scan, never a slot. Never throws.
+// Pack 2 review F3 (C2): time-boxed (LIST_RESCREEN_BUDGET_MS); no row starts
+// once the budget is spent, and the count left is logged and returned.
 
 import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -48,10 +50,27 @@ export const LIST_RESCREEN_BATCH = 25;
 /** At most this many pages are scanned per sweep (skipped rows cost a scan). */
 export const MAX_PAGES = 4;
 
+/**
+ * Pack 2 review F3 (C2): the sweep's wall-clock budget. It runs inside
+ * reconcileSweep, BEFORE the worker drain, on every full run (pokes included),
+ * so it never STARTS a row once this much time has passed; the rows it leaves
+ * wait for the next run.
+ */
+export const LIST_RESCREEN_BUDGET_MS = 5_000;
+
 export interface ListHoldSweepResult {
   released: number;
   stillHeld: number;
   blocked: number;
+  /** Present only when the budget stopped the sweep: rows of the current page it did not start. */
+  deferred?: number;
+}
+
+export interface ListHoldSweepOptions {
+  /** Wall-clock budget (default LIST_RESCREEN_BUDGET_MS). */
+  budgetMs?: number;
+  /** Injectable wall clock (default Date.now); `now` stays the screening time. */
+  clock?: () => number;
 }
 
 type RowOutcome = 'released' | 'still_held' | 'blocked' | 'moved' | 'skipped';
@@ -177,9 +196,16 @@ export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise
   return 'review';
 }
 
-/** Never throws. Pokes the worker once when a row was released or blocked. */
-export async function sweepListUnavailableHolds(db: Db, now: Date): Promise<ListHoldSweepResult> {
+/**
+ * Never throws. Pokes the worker once when a row was released or blocked.
+ * Time-boxed (opts.budgetMs): no row is started once the budget is spent.
+ */
+export async function sweepListUnavailableHolds(db: Db, now: Date, opts: ListHoldSweepOptions = {}): Promise<ListHoldSweepResult> {
   const out: ListHoldSweepResult = { released: 0, stillHeld: 0, blocked: 0 };
+  const clock = opts.clock ?? Date.now;
+  const started = clock();
+  const budgetMs = opts.budgetMs ?? LIST_RESCREEN_BUDGET_MS;
+  let deferred = 0;
   const repo = createTransferRepo(db);
   let fitness: ListFitness | null = null;
   let after: { paidAt: string; id: string } | undefined;
@@ -199,7 +225,12 @@ export async function sweepListUnavailableHolds(db: Db, now: Date): Promise<List
         if (fitness !== 'live') continue;
       }
       pages++;
-      for (const t of rows) {
+      for (let i = 0; i < rows.length; i++) {
+        const t = rows[i];
+        if (clock() - started >= budgetMs) {
+          deferred = rows.length - i;
+          break;
+        }
         let outcome: RowOutcome;
         try {
           outcome = await rescreenRow(db, t, fitness, now);
@@ -212,13 +243,18 @@ export async function sweepListUnavailableHolds(db: Db, now: Date): Promise<List
         else if (outcome === 'blocked') out.blocked++;
         if (out.released + out.stillHeld + out.blocked >= LIST_RESCREEN_BATCH) break;
       }
-      if (out.released + out.stillHeld + out.blocked >= LIST_RESCREEN_BATCH) break;
+      if (deferred > 0 || out.released + out.stillHeld + out.blocked >= LIST_RESCREEN_BATCH) break;
       if (rows.length < LIST_RESCREEN_BATCH) break;
       const last = rows[rows.length - 1];
       after = { paidAt: last.paidAt ?? last.createdAt, id: last.id };
     }
   } catch (err) {
     logWarn('list-rescreen', err);
+  }
+  if (deferred > 0) {
+    // Counts only: the rows wait for the next full run.
+    logWarn('list-rescreen', 'time budget spent; rows left for the next run', { deferred, budgetMs });
+    out.deferred = deferred;
   }
   if (out.released > 0 || out.blocked > 0) pokeWorker();
   return out;

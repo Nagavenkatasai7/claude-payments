@@ -107,7 +107,26 @@ export async function reinstructLocked(db: Db, transferId: string): Promise<'enq
   });
 }
 
-export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<SweepResult> {
+/**
+ * Pack 2 review F3 (C2): the wall-clock budget shared by this sweep's
+ * re-screens (the stuck-paid heal and the crash-resume re-screen). The sweep
+ * runs before the worker drain on every full run, so once the budget is spent
+ * no further re-screen STARTS; that row is left as it is for the next sweep.
+ * The list-hold sweep has its own budget (LIST_RESCREEN_BUDGET_MS).
+ */
+export const RESCREEN_BUDGET_MS = 5_000;
+
+export interface ReconcileSweepOptions {
+  /** Re-screen budget (default RESCREEN_BUDGET_MS). */
+  rescreenBudgetMs?: number;
+  /** Injectable wall clock (default Date.now), also handed to the list-hold sweep. */
+  clock?: () => number;
+}
+
+export async function reconcileSweep(db: Db, now: Date = new Date(), opts: ReconcileSweepOptions = {}): Promise<SweepResult> {
+  const clock = opts.clock ?? Date.now;
+  const rescreenDeadline = clock() + (opts.rescreenBudgetMs ?? RESCREEN_BUDGET_MS);
+  const rescreenTimeLeft = (): boolean => clock() < rescreenDeadline;
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
   const integrationsRepo = createIntegrationsRepo(db);
@@ -156,7 +175,8 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       // live-list gate refuses (its newest screen is too old or not live) is
       // re-screened on a live list first, so the retrying instruct (or the
       // re-instruction below) can pass. Isolated: an error costs nothing else.
-      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
+      // F3 (C2): not started once the re-screen budget is spent (the next sweep heals it).
+      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null }) && rescreenTimeLeft()) {
         try {
           await healPaidRowScreen(db, t, now);
         } catch (err) {
@@ -259,6 +279,8 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
         let outcome: Awaited<ReturnType<typeof rescreenOnFile>> | null = null;
         try {
           if (!liveFresh((await listScreenEvidence(db, t, now)).at(-1), now)) {
+            // F3 (C2): the budget is spent: leave this victim untouched (the next sweep resumes it).
+            if (!rescreenTimeLeft()) continue;
             outcome = await rescreenOnFile(db, t, { realMoney: true, stage: 'resume' });
           }
         } catch (err) {
@@ -414,7 +436,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
   // never throws, and a failure here never costs the sweeps above.
   let listHoldsReleased = 0;
   try {
-    listHoldsReleased = (await sweepListUnavailableHolds(db, now)).released;
+    listHoldsReleased = (await sweepListUnavailableHolds(db, now, opts.clock ? { clock: opts.clock } : {})).released;
   } catch (e) {
     logWarn('reconcile', 'list-hold re-screen skipped', { error: e instanceof Error ? e.message : String(e) });
   }

@@ -203,8 +203,8 @@ export async function streamPartnerDoc(url: string): Promise<PartnerDocStream | 
 
 // ---- Fix pack 2 (R07): generic private objects (the sanctions list archive) ----
 
-/** Put / read time limit for one archive object. */
-const OBJECT_TIMEOUT_MS = 60_000;
+/** Put / read time limit for one archive object (list-archive.ts budgets 2 of these per version). */
+export const OBJECT_TIMEOUT_MS = 60_000;
 
 /** True when the private store's token is set (never says anything about the token itself). */
 export function isBlobConfigured(): boolean {

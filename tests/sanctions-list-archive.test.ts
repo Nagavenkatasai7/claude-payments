@@ -31,6 +31,7 @@ import {
   MAX_ARCHIVES_PER_RUN,
   SANCTIONS_ARCHIVE_PREFIX,
 } from '@/lib/sanctions/list-archive';
+import { OBJECT_TIMEOUT_MS } from '@/lib/blob';
 
 // Joined at runtime from plain words so no token-shaped literal exists.
 const PRIVATE_TOKEN = ['fake', 'blob', 'rw', 'privstore', 'for-tests'].join('_');
@@ -150,6 +151,33 @@ describe('sanctions list archive (R07)', () => {
     const rows = await versionRows(db);
     expect(rows.map((r) => r.archived_at !== null)).toEqual([true, true, true, false]);
     expect((await archivePending(db)).archived).toBe(1);
+  });
+
+  // Pack 2 review F3 (C3): a total budget. A version is not STARTED unless
+  // 2 x OBJECT_TIMEOUT_MS (its put + its read-back) is still left.
+  it('time budget: a slow put leaves < 2 x OBJECT_TIMEOUT_MS -> no further version is started (deferred)', async () => {
+    const repo = createSanctionsListRepo(db);
+    for (const n of [1, 2, 3, 4]) await repo.storeList(realVariant(n));
+    const clock = { t: 7_000_000 };
+    putMock.mockImplementation((...a: Parameters<typeof defaultPut>) => {
+      clock.t += 10_000;
+      return defaultPut(...a);
+    });
+    const res = await archivePending(db, { budgetMs: 2 * OBJECT_TIMEOUT_MS + 5_000, clock: () => clock.t });
+    // The one archived version (the oldest, beyond KEEP_INACTIVE_VERSIONS) is pruned as before.
+    expect(res).toEqual({ status: 'done', archived: 1, failed: 0, pruned: 6, deferred: 2 });
+    expect(putMock).toHaveBeenCalledTimes(1);
+    expect((await versionRows(db)).map((r) => r.archived_at !== null)).toEqual([true, false, false, false]);
+    expect(await alerts(db)).toEqual([]);
+  });
+
+  it('time budget below 2 x OBJECT_TIMEOUT_MS -> nothing is started, nothing pruned', async () => {
+    const repo = createSanctionsListRepo(db);
+    for (const n of [1, 2, 3, 4]) await repo.storeList(realVariant(n));
+    const res = await archivePending(db, { budgetMs: 2 * OBJECT_TIMEOUT_MS - 1 });
+    expect(res).toEqual({ status: 'done', archived: 0, failed: 0, pruned: 0, deferred: 3 });
+    expect(putMock).not.toHaveBeenCalled();
+    for (const r of await versionRows(db)) expect(await entryCount(db, r.id)).toBe(6);
   });
 
   it('put throws but the object exists and verifies -> stamped (heal)', async () => {

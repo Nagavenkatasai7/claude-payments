@@ -430,6 +430,31 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
   });
 
+  // Pack 2 review F3 (C2): the sweep runs before the worker drain on every full
+  // run, so it has a time budget: it never STARTS a row once the budget is
+  // spent, and reports the rows it left for the next run.
+  it('time budget: a row whose re-screen spends the budget -> the next row is not started (left for the next run)', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_budget_a' });
+    await heldRow({ id: 'lh_budget_b' });
+    const clock = { t: 1_000_000 };
+    names.before = async () => { clock.t += 10_000; };
+    const r = await sweepListUnavailableHolds(db, new Date(), { budgetMs: 5_000, clock: () => clock.t });
+    expect(r).toEqual({ released: 1, stillHeld: 0, blocked: 0, deferred: 1 });
+    const statuses = [(await store.getTransfer('lh_budget_a'))?.status, (await store.getTransfer('lh_budget_b'))?.status].sort();
+    expect(statuses).toEqual(['in_review', 'paid']);
+    // The row left behind is untouched (only its mint evidence) and the next run takes it.
+    names.before = null;
+    expect(await sweepListUnavailableHolds(db, new Date(), { budgetMs: 5_000, clock: () => clock.t })).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+  });
+
+  it('time budget: the default leaves a normal sweep unchanged (no deferred field)', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_budget_d1' });
+    await heldRow({ id: 'lh_budget_d2' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toStrictEqual({ released: 2, stillHeld: 0, blocked: 0 });
+  });
+
   it('no held rows -> no warm, one query', async () => {
     primeOfacSource({ checkedAgoMs: H });
     const stop = captureQueries();

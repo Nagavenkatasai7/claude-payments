@@ -332,6 +332,24 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect((await keys()).filter((k) => k === 'instructrescreen:rr_heal_u')).toHaveLength(1);
   });
 
+  // Pack 2 review F3 (C2): the heal shares the sweep's re-screen time budget.
+  it('time budget spent: the heal does not start (no new evidence); the next sweep heals it', async () => {
+    fetchFn.mockReset();
+    await rail('acme', 'http');
+    const t = base({ id: 'rr_heal_b', status: 'paid', paidAt: new Date(Date.now() - 20 * 60_000).toISOString() });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(
+      db,
+      { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
+      { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
+    );
+    primeOfacSource({ checkedAgoMs: H });
+    await reconcileSweep(db, new Date(), { rescreenBudgetMs: 0 });
+    expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
+    await reconcileSweep(db, new Date());
+    expect((await auditRows(t.id)).filter((a) => a.action === 'sanctions.screen')).toHaveLength(2);
+  });
+
   it('the sweep does not re-screen while the list is not live: the row stays refused (fail closed)', async () => {
     fetchFn.mockReset();
     await rail('acme', 'http');

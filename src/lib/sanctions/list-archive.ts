@@ -35,13 +35,19 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import type { Db } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createSanctionsListRepo, type ArchiveCandidate } from '@/db/repos/sanctions-list-repo';
-import { isBlobConfigured, putPrivateObject, readPrivateObject } from '../blob';
+import { isBlobConfigured, OBJECT_TIMEOUT_MS, putPrivateObject, readPrivateObject } from '../blob';
 import { logError, logWarn } from '../log';
 import { easternDay } from './list-loader';
 import { canonicalLines } from './ofac-sdn-loader';
 
 export const SANCTIONS_ARCHIVE_PREFIX = 'sanctions-archive/';
 export const MAX_ARCHIVES_PER_RUN = 3;
+/**
+ * Pack 2 review F3 (C3): the run's total wall-clock budget. A version is not
+ * STARTED unless 2 x OBJECT_TIMEOUT_MS (its put and its read-back) is still
+ * left, so the Blob calls end inside the budget; the rest wait for the next run.
+ */
+export const ARCHIVE_BUDGET_MS = 150_000;
 
 const DEFAULT_SOURCE = 'ofac-sdn';
 
@@ -51,6 +57,8 @@ export interface ArchiveRunResult {
   failed: number;
   /** Entry rows deleted by the prune. */
   pruned: number;
+  /** Present only when the budget stopped the run: candidates it did not start. */
+  deferred?: number;
 }
 
 const sha256 = (b: Buffer | string): string => createHash('sha256').update(b).digest('hex');
@@ -110,8 +118,14 @@ async function alert(db: Db, message: string, dedupeKey: string): Promise<void> 
 }
 
 /** Archive pending versions, then prune archived entries. Never throws. */
-export async function archivePending(db: Db, opts: { now?: Date; source?: string } = {}): Promise<ArchiveRunResult> {
+export async function archivePending(
+  db: Db,
+  opts: { now?: Date; source?: string; budgetMs?: number; clock?: () => number } = {},
+): Promise<ArchiveRunResult> {
   const now = opts.now ?? new Date();
+  const clock = opts.clock ?? Date.now;
+  const started = clock();
+  const budgetMs = opts.budgetMs ?? ARCHIVE_BUDGET_MS;
   const source = opts.source ?? DEFAULT_SOURCE;
   const day = easternDay(now.getTime());
   const repo = createSanctionsListRepo(db);
@@ -137,7 +151,13 @@ export async function archivePending(db: Db, opts: { now?: Date; source?: string
   try {
     const candidates = await repo.pendingArchive(source, MAX_ARCHIVES_PER_RUN);
     let mismatched = 0;
-    for (const v of candidates) {
+    for (let i = 0; i < candidates.length; i++) {
+      const v = candidates[i];
+      if (budgetMs - (clock() - started) < 2 * OBJECT_TIMEOUT_MS) {
+        result.deferred = candidates.length - i;
+        logWarn('sanctions.archive', 'time budget spent; versions left for the next run', { source, deferred: result.deferred });
+        break;
+      }
       let outcome: Outcome;
       try {
         outcome = await archiveOne(repo, v, now);
