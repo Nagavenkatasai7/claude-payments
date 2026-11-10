@@ -133,36 +133,59 @@ describe('POST /api/pay/b2b/[invoiceId] — not_available (pack 3)', { retry: 0 
 // ── Fix pack 2 T9 (R02): B2B pay settles through settleOrHold, so a real-money
 // (http) rail whose mint screen was not on a live list is HELD, never instructed.
 import { sql } from 'drizzle-orm';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { seedLiveEvidence } from './helpers-sanctions';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { Transfer } from '@/lib/types';
 
+const HTTP_INTEGRATIONS = {
+  kyc: {},
+  payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+  whatsapp: {},
+};
+/**
+ * A minted live B2B transfer on a PGlite ledger, owned by `owner`, with the route's (stubbed)
+ * integrations on an http rail. Pack 3: a non-default owner is seeded, and certified unless
+ * `certify: false`.
+ */
+async function liveB2bOnHttp(o: { owner?: string; certify?: boolean; id?: string } = {}) {
+  createdAt = new Date().toISOString();
+  const owner = o.owner ?? 'acme';
+  const id = o.id ?? 'b2b_t1';
+  const db = await freshDb();
+  if (owner !== 'default') {
+    await seedPartner(db, owner);
+    if (o.certify ?? true) await certifyPartnerForTest(db, owner);
+  }
+  const ledger = createTransferRepo(db);
+  const t = {
+    id, phone: '15550001111', amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99,
+    fxRate: 1, amountInr: 0, recipientName: 'Seller Co', recipientPhone: '15550002222',
+    payoutMethod: 'bank', payoutDestination: '12345678|021000021', fundingMethod: 'bank_pull',
+    status: 'awaiting_payment', complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: new Date().toISOString(), partnerId: owner, environment: 'live',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'US', destinationCurrency: 'USD',
+    amountSource: 500, feeSource: 1.99, totalChargeSource: 501.99,
+  } as Transfer;
+  await ledger.saveTransfer(t);
+  await seedLiveEvidence(db, t, { listFitness: 'not_live' }); // the mint screened on the mock list
+  state.db = db;
+  state.transfer = t;
+  state.integrations = HTTP_INTEGRATIONS;
+  finalizeCrossBorderBillPayment.mockResolvedValue({ ok: true, transferId: id });
+  const outbox = async () =>
+    ((await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ kind: string; dedupe_key: string }>;
+    }).rows;
+  return { db, ledger, outbox };
+}
+
 describe('POST /api/pay/b2b/[invoiceId] — settle-time live-list backstop (fix pack 2 T9)', { retry: 0 }, () => {
   it('http rail + mint evidence not live -> 200 in_review, no instruct', async () => {
-    createdAt = new Date().toISOString();
-    const db = await freshDb();
-    const ledger = createTransferRepo(db);
-    const t = {
-      id: 'b2b_t1', phone: '15550001111', amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99,
-      fxRate: 1, amountInr: 0, recipientName: 'Seller Co', recipientPhone: '15550002222',
-      payoutMethod: 'bank', payoutDestination: '12345678|021000021', fundingMethod: 'bank_pull',
-      status: 'awaiting_payment', complianceStatus: 'cleared', complianceReasons: [],
-      createdAt: new Date().toISOString(), partnerId: 'default', environment: 'live',
-      sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'US', destinationCurrency: 'USD',
-      amountSource: 500, feeSource: 1.99, totalChargeSource: 501.99,
-    } as Transfer;
-    await ledger.saveTransfer(t);
-    await seedLiveEvidence(db, t, { listFitness: 'not_live' }); // the mint screened on the mock list
-    state.db = db;
-    state.transfer = t;
-    state.integrations = {
-      kyc: {},
-      payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
-      whatsapp: {},
-    };
-    finalizeCrossBorderBillPayment.mockResolvedValue({ ok: true, transferId: 'b2b_t1' });
+    // Pack 3: the owner is a certified non-default partner (the pay-time live gate).
+    const { ledger, outbox } = await liveB2bOnHttp();
 
     const res = await pay();
     expect(res.status).toBe(200);
@@ -170,9 +193,41 @@ describe('POST /api/pay/b2b/[invoiceId] — settle-time live-list backstop (fix 
     const after = await ledger.getTransfer('b2b_t1');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
-    const kinds = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
-    const rows = (kinds as unknown as { rows: Array<{ kind: string; dedupe_key: string }> }).rows;
+    const rows = await outbox();
     expect(rows.map((r) => r.dedupe_key)).toEqual(['stage1:b2b_t1']);
     expect(rows.some((r) => r.kind === 'settlement.instruct')).toBe(false);
+  });
+});
+
+// Pack 3 (contract 6): the B2B route settles an awaiting_payment row through settleOrHold
+// only when its rail (the integrations it read) is not real money or is certified; the
+// default tenant never owns a real-money transfer. Nothing is held, instructed or written.
+describe('POST /api/pay/b2b/[invoiceId] — pay-time live gate (pack 3)', { retry: 0 }, () => {
+  it('uncertified non-default http rail (stubbed integrations) -> 409 PAY_NOT_AVAILABLE, settleOrHold never runs, no outbox row', async () => {
+    const { ledger, outbox } = await liveB2bOnHttp({ certify: false });
+    const res = await pay();
+    expect(res.status).toBe(PAY_NOT_AVAILABLE.status);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    const after = await ledger.getTransfer('b2b_t1');
+    expect(after?.status).toBe('awaiting_payment');
+    expect(after?.complianceReasons).toEqual([]);
+    expect(await outbox()).toEqual([]);
+  });
+
+  it('certified -> 200 as before', async () => {
+    const { ledger } = await liveB2bOnHttp();
+    const res = await pay();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: 'in_review' });
+    expect((await ledger.getTransfer('b2b_t1'))?.status).toBe('in_review');
+  });
+
+  it("a 'default' owner with stubbed http integrations -> 409", async () => {
+    const { ledger, outbox } = await liveB2bOnHttp({ owner: 'default' });
+    const res = await pay();
+    expect(res.status).toBe(PAY_NOT_AVAILABLE.status);
+    expect((await res.json()).reason).toBe('not_available');
+    expect((await ledger.getTransfer('b2b_t1'))?.status).toBe('awaiting_payment');
+    expect(await outbox()).toEqual([]);
   });
 });

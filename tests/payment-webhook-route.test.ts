@@ -113,6 +113,12 @@ const setPayoutReference = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => tr
 vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({ setPayoutReference: (...a: unknown[]) => setPayoutReference(...a) }),
 }));
+// Pack 3: the rail-callback live gate reads the RAIL partner from the DB (createPartnerRepo);
+// per test, a Partner fake (certified or not) by id. Unset ⇒ no row (not certified).
+const partnersById = vi.hoisted(() => ({ map: {} as Record<string, unknown> }));
+vi.mock('@/db/repos/partner-repo', () => ({
+  createPartnerRepo: () => ({ getPartner: async (id: string) => partnersById.map[id] ?? null }),
+}));
 const logWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
@@ -122,6 +128,7 @@ vi.mock('@/lib/log', async (orig) => {
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
+import { certifiedLiveControls } from './helpers-live';
 
 const deliveredTransfer = {
   id: 'wh_1', phone: '15551230000', amountInr: 16600, recipientName: 'Mom',
@@ -161,6 +168,7 @@ beforeEach(() => {
   outboxFake.keys.clear(); outboxFake.enqueued.length = 0;
   logWarnSpy.mockClear();
   setPayoutReference.mockReset(); setPayoutReference.mockResolvedValue(true);
+  partnersById.map = {};
 });
 
 describe('POST /api/payment-webhook/[provider]', () => {
@@ -796,5 +804,129 @@ describe('POST /api/payment-webhook — payout reference (Batch B1)', { retry: 0
     const raw = withRef('UTR-4', 'weird');
     expect((await post('uniteller', raw, sig(raw))).status).toBe(200);
     expect(setPayoutReference).not.toHaveBeenCalled();
+  });
+});
+
+// Pack 3 (contract 6, critic M1): a signed funded / paid_out on an awaiting_payment row whose rail
+// is real money (http, not sandbox) and not certified — or whose owner is the default tenant — is
+// NOT applied: 200 { ok: true, held: true } so the rail stops retrying, one deduped livegate:<id>
+// ops alert naming only ids. A paid row's paid_out, and simulator / mock / sandbox callbacks,
+// apply as before.
+describe('rail callback on an uncertified real-money rail (pack 3)', { retry: 0 }, () => {
+  const HTTP_INTEG = {
+    kyc: {},
+    payment: { providerType: 'http', webhookSecret: 'rail_whk', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } },
+    whatsapp: {},
+  };
+  const awaiting = (o: Record<string, unknown> = {}) => ({
+    ...deliveredTransfer, status: 'awaiting_payment', partnerId: 'acme', environment: 'live', ...o,
+  });
+  const partnerFake = (id: string, certified: boolean) => ({
+    id, name: id, status: 'active', countries: ['US'],
+    liveControls: certified ? certifiedLiveControls() : { optIns: {}, complianceUsers: [] },
+  });
+  const funded = JSON.stringify({ reference: 'wh_1', status: 'funded' });
+  const paidOut = JSON.stringify({ reference: 'wh_1', status: 'paid_out', payout_reference: 'UTR-LIVE-1' });
+  const liveAlerts = () => outboxFake.enqueued.filter((e) => e.dedupeKey === 'livegate:wh_1');
+
+  it('signed funded on an uncertified http rail\'s awaiting_payment row -> 200 { ok: true, held: true }, updateTransferFromWebhook never called, one ops.alert livegate:<id> naming only ids', async () => {
+    fixtures.transfersById['wh_1'] = awaiting();
+    fixtures.integrationsByPartner['acme'] = HTTP_INTEG;
+    partnersById.map.acme = partnerFake('acme', false);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    const res = await post('http', funded, sig(funded, 'rail_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    const alerts = liveAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].kind).toBe('ops.alert');
+    const msg = (alerts[0].payload as { message: string }).message;
+    expect(msg).toContain('wh_1');
+    expect(msg).toContain('acme');
+    expect(msg).not.toContain('15551230000');
+    expect(msg).not.toContain('919876543210');
+    expect(msg).not.toContain('Mom');
+    // A replay of the same callback is deduped: still one alert.
+    expect((await post('http', funded, sig(funded, 'rail_whk'))).status).toBe(200);
+    expect(liveAlerts()).toHaveLength(1);
+  });
+
+  it('signed paid_out on the same row -> held, no savePayoutReference, no stage-2 notice', async () => {
+    fixtures.transfersById['wh_1'] = awaiting();
+    fixtures.integrationsByPartner['acme'] = HTTP_INTEG;
+    partnersById.map.acme = partnerFake('acme', false);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    const res = await post('http', paidOut, sig(paidOut, 'rail_whk'));
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    await flushAfter();
+    expect(setPayoutReference).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(liveAlerts()).toHaveLength(1);
+  });
+
+  it('certified rail -> applied as before', async () => {
+    fixtures.transfersById['wh_1'] = awaiting();
+    fixtures.integrationsByPartner['acme'] = HTTP_INTEG;
+    partnersById.map.acme = partnerFake('acme', true);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    updateTransferFromWebhook.mockResolvedValue({ ...awaiting(), status: 'paid' });
+    const res = await post('http', funded, sig(funded, 'rail_whk'));
+    expect(await res.json()).toEqual({ ok: true });
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'paid');
+    expect(liveAlerts()).toHaveLength(0);
+  });
+
+  it("a 'default' owner on an http rail -> held", async () => {
+    fixtures.transfersById['wh_1'] = awaiting({ partnerId: 'default' });
+    fixtures.integrationsByPartner['default'] = HTTP_INTEG;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    const res = await post('http', funded, sig(funded, 'rail_whk'));
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(liveAlerts()).toHaveLength(1);
+  });
+
+  it("a paid row's paid_out on an uncertified rail -> applied (not gated)", async () => {
+    fixtures.transfersById['wh_1'] = awaiting({ status: 'paid' });
+    fixtures.integrationsByPartner['acme'] = HTTP_INTEG;
+    partnersById.map.acme = partnerFake('acme', false);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, partnerId: 'acme' });
+    const res = await post('http', paidOut, sig(paidOut, 'rail_whk'));
+    expect(res.status).toBe(200);
+    await flushAfter();
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(setPayoutReference).toHaveBeenCalledWith('wh_1', 'UTR-LIVE-1');
+    expect(liveAlerts()).toHaveLength(0);
+  });
+
+  it('simulator / mock rail callback -> unchanged', async () => {
+    for (const providerType of ['simulator', 'mock']) {
+      updateTransferFromWebhook.mockReset();
+      fixtures.transfersById['wh_1'] = awaiting();
+      fixtures.integrationsByPartner['acme'] = { ...HTTP_INTEG, payment: { ...HTTP_INTEG.payment, providerType } };
+      partnersById.map.acme = partnerFake('acme', false);
+      handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+      updateTransferFromWebhook.mockResolvedValue({ ...awaiting(), status: 'paid' });
+      const res = await post(providerType, funded, sig(funded, 'rail_whk'));
+      expect(await res.json(), providerType).toEqual({ ok: true });
+      expect(updateTransferFromWebhook, providerType).toHaveBeenCalledWith('wh_1', 'paid');
+    }
+    expect(liveAlerts()).toHaveLength(0);
+  });
+
+  it("a 'test' transfer -> unchanged", async () => {
+    fixtures.transfersById['wh_1'] = awaiting({ environment: 'test' });
+    fixtures.integrationsByPartner['acme'] = HTTP_INTEG;
+    partnersById.map.acme = partnerFake('acme', false);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    updateTransferFromWebhook.mockResolvedValue({ ...awaiting({ environment: 'test' }), status: 'paid' });
+    const res = await post('http', funded, sig(funded, 'rail_whk'));
+    expect(await res.json()).toEqual({ ok: true });
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'paid');
+    expect(liveAlerts()).toHaveLength(0);
   });
 });

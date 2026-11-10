@@ -13,6 +13,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import {
@@ -126,11 +127,11 @@ function post(id: string, body: unknown = { otp: '000000' }) {
   return POST(req, { params: Promise.resolve({ transferId: id }) }) as Promise<Response>;
 }
 
-async function seedOwner(fullName: string | undefined) {
+async function seedOwner(fullName: string | undefined, partnerId = 'default') {
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
     senderPhone: SENDER_PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
-    senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    senderCountry: 'US', partnerId, optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
     ...(fullName !== undefined ? { fullName } : {}),
   });
@@ -308,15 +309,20 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' },
   };
   const H = 3_600_000;
-  async function httpRail(partnerId: string) {
+  // Pack 3: a non-default partner on an http rail is CERTIFIED for live money by default (the
+  // pay-time live gate refuses an uncertified real-money rail before any charge).
+  async function httpRail(partnerId: string, o: { certify?: boolean } = {}) {
     if (partnerId !== 'default') {
       await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
         VALUES (${partnerId}, ${partnerId}, 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
+      if (o.certify ?? true) await certifyPartnerForTest(db, partnerId);
     }
     await setRailProviderType(db, partnerId, 'http');
     rails.byPartner[partnerId] = HTTP_RAIL;
   }
   const kinds = async () => (await outboxKinds()).map(([k]) => k);
+  // Pack 3: the owner of a real-money transfer is a certified non-default partner.
+  const OWNER = 'acme';
 
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
@@ -327,9 +333,9 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
   });
 
   it('http rail on the mock list (never live) → in_review LIST_UNAVAILABLE, not instructed', async () => {
-    await seedOwner('Alex Sender');
-    await httpRail('default');
-    await store.saveTransfer(makeTransfer({ id: 'lv-mock' }));
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    await store.saveTransfer(makeTransfer({ id: 'lv-mock', partnerId: OWNER }));
     expect(await (await post('lv-mock')).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-mock');
     expect(t?.complianceStatus).toBe('flagged');
@@ -338,10 +344,10 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
   });
 
   it('http rail, OFAC list checked 35 h ago (live) → paid and instructed', async () => {
-    await seedOwner('Alex Sender');
-    await httpRail('default');
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: 35 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-35' }));
+    await store.saveTransfer(makeTransfer({ id: 'lv-35', partnerId: OWNER }));
     // A webhook-driven rail answers 'processing'; the ledger row is paid.
     expect(await (await post('lv-35')).json()).toEqual({ ok: true, status: 'processing' });
     expect((await store.getTransfer('lv-35'))?.status).toBe('paid');
@@ -349,30 +355,51 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
   });
 
   it('http rail, OFAC list checked 37 h ago (stale) → in_review LIST_UNAVAILABLE', async () => {
-    await seedOwner('Alex Sender');
-    await httpRail('default');
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: 37 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-37' }));
+    await store.saveTransfer(makeTransfer({ id: 'lv-37', partnerId: OWNER }));
     expect(await (await post('lv-37')).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-37'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
     expect(await kinds()).not.toContain('settlement.instruct');
   });
 
-  it('a default-tenant transfer ROUTED to an http partner, stale list → in_review (the rail partner decides)', async () => {
-    await seedOwner('Alex Sender');
+  it('a transfer ROUTED to a certified http partner, stale list → in_review (the rail partner decides)', async () => {
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
     await httpRail('railp');
+    // The owner's own rail is mock: only the routed rail makes this real money.
+    rails.byPartner[OWNER] = { providerType: 'mock' };
+    await setRailProviderType(db, OWNER, 'mock');
     primeOfacSource({ checkedAgoMs: 37 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-routed', settlementPartnerId: 'railp' }));
+    await store.saveTransfer(makeTransfer({ id: 'lv-routed', partnerId: OWNER, settlementPartnerId: 'railp' }));
     expect(await (await post('lv-routed')).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
   });
 
-  it('the sender legal name changed since the mint → in_review SENDER_IDENTITY_MISSING (the old name is uncovered)', async () => {
+  it('a default-tenant transfer routed to an http partner -> 409 not_available, never charged, nothing written to the outbox', async () => {
+    // Pack 3 (contract 6): the default tenant may never own a real-money transfer, even on a
+    // certified routed rail. The pay-time re-screen (sanctions always runs) comes BEFORE the
+    // gate, which sits in pay-process right before the capture; it leaves the row awaiting_payment.
     await seedOwner('Alex Sender');
-    await httpRail('default');
+    await httpRail('railp');
     primeOfacSource({ checkedAgoMs: H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-renamed' }));
-    await seedLiveEvidence(db, { id: 'lv-renamed', partnerId: 'default', recipientName: 'Mom', senderName: 'Alexandra Previous' });
+    await store.saveTransfer(makeTransfer({ id: 'lv-default-routed', settlementPartnerId: 'railp' }));
+    const res = await post('lv-default-routed');
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: expect.any(String), reason: 'not_available' });
+    const t = await store.getTransfer('lv-default-routed');
+    expect(t?.status).toBe('awaiting_payment');
+    expect(t?.fundingRef).toBeFalsy();
+    expect(await kinds()).toEqual([]);
+  });
+
+  it('the sender legal name changed since the mint → in_review SENDER_IDENTITY_MISSING (the old name is uncovered)', async () => {
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id: 'lv-renamed', partnerId: OWNER }));
+    await seedLiveEvidence(db, { id: 'lv-renamed', partnerId: OWNER, recipientName: 'Mom', senderName: 'Alexandra Previous' });
     expect(await (await post('lv-renamed')).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-renamed');
     expect(t?.complianceStatus).toBe('flagged');

@@ -5,10 +5,11 @@ import { getFundingProvider, isPendingCapture, selectFundingProvider } from './p
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
-import { logError } from './log';
+import { logError, logWarn } from './log';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
-import { settlementTargetUrl } from './live-gate';
+import { liveRefusalForRail, settlementTargetUrl } from './live-gate';
+import { payNotAvailable } from './pay-not-available';
 import { settleOrHold } from './settlement';
 import { isPartnerPulled } from './funding-method';
 import type { Store } from './store';
@@ -123,6 +124,10 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  *   2. rail fail-closed (a routed rail must be webhook-driven, and — fix 22 —
  *      a webhook-driven rail, routed OR owner, must carry a settlement URL
  *      that passes checkSettlementUrl)
+ *   3. live certification (pack 3, contract 6): an uncertified real-money
+ *      rail, or the default tenant on one, is refused before any charge
+ *      (409 not_available; the row stays awaiting_payment). It reads the
+ *      rail type from the integrations already in hand (no second read).
  * The masked-destination (fix 6), FX-unavailable (fix 9) and send-cap (fix 10)
  * guards do NOT live here: they are pay-finalize.ts's pre-claim contract
  * (kyc → masked destination → FX → cap → idem.claim) and run before a draft is
@@ -204,6 +209,17 @@ export async function processTransferPayment(
       });
       return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
     }
+  }
+
+  // Pack 3 (gate #3, contract 6): live certification, AFTER the routed-rail and
+  // URL checks (their 400s come first) and BEFORE the capture. Real money is
+  // judged on the rail type read above (railIntegrations), so a transient read
+  // failure elsewhere can never refuse a simulator, mock or default payment
+  // here. Nothing is charged or written; the log names ids and the code only.
+  const live = await liveRefusalForRail(getDb(), transfer, railProviderType ?? null);
+  if (live) {
+    logWarn('pay.live-refused', 'live payment refused before capture', { transferId: transfer.id, code: live });
+    return payNotAvailable();
   }
 
   // ── FUNDS CAPTURE — after every refusal gate, before any effect ──────────

@@ -45,7 +45,7 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
-import { railPartnerOf, realMoneyFor } from './live-gate';
+import { liveRefusalFor, railPartnerOf, realMoneyFor } from './live-gate';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { rescreenOnFile } from './pay-rescreen';
 import { parseClientReference } from './order-references';
@@ -805,6 +805,13 @@ export async function confirmTransaction(
     return ok(200, await transferViewWithName(deps, t));
   }
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
+  // Pack 3 (contract 6): ONE live-certification gate before the re-screen and
+  // both settleOrHold calls (and the deps.initiatePayment seam): an uncertified
+  // real-money rail, or the default tenant on one, is refused with nothing
+  // written. Nothing is in hand here, so liveRefusalFor reads the rail itself.
+  if (await liveRefusalFor(deps.db, t)) {
+    return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
+  }
 
   // Fix pack 2 T3 (R02): on a real-money rail (the RAIL partner is http, env
   // not 'test'), settle only on a LIVE, fresh screen. When the newest evidence

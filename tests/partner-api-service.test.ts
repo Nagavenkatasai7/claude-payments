@@ -781,6 +781,67 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
   });
 });
 
+// Pack 3 (contract 6): confirm on an uncertified real-money rail is refused BEFORE the re-screen
+// and the settle: 403 partner_not_live, the row stays awaiting_payment, no screen row is written
+// and deps.initiatePayment is never called (confirm reads the rail itself: liveRefusalFor).
+describe('partner-api-service: confirmTransaction live certification (pack 3)', { retry: 0 }, () => {
+  const originalList = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(originalList));
+  type View = { id: string; status: string };
+  const screens = async (db: Awaited<ReturnType<typeof harness>>['db'], id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+  async function mintOn(h: Awaited<ReturnType<typeof harness>>, idem: string) {
+    const r = await createTransaction(h.deps, DELEGATED, 'pk_1', idem, txBody());
+    if (!r.ok) throw new Error('unexpected: ' + r.error);
+    return (r.data as View).id;
+  }
+
+  it('confirm on an uncertified http rail (DB row; confirm uses liveRefusalFor) -> 403 { code: partner_not_live }, still awaiting_payment, no re-screen row, deps.initiatePayment never called', async () => {
+    const h = await harness();
+    // Minted on a simulator rail (not real money, no certification needed), then switched to http.
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-1');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const before = await screens(h.db, id);
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({
+      ok: false, status: 403,
+      error: 'This partner is not certified for live transfers on its settlement rail.',
+      code: 'partner_not_live',
+    });
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+    expect(await screens(h.db, id)).toBe(before);
+    expect(initiatePayment).not.toHaveBeenCalled();
+  });
+
+  it('certified -> settles', async () => {
+    const h = await harness();
+    await certifyPartnerForTest(h.db, 'acme');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mintOn(h, 'idem-live-2');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+  });
+
+  it("a 'test' transfer confirms as before", async () => {
+    const h = await harness();
+    h.deps.keyMode = 'test';
+    await setRailProviderType(h.db, 'acme', 'http');
+    const id = await mintOn(h, 'idem-live-3');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+  });
+});
+
 describe('partner-api-service: FX unavailable is a 503 (retryable), never a 400 (Task 9)', () => {
   it('createQuote → 503 with the customer-safe message when Frankfurter is down and nothing is cached', async () => {
     const { deps } = await harness();
