@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
 import { partnerRequests, partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
+import { createPendingGoLive, isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 import { isPartnerRequestId } from '@/lib/partner-application-decision';
 import { partnerIdForRequest } from '@/lib/partner-from-request';
 import { createAuditRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
@@ -697,14 +697,13 @@ export async function issueApiKeyAction(
   const staff = await gatePartnerConfig(partnerId);
   const m: unknown = mode ?? 'live';
   if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
-  // UI redesign M3-21 (#427 review follow-up): a PARTNER-scoped admin gets a live key only once
-  // SmartRemit approved its go-live, checked in the same transaction as the insert (a thrown read
-  // fails closed). Platform admins are the approvers and are unchanged.
-  const partnerScoped = scopeOf(staff).kind === 'partner';
+  // Pack 3 T13 (D14): EVERY live key needs an approved go-live, platform admins included, checked in
+  // the same transaction as the insert (a thrown read fails closed). Platform admins approve go-live
+  // on the partner page; the setup wizard issues its own first key (it never calls this action).
   // R3a (M4): the key and its audit row commit together. Meta: keyId, mode,
   // last4 — never the plaintext.
   const issued = await getDb().transaction(async (tx) => {
-    if (m === 'live' && partnerScoped && !(await isLiveApproved(tx, partnerId))) {
+    if (m === 'live' && !(await isLiveApproved(tx, partnerId))) {
       throw new Error('Live keys are available after SmartRemit approves go-live. Issue a sandbox key for now.');
     }
     const k = await createPartnerApiKeyStore(tx).issue(partnerId, m);
@@ -787,6 +786,8 @@ export interface PartnerWizardResult {
   id: string;
   apiKey: string; // shown once by the wizard, then discarded
   apiKeyLast4: string;
+  /** Pack 3 T13: 'test' (a sandbox key) for an http rail, which starts with a pending go-live. */
+  apiKeyMode: ApiKeyMode;
   whatsappCallbackUrl: string;
   statusCallbackUrl: string;
   apiBaseUrl: string;
@@ -894,6 +895,9 @@ export async function wizardCreatePartnerAction(
     appSecret: clean(wa.appSecret),
   };
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
+  // Pack 3 T13 (R15, owner Q3): a partner-operated (http) rail moves real money, so it starts with a
+  // pending go-live and a sandbox first key; simulator, mock and no rail keep auto-approval + live.
+  const firstKeyMode: ApiKeyMode = providerType === 'http' ? 'test' : 'live';
   // The partner row and its integrations commit in ONE transaction (fix 1
   // review): if the pnid unique index loses a race (23505), the partner insert
   // rolls back too — never an orphan ACTIVE partner with no integrations/key.
@@ -913,16 +917,22 @@ export async function wizardCreatePartnerAction(
       }
       await createPartnerStore(tx).savePartner(partner);
       // UI redesign M3-21: a platform-wizard partner is approved for go-live at creation (it gets a
-      // live key below), committed with the partner itself.
-      await upsertApprovedGoLive(tx, id, staff.username);
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.go_live.approve',
-        subjectId: id,
-        meta: { reason: 'platform setup wizard', actorScope: 'platform' },
-      });
+      // live key below), committed with the partner itself. Pack 3 R15: except on a partner-operated
+      // (http) rail, which moves real money: it goes live only through the request and approval path
+      // (and, for live money, certification), so it starts with a pending row and no approve audit.
+      if (providerType === 'http') {
+        await createPendingGoLive(tx, id);
+      } else {
+        await upsertApprovedGoLive(tx, id, staff.username);
+        await createAuditRepo(tx).record({
+          partnerId: id,
+          actor: staff.username,
+          actorType: 'staff',
+          action: 'partner.go_live.approve',
+          subjectId: id,
+          meta: { reason: 'platform setup wizard', actorScope: 'platform' },
+        });
+      }
       if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},
@@ -951,8 +961,8 @@ export async function wizardCreatePartnerAction(
   // commit (as before R3a), so a key-insert error is never reported as a pnid
   // conflict by rethrowPnidConflict above.
   const issued = await getDb().transaction(async (tx) => {
-    const k = await createPartnerApiKeyStore(tx).issue(id);
-    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(id, staff.username, k.keyId, 'live', k.last4));
+    const k = await createPartnerApiKeyStore(tx).issue(id, firstKeyMode);
+    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(id, staff.username, k.keyId, firstKeyMode, k.last4));
     return k;
   });
 
@@ -961,6 +971,7 @@ export async function wizardCreatePartnerAction(
     id,
     apiKey: issued.plaintext,
     apiKeyLast4: issued.last4,
+    apiKeyMode: firstKeyMode,
     whatsappCallbackUrl: `${env.appBaseUrl}/api/whatsapp/${id}`,
     statusCallbackUrl: `${env.appBaseUrl}/api/payment-webhook/${providerType === 'simulator' ? 'simulator' : 'http'}`,
     apiBaseUrl: `${env.appBaseUrl}/api/partner/v1`,

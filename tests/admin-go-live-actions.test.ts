@@ -462,6 +462,19 @@ describe('wizard fromRequest + create-from-request: one partner per request', ()
     await expect(wizard()).rejects.toThrow(/already/i); // a second wizard run too
   });
 
+  // Pack 3 T13 (R15): an http-rail wizard run from a request starts pending with a sandbox key.
+  it('http with fromRequest: pending, test key, still one partner per request', async () => {
+    await asPlatformAdmin();
+    const r = await wizard({ payment: { providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' } });
+    expect(r.id).toBe(NEW_PID);
+    expect(await isLiveApproved(db, NEW_PID)).toBe(false);
+    expect(r.apiKeyMode).toBe('test');
+    expect(r.apiKey.startsWith('sr_test_')).toBe(true);
+    expect(await run(createPartnerFromRequestAction(createForm()))).toBe(`/admin-dashboard/partner-requests/${REQ}?create=exists`);
+    await expect(wizard({ payment: { providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' } })).rejects.toThrow(/already/i);
+    expect(await fromRequestPartners()).toHaveLength(1);
+  });
+
   it('a wizard fromRequest that is malformed, unknown or not approved → refused, nothing written', async () => {
     await asPlatformAdmin();
     const before = (await partnerRows()).length;

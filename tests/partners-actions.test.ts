@@ -1228,9 +1228,17 @@ describe('savePaymentConfigAction — rail secret rotation (Program-Fix 29)', ()
 describe('issueApiKeyAction — mode is live by default, test on request, nothing else', () => {
   it('no mode ⇒ an sr_live_ / pk_live_ key (every existing caller unchanged)', async () => {
     await seedPartner(db, 'acme');
+    await upsertApprovedGoLive(db, 'acme', 'root'); // pack 3 T13: every live key needs an approved go-live
     const r = await issueApiKeyAction('acme');
     expect(r.plaintext.startsWith('sr_live_')).toBe(true);
     expect(r.keyId.startsWith('pk_live_')).toBe(true);
+  });
+
+  it('no mode on an unapproved partner ⇒ refused (the default mode is live)', async () => {
+    await seedPartner(db, 'acme');
+    await expect(issueApiKeyAction('acme')).rejects.toThrow(/after SmartRemit approves go-live/);
+    const keys = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = 'acme'`);
+    expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 
   it("mode 'test' ⇒ an sr_test_ / pk_test_ sandbox key", async () => {
@@ -1250,9 +1258,12 @@ describe('issueApiKeyAction — mode is live by default, test on request, nothin
     expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 
-  it('the setup wizard\'s first key is live', async () => {
-    const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment: { providerType: 'simulator' } });
-    expect(r.apiKey.startsWith('sr_live_')).toBe(true);
+  it('the setup wizard\'s first key is live on a simulator, mock or no rail', async () => {
+    for (const payment of [{ providerType: 'simulator' }, { providerType: 'mock' }, undefined]) {
+      const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment });
+      expect(r.apiKey.startsWith('sr_live_')).toBe(true);
+      expect(r.apiKeyMode).toBe('live');
+    }
   });
 
   // UI redesign M3-21 (#427 review follow-up): the legacy per-partner page no longer lets a
@@ -1277,9 +1288,21 @@ describe('issueApiKeyAction — mode is live by default, test on request, nothin
     const audits = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'api_key.issue'`);
     expect((audits as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
-  it('a platform admin (the approver) may issue a live key before go-live', async () => {
+  // Pack 3 T13 (D14): the platform-admin exemption is gone. Every live key needs an approved go-live.
+  it('a platform admin cannot issue a live key before go-live: refused, no key, no audit row; a test key is issued; after approval the live key is issued', async () => {
     await seedPartner(db, 'acme');
     expect(await isLiveApproved(db, 'acme')).toBe(false);
+    for (const mode of [undefined, 'live'] as const) {
+      await expect(issueApiKeyAction('acme', mode)).rejects.toThrow(
+        'Live keys are available after SmartRemit approves go-live. Issue a sandbox key for now.',
+      );
+    }
+    expect(await allKeys('acme')).toEqual([]);
+    const audits = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'api_key.issue'`);
+    expect((audits as unknown as { rows: unknown[] }).rows).toEqual([]);
+    const t = await issueApiKeyAction('acme', 'test');
+    expect(t.keyId.startsWith('pk_test_')).toBe(true);
+    await upsertApprovedGoLive(db, 'acme', 'root');
     const r = await issueApiKeyAction('acme');
     expect(r.keyId.startsWith('pk_live_')).toBe(true);
     expect(await liveKeys('acme')).toHaveLength(1);
@@ -1294,10 +1317,56 @@ describe('wizardCreatePartnerAction — go-live', () => {
     expect(await isLiveApproved(db, r.id)).toBe(true);
     expect((await getGoLive(db, r.id))?.approvedBy).toBe('admin');
   });
+  it('a simulator, mock or no-rail wizard partner is approved at creation', async () => {
+    for (const payment of [{ providerType: 'simulator' }, { providerType: 'mock' }, undefined]) {
+      const r = await wizardCreatePartnerAction({ name: 'Approved Co', countries: ['US'], payment });
+      expect(await isLiveApproved(db, r.id)).toBe(true);
+      expect(r.apiKeyMode).toBe('live');
+    }
+  });
   it('a refused wizard commit writes no go-live row', async () => {
     await expect(wizardCreatePartnerAction({ name: 'X', countries: ['ZZ'] })).rejects.toThrow();
     const rows = await db.execute(sql`SELECT partner_id FROM partner_go_live`);
     expect((rows as unknown as { rows: unknown[] }).rows).toEqual([]);
+  });
+});
+
+// Pack 3 T13 (R15, owner Q3): a partner-operated (http) rail moves real money, so the wizard no
+// longer approves it at creation: a pending go-live row, a sandbox first key, a 'test' audit mode.
+describe('wizardCreatePartnerAction - http rail starts pending', () => {
+  const HTTP = { providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' };
+  const auditFor = async (pid: string) =>
+    (await db.execute(sql`SELECT action, meta FROM audit_events WHERE partner_id = ${pid} ORDER BY id`) as unknown as {
+      rows: Array<{ action: string; meta: Record<string, unknown> | null }>;
+    }).rows;
+
+  it('http: go-live row pending, first key sr_test_, apiKeyMode test, settlement configured', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    expect(await isLiveApproved(db, r.id)).toBe(false);
+    const row = await getGoLive(db, r.id);
+    expect(row).not.toBeNull();
+    expect(row?.approvedAt).toBeNull();
+    expect(r.apiKey.startsWith('sr_test_')).toBe(true);
+    expect(r.apiKeyMode).toBe('test');
+    expect(r.settlementConfigured).toBe(true);
+  });
+
+  it('http: no partner.go_live.approve audit row; api_key.issue meta mode test', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    const rows = await auditFor(r.id);
+    expect(rows.map((x) => x.action)).not.toContain('partner.go_live.approve');
+    const issue = rows.filter((x) => x.action === 'api_key.issue');
+    expect(issue).toHaveLength(1);
+    expect(issue[0].meta).toMatchObject({ mode: 'test', last4: r.apiKeyLast4 });
+  });
+
+  it('http then issueApiKeyAction: live refused, test issued', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    await expect(issueApiKeyAction(r.id, 'live')).rejects.toThrow(/after SmartRemit approves go-live/);
+    const t = await issueApiKeyAction(r.id, 'test');
+    expect(t.keyId.startsWith('pk_test_')).toBe(true);
+    const live = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = ${r.id} AND id LIKE 'pk_live_%'`);
+    expect((live as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 });
 
