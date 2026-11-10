@@ -10,7 +10,7 @@ import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import { isFlagOn } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
-import { realMoneyRail } from '@/lib/live-gate';
+import { liveRefusalFor, realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
@@ -171,6 +171,13 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     ) {
       continue;
     }
+    // Fix pack 3 T6 (R15, contract 7): a real-money row whose rail partner is
+    // not certified for live money (or whose owner is the default tenant) is
+    // owned by the worker: it defers the instruct uncharged and raised
+    // `livegate:<id>`. A re-instruct would only defer again, a heal re-screen
+    // would be wasted, and a `recon:` alert would be noise. liveRefusalFor makes
+    // no read for a 'test' row and never throws (a failed read is real money).
+    if ((await liveRefusalFor(db, t)) !== null) continue;
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT
     // partner's when routed — classify (webhook-driven vs mock) by THEIR
     // config, or a routed stuck transfer reads the owner's (often mock)

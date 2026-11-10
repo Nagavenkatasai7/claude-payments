@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
@@ -85,6 +86,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   outbox = createOutboxRepo(db);
   await seedPartner(db, 'acme');
+  await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   fetchFn.mockReset();
   fetchFn.mockResolvedValue(new Response(JSON.stringify({ providerRef: 'rail-1' }), { status: 200 }));
   await store.saveTransfer(transferFixture());
@@ -120,6 +122,7 @@ describe('settlement.instruct under settlement.paused', { retry: 0 }, () => {
 
   it('a pause on the ROUTED rail partner defers the row; a pause on another partner does not', async () => {
     await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle'));
     await pause('partner', 'globex');

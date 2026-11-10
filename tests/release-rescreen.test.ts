@@ -20,6 +20,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { beginHold } from '@/lib/settlement';
@@ -151,6 +152,7 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   const nowIso = new Date().toISOString();
   await createCustomerStore(db, store).saveCustomer({
     senderPhone: SENDER_PHONE, firstSeenAt: nowIso, kycStatus: 'verified', fullName: SENDER,

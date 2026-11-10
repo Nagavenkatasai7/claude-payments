@@ -14,6 +14,7 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
@@ -850,6 +851,8 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
         : { providerType: 'mock' },
       whatsapp: {},
     });
+    // Pack 3 T6: the stuck-paid loop skips an uncertified real-money row (K3 feeds it 'acme' http rows).
+    if (providerType === 'http') await certifyPartnerForTest(db, 'acme');
   }
   const message = async (key: string) =>
     ((await db.execute(sql`SELECT payload->>'message' AS message FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {
