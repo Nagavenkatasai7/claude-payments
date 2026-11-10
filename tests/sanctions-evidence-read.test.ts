@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { auditEvents } from '@/db/schema';
-import { listScreenEvidence, liveFresh, uncoveredRoles } from '@/lib/sanctions/evidence-read';
+import { instructGateRefuses, listScreenEvidence, liveFresh, uncoveredRoles } from '@/lib/sanctions/evidence-read';
 import { inputHash, type ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { SANCTIONS_LIST_MAX_AGE_MS } from '@/lib/sanctions/list-policy';
 import type { Db } from '@/db/client';
@@ -61,6 +61,21 @@ describe('listScreenEvidence', { retry: 0 }, () => {
     expect(rows[1].parties).toEqual([{ role: 'recipient', inputHash: inputHash('Anita Rao'), matched: false, matchScore: 0 }]);
   });
 
+  it('F1 A4: 210 other audit rows on the subject never hide a later screen (no cap shared with other actions)', async () => {
+    const t = transfer(30 * MIN);
+    const now = new Date();
+    const base = now.getTime() - 25 * MIN;
+    await seedLiveEvidence(db, t, { at: new Date(base) });
+    await db.insert(auditEvents).values(Array.from({ length: 210 }, (_, i) => ({
+      partnerId: 'acme', actor: 'staff:x', actorType: 'staff', action: 'pii.reveal', subjectId: t.id, meta: {},
+      at: new Date(base + (i + 1) * 1_000),
+    })));
+    await seedLiveEvidence(db, t, { at: new Date(now.getTime() - MIN), listFitness: 'not_live' });
+    const rows = await listScreenEvidence(db, t, now);
+    expect(rows.map((r) => r.listFitness)).toEqual(['live', 'not_live']);
+    expect(rows.at(-1)?.listFitness).toBe('not_live');
+  });
+
   it('malformed meta skipped', async () => {
     const t = transfer();
     const now = new Date();
@@ -105,6 +120,22 @@ describe('liveFresh', { retry: 0 }, () => {
     expect(liveFresh(ev({ screenedAt: ago(-10 * MIN) }), now)).toBe(false);
     expect(liveFresh(ev({ screenedAt: ago(-2 * MIN) }), now)).toBe(true); // within the clock skew
     expect(liveFresh(ev({ screenedAt: 'not a date' }), now)).toBe(false);
+  });
+});
+
+describe('instructGateRefuses (review F1/A1)', { retry: 0 }, () => {
+  it('refuses evidence with listFitness that is not liveFresh; passes no evidence and pre-pack evidence', () => {
+    const now = new Date();
+    const at = (ms: number) => new Date(now.getTime() - ms).toISOString();
+    expect(instructGateRefuses(undefined, now)).toBe(false);
+    expect(instructGateRefuses(ev({ listFitness: undefined, screenedAt: at(100 * HOUR) }), now)).toBe(false);
+    expect(instructGateRefuses(ev({ screenedAt: at(HOUR) }), now)).toBe(false);
+    expect(instructGateRefuses(ev({ screenedAt: at(SANCTIONS_LIST_MAX_AGE_MS + MIN) }), now)).toBe(true);
+    expect(instructGateRefuses(ev({ listFitness: 'not_live', screenedAt: at(MIN) }), now)).toBe(true);
+    expect(instructGateRefuses(ev({ listFitness: 'stale', screenedAt: at(MIN) }), now)).toBe(true);
+    expect(instructGateRefuses(ev({ decision: 'match', screenedAt: at(MIN) }), now)).toBe(true);
+    expect(instructGateRefuses(ev({ decision: 'possible_match', screenedAt: at(MIN) }), now)).toBe(false);
+    expect(instructGateRefuses(ev({ listFitness: undefined, decision: 'match', screenedAt: at(MIN) }), now)).toBe(false);
   });
 });
 

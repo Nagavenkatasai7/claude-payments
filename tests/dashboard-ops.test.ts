@@ -20,6 +20,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
 import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { seedLiveEvidence } from './helpers-sanctions';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -1026,6 +1027,8 @@ describe('sender screening hold — platform release refusal (fix pack 2 T6)', (
     expect(await auditRows()).toEqual([]);
     // The audited clear lifts the hold (the repo writer the action calls).
     await createCustomerRepo(db, async () => null).clearScreeningHold('rp', PHONE, new Date());
+    // Review F1/A1: a real-money release needs a live, fresh newest screen (else it re-screens first).
+    await seedLiveEvidence(db, (await store.getTransfer('rel_sender'))!);
     await releaseTransfer(store, db, 'rel_sender', REL);
     expect((await store.getTransfer('rel_sender'))?.status).toBe('paid');
   });

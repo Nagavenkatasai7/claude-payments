@@ -17,7 +17,7 @@ import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
-import { listScreenEvidence } from '@/lib/sanctions/evidence-read';
+import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
@@ -301,6 +301,22 @@ export class UnknownOutboxKindError extends Error {
 /** A row's kind as it may appear in an alert or a dedupe key: bounded, one line, a safe alphabet. */
 function safeKindLabel(kind: string): string {
   return kind.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) || '_';
+}
+
+/**
+ * Pack 2 review F1 (C1): the instruct live-list gate refused a real-money
+ * instruction because the newest screen is not on a live list, is older than
+ * SANCTIONS_LIST_MAX_AGE_MS, or was a match. A COMPLIANCE refusal, never a rail
+ * failure: deliberately NOT a RailInstructError, so it never raises
+ * railfail:<partner> and never touches rail health or best-rate routing.
+ * Retryable under the settlement.instruct policy: the reconcile stuck-paid
+ * heal (healPaidRowScreen) re-screens the row on a live list.
+ */
+export class InstructNotLiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InstructNotLiveError';
+  }
 }
 
 /**
@@ -834,22 +850,34 @@ async function handle(
       // retried, re-instructed or dead-letter-retried after the rail went 'http',
       // is NOT sent: its newest screen must have been on a live list. Evidence
       // with no listFitness (written before pack 2), or no evidence at all,
-      // passes (in-flight rows keep today's behaviour). The gate only ever stops
-      // a POST; it never moves money. Retried like any rail error.
+      // passes (in-flight rows keep today's behaviour). Evidence that carries a
+      // listFitness must be liveFresh: a live list AND screened within
+      // SANCTIONS_LIST_MAX_AGE_MS (review F1/A1: a release or a dead-letter
+      // Retry days later never POSTs on an old screen), and not a match. The
+      // gate only ever stops a POST; it never moves money. InstructNotLiveError,
+      // not a rail failure (review F1/C1): retried under the instruct policy, no
+      // railfail alert; the reconcile stuck-paid heal re-screens the row.
       if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
-        const newest = (await listScreenEvidence(deps.db, transfer, new Date())).at(-1);
-        if (newest?.listFitness !== undefined && newest.listFitness !== 'live') {
-          logWarn('outbox.instruct-not-live', 'last sanctions screen not on a live list; instruction not sent', { transferId });
+        const gateNow = new Date();
+        const newest = (await listScreenEvidence(deps.db, transfer, gateNow)).at(-1);
+        if (newest && instructGateRefuses(newest, gateNow)) {
+          const why =
+            newest.decision === 'match'
+              ? 'Last screen was a sanctions match.'
+              : newest.listFitness !== 'live'
+                ? 'Last screen not on a live list.'
+                : 'Last screen older than the list age limit.';
+          logWarn('outbox.instruct-not-live', 'last sanctions screen not live, too old or a match; instruction not sent', { transferId });
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
             {
               message:
-                `transfer ${transferId} (rail ${railPartnerId}) is paid but its last sanctions screen was not on a live list; ` +
-                'not instructed. Reject and refund it, or re-screen it.',
+                `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: ${why} ` +
+                'The reconcile sweep re-screens it once a live list is served; otherwise refund it.',
             },
             { dedupeKey: `instructnotlive:${transferId}` },
           );
-          throw new RailInstructError(railPartnerId, 'Last screen not on a live list.');
+          throw new InstructNotLiveError(why);
         }
       }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy

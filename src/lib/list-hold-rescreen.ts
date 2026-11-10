@@ -26,14 +26,18 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
-import { screenTransfer } from './compliance';
+import { screenTransfer, type ComplianceResult } from './compliance';
 import { LIST_UNAVAILABLE_REASON, resolveCorridorRules, senderScreeningHoldActive } from './compliance-config';
 import { railPartnerOf, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
 import { pokeWorker } from './outbox';
 import { createPartnerStore } from './partner-store';
 import { resolveRescreenNames } from './pay-rescreen';
-import { listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { sanctionsAuditEvent } from './sanctions/evidence';
+import { instructGateRefuses, listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { sanctionsListFitnessNow } from './sanctions/list-health';
 import type { ListFitness } from './sanctions/list-policy';
 import { releaseRescreenedHold } from './settlement';
@@ -52,17 +56,19 @@ export interface ListHoldSweepResult {
 
 type RowOutcome = 'released' | 'still_held' | 'blocked' | 'moved' | 'skipped';
 
-async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date): Promise<RowOutcome> {
-  const railIntegrations = await createIntegrationsRepo(db).getIntegrations(railPartnerOf(t));
-  // The integrations were read: no providerType is the default mock rail (null).
-  const needLive = realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null });
-  if (needLive && fitness !== 'live') return 'skipped';
-
-  // Fix pack 2 T6 (R06): on a real-money rail the sender's screening hold
-  // (owning tenant) keeps the row held; a read error throws and the caller
-  // skips the row. No read otherwise.
-  const senderHold = needLive && senderScreeningHoldActive(await readSenderScreeningFlags(db, t.partnerId, t.phone));
-
+/**
+ * Re-screen a HELD transfer with the names on file and its owner's corridor
+ * rules (no write): the screen result, and the roles an earlier screen covered
+ * that this one does not. Shared by the list-hold sweep and (review F1/A1)
+ * releaseTransfer's re-screen of a real-money hold whose screen is not
+ * liveFresh. Reads outside any transaction; a read error throws.
+ */
+export async function screenHeldOnFile(
+  db: Db,
+  t: Transfer,
+  needLive: boolean,
+  now: Date,
+): Promise<{ result: ComplianceResult; uncovered: Array<'sender' | 'recipient'> }> {
   const names = await resolveRescreenNames(db, t);
   const partners = createPartnerStore(db);
   const owner = (await partners.getPartner(t.partnerId)) ?? (await partners.ensureDefaultPartner());
@@ -83,6 +89,21 @@ async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date)
     now,
     ...(names.alsoRecipientNames.length > 0 ? { alsoRecipientNames: names.alsoRecipientNames } : {}),
   });
+  return { result, uncovered };
+}
+
+async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date): Promise<RowOutcome> {
+  const railIntegrations = await createIntegrationsRepo(db).getIntegrations(railPartnerOf(t));
+  // The integrations were read: no providerType is the default mock rail (null).
+  const needLive = realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null });
+  if (needLive && fitness !== 'live') return 'skipped';
+
+  // Fix pack 2 T6 (R06): on a real-money rail the sender's screening hold
+  // (owning tenant) keeps the row held; a read error throws and the caller
+  // skips the row. No read otherwise.
+  const senderHold = needLive && senderScreeningHoldActive(await readSenderScreeningFlags(db, t.partnerId, t.phone));
+
+  const { result, uncovered } = await screenHeldOnFile(db, t, needLive, now);
   // Still no list to screen on: wait for the next sweep, nothing written.
   if (result.reasons.includes(LIST_UNAVAILABLE_REASON)) return 'skipped';
   const r = await releaseRescreenedHold(db, t.id, {
@@ -93,6 +114,67 @@ async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date)
     uncovered,
   });
   return r.kind;
+}
+
+export type PaidHealOutcome = 'cleared' | 'blocked' | 'review' | 'skipped';
+
+/**
+ * Pack 2 review F1 (A1): the heal of a PAID real-money row whose instruct the
+ * worker gate refuses (instructGateRefuses: newest evidence with a listFitness
+ * that is not liveFresh). Called by the reconcile stuck-paid sweep, only for a
+ * row on a real-money rail. Re-screens with the names on file on a LIVE list:
+ *   • the list is not live (or the screen still says LIST_UNAVAILABLE) ⇒
+ *     'skipped', nothing written (the gate keeps refusing: fail closed);
+ *   • a live, clear screen that covers every name screened before ⇒ its
+ *     sanctions.screen evidence row ⇒ 'cleared' (the next instruct passes);
+ *   • a match ⇒ the evidence row and the sanctions block notices (stage
+ *     'resume') in ONE transaction ⇒ 'blocked' (the gate refuses a match);
+ *   • anything else (a possible match, an uncovered name) ⇒ NO evidence (a
+ *     fresh live row would unlock the gate on an unreviewed result) and one
+ *     deduped `instructrescreen:<id>` ops alert, ids only ⇒ 'review'.
+ * A newest screen that is a match, or a row already alerted, is not screened
+ * again. Reads outside the transaction; a read error throws (nothing written).
+ */
+export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise<PaidHealOutcome> {
+  if (t.status !== 'paid') return 'skipped';
+  const newest = (await listScreenEvidence(db, t, now)).at(-1);
+  if (!newest || !instructGateRefuses(newest, now) || newest.decision === 'match') return 'skipped';
+  const reviewKey = `instructrescreen:${t.id}`;
+  if (await createOutboxRepo(db).hasDedupeKey(reviewKey)) return 'skipped';
+  if ((await sanctionsListFitnessNow(now)) !== 'live') return 'skipped';
+  const { result, uncovered } = await screenHeldOnFile(db, t, true, now);
+  if (result.reasons.includes(LIST_UNAVAILABLE_REASON) || !result.evidence) return 'skipped';
+  const evidence = result.evidence;
+  if (result.status === 'blocked') {
+    await db.transaction(async (tx) => {
+      await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, evidence));
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId: t.partnerId,
+        railPartnerId: railPartnerOf(t),
+        subjectId: t.id,
+        stage: 'resume',
+        environment: t.environment ?? 'live',
+        realMoney: true,
+        evidence,
+      });
+    });
+    pokeWorker();
+    return 'blocked';
+  }
+  if (evidence.decision === 'clear' && evidence.listFitness === 'live' && uncovered.length === 0) {
+    await createAuditRepo(db).record(sanctionsAuditEvent(t.partnerId, t.id, evidence));
+    return 'cleared';
+  }
+  await createOutboxRepo(db).enqueue(
+    'ops.alert',
+    {
+      message:
+        `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is paid but not instructed: its re-screen on a live list did not clear ` +
+        '(a possible match or a name that cannot be screened again). It stays uninstructed; review it on the compliance page and refund it.',
+    },
+    { dedupeKey: reviewKey },
+  );
+  return 'review';
 }
 
 /** Never throws. Pokes the worker once when a row was released or blocked. */

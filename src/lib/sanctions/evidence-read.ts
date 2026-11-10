@@ -81,8 +81,9 @@ function parseEvidence(meta: Record<string, unknown>): ScreeningEvidence | null 
 }
 
 /**
- * The transfer's sanctions.screen evidence, OWNER tenant, written in
- * [createdAt - 10 min, now + 1 min), oldest first. Malformed rows are skipped.
+ * ALL the transfer's sanctions.screen evidence, OWNER tenant, written in
+ * [createdAt - 10 min, now + 1 min), oldest first, however many other audit
+ * rows the subject has. Malformed rows are skipped.
  * An unreadable createdAt reads nothing (the caller then sees no live evidence).
  * A read error propagates: the caller must not settle on it.
  */
@@ -93,15 +94,17 @@ export async function listScreenEvidence(
 ): Promise<ScreeningEvidence[]> {
   const created = Date.parse(t.createdAt);
   if (!Number.isFinite(created) || !t.partnerId) return [];
-  const rows = await createAuditRepo(db).listBySubject(
+  // Its own query on the action (no cap shared with other audit actions), so
+  // .at(-1) is always the newest screen (pack 2 review F1/A4).
+  const rows = await createAuditRepo(db).listBySubjectAction(
     t.partnerId,
     t.id,
+    SANCTIONS_AUDIT_ACTION,
     new Date(created - BEFORE_CREATED_MS),
     new Date(now.getTime() + AFTER_NOW_MS),
   );
   const out: ScreeningEvidence[] = [];
   for (const row of rows) {
-    if (row.action !== SANCTIONS_AUDIT_ACTION) continue;
     const e = parseEvidence(row.meta);
     if (e) out.push(e);
   }
@@ -119,6 +122,20 @@ export function liveFresh(e: ScreeningEvidence | undefined, now: Date): boolean 
   if (!Number.isFinite(screened)) return false;
   const age = now.getTime() - screened;
   return age >= -LIST_CLOCK_SKEW_MS && age <= SANCTIONS_LIST_MAX_AGE_MS;
+}
+
+/**
+ * Pack 2 review F1 (A1): the settlement.instruct live-list gate's rule, shared
+ * with the reconcile stuck-paid heal so the two can never disagree. A
+ * real-money instruct is refused when the newest evidence carries a
+ * listFitness and is not liveFresh, or is a match (the heal records a match it
+ * finds, and that row must never be instructed). No evidence, or evidence
+ * without listFitness (written before pack 2), is not refused (the deliberate
+ * pre-pack pass-through).
+ */
+export function instructGateRefuses(newest: ScreeningEvidence | undefined, now: Date): boolean {
+  if (newest?.listFitness === undefined) return false;
+  return newest.decision === 'match' || !liveFresh(newest, now);
 }
 
 /**

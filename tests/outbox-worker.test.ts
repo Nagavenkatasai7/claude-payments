@@ -23,6 +23,7 @@ import { TelegramNoTemplateError } from '@/lib/whatsapp';
 import { ProviderHttpError } from '@/lib/llm-provider-error';
 import { env } from '@/lib/env';
 import { seedLiveEvidence } from './helpers-sanctions';
+import { recentlyFailingRails } from '@/lib/rail-health';
 
 // R17: the AI notice and its durable marker are covered by
 // tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
@@ -3221,6 +3222,49 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
     // Ids only: no names, phones or account numbers.
     for (const pii of ['Anita', '15551230000', '919876543210', '123456789012']) expect(msg).not.toContain(pii);
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('F1 C1: the not-live refusal at attempt 3+ is NOT a rail failure: no railfail alert, routing unchanged, row stays retryable', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'not_live' });
+    await rail('http');
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await db.execute(sql`UPDATE outbox SET attempts = ${RAILFAIL_ALERT_MIN_ATTEMPT + 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const keys = (await rowsOf('ops.alert')).map((a) => a.dedupe_key);
+    expect(keys.filter((k) => k.startsWith('railfail:'))).toEqual([]);
+    expect(keys).toEqual(['instructnotlive:wk_t1']);
+    expect([...(await recentlyFailingRails(db, ['acme'], new Date()))]).toEqual([]);
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed'); // retryable (a re-screen can heal it), not dead
+    expect(instruct.last_error).toBe('Last screen not on a live list.');
+  });
+
+  it('F1 A1: http + newest evidence live but screened 40 h ago: not POSTed, one instructnotlive alert, retryable', async () => {
+    const t = liveTransfer();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live', screenedAgoMs: 40 * 3_600_000 });
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const [instruct] = await rowsOf('settlement.instruct');
+    expect(instruct.status).toBe('failed');
+    expect(instruct.last_error).toBe('Last screen older than the list age limit.');
+    expect((await rowsOf('ops.alert')).map((a) => a.dedupe_key)).toEqual(['instructnotlive:wk_t1']);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('F1 A1: no evidence at all on http: POSTed (pre-pack pass-through)', async () => {
+    await store.saveTransfer(liveTransfer());
+    await rail('http');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'http-4' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((fetchFn.mock.calls[0] as [string])[0]).toBe(STORED);
   });
 
   it('http + newest evidence live: POSTed', async () => {

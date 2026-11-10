@@ -12,7 +12,7 @@ import { isFlagOn } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
-import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import type { Transfer } from '@/lib/types';
 
@@ -25,6 +25,8 @@ import type { Transfer } from '@/lib/types';
 // still strand:
 //   • a webhook-driven transfer stuck in 'paid' too long (the partner's rail
 //     never called back, or the instruction died) → re-instruct ONCE + alert,
+//     (on a real-money rail, first re-screened on a live list when the
+//     instruct gate refuses its newest screen: pack 2 review F1),
 //   • a compliance hold ('in_review') nobody has touched in 24h → alert,
 //   • a CHARGED transfer still awaiting_payment (fundingRef set; the process
 //     died between capture and settleOrHold) → resume settlement (cleared) or
@@ -150,6 +152,17 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     let reinstructedNow = false;
     let inFlight = false;
     if (webhookDriven && !held) {
+      // Pack 2 review F1 (A1): a real-money row whose instruct the worker's
+      // live-list gate refuses (its newest screen is too old or not live) is
+      // re-screened on a live list first, so the retrying instruct (or the
+      // re-instruction below) can pass. Isolated: an error costs nothing else.
+      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
+        try {
+          await healPaidRowScreen(db, t, now);
+        } catch (err) {
+          logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
+        }
+      }
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —

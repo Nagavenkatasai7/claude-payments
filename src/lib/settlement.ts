@@ -15,6 +15,7 @@ import {
   POSSIBLE_MATCH_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
+  isRescreenOnlyHold,
   senderScreeningHoldActive,
 } from '@/lib/compliance-config';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
@@ -358,6 +359,106 @@ export async function releaseHold(
       });
     }
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
+    return { kind: 'released', webhookDriven };
+  });
+}
+
+export type StaffRescreenReleaseResult =
+  | { kind: 'released'; webhookDriven: boolean } // in_review → paid + the rail effect, after a live, fresh, clear re-screen
+  | { kind: 'held' } // the re-screen did not clear: still in_review, reasons updated (LIST_UNAVAILABLE when the list is not live)
+  | { kind: 'blocked' } // a match: blocked, notices enqueued, never paid out
+  | { kind: 'already' }; // not in_review anymore (or now blocked / rescreen-only): nothing written
+
+/**
+ * Pack 2 review F1 (A1): a STAFF release of a real-money hold whose newest
+ * screen is not liveFresh. The caller (dashboard-ops releaseTransfer)
+ * re-screened the row on file OUTSIDE this transaction (`result`, requiring a
+ * live list) and worked out the uncovered roles. ONE transaction, the row
+ * locked (FOR UPDATE, tenant-pinned for a partner release):
+ *   1. no longer in_review, blocked, or rescreen-only ⇒ 'already', nothing written;
+ *   2. the re-screen's sanctions.screen evidence row;
+ *   3. a match ⇒ blocked (the screen's reasons added) + the sanctions block
+ *      notices (stage 'hold_rescreen') ⇒ 'blocked';
+ *   4. not a live, clear, fully covered screen, or a reason the row did not
+ *      carry (LIST_UNAVAILABLE, a possible match, an uncovered name) ⇒
+ *      'flagged' with them and a staff `transfer.rescreen` audit row ⇒ 'held'
+ *      (with LIST_UNAVAILABLE the automatic sweep owns the row);
+ *   5. otherwise the claim and rail effect releaseHold commits (the same
+ *      markPaidIfInReview, with `partnerRelease`), audited as the staff
+ *      transfer.release ⇒ 'released'. A refused claim ⇒ 'already' (the
+ *      screen's evidence stays: it is a true record).
+ * Audit meta carries ids and reason strings only, never a name.
+ */
+export async function releaseHoldAfterRescreen(
+  db: Db,
+  transferId: string,
+  input: {
+    result: ComplianceResult;
+    uncovered: Array<'sender' | 'recipient'>;
+    railIntegrations: PartnerIntegrations;
+    audit: StaffAuditCtx;
+    partnerRelease?: { partnerId: PartnerId };
+  },
+): Promise<StaffRescreenReleaseResult> {
+  const { result, uncovered, audit, partnerRelease } = input;
+  return db.transaction(async (tx): Promise<StaffRescreenReleaseResult> => {
+    const repo = createTransferRepo(tx);
+    const t = await repo.getTransferForUpdate(transferId, partnerRelease ? { partnerId: partnerRelease.partnerId } : {});
+    if (!t || t.status !== 'in_review' || t.complianceStatus === 'blocked' || isRescreenOnlyHold(t)) return { kind: 'already' };
+    const previousReasons = t.complianceReasons ?? [];
+    if (result.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, result.evidence));
+
+    if (result.status === 'blocked') {
+      const reasons = [...new Set([...previousReasons, ...result.reasons])];
+      const blocked = await repo.applyListRescreenInReview(t.id, t.partnerId, { complianceStatus: 'blocked', reasons });
+      if (!blocked) throw new Error('release re-screen: the locked row refused the block');
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId: t.partnerId,
+        railPartnerId: railPartnerOf(t),
+        subjectId: t.id,
+        stage: 'hold_rescreen',
+        environment: t.environment ?? 'live',
+        realMoney: true,
+        evidence: result.evidence,
+      });
+      return { kind: 'blocked' };
+    }
+
+    const newReasons = [
+      ...new Set([
+        ...previousReasons,
+        ...result.reasons,
+        ...(uncovered.includes('sender') ? [SENDER_IDENTITY_MISSING_REASON] : []),
+        ...(uncovered.includes('recipient') ? [POSSIBLE_MATCH_REASON] : []),
+      ]),
+    ];
+    const ev = result.evidence;
+    const clear =
+      ev?.decision === 'clear' &&
+      ev.listFitness === 'live' &&
+      liveFresh(ev, new Date()) &&
+      uncovered.length === 0 &&
+      newReasons.every((r) => previousReasons.includes(r));
+    if (!clear) {
+      const flagged = await repo.applyListRescreenInReview(t.id, t.partnerId, { complianceStatus: 'flagged', reasons: newReasons });
+      if (!flagged) throw new Error('release re-screen: the locked row refused the update');
+      await recordStaffTransferAudit(tx, audit, 'transfer.rescreen', t, {
+        previousReasons,
+        newReasons,
+        decision: ev?.decision ?? null,
+        uncovered: [...uncovered],
+        trigger: 'release',
+      });
+      return { kind: 'held' };
+    }
+
+    const paid = await repo.markPaidIfInReview(t.id, partnerRelease);
+    if (!paid) return { kind: 'already' };
+    await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {
+      previousStatus: 'in_review',
+      newStatus: paid.status,
+    });
+    const { webhookDriven } = await enqueueRailEffect(tx, paid, input.railIntegrations);
     return { kind: 'released', webhookDriven };
   });
 }

@@ -748,6 +748,26 @@ function createAuditCaseQueries(db: DbOrTx) {
       return rows.map(toAuditRow);
     },
 
+    /**
+     * EVERY row of one action about one subject in [from, to), pinned to one
+     * tenant, oldest first. No row cap: rows of other actions never count
+     * against it (pack 2 review F1/A4, the sanctions.screen evidence reader).
+     */
+    async listBySubjectAction(partnerId: PartnerId, subjectId: string, action: string, from: Date, to: Date): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.partnerId, partnerId),
+          eq(auditEvents.subjectId, subjectId),
+          eq(auditEvents.action, action),
+          gte(auditEvents.at, from),
+          lt(auditEvents.at, to),
+        ))
+        .orderBy(asc(auditEvents.at), asc(auditEvents.id));
+      return rows.map(toAuditRow);
+    },
+
     /** Rows of one action in [from, to), optionally tenant-pinned, newest first. */
     async listByAction(
       action: string,
