@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SITE_SKINS, isSkinSlug, skinForSlug, siteSkinFor, skinLogoSrc, type SiteSkin } from '@/lib/site-skins';
+import { SITE_SKINS, CUSTOM_SKIN_HOSTS, isSkinSlug, skinForSlug, siteSkinFor, skinLogoSrc, type SiteSkin } from '@/lib/site-skins';
 import { isValidSiteSlug } from '@/lib/site-host';
 import { validateThemeColor } from '@/lib/ui/theme';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -30,6 +30,40 @@ describe('SITE_SKINS', () => {
   it.each(Object.entries(SITE_SKINS))('%s: the logo (when set) is a file under /brand/partners/', (_key, skin) => {
     if (skin.logoSrc === null) return;
     expect(skinLogoSrc(skin)).toBe(skin.logoSrc);
+  });
+});
+
+describe('custom skin hosts (smartremitai.tgfl.org)', () => {
+  // One DNS name: labels of [a-z0-9-] without edge hyphens, at least two labels, no port, no trailing dot.
+  const DNS_NAME = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+  const all = Object.values(SITE_SKINS).flatMap((s) => s.hosts.map((h) => [h, s] as const));
+
+  it('CUSTOM_SKIN_HOSTS maps exactly smartremitai.tgfl.org to the tgfl skin', () => {
+    expect([...CUSTOM_SKIN_HOSTS.entries()]).toEqual([['smartremitai.tgfl.org', 'tgfl']]);
+    expect(SITE_SKINS.tgfl.hosts).toEqual(['smartremitai.tgfl.org']);
+  });
+
+  it.each(all)('%s: lowercase, no port, no trailing dot, a DNS name, outside smartremit.ai', (host) => {
+    expect(host).toBe(host.toLowerCase());
+    expect(host).not.toContain(':');
+    expect(host.endsWith('.')).toBe(false);
+    expect(host).toMatch(DNS_NAME);
+    expect(host.length).toBeLessThanOrEqual(253);
+    expect(host === 'smartremit.ai' || host.endsWith('.smartremit.ai')).toBe(false);
+  });
+
+  it('every custom host is unique across skins, and its slug is a valid site slug and a skin slug', () => {
+    expect(new Set(all.map(([h]) => h)).size).toBe(all.length);
+    expect(CUSTOM_SKIN_HOSTS.size).toBe(all.length);
+    for (const [host, slug] of CUSTOM_SKIN_HOSTS) {
+      expect(isValidSiteSlug(slug), host).toBe(true);
+      expect(isSkinSlug(slug), host).toBe(true);
+    }
+  });
+
+  it.each(Object.entries(SITE_SKINS))('%s: credentialEpoch is a positive integer', (_key, skin) => {
+    expect(Number.isInteger(skin.credentialEpoch)).toBe(true);
+    expect(skin.credentialEpoch).toBeGreaterThan(0);
   });
 });
 

@@ -32,15 +32,32 @@ export interface SiteSkin {
   theme: { primary: string; accent: string } | null;
   /** true shows the demo line ("… demo, run by SmartRemit. No real money moves.") on every page. */
   demo: boolean;
+  /**
+   * Exact extra hostnames OUTSIDE smartremit.ai that serve this skin (lowercase, no port, no trailing dot).
+   * Each needs its literal in src/proxy.ts matcher entry (3); tests/site-matcher-parity.test.ts rebuilds it.
+   * NEVER remove a host while its DNS may still point at Vercel: a host not in this list parses as apex
+   * (CLAUDE.md "Site skins").
+   */
+  hosts: readonly string[];
+  /** Bump to revoke every portal session and AI-app refresh token minted on this skin's custom hosts. */
+  credentialEpoch: number;
 }
 
 export const SITE_SKINS: Readonly<Record<string, SiteSkin>> = {
   // TGFL = Telangana Association of Florida, https://tgfl.org (owner, 2026-11-09: the domain is
   // tgfl.org, not tgfl.com). A community association, not a licensed partner; nothing signed. No
   // logo file or brand colours in the repo yet, so the header shows the name as text in
-  // SmartRemit's colours. The planned custom address is smartremitai.tgfl.org (not built).
-  tgfl: { slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL', logoSrc: null, theme: null, demo: true },
+  // SmartRemit's colours. Custom address: smartremitai.tgfl.org (a CNAME on TGFL's DNS).
+  tgfl: {
+    slug: 'tgfl', partnerId: DEFAULT_PARTNER_ID, name: 'TGFL', logoSrc: null, theme: null, demo: true,
+    hosts: ['smartremitai.tgfl.org'], credentialEpoch: 1,
+  },
 };
+
+/** Every custom skin host → its skin slug (exact, lowercase keys). parseSiteHost and the proxy matcher use it. */
+export const CUSTOM_SKIN_HOSTS: ReadonlyMap<string, string> = new Map(
+  Object.values(SITE_SKINS).flatMap((s) => s.hosts.map((h) => [h, s.slug] as const)),
+);
 
 /** Own keys only: 'constructor', '__proto__' and friends are never a skin. */
 export function isSkinSlug(slug: string): boolean {

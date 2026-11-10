@@ -7,6 +7,8 @@
 // SITE    = <valid slug>.smartremit.ai.
 // REFUSED = every other *.smartremit.ai host (reserved labels, ??-- labels, bad lengths or edges,
 //           multi-label names, the trailing-dot form). Never served by the apex app.
+// CUSTOM  = a site skin's exact custom host outside smartremit.ai (SITE_SKINS[*].hosts), any case, any port.
+// CUSTOM_REFUSED = the trailing-dot form and every sub-label of a custom host. Never served by the apex app.
 import { RESERVED_SLUGS } from '@/lib/site-host';
 
 export const SITE_HOSTS: Array<[host: string, slug: string]> = [
@@ -21,6 +23,9 @@ export const APEX_HOSTS: string[] = [
   'smartremit.ai.evil.com', 'acme.smartremit.ai.evil.com', 'evilsmartremit.ai', 'acme.evilsmartremit.ai',
   'claude-payments.vercel.app', 'claude-payments-git-feat-x-team.vercel.app', 'localhost', 'localhost:3000',
   'acme.localhost', '127.0.0.1', '127.0.0.1:3000', '[::1]', '[::1]:3000', '',
+  // Look-alikes of the custom skin host smartremitai.tgfl.org: apex as today (never routed to this project).
+  'tgfl.org', 'www.tgfl.org', 'evil-tgfl.org', 'evilsmartremitai.tgfl.org', 'smartremitai-tgfl.org', 'smartremitaiXtgflXorg',
+  'smartremitai.tgflXorg', 'smartremitai.tgfl.org.evil.com', '.smartremitai.tgfl.org',
 ];
 
 export const REFUSED_HOSTS: string[] = [
@@ -31,4 +36,15 @@ export const REFUSED_HOSTS: string[] = [
   'xn--80ak6aa92e.smartremit.ai', 'XN--ABC.smartremit.ai', 'ab--cd.smartremit.ai', 'a.b.smartremit.ai', 'www.acme.smartremit.ai',
   'acme.www.smartremit.ai', 'acme.smartremit.ai.', 'ACME.smartremit.ai.:443', 'ab.smartremit.ai', 'a.smartremit.ai',
   `${'a'.repeat(31)}.smartremit.ai`, '-acme.smartremit.ai', 'acme-.smartremit.ai', 'ac_me.smartremit.ai', 'www2.smartremit.ai',
+];
+
+/** [host, slug, canonical host] of every custom skin host form that parses as that skin's site. */
+export const CUSTOM_HOSTS: Array<[host: string, slug: string, canonical: string]> = [
+  ['smartremitai.tgfl.org', 'tgfl', 'smartremitai.tgfl.org'], ['SMARTREMITAI.TGFL.ORG:443', 'tgfl', 'smartremitai.tgfl.org'],
+  ['SmartRemitAI.tgfl.org', 'tgfl', 'smartremitai.tgfl.org'], ['smartremitai.tgfl.org:8080', 'tgfl', 'smartremitai.tgfl.org'],
+];
+
+export const CUSTOM_REFUSED_HOSTS: string[] = [
+  'smartremitai.tgfl.org.', 'SMARTREMITAI.TGFL.ORG.:443', 'x.smartremitai.tgfl.org', 'a.b.smartremitai.tgfl.org',
+  'www.smartremitai.tgfl.org', 'x.smartremitai.tgfl.org.',
 ];

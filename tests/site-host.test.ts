@@ -1,9 +1,23 @@
 import { describe, it, expect } from 'vitest';
 import { parseSiteHost, stripSiteHeaders, SITE_HEADERS, isValidSiteSlug, RESERVED_SLUGS } from '@/lib/site-host';
-import { SITE_HOSTS, APEX_HOSTS, REFUSED_HOSTS } from './site-host-corpus';
+import { SITE_HOSTS, APEX_HOSTS, REFUSED_HOSTS, CUSTOM_HOSTS, CUSTOM_REFUSED_HOSTS } from './site-host-corpus';
 
 describe('parseSiteHost', () => {
-  it.each(SITE_HOSTS)('%s → site %s', (h, slug) => expect(parseSiteHost(h)).toEqual({ kind: 'site', slug }));
+  it.each(SITE_HOSTS)('%s → site %s', (h, slug) =>
+    expect(parseSiteHost(h)).toEqual({ kind: 'site', slug, host: `${slug}.smartremit.ai`, custom: false }));
+  it.each(CUSTOM_HOSTS)('%s → custom site %s on %s', (h, slug, canonical) =>
+    expect(parseSiteHost(h)).toEqual({ kind: 'site', slug, host: canonical, custom: true }));
+  it.each(CUSTOM_REFUSED_HOSTS)('%j → refused (the trailing-dot form or a sub-label of a custom skin host)', (h) =>
+    expect(parseSiteHost(h)).toEqual({ kind: 'refused' }));
+  it('the canonical host is rebuilt from the code table: it never echoes the header\'s case, port or dot', () => {
+    for (const h of [...SITE_HOSTS.map(([x]) => x), ...CUSTOM_HOSTS.map(([x]) => x)]) {
+      const p = parseSiteHost(h);
+      expect(p.kind, h).toBe('site');
+      if (p.kind !== 'site') continue;
+      expect(p.host, h).toBe(p.host.toLowerCase());
+      expect(p.host, h).not.toMatch(/[:]|\.$/);
+    }
+  });
   it.each(APEX_HOSTS)('%j → apex', (h) => expect(parseSiteHost(h)).toEqual({ kind: 'apex' }));
   it.each(REFUSED_HOSTS)('%j → refused (a smartremit.ai subdomain that is not a valid slug and not www)', (h) =>
     expect(parseSiteHost(h)).toEqual({ kind: 'refused' }));

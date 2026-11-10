@@ -12,9 +12,10 @@ import { REFERRAL_COOKIE, referralCodeToStore, referralCookieOptions } from '@/l
 // every server action self-gates (the server-action security checklist); the
 // middleware just stops anonymous traffic from reaching protected trees.
 //
-// UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) is dispatched
-// FIRST to siteProxy, before any cookie gate; any other smartremit.ai subdomain except www is refused
-// (404), so the apex app is never served on it. The apex (smartremit.ai, www, previews, localhost)
+// UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) or a custom
+// skin host (src/lib/site-skins.ts `hosts`, e.g. smartremitai.tgfl.org) is dispatched FIRST to
+// siteProxy, before any cookie gate; any other smartremit.ai subdomain except www, and the trailing-dot
+// form or a sub-label of a custom skin host, is refused (404), so the apex app is never served on it. The apex (smartremit.ai, www, previews, localhost)
 // runs the unchanged legacy gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
 // headers are stripped from every request this proxy sees; only siteProxy sets them.
 
@@ -165,11 +166,12 @@ export const config = {
     '/admin-dashboard/:path*',
     '/account',
     '/account/:path*',
-    // UI redesign M1: subdomains of smartremit.ai ONLY. Next lowercases the Host, strips the port and
-    // tests ^value$ (next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so the apex
-    // (smartremit.ai, www.smartremit.ai) and every non-smartremit.ai host never satisfy either `has`,
-    // and the apex match set is unchanged (tests/site-matcher-parity.test.ts). The values are
-    // hand-written literals of the parseSiteHost rules; the parity test fails if they drift.
+    // UI redesign M1: subdomains of smartremit.ai and the exact custom skin hosts ONLY. Next lowercases
+    // the Host, strips the port and tests ^value$ (next 16.4.3,
+    // next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so the apex (smartremit.ai,
+    // www.smartremit.ai) and every other host never satisfy any `has`, and the apex match set is
+    // unchanged (tests/site-matcher-parity.test.ts). The values are hand-written literals of the
+    // parseSiteHost rules (a matcher must be a constant); the parity test fails if they drift.
     // Static assets are excluded explicitly (end-anchored).
     // (1) <valid slug>.smartremit.ai: a partner site.
     {
@@ -187,6 +189,13 @@ export const config = {
     {
       source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
       has: [{ type: 'host', value: '(?!www\\.smartremit\\.ai\\.?$).+\\.smartremit\\.ai\\.?' }],
+    },
+    // (3) the custom skin hosts of site-skins.ts (CUSTOM_SKIN_HOSTS), their trailing-dot form and every
+    // sub-label: the exact host is the skin's site, the rest is refused. Rebuilt from CUSTOM_SKIN_HOSTS
+    // and compared byte for byte by tests/site-matcher-parity.test.ts.
+    {
+      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
+      has: [{ type: 'host', value: '(?:.+\\.)?(?:smartremitai\\.tgfl\\.org)\\.?' }],
     },
   ],
 };
