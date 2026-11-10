@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
@@ -81,5 +82,22 @@ describe('payErrorMessage — Step 0 rate refusals', () => {
     expect(m).toBe(PAY_QUOTE_EXPIRED_COPY);
     expect(m).not.toBe(PAY_RATE_EXPIRED_COPY);
     expect(m).not.toMatch(/cancel/i);
+  });
+});
+
+// Fix pack 4 (C14): the reload and approval-not-recorded copies the pay routes answer with.
+describe('payErrorMessage: fix pack 4 copy', () => {
+  it('reload_required -> PAY_RELOAD_REQUIRED_COPY and approval_not_recorded -> PAY_APPROVAL_NOT_RECORDED_COPY', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', error: 'x' })).toBe(PAY_RELOAD_REQUIRED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', error: 'x' })).toBe(PAY_APPROVAL_NOT_RECORDED_COPY);
+  });
+
+  it('the three new constants equal the C14 strings exactly, and PAY_ACCOUNT_HOLDER_COPY is not returned by payErrorMessage', () => {
+    expect(PAY_RELOAD_REQUIRED_COPY).toBe('This page is out of date. Reload the page, check the details, then try again. Nothing was charged.');
+    expect(PAY_APPROVAL_NOT_RECORDED_COPY).toBe("We couldn't record your approval, so nothing was charged. Tap Resend for a new code, then try again.");
+    expect(PAY_ACCOUNT_HOLDER_COPY).toBe("Enter the account holder's name as it appears at the recipient's bank.");
+    for (const body of [{ reason: 'account_holder' }, { reason: 'account_holder_required' }, { fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } }]) {
+      expect(payErrorMessage(body), JSON.stringify(body)).toBeNull();
+    }
   });
 });

@@ -45,6 +45,17 @@ export const PAY_QUOTE_EXPIRED_COPY = 'This quote has expired. Reply in the What
 /** B3 rewards v1: the reward on this quote ended before payment; nothing was charged. */
 export const PAY_REWARD_ENDED_COPY = REWARD_ENDED_MESSAGE;
 
+// Fix pack 4 (C10, C8, C18): the server sends the same strings as `error`.
+//   409 reload_required        — the page the customer approved is out of date
+//   503 approval_not_recorded  — the evidence commit failed before any capture
+// PAY_ACCOUNT_HOLDER_COPY is a field error (fieldErrors.accountHolder), never
+// a payErrorMessage answer.
+export const PAY_RELOAD_REQUIRED_COPY =
+  'This page is out of date. Reload the page, check the details, then try again. Nothing was charged.';
+export const PAY_APPROVAL_NOT_RECORDED_COPY =
+  "We couldn't record your approval, so nothing was charged. Tap Resend for a new code, then try again.";
+export const PAY_ACCOUNT_HOLDER_COPY = "Enter the account holder's name as it appears at the recipient's bank.";
+
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
 export function payErrorMessage(body: unknown): string | null {
   if (!body || typeof body !== 'object') return null;
@@ -57,5 +68,7 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.kyc_required === true || b.reason === 'kyc_required') return PAY_KYC_REQUIRED_COPY;
   if (b.reason === 'temporarily_unavailable') return PAY_TEMPORARY_COPY;
   if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
+  if (b.reason === 'reload_required') return PAY_RELOAD_REQUIRED_COPY;
+  if (b.reason === 'approval_not_recorded') return PAY_APPROVAL_NOT_RECORDED_COPY;
   return null;
 }
