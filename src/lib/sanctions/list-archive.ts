@@ -6,7 +6,9 @@
 //   1. its stored entries -> canonicalLines; the sha256 must equal the
 //      version hash (a version stored from a list with a repeated uid fails
 //      here: the parser hashes the repeat, storeList keeps the first only).
-//      A mismatch is never archived and never pruned.
+//      A mismatch is never archived and never pruned, and it does not hold
+//      the queue: the run reads past it (review R4, H3) and raises its own
+//      daily alert that a person must act.
 //   2. gzip -> putPrivateObject(archivePathOf(v)) in the PRIVATE partner-docs
 //      store (no suffix, no overwrite);
 //   3. ALWAYS read it back, gunzip, and require sha256 == hash. A put that
@@ -26,7 +28,7 @@
 // verifies it). Nothing here runs inside a DB transaction.
 //
 // Fail soft: never throws. A failed version raises ONE ops.alert per source
-// per Eastern day; an unconfigured store raises one per day only while
+// per Eastern day (a mismatch its own one); an unconfigured store raises one per day only while
 // something is pending. Alert text carries counts and the source only: no
 // names, entry ids, paths or store details. The cron route pokes the worker.
 
@@ -149,37 +151,58 @@ export async function archivePending(
 
   const result: ArchiveRunResult = { status: 'done', archived: 0, failed: 0, pruned: 0 };
   try {
-    const candidates = await repo.pendingArchive(source, MAX_ARCHIVES_PER_RUN);
+    // Pack 2 review R4 (H3): a 'mismatch' version can never archive, and a
+    // person must act on it. It does not count toward MAX_ARCHIVES_PER_RUN:
+    // the run reads past it (afterId), so up to that many OTHER versions are
+    // still attempted. The time budget bounds the whole loop.
     let mismatched = 0;
-    for (let i = 0; i < candidates.length; i++) {
-      const v = candidates[i];
-      if (budgetMs - (clock() - started) < 2 * OBJECT_TIMEOUT_MS) {
-        result.deferred = candidates.length - i;
-        logWarn('sanctions.archive', 'time budget spent; versions left for the next run', { source, deferred: result.deferred });
-        break;
-      }
-      let outcome: Outcome;
-      try {
-        outcome = await archiveOne(repo, v, now);
-      } catch (err) {
-        logError('sanctions.archive-version', err instanceof Error ? err.name : 'unknown', { source, versionId: v.id });
-        outcome = 'unverified';
-      }
-      if (outcome === 'archived') result.archived += 1;
-      else {
-        result.failed += 1;
-        if (outcome === 'mismatch') mismatched += 1;
-        logError('sanctions.archive-version', outcome, { source, versionId: v.id });
+    let attempted = 0;
+    let afterId: number | undefined;
+    scan: while (attempted < MAX_ARCHIVES_PER_RUN) {
+      const candidates = await repo.pendingArchive(source, MAX_ARCHIVES_PER_RUN - attempted, afterId);
+      if (candidates.length === 0) break;
+      for (let i = 0; i < candidates.length; i++) {
+        const v = candidates[i];
+        if (budgetMs - (clock() - started) < 2 * OBJECT_TIMEOUT_MS) {
+          result.deferred = candidates.length - i;
+          logWarn('sanctions.archive', 'time budget spent; versions left for the next run', { source, deferred: result.deferred });
+          break scan;
+        }
+        afterId = v.id;
+        let outcome: Outcome;
+        try {
+          outcome = await archiveOne(repo, v, now);
+        } catch (err) {
+          logError('sanctions.archive-version', err instanceof Error ? err.name : 'unknown', { source, versionId: v.id });
+          outcome = 'unverified';
+        }
+        if (outcome !== 'mismatch') attempted += 1;
+        if (outcome === 'archived') result.archived += 1;
+        else {
+          result.failed += 1;
+          if (outcome === 'mismatch') mismatched += 1;
+          logError('sanctions.archive-version', outcome, { source, versionId: v.id });
+        }
       }
     }
-    if (result.failed > 0) {
+    const unverified = result.failed - mismatched;
+    if (unverified > 0) {
       await alert(
         db,
-        `⚠️ SmartRemit ops: the sanctions list archive failed for ${result.failed} ${source} version(s) on ${day}` +
-          (mismatched > 0 ? ` (${mismatched} whose stored entries do not hash to the version hash)` : '') +
-          `. Those versions keep their entries (nothing unarchived is pruned); the next daily cron retries. ` +
+        `⚠️ SmartRemit ops: the sanctions list archive failed for ${unverified} ${source} version(s) on ${day}. ` +
+          `Those versions keep their entries (nothing unarchived is pruned); the next daily cron retries. ` +
           `Check the sanctions list card on the compliance page and the logs.`,
         `sanctions-archive-failed:${source}:${day}`,
+      );
+    }
+    if (mismatched > 0) {
+      await alert(
+        db,
+        `⚠️ SmartRemit ops: ${mismatched} ${source} version(s) cannot be archived on ${day}: their stored entries ` +
+          `do not hash to the version hash. A person must act: the next run will not repair them. ` +
+          `They keep their entries (never pruned) and later versions are still archived. ` +
+          `Check the sanctions list card on the compliance page and the logs.`,
+        `sanctions-archive-mismatch:${source}:${day}`,
       );
     }
     result.pruned = await repo.pruneArchivedEntries(source);

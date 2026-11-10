@@ -258,6 +258,58 @@ describe('sanctions list archive (R07)', () => {
     expect(await alerts(db)).toHaveLength(1);
   });
 
+  // Pack 2 review R4 (H3): a version whose stored entries do not hash to its
+  // version hash can never archive. It must not hold the oldest-first queue:
+  // the run moves past it, and still attempts up to MAX_ARCHIVES_PER_RUN
+  // other versions. Its entries are never pruned.
+  function dupVariant(n: number): SanctionsList {
+    const dupEntries = [...realVariant(n).entries, { ...LIST.entries[0], names: ['Other Name'] }];
+    return { ...realVariant(n), hash: hashEntries(dupEntries), entries: dupEntries };
+  }
+
+  it('three mismatched versions at the head do not block later versions; their entries are never pruned', async () => {
+    const repo = createSanctionsListRepo(db);
+    for (const n of [1, 2, 3]) await repo.storeList(dupVariant(n));
+    for (const n of [4, 5, 6, 7]) await repo.storeList(realVariant(n));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const first = await archivePending(db);
+    expect(first).toMatchObject({ status: 'done', archived: MAX_ARCHIVES_PER_RUN, failed: 3 });
+    expect((await versionRows(db)).map((r) => r.archived_at !== null)).toEqual([false, false, false, true, true, true, false]);
+    const second = await archivePending(db);
+    vi.restoreAllMocks();
+    expect(second).toMatchObject({ archived: 1, failed: 3 });
+    const rows = await versionRows(db);
+    expect(rows.map((r) => r.archived_at !== null)).toEqual([false, false, false, true, true, true, true]);
+    // Mismatched, inactive and beyond KEEP_INACTIVE_VERSIONS: kept, never put.
+    for (const r of rows.slice(0, 3)) {
+      expect(await entryCount(db, r.id)).toBe(6);
+      expect([...objects.keys()].some((k) => k.includes(r.hash))).toBe(false);
+    }
+    // The archived ones beyond KEEP are pruned as before.
+    expect(await entryCount(db, rows[3].id)).toBe(0);
+  });
+
+  it('a mismatch alert says a person must act and that the next run will not repair it (counts and source only)', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(dupVariant(1));
+    await repo.storeList(realVariant(2));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await archivePending(db);
+    await archivePending(db);
+    vi.restoreAllMocks();
+    const a = await alerts(db);
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toBe(`sanctions-archive-mismatch:ofac-sdn:${easternDay(Date.now())}`);
+    const msg = a[0].payload.message;
+    expect(msg).toMatch(/1 ofac-sdn version/);
+    expect(msg).toMatch(/a person must/i);
+    expect(msg).toMatch(/will not repair/i);
+    expect(msg).not.toMatch(/retries/);
+    expect(Object.keys(a[0].payload)).toEqual(['message']);
+    expect(msg).not.toMatch(/sdn:\d/);
+    for (const n of dupVariant(1).entries.flatMap((e) => e.names)) expect(msg).not.toContain(n);
+  });
+
   it("Blob unconfigured -> 'unconfigured', entries kept, one alert per day only when pending", async () => {
     delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
     expect(await archivePending(db)).toEqual({ status: 'unconfigured', archived: 0, failed: 0, pruned: 0 });

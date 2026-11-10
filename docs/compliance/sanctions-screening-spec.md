@@ -61,6 +61,8 @@ Hold reasons are fixed generic strings (section 4, hold-reason registry). They n
 - `ofac-sdn`: the OFAC SDN list stored in Postgres by the daily loader (`src/lib/sanctions/list-loader.ts`), plus the extra names;
 - any other value: the mock, and one warning in the log.
 
+The list health check (`sanctionsListStatus`, `src/lib/sanctions/list-health.ts`, behind the compliance page card and the daily list health alert) also reports the list as not live when the active version's stored entries do not match its `entry_count` (screens cannot load it). The loader's next load of the same content re-inserts them (review R4, E5).
+
 Switching production to `ofac-sdn` is an **owner step**. Fix pack 2 does not set `SANCTIONS_LIST`. Until the owner sets it, every real-money screen holds with `LIST_UNAVAILABLE` (the mock is never a live list), and the daily list health alert says so.
 
 ## 4. Fail-closed rules on real-money rails
@@ -146,7 +148,7 @@ The rules:
 - Two hashes: the **list hash** is the sha256 of the canonical lines (`canonicalLines`), which must equal the version's stored hash before upload and after a read-back; **`archive_sha256`** is the sha256 of the stored gzip bytes, stamped on the version row with the path and `archived_at`.
 - The row is stamped only after a verified read-back. A put that fails because the object exists goes to the read-back: a verified object heals a crashed run.
 - `KEEP_INACTIVE_VERSIONS = 2`: the entries (never the version row) of inactive versions older than the newest two are pruned, and only once that version has a stamped archive. Re-activating a pruned version re-inserts its entries.
-- A version stored from a list with a repeated uid (its stored entries do not hash to the version hash): never archived, never pruned, and one ops alert per source per day. This fails safe: the entries stay in the database.
+- A version stored from a list with a repeated uid (its stored entries do not hash to the version hash): never archived, never pruned, and one `sanctions-archive-mismatch:<source>:<day>` ops alert per source per day, which says a person must act (the next run will not repair it). It does not hold the oldest-first queue: the run reads past it and still attempts up to `MAX_ARCHIVES_PER_RUN` (3) other versions (review R4, H3). This fails safe: the entries stay in the database. Other failures (a put or read-back that does not verify) raise `sanctions-archive-failed:<source>:<day>` and are retried by the next run.
 - Manual restore: `readArchivedVersion(path)` returns the gunzipped canonical lines (or null for a path outside `sanctions-archive/`).
 - The Blob put is the documented exception to the outbox rule: it is idempotent, verified by read-back, and healed by the next run.
 
@@ -164,6 +166,7 @@ Recorded on purpose. Owner question 2 accepts the match gaps for now; R08 (fix p
 - **B2B pay** has no pay-time re-screen. Only the settle-time evidence backstop (section 4, rule 2) applies.
 - **Pre-PR2 rows**: an in-flight instruct of a row screened before fix pack 2 (no `listFitness` in its evidence, or no evidence at all) is not list-gated by the instruct gate. A staff or partner release of such a held row on real money does re-screen it (section 4, rule 3a).
 - **Velocity** of a `LIST_UNAVAILABLE` row held before the deploy cannot be re-derived by the re-screen.
+- **List-hold sweep order**: the sweep always starts at the oldest held rows, so rows behind enough rows whose re-screen throws on every run wait; each run that has such a row raises one `listsweeperror:<hour>` ops alert with the count only, so a person can fix the cause (review R4, E6).
 - **One list only**: OFAC SDN. No UN, EU, UK or other list yet (R08, pack 5).
 
 ## 10. Changes after independent review (fix pack 2)
@@ -190,3 +193,6 @@ A second review confirmed more; fixed in the pack:
 - **E2**: a paid-row heal that finds a match blocks the row and raises `paidmatch:<id>`; the instruct and the reinstruct refuse a blocked row (section 4, rule 3; section 6).
 - **G2**: the Partner-API confirm holds a flagged row through `settleOrHold`, with the same added reasons (section 5).
 - **H2**: the platform release re-checks the sender hold inside its transaction (section 4, rule 3a; section 5).
+- **E5**: an active version that lost its entries is not live on the health check, and the same content's next load re-inserts them (section 3; `docs/ROLLBACK.md`).
+- **H3**: a version that cannot archive (mismatch) no longer holds the archive queue; its alert says a person must act (section 7).
+- **E6**: re-screen rows that throw raise one hourly `listsweeperror:` alert with the count (section 9).

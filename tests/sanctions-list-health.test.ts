@@ -102,6 +102,29 @@ describe('sanctions list health (fix pack 2 R02)', () => {
     expect(await checkSanctionsListHealth(db, new Date())).toEqual({ alerted: true });
   });
 
+  // Pack 2 review R4 (E5): an active version whose stored entries do not
+  // match its entry_count (a pruned row an older build re-activated) cannot
+  // be screened on (loadList throws), so it is not live, and the daily
+  // check alerts, however fresh its checked_at.
+  it('fresh checked_at but the active version lost its entries -> not live, one alert', async () => {
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await setRail(db, 'acme', 'http');
+    await loadList(db, HOUR);
+    await db.execute(sql`DELETE FROM sanctions_list_entries`);
+    const s = await sanctionsListStatus(db, new Date());
+    expect(s.fitness).toBe('not_live');
+    expect(s.entryCount).toBe(LIST.entries.length);
+    expect(await checkSanctionsListHealth(db, new Date())).toEqual({ alerted: true });
+    expect(await alertRows(db)).toHaveLength(1);
+  });
+
+  it('a partial entry set (one row missing) is not live either', async () => {
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await loadList(db, HOUR);
+    await db.execute(sql`DELETE FROM sanctions_list_entries WHERE entry_id = ${LIST.entries[0].id}`);
+    expect((await sanctionsListStatus(db, new Date())).fitness).toBe('not_live');
+  });
+
   it('db error -> no throw', async () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     await setRail(db, 'acme', 'http');

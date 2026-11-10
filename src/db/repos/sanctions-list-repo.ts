@@ -9,7 +9,7 @@
 //
 // Public-domain list data only: no customer data is read or written here.
 
-import { and, asc, count, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { sanctionsListEntries, sanctionsListVersions } from '@/db/schema';
 import type { Db, DbOrTx } from '@/db/client';
 import type { SanctionsList, SanctionsListEntry } from '@/lib/sanctions/list-source';
@@ -162,7 +162,8 @@ export function createSanctionsListRepo(db: Db) {
      * Store a parsed list and make it the active version, all in ONE
      * transaction under a per-source advisory lock (the 13:00 and 17:00 cron
      * runs, or a manual re-run, can never interleave):
-     *   • the same content as the active version → 'unchanged' (checked_at only);
+     *   • the same content as the active version → 'unchanged' (checked_at,
+     *     plus a re-insert of the entries when the stored count differs);
      *   • content seen before (a re-publish of an older version) → re-activated;
      *   • otherwise a new version row plus its entries, then the switch.
      * A list that shrank below MIN_ENTRY_RATIO of the active one is refused
@@ -184,16 +185,29 @@ export function createSanctionsListRepo(db: Db) {
         const active = await activeOf(tx, list.source);
 
         if (active && active.hash === list.hash) {
+          // Pack 2 review R4 (E5): an active version can have lost its entries
+          // (an older build re-activated a pruned row, docs/ROLLBACK.md). Same
+          // hash = same content: re-insert the parsed entries when the stored
+          // count differs, so loadList's count check passes again.
+          const stored = await tx
+            .select({ n: count() })
+            .from(sanctionsListEntries)
+            .where(eq(sanctionsListEntries.versionId, active.id));
+          const repair = Number(stored[0]?.n ?? 0) !== entries.length || active.entryCount !== entries.length;
+          if (repair) {
+            await tx.delete(sanctionsListEntries).where(eq(sanctionsListEntries.versionId, active.id));
+            await insertEntryRows(tx, active.id, entries);
+          }
           await tx
             .update(sanctionsListVersions)
-            .set({ checkedAt: now })
+            .set(repair ? { checkedAt: now, entryCount: entries.length, nameCount } : { checkedAt: now })
             .where(eq(sanctionsListVersions.id, active.id));
           return {
             status: 'unchanged' as const,
             versionId: active.id,
             version: active.version,
             hash: active.hash,
-            entryCount: active.entryCount,
+            entryCount: repair ? entries.length : active.entryCount,
             nameCount,
           };
         }
@@ -286,8 +300,12 @@ export function createSanctionsListRepo(db: Db) {
 
     // ---- Fix pack 2 (R07): the verified Blob archive (src/lib/sanctions/list-archive.ts) ----
 
-    /** Versions of a source with no stamped archive, oldest first. Active ones included. */
-    async pendingArchive(source: string, limit: number): Promise<ArchiveCandidate[]> {
+    /**
+     * Versions of a source with no stamped archive, oldest first. Active ones
+     * included. `afterId` (review R4, H3) reads past ids the caller already
+     * tried this run, so one that can never archive does not hold the queue.
+     */
+    async pendingArchive(source: string, limit: number, afterId?: number): Promise<ArchiveCandidate[]> {
       return db
         .select({
           id: sanctionsListVersions.id,
@@ -297,7 +315,13 @@ export function createSanctionsListRepo(db: Db) {
           entryCount: sanctionsListVersions.entryCount,
         })
         .from(sanctionsListVersions)
-        .where(and(eq(sanctionsListVersions.source, source), isNull(sanctionsListVersions.archivedAt)))
+        .where(
+          and(
+            eq(sanctionsListVersions.source, source),
+            isNull(sanctionsListVersions.archivedAt),
+            afterId === undefined ? undefined : gt(sanctionsListVersions.id, afterId),
+          ),
+        )
         .orderBy(asc(sanctionsListVersions.id))
         .limit(limit);
     },

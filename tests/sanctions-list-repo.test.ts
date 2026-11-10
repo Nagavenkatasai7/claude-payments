@@ -87,6 +87,37 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(await versions(db)).toHaveLength(1);
   });
 
+  // Pack 2 review R4 (E5): the roll-forward case in docs/ROLLBACK.md. An older
+  // build re-activated a pruned version (no entries); the same content again
+  // takes the 'unchanged' path, which now re-inserts the entries in the same
+  // transaction, so loadList's count check passes again.
+  it("'unchanged' re-inserts the entries of an active version that lost them", async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    await db.execute(sql`DELETE FROM sanctions_list_entries`);
+    const active = (await repo.activeVersion('ofac-sdn'))!;
+    await expect(repo.loadList(active)).rejects.toThrow(/0 entries stored/);
+    const again = await repo.storeList(LIST);
+    expect(again).toMatchObject({ status: 'unchanged', versionId: active.id, entryCount: 5 });
+    expect(await versions(db)).toHaveLength(1);
+    expect((await entryCounts(db)).get(active.id)).toBe(5);
+    expect((await repo.loadList((await repo.activeVersion('ofac-sdn'))!)).entries).toHaveLength(5);
+  });
+
+  it("'unchanged' with a partial entry set re-inserts the full set; a whole set is not touched", async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    const ctids = async () =>
+      ((await db.execute(sql`SELECT ctid::text AS c FROM sanctions_list_entries ORDER BY entry_id`)) as unknown as { rows: unknown[] }).rows;
+    const before = await ctids();
+    await repo.storeList(LIST);
+    expect(await ctids()).toEqual(before); // nothing re-written when whole
+    await db.execute(sql`DELETE FROM sanctions_list_entries WHERE entry_id = ${LIST.entries[0].id}`);
+    await repo.storeList(LIST);
+    const id = (await repo.activeVersion('ofac-sdn'))!.id;
+    expect((await entryCounts(db)).get(id)).toBe(5);
+  });
+
   it('a new version switches the active pointer atomically: exactly one active row', async () => {
     const repo = createSanctionsListRepo(db);
     await repo.storeList(LIST);

@@ -354,11 +354,42 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     await heldRow({ id: 'lh_bad' });
     await heldRow({ id: 'lh_good' });
     names.throwFor.add('lh_bad');
-    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
-    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0, failed: 1 });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0, failed: 1 });
     expect((await store.getTransfer('lh_good'))?.status).toBe('paid');
     expect((await store.getTransfer('lh_bad'))?.status).toBe('in_review');
     expect((await store.getTransfer('lh_bad'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+  });
+
+  // Pack 2 review R4 (E6): a row that throws stays held at the head of the
+  // oldest-first scan. That is made visible: ONE ops alert per hour with the
+  // count of failed rows only (no ids, no names), and the count in the result.
+  it('rows that throw -> one listsweeperror:<hour> alert with the count only, deduped within the hour', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_err_a' });
+    await heldRow({ id: 'lh_err_b' });
+    await heldRow({ id: 'lh_err_ok' });
+    names.throwFor.add('lh_err_a');
+    names.throwFor.add('lh_err_b');
+    const now = new Date();
+    expect(await sweepListUnavailableHolds(db, now)).toEqual({ released: 1, stillHeld: 0, blocked: 0, failed: 2 });
+    expect(await sweepListUnavailableHolds(db, now)).toEqual({ released: 0, stillHeld: 0, blocked: 0, failed: 2 });
+    const alerts = (await outbox()).filter((r) => r.kind === 'ops.alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupe_key).toBe(`listsweeperror:${Math.floor(now.getTime() / H)}`);
+    expect(Object.keys(alerts[0].payload)).toEqual(['message']);
+    const msg = String(alerts[0].payload.message);
+    expect(msg).toMatch(/2 held transfer/);
+    expect(msg).not.toContain('lh_err');
+    expect(msg).not.toContain(SENDER);
+    expect(msg).not.toContain('Anita');
+  });
+
+  it('no row throws -> no listsweeperror alert, no failed field', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_noerr' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toStrictEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    expect((await keys()).filter((k) => k?.startsWith('listsweeperror:'))).toEqual([]);
   });
 
   it('LIST_UNAVAILABLE + LARGE -> held with LARGE only', async () => {

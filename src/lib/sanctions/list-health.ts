@@ -9,7 +9,8 @@
 //  - sanctionsListStatus: READ-ONLY, for the compliance page and the health
 //    check. The fitness comes from the setting (env.sanctionsList) plus the DB
 //    checked_at of the active 'ofac-sdn' version, so it is the same on every
-//    instance whatever its cache holds.
+//    instance whatever its cache holds. A version whose stored entries do not
+//    match its entry_count is 'not_live' (screens cannot load it).
 //  - checkSanctionsListHealth: the ENQUEUER. Called from the daily /api/cron
 //    route (which pokes the worker afterwards), even with the loader OFF. ONE
 //    ops.alert per Eastern day, keyed listNotLiveDedupeKey (shared with the
@@ -19,7 +20,7 @@
 
 import { count, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
-import { partnerIntegrations } from '@/db/schema';
+import { partnerIntegrations, sanctionsListEntries } from '@/db/schema';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
 import { env } from '../env';
@@ -57,7 +58,20 @@ export interface SanctionsListStatus {
   httpPartners: number;
 }
 
-/** READ-ONLY. Throws on a database error (checkSanctionsListHealth catches). */
+/** Entry rows stored for one list version (public list data; the table has no tenant). */
+async function storedEntryCount(db: Db, versionId: number): Promise<number> {
+  const rows = await db
+    .select({ n: count() })
+    .from(sanctionsListEntries)
+    .where(eq(sanctionsListEntries.versionId, versionId));
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * READ-ONLY. Throws on a database error (checkSanctionsListHealth catches).
+ * An active version whose stored entries do not match its entry_count is
+ * 'not_live' (review R4, E5).
+ */
 export async function sanctionsListStatus(db: Db, now: Date): Promise<SanctionsListStatus> {
   const listSetting = env.sanctionsList || 'mock';
   const active = await createSanctionsListRepo(db).activeVersion(OFAC_SOURCE);
@@ -67,8 +81,12 @@ export async function sanctionsListStatus(db: Db, now: Date): Promise<SanctionsL
     .where(eq(partnerIntegrations.paymentProviderType, 'http'));
   const httpPartners = Number(rows[0]?.n ?? 0);
   const checkedAt = active?.checkedAt ? active.checkedAt.toISOString() : null;
+  // Pack 2 review R4 (E5): a version whose stored entries do not match its
+  // entry_count cannot be screened on (loadList throws, screens fail closed),
+  // so it is not live, however fresh its checked_at. One count query.
+  const whole = listSetting === OFAC_SOURCE && active ? (await storedEntryCount(db, active.id)) === active.entryCount : false;
   const fitness: ListFitness =
-    listSetting === OFAC_SOURCE && active
+    listSetting === OFAC_SOURCE && active && whole
       ? listFitness(
           { source: active.source, version: active.version, hash: active.hash, ...(checkedAt ? { checkedAt } : {}) },
           now,

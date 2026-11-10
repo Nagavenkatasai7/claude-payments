@@ -20,7 +20,9 @@
 //     screening hold (senderScreeningHoldActive) stays held with
 //     SENDER_SCREENING_REASON (a platform clear, then a person, decides).
 // Reads, the list warm and decryption stay OUTSIDE the transaction. A row that
-// throws is logged (id only) and costs a scan, never a slot. Never throws.
+// throws is logged (id only) and costs a scan, never a slot; the run counts
+// them (`failed`) and raises ONE `listsweeperror:<hour>` ops alert with the
+// count only (review R4, E6). Never throws.
 // Pack 2 review F3 (C2): time-boxed (LIST_RESCREEN_BUDGET_MS); no row starts
 // once the budget is spent, and the count left is logged and returned.
 
@@ -64,7 +66,12 @@ export interface ListHoldSweepResult {
   blocked: number;
   /** Present only when the budget stopped the sweep: rows of the current page it did not start. */
   deferred?: number;
+  /** Present only when a row's re-screen threw (review R4, E6): how many (they stay held). */
+  failed?: number;
 }
+
+/** One ops alert per hour while held rows keep failing their re-screen (review R4, E6). */
+export const listSweepErrorDedupeKey = (now: Date): string => `listsweeperror:${Math.floor(now.getTime() / 3_600_000)}`;
 
 export interface ListHoldSweepOptions {
   /** Wall-clock budget (default LIST_RESCREEN_BUDGET_MS). */
@@ -229,6 +236,7 @@ export async function sweepListUnavailableHolds(db: Db, now: Date, opts: ListHol
   const started = clock();
   const budgetMs = opts.budgetMs ?? LIST_RESCREEN_BUDGET_MS;
   let deferred = 0;
+  let failed = 0;
   const repo = createTransferRepo(db);
   let fitness: ListFitness | null = null;
   let after: { paidAt: string; id: string } | undefined;
@@ -259,6 +267,7 @@ export async function sweepListUnavailableHolds(db: Db, now: Date, opts: ListHol
           outcome = await rescreenRow(db, t, fitness, now);
         } catch (err) {
           logWarn('list-rescreen', err, { transferId: t.id });
+          failed++;
           outcome = 'skipped';
         }
         if (outcome === 'released') out.released++;
@@ -278,6 +287,26 @@ export async function sweepListUnavailableHolds(db: Db, now: Date, opts: ListHol
     // Counts only: the rows wait for the next full run.
     logWarn('list-rescreen', 'time budget spent; rows left for the next run', { deferred, budgetMs });
     out.deferred = deferred;
+  }
+  if (failed > 0) {
+    // Review R4 (E6): a row that throws stays held at the head of the
+    // oldest-first scan, and rows behind enough of them wait. Tell a person:
+    // ONE ops alert per hour, the count only (no id, no name).
+    out.failed = failed;
+    try {
+      await createOutboxRepo(db).enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: the sanctions list-hold re-screen failed for ${failed} held transfer(s) this run. ` +
+            'They stay held (LIST_UNAVAILABLE), and transfers held behind them can wait too. ' +
+            'Read the list-rescreen warnings in the logs and fix the cause; the sweep retries every worker run.',
+        },
+        { dedupeKey: listSweepErrorDedupeKey(now) },
+      );
+    } catch (err) {
+      logWarn('list-rescreen', err instanceof Error ? err.name : 'unknown');
+    }
   }
   if (out.released > 0 || out.blocked > 0) pokeWorker();
   return out;
