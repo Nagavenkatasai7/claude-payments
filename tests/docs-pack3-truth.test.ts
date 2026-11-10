@@ -82,6 +82,52 @@ describe('pack 3 documents say what the code does', () => {
     expect(confirm403).not.toContain("`");
   });
 
+  // Review P3 (D1, E2): on the Partner API only a USDC payout can reach the
+  // capability gate (partner-api-service.ts mints with fundingMethod
+  // 'bank_transfer', no transferType, no scheduleId), so 403 capability_off is
+  // tied to USDC there; the other three features are closed on the customer
+  // surfaces with a neutral message.
+  it('go-live.mdx, errors.mdx and openapi.yaml tie 403 capability_off to a USDC payout on a Partner API transaction only', () => {
+    const goLive = read('src/content/docs/go-live.mdx');
+    const sentences = goLive.split(/(?<=\.)\s+/);
+    const capSentences = sentences.filter((s) => s.includes('capability_off'));
+    expect(capSentences.length).toBeGreaterThan(0);
+    for (const s of capSentences) {
+      expect(s, s).toMatch(/USDC payout/);
+      expect(s, s).toMatch(/Partner API/);
+      expect(s, s).toContain('`403`');
+      expect(s, s).not.toMatch(/business payments|repeat payments|AI apps/i);
+    }
+    const others = sentences.find((s) => /business payments/i.test(s) && /repeat payments/.test(s) && /AI apps/.test(s));
+    expect(others, 'a sentence naming the other three features').toBeDefined();
+    expect(others!).not.toContain('403');
+    expect(others!).toMatch(/neutral message/);
+    for (const surface of ['chat', 'portal', 'pay pages']) expect(others!, surface).toContain(surface);
+
+    const row403 = read('src/content/docs/errors.mdx').split('\n').find((l) => l.startsWith('| `403`'))!;
+    expect(row403).toMatch(/USDC payout[^|]*\(`capability_off`\)/);
+    expect(row403).not.toMatch(/business payments|repeat payments|AI apps/i);
+
+    const yaml = read('openapi.yaml');
+    const at = yaml.indexOf('operationId: createTransaction');
+    const create403 = yaml.slice(at, yaml.indexOf("'429'", at)).split('\n').find((l) => l.includes("'403'"))!;
+    expect(create403).toMatch(/USDC payout[^']*\(code capability_off\)/);
+    expect(create403).not.toContain('`');
+  });
+
+  // Review P3 (E3): the older build has no agent.paused / agent.tools.paused
+  // keys (ba8eb39 flags.ts FLAG_DEFINITIONS; its switches page renders only
+  // FLAG_KEYS), so it neither shows nor honours such rows at any scope.
+  it('ROLLBACK.md PR3 paragraph queries the agent pause rows at any scope and says the older build neither shows nor honours them, and they apply again at roll-forward', () => {
+    const p = pr3();
+    expect(p).toContain("key IN ('agent.paused','agent.tools.paused')");
+    expect(p).toMatch(/neither shows nor honours/);
+    expect(p).toMatch(/no substitute/);
+    expect(p).toMatch(/roll-forward/);
+    // The "partner tenant:x / platform row" advice is for the two keys the old build knows.
+    expect(p).toMatch(/`sends\.paused` and `settlement\.paused`[^;]*partner tenant:x/);
+  });
+
   it('flags.ts header names tenant rows and Q5', () => {
     const src = read('src/lib/flags.ts');
     const header = src.slice(src.indexOf('// flags'), src.indexOf('export const FLAG_CACHE_TTL_MS'));
