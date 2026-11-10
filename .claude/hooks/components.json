@@ -13,7 +13,7 @@
       "src/lib/b2b-*", "src/app/pay/b2b/", "src/app/api/pay/b2b/", "src/app/admin-dashboard/b2b/", "tests/b2b-*"
     ]},
     "compliance-kyc": { "branch": "component/compliance-kyc", "paths": [
-      "src/lib/compliance*", "src/lib/consent.ts", "src/lib/kyc-*", "src/lib/tier-rules.ts", "src/lib/review-triage-ai.ts",
+      "src/lib/compliance*", "src/lib/live-gate.ts", "src/lib/list-hold-rescreen.ts", "src/lib/sanctions/", "src/lib/consent.ts", "src/lib/kyc-*", "src/lib/tier-rules.ts", "src/lib/review-triage-ai.ts",
       "src/lib/providers/kyc-provider.ts", "src/lib/providers/mock-kyc-provider.ts", "src/lib/providers/persona-*", "src/lib/providers/sanctions-provider.ts",
       "src/app/api/persona-webhook/", "src/app/admin-dashboard/compliance/", "src/app/admin-dashboard/kyc/", "src/app/admin-dashboard/kyc-badge.tsx",
       "tests/compliance*", "tests/kyc-*", "tests/consent.test.ts", "tests/persona-*", "tests/sanctions*", "tests/tier-*"

@@ -96,7 +96,7 @@ describe('payees', () => {
     expect(JSON.stringify(ob)).not.toMatch(/testa|fixturelli/i);
   });
 
-  it('payee match on approve -> evidence + sanctions.block + notices in one tx', async () => {
+  it('payee match on approve -> evidence + sanctions.block + notices together (committed before the rejection)', async () => {
     const p = await addPayee(db, ACME, PAYEE);
     const original = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 3_600_000 });

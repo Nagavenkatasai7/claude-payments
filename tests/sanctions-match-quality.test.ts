@@ -122,6 +122,7 @@ describe('sanctions match-quality fixture (R09)', () => {
       ['mohammed-muhammad', 'known_gap'],
       ['added-middle-name', 'known_gap'],
       ['cyrillic-latin', 'known_gap'],
+      ['abdul-rahman-bare', 'known_gap'],
     ] as const)('%s is %s', (id, tag) => {
       const c = caseById(id);
       expect(c.tag).toBe(tag);
