@@ -8,6 +8,8 @@ import { Card, EmptyState, PageHeader } from '@/components/ds';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { disconnectAgentAppAction } from './actions';
 import { DisconnectApp } from './disconnect-form';
+import { mcpResourceUrl } from '@/lib/agent-auth/contract';
+import { ConnectorBox } from './connector-box';
 
 export const generateMetadata = () => portalMetadata('portal.agentApps.title');
 
@@ -33,6 +35,7 @@ export default async function AgentAppsPage() {
     <>
       <PageHeader title={t('portal.agentApps.title')} sub={t('portal.agentApps.sub')} />
       <div className="flex flex-col gap-6">
+        <ConnectorBox url={mcpResourceUrl(ctx.site.host)} />
         {grants.length === 0 ? (
           <EmptyState icon={<Bot aria-hidden="true" className="size-6" />} title={t('portal.agentApps.emptyTitle')} body={t('portal.agentApps.emptyBody')} />
         ) : (

@@ -22,6 +22,10 @@ import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
 import { DEFAULT_CATALOG } from '@/lib/rewards/settings';
 import { easternMonth } from '@/lib/dates';
+import { createAgentOAuthRepo } from '@/db/repos/agent-oauth-repo';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { waLink, WA_MESSAGES } from '@/app/landing/wa';
+import { TELEGRAM_BOT_HREF } from '@/app/landing/channels';
 
 // UI redesign M2-7, Task 7.2: Home, the transfer list, the detail page and the printable receipt
 // (render tests over the real PGlite fixture; the UI itself is walked after enablement). Pinned:
@@ -195,6 +199,61 @@ describe('Home', () => {
     signIn('pa', phone);
     h.ctx = null;
     await expect(PortalHomePage()).rejects.toThrow('REDIRECT:/portal/login');
+  });
+});
+
+// TGFL custom host, design §5.2-5.3 / §6 item 26: the "Ways to send" card on the home.
+describe('Home: Ways to send', () => {
+  const AGC = 'agc_WWWWWWWWWWWWWWWWWWWWWW';
+  const AGG = 'agg_WWWWWWWWWWWWWWWWWWWWWW';
+  const amp = (s: string) => s.replaceAll('&', '&amp;').replaceAll("'", '&#x27;'); // React's attribute escaping
+  async function agentTools(on: boolean) {
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.tools', scopeType: 'partner', scopeId: DEFAULT_PARTNER_ID, enabled: on, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+  }
+  afterEach(() => invalidateFlagCache(db));
+
+  it('shown on every portal; on the default tenant WhatsApp opens the SmartRemit bot in a new tab', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    expect(html).toContain('data-ways-to-send');
+    expect(html).toContain('Ways to send');
+    expect(html).toContain(`href="${amp(waLink(WA_MESSAGES.generic))}" target="_blank" rel="noopener noreferrer"`);
+    expect(html).not.toContain(TELEGRAM_BOT_HREF); // no token and no telegram.bot switch here
+    expect(html).not.toMatch(/\b(test|testing)\b/i);
+  });
+
+  it('a partner tenant shows the card without the shared bots', async () => {
+    const html = await home(); // signed in on 'pa'
+    expect(html).toContain('data-ways-to-send');
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+  });
+
+  it('agent.tools off → no AI app is named', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).not.toContain(app);
+  });
+
+  it('agent.tools on, gate shut → the names without a /portal/ai-apps link, by invitation', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).toContain(app);
+    expect(html).not.toContain('/portal/ai-apps');
+    expect(html).toContain('By invitation');
+    expect(html).toContain('not affiliated');
+  });
+
+  it('agent.tools on and a live grant → each AI app links to its section of /portal/ai-apps', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    const repo = createAgentOAuthRepo(db);
+    await repo.insertClient({ id: AGC, partnerId: DEFAULT_PARTNER_ID, name: 'App', redirectUris: ['https://app.example/cb'], authMethod: 'none', secretHash: null });
+    await repo.insertGrant({ id: AGG, partnerId: DEFAULT_PARTNER_ID, phone, clientId: AGC, scopes: ['quotes:read'], refreshHash: `h-${AGG}`, now: new Date(), expiresAt: new Date(Date.now() + 86_400_000) });
+    const html = await home();
+    for (const id of ['claude', 'chatgpt', 'perplexity']) expect(html).toContain(`href="/portal/ai-apps#connect-${id}"`);
   });
 });
 
