@@ -11,10 +11,15 @@
 // and nothing written. The alert email is never written to an audit row (booleans only).
 import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createPartnerStore } from '@/lib/partner-store';
 import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { boundUntrustedText } from '@/lib/untrusted-text';
+import { DEFAULT_PARTNER_ID } from './defaults';
+import { disclosureHash } from './disclosure-hash';
+import { isLiveCertified } from './live-gate';
+import { notifyLiveChange } from './live-controls-write';
 import type { PartnerDisclosureConfig, PartnerId, PartnerSupportConfig } from '@/lib/types';
 
 export const DISCLOSURE_TEXT_MAX = 120;
@@ -202,24 +207,83 @@ export function setComplianceAlertEmail(db: DbOrTx, partnerId: PartnerId, actor:
   );
 }
 
-/** Replace (a parsed config) or clear (undefined) the Reg E disclosure block. */
+export interface SetDisclosureOptions {
+  /** Stamp a partner approval. Honoured ONLY for a partner actor on a real (not 'default') partner. */
+  approve?: boolean;
+  now?: Date;
+}
+
+/** The block without any `approval` key (a stamp is never stored as given). */
+function withoutApproval(d: PartnerDisclosureConfig): PartnerDisclosureConfig {
+  const { approval: _approval, ...rest } = d;
+  void _approval;
+  return rest;
+}
+
+/** The stored block carries a stamp whose hash equals the block's own hash. */
+function hasValidApproval(d: unknown): boolean {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+  const ap = (d as Record<string, unknown>).approval;
+  const h = ap && typeof ap === 'object' ? (ap as Record<string, unknown>).hash : undefined;
+  return typeof h === 'string' && h === disclosureHash(d);
+}
+
+/**
+ * Replace (a parsed config) or clear (undefined) the Reg E disclosure block.
+ *
+ * Fix pack 4 T5 (C11): the provider block's approval stamp. Any `approval` on the input is
+ * dropped; the writer stamps `{ by: actor.username, at: now ISO, hash: disclosureHash(block) }`
+ * ONLY for a partner actor with `opts.approve === true` (the partner action passes it only for a
+ * TOTP-enrolled admin after a step-up forced for this save) on a partner other than 'default'.
+ * Every other save stores the block unstamped. One transaction: the locked merge, one audit row
+ * (meta `{ old, new, actorScope, approved, clearedApproval }`; clearedApproval = the previous block
+ * carried a VALID stamp and this save stored none) and, when a PLATFORM save cleared an approval on
+ * a live-certified partner, pack 3's live-change alert and partner email (notifyLiveChange).
+ * Errors propagate (the actions log the error name only).
+ */
 export function setDisclosure(
   db: DbOrTx,
   partnerId: PartnerId,
   actor: SupportSettingsActor,
   disclosure: PartnerDisclosureConfig | undefined,
+  opts: SetDisclosureOptions = {},
 ): Promise<SupportWriteResult> {
-  return mergeAndAudit(
-    db,
-    partnerId,
-    actor,
-    'partner.disclosure_config',
-    (prev) => {
-      const next: PartnerSupportConfig = { ...prev };
-      if (disclosure) next.disclosure = disclosure;
-      else delete next.disclosure;
-      return next;
-    },
-    (prev) => ({ old: prev.disclosure ?? null, new: disclosure ?? null }),
-  );
+  const clean = disclosure ? withoutApproval(disclosure) : undefined;
+  const stamp = actor.actorScope === 'partner' && opts.approve === true && clean !== undefined && partnerId !== DEFAULT_PARTNER_ID;
+  const block: PartnerDisclosureConfig | undefined =
+    stamp && clean
+      ? { ...clean, approval: { by: actor.username, at: (opts.now ?? new Date()).toISOString(), hash: disclosureHash(clean) } }
+      : clean;
+  return inTx(db, async (tx) => {
+    const { found, previous, next } = await createPartnerStore(tx).updateSupportConfig(partnerId, (prev) => {
+      const merged: PartnerSupportConfig = { ...prev };
+      if (block) merged.disclosure = block;
+      else delete merged.disclosure;
+      return merged;
+    });
+    if (!found) return { ok: false, reason: 'not_found' } as const;
+    const clearedApproval = hasValidApproval(previous.disclosure) && !stamp;
+    await createAuditRepo(tx).record({
+      partnerId,
+      actor: actor.username,
+      actorType: 'staff',
+      action: 'partner.disclosure_config',
+      subjectId: partnerId,
+      meta: { old: previous.disclosure ?? null, new: block ?? null, actorScope: actor.actorScope, approved: stamp, clearedApproval },
+    });
+    if (actor.actorScope === 'platform' && clearedApproval) {
+      // The partner row is already locked by updateSupportConfig: this read is for the certification only.
+      const p = await createPartnerRepo(tx).getPartner(partnerId);
+      if (isLiveCertified(p)) {
+        await notifyLiveChange(
+          tx,
+          partnerId,
+          { username: actor.username, scope: 'platform' },
+          { key: 'providerBlock', action: 'partner.disclosure.approval_cleared', word: 'approval cleared; payments wait until your admin approves it again' },
+          next,
+        );
+      }
+    }
+    return { ok: true } as const;
+  });
 }

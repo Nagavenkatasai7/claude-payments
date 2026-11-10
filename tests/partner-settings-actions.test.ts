@@ -43,6 +43,13 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => actual.createPartnerStore(db) };
 });
+// Fix pack 4 T5 (C11): only staffMfaEnrolled is mocked (default false); the step-up itself reads
+// the real MFA store (so its factor stays 'password' for these users).
+const mfa = vi.hoisted(() => ({ enrolled: false }));
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, staffMfaEnrolled: async () => mfa.enrolled };
+});
 const logWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/log', async (orig) => ({ ...(await orig<typeof import('@/lib/log')>()), logWarn: logWarnSpy }));
 
@@ -53,7 +60,9 @@ import { staffStepUpKey } from '@/lib/staff-step-up';
 import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
 import { auditEvents, partners } from '@/db/schema';
 import { t } from '@/lib/i18n';
-import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
+import { disclosureHash } from '@/lib/disclosure-hash';
+import { createPartnerStore } from '@/lib/partner-store';
 import type { PartnerSupportConfig, Staff } from '@/lib/types';
 import { PARTNER_ROUTES } from '@/app/partner/routes';
 import { saveAlertEmailAction, saveComplianceAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from '@/app/partner/(app)/settings/actions';
@@ -108,6 +117,7 @@ beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   host.value = 'smartremit.ai';
+  mfa.enrolled = false;
   revalidatePath.mockClear();
   logWarnSpy.mockClear();
   db = await freshDb();
@@ -290,7 +300,7 @@ describe('saveDisclosureAction: validation and copy', () => {
     await db.update(partners).set({ supportConfig: { enableSupportPortal: false, alertEmail: 'ops@acme.example' } }).where(eq(partners.id, 'pa'));
     expect(await saveDisclosureAction(null, disclosureForm())).toEqual({ ok: true });
     expect(await sc('pa')).toEqual({ enableSupportPortal: false, alertEmail: 'ops@acme.example', disclosure: DISCLOSURE });
-    expect((await audits())[0].meta).toEqual({ old: null, new: DISCLOSURE, actorScope: 'partner' });
+    expect((await audits())[0].meta).toEqual({ old: null, new: DISCLOSURE, actorScope: 'partner', approved: false, clearedApproval: false });
   });
   it('an all-blank form clears the block', async () => {
     await db.update(partners).set({ supportConfig: { disclosure: DISCLOSURE } }).where(eq(partners.id, 'pa'));
@@ -381,5 +391,54 @@ describe('saveDisclosureAction: the 15-minute step-up (target disclosure.save)',
     await signInAdmin();
     expect(await saveSupportPortalAction(form({ enableSupportPortal: 'on' }))).toEqual({ ok: true });
     expect(await saveAlertEmailAction(form({ alertEmail: 'ops@acme.example' }))).toEqual({ ok: true });
+  });
+});
+
+// Fix pack 4 T5 (C11, critic M7): a disclosure save by a TOTP-enrolled admin stamps the partner
+// approval, and only after a step-up forced for THIS save (a still-fresh step-up from before the
+// enrolment never stamps). Without enrolment the save works as before, unapproved.
+describe('saveDisclosureAction: the partner approval stamp (C11)', () => {
+  it("an MFA-enrolled admin's disclosure save with a valid step-up stores an approval by that username", async () => {
+    mfa.enrolled = true;
+    await signInAdmin();
+    const before = Date.now();
+    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: PASSWORD }))).toEqual({ ok: true });
+    const stored = (await sc('pa'))?.disclosure;
+    expect(stored?.approval).toMatchObject({ by: 'pa-admin', hash: disclosureHash(DISCLOSURE) });
+    expect(Date.parse(String(stored?.approval?.at))).toBeGreaterThanOrEqual(before - 1000);
+    expect(resolvePartnerDisclosure(await createPartnerStore(db).getPartner('pa')).partnerApproved).toBe(true);
+    const rows = await audits();
+    expect(rows.map((r) => r.action)).toEqual(['auth.stepup', 'partner.disclosure_config']);
+    expect(rows[1].meta).toMatchObject({ actorScope: 'partner', approved: true, clearedApproval: false });
+  });
+
+  it('an enrolled admin with a still-FRESH step-up (from before enrolment) and no secret in the form is asked for a step-up and nothing is stored', async () => {
+    await signInAdmin();
+    await freshen();
+    mfa.enrolled = true;
+    const before = await snapshot();
+    const r = await saveDisclosureAction(null, disclosureForm());
+    expect(isStepUpRequired(r)).toBe(true);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('without enrolment the save succeeds ({ ok: true }) unapproved (a fresh step-up still skips the prompt, as today)', async () => {
+    await signInAdmin();
+    await freshen();
+    expect(await saveDisclosureAction(null, disclosureForm())).toEqual({ ok: true });
+    expect((await sc('pa'))?.disclosure).toEqual(DISCLOSURE);
+    const rows = await audits();
+    expect(rows.map((r) => r.action)).toEqual(['partner.disclosure_config']);
+    expect(rows[0].meta).toMatchObject({ approved: false, clearedApproval: false });
+  });
+
+  it('an unenrolled re-save over an approved block strips the approval', async () => {
+    mfa.enrolled = true;
+    await signInAdmin();
+    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: PASSWORD }))).toEqual({ ok: true });
+    mfa.enrolled = false;
+    expect(await saveDisclosureAction(null, disclosureForm())).toEqual({ ok: true });
+    expect((await sc('pa'))?.disclosure).toEqual(DISCLOSURE);
+    expect((await audits()).at(-1)?.meta).toMatchObject({ approved: false, clearedApproval: true });
   });
 });

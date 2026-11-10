@@ -4,6 +4,7 @@ import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import {
+  notifyLiveChange,
   writeCertification,
   writeComplianceUser,
   writeContract,
@@ -573,5 +574,40 @@ describe('T10 writers: emails', () => {
     expect(await contract({ ref: 'MSA-D', signedOn: today() }, 'default')).toEqual({ ok: true });
     expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert', 'ops.alert', 'ops.alert', 'ops.alert']);
     for (const r of await outboxRows()) expect(String(r.payload.message)).toMatch(/^SmartRemit ops: /);
+  });
+});
+
+// Fix pack 4 T5 (C11): the alert + email half of recordLiveChange, exported for the
+// provider-block approval clear (partner-support-settings.ts setDisclosure).
+describe('notifyLiveChange', () => {
+  const NOTICE = { key: 'providerBlock', action: 'partner.disclosure.approval_cleared', word: 'approval cleared; payments wait until your admin approves it again' } as const;
+
+  it("writes the alert and the email but no audit row; 'default' gets no email", async () => {
+    await db.transaction((tx) => notifyLiveChange(tx, 'acme', { username: 'ops-ana', scope: 'platform' }, NOTICE));
+    expect(await audits()).toEqual([]);
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:providerBlock:acme:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: partner.disclosure.approval_cleared on partner acme by platform staff.' });
+    expect(o[1].dedupe_key).toMatch(new RegExp(`^livectlmail:providerBlock:acme:${UUID}$`));
+    expect(o[1].payload).toEqual({
+      to: ['compliance@acme.example'],
+      subject: 'SmartRemit: a live control changed for your workspace',
+      text: 'Your provider disclosure was changed by SmartRemit (approval cleared; payments wait until your admin approves it again). Details are in your SmartRemit workspace.',
+    });
+
+    await setAddress('default');
+    await db.transaction((tx) => notifyLiveChange(tx, 'default', { username: 'ops-ana', scope: 'platform' }, NOTICE));
+    expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert', 'email.send', 'ops.alert']);
+    expect(await audits()).toEqual([]);
+  });
+
+  it('uses a supportConfig given by the caller instead of reading the row', async () => {
+    await db.transaction((tx) => notifyLiveChange(tx, 'acme', { username: 'ops-ana', scope: 'platform' }, NOTICE, { complianceAlertEmail: 'other@acme.example' }));
+    const o = await outboxRows();
+    expect(o[1].payload.to).toEqual(['other@acme.example']);
+    await db.execute(sql`DELETE FROM outbox`);
+    await db.transaction((tx) => notifyLiveChange(tx, 'acme', { username: 'ops-ana', scope: 'platform' }, NOTICE, null));
+    expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert']);
   });
 });

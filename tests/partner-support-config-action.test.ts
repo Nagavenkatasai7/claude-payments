@@ -127,7 +127,27 @@ describe('saveDisclosureConfigAction (Reg E provider identity, draft)', () => {
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ partner_id: 'p1', actor: 'admin', action: 'partner.disclosure_config', subject_id: 'p1' });
-    expect(rows[0].meta).toEqual({ old: null, new: DISCLOSURE, actorScope: 'platform' });
+    expect(rows[0].meta).toEqual({ old: null, new: DISCLOSURE, actorScope: 'platform', approved: false, clearedApproval: false });
+  });
+
+  // Fix pack 4 T5 (C11): a platform save never approves; over an approved block it strips the stamp,
+  // and on a live-certified partner pack 3's live-change alert and partner email go out with it.
+  it('a platform save over an approved block strips the approval, audits clearedApproval: true, and on a certified partner enqueues the providerBlock alert and email', async () => {
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const approval = { by: 'p1-admin', at: new Date(Date.now() - 60_000).toISOString(), hash: disclosureHash(DISCLOSURE) };
+    await ps.savePartner(basePartner({ supportConfig: { complianceAlertEmail: 'compliance@acme.example', disclosure: { ...DISCLOSURE, approval } } }));
+    await certifyPartnerForTest(db, 'p1');
+    await saveDisclosureConfigAction(disclosureForm({ phone: '+1 800 555 0101' }));
+    const got = (await ps.getPartner('p1'))?.supportConfig?.disclosure;
+    expect(got).toEqual({ ...DISCLOSURE, phone: '+1 800 555 0101' });
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ actorScope: 'platform', approved: false, clearedApproval: true });
+    const o = (await db.execute(rawSql`SELECT kind, dedupe_key FROM outbox ORDER BY id`)).rows as Array<{ kind: string; dedupe_key: string }>;
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(/^livectl:providerBlock:p1:/);
+    expect(o[1].dedupe_key).toMatch(/^livectlmail:providerBlock:p1:/);
   });
 
   it('splits licence ids on commas and new lines, dropping blanks', async () => {

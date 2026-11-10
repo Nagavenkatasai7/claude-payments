@@ -44,6 +44,8 @@ describe('resolvePartnerDisclosure', () => {
       website: null,
       stateRegulator: null,
       deliveryBusinessDays: 1,
+      partnerApproved: false,
+      hash: null,
     });
   });
 
@@ -69,6 +71,8 @@ describe('resolvePartnerDisclosure', () => {
       website: 'https://acme.example',
       stateRegulator: { name: 'State Department of Financial Services', phone: '+1 800 555 0199', website: 'https://regulator.example' },
       deliveryBusinessDays: 2,
+      partnerApproved: false,
+      hash: expect.stringMatching(/^dh1:[0-9a-f]{64}$/),
     });
   });
 
@@ -106,7 +110,63 @@ describe('resolvePartnerDisclosure', () => {
       website: null,
       stateRegulator: null,
       deliveryBusinessDays: 1,
+      partnerApproved: false,
+      hash: expect.stringMatching(/^dh1:[0-9a-f]{64}$/),
     });
+  });
+
+  // Fix pack 4 T5 (C11): the approval stamp. A block is partner-approved only when it is
+  // configured (a licensed entity) and its stamp's hash equals the stored block's hash.
+  it('a block whose approval.hash equals its hash is partnerApproved; an edited block (hash mismatch) is not', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const approval = { by: 'acme.admin', at: new Date().toISOString(), hash: disclosureHash(FULL) };
+    const ok = resolvePartnerDisclosure(partner({ supportConfig: { disclosure: { ...FULL, approval } } }));
+    expect(ok.partnerApproved).toBe(true);
+    expect(ok.hash).toBe(disclosureHash(FULL));
+    const edited = resolvePartnerDisclosure(partner({ supportConfig: { disclosure: { ...FULL, phone: '+1 800 555 0101', approval } } }));
+    expect(edited.partnerApproved).toBe(false);
+    expect(edited.hash).not.toBe(approval.hash);
+  });
+
+  it('an approved stamp on an UNCONFIGURED block (no entity) is not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const block = { phone: '+1 800 555 0100' };
+    const r = resolvePartnerDisclosure(
+      partner({ displayName: 'Acme Send', supportConfig: { disclosure: { ...block, approval: { by: 'a', at: new Date().toISOString(), hash: disclosureHash(block) } } } }),
+    );
+    expect(r.configured).toBe(false);
+    expect(r.partnerApproved).toBe(false);
+    expect(r.hash).toBe(disclosureHash(block));
+  });
+
+  it('the default tenant with a stamped block is never approved and its hash is null', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const approval = { by: 'x', at: new Date().toISOString(), hash: disclosureHash(FULL) };
+    const r = resolvePartnerDisclosure(partner({ id: 'default', supportConfig: { disclosure: { ...FULL, approval } } }));
+    expect(r.partnerApproved).toBe(false);
+    expect(r.hash).toBeNull();
+  });
+
+  it('no stored block gives hash null and not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const r = resolvePartnerDisclosure(partner({ displayName: 'Acme Send' }));
+    expect(r.hash).toBeNull();
+    expect(r.partnerApproved).toBe(false);
+  });
+
+  it('a malformed approval (not an object, hash not a string) reads as not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const h = disclosureHash(FULL);
+    for (const approval of [h, 42, null, ['x'], { hash: 7 }, { hash: { h } }, {}]) {
+      const disclosure = { ...FULL, approval } as unknown as NonNullable<Partner['supportConfig']>['disclosure'];
+      const r = resolvePartnerDisclosure(partner({ supportConfig: { disclosure } }));
+      expect(r.partnerApproved).toBe(false);
+      expect(r.hash).toBe(h);
+    }
   });
 
   it('a regulator website that is not https is dropped but the name stays', async () => {

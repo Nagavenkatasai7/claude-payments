@@ -56,7 +56,13 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
   // Fix pack 3 T9 (contract 9): the typed live-controls writers run in the caller's
   // transaction; their callers (the partner / platform live-controls actions) poke.
-  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn'],
+  // Fix pack 4 T5 (C11): notifyLiveChange (the alert + email half, no audit row) is also called by
+  // partner-support-settings.ts setDisclosure, listed below.
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange'],
+  // Fix pack 4 T5 (C11): no .enqueue( of its own; setDisclosure calls notifyLiveChange
+  // (live-controls-write.ts) when a platform save clears a certified partner's provider
+  // approval. Its two callers (the partner settings and the admin partner disclosure actions) poke.
+  'src/lib/partner-support-settings.ts': ['setDisclosure'],
   // Pack 3 review I1: the livegate:stuck: alert — called only from the two
   // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
   'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
@@ -101,7 +107,13 @@ describe('every outbox enqueue site is followed by a worker poke (partner-demo R
 
   it('finds the enqueue sites (the scan is not vacuous)', () => {
     expect(enqueuers.length).toBeGreaterThan(20);
-    for (const helper of Object.keys(HELPERS)) expect(enqueuers, helper).toContain(helper);
+    // A helper enqueues itself, or (fix pack 4 T5) calls a listed function of another helper that does.
+    const helperFns = (self: string) => Object.entries(HELPERS).filter(([rel]) => rel !== self).flatMap(([, fns]) => fns);
+    for (const helper of Object.keys(HELPERS)) {
+      const text = files.find((f) => f.rel === helper)?.text ?? '';
+      const viaHelper = helperFns(helper).some((fn) => new RegExp(`\\b${fn}\\(`).test(text));
+      if (!viaHelper) expect(enqueuers, helper).toContain(helper);
+    }
   });
 
   it('each one pokes, or is a helper whose every caller pokes / is the worker', () => {

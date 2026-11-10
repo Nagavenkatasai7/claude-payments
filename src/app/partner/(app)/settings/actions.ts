@@ -20,6 +20,8 @@ import {
 } from '@/lib/partner-support-settings';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
+import { pokeWorker } from '@/lib/outbox';
 import type { StepUpRequired } from '@/lib/staff-step-up-result';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
@@ -36,6 +38,8 @@ import { PARTNER_ROUTES } from '../../routes';
 //    transaction whose meta.actorScope comes from the session. The alert address is never audited;
 //  - the Reg E disclosure is what customers see as the provider of record, so its save needs the
 //    15-minute step-up (partner-step-up-gate.ts), checked after the parse and before any write;
+//    a TOTP-enrolled admin's save also stamps the partner approval and needs a step-up for that
+//    save itself (fix pack 4 C11);
 //  - errors are fixed, translated copy: never an exception message, never the input echoed back.
 
 const POLICY = PARTNER_ROUTES.settings.policy;
@@ -112,8 +116,17 @@ export async function saveDisclosureAction(_prev: ActionResult | null, formData:
   const ctx = await requirePartnerStaff(POLICY);
   const parsed = parseDisclosureForm(formData); // validated BEFORE the step-up and any write
   if (!parsed.ok) return refused(DISCLOSURE_ERROR[parsed.reason], { max: MAX_DELIVERY_BUSINESS_DAYS });
-  const stepUp = await gatePartnerStepUp(ctx, formData, 'disclosure.save');
+  // Fix pack 4 T5 (C11): a TOTP-enrolled admin's save stamps the partner approval, so the step-up is
+  // forced for THIS save (critic M7: a still-fresh step-up taken with a password before enrolment
+  // never stamps). Fail closed: a read error counts as not enrolled (saved unapproved, as today).
+  const enrolled = await staffMfaEnrolled(ctx.username);
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'disclosure.save', enrolled ? { always: true } : {});
   if (stepUp) return stepUp;
   if (!(await tenantExists(ctx))) return refused('partner.settings.notFound');
-  return write('partner.settings.disclosure', ctx, () => setDisclosure(getDb(), ctx.partnerId, actorOf(ctx), parsed.value));
+  const r = await write('partner.settings.disclosure', ctx, () =>
+    setDisclosure(getDb(), ctx.partnerId, actorOf(ctx), parsed.value, { approve: enrolled }),
+  );
+  // setDisclosure can enqueue (the platform-clear notice); post-response, so after the commit.
+  if (r.ok) pokeWorker();
+  return r;
 }

@@ -54,6 +54,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { hasStandingCertification, settlementTargetUrl } from '@/lib/live-gate';
 import { lockPartner } from '@/lib/live-controls-write';
+import { pokeWorker } from '@/lib/outbox';
 import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
@@ -698,8 +699,11 @@ export async function saveDisclosureConfigAction(formData: FormData): Promise<vo
   const staff = await gatePartnerConfig(id);
   const parsed = parseDisclosureForm(formData); // validate BEFORE any write
   if (!parsed.ok) throw new Error(DISCLOSURE_ERROR[parsed.reason]);
+  // Fix pack 4 T5 (C11): a platform save never approves (it strips a partner approval; on a
+  // live-certified partner setDisclosure enqueues the live-change notice in its transaction).
   const r = await setDisclosure(getDb(), id, supportActor(staff), parsed.value);
   if (!r.ok) throw new Error('Partner not found.');
+  pokeWorker(); // post-response after(), so after the commit
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 

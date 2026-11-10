@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { auditEvents, partners } from '@/db/schema';
@@ -15,7 +15,9 @@ import {
   setSupportKnobs,
   setSupportPortal,
 } from '@/lib/partner-support-settings';
-import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
+import { disclosureHash } from '@/lib/disclosure-hash';
+import { certifyPartnerForTest } from './helpers-live';
 
 // partner-support-settings: the support-portal switch, the channel alert email and the Reg E
 // disclosure, shared by the legacy "My partner" actions and /partner/settings. The parsers are pure
@@ -179,8 +181,8 @@ describe('the support_config writers (PGlite)', () => {
     expect(await sc()).toEqual({ enableSupportPortal: true, autoAssign: 'round_robin', alertEmail: 'ops@acme.example' });
     const rows = await audits();
     expect(rows.map((r) => [r.action, r.meta])).toEqual([
-      ['partner.disclosure_config', { old: DISCLOSURE, new: next, actorScope: 'partner' }],
-      ['partner.disclosure_config', { old: next, new: null, actorScope: 'partner' }],
+      ['partner.disclosure_config', { old: DISCLOSURE, new: next, actorScope: 'partner', approved: false, clearedApproval: false }],
+      ['partner.disclosure_config', { old: next, new: null, actorScope: 'partner', approved: false, clearedApproval: false }],
     ]);
   });
 
@@ -202,5 +204,139 @@ describe('the support_config writers (PGlite)', () => {
     ).rejects.toThrow('boom');
     expect((await sc())?.enableSupportPortal).toBe(true);
     expect(await audits()).toEqual([]);
+  });
+});
+
+// Fix pack 4 T5 (C11): the approval stamp. Only a partner admin's save with approve: true (the
+// action passes it only for a TOTP-enrolled admin after a forced step-up) stamps the block; every
+// other save strips the stamp. A platform save that clears a VALID approval on a live-certified
+// partner sends pack 3's live-change alert and partner email in the same transaction.
+describe('setDisclosure: the approval stamp (C11)', () => {
+  let db: Db;
+  const partnerAdmin = { username: 'pa-admin', actorScope: 'partner' as const };
+  const platform = { username: 'ops-ana', actorScope: 'platform' as const };
+  const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const getPartner = async (id = 'pa') => createPartnerStore(db).getPartner(id);
+  const stored = async (id = 'pa') => (await getPartner(id))?.supportConfig?.disclosure;
+  const audits = () => db.select().from(auditEvents).orderBy(asc(auditEvents.id));
+  const outboxRows = async () =>
+    ((await db.execute(sql`SELECT kind, payload, dedupe_key FROM outbox ORDER BY id`)) as unknown as {
+      rows: { kind: string; payload: Record<string, unknown>; dedupe_key: string }[];
+    }).rows;
+  const meta = (r: { meta: unknown }) => r.meta as Record<string, unknown>;
+  const validStamp = (block = DISCLOSURE) => ({ by: 'pa-admin', at: new Date(Date.now() - 60_000).toISOString(), hash: disclosureHash(block) });
+  async function storeBlock(block: unknown, id = 'pa'): Promise<void> {
+    await db.update(partners).set({ supportConfig: { complianceAlertEmail: 'compliance@acme.example', disclosure: block as typeof DISCLOSURE } }).where(eq(partners.id, id));
+  }
+
+  beforeEach(async () => {
+    db = await freshDb();
+    await seedPartner(db, 'pa', 'Partner A');
+    await seedPartner(db, 'default', 'SmartRemit');
+  });
+
+  it('a partner actor with approve: true stamps { by: username, at: now ISO, hash } and the stored block resolves partnerApproved', async () => {
+    const now = new Date(Date.now() - 5_000);
+    expect(await setDisclosure(db, 'pa', partnerAdmin, DISCLOSURE, { approve: true, now })).toEqual({ ok: true });
+    const block = await stored();
+    expect(block).toEqual({ ...DISCLOSURE, approval: { by: 'pa-admin', at: now.toISOString(), hash: disclosureHash(DISCLOSURE) } });
+    const r = resolvePartnerDisclosure(await getPartner());
+    expect(r.partnerApproved).toBe(true);
+    expect(r.hash).toBe(disclosureHash(DISCLOSURE));
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partnerId: 'pa', actor: 'pa-admin', actorType: 'staff', action: 'partner.disclosure_config', subjectId: 'pa' });
+    expect(rows[0].meta).toEqual({ old: null, new: block, actorScope: 'partner', approved: true, clearedApproval: false });
+    expect(await outboxRows()).toEqual([]);
+  });
+
+  it('a partner save without approve, and every platform save, strips a stored approval', async () => {
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', partnerAdmin, DISCLOSURE)).toEqual({ ok: true });
+    expect(await stored()).toEqual(DISCLOSURE);
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', platform, DISCLOSURE, { approve: true })).toEqual({ ok: true });
+    expect(await stored()).toEqual(DISCLOSURE);
+    // A stale stamp (the block was edited after it) is not a valid approval: clearing it is not a clear.
+    await storeBlock({ ...DISCLOSURE, phone: '+1 800 555 0101', approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', partnerAdmin, DISCLOSURE)).toEqual({ ok: true });
+    // A cleared block (undefined) on a valid stamp is a clear.
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', partnerAdmin, undefined, { approve: true })).toEqual({ ok: true });
+    expect(await stored()).toBeUndefined();
+    expect((await audits()).map((r) => [meta(r).approved, meta(r).clearedApproval])).toEqual([
+      [false, true],
+      [false, true],
+      [false, false],
+      [false, true],
+    ]);
+  });
+
+  it("the 'default' partner is never stamped, even with approve: true", async () => {
+    expect(await setDisclosure(db, 'default', partnerAdmin, DISCLOSURE, { approve: true })).toEqual({ ok: true });
+    expect(await stored('default')).toEqual(DISCLOSURE);
+    expect((await audits())[0].meta).toMatchObject({ approved: false, clearedApproval: false });
+  });
+
+  it('an approval key on the input disclosure is never stored as given', async () => {
+    const forged = { ...DISCLOSURE, approval: { by: 'someone-else', at: '2000-01-01T00:00:00.000Z', hash: disclosureHash(DISCLOSURE) } };
+    expect(await setDisclosure(db, 'pa', partnerAdmin, forged)).toEqual({ ok: true });
+    expect(await stored()).toEqual(DISCLOSURE);
+    expect(await setDisclosure(db, 'pa', platform, forged)).toEqual({ ok: true });
+    expect(await stored()).toEqual(DISCLOSURE);
+    const now = new Date();
+    expect(await setDisclosure(db, 'pa', partnerAdmin, forged, { approve: true, now })).toEqual({ ok: true });
+    expect((await stored())?.approval).toEqual({ by: 'pa-admin', at: now.toISOString(), hash: disclosureHash(DISCLOSURE) });
+    expect(JSON.stringify(await audits())).not.toContain('someone-else');
+  });
+
+  it('a platform save that clears a valid approval on a CERTIFIED partner enqueues one ops.alert and one email.send in the same transaction', async () => {
+    await certifyPartnerForTest(db, 'pa');
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', platform, { ...DISCLOSURE, phone: '+1 800 555 0101' })).toEqual({ ok: true });
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:providerBlock:pa:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: partner.disclosure.approval_cleared on partner pa by platform staff.' });
+    expect(o[1].dedupe_key).toMatch(new RegExp(`^livectlmail:providerBlock:pa:${UUID}$`));
+    expect(o[1].payload).toEqual({
+      to: ['compliance@acme.example'],
+      subject: 'SmartRemit: a live control changed for your workspace',
+      text: 'Your provider disclosure was changed by SmartRemit (approval cleared; payments wait until your admin approves it again). Details are in your SmartRemit workspace.',
+    });
+    expect(JSON.stringify(o)).not.toContain('ops-ana');
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0].meta).toMatchObject({ actorScope: 'platform', approved: false, clearedApproval: true });
+  });
+
+  it('the notice rolls back with the save (one transaction)', async () => {
+    await certifyPartnerForTest(db, 'pa');
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    await expect(
+      db.transaction(async (tx) => {
+        await setDisclosure(tx, 'pa', platform, DISCLOSURE);
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(await outboxRows()).toEqual([]);
+    expect(await audits()).toEqual([]);
+    expect((await stored())?.approval).toBeDefined();
+  });
+
+  it('uncertified, or nothing cleared, or a partner actor: no outbox row', async () => {
+    // Uncertified, platform clear.
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', platform, DISCLOSURE)).toEqual({ ok: true });
+    await certifyPartnerForTest(db, 'pa');
+    // Certified, nothing to clear (no stamp; then a stale stamp).
+    expect(await setDisclosure(db, 'pa', platform, DISCLOSURE)).toEqual({ ok: true });
+    await storeBlock({ ...DISCLOSURE, phone: '+1 800 555 0101', approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', platform, DISCLOSURE)).toEqual({ ok: true });
+    // Certified, a partner actor clears a valid stamp.
+    await storeBlock({ ...DISCLOSURE, approval: validStamp() });
+    expect(await setDisclosure(db, 'pa', partnerAdmin, DISCLOSURE)).toEqual({ ok: true });
+    expect(await outboxRows()).toEqual([]);
+    expect((await audits()).map((r) => meta(r).clearedApproval)).toEqual([true, false, false, true]);
   });
 });

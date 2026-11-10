@@ -53,13 +53,20 @@ export type LiveWriteResult =
   | { ok: true }
   | { ok: false; code: 'not_found' | 'kyc_decider_mismatch' | 'not_ready' | 'not_certified' | 'bad_input' };
 
+/**
+ * Fix pack 4 T5 (C11): the keys a live-change notice can name: the live_controls keys plus
+ * 'providerBlock' (a platform save that clears a partner's provider-disclosure approval).
+ */
+export type LiveNoticeKey = LiveControlsKey | 'providerBlock';
+
 /** The email's `<label>` per key (contract 9). */
-const LABELS: Record<LiveControlsKey, string> = {
+const LABELS: Record<LiveNoticeKey, string> = {
   posture: 'Your compliance posture',
   complianceUsers: 'Your compliance users',
   contract: 'Your live contract record',
   certification: 'Your live certification',
   optIns: 'A live feature approval',
+  providerBlock: 'Your provider disclosure',
 };
 
 /** The same username rule as the parser (live-controls.ts complianceUsers). */
@@ -85,6 +92,22 @@ async function recordLiveChange(
     subjectId: partnerId,
     meta: { ...c.meta, actorScope: actor.scope },
   });
+  await notifyLiveChange(tx, partnerId, actor, { key: c.key, action: c.action, word: c.word }, supportConfig);
+}
+
+/**
+ * The ops alert (ids only) and, for a partner other than 'default' with an alert address, the
+ * partner email of one live change, in `tx`; no audit row (the caller writes its own). Fix pack 4
+ * T5 (C11): extracted from recordLiveChange (texts and dedupe keys unchanged) for the
+ * provider-block approval clear. `supportConfig` undefined reads the row; null means no address.
+ */
+export async function notifyLiveChange(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  actor: LiveActor,
+  c: { key: LiveNoticeKey; action: string; word: string },
+  supportConfig?: PartnerSupportConfig | null,
+): Promise<void> {
   const outbox = createOutboxRepo(tx);
   await outbox.enqueue(
     'ops.alert',

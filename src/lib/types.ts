@@ -440,6 +440,9 @@ export interface PartnerDisclosureConfig {
   website?: string;                     // https URL
   stateRegulator?: { name: string; phone?: string; website?: string };
   deliveryEstimate?: { businessDays: number }; // §1005.32 estimate; absent ⇒ 1 business day
+  // fix pack 4 (C11): set ONLY by setDisclosure for a partner admin with TOTP; any other save strips it.
+  // hash = disclosureHash(this block without `approval`); a later edit makes it stale (not approved).
+  approval?: { by: string; at: string; hash: string };
 }
 
 export interface Draft {
