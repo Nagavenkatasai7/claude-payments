@@ -4,7 +4,7 @@ import { freshDb } from './helpers-db';
 import { fakeRedis } from './helpers';
 import { partners, partnerSites, partnerSlugTombstones, auditEvents } from '@/db/schema';
 import type { Db } from '@/db/client';
-import { resolveSiteSlug, siteCacheKey, skinCacheKey, SITE_CACHE_TTL_SEC } from '@/lib/site-tenant-resolver';
+import { resolveSiteSlug, resolveSkinHost, siteCacheKey, skinCacheKey, SITE_CACHE_TTL_SEC } from '@/lib/site-tenant-resolver';
 import { findActivePartnerIdBySlug } from '@/db/repos/partner-site-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
@@ -296,5 +296,114 @@ describe('resolveSiteSlug: a skin slug (tgfl)', () => {
     expect(await resolveSiteSlug('nope', H, { redis, db, limited, skinsOn })).toBeNull();
     expect(skinsOn).not.toHaveBeenCalled();
     expect(await redis.get(skinCacheKey('acme'))).toBeNull();
+  });
+});
+
+// The custom skin host (smartremitai.tgfl.org, site-skins.ts `hosts`) resolves SKIN-ONLY: the skin's tenant
+// when the switch is clearly on and the status is 'ok', else null. It never falls through to the partner
+// path (on TGFL's DNS name a 'held' slug must never show another partner's portal), and it shares the
+// skin status cache and the per-IP limiter with tgfl.smartremit.ai.
+describe('resolveSkinHost (custom skin host: skin-only, never the partner path)', () => {
+  let db: Db; let redis: ReturnType<typeof fakeRedis>;
+  const limited = async () => false;
+  const H = new Headers({ 'x-forwarded-for': '1.1.1.1' });
+  const on = async () => true;
+  const off = async () => false;
+  beforeEach(async () => {
+    db = await freshDb(); redis = fakeRedis();
+    await db.insert(partners).values([{ id: 'pa', name: 'A' }]);
+  });
+  const spyDb = () => {
+    const d = { select: vi.fn(), execute: vi.fn() };
+    return { db: d as unknown as Db, select: d.select, execute: d.execute };
+  };
+
+  it('switch on + status ok → the skin\'s tenant, status cached under the shared skin key', async () => {
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited, skinsOn: on })).toBe('default');
+    expect(await redis.get(skinCacheKey('tgfl'))).toBe('ok');
+    expect(await redis.get(siteCacheKey('tgfl'))).toBeNull();
+  });
+  it('switch off → null; neither the skin status nor findActivePartnerIdBySlug is read, nothing cached', async () => {
+    const s = spyDb();
+    expect(await resolveSkinHost('tgfl', H, { redis, db: s.db, limited, skinsOn: off })).toBeNull();
+    expect(s.select).not.toHaveBeenCalled();
+    expect(s.execute).not.toHaveBeenCalled();
+    expect(await redis.get(siteCacheKey('tgfl'))).toBeNull();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+  });
+  it('held by an ACTIVE partner → null (never that partner\'s portal), and the partner lookup never runs', async () => {
+    await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'tgfl' });
+    const selectSpy = vi.spyOn(db, 'select');
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited, skinsOn: on })).toBeNull();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBe('held');
+    expect(selectSpy).not.toHaveBeenCalled();
+    expect(await redis.get(siteCacheKey('tgfl'))).toBeNull();
+    // A cached 'held' answers the same way without the DB.
+    const s = spyDb();
+    expect(await resolveSkinHost('tgfl', H, { redis, db: s.db, limited, skinsOn: on })).toBeNull();
+    expect(s.select).not.toHaveBeenCalled();
+    selectSpy.mockRestore();
+  });
+  it('a released slug (tombstone) → null', async () => {
+    await db.insert(partnerSlugTombstones).values({ slug: 'tgfl', partnerId: 'pa', releasedBy: 'admin', releasedAt: new Date() });
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited, skinsOn: on })).toBeNull();
+  });
+  it('a slug in the slug audit history → null', async () => {
+    await db.insert(auditEvents).values({ partnerId: 'pa', actor: 'u', actorType: 'staff', action: 'partner.slug.update', subjectId: 'pa', meta: { slug: 'other', previousSlug: 'tgfl' } });
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited, skinsOn: on })).toBeNull();
+  });
+  it('the skin\'s tenant is not active → null', async () => {
+    await db.update(partners).set({ status: 'suspended' }).where(eq(partners.id, 'default'));
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited, skinsOn: on })).toBeNull();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBe('inactive');
+  });
+  it('a throwing or stalled switch read → null, the status never read', async () => {
+    const log = await import('@/lib/log');
+    const warn = vi.spyOn(log, 'logWarn').mockImplementation(() => {});
+    const s = spyDb();
+    expect(await resolveSkinHost('tgfl', H, { redis, db: s.db, limited, skinsOn: async () => { throw new Error('x'); } })).toBeNull();
+    expect(await resolveSkinHost('tgfl', H, { redis, db: s.db, limited, skinsOn: () => new Promise(() => {}), dbTimeoutMs: 20 })).toBeNull();
+    expect(s.select).not.toHaveBeenCalled();
+    expect(s.execute).not.toHaveBeenCalled();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+    warn.mockRestore();
+  });
+  it('a throttled status-cache miss → null without the DB, nothing cached', async () => {
+    const s = spyDb();
+    expect(await resolveSkinHost('tgfl', H, { redis, db: s.db, limited: async () => true, skinsOn: on })).toBeNull();
+    expect(s.execute).not.toHaveBeenCalled();
+    expect(s.select).not.toHaveBeenCalled();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+  });
+  it('a status read that fails → null, nothing cached', async () => {
+    const log = await import('@/lib/log');
+    const warn = vi.spyOn(log, 'logWarn').mockImplementation(() => {});
+    const brokenDb = { execute: () => { throw new Error('db down'); }, select: vi.fn() } as unknown as Db;
+    expect(await resolveSkinHost('tgfl', H, { redis, db: brokenDb, limited, skinsOn: on })).toBeNull();
+    expect(await redis.get(skinCacheKey('tgfl'))).toBeNull();
+    warn.mockRestore();
+  });
+  it('a slug that is not a skin, or not a valid slug → null with no switch, Redis or DB read', async () => {
+    await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'acme' });
+    const skinsOn = vi.fn(async () => true);
+    const get = vi.spyOn(redis, 'get');
+    const s = spyDb();
+    for (const slug of ['acme', 'nope', 'www', 'TGFL', 'constructor', '__proto__', '']) {
+      expect(await resolveSkinHost(slug, H, { redis, db: s.db, limited, skinsOn }), slug).toBeNull();
+    }
+    expect(skinsOn).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(s.select).not.toHaveBeenCalled();
+    expect(s.execute).not.toHaveBeenCalled();
+  });
+  it('reads the real switch by default: off with no row, on with a global row, off again', async () => {
+    invalidateFlagCache(db);
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited })).toBeNull();
+    await createFeatureFlagRepo(db).upsert({ key: 'portal.skins', scopeType: 'global', scopeId: '', enabled: true, reason: 'demo for TGFL', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited })).toBe('default');
+    await createFeatureFlagRepo(db).upsert({ key: 'portal.skins', scopeType: 'global', scopeId: '', enabled: false, reason: 'demo over', updatedBy: 'admin' });
+    invalidateFlagCache(db);
+    expect(await resolveSkinHost('tgfl', H, { redis, db, limited })).toBeNull();
   });
 });

@@ -5,6 +5,10 @@ import { parseSiteHost, SITE_HEADERS } from './site-host';
 export interface SiteTenant {
   partnerId: string;
   slug: string;
+  /** The canonical public host from parseSiteHost (rebuilt from the slug or the skin table), never the raw header. */
+  host: string;
+  /** true only on a custom skin host outside smartremit.ai (site-skins.ts `hosts`). */
+  custom: boolean;
 }
 
 /**
@@ -19,6 +23,7 @@ export interface SiteTenant {
  *   Host alone, even if the platform ever skipped the proxy.
  * The re-resolve shares the proxy's 60 s cache (so a disabled partner is dropped within the TTL) and
  * uses a no-op limiter so the IP is not counted twice. Any failure → null (fail closed).
+ * A custom skin host re-resolves skin-only (resolveSkinHost), exactly as the proxy does.
  */
 export async function getSiteTenant(): Promise<SiteTenant | null> {
   const h = await headers();
@@ -27,10 +32,11 @@ export async function getSiteTenant(): Promise<SiteTenant | null> {
   const claimed = h.get(SITE_HEADERS.partner);
   if (!claimed || h.get(SITE_HEADERS.slug) !== site.slug) return null;
   try {
-    const { resolveSiteSlug } = await import('./site-tenant-resolver');
-    const resolved = await resolveSiteSlug(site.slug, new Headers(h), { limited: async () => false });
+    const { resolveSiteSlug, resolveSkinHost } = await import('./site-tenant-resolver');
+    const resolve = site.custom ? resolveSkinHost : resolveSiteSlug;
+    const resolved = await resolve(site.slug, new Headers(h), { limited: async () => false });
     if (!resolved || resolved !== claimed) return null;
-    return { partnerId: resolved, slug: site.slug };
+    return { partnerId: resolved, slug: site.slug, host: site.host, custom: site.custom };
   } catch {
     return null;
   }

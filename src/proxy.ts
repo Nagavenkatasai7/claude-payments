@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { hasStaffSessionCookie } from '@/lib/session-cookie';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
-import { parseSiteHost, stripSiteHeaders, SITE_HEADERS } from '@/lib/site-host';
+import { parseSiteHost, stripSiteHeaders, SITE_HEADERS, type SiteHostSite } from '@/lib/site-host';
 import { classifySitePath, type SitePathClass } from '@/lib/site-routes';
 import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-session-cookie';
 import { continuePath, legacyDeepLink } from '@/lib/legacy-deep-link';
@@ -33,7 +33,7 @@ const hasSiteHeader = (h: Headers) => h.has(SITE_HEADERS.partner) || h.has(SITE_
 
 export function proxy(req: NextRequest): NextResponse | Promise<NextResponse> {
   const site = parseSiteHost(req.headers.get('host'));
-  if (site.kind === 'site') return siteProxy(req, site.slug);
+  if (site.kind === 'site') return siteProxy(req, site);
   if (site.kind === 'refused') return refuse(req);
   if (!isLegacyGatedPath(req.nextUrl.pathname)) {
     // Only reachable if the platform ever dropped the host condition: never the /login fallthrough.
@@ -94,17 +94,21 @@ function refuse(req: NextRequest, headers: Headers = stripSiteHeaders(req.header
   return isRead(req.method) ? NextResponse.rewrite(new URL('/_site-not-found', req.url), { request: { headers } }) : bare404();
 }
 
-async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> {
+async function siteProxy(req: NextRequest, site: SiteHostSite): Promise<NextResponse> {
+  const { slug } = site;
   const headers = stripSiteHeaders(req.headers);
   let partnerId: string | null = null;
   try {
-    const { resolveSiteSlug } = await import('@/lib/site-tenant-resolver'); // lazy: apex never loads it
-    partnerId = await resolveSiteSlug(slug, headers);
+    const mod = await import('@/lib/site-tenant-resolver'); // lazy: apex never loads it
+    // A custom skin host resolves skin-only: it never falls through to a partner that holds the slug.
+    partnerId = site.custom ? await mod.resolveSkinHost(slug, headers) : await mod.resolveSiteSlug(slug, headers);
   } catch {
-    partnerId = null; // fail closed: the same sheet as an unknown slug
+    partnerId = null; // fail closed: the same answer as an unknown slug
   }
-  // Unknown, disabled, throttled and errored all look identical (no oracle).
+  // Unknown, disabled, throttled and errored all look identical (no oracle). A custom skin host is
+  // another organisation's DNS name: it answers a plain 404 instead of the SmartRemit inactive sheet.
   if (!partnerId) {
+    if (site.custom) return refuse(req, headers);
     return isRead(req.method) ? NextResponse.rewrite(new URL('/site-inactive', req.url), { request: { headers } }) : bare404();
   }
   const route: SitePathClass = siteRoutesLive() ? classifySitePath(req.nextUrl.pathname) : DENY;
@@ -115,7 +119,8 @@ async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> 
     ? NextResponse.rewrite(new URL(route.rewriteTo, req.url), { request: { headers } })
     : NextResponse.next({ request: { headers } });
   refreshPortalCookie(req, res);
-  rememberReferralCode(req, res);
+  // D14: tgfl.org can plant a Domain=tgfl.org sr_ref, so a custom skin host never stores a referral code.
+  if (!site.custom) rememberReferralCode(req, res);
   return res;
 }
 
