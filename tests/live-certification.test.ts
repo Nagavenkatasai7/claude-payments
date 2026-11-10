@@ -9,14 +9,15 @@ import {
 } from '@/lib/live-certification';
 import type { LiveControls } from '@/lib/live-controls';
 import type { Partner } from '@/lib/types';
-import { certifiedLiveControls } from './helpers-live';
+import { disclosureHash } from '@/lib/disclosure-hash';
+import { approvedDisclosureConfig, certifiedLiveControls } from './helpers-live';
 
 // Fix pack 3 (contract 8): the 12-line live readiness checklist. Pure: the
-// partner and the facts are literals here. Six lines are built in pack 3; the
-// other six are 'not_built' (always failing), so `ok` is false for EVERY
-// partner in pack 3 (pinned below).
+// partner and the facts are literals here. Seven lines are built (pack 4 T6
+// added provider_block); the other five are 'not_built' (always failing), so
+// `ok` is false for EVERY partner until PR9 (pinned below).
 
-type P = Pick<Partner, 'id' | 'status' | 'kycMode' | 'requireKycBeforeSend' | 'liveControls'>;
+type P = Pick<Partner, 'id' | 'status' | 'kycMode' | 'requireKycBeforeSend' | 'liveControls' | 'supportConfig' | 'displayName' | 'brandName'>;
 
 const USERS = ['acme-comp1', 'acme-comp2'];
 
@@ -27,6 +28,7 @@ function passingPartner(o: Partial<P> = {}): P {
     kycMode: 'ours',
     requireKycBeforeSend: true,
     liveControls: certifiedLiveControls({ posture: true, complianceUsers: USERS }),
+    supportConfig: { disclosure: approvedDisclosureConfig() },
     ...o,
   };
 }
@@ -70,7 +72,7 @@ describe('liveReadiness: shape', () => {
       'provider_block', 'funding', 'licence_matrix', 'corridor_register', 'staff_mfa', 'dual_control',
     ]);
     expect(NOT_BUILT_LINES).toEqual({
-      provider_block: 'PR4', funding: 'PR5', licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9',
+      funding: 'PR5', licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9',
     });
   });
 
@@ -86,10 +88,10 @@ describe('liveReadiness: shape', () => {
     }
   });
 
-  it('ok is false for EVERY partner in pack 3 (all built lines passing still false)', () => {
+  it('ok is false for EVERY partner (pack 4: five lines not built; all built lines passing still false)', () => {
     const r = liveReadiness(passingPartner(), allPassFacts());
     const built = r.lines.filter((l) => !(l.id in NOT_BUILT_LINES));
-    expect(built).toHaveLength(6);
+    expect(built).toHaveLength(7);
     for (const l of built) expect(l).toEqual({ id: l.id, state: 'pass', ok: true });
     expect(r.ok).toBe(false);
   });
@@ -189,5 +191,63 @@ describe('liveReadiness: built lines', () => {
     const lc = certifiedLiveControls({ posture: true, complianceUsers: USERS });
     delete lc.contract;
     expect(okOf(passingPartner({ liveControls: lc }), allPassFacts(), 'contract')).toBe(false);
+  });
+});
+
+describe('provider_block (pack 4)', () => {
+  const withBlock = (disclosure: unknown): P => passingPartner({ supportConfig: { disclosure: disclosure as never } });
+  const stripped = () => {
+    const { approval: _a, ...block } = approvedDisclosureConfig();
+    void _a;
+    return block;
+  };
+  // Re-stamp an edited block so only the edited field decides the line.
+  const restamped = (block: Record<string, unknown>) => ({
+    ...block,
+    approval: { ...approvedDisclosureConfig().approval!, hash: disclosureHash(block) },
+  });
+
+  it('passes for a configured, approved block with licence, phone, website and regulator', () => {
+    expect(line(liveReadiness(passingPartner(), allPassFacts()), 'provider_block')).toEqual({ id: 'provider_block', state: 'pass', ok: true });
+  });
+
+  it('fails with no block', () => {
+    expect(okOf(passingPartner({ supportConfig: {} }), allPassFacts(), 'provider_block')).toBe(false);
+  });
+
+  it('fails for an unapproved block (no approval, or a stamp whose hash no longer matches after an edit)', () => {
+    expect(okOf(withBlock(stripped()), allPassFacts(), 'provider_block')).toBe(false);
+    const edited = { ...approvedDisclosureConfig(), phone: '+1 800 555 0111' };
+    expect(okOf(withBlock(edited), allPassFacts(), 'provider_block')).toBe(false);
+    // the same edit re-stamped passes (the fixture is sound)
+    const { approval: _a, ...rest } = edited;
+    void _a;
+    expect(okOf(withBlock(restamped(rest)), allPassFacts(), 'provider_block')).toBe(true);
+  });
+
+  it('fails when licenseIds is empty / phone missing / website missing / regulator missing', () => {
+    const b = stripped();
+    expect(okOf(withBlock(restamped({ ...b, licenseIds: [] })), allPassFacts(), 'provider_block')).toBe(false);
+    const { phone: _p, ...noPhone } = b;
+    void _p;
+    expect(okOf(withBlock(restamped(noPhone)), allPassFacts(), 'provider_block')).toBe(false);
+    const { website: _w, ...noSite } = b;
+    void _w;
+    expect(okOf(withBlock(restamped(noSite)), allPassFacts(), 'provider_block')).toBe(false);
+    const { stateRegulator: _r, ...noReg } = b;
+    void _r;
+    expect(okOf(withBlock(restamped(noReg)), allPassFacts(), 'provider_block')).toBe(false);
+    // an http (not https) website reads as missing
+    expect(okOf(withBlock(restamped({ ...b, website: 'http://acme.example' })), allPassFacts(), 'provider_block')).toBe(false);
+  });
+
+  it('fails for the default tenant even with an approved block', () => {
+    expect(okOf(passingPartner({ id: 'default' }), allPassFacts(), 'provider_block')).toBe(false);
+  });
+
+  it('missing supportConfig does not throw', () => {
+    const p = passingPartner({ supportConfig: undefined });
+    expect(() => liveReadiness(p, allPassFacts())).not.toThrow();
+    expect(okOf(p, allPassFacts(), 'provider_block')).toBe(false);
   });
 });

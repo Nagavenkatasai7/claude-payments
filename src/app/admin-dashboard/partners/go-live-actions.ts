@@ -126,8 +126,9 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
 // (contract 8). Inside the transaction the partner row is locked, re-read, and readiness is
 // recomputed on the LOCKED row, so drift since the facts were read (posture, contract, status,
 // kycMode, a compliance user taken off the list) refuses. Nothing in the transaction touches
-// getDb(), getAuthStore(), Redis or the OFAC source. In pack 3 six readiness lines are not built
-// yet, so certify always answers "not ready" (pinned in tests/admin-live-actions.test.ts).
+// getDb(), getAuthStore(), Redis or the OFAC source. Five readiness lines are not built until
+// PR5/PR8/PR9 (pack 4 built provider_block), so certify always answers "not ready" (pinned in
+// tests/admin-live-actions.test.ts).
 
 export type LiveActionResult = { ok: true } | { ok: false; error: string };
 

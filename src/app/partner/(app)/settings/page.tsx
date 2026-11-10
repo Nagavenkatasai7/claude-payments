@@ -6,7 +6,8 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { setupView, type SetupView } from '@/lib/partner-setup-view';
-import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
+import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import type { PartnerDisclosureConfig } from '@/lib/types';
@@ -25,8 +26,22 @@ export const metadata: Metadata = { title: t('partner.settings.title'), robots: 
 // Lost-features p3 B13: a read-only "Compliance setup" card first (KYC mode, verify-before-send, the
 // live-rail warning, countries, and the fixed sanctions line). Admin only, like the page (owner
 // line: agents no longer see these facts).
+// Fix pack 4 T6 (C23): the disclosure card shows the block's approval state ('Approved by <username>
+// on <date>' or 'Not approved') and, when the VIEWER has no two-step sign-in, how to approve it (a
+// partner admin's save approves only with TOTP enrolled). A failed enrolment read counts as not
+// enrolled (logged by error name only).
 
 const H2 = 'text-[18px] font-extrabold text-ds-ink';
+const day = (iso: string | undefined): string => (iso ? iso.slice(0, 10) : '');
+
+async function viewerEnrolled(username: string, partnerId: string): Promise<boolean> {
+  try {
+    return await staffMfaEnrolled(username);
+  } catch (err) {
+    logWarn('partner.settings.page', err instanceof Error ? err.name : 'error', { source: 'mfa', partnerId });
+    return false;
+  }
+}
 const INTRO = 'mt-1 mb-4 text-[14px] text-ds-ink-muted';
 
 function disclosureValues(d: PartnerDisclosureConfig | undefined): DisclosureValues {
@@ -103,10 +118,11 @@ function SetupCard({ view }: { view: SetupView }) {
 
 export default async function PartnerSettingsPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.settings.policy);
-  const [partner, margins, payment] = await Promise.all([
+  const [partner, margins, payment, enrolled] = await Promise.all([
     getPartnerStore().getPartner(ctx.partnerId),
     marginRows(ctx.partnerId),
     paymentConfig(ctx.partnerId),
+    viewerEnrolled(ctx.username, ctx.partnerId),
   ]);
   const header = <PageHeader title={t('partner.settings.title')} sub={t('partner.settings.sub')} />;
   if (!partner) {
@@ -118,6 +134,7 @@ export default async function PartnerSettingsPage() {
     );
   }
   const sc = partner.supportConfig ?? {};
+  const shown = resolvePartnerDisclosure(partner);
 
   return (
     <>
@@ -141,6 +158,16 @@ export default async function PartnerSettingsPage() {
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.settings.disclosure.title')}</h2>
           <p className={INTRO}>{t('partner.settings.disclosure.intro')}</p>
+          {sc.disclosure ? (
+            <p data-testid="settings-disclosure-approval" data-approved={shown.partnerApproved ? 'true' : 'false'} className="mb-2 text-[14px] font-semibold text-ds-ink">
+              {shown.partnerApproved
+                ? t('partner.settings.disclosure.approved', { who: sc.disclosure.approval?.by ?? '', date: day(sc.disclosure.approval?.at) })
+                : t('partner.settings.disclosure.notApproved')}
+            </p>
+          ) : null}
+          {!enrolled ? (
+            <p data-testid="settings-disclosure-enrol" className="mb-4 text-[13px] text-ds-ink-muted">{t('partner.settings.disclosure.enrolToApprove')}</p>
+          ) : null}
           <DisclosureForm current={disclosureValues(sc.disclosure)} maxDays={MAX_DELIVERY_BUSINESS_DAYS} />
         </Card>
         <Card as="section" className="p-5 sm:p-6">

@@ -15,7 +15,7 @@ import {
 import { LIVE_READINESS_LINE_IDS, liveReadiness, type LiveReadiness } from '@/lib/live-certification';
 import { isLiveCertified } from '@/lib/live-gate';
 import type { LiveCapability } from '@/lib/live-controls';
-import { certifyPartnerForTest, certifiedLiveControls } from './helpers-live';
+import { approvedDisclosureConfig, certifyPartnerForTest, certifiedLiveControls } from './helpers-live';
 
 // Fix pack 3 T9 (R27, contracts 9 and 13): the typed live-controls writers for the posture and
 // the compliance users. Each write is ONE transaction: the key write under the partner row lock,
@@ -331,9 +331,13 @@ describe('writeCertification', () => {
     await expectNothingWritten(before);
   });
 
-  it('pack 3 pin: liveReadiness from facts where every built line passes is still not ok, so certify answers not_ready', async () => {
+  it('pack 4 pin: liveReadiness from facts where every built line passes is still not ok, so certify answers not_ready', async () => {
     const users = ['acme-comp1', 'acme-comp2'];
-    const p = { id: 'acme', status: 'active' as const, kycMode: 'ours' as const, requireKycBeforeSend: true, liveControls: certifiedLiveControls({ posture: true, complianceUsers: users }) };
+    const p = {
+      id: 'acme', status: 'active' as const, kycMode: 'ours' as const, requireKycBeforeSend: true,
+      liveControls: certifiedLiveControls({ posture: true, complianceUsers: users }),
+      supportConfig: { disclosure: approvedDisclosureConfig() },
+    };
     const r = liveReadiness(p, {
       goLiveApproved: true,
       listFitness: 'live',

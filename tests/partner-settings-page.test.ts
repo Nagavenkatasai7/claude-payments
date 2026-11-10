@@ -44,6 +44,15 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
+// Fix pack 4 T6: the viewer's two-step sign-in (the approval hint) comes from staffMfaEnrolled.
+const staffMfa = vi.hoisted(() => ({ enrolled: new Set<string>(), fail: false }));
+vi.mock('@/lib/staff-mfa-store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/staff-mfa-store')>()),
+  staffMfaEnrolled: async (u: string) => {
+    if (staffMfa.fail) throw new Error('mfa store down');
+    return staffMfa.enrolled.has(u);
+  },
+}));
 const failIntegrations = { on: false };
 vi.mock('@/lib/partner-integrations-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-integrations-store')>('@/lib/partner-integrations-store');
@@ -64,6 +73,7 @@ import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import SettingsPage from '@/app/partner/(app)/settings/page';
 import { t } from '@/lib/i18n';
+import { approvedDisclosureConfig } from './helpers-live';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -81,6 +91,8 @@ beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   failIntegrations.on = false;
+  staffMfa.enrolled.clear();
+  staffMfa.fail = false;
   box.db = await freshDb();
   pgPartnerStore = createPartnerStore(box.db);
   await seedPartner(box.db, PA, 'Alpha');
@@ -199,5 +211,66 @@ describe('/partner/settings compliance setup card (p3 B13)', () => {
     expect(html).not.toContain('data-setup="liveRailWarning"');
     expect(html).toContain('data-testid="settings-portal-form"');
     expect(html).not.toContain('integrations down');
+  });
+});
+
+describe('disclosure approval state (pack 4)', () => {
+  beforeEach(async () => {
+    await signInAs({});
+  });
+  const setBlock = async (disclosure: unknown) =>
+    box.db!.update(partners).set({ supportConfig: { disclosure: disclosure as never } }).where(eq(partners.id, PA));
+  const approvalLine = (html: string) => html.match(/<p[^>]*data-testid="settings-disclosure-approval"[^>]*>([^<]*)<\/p>/);
+
+  it("an approved block reads 'Approved by <by> on <YYYY-MM-DD>'", async () => {
+    const cfg = approvedDisclosureConfig();
+    await setBlock(cfg);
+    staffMfa.enrolled.add('pa-admin');
+    const html = decode(await render());
+    const m = approvalLine(html);
+    expect(m?.[0]).toContain('data-approved="true"');
+    const date = cfg.approval!.at.slice(0, 10);
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(m?.[1]).toBe(t('partner.settings.disclosure.approved', { who: 'test-partner-admin', date }));
+    expect(m?.[1]).toBe(`Approved by test-partner-admin on ${date}.`);
+  });
+
+  it("an unapproved block reads 'Not approved'", async () => {
+    const { approval: _a, ...block } = approvedDisclosureConfig();
+    void _a;
+    await setBlock(block);
+    staffMfa.enrolled.add('pa-admin');
+    const m = approvalLine(decode(await render()));
+    expect(m?.[0]).toContain('data-approved="false"');
+    expect(m?.[1]).toBe(t('partner.settings.disclosure.notApproved'));
+    // an edited block whose stamp no longer matches is not approved either
+    await setBlock({ ...approvedDisclosureConfig(), phone: '+1 800 555 0111' });
+    expect(approvalLine(decode(await render()))?.[1]).toBe(t('partner.settings.disclosure.notApproved'));
+  });
+
+  it('no block shows no approval line', async () => {
+    staffMfa.enrolled.add('pa-admin');
+    const html = await render();
+    expect(html).not.toContain('data-testid="settings-disclosure-approval"');
+    expect(html).not.toContain(t('partner.settings.disclosure.notApproved'));
+  });
+
+  it('a viewer without two-step sign-in sees the enrol hint; an enrolled viewer does not', async () => {
+    await setBlock(approvedDisclosureConfig());
+    expect(decode(await render())).toContain(t('partner.settings.disclosure.enrolToApprove'));
+    staffMfa.enrolled.add('pa-admin');
+    expect(decode(await render())).not.toContain(t('partner.settings.disclosure.enrolToApprove'));
+  });
+
+  it('a failed two-step read counts as not enrolled (hint shown, logged by name only); the page renders', async () => {
+    await setBlock(approvedDisclosureConfig());
+    staffMfa.fail = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const html = decode(await render());
+    const logged = JSON.stringify(warn.mock.calls);
+    warn.mockRestore();
+    expect(html).toContain(t('partner.settings.disclosure.enrolToApprove'));
+    expect(html).toContain('data-testid="settings-disclosure-form"');
+    expect(logged).not.toContain('mfa store down');
   });
 });

@@ -581,6 +581,10 @@ export const en = {
   'partner.settings.disclosure.regulatorWebsite': 'Regulator website',
   'partner.settings.disclosure.days': 'Delivery estimate (business days)',
   'partner.settings.disclosure.daysHint': 'A whole number from 0 to {max}. Blank means 1 business day.',
+  // Fix pack 4 T6 (C23): the provider block's approval state; fixed text, flagged for counsel review (O-PR4-c).
+  'partner.settings.disclosure.approved': 'Approved by {who} on {date}.',
+  'partner.settings.disclosure.notApproved': 'Not approved. A partner admin with two-step sign-in approves it by saving this block.',
+  'partner.settings.disclosure.enrolToApprove': 'Turn on two-step sign-in for your own account to approve this block when you save it.',
   'partner.settings.disclosure.error.providerPhone': 'The customer service phone must have 7 to 15 digits. Spaces, dashes, dots, brackets and a leading + are allowed.',
   'partner.settings.disclosure.error.regulatorPhone': 'The regulator phone must have 7 to 15 digits. Spaces, dashes, dots, brackets and a leading + are allowed.',
   'partner.settings.disclosure.error.providerWebsite': 'The website must be a full https:// address.',

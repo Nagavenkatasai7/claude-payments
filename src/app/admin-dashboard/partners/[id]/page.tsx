@@ -55,6 +55,8 @@ import { SendLimitsCard } from '../../send-limits-card';
 import { enablePartnerPortalAction, recordPortalAuthTemplateAction } from '../portal-actions';
 import { GoLiveCard, goLiveFlash, type GoLiveChecklistView } from '../go-live-card';
 import { LiveCertificationCard } from '../live-certification-card';
+import { DisclosureApprovalState } from '../disclosure-approval-state';
+import { isLiveCertified } from '@/lib/live-gate';
 import { certifyLiveAction, recordContractAction, recordCounselAction, revokeLiveAction } from '../go-live-actions';
 import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { liveReadiness, type LiveReadiness } from '@/lib/live-certification';
@@ -1013,6 +1015,8 @@ export default async function PartnerDetailPage({
                       whatever is saved below, so SmartRemit is never shown as the licensed transmitter.
                     </p>
                   )}
+                  {/* Fix pack 4 T6 (C23): approval state, the never-approves note and the certified pre-save warning. */}
+                  <DisclosureApprovalState shown={disclosureShown} approval={disclosureCfg?.approval} certified={isLiveCertified(partner)} />
                   <form action={saveDisclosureConfigAction} className="mt-4 space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
                     <div className="space-y-1.5">
