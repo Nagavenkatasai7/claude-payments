@@ -84,7 +84,7 @@ export async function escalateStuckPaid(db: Db, now: Date = new Date()): Promise
     // still no rung and no audit row.
     const refusal = await liveRefusalFor(db, t);
     if (refusal !== null) {
-      await db.transaction((tx) => alertStuckLivegate(tx, t.id, refusal));
+      await db.transaction((tx) => alertStuckLivegate(tx, t, refusal));
       continue;
     }
     const fresh = await db.transaction(async (tx) => {

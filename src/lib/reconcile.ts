@@ -185,7 +185,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     // is raised instead, and the row is still not re-instructed.
     const refusal = await liveRefusalFor(db, t);
     if (refusal !== null) {
-      await alertStuckLivegate(db, t.id, refusal);
+      await alertStuckLivegate(db, t, refusal);
       continue;
     }
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT

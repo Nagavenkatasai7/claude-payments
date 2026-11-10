@@ -16,7 +16,7 @@
 import type { DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import type { LiveRefusalCode } from './live-gate';
-import type { PartnerId } from './types';
+import type { PartnerId, Transfer } from './types';
 
 /** The worker's livegate:<id> alert text (wording pinned by tests/instruct-live-gate.test.ts). */
 export function instructLivegateMessage(transferId: string, railPartnerId: PartnerId): string {
@@ -41,13 +41,23 @@ export function stuckLivegateMessage(transferId: string, code: LiveRefusalCode):
  * settlement.instruct row for the transfer is live; a row the worker still
  * holds stays quiet. A failed read throws, as every other read in the sweeps
  * does. Returns true when a fresh alert was queued.
+ *
+ * Pack 3 final check J1: a row that sanctions screening BLOCKED gets no alert.
+ * Its paidmatch:/paidmatchinstructed: alert and the sanctions procedure own it;
+ * it is never re-instructed, and no ops text about it may say to refund
+ * (SANCTIONS_FUNDS_RULE). The sweeps still skip it (no re-instruct, no recon:).
  */
-export async function alertStuckLivegate(db: DbOrTx, transferId: string, code: LiveRefusalCode): Promise<boolean> {
+export async function alertStuckLivegate(
+  db: DbOrTx,
+  t: Pick<Transfer, 'id' | 'complianceStatus'>,
+  code: LiveRefusalCode,
+): Promise<boolean> {
+  if (t.complianceStatus === 'blocked') return false;
   const outbox = createOutboxRepo(db);
-  if (await outbox.hasLiveInstruction(transferId)) return false;
+  if (await outbox.hasLiveInstruction(t.id)) return false;
   return outbox.enqueue(
     'ops.alert',
-    { message: stuckLivegateMessage(transferId, code) },
-    { dedupeKey: stuckLivegateDedupeKey(transferId) },
+    { message: stuckLivegateMessage(t.id, code) },
+    { dedupeKey: stuckLivegateDedupeKey(t.id) },
   );
 }

@@ -285,6 +285,15 @@ describe('escalateStuckPaid and the live gate', () => {
     expect(await audits('transfer.stuck_escalated')).toEqual([]);
   });
 
+  it("pack 3 final check J1: a sanctions-BLOCKED row whose only instruct is 'done': returns 0, no livegate:stuck: alert, no rung, no audit (its paidmatch alert owns it)", async () => {
+    await railOf('http');
+    await paidFor('lg_50h', '50 hours', { complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] });
+    await instructRow('lg_50h', 'done');
+    expect(await escalateStuckPaid(db)).toBe(0);
+    expect(await alerts()).toEqual([]);
+    expect(await audits('transfer.stuck_escalated')).toEqual([]);
+  });
+
   it('reconcileSweep and escalateStuckPaid share the key: one alert in all', async () => {
     await railOf('http');
     await paidFor('lg_50h', '50 hours');

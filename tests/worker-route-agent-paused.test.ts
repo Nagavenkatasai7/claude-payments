@@ -5,7 +5,7 @@ import { fakeGateRedis } from './helpers-gate-redis';
 import { freshDb } from './helpers-db';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
-import { invalidateFlagCache } from '@/lib/flags';
+import { invalidateFlagCache, tenantScopeId } from '@/lib/flags';
 import type { Db } from '@/db/client';
 
 // Fix pack 3 T7 (R26, contract 10): the PRODUCTION /api/worker deps wire the
@@ -78,6 +78,27 @@ describe('/api/worker runAgentTurn wiring — agent.paused', () => {
     invalidateFlagCache(db);
     await runTurn();
     expect(box.chatCalls).toBe(0);
+  });
+
+  // Pack 3 final check K2: the route passes the TURN's tenant to the flag read (a partner-set
+  // tenant:<id> row from /partner/controls). The queued turn carries no partnerId and arrives on
+  // the shared number, so its tenant is 'default'.
+  it("a partner-set agent.paused row for the turn's tenant -> no model call", async () => {
+    await createFeatureFlagRepo(db).upsert({
+      key: 'agent.paused', scopeType: 'partner', scopeId: tenantScopeId('default'), enabled: true, reason: 'model incident', updatedBy: 'admin',
+    });
+    invalidateFlagCache(db);
+    await runTurn();
+    expect(box.chatCalls).toBe(0);
+  });
+
+  it('a partner-set agent.paused row for a DIFFERENT tenant -> one model call', async () => {
+    await createFeatureFlagRepo(db).upsert({
+      key: 'agent.paused', scopeType: 'partner', scopeId: tenantScopeId('other'), enabled: true, reason: 'model incident', updatedBy: 'admin',
+    });
+    invalidateFlagCache(db);
+    await runTurn();
+    expect(box.chatCalls).toBe(1);
   });
 
   it('no row -> one model call', async () => {

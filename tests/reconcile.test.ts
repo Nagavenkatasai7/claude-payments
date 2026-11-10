@@ -441,6 +441,18 @@ describe('reconcileSweep — stuck paid refused by the live gate (pack 3 review 
     expect((await reconcileSweep(db)).reinstructed).toBe(0);
     expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
   });
+
+  // Pack 3 final check J1: a paid row that sanctions screening BLOCKED is owned
+  // by its paidmatch:/paidmatchinstructed: alert and the sanctions procedure. It
+  // gets no livegate:stuck: alert (whose "re-instruct / cancel and refund" would
+  // be wrong for it), and is still skipped: no recon:, no re-instruct.
+  it("a sanctions-BLOCKED twin whose only instruct is 'done': no livegate:stuck: alert, no recon:, no reinstruct (J1)", async () => {
+    await db.execute(sql`UPDATE transfers SET compliance_status = 'blocked' WHERE id = 'lg_r1'`);
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
+  });
 });
 
 describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () => {

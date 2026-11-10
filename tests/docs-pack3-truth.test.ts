@@ -31,6 +31,8 @@ describe('pack 3 documents say what the code does', () => {
     const p = pr3();
     for (const s of ['`partners.live_controls jsonb', '0037', '`tenant:', '`livegate:<id>`', '`livegate:stuck:<id>`', '`flagread:`', 'What to check first']) expect(p, s).toContain(s);
     for (const s of ['sends', 'settlement', 'AI agent', 'AI agent tools']) expect(p, s).toContain(s);
+    // Pack 3 final check J1: the livegate:stuck: advice excludes a sanctions-blocked row.
+    expect(p).toContain('a row blocked by sanctions screening gets no `livegate:stuck:<id>` alert, because its `paidmatch:<id>` or `paidmatchinstructed:<id>` alert owns it');
     const bullet = rollback.split('\n').find((l) => l.startsWith('- **Kill switches**'))!;
     expect(bullet).toContain('`/partner/controls`');
     expect(bullet).toMatch(/unreadable `settlement.paused` waits on real-money rails/);

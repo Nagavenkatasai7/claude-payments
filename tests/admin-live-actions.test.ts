@@ -103,7 +103,8 @@ vi.mock('@/db/repos/live-certification-facts', async (orig) => {
 const pokeSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/outbox', async (orig) => ({ ...(await orig<typeof import('@/lib/outbox')>()), pokeWorker: pokeSpy }));
 
-import { updateLiveControlsKey } from '@/db/repos/partner-repo';
+import { createPartnerRepo, updateLiveControlsKey } from '@/db/repos/partner-repo';
+import { isLiveCertified } from '@/lib/live-gate';
 import { partnerGoLive } from '@/db/schema';
 import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
 import { getAuthStore } from '@/lib/auth-store';
@@ -434,6 +435,18 @@ describe('revokeLiveAction', () => {
     expect(a[0].meta).toEqual({ reason: REASON, actorScope: 'platform' });
     expect(pokeSpy).toHaveBeenCalledTimes(1);
     expect(factsHook.firstArgs).toEqual([]); // revoke never needs readiness
+  });
+
+  // Pack 3 final check K1: revoke is the only way out of a standing certification on a suspended partner.
+  it('revoke a certified partner that is now SUSPENDED -> revoked, one audit; reactivated it is not certified', async () => {
+    await platformAdmin();
+    await certifyPartnerForTest(db, 'acme');
+    await db.execute(sql`UPDATE partners SET status = 'suspended' WHERE id = 'acme'`);
+    expect(await revokeLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    expect((await lcOf()).certification).toMatchObject({ revokedBy: 'ops-admin', revokedAt: expect.any(String) });
+    expect((await liveAudits()).map((r) => r.action)).toEqual(['partner.live.revoke']);
+    await db.execute(sql`UPDATE partners SET status = 'active' WHERE id = 'acme'`);
+    expect(isLiveCertified((await createPartnerRepo(db).getPartner('acme'))!)).toBe(false);
   });
 
   it("revoke an uncertified one -> 'This partner is not certified.', nothing written", async () => {

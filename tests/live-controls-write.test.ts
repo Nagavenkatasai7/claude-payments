@@ -364,6 +364,21 @@ describe('writeCertification', () => {
     expect(o.at(-2)!.payload).toEqual({ message: 'SmartRemit ops: partner.live.revoke on partner acme by platform staff.' });
   });
 
+  // Pack 3 final check K1: revoke works in every partner state. A suspended partner keeps a
+  // standing certification that would come back on reactivation; revoke is the only way out.
+  it('revoke a certified partner that is now SUSPENDED -> ok, revokedAt set, partner.live.revoke; reactivated it is not certified', async () => {
+    expect(await certify()).toEqual({ ok: true });
+    await db.execute(sql`UPDATE partners SET status = 'suspended' WHERE id = 'acme'`);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await revoke()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(c.revokedAt).toEqual(expect.any(String));
+    expect(c.revokedBy).toBe('ops-admin');
+    expect((await audits()).map((r) => r.action)).toEqual(['partner.live.certify', 'partner.live.revoke']);
+    await db.execute(sql`UPDATE partners SET status = 'active' WHERE id = 'acme'`);
+    expect(isLiveCertified(await partner())).toBe(false);
+  });
+
   it('revoke when not certified or already revoked -> not_certified, no audit', async () => {
     const before = await column();
     expect(await revoke()).toEqual({ ok: false, code: 'not_certified' });

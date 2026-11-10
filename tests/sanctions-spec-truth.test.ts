@@ -335,6 +335,8 @@ describe('sanctions screening spec says what pack 3 does', () => {
     expect(stuckText[0]).toContain('no instruction waiting');
     expect(stuck).toContain('`reconcileSweep`');
     expect(stuck).toContain('`escalateStuckPaid`');
+    // Pack 3 final check J1: a sanctions-blocked row gets no livegate:stuck: alert (its paidmatch alert owns it).
+    expect(stuck).toContain('a row blocked by sanctions screening gets no `livegate:stuck:<id>` alert: its `paidmatch:<id>` or `paidmatchinstructed:<id>` alert owns it');
     const flagread = [...rows.find((l) => l.startsWith('| `flagread:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
     expect(flagread).toHaveLength(1);
     for (const row of rows) {
