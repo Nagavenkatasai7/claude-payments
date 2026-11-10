@@ -4,6 +4,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { liveRefusalFor } from './live-gate';
+import { alertStuckLivegate } from './livegate-alerts';
 
 // stale-money — Program-Fix 32. Two sweeps over money that has stopped moving:
 //
@@ -78,7 +79,14 @@ export async function escalateStuckPaid(db: Db, now: Date = new Date()): Promise
     // `livegate:<id>`. A 'Chase the rail partner.' rung would give the wrong
     // remedy, every day. liveRefusalFor makes no read for a 'test' row and
     // never throws (a failed rail read is real money).
-    if ((await liveRefusalFor(db, t)) !== null) continue;
+    // Pack 3 review I1: with no live instruct row the worker never alerts again,
+    // so one `livegate:stuck:<id>` alert (shared with reconcileSweep) is raised;
+    // still no rung and no audit row.
+    const refusal = await liveRefusalFor(db, t);
+    if (refusal !== null) {
+      await db.transaction((tx) => alertStuckLivegate(tx, t.id, refusal));
+      continue;
+    }
     const fresh = await db.transaction(async (tx) => {
       const enqueued = await createOutboxRepo(tx).enqueue(
         'ops.alert',

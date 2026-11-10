@@ -321,11 +321,20 @@ describe('sanctions screening spec says what pack 3 does', () => {
     const src = srcText();
     for (const k of ['livegate:', 'flagread:', 'livectl:', 'flag:']) expect(table, k).toContain(`| \`${k}`);
     const rows = table.split('\n').filter((l) => /^\| `[a-z-]+:/.test(l));
-    expect(rows.length).toBe(4);
-    const livegate = [...rows.find((l) => l.startsWith('| `livegate:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(rows.length).toBe(5);
+    const livegate = [...rows.find((l) => l.startsWith('| `livegate:<id>`'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
     expect(livegate).toHaveLength(2);
     expect(livegate[0]).toContain('is paid but was not instructed');
     expect(livegate[1]).toContain('got a signed rail callback that was not applied');
+    // Pack 3 review I1: the stuck-paid sweeps' own key for a refused paid row with no live instruction.
+    const stuck = rows.find((l) => l.startsWith('| `livegate:stuck:<id>`'))!;
+    expect(stuck).toBeDefined();
+    expect(src).toContain('livegate:stuck:');
+    const stuckText = [...stuck.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(stuckText).toHaveLength(1);
+    expect(stuckText[0]).toContain('no instruction waiting');
+    expect(stuck).toContain('`reconcileSweep`');
+    expect(stuck).toContain('`escalateStuckPaid`');
     const flagread = [...rows.find((l) => l.startsWith('| `flagread:'))!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
     expect(flagread).toHaveLength(1);
     for (const row of rows) {

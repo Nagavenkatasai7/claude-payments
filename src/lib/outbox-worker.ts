@@ -17,6 +17,7 @@ import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
@@ -887,11 +888,7 @@ async function handle(
         logWarn('outbox.instruct-livegate', 'rail partner not certified for live money; instruction deferred', { transferId });
         await createOutboxRepo(deps.db).enqueue(
           'ops.alert',
-          {
-            message:
-              `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: the rail partner is not certified for live money. ` +
-              'It waits; certify the partner or cancel and refund it.',
-          },
+          { message: instructLivegateMessage(transferId, railPartnerId) },
           { dedupeKey: `livegate:${transferId}` },
         );
         throw new InstructNotCertifiedError();

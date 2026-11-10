@@ -329,7 +329,7 @@ describe('reconcileSweep and the live gate', { retry: 0 }, () => {
   const instructRows = () => count(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'settlement.instruct'`);
   const screens = () => count(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${ID}`);
 
-  it('uncertified http rail: skipped - reinstructed 0, no reinstruct: row, no recon: alert, no sanctions.screen audit row', async () => {
+  it('uncertified http rail: skipped - reinstructed 0, no reinstruct: row, no recon: alert, no sanctions.screen audit row; with no live instruct row, one livegate:stuck: alert (pack 3 review I1)', async () => {
     // A 40 h old live screen and a live list: the stuck-paid heal WOULD re-screen this row.
     primeOfacSource({ checkedAgoMs: H });
     const t = transferFixture();
@@ -337,7 +337,7 @@ describe('reconcileSweep and the live gate', { retry: 0 }, () => {
     const r = await reconcileSweep(db);
     expect(r.reinstructed).toBe(0);
     expect(await instructRows()).toBe(0);
-    expect(await opsAlerts()).toEqual([]);
+    expect(await opsAlerts()).toEqual([`livegate:stuck:${ID}`]);
     expect(await screens()).toBe(1); // only the seeded one
   });
 

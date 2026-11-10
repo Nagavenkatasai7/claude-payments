@@ -29,7 +29,7 @@ describe('pack 3 documents say what the code does', () => {
 
   it('ROLLBACK.md names live_controls, tenant:, livegate:, the four partner switches and "what to check first"', () => {
     const p = pr3();
-    for (const s of ['`partners.live_controls jsonb', '0037', '`tenant:', '`livegate:<id>`', '`flagread:`', 'What to check first']) expect(p, s).toContain(s);
+    for (const s of ['`partners.live_controls jsonb', '0037', '`tenant:', '`livegate:<id>`', '`livegate:stuck:<id>`', '`flagread:`', 'What to check first']) expect(p, s).toContain(s);
     for (const s of ['sends', 'settlement', 'AI agent', 'AI agent tools']) expect(p, s).toContain(s);
     const bullet = rollback.split('\n').find((l) => l.startsWith('- **Kill switches**'))!;
     expect(bullet).toContain('`/partner/controls`');

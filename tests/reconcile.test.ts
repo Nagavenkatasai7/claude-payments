@@ -400,6 +400,49 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   });
 });
 
+// Pack 3 review Q2 (I1): a stuck paid row the live gate refuses is skipped (no
+// re-instruct, no recon:). While an instruct row for it is still live the worker
+// owns it (it raises livegate:<id>); once that instruct has finished, nothing
+// would ever alert, so the sweep raises ONE livegate:stuck:<id> alert.
+describe('reconcileSweep — stuck paid refused by the live gate (pack 3 review I1)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(fixture({ id: 'lg_r1', paidAt: new Date(Date.now() - 30 * 60_000).toISOString() }));
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '30 minutes' WHERE id = 'lg_r1'`);
+  });
+
+  it("the only settlement.instruct row is 'done': one livegate:stuck:<id> alert (ids and code only), no recon:, no reinstruct; a second sweep adds nothing", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    const first = await reconcileSweep(db);
+    expect(first.reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([
+      { kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' },
+      { kind: 'ops.alert', dedupe_key: 'livegate:stuck:lg_r1' },
+    ]);
+    const msg = String(((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = 'livegate:stuck:lg_r1'`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m);
+    expect(msg).toContain('lg_r1');
+    expect(msg).toContain('live_not_certified');
+    for (const pii of ['15551230000', 'Anita', '919876543210', '123456789012', '200']) expect(msg).not.toContain(pii);
+    await reconcileSweep(db);
+    expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it("a 'pending' settlement.instruct row (the worker owns it): no alert from the sweep", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
+  });
+});
+
 describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () => {
   it("classifies + re-instructs via the SETTLEMENT partner's rail (owner is mock)", async () => {
     // Owner 'acme' has NO integrations row ⇒ mock. The route is railp's rail —

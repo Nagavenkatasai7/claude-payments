@@ -5,6 +5,7 @@ import { reconcileSweep } from '@/lib/reconcile';
 import { beginHold, releaseHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
@@ -257,12 +258,39 @@ describe('escalateStuckPaid and the live gate', () => {
       whatsapp: {},
     });
 
-  it('an uncertified http paid row older than 48 h: returns 0, no recon:<id>:<rung> alert, no transfer.stuck_escalated audit', async () => {
+  const instructRow = async (id: string, status: string) => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: id }, { dedupeKey: `instruct:${id}` });
+    await db.execute(sql`UPDATE outbox SET status = ${status} WHERE dedupe_key = ${`instruct:${id}`}`);
+  };
+
+  it("an uncertified http paid row older than 48 h with a 'pending' instruct (the worker owns it): returns 0, no alert, no transfer.stuck_escalated audit", async () => {
     await railOf('http');
     await paidFor('lg_50h', '50 hours');
+    await instructRow('lg_50h', 'pending');
     expect(await escalateStuckPaid(db)).toBe(0);
     expect(await alerts()).toEqual([]);
     expect(await audits('transfer.stuck_escalated')).toEqual([]);
+  });
+
+  it("pack 3 review I1: the same row whose only instruct is 'done': returns 0, ONE livegate:stuck:<id> alert (ids and code only), no rung, no audit; a re-run adds nothing", async () => {
+    await railOf('http');
+    await paidFor('lg_50h', '50 hours');
+    await instructRow('lg_50h', 'done');
+    expect(await escalateStuckPaid(db)).toBe(0);
+    expect(await escalateStuckPaid(db)).toBe(0);
+    const a = await alerts();
+    expect(a.map((x) => x.dedupe_key)).toEqual(['livegate:stuck:lg_50h']);
+    expect(a[0].payload.message).toContain('live_not_certified');
+    for (const pii of ['15551230000', 'Anita', '919876543210']) expect(a[0].payload.message).not.toContain(pii);
+    expect(await audits('transfer.stuck_escalated')).toEqual([]);
+  });
+
+  it('reconcileSweep and escalateStuckPaid share the key: one alert in all', async () => {
+    await railOf('http');
+    await paidFor('lg_50h', '50 hours');
+    await reconcileSweep(db);
+    await escalateStuckPaid(db);
+    expect((await alerts()).map((x) => x.dedupe_key)).toEqual(['livegate:stuck:lg_50h']);
   });
 
   it('the same row certified: escalates as before', async () => {

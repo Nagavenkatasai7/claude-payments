@@ -10,6 +10,7 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
 import { restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import { certifyPartnerForTest } from './helpers-live';
+import { createScheduleStore } from '@/lib/schedule-store';
 import type { LiveCapability } from '@/lib/live-controls';
 import type { Db } from '@/db/client';
 
@@ -139,6 +140,30 @@ describe('mint capability gate (fix pack 3 T12, contract 4 (c))', { retry: 0 }, 
     const t = await createTransfer(store, partnerStore, mvs, { ...base, ...b2b, partnerId: 'acme' });
     expect(t.status).toBe('awaiting_payment');
     expect(t.transferType).toBe('b2b');
+  });
+
+  // Pack 3 review Q2 (G3): the open side for usdc and schedules (b2b is pinned above).
+  it("optIns ['usdc'] -> the usdc mint goes ahead", async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', 'http', ['usdc']);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, ...usdc, partnerId: 'acme' });
+    expect(t.status).toBe('awaiting_payment');
+    expect(t.payoutMethod).toBe('usdc');
+  });
+
+  it("optIns ['schedules'] -> a mint for an active schedule goes ahead", async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', 'http', ['schedules']);
+    await createScheduleStore(db).saveSchedule({
+      id: 'sch_ok', phone: PHONE, amountUsd: 200,
+      recipientName: base.recipientName, recipientPhone: base.recipientPhone,
+      payoutMethod: 'upi', payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer',
+      frequency: 'monthly', dayOfMonth: 1, status: 'active',
+      createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+      partnerId: 'acme', sourceCurrency: 'USD', amountSource: 200,
+    });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, scheduleId: 'sch_ok', partnerId: 'acme' });
+    expect(t.status).toBe('awaiting_payment');
   });
 
   it('approval withdrawn (counselRef kept, partnerApprovedAt gone) -> refused', async () => {

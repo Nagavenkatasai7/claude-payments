@@ -11,6 +11,7 @@ import { logWarn } from '@/lib/log';
 import { readFlag } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { liveRefusalFor, realMoneyFor, realMoneyRail } from '@/lib/live-gate';
+import { alertStuckLivegate } from '@/lib/livegate-alerts';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
@@ -179,7 +180,14 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     // `livegate:<id>`. A re-instruct would only defer again, a heal re-screen
     // would be wasted, and a `recon:` alert would be noise. liveRefusalFor makes
     // no read for a 'test' row and never throws (a failed read is real money).
-    if ((await liveRefusalFor(db, t)) !== null) continue;
+    // Pack 3 review I1: the worker owns it only while an instruct row is live;
+    // with none (the instruct already finished) one `livegate:stuck:<id>` alert
+    // is raised instead, and the row is still not re-instructed.
+    const refusal = await liveRefusalFor(db, t);
+    if (refusal !== null) {
+      await alertStuckLivegate(db, t.id, refusal);
+      continue;
+    }
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT
     // partner's when routed — classify (webhook-driven vs mock) by THEIR
     // config, or a routed stuck transfer reads the owner's (often mock)

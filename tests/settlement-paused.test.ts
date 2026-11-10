@@ -311,3 +311,33 @@ describe('tenant rows at instruct', { retry: 0 }, () => {
     expect(r.released).toBe(1);
   });
 });
+
+// Pack 3 review Q2 (G4): the owner side of a partner-set (`tenant:`) settlement
+// pause, pinned apart from the rail side: at the reconcile sweep, and on a
+// ROUTED instruct (where owner and rail are different ids).
+describe('owner tenant pause (pack 3 review G4)', { retry: 0 }, () => {
+  it('reconcileSweep: tenant:acme on settlement.paused -> nothing re-instructed, no recon: alert', async () => {
+    await pause('partner', tenantScopeId('acme'));
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(0);
+    expect((await opsAlerts()).filter((k) => k.startsWith('recon:'))).toEqual([]);
+    const instr = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'settlement.instruct'`)) as unknown as {
+      rows: Array<{ n: number }>;
+    };
+    expect(Number(instr.rows[0].n)).toBe(0);
+  });
+
+  it('a row routed to railp with ONLY the owner tenant:acme paused: deferred uncharged, no POST', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await db.execute(sql`DELETE FROM transfers WHERE id = 'sp_t1'`);
+    await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle'));
+    await pause('partner', tenantScopeId('acme'));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ processed: 0, failed: 0, released: 1 });
+    expect(await rowState()).toMatchObject({ status: 'pending', attempts: 0, last_error: null });
+  });
+});

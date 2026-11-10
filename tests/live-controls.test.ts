@@ -7,6 +7,7 @@ import {
   postureSigned,
   type LiveControls,
 } from '@/lib/live-controls';
+import { capabilityOpen } from '@/lib/live-gate';
 
 // Fix pack 3 T1 (contract 1): partners.live_controls is parsed per key and
 // fails closed per key: a malformed key reads as absent, the others survive.
@@ -113,6 +114,36 @@ describe('parseLiveControls: keys', () => {
     const revoked = { ...rec.certification, revokedAt: iso(), revokedBy: 'ops-admin' };
     expect(parseLiveControls({ certification: revoked }).certification).toEqual(revoked);
     expect(parseLiveControls({ optIns: { b2b: { counselAt: 'later' } } }).optIns).toEqual({});
+  });
+
+  // Pack 3 review Q2 (G2): partnerApprovedAt is the only type guard on the
+  // approval capabilityOpen reads (a truthy check), so a bad value must drop the opt-in.
+  it('a malformed partnerApprovedAt drops that opt-in, so capabilityOpen stays closed for a certified partner', () => {
+    const rec = fullRecord();
+    for (const partnerApprovedAt of ['later', 'yes', '', true, 1]) {
+      const lc = parseLiveControls({
+        certification: rec.certification,
+        optIns: { b2b: { counselRef: 'm', counselBy: 'ops-admin', counselAt: iso(-1000), partnerApprovedBy: 'acme-admin', partnerApprovedAt } },
+      });
+      expect(lc.certification, String(partnerApprovedAt)).toEqual(rec.certification);
+      expect(lc.optIns, String(partnerApprovedAt)).toEqual({});
+      expect(capabilityOpen({ id: 'acme', status: 'active', liveControls: lc }, 'b2b'), String(partnerApprovedAt)).toBe(false);
+    }
+    // The contrast: a real timestamp opens it.
+    const ok = parseLiveControls({ certification: rec.certification, optIns: { b2b: rec.optIns.b2b } });
+    expect(capabilityOpen({ id: 'acme', status: 'active', liveControls: ok }, 'b2b')).toBe(true);
+  });
+
+  it('a missing required field drops the key: certification without certifiedBy; posture without kycDecider, holdDecider, requireKycBeforeSend, version or fourEyesNonSanctions', () => {
+    const rec = fullRecord();
+    const { certifiedBy: _c, ...noCertifier } = rec.certification;
+    void _c;
+    expect(parseLiveControls({ certification: noCertifier }).certification).toBeUndefined();
+    for (const field of ['kycDecider', 'holdDecider', 'requireKycBeforeSend', 'version', 'fourEyesNonSanctions', 'signedAt'] as const) {
+      const p: Record<string, unknown> = { ...rec.posture };
+      delete p[field];
+      expect(parseLiveControls({ posture: p }).posture, field).toBeUndefined();
+    }
   });
 
   it('strings over 200 chars are refused', () => {
