@@ -17,6 +17,9 @@ export const PARTNER_ROUTES = Object.freeze({
   home: { href: '/partner', labelKey: 'partner.nav.home', policy: PARTNER_ANY, nav: true },
   // M3-20: the seven-step go-live checklist + request (admin only; SPEC §3.1).
   onboarding: { href: '/partner/onboarding', labelKey: 'partner.nav.onboarding', policy: PARTNER_ADMIN, nav: true },
+  // Fix pack 3 T11 (R26, R13): pause or resume the tenant's own switches, approve the live features
+  // SmartRemit's counsel reviewed, read the live readiness lines (admin only; every action re-gates).
+  controls: { href: '/partner/controls', labelKey: 'partner.nav.controls', policy: PARTNER_ADMIN, nav: true },
   transfers: { href: '/partner/transfers', labelKey: 'partner.nav.transfers', policy: PARTNER_MONEY_READ, nav: true },
   customers: { href: '/partner/customers', labelKey: 'partner.nav.customers', policy: PARTNER_OPS, nav: true },
   // Lost-features A5: create a customer by hand (admin only; linked from Customers, not in the nav).
@@ -63,10 +66,10 @@ export const PARTNER_ROUTES = Object.freeze({
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
-// The final order (UI M5): home, onboarding, transfers, refunds, schedules, customers, reviews,
+// The final order (UI M5): home, onboarding, controls (fix pack 3 T11), transfers, refunds, schedules, customers, reviews,
 // payment links (Batch B2), reports, analytics, support, staff, audit, integrations, branding,
 // rewards (B3), settings, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'transfers', 'refunds', 'schedules', 'customers', 'reviews', 'paymentLinks', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'rewards', 'settings', 'security'];
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'onboarding', 'controls', 'transfers', 'refunds', 'schedules', 'customers', 'reviews', 'paymentLinks', 'reports', 'analytics', 'support', 'staff', 'audit', 'integrations', 'branding', 'rewards', 'settings', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

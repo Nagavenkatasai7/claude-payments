@@ -30,7 +30,7 @@ describe('PARTNER_ROUTES', () => {
     expect(PARTNER_ROUTES.integrationsWebhooks.nav).toBe(false);
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/transfers', '/partner/refunds', '/partner/schedules', '/partner/customers', '/partner/reviews', '/partner/payment-links', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/rewards', '/partner/settings', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/onboarding', '/partner/controls', '/partner/transfers', '/partner/refunds', '/partner/schedules', '/partner/customers', '/partner/reviews', '/partner/payment-links', '/partner/reports', '/partner/analytics', '/partner/support', '/partner/staff', '/partner/audit', '/partner/integrations', '/partner/branding', '/partner/rewards', '/partner/settings', '/partner/security']);
     expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/support', '/partner/security']);
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/branding');
     expect(partnerNav('agent').map((r) => r.href)).not.toContain('/partner/audit');
@@ -66,6 +66,12 @@ describe('PARTNER_ROUTES', () => {
     for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('onboarding', role)).toBe(role === 'admin');
     expect(partnerNav('admin')[1].href).toBe('/partner/onboarding');
     for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/onboarding');
+  });
+  it('R26: Controls is admin-only, right after onboarding', () => {
+    expect(PARTNER_ROUTES.controls).toMatchObject({ href: '/partner/controls', labelKey: 'partner.nav.controls', nav: true });
+    for (const role of KNOWN_PARTNER_ROLES) expect(routeAllows('controls', role)).toBe(role === 'admin');
+    expect(partnerNav('admin')[2].href).toBe('/partner/controls');
+    for (const role of ['agent', 'support', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).not.toContain('/partner/controls');
   });
   it('M3-16: Reports is a money read (admin, agent, finance); support never sees it', () => {
     for (const role of ['admin', 'agent', 'finance'] as const) expect(partnerNav(role).map((r) => r.href)).toContain('/partner/reports');

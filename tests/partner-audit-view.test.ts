@@ -229,6 +229,42 @@ describe('lost-features audit labels (BL-4)', () => {
   });
 });
 
+describe('fix pack 3 T11: switch changes and capability approvals in the tenant feed', () => {
+  it('flag.change shows key, enabled, corridor only (never reason, scopeId, previous); optin.approve shows capability, on; optin.counsel not in TENANT_AUDIT_ACTIONS', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('flag.change');
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.optin.approve');
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('partner.live.optin.counsel');
+    expect(t(actionLabelKey('flag.change'))).toBe('Switch changed');
+    expect(t(actionLabelKey('partner.live.optin.approve'))).toBe('Live feature approval changed');
+    const flag = projectAuditRow(
+      row({
+        action: 'flag.change',
+        subjectId: 'sends.paused:partner:tenant:pa:IN',
+        meta: { key: 'sends.paused', scopeType: 'partner', scopeId: 'tenant:pa:IN', corridor: 'IN', enabled: true, previous: false, reason: 'SECRET_REASON pausing', actorScope: 'partner' },
+      }),
+      tenant,
+    );
+    expect(flag.actor).toBe('pa-admin');
+    expect(flag.detail).toBe('key=sends.paused, enabled=true, corridor=IN');
+    const approve = projectAuditRow(row({ action: 'partner.live.optin.approve', subjectId: 'pa', meta: { capability: 'b2b', on: true, actorScope: 'partner', counselRef: 'SECRET_REF' } }), tenant);
+    expect(approve.detail).toBe('capability=b2b, on=true');
+    for (const p of [flag, approve]) for (const v of ['SECRET_REASON', 'SECRET_REF', 'previous', 'scopeType', 'actorScope']) expect(JSON.stringify(p)).not.toContain(v);
+  });
+  it("a PLATFORM-written flag.change row for this tenant (applyFlagChange: partnerId = the tenant id, a platform actor, no actorScope) shows actor 'SmartRemit' and key/enabled only", () => {
+    const platformRow = row({
+      action: 'flag.change',
+      actor: 'owner-admin',
+      subjectId: 'settlement.paused:partner:pa',
+      meta: { key: 'settlement.paused', scopeType: 'partner', scopeId: 'pa', enabled: true, previous: false, reason: 'PLATFORM_SECRET_REASON' },
+    });
+    for (const p of [projectAuditRow(platformRow, tenant), projectAuditRow(platformRow, tenant, platform)]) {
+      expect(p.actor).toBe(t('partner.audit.smartremit'));
+      expect(p.detail).toBe('key=settlement.paused, enabled=true');
+      for (const v of ['owner-admin', 'PLATFORM_SECRET_REASON', 'previous']) expect(JSON.stringify(p)).not.toContain(v);
+    }
+  });
+});
+
 describe('parseAuditFilters', () => {
   const now = new Date('2026-09-28T12:00:00.000Z');
   it('an actor outside the tenant is dropped; an action outside the allowlist is dropped', () => {
