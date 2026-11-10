@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, MintRefusedError, type MintRefusalCode } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -947,4 +947,26 @@ describe('finalizeDraftPayment: sends.paused', { retry: 0 }, () => {
     expect(ok.ok).toBe(true);
     invalidateFlagCache(stores.db);
   });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint. Nothing throws
+// MintRefusedError in production yet (T4/T12 do), so the throw is stubbed at
+// the sender lock every mint passes through. Same shape as sends.paused: the
+// claimed id stays bound-but-unminted and the draft is kept.
+describe('finalizeDraftPayment: MintRefusedError (pack 3)', () => {
+  it.each<MintRefusalCode>(['live_not_certified', 'default_on_live_rail', 'capability_off'])(
+    'a MintRefusedError (%s) ⇒ { ok: false, error: "not_available" }, draft NOT consumed, no transfer; the same link mints once the refusal is gone',
+    async (code) => {
+      const stores = await buildStores();
+      const draftId = await makeDraft(stores, 200);
+      vi.spyOn(stores.store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(code));
+      expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'not_available' });
+      expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+      expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+      const bound = await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
+      expect(bound).not.toBeNull();
+      expect(await stores.store.getTransfer(bound!)).toBeNull();
+      expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: true, transferId: bound });
+    },
+  );
 });

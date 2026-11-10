@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { SendBusyError } from '@/lib/send-limits';
+import { MintRefusedError } from '@/lib/transfer-create';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -439,4 +440,24 @@ describe('finalizeCrossBorderBillPayment — send cap (Program fix 16)', () => {
     expect(await transferCount(stores)).toBe(0);
     expect((await finalize(stores, invoiceId)).ok).toBe(true);
   });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint. Nothing throws it in
+// production yet (T4/T12 do), so the throw is stubbed at the sender lock.
+describe('finalizeCrossBorderBillPayment: MintRefusedError (pack 3)', () => {
+  it.each(['live_not_certified', 'capability_off'] as const)(
+    'a MintRefusedError (%s) ⇒ { ok: false, error: "not_available" }, nothing minted; the bill mints once the refusal is gone',
+    async (code) => {
+      const stores = await buildStores();
+      await seedActiveSeller(stores);
+      await seedBuyer(stores);
+      const invoiceId = await seedInvoice(stores);
+      vi.spyOn(stores.store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(code));
+      expect(await finalize(stores, invoiceId)).toEqual({ ok: false, error: 'not_available' });
+      expect(await transferCount(stores)).toBe(0);
+      expect((await stores.store.getB2bInvoice(invoiceId))?.status).toBe('unpaid');
+      expect((await finalize(stores, invoiceId)).ok).toBe(true);
+      expect(await transferCount(stores)).toBe(1);
+    },
+  );
 });

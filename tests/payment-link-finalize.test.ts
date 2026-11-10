@@ -9,6 +9,7 @@ import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { invalidateFlagCache } from '@/lib/flags';
 import { linkExpiresAt, newLinkToken } from '@/lib/payment-links';
 import { SendBusyError } from '@/lib/send-limits';
+import { MintRefusedError } from '@/lib/transfer-create';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { createPayeeRepo } from '@/db/repos/payee-repo';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
@@ -409,4 +410,28 @@ describe('finalizeLinkPayment — the payee screen on a real-money rail (fix pac
     expect((await pay(l.token)).ok).toBe(true);
     expect(await screening(p)).toBe('clear');
   });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint. Nothing throws
+// MintRefusedError in production yet (T4 adds a PRE-claim check that keeps the
+// link open; T12 throws capability_off at the mint), so the throw is stubbed
+// at the sender lock, AFTER the claim. Nothing is minted or saved beyond the
+// claim itself: the link is left claimed and bound to the unminted id, the
+// same replay shape as a busy lock, and a retry mints that same id.
+describe('finalizeLinkPayment — MintRefusedError (pack 3)', { retry: 0 }, () => {
+  it.each(['live_not_certified', 'capability_off'] as const)(
+    'a MintRefusedError (%s) ⇒ { ok: false, error: "not_available" }, nothing minted or saved; the claimed id re-mints',
+    async (code) => {
+      const l = await link({ payeeId: await payee() });
+      const spy = vi.spyOn(stores.store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(code));
+      expect(await pay(l.token)).toEqual({ ok: false, error: 'not_available' });
+      expect(await transfersN()).toBe(0); // (ensureCustomer runs before the claim, as on a busy lock)
+      const claimed = await linkStatus(l.id);
+      expect(claimed.status).toBe('used');
+      expect(await resolvePayableLink(db, stores.store, l.token)).toMatchObject({ payability: 'resume', transfer: null });
+      spy.mockRestore();
+      expect(await pay(l.token)).toEqual({ ok: true, transferId: claimed.transfer_id });
+      expect(await transfersN()).toBe(1);
+    },
+  );
 });

@@ -10,6 +10,7 @@ import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
+import { MintRefusedError, type MintRefusalCode } from '@/lib/transfer-create';
 import { FX_UNAVAILABLE_MESSAGE, resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
@@ -1367,5 +1368,35 @@ describe('createQuote fee parity with the mint', () => {
     vi.spyOn(deps.store, 'getTransferCount').mockRejectedValueOnce(new Error('db down'));
     const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }, MINT_KEY));
     expect([q.fee_source, q.first_transfer_free]).toEqual([1.99, false]);
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint ⇒ 403 with a fixed
+// code and the contract message (never a reason, counsel or contract text).
+// Nothing throws it in production yet (T4/T12 do): the throw is stubbed at the
+// sender lock. The key stays bound-but-unminted, so the SAME key mints after.
+describe('createTransaction: MintRefusedError (pack 3)', () => {
+  const NOT_LIVE = 'This partner is not certified for live transfers on its settlement rail.';
+  const CAP_OFF = 'This feature is not enabled for live transfers on this partner.';
+  const PHONE = '15557771099';
+  it.each<[MintRefusalCode, string, string]>([
+    ['live_not_certified', 'partner_not_live', NOT_LIVE],
+    ['default_on_live_rail', 'partner_not_live', NOT_LIVE],
+    ['capability_off', 'capability_off', CAP_OFF],
+  ])('%s ⇒ 403 { code: %s } with the contract message, nothing minted; the same Idempotency-Key mints after', async (refusal, code, message) => {
+    const { deps, db, store } = await harness();
+    vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(refusal));
+    const body = txBody({ sender: { phone: PHONE, kyc_status: 'not_started' } });
+    const key = `idem-live-${refusal}`;
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', key, body);
+    expect(r).toEqual({ ok: false, status: 403, error: message, code });
+    const bound = await createIdempotencyRepo(db).find('acme', key);
+    expect(bound).not.toBeNull();
+    expect(await store.getTransfer(bound!)).toBeNull();
+    expect(await store.getTransferCount('acme', PHONE)).toBe(0);
+    const r2 = await createTransaction(deps, DELEGATED, 'pk_1', key, body);
+    expect(r2).toMatchObject({ ok: true, status: 201 });
+    if (!r2.ok) throw new Error('unexpected');
+    expect((r2.data as { id: string }).id).toBe(bound);
   });
 });

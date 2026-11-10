@@ -22,6 +22,8 @@ import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Customer } from '@/lib/types';
+import { MintRefusedError } from '@/lib/transfer-create';
+import { fixedReply } from '@/lib/hold-replies';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -243,5 +245,40 @@ describe('POST /api/pay/l/[token]', () => {
     expect(lines[0]).not.toContain('Asha');
     err.mockRestore();
     vi.restoreAllMocks();
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint AFTER the claim.
+// The common live refusal never reaches this arm (T4 adds a pre-claim check
+// that keeps the link OPEN); this arm stays for capability_off (T12) and races.
+describe('POST /api/pay/l/[token] — MintRefusedError at the mint (pack 3)', () => {
+  it('a MintRefusedError at the mint (stubbed AFTER the claim) ⇒ 409 not_available with the cannot_complete text; no transfer row; the link is left claimed and a retry re-mints that same id', async () => {
+    const spy = vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError('live_not_certified'));
+    await call({ action: 'request_otp' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+    // Left claimed exactly like a sends.paused refusal under the claim: 'used',
+    // bound to the unminted id, one paylink.claim audit row.
+    const row = ((await db.execute(sql.raw(`SELECT status, transfer_id FROM payment_links WHERE id = '${linkId}'`))) as unknown as {
+      rows: Array<{ status: string; transfer_id: string | null }>;
+    }).rows[0];
+    expect(row.status).toBe('used');
+    expect(row.transfer_id).toMatch(/\S/);
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'paylink.claim'`)).toBe(1);
+    spy.mockRestore();
+
+    // The retry (the refusal is gone) re-mints that same id: one transfer.
+    // (A fresh OTP store: the first code was spent and the issue cooldown
+    // would refuse a second code this soon.)
+    txOtp = createTransactionOtpStore(fakeRedis(), { randomInt: () => 654321 });
+    await call({ action: 'request_otp' });
+    const retry = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).transferId).toBe(row.transfer_id);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'paylink.claim'`)).toBe(1);
   });
 });

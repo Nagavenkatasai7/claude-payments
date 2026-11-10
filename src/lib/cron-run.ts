@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isScheduleDueToday, upcomingDueDay } from './schedule';
-import { createTransfer, ScheduleMintRefusedError } from './transfer-create';
+import { createTransfer, MintRefusedError, ScheduleMintRefusedError } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
 import { SendsPausedError } from './flags';
 import { isSendVerified, sendGateActive } from './kyc-gate';
@@ -233,6 +233,7 @@ export async function runDueSchedules(
         : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
         : err instanceof SendsPausedError ? 'sends_paused' // Release safety part A: the kill switch is on
         : err instanceof ScheduleMintRefusedError ? 'recipient_deleted' // M2-10: the account's recipient was deleted
+        : err instanceof MintRefusedError ? err.code // pack 3: a live control refused the mint (a fixed code, no reason text)
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
       await alertScheduleNotCreated(deps, schedule.id, reason, 'schedule-refused');

@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
+import { PAY_NOT_AVAILABLE } from '@/lib/pay-not-available';
+import { fixedReply } from '@/lib/hold-replies';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -112,6 +114,19 @@ describe('POST /api/pay/b2b/[invoiceId] — bill expiry (Program-Fix 44)', { ret
     expect(verify).toHaveBeenCalledOnce();
     expect(finalizeCrossBorderBillPayment).toHaveBeenCalledOnce();
     expect(res.status).toBe(400); // the stubbed finalize refusal, not the expiry gate
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint ⇒ the neutral 409
+// PAY_NOT_AVAILABLE, never the generic 400.
+describe('POST /api/pay/b2b/[invoiceId] — not_available (pack 3)', { retry: 0 }, () => {
+  it('finalize not_available ⇒ 409 PAY_NOT_AVAILABLE', async () => {
+    createdAt = new Date(Date.now() - 1 * DAY).toISOString();
+    finalizeCrossBorderBillPayment.mockResolvedValueOnce({ ok: false, error: 'not_available' });
+    const res = await pay();
+    expect(finalizeCrossBorderBillPayment).toHaveBeenCalledOnce();
+    expect(res.status).toBe(PAY_NOT_AVAILABLE.status);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
   });
 });
 

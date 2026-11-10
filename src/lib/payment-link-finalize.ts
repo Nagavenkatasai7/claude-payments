@@ -1,4 +1,4 @@
-import { assertQuoteOverrideFresh, createTransfer } from './transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, MintRefusedError } from './transfer-create';
 import { RateUnavailableError } from './rate';
 import { QuoteError } from './fx';
 import { isFlagOn, SendsPausedError } from './flags';
@@ -110,7 +110,10 @@ export type LinkFinalizeError =
   | 'kyc_required'
   | 'cap'
   | 'busy'
-  | 'blocked';
+  | 'blocked'
+  // Pack 3 (contract 5): a live control refused the mint (MintRefusedError).
+  // Nothing was minted; the route answers 409 PAY_NOT_AVAILABLE.
+  | 'not_available';
 
 export type LinkFinalizeResult =
   | { ok: true; transferId: string }
@@ -285,6 +288,7 @@ export async function finalizeLinkPayment(
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
+    if (err instanceof MintRefusedError) return { ok: false, error: 'not_available' };
     if (err instanceof Error && err.message === 'kyc_required') return { ok: false, error: 'kyc_required' };
     throw err;
   }

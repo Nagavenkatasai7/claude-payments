@@ -1,4 +1,4 @@
-import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft, RewardEndedError } from './transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, MintRefusedError, quoteOverrideFromDraft, RewardEndedError } from './transfer-create';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { assertLegsUsable } from './fx';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
@@ -64,9 +64,13 @@ export type FinalizeResult =
       // 'reward_ended' (B3): the reward on the approved quote ended before the
       // mint. Nothing was minted; the draft is KEPT (owner rule) and the route
       // answers "This offer has ended. Ask for a new quote."
+      // 'not_available' (pack 3): a live control refused the mint
+      // (MintRefusedError). Nothing was minted or consumed; the claimed id
+      // stays bound-but-unminted and the route answers 409 PAY_NOT_AVAILABLE.
       error:
         | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
-        | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused' | 'reward_ended';
+        | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused' | 'reward_ended'
+        | 'not_available';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -345,6 +349,7 @@ export async function finalizeDraftPayment(
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
     if (err instanceof RewardEndedError) return { ok: false, error: 'reward_ended' };
+    if (err instanceof MintRefusedError) return { ok: false, error: 'not_available' };
     throw err;
   }
 

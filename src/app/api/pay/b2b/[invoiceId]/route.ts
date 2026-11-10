@@ -22,6 +22,7 @@ import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
 import { logError } from '@/lib/log';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { payNotAvailable } from '@/lib/pay-not-available';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
 
 // Cross-border B2B bill checkout (Plan 4) — the country-aware sibling of
@@ -264,6 +265,9 @@ export async function POST(
           { status: 503 },
         );
       }
+      // Pack 3 (contract 5): a live control refused the mint. Nothing was
+      // minted or charged; the neutral 409 never names the reason.
+      if (minted.error === 'not_available') return payNotAvailable();
       const msg =
         minted.error === 'blocked' || minted.error === 'buyer_unscreened'
           ? "We can't process this payment."

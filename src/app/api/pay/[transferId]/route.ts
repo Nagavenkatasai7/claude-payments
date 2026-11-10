@@ -38,6 +38,7 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { payNotAvailable } from '@/lib/pay-not-available';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
 import { QuoteError } from '@/lib/fx';
@@ -733,6 +734,11 @@ export async function POST(
           { ok: false, error: 'Please try again.', reason: 'busy' },
           { status: 503 },
         );
+      }
+      if (result.error === 'not_available') {
+        // Pack 3 (contract 5): a live control refused the mint. Nothing was
+        // minted, charged or consumed; the neutral 409 never names the reason.
+        return payNotAvailable();
       }
       const msg =
         result.error === 'cap'

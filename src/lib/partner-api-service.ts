@@ -10,7 +10,7 @@ import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { assertLegsUsable, quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
-import { createTransferWithOutcome, TransferIdConflictError } from './transfer-create';
+import { createTransferWithOutcome, MintRefusedError, TransferIdConflictError } from './transfer-create';
 import { SendsPausedError, SENDS_PAUSED_RETRY_AFTER_SEC } from './flags';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isValidPhone, normalizePhone } from './phone';
@@ -629,6 +629,17 @@ export async function createTransaction(
         code: 'sends_paused',
         retryAfterSec: SENDS_PAUSED_RETRY_AFTER_SEC,
       });
+    }
+    // Pack 3 (contract 5): a live control refused the mint. Nothing was minted;
+    // the key stays bound-but-unminted, so the SAME Idempotency-Key mints once
+    // the partner is certified / the capability is on. A fixed code and message
+    // only: never the reason, a contract or a counsel reference.
+    // (Two plain `return err(` statements: the OpenAPI route inventory reads them.)
+    if (e instanceof MintRefusedError) {
+      if (e.code === 'capability_off') {
+        return err(403, 'This feature is not enabled for live transfers on this partner.', { code: 'capability_off' });
+      }
+      return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
     }
     throw e;
   }

@@ -18,6 +18,7 @@ import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { payNotAvailable } from '@/lib/pay-not-available';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 import { pokeWorker } from '@/lib/outbox';
 import { processTransferPayment } from '@/lib/pay-process';
@@ -193,6 +194,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
           return NextResponse.json({ ok: false, reason: 'sends_paused', error: SENDS_PAUSED_MESSAGE }, { status: 503 });
         case 'busy':
           return NextResponse.json({ ok: false, reason: 'busy', error: 'Please try again.' }, { status: 503 });
+        case 'not_available':
+          // Pack 3 (contract 5): a live control refused the mint; the neutral 409.
+          return payNotAvailable();
         case 'fx_unavailable':
           return NextResponse.json({ ok: false, reason: 'fx_unavailable', error: FX_UNAVAILABLE_MESSAGE }, { status: 503 });
         case 'quote_error':
