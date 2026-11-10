@@ -1,5 +1,6 @@
 import type { DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { logWarn } from './log';
 
 // rail-health — "is this partner's settlement rail failing right now?" for the
 // best-rate router (smart-routing R0 fix B). No new table: the worker already
@@ -38,7 +39,7 @@ export async function recentlyFailingRails(db: DbOrTx, partnerIds: string[], now
       if (id) failing.add(id);
     }
   } catch (err) {
-    console.warn('recentlyFailingRails: lookup failed (routing fails open):', err instanceof Error ? err.message : err);
+    logWarn('routing.rail-health', err, { outcome: 'fail-open' });
   }
   return failing;
 }

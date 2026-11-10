@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import { isPwnedPassword } from '@/lib/pwned';
+import { captureConsole, expectSafeLog } from './helpers-db-error-log';
 
 function sha1Upper(s: string): string {
   return createHash('sha1').update(s).digest('hex').toUpperCase();
@@ -66,5 +67,24 @@ describe('isPwnedPassword', () => {
   it('fails open (returns false) on a non-OK HTTP status', async () => {
     const fetchImpl = fakeFetch('', false, 503);
     expect(await isPwnedPassword('password', fetchImpl)).toBe(false);
+  });
+});
+
+// 2026-11-10 (C6): the fail-open branch printed the error object raw; it now
+// logs one scrubbed JSON line through logWarn.
+describe('isPwnedPassword failure log', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('logs pwned.check as one logger line (no raw error object)', async () => {
+    const c = captureConsole();
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    expect(await isPwnedPassword('password', fetchImpl)).toBe(false);
+    const line = expectSafeLog(c, 'pwned.check');
+    expect(line).toMatchObject({ msg: 'TypeError: fetch failed', outcome: 'fail-open' });
+    expect(c.warn).toHaveLength(1);
+    expect(typeof c.warn[0][0]).toBe('string');
+    expect(c.warn[0]).toHaveLength(1);
   });
 });

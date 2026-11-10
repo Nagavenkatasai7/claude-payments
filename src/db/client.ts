@@ -4,6 +4,7 @@ import ws from 'ws';
 import { env } from '@/lib/env';
 import * as schema from './schema';
 import { guardPool } from './pool-guard';
+import { guardQueryErrors } from './query-error-guard';
 
 // db/client — the cached Drizzle handle over Neon's serverless WebSocket Pool.
 //
@@ -41,6 +42,10 @@ export function getDb() {
     // A dropped connection must not crash the instance or print DATABASE_URL
     // (2026-10-17 and 2026-11-09 password leaks): see ./pool-guard.
     guardPool(pool);
+    // A failed query must not print its bound values or the Postgres detail when
+    // something (Next's uncaught-error print, a raw console call) inspects the
+    // error object: see ./query-error-guard.
+    guardQueryErrors();
     cached = drizzle(pool, { schema });
   }
   return cached;

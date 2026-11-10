@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { logWarn } from './log';
 
 /**
  * pwned — Have I Been Pwned (HIBP) "Pwned Passwords" k-anonymity breach check.
@@ -44,7 +45,7 @@ export async function isPwnedPassword(
     }
     return false;
   } catch (err) {
-    console.warn('[pwned] HIBP check failed; failing open', err);
+    logWarn('pwned.check', err, { outcome: 'fail-open' });
     return false;
   }
 }
