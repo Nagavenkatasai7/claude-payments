@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { fixedReply } from './hold-replies';
-import { PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from './pay-outcome';
+import { PAY_ACCOUNT_HOLDER_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from './pay-outcome';
 
 /**
  * Pack 3 (contract 5): the one neutral answer a pay route gives when a live
@@ -44,5 +44,17 @@ export function payApprovalNotRecorded(): NextResponse {
   return NextResponse.json(
     { ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY },
     { status: 503 },
+  );
+}
+
+/**
+ * Fix pack 4 (C14, C18): the account-holder name the page posted is missing on
+ * real money, not a string, or not a clean name of at most 80 characters.
+ * Answered before the code is checked: nothing was consumed or charged.
+ */
+export function payAccountHolderInvalid(): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: 'Please check the account holder name.', fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } },
+    { status: 400 },
   );
 }

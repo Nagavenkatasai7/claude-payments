@@ -11,7 +11,8 @@ import { newTransferId } from './id';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { hasSenderName } from './sender-identity';
-import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
+import { logWarn } from './log';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
@@ -111,6 +112,8 @@ export async function finalizeDraftPayment(
   stores: FinalizeStores,
   draftId: string,
   bankDetails?: BankDetails,
+  // Fix pack 4 (C18): the account-holder name typed on the pay page (b2c only).
+  opts: { recipientLegalName?: string } = {},
 ): Promise<FinalizeResult> {
   const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
 
@@ -299,6 +302,27 @@ export async function finalizeDraftPayment(
   // bound-but-UNMINTED and the draft is not consumed, so a retry of the same
   // link falls through the claim's replay branch and mints THAT id (the
   // existing crash-replay shape). Never the route's generic 400.
+  // Fix pack 4 (C18, C3): the recipient's legal name for the mint (screened there, C20). A
+  // consumer draft takes its own name, else the one typed on the pay page, else the saved
+  // recipient's book name ONLY for the account actually minted (method + last4 of the final
+  // destination, after any bank details). A book read error mints without a name (the identity
+  // hold at settle is the backstop) and logs the draft id only. B2B drafts take only their own.
+  const bookLegalName = async (): Promise<string | undefined> => {
+    try {
+      const name = await createRecipientRepo(db).getRecipientLegalName(partnerId, draft.senderPhone, draft.recipient.recipientPhone, {
+        payoutMethod,
+        payoutDestination,
+      });
+      return name?.trim() || undefined;
+    } catch (err) {
+      logWarn('pay.finalize_legal_name', err instanceof Error ? err.name : 'error', { draftId });
+      return undefined;
+    }
+  };
+  const recipientLegalName = isB2bDraft
+    ? draft.recipientLegalName
+    : draft.recipientLegalName?.trim() || opts.recipientLegalName?.trim() || (await bookLegalName()) || undefined;
+
   let transfer: Awaited<ReturnType<typeof createTransfer>>;
   try {
     transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
@@ -314,7 +338,7 @@ export async function finalizeDraftPayment(
       destinationCountry: draft.destinationCountry,
       destinationCurrency: draft.destinationCurrency,
       partnerId,
-      recipientLegalName: draft.recipientLegalName,
+      recipientLegalName,
       relationship: draft.relationship,
       purpose: draft.purpose,
       purposeDetail: draft.purposeDetail, // Batch B follow-up A3 (re-checked at the mint)

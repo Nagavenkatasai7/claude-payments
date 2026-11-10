@@ -37,8 +37,9 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
-import { parsePayBody } from '@/lib/pay-body';
+import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
+import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
+import { fillRecipientBookLegalName, payLegalNameOnFile, writeRecipientLegalName } from '@/lib/recipient-legal-name';
 import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
@@ -441,6 +442,46 @@ export async function POST(
     if (gateRefusal === 'reload_required') return payReloadRequired();
     if (gateRefusal === 'not_available') return payNotAvailable();
 
+    // Fix pack 4 (C18 step 1, R03): the recipient's account-holder name, b2c only,
+    // still BEFORE the code is checked (none of these answers consumes it). The
+    // default tenant and the simulator make no read at all for an old tab (no key):
+    // `realMoneyForField` is never true for the default owner (critic M3). An
+    // unresolved owner (SAFE context) skips the rule: the identity hold at settle
+    // is the backstop. A name already on file (or an exempt row: Partner-API,
+    // b2b) skips it too, so a typed name is then ignored (fill-only).
+    let typedLegalName: string | null = null;
+    if ((otpTransfer?.transferType ?? otpDraft?.transferType ?? 'b2c') !== 'b2b') {
+      const skip = !payCtx.realMoneyForField && !body.present.accountHolder;
+      const onFile =
+        skip || !payOwnerId
+          ? true
+          : await payLegalNameOnFile(
+              getDb(),
+              otpTransfer
+                ? { transfer: otpTransfer }
+                : { draft: otpDraft!, ownerId: payOwnerId, newBankFields: body.fields !== null },
+            );
+      if (!onFile) {
+        if (payCtx.realMoneyForField && !body.present.accountHolder) return payReloadRequired();
+        if (body.present.accountHolder && body.accountHolder === null) return payAccountHolderInvalid(); // non-string
+        const typed = body.accountHolder ?? '';
+        if (typed !== '') {
+          const valid = validateAccountHolder(typed);
+          if (!valid.ok) return payAccountHolderInvalid();
+          typedLegalName = valid.name;
+        } else if (body.present.accountHolder && payCtx.realMoneyForField) {
+          return payAccountHolderInvalid();
+        }
+      }
+    }
+
+    // Fix pack 4 (C18 step 6): after a 2xx b2c payment with a typed name, fill the
+    // saved recipient's EMPTY book entry (best-effort; never changes the answer).
+    const withBookFill = async (res: NextResponse, t: Transfer): Promise<NextResponse> => {
+      if (typedLegalName && res.status < 300) await fillRecipientBookLegalName(getDb(), t, typedLegalName);
+      return res;
+    };
+
     const otpCheck = await getTransactionOtpStore().verify(payId, otpPhone, body.otp);
     if (!otpCheck.ok) {
       return NextResponse.json(
@@ -615,13 +656,31 @@ export async function POST(
         // partner (routed, else owner) and its environment — never by the
         // owning partner — and then needs a live list and full name coverage.
         // The corridor rules stay the owner's.
+        // Fix pack 4 (C18 step 3): the typed account-holder name is written
+        // fill-only, with its audit row, BEFORE the re-screen, so the screened set
+        // equals the row (chat + legal). A guard miss writes nothing and goes on
+        // (the identity hold at settle catches a real-money row). A THROW answers
+        // 503 here (nothing is charged yet), never through the outer catch, which
+        // would log the raw error object.
+        let legalRow = decrypted;
+        if (typedLegalName) {
+          let wrote: boolean;
+          try {
+            wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName);
+          } catch (err) {
+            logWarn('pay.legal_name_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+            return payApprovalNotRecorded();
+          }
+          if (wrote) legalRow = await store.getTransferDecrypted(payId);
+          else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
+        }
         const realMoney = await realMoneyFor(getDb(), transfer);
         const rescreen = await rescreenBeforePay(
           getDb(),
           transfer,
           {
             senderName: (owner?.fullName ?? '').trim(),
-            recipientName: (decrypted?.recipientLegalName ?? '').trim() || transfer.recipientName,
+            recipientName: (legalRow?.recipientLegalName ?? '').trim() || transfer.recipientName,
           },
           resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
           { realMoney, stage: 'pay' },
@@ -661,7 +720,7 @@ export async function POST(
             { status: 409 },
           );
         }
-        return await processTransferPayment(store, edited, evidence);
+        return await withBookFill(await processTransferPayment(store, edited, evidence), transfer);
       }
       if (!hasDestination) {
         // A SCHEDULED/cron transfer can be created with an empty destination (Item 2:
@@ -674,7 +733,7 @@ export async function POST(
       }
       // Destination already set (re-opened link) → process exactly as before
       // (with the re-screened row: a flagged verdict takes the normal hold).
-      return await processTransferPayment(store, payable, evidence);
+      return await withBookFill(await processTransferPayment(store, payable, evidence), transfer);
     }
 
     // ── Draft branch: treat id as a draftId and finalize at pay time ──────
@@ -687,7 +746,12 @@ export async function POST(
       dailyVolumeStore: getDailyVolumeStore(),
       db: getDb(),
     };
-    const result = await finalizeDraftPayment(stores, transferId, bankDetails);
+    const result = await finalizeDraftPayment(
+      stores,
+      transferId,
+      bankDetails,
+      typedLegalName ? { recipientLegalName: typedLegalName } : undefined,
+    );
     if (!result.ok) {
       if (result.error === 'kyc_required') {
         return NextResponse.json(
@@ -790,7 +854,7 @@ export async function POST(
       if (withToken instanceof NextResponse) return withToken;
       return await processTransferPayment(store, withToken, evidence);
     }
-    return await processTransferPayment(store, created, evidence);
+    return await withBookFill(await processTransferPayment(store, created, evidence), created);
   } catch (err) {
     logError('pay.route', err, { transferId });
     // Fix D: an infrastructure error (Redis / Neon) is retryable, not a refusal.
