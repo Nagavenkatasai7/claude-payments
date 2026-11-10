@@ -23,6 +23,7 @@ import { requestRecallAction } from '../recall-actions';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildReceiptDisclosure, formatRateLine } from '@/lib/remittance-disclosure';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import { ReceiptDisclosureCard } from './disclosure-card';
 
 export const metadata = { title: 'Receipt · SmartRemit' };
@@ -195,6 +196,9 @@ export default async function ReceiptPage({
   // Program-Fix 15 PR B: the Reg E receipt disclosure (null for B2B). The
   // provider of record is the OWNING partner (t.partnerId, ownership-checked
   // above); the default tenant resolves to the demo note.
+  // Fix pack 4 (C22 b): ONE owner resolve feeds the disclosure and the provider
+  // line (from the LIVE approved config, not the snapshot; null renders nothing).
+  const resolved = resolvePartnerDisclosure(await getPartnerStore().getPartner(t.partnerId));
   const disclosure = buildReceiptDisclosure(
     {
       transferType: t.transferType,
@@ -210,7 +214,7 @@ export default async function ReceiptPage({
       deliveredAt: t.deliveredAt,
       deliveryBusinessDays: t.deliveryBusinessDays,
     },
-    resolvePartnerDisclosure(await getPartnerStore().getPartner(t.partnerId)),
+    resolved,
     Date.now(),
   );
 
@@ -332,7 +336,7 @@ export default async function ReceiptPage({
           </Card>
         )}
 
-        {disclosure && <ReceiptDisclosureCard disclosure={disclosure} />}
+        {disclosure && <ReceiptDisclosureCard disclosure={disclosure} providerLine={providerLineFor(resolved)} />}
 
         {cancelNotice && (
           <Alert className="sm:col-span-2">

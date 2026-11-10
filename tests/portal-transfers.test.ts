@@ -21,6 +21,7 @@ import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
 import { DEFAULT_CATALOG } from '@/lib/rewards/settings';
 import { easternMonth } from '@/lib/dates';
+import { approveDisclosureForTest } from './helpers-live';
 
 // UI redesign M2-7, Task 7.2: Home, the transfer list, the detail page and the printable receipt
 // (render tests over the real PGlite fixture; the UI itself is walked after enablement). Pinned:
@@ -295,6 +296,14 @@ describe('Printable receipt', () => {
   });
   it("B's transfer → 404", async () => {
     await expect(receipt(B.transferIds[0])).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');
+  });
+  // Fix pack 4 T18 (C22 b): the owner's approved provider line, from the live config.
+  it("an approved owner's receipt shows the provider line once; an unapproved owner's shows none", async () => {
+    expect(await receipt(A.transferIds[0])).not.toContain('provider-line');
+    await approveDisclosureForTest(db, 'pa');
+    const html = await receipt(A.transferIds[0]);
+    expect(html.split('data-testid="provider-line"')).toHaveLength(2);
+    expect(html).toContain('Payments by Acme Money Services LLC, licensed by State Department of Financial Services');
   });
 });
 

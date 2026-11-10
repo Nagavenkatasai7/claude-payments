@@ -8,6 +8,7 @@ import { payoutMethodLabel } from '@/lib/payout-format';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildReceiptDisclosure } from '@/lib/remittance-disclosure';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import { t } from '@/lib/i18n';
 import { Money, PageHeader } from '@/components/ds';
 import { ReceiptDisclosureCard } from '@/app/account/receipt/[transferId]/disclosure-card';
@@ -46,6 +47,9 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
   const v = receiptView(transfer, await transferRewardOrNull(getDb(), owner.partnerId, transfer.id));
   const parties = await getPortalB2bParties(owner, transfer);
 
+  // Fix pack 4 (C22 b): ONE owner resolve feeds the disclosure and the provider
+  // line (from the LIVE approved config, not the snapshot; null renders nothing).
+  const resolved = resolvePartnerDisclosure(await getPartnerStore().getPartner(transfer.partnerId));
   const disclosure = buildReceiptDisclosure(
     {
       transferType: transfer.transferType,
@@ -61,7 +65,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
       deliveredAt: transfer.deliveredAt,
       deliveryBusinessDays: transfer.deliveryBusinessDays,
     },
-    resolvePartnerDisclosure(await getPartnerStore().getPartner(transfer.partnerId)),
+    resolved,
     Date.now(),
   );
 
@@ -140,7 +144,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
             </dl>
           </section>
         ) : null}
-        {disclosure ? <ReceiptDisclosureCard disclosure={disclosure} /> : null}
+        {disclosure ? <ReceiptDisclosureCard disclosure={disclosure} providerLine={providerLineFor(resolved)} /> : null}
       </div>
     </>
   );

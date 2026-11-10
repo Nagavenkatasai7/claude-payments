@@ -4,6 +4,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildPrepaymentDisclosure, deliveryDaysFor } from '@/lib/remittance-disclosure';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import { approvingAmountText } from '@/lib/approving-line';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
@@ -350,6 +351,9 @@ async function renderPayPage(transferId: string) {
   const forPage = transfer
     ? { ...resolvedDisclosure, deliveryBusinessDays: deliveryDaysFor(transfer, resolvedDisclosure) }
     : resolvedDisclosure;
+  // Fix pack 4 (C22 a, R16): the owner's approved provider line, from the same
+  // resolve (never a second one). Null keeps the page byte-identical.
+  const providerLine = providerLineFor(resolvedDisclosure);
   const disclosure = view.awaitingPayment
     ? buildPrepaymentDisclosure(view, forPage)
     : null;
@@ -364,6 +368,11 @@ async function renderPayPage(transferId: string) {
       <div className={sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>Secure payment</h1>
+        {providerLine && (
+          <p data-testid="provider-line" className="-mt-3 mb-4 text-[13px] leading-normal text-[#8696a0]">
+            {providerLine}
+          </p>
+        )}
         {view.awaitingPayment && view.preparedByNote && (
           <p data-prepared-by className="mb-4 rounded-xl border border-[#2a3942] p-3.5 text-sm leading-normal text-[#e9edef]">
             {view.preparedByNote}

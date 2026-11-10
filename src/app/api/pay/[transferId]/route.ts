@@ -43,6 +43,7 @@ import { fillRecipientBookLegalName, payLegalNameOnFile, writeRecipientLegalName
 import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import type { PaymentEvidence } from '@/lib/payment-evidence';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
@@ -388,11 +389,16 @@ export async function POST(
       }
       if (issued.ok) {
         const tenant = otpPartnerId;
+        // Fix pack 4 (C22 c, R16): the OWNER's approved provider line, from the
+        // gate context above (no extra partner read). Added only when there is
+        // one, so without it the hooks and the code text are unchanged.
+        const providerLine = providerLineFor(requestCtx.disclosure) ?? undefined;
         let sentOn: 'wa' | 'tg' | undefined;
         try {
           sentOn = await sendTransactionOtp(otpPhone, issued.code, otpCreds, otpBrand, otpTemplate, {
             // Fix pack 4 (C5): a payment code (a Telegram chat gets the transaction text).
             purpose: 'payment',
+            ...(providerLine ? { providerLine } : {}),
             // PR 393: outside the window a free-form fallback is accepted, then dropped.
             inWindow: () => isInServiceWindow(store, tenant, otpPhone),
             // PR 393: the partner sees (and is emailed about) a REJECTED template: a Graph 4xx

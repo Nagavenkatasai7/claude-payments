@@ -21,6 +21,7 @@ import { parsePayBody } from '@/lib/pay-body';
 import { readPayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import type { PaymentEvidence } from '@/lib/payment-evidence';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 import { pokeWorker } from '@/lib/outbox';
@@ -115,12 +116,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       }
       if (issued.ok) {
         const tenant = link.partnerId;
+        // Fix pack 4 (C22 c, R16): the link owner's approved provider line, from
+        // the gate context (no extra partner read); no key when there is none.
+        const providerLine = providerLineFor(ctx.disclosure) ?? undefined;
         let sentOn: 'wa' | 'tg' | undefined;
         try {
           // No brand argument: the code's wording names SmartRemit (owner branding decision).
           sentOn = await sendTransactionOtp(phone, issued.code, channel.creds, undefined, template, {
             // Fix pack 4 (C5): a payment code (a Telegram chat gets the transaction text).
             purpose: 'payment',
+            ...(providerLine ? { providerLine } : {}),
             inWindow: () => isInServiceWindow(store, tenant, phone),
             onTemplateFailure: async ({ status, code }) => {
               if (status === undefined || status < 400 || status >= 500) return;

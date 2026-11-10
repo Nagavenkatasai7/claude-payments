@@ -110,3 +110,32 @@ describe('ReceiptDisclosureCard', { retry: 0 }, () => {
     expect(out).toContain(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 4))} (estimate)`);
   });
 });
+
+// Fix pack 4 T18 (C22 b): the optional provider line, inside the card before the rows.
+describe('ReceiptDisclosureCard provider line', { retry: 0 }, () => {
+  const LINE = 'Payments by Acme Money Services LLC, licensed by State Department of Financial Services';
+  const disclosure = () => {
+    const d = buildReceiptDisclosure(transfer(), resolvePartnerDisclosure(partner({ supportConfig: { disclosure: FULL } })), NOW);
+    if (!d) throw new Error('expected a disclosure');
+    return d;
+  };
+
+  it('providerLine given -> one provider-line with the exact text, inside the card', () => {
+    const out = renderToStaticMarkup(createElement(ReceiptDisclosureCard, { disclosure: disclosure(), providerLine: LINE }));
+    expect(out.split('data-testid="provider-line"')).toHaveLength(2);
+    expect(out).toMatch(new RegExp(`<p data-testid="provider-line"[^>]*>${LINE}</p>`));
+    const line = out.indexOf('data-testid="provider-line"');
+    expect(line).toBeGreaterThan(out.indexOf('data-disclosure-version'));
+    expect(line).toBeGreaterThan(out.indexOf('Transfer disclosure'));
+    expect(line).toBeLessThan(out.indexOf('<dl'));
+  });
+
+  it('providerLine undefined, null or empty -> byte-identical to the render without the prop', () => {
+    const d = disclosure();
+    const base = renderToStaticMarkup(createElement(ReceiptDisclosureCard, { disclosure: d }));
+    for (const providerLine of [undefined, null, '']) {
+      expect(renderToStaticMarkup(createElement(ReceiptDisclosureCard, { disclosure: d, providerLine }))).toBe(base);
+    }
+    expect(base).not.toContain('provider-line');
+  });
+});

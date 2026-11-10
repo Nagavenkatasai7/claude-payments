@@ -529,4 +529,23 @@ describe('link route R18 gate (pack 4)', { retry: 0 }, () => {
     expect((await res.json()).reason).toBe('quote_expired');
     expect(codeKeys()).toHaveLength(1);
   });
+
+  // Fix pack 4 T18 (C22 c): the link owner's approved provider line rides on the code text.
+  it('request_otp for an approved link owner -> hooks.providerLine is the line', async () => {
+    await approveDisclosureForTest(db, 'acme');
+    const res = await acmeCall({ action: 'request_otp' });
+    expect(res.status).toBe(200);
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined, undefined, undefined, expect.any(Object));
+    expect(sendTransactionOtp.mock.calls[0][5]).toMatchObject({
+      purpose: 'payment',
+      providerLine: 'Payments by Acme Money Services LLC, licensed by State Department of Financial Services',
+    });
+  });
+
+  it('the default-tenant link (owner read gives no partner) -> no providerLine key', async () => {
+    const res = await call({ action: 'request_otp' });
+    expect(res.status).toBe(200);
+    expect(sendTransactionOtp.mock.calls[0][5]).not.toHaveProperty('providerLine');
+    expect(sendTransactionOtp.mock.calls[0][5]).toMatchObject({ purpose: 'payment' });
+  });
 });
