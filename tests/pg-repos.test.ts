@@ -26,6 +26,7 @@ import {
 } from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { EMPTY_PARTNER_INTEGRATIONS } from '@/lib/partner-integrations';
+import { EMPTY_LIVE_CONTROLS } from '@/lib/live-controls';
 import type { Db } from '@/db/client';
 import type { Customer, Partner, Schedule } from '@/lib/types';
 
@@ -48,7 +49,8 @@ describe('partner-repo', () => {
       createdAt: now, updatedAt: now,
     };
     await repo.savePartner(p);
-    expect(await repo.getPartner('acme')).toEqual(p);
+    // Fix pack 3 (0037): a repo read always carries the parsed live_controls.
+    expect(await repo.getPartner('acme')).toEqual({ ...p, liveControls: EMPTY_LIVE_CONTROLS });
     const def = await repo.ensureDefaultPartner();
     expect(def.id).toBe('default');
     await repo.savePartner({ ...def, name: 'Renamed' });

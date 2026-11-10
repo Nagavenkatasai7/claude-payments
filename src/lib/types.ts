@@ -849,6 +849,10 @@ export interface Partner {
   // single-column writer.
   sendLimits?: PartnerSendLimits;
   supportConfig?: PartnerSupportConfig; // admin-controlled support behavior (absent ⇒ defaults)
+  // Fix pack 3 (0037): the parsed partners.live_controls. Mapped in rowToPartner
+  // only (always set there), NEVER in partnerToRow; its ONE writer is
+  // updateLiveControlsKey. Optional so hand-built Partner fakes still compile.
+  liveControls?: import('./live-controls').LiveControls;
   createdAt: string;
   updatedAt: string;
 }

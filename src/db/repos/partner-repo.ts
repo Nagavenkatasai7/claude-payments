@@ -1,8 +1,9 @@
-import { asc, eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { partners } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerSendLimits, PartnerStatus, PartnerSupportConfig } from '@/lib/types';
 import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
+import { LIVE_CONTROLS_KEYS, parseLiveControls, type LiveControlsKey } from '@/lib/live-controls';
 
 // partner-repo — mirrors partner-store's surface (getPartner / savePartner /
 // listPartners / ensureDefaultPartner) so the cutover is a drop-in swap.
@@ -38,6 +39,10 @@ function rowToPartner(row: PartnerRow): Partner {
   // savePartner's full-row upsert (updatePartnerAction) must never rewrite a
   // limit; fix 16b's setSendLimits is the single-column writer.
   if (row.sendLimits && typeof row.sendLimits === 'object') p.sendLimits = row.sendLimits as PartnerSendLimits;
+  // Fix pack 3 (0037): READ-ONLY here, always set (a malformed key reads as
+  // absent). Deliberately NOT in partnerToRow below: updateLiveControlsKey is
+  // the ONE writer.
+  p.liveControls = parseLiveControls(row.liveControls);
   return p;
 }
 
@@ -194,3 +199,51 @@ export function createPartnerRepo(db: DbOrTx) {
 }
 
 export type PartnerRepo = ReturnType<typeof createPartnerRepo>;
+
+/**
+ * Fix pack 3 (contract 2): the ONE writer of partners.live_controls. It writes
+ * ONE top-level key with jsonb_set, so every other key (unknown, reserved or
+ * malformed) stays byte-for-byte as stored; it never parses and rewrites the
+ * column. The row is read under FOR NO KEY UPDATE, which serialises live
+ * control writers but never blocks the FOR KEY SHARE that FK child inserts
+ * (transfers, outbox) take on the partner row, so mints never wait on it
+ * (drizzle select().for(): node_modules/drizzle-orm/pg-core/query-builders/
+ * select.d.ts:586, LockStrength select.types.d.ts:60).
+ *
+ * `value` may be a function: it receives the RAW stored sub-value (undefined
+ * when the key is absent) and returns the next one. A missing row returns
+ * { found: false, previousRaw: undefined } and writes nothing; a key outside
+ * LIVE_CONTROLS_KEYS, or an undefined value (or function result), throws a
+ * TypeError and writes nothing. Call it inside the caller's transaction so the
+ * audit row commits with the write.
+ */
+export async function updateLiveControlsKey(
+  partnerId: PartnerId,
+  key: LiveControlsKey,
+  value: unknown | ((previousRaw: unknown) => unknown),
+  tx: DbOrTx,
+): Promise<{ found: boolean; previousRaw: unknown }> {
+  if (!(LIVE_CONTROLS_KEYS as readonly string[]).includes(key)) {
+    throw new TypeError(`updateLiveControlsKey: unknown key ${String(key)}`);
+  }
+  if (value === undefined) throw new TypeError('updateLiveControlsKey: value is undefined');
+  const rows = await tx
+    .select({ v: sql<unknown>`${partners.liveControls} -> ${key}` })
+    .from(partners)
+    .where(eq(partners.id, partnerId))
+    .limit(1)
+    .for('no key update');
+  if (!rows[0]) return { found: false, previousRaw: undefined };
+  // SQL NULL (key absent) arrives as null; a stored JSON null also reads as absent.
+  const previousRaw: unknown = rows[0].v === null ? undefined : rows[0].v;
+  const next = typeof value === 'function' ? (value as (previousRaw: unknown) => unknown)(previousRaw) : value;
+  if (next === undefined) throw new TypeError('updateLiveControlsKey: value is undefined');
+  await tx
+    .update(partners)
+    .set({
+      liveControls: sql`jsonb_set(${partners.liveControls}, ARRAY[${key}]::text[], ${JSON.stringify(next)}::jsonb, true)`,
+      updatedAt: new Date(),
+    })
+    .where(eq(partners.id, partnerId));
+  return { found: true, previousRaw };
+}

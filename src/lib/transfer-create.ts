@@ -24,6 +24,8 @@ import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rul
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { RewardMintFacts, SenderLedgerOps, Store } from './store';
 import type { PartnerStore } from './partner-store';
+import type { FixedReplyKind } from './hold-replies';
+import type { LiveCapability } from './live-controls';
 import type {
   CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
@@ -322,6 +324,28 @@ export class TransferIdConflictError extends Error {
   constructor() {
     super('transfer_id_conflict');
     this.name = 'TransferIdConflictError';
+  }
+}
+
+/**
+ * Fix pack 3 (contract 4): ONLY pack 3's live refusals use this class (the
+ * classes above are untouched). Thrown before any write: a real-money mint
+ * owned by the default tenant (default_on_live_rail), a real-money mint on a
+ * rail partner not certified for live money (live_not_certified), or a closed
+ * capability on a certified owner (capability_off, with `capability`).
+ * Callers answer the customer with fixedReply(copyKey). Declared in T1; no
+ * code throws it yet (T4, T12).
+ */
+export type MintRefusalCode = 'live_not_certified' | 'capability_off' | 'default_on_live_rail';
+
+export class MintRefusedError extends Error {
+  constructor(
+    readonly code: MintRefusalCode,
+    readonly copyKey: FixedReplyKind = 'cannot_complete',
+    readonly capability?: LiveCapability,
+  ) {
+    super(`mint_refused:${code}`);
+    this.name = 'MintRefusedError';
   }
 }
 
