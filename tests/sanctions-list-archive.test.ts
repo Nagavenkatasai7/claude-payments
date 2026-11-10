@@ -352,15 +352,35 @@ describe('sanctions list archive (R07)', () => {
     vi.restoreAllMocks();
     const a = await alerts(db);
     expect(a).toHaveLength(2);
-    const names = realVariant(2).entries.flatMap((e) => [...e.names, ...(e.weakNames ?? [])]);
+    // Pack 2 review R5 (J5): check the names of BOTH stored versions, so the
+    // name the injected error carries ('Synthetic Real Party 1') is checked.
+    const names = [1, 2].flatMap((n) => realVariant(n).entries.flatMap((e) => [...e.names, ...(e.weakNames ?? [])]));
+    expect(names).toContain('Synthetic Real Party 1');
     for (const { payload } of a) {
       expect(Object.keys(payload)).toEqual(['message']);
       const text = JSON.stringify(payload);
       for (const n of names) expect(text).not.toContain(n);
+      expect(text).not.toContain('Synthetic Real Party');
       expect(text).not.toMatch(/sdn:\d/);
       expect(text).not.toMatch(/token|secret|cred|passw/i);
       expect(text).not.toContain('privstore');
     }
+  });
+
+  it('a store error that carries only an entry name (no token word) does not reach the alert', async () => {
+    const repo = createSanctionsListRepo(db);
+    for (const n of [1, 2]) await repo.storeList(realVariant(n));
+    putMock.mockImplementation(() => Promise.reject(new Error('boom Synthetic Real Party 1')));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await archivePending(db);
+    vi.restoreAllMocks();
+    const a = await alerts(db);
+    expect(a.map((r) => r.dedupe_key)).toEqual([expect.stringMatching(/^sanctions-archive-failed:/)]);
+    const names = [1, 2].flatMap((n) => realVariant(n).entries.flatMap((e) => [...e.names, ...(e.weakNames ?? [])]));
+    const text = JSON.stringify(a[0].payload);
+    for (const n of names) expect(text).not.toContain(n);
+    expect(text).not.toContain('Synthetic Real Party');
   });
 
   it('never throws on a db error', async () => {
