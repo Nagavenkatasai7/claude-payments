@@ -8,9 +8,9 @@ import { settleFundedTransfer } from '@/lib/stripe-funded-settle';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
-import { isFlagOn } from '@/lib/flags';
+import { readFlag } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
-import { liveRefusalFor, realMoneyRail } from '@/lib/live-gate';
+import { liveRefusalFor, realMoneyFor, realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
@@ -163,14 +163,16 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     // instruction is held ON PURPOSE (outbox-worker defers it), so it is neither
     // re-instructed nor alerted as stuck. The `recon:` alert stays available
     // for a later sweep once the pause is off and the transfer is still stuck.
-    if (
-      await isFlagOn(db, 'settlement.paused', {
-        partnerId: [t.partnerId, t.settlementPartnerId],
-        corridor: t.destinationCountry,
-      })
-    ) {
-      continue;
-    }
+    // Fix pack 3 T7: partner-set (`tenant:`) rows of the owner or the rail
+    // tenant match too, and an unreadable switch on a real-money rail skips
+    // the row as the instruct defers it (owner answer Q5).
+    const pause = await readFlag(db, 'settlement.paused', {
+      partnerId: [t.partnerId, t.settlementPartnerId],
+      tenants: [t.partnerId, t.settlementPartnerId],
+      corridor: t.destinationCountry,
+    });
+    if (pause === 'on') continue;
+    if (pause === 'unknown' && (await realMoneyFor(db, t))) continue;
     // Fix pack 3 T6 (R15, contract 7): a real-money row whose rail partner is
     // not certified for live money (or whose owner is the default tenant) is
     // owned by the worker: it defers the instruct uncharged and raised

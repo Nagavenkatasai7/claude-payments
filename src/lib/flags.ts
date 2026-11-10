@@ -1,6 +1,9 @@
 import { createFeatureFlagRepo, type FlagRow, type FlagScopeType } from '@/db/repos/feature-flag-repo';
 import type { DbOrTx } from '@/db/client';
 import { logWarn } from './log';
+import { noteFlagReadFailure } from './flag-read-alert';
+import { parseDestinationCountry } from './destination-country';
+import type { CountryCode, PartnerId } from './types';
 
 // flags — feature flags and kill switches (Release safety Batch 2 part A).
 //
@@ -13,9 +16,19 @@ import { logWarn } from './log';
 // effect everywhere within that time without a deploy. The admin action clears
 // the cache of the instance that served it at once.
 //
-// A failed read FAILS OPEN (the flag reads as off) with one log line: every
-// caller of a kill switch also needs Neon for its own work, so a database outage
-// stops that work anyway, and a flag outage must never stop money on its own.
+// A failed read FAILS OPEN (the flag reads as off) with one log line and one
+// hourly `flagread:<key>:<hour>` ops alert (flag-read-alert.ts): every caller
+// of a kill switch also needs Neon for its own work, so a database outage stops
+// that work anyway, and a flag outage must never stop money on its own. The one
+// exception (owner answer Q5, fix pack 3): settlement.paused read by the
+// settlement instruct and the reconcile sweep on a real-money rail. There
+// readFlag's 'unknown' WAITS (the instruct defers uncharged, reconcile skips
+// the row), because an unreadable pause must not send real money out.
+//
+// Partner-set pauses (fix pack 3, R26) are 'partner' rows whose scope id is
+// tenantScopeId(): `tenant:<id>` or `tenant:<id>:<CC>`. They match only through
+// parseTenantScopeId (an unparsable id never matches) and only the request's
+// TENANTS (ctx.tenants, else its partners), never a platform-set partner row.
 //
 // Sanctions screening is NOT a flag and never reads this module: it stays
 // structurally on (CLAUDE.md architecture spine).
@@ -37,7 +50,9 @@ export type FlagKey =
   | 'telegram.bot'
   | 'agent.tools'
   | 'agent.reply_guard'
-  | 'portal.skins';
+  | 'portal.skins'
+  | 'agent.paused'
+  | 'agent.tools.paused';
 
 export interface FlagDefinition {
   key: FlagKey;
@@ -48,6 +63,10 @@ export interface FlagDefinition {
   scopes: readonly FlagScopeType[];
   /** A kill switch stops money movement: turning it ON sends an ops alert and shows the red banner. */
   killSwitch: boolean;
+  /** A partner admin may set it for their own tenant (a `tenant:<id>` row, fix pack 3 R26). */
+  partnerOperable: boolean;
+  /** A partner-set row may name one corridor (`tenant:<id>:<CC>`). */
+  tenantCorridor: boolean;
 }
 
 export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
@@ -60,6 +79,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'New sends are paused',
     scopes: ['global', 'partner', 'corridor'],
     killSwitch: true,
+    partnerOperable: true,
+    tenantCorridor: true,
   },
   'settlement.paused': {
     key: 'settlement.paused',
@@ -70,6 +91,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'Settlement to partner rails is paused',
     scopes: ['global', 'partner', 'corridor'],
     killSwitch: true,
+    partnerOperable: true,
+    tenantCorridor: true,
   },
   // Step 1 voice notes: the on/off switch. Voice also needs the Azure Speech
   // env settings and the sender among the demo-mode phones (DEMO_PHONES,
@@ -85,6 +108,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'Voice notes are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // Required purpose (owner decision 2026-10-08; A3 purpose detection, Raj #17,
   // before it): read once per agent turn for the routed tenant, for EVERY phone
@@ -104,6 +129,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'The bot asks for the purpose',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // B3 rewards v1: SmartRemit-funded customer rewards (every Nth transfer in a
   // month, festival offers). Also needs the sender among the demo-mode phones
@@ -121,6 +148,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'Customer rewards are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // Batch B2 payment links: partners make a link per customer to pay an approved
   // company in India. Also needs the customer among the demo-mode phones
@@ -135,6 +164,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'Payment links are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // Telegram test channel (owner request 2026-10-08): the shared SmartRemit bot
   // in Telegram, for demo-mode phones (DEMO_PHONES) only. Also needs
@@ -151,6 +182,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'The Telegram test bot is on',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // Stage C1 AI agent tools (owner go 2026-10-18): customers connect an AI app
   // (Claude, ChatGPT, …) to their portal account over OAuth and MCP, read-only
@@ -169,6 +202,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'AI agent tools (test) are on',
     scopes: ['global', 'partner'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // R32 (bot part): the reply guard (src/lib/reply-guard.ts) checks every bot
   // reply's raw model text against the turn's tool results. Off (no row, or
@@ -186,6 +221,8 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'The bot reply guard replaces mismatched replies',
     scopes: ['global', 'partner', 'corridor'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
   },
   // Site skins (owner go 2026-11-09, src/lib/site-skins.ts): tgfl.smartremit.ai shows SmartRemit's
   // own customer portal with the TGFL name. Global only: it is one address, not a per-partner or
@@ -202,6 +239,37 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     bannerText: 'The TGFL demo portal is on',
     scopes: ['global'],
     killSwitch: false,
+    partnerOperable: false,
+    tenantCorridor: false,
+  },
+  // Fix pack 3 (R26): the AI agent's kill switch. Read per agent turn for the
+  // turn's tenant (the WhatsApp worker and the web chat, turn-router.ts): on ⇒
+  // the fixed non-AI menu (hold-replies.ts agent_paused), HELP still opens a
+  // case. Fails open (off) on a read failure, with the flagread alert.
+  'agent.paused': {
+    key: 'agent.paused',
+    label: 'Pause the AI agent',
+    description:
+      'Customers get the fixed menu instead of the AI agent; HELP still reaches a person. Transfers, pay pages and notices continue.',
+    bannerText: 'The AI agent is paused',
+    scopes: ['global', 'partner'],
+    killSwitch: true,
+    partnerOperable: true,
+    tenantCorridor: false,
+  },
+  // Fix pack 3 (R26): stops the customer AI-app tools (agent-auth/gate.ts
+  // agentToolsOn) whatever 'agent.tools' says. Unreadable ⇒ off (fails open),
+  // but agent.tools itself fails closed, so a read failure still shuts the tools.
+  'agent.tools.paused': {
+    key: 'agent.tools.paused',
+    label: 'Pause AI agent tools',
+    description:
+      'Connected AI apps get "SmartRemit AI tools are switched off." and no new connection starts, whatever "AI agent tools (test)" says.',
+    bannerText: 'AI agent tools are paused',
+    scopes: ['global', 'partner'],
+    killSwitch: true,
+    partnerOperable: true,
+    tenantCorridor: false,
   },
 };
 
@@ -216,6 +284,40 @@ export interface FlagContext {
   partnerId?: string | readonly (string | null | undefined)[] | null;
   /** The destination country code (the corridor). */
   corridor?: string | null;
+  /**
+   * The tenants whose partner-set (`tenant:`) rows apply. Absent ⇒ the
+   * partnerId set. The mint passes only the owner (a rail partner's own sends
+   * pause never stops another tenant's mint); the instruct and reconcile pass
+   * owner and rail.
+   */
+  tenants?: PartnerId | readonly (PartnerId | null | undefined)[];
+}
+
+export type FlagRead = 'on' | 'off' | 'unknown';
+
+const TENANT_PREFIX = 'tenant:';
+const TENANT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** The scope id of a partner-set row: 'tenant:<id>' or 'tenant:<id>:<CC>'. */
+export function tenantScopeId(partnerId: PartnerId, corridor?: CountryCode): string {
+  return corridor === undefined ? `${TENANT_PREFIX}${partnerId}` : `${TENANT_PREFIX}${partnerId}:${corridor}`;
+}
+
+/** Parse a partner-set scope id; null for anything that is not exactly tenantScopeId's shape. Pure. */
+export function parseTenantScopeId(s: string): { partnerId: PartnerId; corridor?: CountryCode } | null {
+  if (typeof s !== 'string' || !s.startsWith(TENANT_PREFIX)) return null;
+  const parts = s.slice(TENANT_PREFIX.length).split(':');
+  if (parts.length < 1 || parts.length > 2) return null;
+  const [partnerId, cc] = parts;
+  if (!TENANT_ID.test(partnerId)) return null;
+  if (parts.length === 1) return { partnerId };
+  const corridor = parseDestinationCountry(cc);
+  if (corridor === null || corridor === undefined) return null;
+  return { partnerId, corridor };
+}
+
+function idSet(v: string | readonly (string | null | undefined)[] | null | undefined): Set<string> {
+  return new Set((Array.isArray(v) ? v : [v]).filter((p): p is string => typeof p === 'string' && p !== ''));
 }
 
 type Snapshot = { at: number; rows: FlagRow[] };
@@ -232,19 +334,40 @@ async function enabledRows(db: DbOrTx, now: number): Promise<FlagRow[]> {
 
 /** The enabled rows of `key` that match `ctx` (pure; exported for tests and the banner). */
 export function matchingRows(rows: readonly FlagRow[], key: string, ctx: FlagContext = {}): FlagRow[] {
-  const partners = new Set(
-    (Array.isArray(ctx.partnerId) ? ctx.partnerId : [ctx.partnerId]).filter(
-      (p): p is string => typeof p === 'string' && p !== '',
-    ),
-  );
+  const partners = idSet(ctx.partnerId);
+  const tenants = ctx.tenants !== undefined ? idSet(ctx.tenants) : partners;
   const corridor = (ctx.corridor ?? '').toUpperCase();
   return rows.filter((r) => {
     if (!r.enabled || r.key !== key) return false;
     if (r.scopeType === 'global') return true;
+    if (r.scopeType === 'partner' && r.scopeId.startsWith(TENANT_PREFIX)) {
+      const t = parseTenantScopeId(r.scopeId);
+      return t !== null && tenants.has(t.partnerId) && (t.corridor === undefined || t.corridor === corridor);
+    }
     if (r.scopeType === 'partner') return partners.has(r.scopeId);
     if (r.scopeType === 'corridor') return corridor !== '' && r.scopeId.toUpperCase() === corridor;
     return false;
   });
+}
+
+/**
+ * The tri-state read of `key` for this request: 'on', 'off', or 'unknown' when
+ * the table could not be read. Never throws. 'unknown' logs one line and raises
+ * the hourly flagread alert. Shares isFlagOn's 15 s snapshot.
+ */
+export async function readFlag(
+  db: DbOrTx,
+  key: FlagKey,
+  ctx: FlagContext = {},
+  now: number = Date.now(),
+): Promise<FlagRead> {
+  try {
+    return matchingRows(await enabledRows(db, now), key, ctx).length > 0 ? 'on' : 'off';
+  } catch (err) {
+    logWarn('flags.read', err, { key });
+    await noteFlagReadFailure(db, key, now); // never throws
+    return 'unknown';
+  }
 }
 
 /**
@@ -257,12 +380,7 @@ export async function isFlagOn(
   ctx: FlagContext = {},
   now: number = Date.now(),
 ): Promise<boolean> {
-  try {
-    return matchingRows(await enabledRows(db, now), key, ctx).length > 0;
-  } catch (err) {
-    logWarn('flags.read', err, { key });
-    return false;
-  }
+  return (await readFlag(db, key, ctx, now)) === 'on';
 }
 
 /** Every enabled kill-switch row (for the admin banner). Never throws; [] on a read failure. */

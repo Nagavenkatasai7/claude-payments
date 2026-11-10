@@ -35,7 +35,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
-import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
+import { readFlag, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { replyGuardAlertFor, type ReplyGuardReport } from '@/lib/reply-guard';
@@ -158,8 +158,10 @@ export interface WorkerDeps {
   /**
    * R26's slot in the agent.turn router (turn-router.ts): whether this tenant's
    * AI agent is paused. A paused tenant's customers get the fixed, non-AI menu
-   * (HELP still opens a case). Absent ⇒ never paused; R26 (PR3) wires it to the
-   * agent.paused kill switch. A throw fails the row, which retries.
+   * (HELP still opens a case). Absent ⇒ never paused. The worker route wires it
+   * to the agent.paused kill switch (fix pack 3 R26) through isFlagOn, which
+   * never throws and fails open (an unreadable switch ⇒ not paused). A throw
+   * would fail the row, which retries.
    */
   agentPaused?: (partnerId: PartnerId) => Promise<boolean>;
 }
@@ -854,19 +856,27 @@ async function handle(
       // Release safety part A: the settlement.paused kill switch. Checked after
       // every "not payable" guard above (those rows finish as before) and
       // BEFORE the instruction is built or sent. The row waits, uncharged.
-      if (
-        await isFlagOn(deps.db, 'settlement.paused', {
-          partnerId: [transfer.partnerId, railPartnerId],
-          corridor: transfer.destinationCountry,
-        })
-      ) {
+      // Fix pack 3 (R26): partner-set (`tenant:`) rows of the owner or the
+      // rail tenant match too.
+      const pause = await readFlag(deps.db, 'settlement.paused', {
+        partnerId: [transfer.partnerId, railPartnerId],
+        tenants: [transfer.partnerId, railPartnerId],
+        corridor: transfer.destinationCountry,
+      });
+      if (pause === 'on') {
         logWarn('outbox.instruct-paused', 'settlement.paused is on; instruction deferred', { transferId });
         throw new SettlementPausedError();
       }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
-      // (Pack 3 T7, contract 7 step 10, goes here: a settlement.paused read
-      // that failed defers a real-money row.)
+      // Fix pack 3 T7 (owner answer Q5, contract 7 step 10): the switch table
+      // could not be read. On a real-money rail the row WAITS, uncharged, as if
+      // paused (readFlag raised the flagread alert); anywhere else the read
+      // fails open and the instruction continues.
+      if (pause === 'unknown' && realMoney) {
+        logWarn('outbox.instruct-paused', 'settlement.paused unreadable on a real-money rail; instruction deferred', { transferId });
+        throw new SettlementPausedError();
+      }
       // Fix pack 3 T6 (R15, contract 7 step 11): on real money the RAIL partner
       // must be certified for live money, and the default tenant never owns a
       // real-money row. Before the URL check, so an uncertified rail with no URL

@@ -406,10 +406,14 @@ export async function createTransferWithOutcome(
   // caller's key stays bound-but-unminted and the same request mints once the
   // switch is off. A sandbox (test-key) mint moves no money and is never
   // paused, so the pre-release synthetic transfer still runs during a pause.
+  // Fix pack 3 (R26): a partner-set (`tenant:`) pause applies to the OWNER's
+  // sends only; a routed rail partner's own sends pause never stops this mint
+  // (a platform 'partner' row of the rail still does).
   if (
     input.environment !== 'test' &&
     (await store.isFlagOn('sends.paused', {
       partnerId: [input.partnerId, input.settlementPartnerId],
+      tenants: [input.partnerId],
       corridor: destinationCountry,
     }))
   ) {

@@ -3,6 +3,7 @@ import { env } from '@/lib/env';
 import { bearerMatches } from '@/lib/cron-auth';
 import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
+import { isFlagOn } from '@/lib/flags';
 import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
@@ -233,6 +234,10 @@ async function run(req: NextRequest): Promise<NextResponse> {
         signal,
       });
     },
+    // Fix pack 3 (R26): the agent.turn router's paused slot reads the
+    // agent.paused kill switch for the turn's tenant (global, a platform partner
+    // row or the tenant's own row). isFlagOn never throws and fails open.
+    agentPaused: (partnerId) => isFlagOn(getDb(), 'agent.paused', { partnerId }),
   };
 
   // Quiet-cron check on NON-cron calls only (a cron call cannot notice its own

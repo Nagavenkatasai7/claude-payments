@@ -35,8 +35,10 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
-// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one per
-// stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one readFlag
+// per stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+// (flags.ts's own isFlagOn -> readFlag call does not go through this mock, so a
+// row is never counted twice.)
 const flagHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
 vi.mock('@/lib/flags', async (orig) => {
   const real = await orig<typeof import('@/lib/flags')>();
@@ -45,6 +47,10 @@ vi.mock('@/lib/flags', async (orig) => {
     isFlagOn: async (...a: Parameters<typeof real.isFlagOn>) => {
       flagHook.before?.();
       return real.isFlagOn(...a);
+    },
+    readFlag: async (...a: Parameters<typeof real.readFlag>) => {
+      flagHook.before?.();
+      return real.readFlag(...a);
     },
   };
 });
