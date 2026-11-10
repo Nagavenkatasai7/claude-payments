@@ -1,5 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
+
+// Fix pack 3 T12: counts and optionally fails the gate's partner reads (the real repo otherwise).
+const partnerReads = vi.hoisted(() => ({ ids: [] as string[], fail: false }));
+vi.mock('@/db/repos/partner-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/partner-repo')>();
+  return {
+    ...real,
+    createPartnerRepo: (...a: Parameters<typeof real.createPartnerRepo>) => {
+      const repo = real.createPartnerRepo(...a);
+      return {
+        ...repo,
+        getPartner: async (id: string) => {
+          partnerReads.ids.push(id);
+          if (partnerReads.fail) throw new Error('partner read failed');
+          return repo.getPartner(id);
+        },
+      };
+    },
+  };
+});
+
 import { agentToolsOn } from '@/lib/agent-auth/gate';
 import { invalidateFlagCache, tenantScopeId } from '@/lib/flags';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
@@ -17,6 +39,8 @@ async function setFlag(key: string, scopeType: 'global' | 'partner', scopeId: st
 beforeEach(async () => {
   db = await freshDb();
   invalidateFlagCache(db);
+  partnerReads.ids = [];
+  partnerReads.fail = false;
 });
 afterEach(() => {
   invalidateFlagCache(db);
@@ -57,5 +81,46 @@ describe('agentToolsOn', () => {
       },
     } as unknown as Db;
     expect(await agentToolsOn(broken, 'acme')).toBe(false);
+  });
+});
+
+// Fix pack 3 T12 (R13, contract 10): a tenant certified for live money also
+// needs its AI-tools (mcp) opt-in. A partner read failure is false (closed).
+describe('agentToolsOn and the mcp capability (fix pack 3 T12)', () => {
+  beforeEach(async () => {
+    await setFlag('agent.tools', 'global', '');
+    await seedPartner(db, 'acme');
+  });
+
+  it('certified tenant, mcp closed, agent.tools on -> false', async () => {
+    await certifyPartnerForTest(db, 'acme', { optIns: ['b2b', 'usdc', 'schedules', 'telegram'] });
+    expect(await agentToolsOn(db, 'acme')).toBe(false);
+  });
+
+  it('mcp open -> true', async () => {
+    await certifyPartnerForTest(db, 'acme', { optIns: ['mcp'] });
+    expect(await agentToolsOn(db, 'acme')).toBe(true);
+  });
+
+  it('uncertified -> true', async () => {
+    expect(await agentToolsOn(db, 'acme')).toBe(true);
+    expect(partnerReads.ids).toEqual(['acme']);
+  });
+
+  it('partner read throws -> false', async () => {
+    partnerReads.fail = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await agentToolsOn(db, 'acme')).toBe(false);
+  });
+
+  it("'default' -> no partner read", async () => {
+    expect(await agentToolsOn(db, 'default')).toBe(true);
+    expect(partnerReads.ids).toEqual([]);
+  });
+
+  it('agent.tools off -> no partner read', async () => {
+    await setFlag('agent.tools', 'global', '', false);
+    expect(await agentToolsOn(db, 'acme')).toBe(false);
+    expect(partnerReads.ids).toEqual([]);
   });
 });

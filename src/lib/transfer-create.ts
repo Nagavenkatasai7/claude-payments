@@ -3,7 +3,7 @@ import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRate
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
-import { liveMoneyRefusal, railPartnerOf, realMoneyRail } from './live-gate';
+import { capabilityOpen, isLiveCertified, liveMoneyRefusal, railPartnerOf, realMoneyRail } from './live-gate';
 import { resolveCorridorRules, senderScreeningHoldActive, SENDER_SCREENING_REASON, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -333,8 +333,8 @@ export class TransferIdConflictError extends Error {
  * owned by the default tenant (default_on_live_rail), a real-money mint on a
  * rail partner not certified for live money (live_not_certified), or a closed
  * capability on a certified owner (capability_off, with `capability`).
- * Callers answer the customer with fixedReply(copyKey). Declared in T1; no
- * code throws it yet (T4, T12).
+ * Callers answer the customer with fixedReply(copyKey). Thrown by
+ * createTransferWithOutcome (T4: the live gate; T12: the capability gate).
  */
 export type MintRefusalCode = 'live_not_certified' | 'capability_off' | 'default_on_live_rail';
 
@@ -367,7 +367,10 @@ export async function createTransfer(
  * Order before the lock: KYC backstop, pulled-on-b2c refusal, sends.paused,
  * root-handle reads (owner, subject), quote, route, real-money rail read,
  * then the fix pack 3 live gate (MintRefusedError: default_on_live_rail or
- * live_not_certified, nothing written), then the reward plan and the lock.
+ * live_not_certified, nothing written), then the fix pack 3 capability gate
+ * (MintRefusedError capability_off: a certified owner, env not 'test', a
+ * closed b2b / usdc / schedules opt-in; nothing written), then the reward
+ * plan and the lock.
  */
 export async function createTransferWithOutcome(
   store: Store,
@@ -513,6 +516,26 @@ export async function createTransferWithOutcome(
     if (code) {
       logWarn('transfer-create.live-refused', 'live mint refused', { partnerId: input.partnerId, code });
       throw new MintRefusedError(code);
+    }
+  }
+
+  // ── Fix pack 3 (R13; contract 4 (c)): the capability gate ────────────────
+  // A CERTIFIED owner mints B2B (a b2b transfer or a partner-pulled funding
+  // method), USDC payouts and scheduled runs only with that capability's
+  // opt-in (counsel ref + partner approval). Keyed on the owner's
+  // certification, not on the rail being real money; a sandbox ('test') mint
+  // skips it. No extra read: the owner row is in hand. Checked in the order
+  // b2b, usdc, schedules; the first closed one is refused, before any write
+  // (so before the locked scheduleMintCheck too).
+  if (input.environment !== 'test' && isLiveCertified(partner)) {
+    const needed: LiveCapability[] = [];
+    if ((input.transferType ?? 'b2c') === 'b2b' || isPartnerPulled(input.fundingMethod)) needed.push('b2b');
+    if (input.payoutMethod === 'usdc') needed.push('usdc');
+    if (input.scheduleId) needed.push('schedules');
+    const closed = needed.find((c) => !capabilityOpen(partner, c));
+    if (closed) {
+      logWarn('transfer-create.live-refused', 'live mint refused', { partnerId: input.partnerId, code: 'capability_off' });
+      throw new MintRefusedError('capability_off', 'cannot_complete', closed);
     }
   }
 

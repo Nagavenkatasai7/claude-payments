@@ -17,6 +17,7 @@ import {
   type ScheduleFormErrors,
 } from '@/lib/portal-schedules';
 import type { ScheduleAction } from '@/lib/schedule-control';
+import type { ScheduleRefusalCode } from '@/lib/schedule-validate';
 import { needsScamAck, showsScamWarning } from '@/lib/portal-send';
 import { logWarn } from '@/lib/log';
 import type { MessageKey } from '@/lib/i18n';
@@ -86,8 +87,11 @@ async function withinLimit(partnerId: PartnerId, phone: string): Promise<boolean
   }
 }
 
-/** Each create refusal maps to ONE fixed message (a gone recipient and a foreign rid read the same). */
-const CREATE_REFUSAL: Record<string, MessageKey> = {
+/**
+ * Each create refusal maps to ONE fixed message (a gone recipient and a foreign rid read the same).
+ * Typed on every ScheduleRefusalCode (fix pack 3 T12), so a later code is compile-forced here.
+ */
+const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusalCode, MessageKey> = {
   not_found: 'portal.schedules.recipient_gone',
   recipient_changed: 'portal.schedules.recipient_changed',
   corridor: 'portal.schedules.corridor',
@@ -99,6 +103,10 @@ const CREATE_REFUSAL: Record<string, MessageKey> = {
   invalid_phone: 'portal.schedules.recipient_unusable',
   bad_funding: 'portal.schedules.failed',
   purpose: 'portal.schedules.purpose_invalid',
+  // Fix pack 3 (R13): one neutral text for all three, never the reason.
+  capability_off: 'portal.schedules.unavailable',
+  licence: 'portal.schedules.unavailable',
+  corridor_closed: 'portal.schedules.unavailable',
 };
 
 /** Create a scheduled payment to a saved recipient (by its opaque rid). */
@@ -128,7 +136,7 @@ export async function createScheduleAction(_prev: ScheduleFormState, formData: F
     logWarn('portal.schedules.create', 'create failed');
     return refuse(formData, { error: 'portal.schedules.failed', ...scam });
   }
-  if (out.kind !== 'done') return refuse(formData, { error: CREATE_REFUSAL[out.kind] ?? 'portal.schedules.failed', ...scam });
+  if (out.kind !== 'done') return refuse(formData, { error: CREATE_REFUSAL[out.kind as keyof typeof CREATE_REFUSAL] ?? 'portal.schedules.failed', ...scam });
   redirect('/portal/schedules?done=created');
 }
 

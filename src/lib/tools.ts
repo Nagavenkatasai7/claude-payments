@@ -35,7 +35,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
-import { liveMoneyRefusal, realMoneyRail } from './live-gate';
+import { capabilityOpen, liveMoneyRefusal, realMoneyRail } from './live-gate';
 import { sanctionsBlockUnrecordedKey } from './sanctions/notices';
 import { getDb, type Db } from '@/db/client';
 import { openRecallTicketLocked } from './receipt-cores';
@@ -133,6 +133,18 @@ export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
  * mint directly, and a stale call to it is an unknown tool that runs nothing.
  */
 export const WHATSAPP_HIDDEN_TOOLS: ReadonlySet<string> = new Set(['generate_payment_link']);
+
+/**
+ * Fix pack 3 (R13, contract 15): the bot's B2B tools. On a tenant certified
+ * for live money they run only while its `b2b` capability is open (counsel
+ * ref + partner approval); executeTool refuses them otherwise with
+ * fixedReply('cannot_complete'). The partner is read only for these names and
+ * never for the default tenant; a read failure fails CLOSED. check_bill_status
+ * only reads and is never gated.
+ */
+export const B2B_CAPABILITY_TOOLS: ReadonlySet<string> = new Set([
+  'present_bill', 'register_seller', 'create_invoice', 'cancel_bill', 'dispute_bill',
+]);
 
 /**
  * Required purpose (owner decision 2026-10-08): the tools whose schema lists
@@ -1518,6 +1530,25 @@ export async function executeTool(
   if (ctx.turn?.inputModality === 'voice' && VOICE_TYPED_ONLY_TOOLS.has(name)) {
     logWarn('voice.tool-blocked', `typed-only tool refused in a voice turn: ${name}`, { phone: ctx.phone });
     return { error: 'This needs a typed confirmation. Read back the details and ask the customer to type yes.' };
+  }
+  // Fix pack 3 (R13): B2B on a certified tenant needs its b2b opt-in (see
+  // B2B_CAPABILITY_TOOLS). Logs the tool name (and a read failure's error
+  // name) only.
+  if (B2B_CAPABILITY_TOOLS.has(name) && ctx.partnerId !== DEFAULT_PARTNER_ID) {
+    let open: boolean;
+    try {
+      open = capabilityOpen(await ctx.partnerStore.getPartner(ctx.partnerId), 'b2b');
+    } catch (err) {
+      logWarn('capability.tool-blocked', 'partner read failed; b2b tool refused', {
+        tool: name,
+        error: err instanceof Error ? err.name : 'error',
+      });
+      return { error: fixedReply('cannot_complete') };
+    }
+    if (!open) {
+      logWarn('capability.tool-blocked', 'b2b capability closed; tool refused', { tool: name });
+      return { error: fixedReply('cannot_complete') };
+    }
   }
   switch (name) {
     case 'get_quote':
@@ -3391,6 +3422,22 @@ export async function validateScheduleInput(
   input: ScheduleInput,
   opts: ScheduleValidateOptions = {},
 ): Promise<ScheduleValidateResult> {
+  // Fix pack 3 (R13, contract 15): a tenant certified for live money sets up
+  // repeat payments only with its schedules opt-in. FIRST, so a refusal writes
+  // nothing; a partner read failure fails CLOSED. The default tenant makes no
+  // read (the golden corpus stays byte-identical).
+  if (ctx.partnerId !== DEFAULT_PARTNER_ID) {
+    let open: boolean;
+    try {
+      open = capabilityOpen(await ctx.partnerStore.getPartner(ctx.partnerId), 'schedules');
+    } catch (err) {
+      logWarn('capability.schedule-blocked', 'partner read failed; schedule refused', {
+        error: err instanceof Error ? err.name : 'error',
+      });
+      open = false;
+    }
+    if (!open) return { ok: false, code: 'capability_off' };
+  }
   const recipientPhone = normalizePhone(input.recipientPhone);
   if (!isValidPhone(recipientPhone)) return { ok: false, code: 'invalid_phone' };
   // fix 6: a schedule is a consumer send — funding_method is a closed set.
@@ -3530,7 +3577,7 @@ async function createScheduleTool(
 }
 
 /** The bot's exact pre-M2-10 error record for each refusal (golden-pinned). */
-function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: false }>): ToolResult {
+export function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: false }>): ToolResult {
   switch (r.code) {
     case 'invalid_phone':
       return { error: 'A valid recipient WhatsApp number with country code is required.' };
@@ -3553,6 +3600,12 @@ function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: fals
       return { error: 'No saved bank details for this recipient.' };
     case 'purpose':
       return purposeRequiredResult();
+    // Fix pack 3 (R13): one neutral text, never the reason ('licence' and
+    // 'corridor_closed' have no producer until PR8).
+    case 'capability_off':
+    case 'licence':
+    case 'corridor_closed':
+      return { error: fixedReply('schedule_unavailable') };
   }
 }
 

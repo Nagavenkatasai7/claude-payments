@@ -1125,6 +1125,8 @@ export const en = {
   'portal.schedules.recipient_gone': 'That recipient is no longer saved. Choose another one.',
   'portal.schedules.recipient_changed': 'That recipient\'s bank details just changed. Check them and try again.',
   'portal.schedules.corridor': 'Scheduled payments can go to India only for now.',
+  // Fix pack 3 (R13): the same sentence as FIXED_REPLIES.schedule_unavailable (a closed capability, a licence or a closed corridor; never the reason).
+  'portal.schedules.unavailable': 'Repeat payments aren\'t available on this account right now.',
   'portal.schedules.sender_name': 'We need your full legal name before a scheduled payment. Add it above, then try again.',
   'portal.schedules.nameTitle': 'Add your legal name',
   'portal.schedules.nameBody': 'Your scheduled payments can’t go out until we have your full legal name, exactly as on your ID. You only need to add it once.',

@@ -24,7 +24,7 @@ import { boundUntrustedText } from './untrusted-text';
  */
 
 /** The wording version the partner's compliance officer (MLRO) approves. Bump it on any text change. */
-export const HOLD_REPLIES_VERSION = '2026-10-31.2 (draft, awaiting MLRO approval)';
+export const HOLD_REPLIES_VERSION = '2026-11-10.1 (draft, awaiting MLRO approval)';
 
 export const FIXED_REPLIES = {
   /** A paid transfer that is held before payout (status in_review). */
@@ -56,6 +56,11 @@ export const FIXED_REPLIES = {
   timeline_held: "Processing. We'll message you as soon as there is an update.",
   /** The status pill of a held transfer on customer surfaces (the portal, its receipt, /account). */
   label_held: 'Processing',
+  /**
+   * Fix pack 3 (R13): a repeat payment this account may not set up: a closed
+   * capability, a licence or a closed corridor. Never says which (no reason).
+   */
+  schedule_unavailable: "Repeat payments aren't available on this account right now.",
 } as const;
 
 export type FixedReplyKind = keyof typeof FIXED_REPLIES;

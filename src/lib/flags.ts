@@ -197,7 +197,9 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     label: 'AI agent tools (test)',
     description:
       'Demo-mode phones (DEMO_PHONES) can connect an AI app to their customer-portal account and let it read quotes, their send limit, ' +
-      'their saved recipients (masked) and their transfers. The app can never send or pay. ' +
+      'their saved recipients (masked) and their transfers. The app can also prepare a transfer or set up a repeat payment, which the ' +
+      'customer approves and pays on the SmartRemit pay page. On a partner approved for live money, the app also needs that partner\'s ' +
+      'AI-tools approval. ' +
       'Off: no new connection, and connected apps get "SmartRemit AI tools are switched off." Customers can still disconnect apps in the portal.',
     bannerText: 'AI agent tools (test) are on',
     scopes: ['global', 'partner'],

@@ -83,6 +83,10 @@ describe('flag definitions', () => {
   it('Stage C1: agent.tools is "AI agent tools (test)", global or one partner, off with no row', async () => {
     const def = FLAG_DEFINITIONS['agent.tools'];
     expect(def.label).toBe('AI agent tools (test)');
+    // Fix pack 3 T12: the app can prepare (never pay), and a live partner's AI-tools approval is named.
+    expect(def.description).not.toContain('can never send or pay');
+    expect(def.description).toContain('approves and pays on the SmartRemit pay page');
+    expect(def.description).toContain("that partner's AI-tools approval");
     expect(def.killSwitch).toBe(false);
     expect(def.scopes).toEqual(['global', 'partner']);
     const db = await freshDb();

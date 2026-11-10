@@ -5,6 +5,7 @@ import type { Db } from '@/db/client';
 import { getDb } from '@/db/client';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { auditSubjectId } from '@/lib/customer-ref';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
 import { normalizePhone } from '@/lib/phone';
@@ -190,7 +191,7 @@ export const createScheduleInput = z.object({
 export type CreateScheduleArgs = z.infer<typeof createScheduleInput>;
 
 /** Each refusal of the portal's create, worded for an app (one fixed message per code). */
-const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusalCode, string> = {
+export const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusalCode, string> = {
   not_found: RECIPIENT_NOT_FOUND,
   recipient_changed: "The recipient's saved account changed a moment ago. Check list_recipients and try again.",
   invalid_phone: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
@@ -204,6 +205,10 @@ const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusal
   day_range: 'The day is not valid. Use day_of_month 1 to 28 for monthly, or day_of_week for weekly.',
   bad_funding: SCHEDULE_FAILED,
   purpose: 'A purpose is required. Ask the customer why they send the money.',
+  // Fix pack 3 (R13): one neutral text for all three, never the reason.
+  capability_off: FIXED_REPLIES.schedule_unavailable,
+  licence: FIXED_REPLIES.schedule_unavailable,
+  corridor_closed: FIXED_REPLIES.schedule_unavailable,
 };
 
 /** The retry key: one app connection, one set of details. 32 hex characters (runOnce's key shape). */
