@@ -25,6 +25,7 @@ import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
+import { postureSigned } from '@/lib/live-controls';
 import { removeTenantStaff } from '@/lib/partner-staff-ops';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
@@ -131,9 +132,13 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const kycMode: KycMode = isPlatform
     ? (formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours')
     : (existing.kycMode ?? 'ours');
-  const requireKycBeforeSend = isPlatform
-    ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
-    : existing.requireKycBeforeSend;
+  // Fix pack 3 (contract 14): while the partner's compliance posture is signed the admin
+  // checkbox is rendered disabled (a disabled box posts nothing), so the stored column is
+  // kept as is; the posture forces the gate on in resolveKycMode regardless.
+  const requireKycBeforeSend =
+    isPlatform && !postureSigned(existing.liveControls)
+      ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
+      : existing.requireKycBeforeSend;
   // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
   // partner-scoped admin can set it for their own tenant — strip control
   // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not

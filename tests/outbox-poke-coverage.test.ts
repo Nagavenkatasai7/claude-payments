@@ -56,7 +56,7 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
   // Fix pack 3 T9 (contract 9): the typed live-controls writers run in the caller's
   // transaction; their callers (the partner / platform live-controls actions) poke.
-  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser'],
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };

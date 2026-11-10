@@ -4,9 +4,19 @@ import type { DbOrTx } from '@/db/client';
 import { partners } from '@/db/schema';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { updateLiveControlsKey } from '@/db/repos/partner-repo';
+import { createPartnerRepo, updateLiveControlsKey } from '@/db/repos/partner-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
-import type { KycDecider, LiveControlsKey, PostureRecord } from './live-controls';
+import type { LiveReadiness } from './live-certification';
+import {
+  LIVE_CAPABILITIES,
+  type CertificationRecord,
+  type ContractRecord,
+  type KycDecider,
+  type LiveCapability,
+  type LiveControlsKey,
+  type PostureRecord,
+} from './live-controls';
+import { isLiveCertified } from './live-gate';
 import { sanctionsNoticeAddress } from './sanctions/notices';
 import type { PartnerId, PartnerSupportConfig } from './types';
 
@@ -26,6 +36,13 @@ import type { PartnerId, PartnerSupportConfig } from './types';
 // the worker after the commit (this file is in tests/outbox-poke-coverage
 // HELPERS). T10 adds writeContract / writeCertification / writeOptIn on the
 // same recordLiveChange helper.
+//
+// T10 refusals that depend on the stored state (revoke when not certified,
+// an approval while uncertified or without counsel) are decided on a plain
+// read of the row taken AFTER the row lock (lockPartner), and then write
+// nothing at all (no key write, no updated_at move). A key that is absent
+// reads back as `undefined`, which updateLiveControlsKey refuses to write,
+// so "return the raw value unchanged" cannot be used for those.
 
 export interface LiveActor {
   username: string;
@@ -186,5 +203,174 @@ export async function writeComplianceUser(
     meta: { target: i.username, on: i.on },
     word: i.on ? 'compliance user added' : 'compliance user removed',
   });
+  return { ok: true };
+}
+
+const MAX_REF = 200;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** YYYY-MM-DD and a real calendar date ('2026-02-30' is not). */
+export function isCalendarDate(s: unknown): s is string {
+  if (typeof s !== 'string' || !DATE_ONLY.test(s)) return false;
+  const t = Date.parse(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
+}
+
+/** A trimmed reference of 1-200 characters, or null. */
+function boundedRef(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const ref = raw.trim();
+  return ref.length >= 1 && ref.length <= MAX_REF ? ref : null;
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** Takes the partner row lock (FOR NO KEY UPDATE, the same lock updateLiveControlsKey takes); false when no row. */
+async function lockPartner(tx: DbOrTx, partnerId: PartnerId): Promise<boolean> {
+  const rows = await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).limit(1).for('no key update');
+  return rows.length === 1;
+}
+
+/** Record (or replace) the partner's signed live contract. The reference text is stored only here. */
+export async function writeContract(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  actor: LiveActor,
+  i: { ref: string; signedOn: string },
+): Promise<LiveWriteResult> {
+  const ref = boundedRef(i.ref);
+  if (ref === null || !isCalendarDate(i.signedOn)) return { ok: false, code: 'bad_input' };
+  const record: ContractRecord = { ref, signedOn: i.signedOn, recordedBy: actor.username, recordedAt: new Date().toISOString() };
+  const w = await updateLiveControlsKey(partnerId, 'contract', record, tx);
+  if (!w.found) return { ok: false, code: 'not_found' };
+  await recordLiveChange(tx, partnerId, actor, {
+    key: 'contract',
+    action: 'partner.live.contract.record',
+    meta: { signedOn: i.signedOn, hadPrevious: w.previousRaw !== undefined },
+    word: 'recorded',
+  });
+  return { ok: true };
+}
+
+/**
+ * Certify (a fresh record: any earlier revoke is gone) or revoke the partner for live money.
+ * Certify needs `readiness.ok` (the caller recomputes it on the LOCKED row); in pack 3 that is
+ * never true. Revoke needs a stored certification that is not already revoked; it keeps
+ * certifiedAt / certifiedBy and adds revokedAt / revokedBy.
+ */
+export async function writeCertification(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  actor: LiveActor,
+  c: { kind: 'certify'; readiness: LiveReadiness } | { kind: 'revoke' },
+  reason: string,
+): Promise<LiveWriteResult> {
+  if (c.kind === 'certify') {
+    if (!c.readiness.ok) return { ok: false, code: 'not_ready' };
+    const record: CertificationRecord = { certifiedAt: new Date().toISOString(), certifiedBy: actor.username };
+    const w = await updateLiveControlsKey(partnerId, 'certification', record, tx);
+    if (!w.found) return { ok: false, code: 'not_found' };
+    await recordLiveChange(tx, partnerId, actor, {
+      key: 'certification',
+      action: 'partner.live.certify',
+      meta: { reason, linesPassed: c.readiness.lines.filter((l) => l.ok).map((l) => l.id) },
+      word: 'certified',
+    });
+    return { ok: true };
+  }
+  if (!(await lockPartner(tx, partnerId))) return { ok: false, code: 'not_found' };
+  const p = await createPartnerRepo(tx).getPartner(partnerId);
+  if (!p) return { ok: false, code: 'not_found' };
+  const cur = p.liveControls?.certification;
+  const revoked =
+    cur?.revokedAt !== undefined && !(Date.parse(cur.revokedAt) < Date.parse(cur.certifiedAt)); // as isLiveCertified
+  if (!cur || revoked) return { ok: false, code: 'not_certified' };
+  const revokedAt = new Date().toISOString();
+  await updateLiveControlsKey(
+    partnerId,
+    'certification',
+    (prev: unknown) => ({ ...(isPlainObject(prev) ? prev : {}), revokedAt, revokedBy: actor.username }),
+    tx,
+  );
+  await recordLiveChange(tx, partnerId, actor, {
+    key: 'certification',
+    action: 'partner.live.revoke',
+    meta: { reason },
+    word: 'revoked',
+  });
+  return { ok: true };
+}
+
+/**
+ * One capability's opt-in record. counsel: a platform reference (trimmed, 1-200) is set, or
+ * cleared (null), which also removes the partner's approval of that capability. approval: on needs
+ * a certified partner and a counsel reference on record; off removes partnerApproved* (always
+ * allowed: withdrawing is safer). Every other capability, and unknown fields, are kept raw.
+ */
+export async function writeOptIn(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  actor: LiveActor,
+  cap: LiveCapability,
+  c: { kind: 'counsel'; counselRef: string | null } | { kind: 'approval'; on: boolean },
+): Promise<LiveWriteResult> {
+  if (!(LIVE_CAPABILITIES as readonly string[]).includes(cap)) return { ok: false, code: 'bad_input' };
+  const ref = c.kind === 'counsel' && c.counselRef !== null ? boundedRef(c.counselRef) : null;
+  if (c.kind === 'counsel' && c.counselRef !== null && ref === null) return { ok: false, code: 'bad_input' };
+  if (c.kind === 'approval' && typeof c.on !== 'boolean') return { ok: false, code: 'bad_input' };
+
+  if (!(await lockPartner(tx, partnerId))) return { ok: false, code: 'not_found' };
+  if (c.kind === 'approval' && c.on) {
+    const p = await createPartnerRepo(tx).getPartner(partnerId);
+    if (!p) return { ok: false, code: 'not_found' };
+    if (!isLiveCertified(p)) return { ok: false, code: 'not_certified' };
+    if (!p.liveControls?.optIns[cap]?.counselRef) return { ok: false, code: 'not_ready' };
+  }
+
+  const now = new Date().toISOString();
+  const w = await updateLiveControlsKey(
+    partnerId,
+    'optIns',
+    (prev: unknown) => {
+      const all: Record<string, unknown> = isPlainObject(prev) ? { ...prev } : {};
+      const rec: Record<string, unknown> = isPlainObject(all[cap]) ? { ...(all[cap] as Record<string, unknown>) } : {};
+      if (c.kind === 'counsel') {
+        if (ref === null) {
+          delete all[cap];
+          return all;
+        }
+        all[cap] = { ...rec, counselRef: ref, counselBy: actor.username, counselAt: now };
+        return all;
+      }
+      if (c.on) {
+        all[cap] = { ...rec, partnerApprovedBy: actor.username, partnerApprovedAt: now };
+      } else if (cap in all) {
+        delete rec.partnerApprovedBy;
+        delete rec.partnerApprovedAt;
+        all[cap] = rec;
+      }
+      return all;
+    },
+    tx,
+  );
+  if (!w.found) return { ok: false, code: 'not_found' };
+  await recordLiveChange(
+    tx,
+    partnerId,
+    actor,
+    c.kind === 'counsel'
+      ? {
+          key: 'optIns',
+          action: 'partner.live.optin.counsel',
+          meta: { capability: cap, set: ref !== null },
+          word: ref !== null ? 'counsel review recorded' : 'counsel review cleared',
+        }
+      : {
+          key: 'optIns',
+          action: 'partner.live.optin.approve',
+          meta: { capability: cap, on: c.on },
+          word: c.on ? 'approved' : 'approval withdrawn',
+        },
+  );
   return { ok: true };
 }

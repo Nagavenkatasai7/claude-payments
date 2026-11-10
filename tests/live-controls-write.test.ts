@@ -3,7 +3,18 @@ import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { writeComplianceUser, writePosture, type LiveActor } from '@/lib/live-controls-write';
+import {
+  writeCertification,
+  writeComplianceUser,
+  writeContract,
+  writeOptIn,
+  writePosture,
+  type LiveActor,
+} from '@/lib/live-controls-write';
+import { LIVE_READINESS_LINE_IDS, liveReadiness, type LiveReadiness } from '@/lib/live-certification';
+import { isLiveCertified } from '@/lib/live-gate';
+import type { LiveCapability } from '@/lib/live-controls';
+import { certifyPartnerForTest, certifiedLiveControls } from './helpers-live';
 
 // Fix pack 3 T9 (R27, contracts 9 and 13): the typed live-controls writers for the posture and
 // the compliance users. Each write is ONE transaction: the key write under the partner row lock,
@@ -199,5 +210,273 @@ describe('writeComplianceUser', () => {
     const before = await column();
     expect(await compliance('acme-comp1', true, 'nobody')).toEqual({ ok: false, code: 'not_found' });
     await expectNothingWritten(before);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// T10 (R15, R13; contracts 9 and 13): contract, certification and opt-in writers (platform actor).
+
+const PLATFORM: LiveActor = { username: 'ops-admin', scope: 'platform' };
+const READY: LiveReadiness = { ok: true, lines: LIVE_READINESS_LINE_IDS.map((id) => ({ id, state: 'pass' as const, ok: true })) };
+const NOT_READY: LiveReadiness = { ok: false, lines: READY.lines.map((l, i) => (i === 0 ? { ...l, state: 'fail' as const, ok: false } : l)) };
+const today = () => new Date().toISOString().slice(0, 10);
+const contract = (i: { ref: string; signedOn: string }, id = 'acme') => db.transaction((tx) => writeContract(tx, id, PLATFORM, i));
+const certify = (readiness: LiveReadiness = READY, id = 'acme') =>
+  db.transaction((tx) => writeCertification(tx, id, PLATFORM, { kind: 'certify', readiness }, 'Every check reviewed today'));
+const revoke = (id = 'acme') => db.transaction((tx) => writeCertification(tx, id, PLATFORM, { kind: 'revoke' }, 'Partner asked to pause live money'));
+const counsel = (cap: string, counselRef: string | null, id = 'acme') =>
+  db.transaction((tx) => writeOptIn(tx, id, PLATFORM, cap as LiveCapability, { kind: 'counsel', counselRef }));
+const approval = (cap: string, on: boolean, actor: LiveActor = ACTOR, id = 'acme') =>
+  db.transaction((tx) => writeOptIn(tx, id, actor, cap as LiveCapability, { kind: 'approval', on }));
+const partner = async (id = 'acme') => (await createPartnerRepo(db).getPartner(id))!;
+
+describe('writeContract', () => {
+  it('stores { ref, signedOn, recordedBy, recordedAt }; audit meta { signedOn, hadPrevious }; alert and email name no ref', async () => {
+    const before = Date.now();
+    expect(await contract({ ref: '  MSA-2026-ACME-01  ', signedOn: today() })).toEqual({ ok: true });
+    const c = (await column()).contract as Record<string, unknown>;
+    expect(c).toMatchObject({ ref: 'MSA-2026-ACME-01', signedOn: today(), recordedBy: 'ops-admin' });
+    expect(Date.parse(String(c.recordedAt))).toBeGreaterThanOrEqual(before - 1000);
+    expect(await contract({ ref: 'MSA-2026-ACME-02', signedOn: today() })).toEqual({ ok: true });
+
+    const a = await audits();
+    expect(a.map((r) => r.action)).toEqual(['partner.live.contract.record', 'partner.live.contract.record']);
+    expect(a[0]).toMatchObject({ partner_id: 'acme', actor: 'ops-admin', actor_type: 'staff', subject_id: 'acme' });
+    expect(a[0].meta).toEqual({ signedOn: today(), hadPrevious: false, actorScope: 'platform' });
+    expect(a[1].meta).toEqual({ signedOn: today(), hadPrevious: true, actorScope: 'platform' });
+
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send', 'ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:contract:acme:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: partner.live.contract.record on partner acme by platform staff.' });
+    expect(o[1].dedupe_key).toMatch(new RegExp(`^livectlmail:contract:acme:${UUID}$`));
+    expect(o[1].payload.text).toBe('Your live contract record was changed by SmartRemit (recorded). Details are in your SmartRemit workspace.');
+    for (const r of [...o.map((x) => x.payload), ...a.map((x) => x.meta)]) expect(JSON.stringify(r)).not.toContain('MSA-2026');
+  });
+
+  it("bad input: empty or 201-char ref, '2026-02-30', a non-date -> bad_input, nothing written", async () => {
+    const before = await column();
+    for (const i of [
+      { ref: '', signedOn: today() },
+      { ref: '   ', signedOn: today() },
+      { ref: 'x'.repeat(201), signedOn: today() },
+      { ref: 'MSA-1', signedOn: '2026-02-30' },
+      { ref: 'MSA-1', signedOn: 'yesterday' },
+      { ref: 'MSA-1', signedOn: `${today()}T00:00:00Z` },
+    ]) {
+      expect(await contract(i)).toEqual({ ok: false, code: 'bad_input' });
+    }
+    await expectNothingWritten(before);
+  });
+
+  it('a 200-char ref is accepted; an unknown partner -> not_found', async () => {
+    expect(await contract({ ref: 'x'.repeat(200), signedOn: today() })).toEqual({ ok: true });
+    expect(await contract({ ref: 'MSA-1', signedOn: today() }, 'nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await audits()).toHaveLength(1);
+  });
+});
+
+describe('writeCertification', () => {
+  it('certify with a readiness whose ok is true -> { certifiedAt, certifiedBy }, audit meta { reason, linesPassed }, isLiveCertified true', async () => {
+    const before = Date.now();
+    expect(await certify()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(Object.keys(c).sort()).toEqual(['certifiedAt', 'certifiedBy']);
+    expect(c.certifiedBy).toBe('ops-admin');
+    expect(Date.parse(String(c.certifiedAt))).toBeGreaterThanOrEqual(before - 1000);
+    expect(isLiveCertified(await partner())).toBe(true);
+
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ action: 'partner.live.certify', actor: 'ops-admin', subject_id: 'acme' });
+    expect(a[0].meta).toEqual({ reason: 'Every check reviewed today', linesPassed: [...LIVE_READINESS_LINE_IDS], actorScope: 'platform' });
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:certification:acme:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: partner.live.certify on partner acme by platform staff.' });
+    expect(o[1].payload.text).toBe('Your live certification was changed by SmartRemit (certified). Details are in your SmartRemit workspace.');
+    for (const r of o) expect(JSON.stringify(r.payload)).not.toContain('Every check');
+  });
+
+  it('certify with readiness.ok false -> not_ready, nothing written', async () => {
+    const before = await column();
+    expect(await certify(NOT_READY)).toEqual({ ok: false, code: 'not_ready' });
+    await expectNothingWritten(before);
+  });
+
+  it('pack 3 pin: liveReadiness from facts where every built line passes is still not ok, so certify answers not_ready', async () => {
+    const users = ['acme-comp1', 'acme-comp2'];
+    const p = { id: 'acme', status: 'active' as const, kycMode: 'ours' as const, requireKycBeforeSend: true, liveControls: certifiedLiveControls({ posture: true, complianceUsers: users }) };
+    const r = liveReadiness(p, {
+      goLiveApproved: true,
+      listFitness: 'live',
+      ownWhatsapp: true,
+      complianceStaff: users.map((username) => ({ username, partnerId: 'acme', role: 'admin' as const, active: true, mfaEnrolled: true })),
+    });
+    expect(r.lines.filter((l) => l.state !== 'not_built').every((l) => l.ok)).toBe(true);
+    expect(r.ok).toBe(false);
+    const before = await column();
+    expect(await certify(r)).toEqual({ ok: false, code: 'not_ready' });
+    await expectNothingWritten(before);
+  });
+
+  it('revoke: revokedAt/revokedBy added, certifiedAt kept, isLiveCertified false; audit meta { reason }', async () => {
+    expect(await certify()).toEqual({ ok: true });
+    const certifiedAt = ((await column()).certification as Record<string, unknown>).certifiedAt;
+    // Revoke must land strictly after certifiedAt (isLiveCertified: revokedAt >= certifiedAt).
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await revoke()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(c).toMatchObject({ certifiedAt, certifiedBy: 'ops-admin', revokedBy: 'ops-admin' });
+    expect(Date.parse(String(c.revokedAt))).toBeGreaterThanOrEqual(Date.parse(String(certifiedAt)));
+    expect(isLiveCertified(await partner())).toBe(false);
+    const a = await audits();
+    expect(a.map((r) => r.action)).toEqual(['partner.live.certify', 'partner.live.revoke']);
+    expect(a[1].meta).toEqual({ reason: 'Partner asked to pause live money', actorScope: 'platform' });
+    const o = await outboxRows();
+    expect(o.at(-1)!.payload.text).toBe('Your live certification was changed by SmartRemit (revoked). Details are in your SmartRemit workspace.');
+    expect(o.at(-2)!.payload).toEqual({ message: 'SmartRemit ops: partner.live.revoke on partner acme by platform staff.' });
+  });
+
+  it('revoke when not certified or already revoked -> not_certified, no audit', async () => {
+    const before = await column();
+    expect(await revoke()).toEqual({ ok: false, code: 'not_certified' });
+    await expectNothingWritten(before);
+    await certify();
+    await new Promise((r) => setTimeout(r, 5));
+    await revoke();
+    const afterRevoke = await column();
+    const n = { audits: (await audits()).length, outbox: (await outboxRows()).length };
+    expect(await revoke()).toEqual({ ok: false, code: 'not_certified' });
+    expect(await column()).toEqual(afterRevoke);
+    expect((await audits()).length).toBe(n.audits);
+    expect((await outboxRows()).length).toBe(n.outbox);
+  });
+
+  it('a malformed stored certification reads as not certified for revoke', async () => {
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_build_object('certification', 'oops') WHERE id = 'acme'`);
+    const before = await column();
+    expect(await revoke()).toEqual({ ok: false, code: 'not_certified' });
+    await expectNothingWritten(before);
+  });
+
+  it('certify after a revoke -> a fresh record with no revokedAt', async () => {
+    await certify();
+    await new Promise((r) => setTimeout(r, 5));
+    await revoke();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await certify()).toEqual({ ok: true });
+    const c = (await column()).certification as Record<string, unknown>;
+    expect(Object.keys(c).sort()).toEqual(['certifiedAt', 'certifiedBy']);
+    expect(isLiveCertified(await partner())).toBe(true);
+  });
+
+  it('an unknown partner -> not_found for certify and revoke', async () => {
+    expect(await certify(READY, 'nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await revoke('nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await audits()).toEqual([]);
+  });
+});
+
+describe('writeOptIn', () => {
+  it('counsel set -> optIns[cap] { counselRef, counselBy, counselAt }; clear removes counsel and approval; other capabilities kept raw', async () => {
+    const seeded = { optIns: { usdc: { counselRef: 'old-usdc', futureField: 7 }, weird: 'kept' } };
+    await db.execute(sql`UPDATE partners SET live_controls = ${JSON.stringify(seeded)}::jsonb WHERE id = 'acme'`);
+    const before = Date.now();
+    expect(await counsel('b2b', '  COUNSEL-B2B-7 ')).toEqual({ ok: true });
+    let optIns = (await column()).optIns as Record<string, Record<string, unknown>>;
+    expect(optIns.b2b).toMatchObject({ counselRef: 'COUNSEL-B2B-7', counselBy: 'ops-admin' });
+    expect(Date.parse(String(optIns.b2b.counselAt))).toBeGreaterThanOrEqual(before - 1000);
+    expect(optIns.usdc).toEqual(seeded.optIns.usdc);
+    expect(optIns.weird).toBe('kept');
+
+    const a = await audits();
+    expect(a[0]).toMatchObject({ action: 'partner.live.optin.counsel' });
+    expect(a[0].meta).toEqual({ capability: 'b2b', set: true, actorScope: 'platform' });
+    let o = await outboxRows();
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:optIns:acme:${UUID}$`));
+    expect(o[1].payload.text).toBe('A live feature approval was changed by SmartRemit (counsel review recorded). Details are in your SmartRemit workspace.');
+
+    // A partner approval on b2b (certified partner), then clearing the counsel removes both.
+    await certifyPartnerForTest(db, 'acme', { optIns: [] });
+    expect(await counsel('b2b', 'COUNSEL-B2B-8')).toEqual({ ok: true });
+    expect(await approval('b2b', true)).toEqual({ ok: true });
+    expect(await counsel('b2b', null)).toEqual({ ok: true });
+    optIns = (await column()).optIns as Record<string, Record<string, unknown>>;
+    expect(optIns.b2b).toBeUndefined();
+    expect((await audits()).at(-1)!.meta).toEqual({ capability: 'b2b', set: false, actorScope: 'platform' });
+    o = await outboxRows();
+    expect(o.at(-1)!.payload.text).toBe('A live feature approval was changed by SmartRemit (counsel review cleared). Details are in your SmartRemit workspace.');
+    for (const r of [...o.map((x) => x.payload), ...(await audits()).map((x) => x.meta)]) expect(JSON.stringify(r)).not.toContain('COUNSEL');
+  });
+
+  it('unknown capability, an empty or 201-char ref -> bad_input, nothing written', async () => {
+    const before = await column();
+    expect(await counsel('routing', 'C-1')).toEqual({ ok: false, code: 'bad_input' });
+    expect(await approval('routing', true)).toEqual({ ok: false, code: 'bad_input' });
+    expect(await counsel('b2b', '  ')).toEqual({ ok: false, code: 'bad_input' });
+    expect(await counsel('b2b', 'x'.repeat(201))).toEqual({ ok: false, code: 'bad_input' });
+    await expectNothingWritten(before);
+  });
+
+  it('approval: uncertified -> not_certified; no counselRef -> not_ready; nothing written', async () => {
+    expect(await counsel('usdc', 'C-USDC')).toEqual({ ok: true });
+    let before = await column();
+    let n = (await audits()).length;
+    expect(await approval('usdc', true)).toEqual({ ok: false, code: 'not_certified' });
+    expect(await column()).toEqual(before);
+    expect((await audits()).length).toBe(n);
+
+    await certifyPartnerForTest(db, 'acme', { optIns: [] });
+    before = await column();
+    n = (await audits()).length;
+    const outboxN = (await outboxRows()).length;
+    expect(await approval('usdc', true)).toEqual({ ok: false, code: 'not_ready' });
+    expect(await column()).toEqual(before);
+    expect((await audits()).length).toBe(n);
+    expect((await outboxRows()).length).toBe(outboxN);
+  });
+
+  it("approval on -> partnerApprovedBy/At, audit meta { capability, on }, email 'by your team'; off deletes partnerApproved*", async () => {
+    await certifyPartnerForTest(db, 'acme', { optIns: [] });
+    expect(await counsel('schedules', 'C-SCHED')).toEqual({ ok: true });
+    const before = Date.now();
+    expect(await approval('schedules', true)).toEqual({ ok: true });
+    let rec = ((await column()).optIns as Record<string, Record<string, unknown>>).schedules;
+    expect(rec).toMatchObject({ counselRef: 'C-SCHED', partnerApprovedBy: 'acme-admin' });
+    expect(Date.parse(String(rec.partnerApprovedAt))).toBeGreaterThanOrEqual(before - 1000);
+    const a = await audits();
+    expect(a.at(-1)).toMatchObject({ action: 'partner.live.optin.approve', actor: 'acme-admin' });
+    expect(a.at(-1)!.meta).toEqual({ capability: 'schedules', on: true, actorScope: 'partner' });
+    let o = await outboxRows();
+    expect(o.at(-2)!.payload).toEqual({ message: 'SmartRemit ops: partner.live.optin.approve on partner acme by partner staff.' });
+    expect(o.at(-1)!.payload.text).toBe('A live feature approval was changed by your team (approved). Details are in your SmartRemit workspace.');
+
+    expect(await approval('schedules', false)).toEqual({ ok: true });
+    rec = ((await column()).optIns as Record<string, Record<string, unknown>>).schedules;
+    expect(Object.keys(rec).sort()).toEqual(['counselAt', 'counselBy', 'counselRef']);
+    expect((await audits()).at(-1)!.meta).toEqual({ capability: 'schedules', on: false, actorScope: 'partner' });
+    o = await outboxRows();
+    expect(o.at(-1)!.payload.text).toBe('A live feature approval was changed by your team (approval withdrawn). Details are in your SmartRemit workspace.');
+  });
+
+  it('an unknown partner -> not_found', async () => {
+    expect(await counsel('b2b', 'C-1', 'nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await approval('b2b', true, ACTOR, 'nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await audits()).toEqual([]);
+  });
+});
+
+describe('T10 writers: emails', () => {
+  it("no email for 'default' or a partner with no address; SmartRemit wording otherwise", async () => {
+    await seedPartner(db, 'globex');
+    expect(await contract({ ref: 'MSA-G', signedOn: today() }, 'globex')).toEqual({ ok: true });
+    expect(await counsel('mcp', 'C-G', 'globex')).toEqual({ ok: true });
+    expect(await certify(READY, 'globex')).toEqual({ ok: true });
+    expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert', 'ops.alert', 'ops.alert']);
+    await setAddress('default');
+    expect(await contract({ ref: 'MSA-D', signedOn: today() }, 'default')).toEqual({ ok: true });
+    expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert', 'ops.alert', 'ops.alert', 'ops.alert']);
+    for (const r of await outboxRows()) expect(String(r.payload.message)).toMatch(/^SmartRemit ops: /);
   });
 });

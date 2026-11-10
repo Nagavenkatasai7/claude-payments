@@ -1556,3 +1556,31 @@ describe('UI M5: legacy partner-config actions refuse partner staff (→ /partne
     expect((await createPartnerRateRepo(db).getRate('acme', 'USD', 'INR'))?.marginBps).toBe(25);
   });
 });
+
+describe('updatePartnerAction: KYC lock while a posture is signed (fix pack 3 T10, contract 14)', () => {
+  it('a platform save without the checkbox keeps requireKycBeforeSend while a posture is signed', async () => {
+    const { updateLiveControlsKey } = await import('@/db/repos/partner-repo');
+    for (const [id, stored] of [['p9', false], ['p10', true]] as const) {
+      await ps.savePartner({
+        id, name: 'Kay', countries: ['US'], status: 'active', kycMode: 'ours', requireKycBeforeSend: stored,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      await updateLiveControlsKey(id, 'posture', {
+        version: 1, signedBy: 'kay-admin', signedAt: new Date().toISOString(), kycDecider: 'smartremit_procedures',
+        holdDecider: 'partner', requireKycBeforeSend: true, fourEyesNonSanctions: false,
+      }, db);
+      const fd = new FormData();
+      fd.set('id', id);
+      fd.set('name', 'Kay');
+      fd.append('countries', 'US');
+      fd.set('kycMode', 'ours');
+      // requireKycBeforeSend omitted: the locked (disabled) box posts nothing
+      await updatePartnerAction(fd);
+      expect((await ps.getPartner(id))?.requireKycBeforeSend).toBe(stored);
+      // A forged 'on' does not rewrite it either.
+      fd.set('requireKycBeforeSend', 'on');
+      await updatePartnerAction(fd);
+      expect((await ps.getPartner(id))?.requireKycBeforeSend).toBe(stored);
+    }
+  });
+});
