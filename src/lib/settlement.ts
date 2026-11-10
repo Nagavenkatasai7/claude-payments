@@ -95,6 +95,7 @@ export function isSandbox(t: Pick<Transfer, 'environment'>): boolean {
 
 export type SettlementResult =
   | { kind: 'started'; webhookDriven: boolean }
+  | { kind: 'held' } // review round 3 (M1): real money, the sender's screening hold was active on the locked re-read: in_review with SENDER_SCREENING, never instructed
   | { kind: 'already' } // not awaiting_payment anymore — idempotent no-op
   | { kind: 'refused'; complianceStatus: 'flagged' | 'blocked' }; // NOT cleared — never instructed
 
@@ -166,6 +167,16 @@ async function enqueueRailEffect(
  * from "not cleared" (refused). Callers should normally go through
  * settleOrHold(); this stays exported for the reconcile sweep's cleared path
  * and for tests.
+ *
+ * Pack 2 review round 3 (M1): on a REAL-MONEY rail (live-gate.ts
+ * realMoneyRail) the transaction first locks the transfer row, then the owning
+ * tenant's customer row (FOR UPDATE; transfer → customer, the order
+ * platformSenderHoldLocked uses), and re-reads the sender's screening flags,
+ * so a stamp that committed after settleOrHold's unlocked read is seen and one
+ * not yet committed waits for this settle. An active hold ⇒ the row is held in
+ * THIS transaction (in_review, SENDER_SCREENING added, the held stage-1, no
+ * rail effect) ⇒ 'held'. A read error throws (nothing paid). Not real money:
+ * no new read and no new lock.
  */
 export async function beginSettlement(
   db: Db,
@@ -174,6 +185,12 @@ export async function beginSettlement(
 ): Promise<SettlementResult> {
   return db.transaction(async (tx): Promise<SettlementResult> => {
     const repo = createTransferRepo(tx);
+    if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
+      const locked = await repo.getTransferForUpdate(transfer.id);
+      if (locked && senderScreeningHoldActive(await readSenderScreeningFlags(tx, locked.partnerId, locked.phone, { forUpdate: true }))) {
+        return holdInTx(tx, transfer, [SENDER_SCREENING_REASON]);
+      }
+    }
     const paid = await repo.markPaidIfAwaiting(transfer.id);
     if (!paid) {
       // Classify from the LEDGER, inside the same transaction. A cleared +
@@ -233,32 +250,35 @@ export async function beginHold(
   opts: { addReasons?: string[] } = {},
 ): Promise<HoldResult> {
   const addReasons = opts.addReasons ?? [];
-  return db.transaction(async (tx): Promise<HoldResult> => {
-    const repo = createTransferRepo(tx);
-    if (addReasons.length > 0) {
-      // The ledger row's reasons (row-locked), never the caller's copy.
-      const current = await repo.getTransferForUpdate(transfer.id, { partnerId: transfer.partnerId });
-      if (!current) return { kind: 'already' };
-      const reasons = [...new Set([...(current.complianceReasons ?? []), ...addReasons])];
-      const flagged = await repo.applyRescreenIfAwaiting(transfer.id, transfer.partnerId, 'flagged', reasons);
-      if (!flagged) return { kind: 'already' };
-    }
-    const held = await repo.markInReviewIfAwaiting(transfer.id);
-    if (!held) return { kind: 'already' };
-    // `held` is the masked RETURNING row; buildStage1Message never names the
-    // destination, so no payout field can reach the outbox payload. Same shape
-    // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
-    await createOutboxRepo(tx).enqueue(
-      'whatsapp.text',
-      // 2026-10-03: `template` lets the worker reach a sender outside the
-      // 24-hour window; `body` stays the free-form fallback (and is all an older
-      // worker build reads). R30: the template is transfer_processing, the fixed
-      // hold text; until Meta approves it the worker sends `body` (132001 fallback).
-      { to: held.phone, body: buildStage1Message(held, { held: true }), template: processingTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
-      { dedupeKey: `stage1:${held.id}` },
-    );
-    return { kind: 'held' };
-  });
+  return db.transaction((tx): Promise<HoldResult> => holdInTx(tx, transfer, addReasons));
+}
+
+/** beginHold's body on the caller's transaction (also beginSettlement's locked sender-hold branch). */
+async function holdInTx(tx: DbOrTx, transfer: Transfer, addReasons: string[]): Promise<HoldResult> {
+  const repo = createTransferRepo(tx);
+  if (addReasons.length > 0) {
+    // The ledger row's reasons (row-locked), never the caller's copy.
+    const current = await repo.getTransferForUpdate(transfer.id, { partnerId: transfer.partnerId });
+    if (!current) return { kind: 'already' };
+    const reasons = [...new Set([...(current.complianceReasons ?? []), ...addReasons])];
+    const flagged = await repo.applyRescreenIfAwaiting(transfer.id, transfer.partnerId, 'flagged', reasons);
+    if (!flagged) return { kind: 'already' };
+  }
+  const held = await repo.markInReviewIfAwaiting(transfer.id);
+  if (!held) return { kind: 'already' };
+  // `held` is the masked RETURNING row; buildStage1Message never names the
+  // destination, so no payout field can reach the outbox payload. Same shape
+  // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
+  await createOutboxRepo(tx).enqueue(
+    'whatsapp.text',
+    // 2026-10-03: `template` lets the worker reach a sender outside the
+    // 24-hour window; `body` stays the free-form fallback (and is all an older
+    // worker build reads). R30: the template is transfer_processing, the fixed
+    // hold text; until Meta approves it the worker sends `body` (132001 fallback).
+    { to: held.phone, body: buildStage1Message(held, { held: true }), template: processingTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
+    { dedupeKey: `stage1:${held.id}` },
+  );
+  return { kind: 'held' };
 }
 
 /**
@@ -516,7 +536,8 @@ export type RescreenReleaseResult = { kind: 'released' | 'still_held' | 'blocked
  *      screen's reasons), status stays in_review (charged: Reject cancels and
  *      refunds; markPaidIfInReview refuses blocked) + one deduped ops alert.
  *   4. any reason left — the row's other reasons, the screen's (a possible
- *      match, LARGE re-derived), a sender hold, an uncovered name ⇒ 'flagged'
+ *      match, LARGE re-derived), a sender hold (on real money re-read here
+ *      under the lock, review round 3 M1), an uncovered name ⇒ 'flagged'
  *      with them (LIST_UNAVAILABLE dropped, so the row leaves the sweep) and a
  *      `transfer.rescreen` audit row: a person decides.
  *   5. none ⇒ the same claim and rail effect a staff release commits
@@ -574,11 +595,18 @@ export async function releaseRescreenedHold(
       return { kind: 'blocked' };
     }
 
+    // Review round 3 (M1): on real money the sender's flags are re-read under
+    // the lock (transfer row above, then the customer row FOR UPDATE), so a
+    // stamp that committed after the sweep's unlocked read keeps the row held.
+    // Not real money: no read. A read error throws (nothing released).
+    const senderHold =
+      input.senderHold ||
+      (input.realMoney && senderScreeningHoldActive(await readSenderScreeningFlags(tx, t.partnerId, t.phone, { forUpdate: true })));
     const newReasons = [
       ...new Set([
         ...kept,
         ...result.reasons,
-        ...(input.senderHold ? [SENDER_SCREENING_REASON] : []),
+        ...(senderHold ? [SENDER_SCREENING_REASON] : []),
         ...(uncovered.includes('sender') ? [SENDER_IDENTITY_MISSING_REASON] : []),
         ...(uncovered.includes('recipient') ? [POSSIBLE_MATCH_REASON] : []),
       ]),

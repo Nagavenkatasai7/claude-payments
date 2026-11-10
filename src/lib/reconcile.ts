@@ -12,7 +12,7 @@ import { isFlagOn } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { realMoneyRail } from '@/lib/live-gate';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
-import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import type { Transfer } from '@/lib/types';
 
@@ -116,6 +116,8 @@ export async function reinstructLocked(db: Db, transferId: string): Promise<'enq
  * Review R2 (E4): only the time spent INSIDE healPaidRowScreen and
  * rescreenOnFile is charged, so the stuck-paid bookkeeping (any size of
  * backlog) never uses it up. A sweep that defers a re-screen logs the counts.
+ * Review round 3 (K3): a blocked paid row is not healed at all, and the
+ * heal's "needs a heal?" reads (paidRowNeedsHeal) are not charged either.
  * The list-hold sweep has its own budget (LIST_RESCREEN_BUDGET_MS).
  */
 export const RESCREEN_BUDGET_MS = 5_000;
@@ -192,15 +194,22 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
       // re-screened on a live list first, so the retrying instruct (or the
       // re-instruction below) can pass. Isolated: an error costs nothing else.
       // F3 (C2): not started once the re-screen budget is spent (the next sweep heals it).
-      if (realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
-        if (!rescreenTimeLeft()) {
-          healDeferred++;
-        } else {
-          try {
-            await timedRescreen(() => healPaidRowScreen(db, t, now));
-          } catch (err) {
-            logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
+      // Review round 3 (K3): a sanctions-blocked paid row (the heal's own match)
+      // is never healed: skipped here with no read. The heal's cheap "needs a
+      // heal?" checks run OUTSIDE the budget (paidRowNeedsHeal), so only a row
+      // that really re-screens spends it; the re-instruct and the recon alert
+      // below run for every row as before.
+      if (t.complianceStatus !== 'blocked' && realMoneyRail({ environment: t.environment, railProviderType: providerType ?? null })) {
+        try {
+          if (await paidRowNeedsHeal(db, t, now)) {
+            if (!rescreenTimeLeft()) {
+              healDeferred++;
+            } else {
+              await timedRescreen(() => healPaidRowScreen(db, t, now, { prechecked: true }));
+            }
           }
+        } catch (err) {
+          logWarn('reconcile.paid-rescreen', err, { transferId: t.id });
         }
       }
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a

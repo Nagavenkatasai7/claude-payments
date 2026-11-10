@@ -60,6 +60,26 @@ vi.mock('@/db/repos/aux-repos', async (orig) => {
   };
 });
 
+// Pack 2 review round 3 (M1): a sender screening stamp that commits right
+// AFTER settleOrHold's unlocked flags read; the locked read inside the settle
+// transaction is the one that decides.
+const senderRace = vi.hoisted(() => ({ stampAfterPreRead: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
+  return {
+    ...real,
+    readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
+      const flags = await real.readSenderScreeningFlags(...a);
+      if (senderRace.stampAfterPreRead && !a[3]?.forUpdate) {
+        senderRace.stampAfterPreRead = false;
+        await a[0].execute(q`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = ${a[1]} AND phone = ${a[2]}`);
+      }
+      return flags;
+    },
+  };
+});
+
 async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
   const r = await db.execute(sql`SELECT partner_id, actor, action, subject_id, meta FROM audit_events ORDER BY id`);
   return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
@@ -75,6 +95,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
   failAudit = false;
+  senderRace.stampAfterPreRead = false;
 });
 
 describe('beginSettlement — webhook-driven rail (http/simulator)', { retry: 0 }, () => {
@@ -680,6 +701,62 @@ describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 },
     const qs = stop();
     expect(r.kind).toBe('started');
     expect(qs.filter((q) => q.sql.includes('"customers"'))).toEqual([]);
+  });
+
+  // Pack 2 review round 3 (M1): the window between the unlocked flags read and
+  // the paid flip is closed on real money: the settle transaction locks the
+  // transfer, then the customer row, and re-reads the flags.
+  it('M1: http, a stamp commits after the unlocked read -> held (SENDER_SCREENING), no instruct, customers read FOR UPDATE in the settle', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    senderRace.stampAfterPreRead = true;
+    const stop = captureQueries();
+    const r = await settleOrHold(db, t, HTTP);
+    const qs = stop();
+    expect(senderRace.stampAfterPreRead).toBe(false); // the stamp landed
+    expect(r).toEqual({ kind: 'held' });
+    const after = await store.getTransfer('st_t1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await outboxRows()).map((r2) => r2.dedupe_key)).toEqual(['stage1:st_t1']);
+    const lower = qs.map((q) => q.sql.toLowerCase());
+    const tLock = lower.findIndex((q) => q.includes('"transfers"') && q.includes('for update'));
+    const cLock = lower.findIndex((q) => q.includes('"customers"') && q.includes('for update'));
+    expect(tLock).toBeGreaterThanOrEqual(0);
+    expect(cLock).toBeGreaterThan(tLock); // transfer first, then customer
+  });
+
+  it('M1: http, no stamp -> started; the locked re-read runs and finds no hold', async () => {
+    const t = live();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    const stop = captureQueries();
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'started', webhookDriven: true });
+    const qs = stop();
+    expect(qs.filter((q) => q.sql.includes('"customers"') && q.sql.toLowerCase().includes('for update'))).toHaveLength(1);
+    expect((await outboxRows()).map((r2) => r2.dedupe_key)).toEqual(['stage1:st_t1', 'instruct:st_t1']);
+  });
+
+  it("M1: simulator / mock / env 'test' -> no customers read and no transfer lock in the settle", async () => {
+    const runs: Array<[Transfer, PartnerIntegrations]> = [
+      [live({ id: 'st_m1sim' }), SIMULATOR],
+      [live({ id: 'st_m1mock' }), MOCK],
+      [live({ id: 'st_m1test', environment: 'test' }), HTTP],
+    ];
+    await flagNow();
+    for (const [t, integrations] of runs) {
+      await store.saveTransfer(t);
+      const stop = captureQueries();
+      const r = await settleOrHold(db, t, integrations);
+      const qs = stop();
+      expect(r.kind).toBe('started');
+      expect(qs.filter((q) => q.sql.includes('"customers"'))).toEqual([]);
+      expect(qs.filter((q) => q.sql.toLowerCase().includes('for update'))).toEqual([]);
+    }
   });
 
   it('flags read error -> throws, nothing paid', async () => {

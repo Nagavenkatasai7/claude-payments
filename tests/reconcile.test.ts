@@ -46,6 +46,20 @@ vi.mock('@/lib/flags', async (orig) => {
     },
   };
 });
+// Pack 2 review round 3 (K3): a hook run on every sanctions evidence read
+// (advances a test clock to model a slow Neon read), and a count of the reads.
+const evidenceHook = vi.hoisted(() => ({ before: null as null | (() => void), calls: [] as string[] }));
+vi.mock('@/lib/sanctions/evidence-read', async (orig) => {
+  const real = await orig<typeof import('@/lib/sanctions/evidence-read')>();
+  return {
+    ...real,
+    listScreenEvidence: async (...a: Parameters<typeof real.listScreenEvidence>) => {
+      evidenceHook.calls.push(a[1].id);
+      evidenceHook.before?.();
+      return real.listScreenEvidence(...a);
+    },
+  };
+});
 const logSpy = vi.hoisted(() => ({ warn: vi.fn() }));
 vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
@@ -123,6 +137,7 @@ beforeEach(async () => {
   rescreenThrows.value = false;
   rescreenHook.before = null;
   flagHook.before = null;
+  evidenceHook.before = null;
   logSpy.warn.mockClear();
   listSweepThrows.value = false;
 });
@@ -870,6 +885,54 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     expect(r.fundingResumed).toBe(1);
     expect((await store.getTransfer('rc_lv1'))?.status).toBe('in_review');
     expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+  });
+
+  // Pack 2 review round 3 (K3): a skipped heal costs nothing against the
+  // budget. A paid+blocked real-money row is skipped before the heal with no
+  // read; the heal's cheap "needs a heal?" reads of any other stuck row run
+  // outside the budget. The re-instruct and the recon alert run for every row.
+  it('K3: 120 paid+blocked http rows (50 ms per evidence read) do not spend the budget, and are not read at all', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    stuckSnapshot.rows = Array.from({ length: 120 }, (_, i) =>
+      fixture({ id: `rc_blk${i}`, complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    const clock = { t: 5_000_000 };
+    evidenceHook.calls = [];
+    evidenceHook.before = () => { clock.t += 50; };
+    try {
+      const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+      expect(evidenceHook.calls.filter((id) => id.startsWith('rc_blk'))).toEqual([]);
+      expect(r.stuckPaid).toBe(120);
+      expect(r.fundingResumed).toBe(1);
+      expect(await screens('rc_lv1')).toBe(2);
+      expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+      // Every stuck row still gets its recon alert.
+      expect((await outboxRows()).filter((x) => x.dedupe_key?.startsWith('recon:rc_blk'))).toHaveLength(120);
+    } finally {
+      evidenceHook.before = null;
+    }
+  });
+
+  it('K3: 120 stuck http rows whose screen needs no heal (50 ms per evidence read) do not spend the budget', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    // No evidence on file: the instruct gate passes them, so the heal is skipped after one read.
+    stuckSnapshot.rows = Array.from({ length: 120 }, (_, i) => fixture({ id: `rc_ok${i}` }));
+    const clock = { t: 5_000_000 };
+    evidenceHook.calls = [];
+    evidenceHook.before = () => { clock.t += 50; };
+    try {
+      const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+      expect(evidenceHook.calls.filter((id) => id.startsWith('rc_ok'))).toHaveLength(120);
+      expect(r.fundingResumed).toBe(1);
+      expect(await screens('rc_lv1')).toBe(2);
+      expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+      expect((await outboxRows()).filter((x) => x.dedupe_key?.startsWith('recon:rc_ok'))).toHaveLength(120);
+    } finally {
+      evidenceHook.before = null;
+    }
   });
 
   it('E4: a victim deferred for lack of budget is logged with counts only (no id, no name)', async () => {

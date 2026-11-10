@@ -145,6 +145,20 @@ async function rescreenRow(db: Db, t: Transfer, fitness: ListFitness, now: Date)
 export type PaidHealOutcome = 'cleared' | 'blocked' | 'review' | 'skipped';
 
 /**
+ * Review round 3 (K3): the heal's cheap "does this row need a heal?" checks,
+ * split out so the reconcile sweep runs them OUTSIDE its re-screen budget (as
+ * the crash-resume loop keeps its evidence read outside): the row is paid, its
+ * newest evidence makes the instruct gate refuse and is not a match, and no
+ * `instructrescreen:<id>` alert was raised. Reads only; a read error throws.
+ */
+export async function paidRowNeedsHeal(db: Db, t: Transfer, now: Date): Promise<boolean> {
+  if (t.status !== 'paid') return false;
+  const newest = (await listScreenEvidence(db, t, now)).at(-1);
+  if (!newest || !instructGateRefuses(newest, now) || newest.decision === 'match') return false;
+  return !(await createOutboxRepo(db).hasDedupeKey(`instructrescreen:${t.id}`));
+}
+
+/**
  * Pack 2 review F1 (A1): the heal of a PAID real-money row whose instruct the
  * worker gate refuses (instructGateRefuses: newest evidence with a listFitness
  * that is not liveFresh). Called by the reconcile stuck-paid sweep, only for a
@@ -156,19 +170,26 @@ export type PaidHealOutcome = 'cleared' | 'blocked' | 'review' | 'skipped';
  *   • a match ⇒ the evidence row, the sanctions block notices (stage
  *     'resume', charged) and, on the locked row still paid with no refund
  *     started, compliance_status 'blocked' plus one paidmatch:<id> alert, in
- *     ONE transaction ⇒ 'blocked' (instruct and reinstruct refuse it);
+ *     ONE transaction ⇒ 'blocked' (instruct and reinstruct refuse it).
+ *     Review round 3 (K1): a row possibly instructed (a rail ref, or a
+ *     settlement.instruct row claimed or done) is blocked too, but gets one
+ *     `paidmatchinstructed:<id>` alert (recall it with the rail, confirm no
+ *     payout before any refund) and the instructed notices instead;
  *   • anything else (a possible match, an uncovered name) ⇒ NO evidence (a
  *     fresh live row would unlock the gate on an unreviewed result) and one
  *     deduped `instructrescreen:<id>` ops alert, ids only ⇒ 'review'.
  * A newest screen that is a match, or a row already alerted, is not screened
- * again. Reads outside the transaction; a read error throws (nothing written).
+ * again (paidRowNeedsHeal; `prechecked` says the caller already ran it).
+ * Reads outside the transaction; a read error throws (nothing written).
  */
-export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise<PaidHealOutcome> {
-  if (t.status !== 'paid') return 'skipped';
-  const newest = (await listScreenEvidence(db, t, now)).at(-1);
-  if (!newest || !instructGateRefuses(newest, now) || newest.decision === 'match') return 'skipped';
+export async function healPaidRowScreen(
+  db: Db,
+  t: Transfer,
+  now: Date,
+  opts: { prechecked?: boolean } = {},
+): Promise<PaidHealOutcome> {
+  if (!opts.prechecked && !(await paidRowNeedsHeal(db, t, now))) return 'skipped';
   const reviewKey = `instructrescreen:${t.id}`;
-  if (await createOutboxRepo(db).hasDedupeKey(reviewKey)) return 'skipped';
   if ((await sanctionsListFitnessNow(now)) !== 'live') return 'skipped';
   const { result, uncovered } = await screenHeldOnFile(db, t, true, now);
   if (result.reasons.includes(LIST_UNAVAILABLE_REASON) || !result.evidence) return 'skipped';
@@ -181,7 +202,14 @@ export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise
       // it; the refund paths still claim it) and ONE paidmatch:<id> alert.
       // Moved meanwhile (cancelled, refunding) ⇒ the evidence and notices only.
       const repo = createTransferRepo(tx);
+      const outbox = createOutboxRepo(tx);
       const locked = await repo.getTransferForUpdate(t.id, { partnerId: t.partnerId });
+      // Review round 3 (K1): on the LOCKED row, was it possibly instructed? A
+      // rail ref on the row, or any settlement.instruct row (instruct: or
+      // reinstruct:) that was claimed (attempts > 0) or is done: a POST that
+      // timed out leaves no ref, yet the rail may hold the instruction. Then
+      // nobody is told it was never sent or that nothing was paid out.
+      const instructed = Boolean(locked?.paymentProviderRef) || (await outbox.hasStartedInstruction(t.id));
       await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, evidence));
       await enqueueSanctionsBlockNotices(tx, {
         partnerId: t.partnerId,
@@ -192,11 +220,27 @@ export async function healPaidRowScreen(db: Db, t: Transfer, now: Date): Promise
         realMoney: true,
         evidence,
         charged: true,
+        ...(instructed ? { instructed: true } : {}),
       });
       if (!locked || locked.status !== 'paid' || (locked.refundStatus ?? 'none') !== 'none') return;
       const reasons = [...new Set([...(locked.complianceReasons ?? []), ...result.reasons])];
+      // Blocked in BOTH cases, so the row is never instructed again.
       if (!(await repo.blockPaidOnMatch(t.id, t.partnerId, reasons))) return;
-      await createOutboxRepo(tx).enqueue(
+      if (instructed) {
+        await outbox.enqueue(
+          'ops.alert',
+          {
+            message:
+              `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is PAID and the sender was CHARGED, and its re-screen on a live list is a sanctions match. ` +
+              'An instruction was sent, or may have been sent, to the rail. Contact the rail now to stop or recall the payout, ' +
+              'and confirm with the rail that no payout happened BEFORE any refund. It is now blocked, so it will never be instructed again; ' +
+              'then follow the block procedure; evidence on the compliance page.',
+          },
+          { dedupeKey: `paidmatchinstructed:${t.id}` },
+        );
+        return;
+      }
+      await outbox.enqueue(
         'ops.alert',
         {
           message:

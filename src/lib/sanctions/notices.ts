@@ -46,6 +46,13 @@ export interface SanctionsBlockNotice {
    * procedure. Omitted ⇒ the usual "nothing paid out" text.
    */
   charged?: boolean;
+  /**
+   * Pack 2 review round 3 (K1): with `charged`, the paid row was (or may have
+   * been) instructed to the rail. The notices then say the payout may be in
+   * progress with the rail: stop or recall it there and confirm no payout
+   * before any refund. Never "nothing paid out". Staff and partners only.
+   */
+  instructed?: boolean;
 }
 
 export const SANCTIONS_BLOCK_AUDIT_ACTION = 'sanctions.block';
@@ -106,7 +113,9 @@ export async function enqueueSanctionsBlockNotices(
     await outbox.enqueue(
       'ops.alert',
       {
-        message: n.charged
+        message: n.charged && n.instructed
+          ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The sender was charged and the payout may be in progress with the rail: contact the rail to stop or recall it, and confirm with the rail that no payout happened before any refund; evidence on the compliance page.`
+          : n.charged
           ? `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. The recipient was not paid, but the sender was charged: follow the block and refund procedure; evidence on the compliance page.`
           : `⚠️ SmartRemit ops: sanctions block (${stage}) on ${subjectId}, partner ${partnerId}, ${environment}. Nothing paid out; evidence on the compliance page.`,
       },
@@ -124,7 +133,9 @@ export async function enqueueSanctionsBlockNotices(
         {
           to: [addr],
           subject: 'SmartRemit: a transfer was stopped by sanctions screening',
-          text: n.charged
+          text: n.charged && n.instructed
+            ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged. An instruction was sent, or may have been sent, to the rail, so the payout may be in progress with the rail: contact the rail now to stop or recall it, and confirm no payout happened before any refund. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
+            : n.charged
             ? `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening after the sender was charged; nothing was paid out to the recipient. Follow your block and refund procedure. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`
             : `Reference ${subjectId} (${stage}, ${environment}) was stopped by sanctions screening; nothing was paid out. Evidence is in your SmartRemit workspace. Do not share this notice with the customer.`,
         },

@@ -33,6 +33,7 @@ const NEW_ALERT_KEYS = [
   'instructsenderhold:',
   'instructrescreen:',
   'paidmatch:',
+  'paidmatchinstructed:',
   'sanctionsblock:',
   'sanctionsblockmail:',
   'sanctions-block-unrecorded:',

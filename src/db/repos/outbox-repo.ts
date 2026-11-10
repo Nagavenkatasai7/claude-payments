@@ -655,6 +655,21 @@ export function createOutboxRepo(db: DbOrTx) {
       return rows.length > 0;
     },
 
+    /**
+     * Pack 2 review round 3 (K1): true when ANY settlement.instruct row for this transfer (the
+     * first `instruct:` or the recovery `reinstruct:`) was claimed at least once (attempts > 0) or
+     * finished (status 'done'): the rail has, or may have, the instruction. A POST that timed out
+     * leaves payment_provider_ref null, so this is read beside it. Ids only; no payload is returned.
+     */
+    async hasStartedInstruction(transferId: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(sql`${outbox.kind} = 'settlement.instruct' AND (${outbox.attempts} > 0 OR ${outbox.status} = 'done') AND (${outbox.payload} ->> 'transferId') = ${transferId}`)
+        .limit(1);
+      return rows.length > 0;
+    },
+
     async countPending(): Promise<number> {
       const rows = await db
         .select({ n: sql<number>`count(*)::int` })

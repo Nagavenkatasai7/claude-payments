@@ -529,6 +529,76 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     expect(await keys()).toContain('refund:rr_heal_m');
   });
 
+  // Pack 2 review round 3 (K1): a heal match on a paid row that was (or may
+  // have been) instructed to the rail. The row is blocked (never instructed
+  // again), but nobody is told it was never sent or that nothing was paid out:
+  // one paidmatchinstructed:<id> alert says to recall it with the rail and to
+  // confirm no payout before any refund, and the notices say the payout may be
+  // in progress with the rail.
+  type OutRow = { kind: string; dedupe_key: string; payload: { message?: string; text?: string; to?: string[] } };
+  async function outRows(): Promise<OutRow[]> {
+    return ((await db.execute(sql`SELECT kind, dedupe_key, payload FROM outbox ORDER BY id`)) as unknown as { rows: OutRow[] }).rows;
+  }
+  it.each([
+    ['instruct done and provider_ref set', 'done', 1, 'rail-ref-k1'],
+    ['provider_ref null but the instruct has attempts > 0 (a timed-out POST)', 'failed', 2, null],
+  ])('K1: %s: blocked, no "not instructed" alert or "nothing paid out" notice, one paidmatchinstructed alert', async (_l, status, attempts, providerRef) => {
+    fetchFn.mockReset();
+    await rail('acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ alertEmail: 'ops@acme.example' })}::jsonb WHERE id = 'acme'`);
+    const id = providerRef ? 'rr_heal_i1' : 'rr_heal_i2';
+    const t = base({
+      id, status: 'paid', recipientName: 'Testa Fixturelli', fundingRef: `pi_${id}`,
+      paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+    });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(
+      db,
+      { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
+      { screenedAgoMs: 37 * H, at: new Date(Date.now() - 37 * H) },
+    );
+    await db.execute(
+      sql`INSERT INTO outbox (kind, payload, dedupe_key, status, attempts) VALUES ('settlement.instruct', ${JSON.stringify({ transferId: t.id })}::jsonb, ${'instruct:' + t.id}, ${status}, ${attempts})`,
+    );
+    if (providerRef) await db.execute(sql`UPDATE transfers SET payment_provider_ref = ${providerRef} WHERE id = ${t.id}`);
+    primeOfacSource({ checkedAgoMs: H });
+    await reconcileSweep(db, new Date());
+
+    const after = await store.getTransfer(t.id);
+    expect(after?.status).toBe('paid');
+    expect(after?.complianceStatus).toBe('blocked');
+
+    const rows = await outRows();
+    const texts = rows.map((r) => String(r.payload.message ?? r.payload.text ?? ''));
+    expect(rows.filter((r) => r.dedupe_key === `paidmatch:${id}`)).toEqual([]);
+    for (const m of texts) {
+      expect(m).not.toContain('not instructed');
+      expect(m).not.toContain('never sent to the rail');
+      expect(m.toLowerCase()).not.toContain('nothing was paid out');
+      expect(m.toLowerCase()).not.toContain('nothing paid out');
+      expect(m).not.toContain('recipient was not paid');
+    }
+    const instructed = rows.filter((r) => r.dedupe_key === `paidmatchinstructed:${id}`);
+    expect(instructed).toHaveLength(1);
+    const msg = String(instructed[0].payload.message);
+    expect(Object.keys(instructed[0].payload)).toEqual(['message']);
+    expect(msg).toContain(id);
+    expect(msg).toContain('PAID');
+    expect(msg).toContain('CHARGED');
+    expect(msg).toMatch(/may have been sent/);
+    expect(msg).toMatch(/stop or recall/);
+    expect(msg).toMatch(/BEFORE any refund/);
+    const block = rows.find((r) => r.dedupe_key === `sanctionsblock:${id}`)!;
+    expect(String(block.payload.message)).toContain('may be in progress with the rail');
+    const mail = rows.find((r) => r.dedupe_key === `sanctionsblockmail:${id}:acme`)!;
+    expect(String(mail.payload.text)).toContain('may be in progress with the rail');
+    for (const m of [msg, String(block.payload.message), String(mail.payload.text)]) {
+      for (const pii of ['Testa', 'Fixturelli', SENDER, SENDER_PHONE, '919876543210', '123456789012']) expect(m).not.toContain(pii);
+    }
+    // Never instructed again.
+    expect(await reinstructLocked(db, t.id)).toBe('not_payable');
+  });
+
   it('a heal match on a row whose refund already started: evidence and notices, the row is NOT rewritten, no paidmatch alert', async () => {
     await rail('acme', 'http');
     const t = base({

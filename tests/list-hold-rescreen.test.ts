@@ -461,6 +461,40 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
   });
 
+  // Pack 2 review round 3 (M1): a sender stamp that commits after the sweep's
+  // unlocked flags read is seen by the locked re-read in the release
+  // transaction (transfer, then customer, FOR UPDATE): still held, not released.
+  it('M1: http, a sender stamp after the unlocked read -> still held with SENDER_SCREENING_REASON, no instruct', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_sender_race' });
+    names.before = async () => {
+      await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${SENDER_PHONE}`);
+    };
+    const stop = captureQueries();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const after = await store.getTransfer('lh_sender_race');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    expect((await keys()).filter((x) => x?.startsWith('instruct:'))).toEqual([]);
+    const tLock = qs.findIndex((q) => q.includes('"transfers"') && q.includes('for update'));
+    const cLock = qs.findIndex((q) => q.includes('"customers"') && q.includes('for update'));
+    expect(tLock).toBeGreaterThanOrEqual(0);
+    expect(cLock).toBeGreaterThan(tLock);
+  });
+
+  it('M1: a mock rail release takes no customers lock and adds no customers read (not real money)', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await heldRow({ id: 'lh_sender_mock2' });
+    const stop = captureQueries();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 1, stillHeld: 0, blocked: 0 });
+    const customerQs = stop().filter((q) => q.sql.includes('"customers"'));
+    // The names on file are read (resolveRescreenNames, one plain select); never a lock.
+    expect(customerQs.filter((q) => q.sql.toLowerCase().includes('for update'))).toEqual([]);
+    expect(customerQs).toHaveLength(1);
+  });
+
   // Pack 2 review F3 (C2): the sweep runs before the worker drain on every full
   // run, so it has a time budget: it never STARTS a row once the budget is
   // spent, and reports the rows it left for the next run.
