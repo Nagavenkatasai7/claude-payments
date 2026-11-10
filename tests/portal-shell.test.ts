@@ -73,7 +73,7 @@ describe('portal layout', () => {
   // Site skins (owner go 2026-11-09): tgfl.smartremit.ai shows the TGFL name over SmartRemit's portal.
   describe('with a skin', () => {
     const SKIN = { name: 'TGFL', logoSrc: null as string | null, theme: null as null | { primary: string; accent: string }, demo: true };
-    const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } });
+    const skinned = (over: Partial<typeof SKIN> = {}) => ({ ...SITE, partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', brand: 'SmartRemit', logo: null, skin: { ...SKIN, ...over } }) satisfies PortalSite;
 
     it('the header shows the skin name as text, not the SmartRemit logo', async () => {
       h.site = skinned();

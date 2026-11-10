@@ -67,7 +67,8 @@ describe('portalEmailVerifyUrl', () => {
       'https://smartremitai.tgfl.org/portal/notifications/verify?token=tok_abc',
     );
   });
-  it.each(['www.smartremit.ai', 'evil.com/x', 'tgfl.org', 'SMARTREMITAI.TGFL.ORG', 'smartremitai.tgfl.org.', 'acme', 'smartremit.ai', ''])(
+  it.each(['www.smartremit.ai', 'evil.com/x', 'tgfl.org', 'SMARTREMITAI.TGFL.ORG', 'smartremitai.tgfl.org.', 'acme', 'smartremit.ai', '',
+    'acme.smartremit.ai:443', 'ACME.smartremit.ai', 'smartremitai.tgfl.org:443'])(
     'refuses a host that is not a canonical site host: %s',
     (host) => {
       expect(() => portalEmailVerifyUrl(host, 'x')).toThrow('portal-email-verify: invalid site host');
