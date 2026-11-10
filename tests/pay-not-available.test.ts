@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PAY_NOT_AVAILABLE, payNotAvailable } from '@/lib/pay-not-available';
+import { PAY_NOT_AVAILABLE, payApprovalNotRecorded, payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
+import { PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from '@/lib/pay-outcome';
 import { fixedReply } from '@/lib/hold-replies';
 
 // Contract 5 (pack 3): the one neutral answer a pay route gives when a live
@@ -31,5 +32,29 @@ describe('PAY_NOT_AVAILABLE (pack 3)', () => {
     expect(a).not.toBe(b);
     await a.json();
     expect(await b.json()).toEqual({ ...PAY_NOT_AVAILABLE.body });
+  });
+});
+
+// Fix pack 4 T8 (C8, C10): the R18 reload answer and the evidence-not-recorded answer.
+describe('payReloadRequired / payApprovalNotRecorded (pack 4)', () => {
+  it('payReloadRequired() is 409 reload_required with the reload copy', async () => {
+    const res = payReloadRequired();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, reason: 'reload_required', error: PAY_RELOAD_REQUIRED_COPY });
+  });
+
+  it('payApprovalNotRecorded() is 503 approval_not_recorded with the approval copy', async () => {
+    const res = payApprovalNotRecorded();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
+  });
+
+  it('each call is a fresh response', async () => {
+    const a = payReloadRequired();
+    const b = payReloadRequired();
+    expect(a).not.toBe(b);
+    await a.json();
+    expect((await b.json()).reason).toBe('reload_required');
+    expect(payApprovalNotRecorded()).not.toBe(payApprovalNotRecorded());
   });
 });

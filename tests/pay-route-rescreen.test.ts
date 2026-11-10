@@ -13,7 +13,8 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { testEvidence } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import {
@@ -81,6 +82,15 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
+// T8 interim: the route threads evidence from T9; T9 deletes this wrapper.
+vi.mock('@/lib/pay-process', async (orig) => {
+  const a = await orig<typeof import('@/lib/pay-process')>();
+  return {
+    ...a,
+    processTransferPayment: (...[s, t, ev]: Parameters<typeof a.processTransferPayment>) =>
+      a.processTransferPayment(s, t, ev ?? testEvidence({ routeId: t.id })),
+  };
+});
 
 // The mock list never returns a possible match and never fails to load, so the
 // screener is switchable per test: 'real' is the production mock list.
@@ -316,6 +326,8 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
       await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
         VALUES (${partnerId}, ${partnerId}, 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
       if (o.certify ?? true) await certifyPartnerForTest(db, partnerId);
+      // Fix pack 4 T8: the owner of a real-money b2c payment needs an approved provider block (R18).
+      if (partnerId === OWNER) await approveDisclosureForTest(db, partnerId);
     }
     await setRailProviderType(db, partnerId, 'http');
     rails.byPartner[partnerId] = HTTP_RAIL;

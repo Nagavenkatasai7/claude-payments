@@ -14,7 +14,8 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { testEvidence } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
@@ -73,6 +74,15 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
+// T8 interim: the route threads evidence from T9; T9 deletes this wrapper.
+vi.mock('@/lib/pay-process', async (orig) => {
+  const a = await orig<typeof import('@/lib/pay-process')>();
+  return {
+    ...a,
+    processTransferPayment: (...[s, t, ev]: Parameters<typeof a.processTransferPayment>) =>
+      a.processTransferPayment(s, t, ev ?? testEvidence({ routeId: t.id })),
+  };
+});
 
 const capture = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/providers/funding-provider', async (orig) => {
@@ -127,10 +137,13 @@ const PUBLIC_RAIL = { providerType: 'http', credentials: { settlementUrl: 'https
 /**
  * Pack 3: a non-default owner 'acme' on a public http rail (the rail type also stored, as
  * live-gate.ts reads it), with its own sender on file. Certified unless `certify: false`.
+ * Fix pack 4 T8: its provider block is approved (R18).
  */
 async function acmeOnHttp(o: { certify?: boolean } = {}): Promise<void> {
   await seedPartner(db, 'acme');
   if (o.certify ?? true) await certifyPartnerForTest(db, 'acme');
+  // Fix pack 4 T8: a real-money b2c payment needs the owner's approved provider block (R18).
+  await approveDisclosureForTest(db, 'acme');
   rails.byPartner.acme = { ...PUBLIC_RAIL, credentials: { ...PUBLIC_RAIL.credentials } };
   await setRailProviderType(db, 'acme', 'http');
   const nowIso = new Date().toISOString();
