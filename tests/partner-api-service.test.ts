@@ -783,7 +783,7 @@ describe('partner-api-service: confirmTransaction re-screens on a real-money rai
 
 // Pack 3 (contract 6): confirm on an uncertified real-money rail is refused BEFORE the re-screen
 // and the settle: 403 partner_not_live, the row stays awaiting_payment, no screen row is written
-// and deps.initiatePayment is never called (confirm reads the rail itself: liveRefusalFor).
+// and deps.initiatePayment is never called (confirm judges on the rail integrations it reads: liveRefusalForRail).
 describe('partner-api-service: confirmTransaction live certification (pack 3)', { retry: 0 }, () => {
   const originalList = process.env.SANCTIONS_LIST;
   afterEach(() => restoreOfacSource(originalList));
@@ -798,7 +798,7 @@ describe('partner-api-service: confirmTransaction live certification (pack 3)', 
     return (r.data as View).id;
   }
 
-  it('confirm on an uncertified http rail (DB row; confirm uses liveRefusalFor) -> 403 { code: partner_not_live }, still awaiting_payment, no re-screen row, deps.initiatePayment never called', async () => {
+  it('confirm on an uncertified http rail (DB row; confirm uses liveRefusalForRail) -> 403 { code: partner_not_live }, still awaiting_payment, no re-screen row, deps.initiatePayment never called', async () => {
     const h = await harness();
     // Minted on a simulator rail (not real money, no certification needed), then switched to http.
     await setRailProviderType(h.db, 'acme', 'simulator');
@@ -839,6 +839,101 @@ describe('partner-api-service: confirmTransaction live certification (pack 3)', 
     const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
     expect(r).toMatchObject({ ok: true, status: 200 });
     if (r.ok) expect((r.data as View).status).toBe('paid');
+  });
+
+  // Review P1 A1: a failed rail read is never a 403 partner_not_live (owner Q15: the pay-time gates do
+  // not refuse on a failed read). The confirm judges on the integrations it reads, and a failed read
+  // throws (a retryable 5xx through the route's error path) with nothing written.
+  const writes = async (db: Awaited<ReturnType<typeof harness>>['db']) =>
+    ((await db.execute(sql`SELECT (SELECT count(*)::int FROM outbox) AS o, (SELECT count(*)::int FROM audit_events) AS a`)) as unknown as {
+      rows: Array<{ o: number; a: number }>;
+    }).rows[0];
+  // The rail's partner_integrations row cannot be read: every read of the table fails, as on a dropped connection.
+  const breakRailRead = (db: Awaited<ReturnType<typeof harness>>['db']) =>
+    db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_unreadable`);
+
+  for (const [label, who] of [
+    ['a simulator-rail partner', 'acme'],
+    ['the default tenant on the mock rail', 'default'],
+  ] as const) {
+    it(`${label}: a failed rail read rejects (retryable), never 403 partner_not_live, and writes nothing`, async () => {
+      const h = await harness();
+      const p = who === 'acme' ? DELEGATED : partner({ id: 'default', kycMode: 'delegated', requireKycBeforeSend: false });
+      if (who === 'acme') await setRailProviderType(h.db, 'acme', 'simulator');
+      const r0 = await createTransaction(h.deps, p, 'pk_1', `idem-fail-${who}`, txBody());
+      if (!r0.ok) throw new Error('unexpected: ' + r0.error);
+      const id = (r0.data as View).id;
+      const initiatePayment = vi.fn(h.deps.initiatePayment!);
+      h.deps.initiatePayment = initiatePayment;
+      const before = await writes(h.db);
+      await breakRailRead(h.db);
+      let outcome: unknown;
+      try {
+        outcome = await confirmTransaction(h.deps, p, 'pk_1', id);
+      } catch (e) {
+        outcome = e;
+      } finally {
+        // The PGlite instance is shared across tests: put the table back.
+        await h.db.execute(sql`ALTER TABLE partner_integrations_unreadable RENAME TO partner_integrations`);
+      }
+      expect(outcome).not.toMatchObject({ status: 403 });
+      expect(outcome).not.toMatchObject({ code: 'partner_not_live' });
+      expect(outcome).toBeInstanceOf(Error);
+      expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+      expect(await writes(h.db)).toEqual(before);
+      expect(initiatePayment).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a rail integrations read that rejects once (store error) rejects the confirm, never 403, and writes nothing', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-fail-once');
+    const before = await writes(h.db);
+    vi.spyOn(h.deps.integrationsStore, 'getIntegrations').mockRejectedValueOnce(new Error('connection dropped'));
+    await expect(confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).rejects.toThrow('connection dropped');
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+    expect(await writes(h.db)).toEqual(before);
+  });
+
+  it('an uncertified http partner is refused 403 partner_not_live from the integrations it read; no sanctions.screen row', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-4');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const before = await screens(h.db, id);
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: false, status: 403, code: 'partner_not_live' });
+    expect(await screens(h.db, id)).toBe(before);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads).toHaveBeenCalledWith('acme');
+  });
+
+  it('a normal confirm (real settleOrHold, simulator rail) reads the rail integrations once', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-5');
+    h.deps.initiatePayment = undefined;
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+
+  it('a held confirm (flagged, real settleOrHold) reads the rail integrations once', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-6');
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    expect(reads).toHaveBeenCalledTimes(1);
   });
 });
 

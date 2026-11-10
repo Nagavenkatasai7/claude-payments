@@ -45,7 +45,7 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
-import { liveRefusalFor, railPartnerOf, realMoneyFor } from './live-gate';
+import { liveRefusalForRail, railPartnerOf, realMoneyFor } from './live-gate';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { rescreenOnFile } from './pay-rescreen';
 import { parseClientReference } from './order-references';
@@ -808,8 +808,16 @@ export async function confirmTransaction(
   // Pack 3 (contract 6): ONE live-certification gate before the re-screen and
   // both settleOrHold calls (and the deps.initiatePayment seam): an uncertified
   // real-money rail, or the default tenant on one, is refused with nothing
-  // written. Nothing is in hand here, so liveRefusalFor reads the rail itself.
-  if (await liveRefusalFor(deps.db, t)) {
+  // written. Review P1 A1: the gate judges on the rail partner's integrations,
+  // read ONCE here and reused by both settleOrHold calls below (as pay-process
+  // and the b2b route do). A failed read throws (a retryable 5xx through the
+  // route's error path), never a 403: owner Q15, the pay-time gates do not
+  // refuse on a failed read.
+  const railId = railPartnerOf(t);
+  const railIntegrations = await deps.integrationsStore.getIntegrations(railId);
+  const integrationsFor = (tr: Transfer) =>
+    railPartnerOf(tr) === railId ? Promise.resolve(railIntegrations) : deps.integrationsStore.getIntegrations(railPartnerOf(tr));
+  if (await liveRefusalForRail(deps.db, t, railIntegrations.payment.providerType ?? null)) {
     return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
   }
 
@@ -849,7 +857,7 @@ export async function confirmTransaction(
     // other entry point (LIST_UNAVAILABLE when the newest screen is not live
     // and fresh, SENDER_SCREENING when the sender's hold is active). Not real
     // money: the same beginHold as before. Still never deps.initiatePayment.
-    const hold = await settleOrHold(deps.db as Db, current, await deps.integrationsStore.getIntegrations(railPartnerOf(current)));
+    const hold = await settleOrHold(deps.db as Db, current, await integrationsFor(current));
     if (hold.kind === 'held') {
       pokeWorker(); // the held "payment received / under review" message is READY now
       // Audit ONLY a real transition (mirrors the settle path below): on the
@@ -867,8 +875,9 @@ export async function confirmTransaction(
     // the customer message names the OWNING partner (creds resolve at drain —
     // fix 11). settleOrHold re-checks the LEDGER: if the row was re-screened
     // to flagged since the read above, it is held instead of instructed.
-    // Fix pack 2 T3: the RAIL partner's integrations (routed, else owner).
-    const integrations = await deps.integrationsStore.getIntegrations(railPartnerOf(tr));
+    // Fix pack 2 T3: the RAIL partner's integrations (routed, else owner);
+    // the gate's read above when the rail partner is the same (review P1 A1).
+    const integrations = await integrationsFor(tr);
     const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its

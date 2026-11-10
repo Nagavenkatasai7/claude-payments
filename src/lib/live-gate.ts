@@ -139,8 +139,11 @@ export async function liveRefusalForRail(
 }
 
 /**
- * The live refusal for a stored transfer when nothing is in hand (Partner API
- * confirm, reconcile, stale-money): reads the rail type itself. A 'test'
+ * The live refusal for a stored transfer when nothing is in hand (the
+ * reconcile and stale-money sweeps, which skip a refused row): reads the rail
+ * type itself, and a failed read refuses. A request path (Partner API confirm,
+ * pay-process, the b2b route) uses liveRefusalForRail on the integrations it
+ * read, so a failed read there is a retryable error, never a refusal. A 'test'
  * transfer makes no read. Never throws.
  */
 export async function liveRefusalFor(db: DbOrTx, t: LiveTransfer): Promise<LiveRefusalCode | null> {
