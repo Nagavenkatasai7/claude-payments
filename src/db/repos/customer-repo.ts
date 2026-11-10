@@ -432,11 +432,18 @@ export function createCustomerRepo(
      * UPDATE of screening_flagged_at keyed (partner_id, phone), so no other
      * column moves. Called in the Persona apply transaction when a watchlist /
      * PEP report matches. Returns whether a row was updated.
+     * Pack 2 review R3 (H1 b): the stamp is never earlier than 1 ms after the
+     * clear on the row the UPDATE locks (greatest() reads the latest committed
+     * screening_cleared_at), so a match committed after a clear always re-arms
+     * the hold, whatever clock `at` came from. GREATEST skips a NULL clear.
      */
     async stampScreeningFlagged(partnerId: PartnerId, senderPhone: string, at: Date): Promise<boolean> {
       const rows = await db
         .update(customers)
-        .set({ screeningFlaggedAt: at, updatedAt: new Date() })
+        .set({
+          screeningFlaggedAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond')`,
+          updatedAt: new Date(),
+        })
         .where(tenantKey(partnerId, senderPhone))
         .returning({ phone: customers.phone });
       return rows.length > 0;
@@ -447,11 +454,16 @@ export function createCustomerRepo(
      * FOR UPDATE (the caller re-checks the hold on that locked value and audits
      * it in the same transaction), then sets screening_cleared_at only.
      * A missing row ⇒ { found: false } and nothing written.
+     * Pack 2 review R3 (H1 b): the clear time is taken AFTER the FOR UPDATE
+     * (`at` only for tests) and is never earlier than 1 ms after the flag it
+     * locked, so it lifts exactly that flag; a stamp committed later re-arms
+     * (stampScreeningFlagged). A caller that refuses on `previous` throws, and
+     * the transaction rollback undoes this write.
      */
     async clearScreeningHold(
       partnerId: PartnerId,
       senderPhone: string,
-      at: Date,
+      at?: Date,
     ): Promise<{ found: boolean; previous: SenderScreeningFlags | null }> {
       const rows = await db
         .select(SCREENING_FLAG_COLUMNS)
@@ -460,9 +472,13 @@ export function createCustomerRepo(
         .limit(1)
         .for('update');
       if (!rows[0]) return { found: false, previous: null };
+      const clearedAt = at ?? new Date(); // taken after the lock
       await db
         .update(customers)
-        .set({ screeningClearedAt: at, updatedAt: new Date() })
+        .set({
+          screeningClearedAt: sql`greatest(${clearedAt.toISOString()}::timestamptz, ${customers.screeningFlaggedAt} + interval '1 millisecond')`,
+          updatedAt: new Date(),
+        })
         .where(tenantKey(partnerId, senderPhone));
       return { found: true, previous: rows[0] };
     },

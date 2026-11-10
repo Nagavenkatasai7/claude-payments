@@ -1,4 +1,5 @@
 import { chat } from '@/lib/llm';
+import { senderScreeningLabel } from '@/lib/compliance-config';
 import type { AuditEntry } from '@/lib/kyc-case-store';
 import type { ChatMessage, Customer } from '@/lib/types';
 
@@ -78,11 +79,14 @@ function providedOrMissing(value: string | undefined | null): 'provided' | 'miss
 }
 
 function fieldLines(customer: Customer): string {
-  const screening = customer.watchlistHit
-    ? 'WATCHLIST HIT (hard hold)'
-    : customer.pepHit
-      ? 'PEP HIT'
-      : 'clear';
+  // Pack 2 review R3: the shared rule, so a stamped, uncleared hold is never
+  // "clear" (a state only: no time, no PII).
+  const screening = {
+    watchlist: 'WATCHLIST HIT (hard hold)',
+    pep: 'PEP HIT',
+    hold: 'SCREENING HOLD (match on file)',
+    clear: 'clear',
+  }[senderScreeningLabel(customer)];
   const inquiry = inquiryLine(customer);
   return [
     `KYC status: ${customer.kycStatus}`,

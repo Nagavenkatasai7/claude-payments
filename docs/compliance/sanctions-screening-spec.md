@@ -102,7 +102,7 @@ The strictest reason wins (rescreen, then platform, then partner). An empty list
 
 ## 5. Sender screening hold (R06)
 
-A sender whose customer row has a watchlist or PEP hit, or a stamped `screeningFlaggedAt`, and no later `screeningClearedAt`, has an active hold (`senderScreeningHoldActive`; a tie counts as held). A KYC watchlist or PEP match stamps the flag in the same transaction (`kyc-case-store.ts`). A later match re-arms a cleared hold.
+A sender whose customer row has a watchlist or PEP hit, or a stamped `screeningFlaggedAt`, and no later `screeningClearedAt`, has an active hold (`senderScreeningHoldActive`; a tie counts as held). A KYC watchlist or PEP match stamps the flag in the same transaction (`kyc-case-store.ts`). A later match re-arms a cleared hold: the stamp time is read after the row lock, and the writer (`customer-repo.ts` `stampScreeningFlagged`) keeps it at least 1 ms after any clear on the locked row, so a match committed after a clear always sorts later.
 
 On real-money rails only:
 
@@ -114,7 +114,7 @@ On real-money rails only:
 
 On every rail, partner staff (a delegated partner's admin) can neither release nor reject a held transfer of such a sender, nor decide the sender's KYC (`isScreeningCustomerHold`, `src/lib/compliance-config.ts`). For them the hold is: a watchlist or PEP hit, OR a stamped `screeningFlaggedAt` that no later `screeningClearedAt` covers (a tie counts as held). The stamp counts even when a stale whole-row save has nulled the booleans. The release and reject claims check the same rule inside their transaction (`senderClearForPartnerRelease`, `src/db/repos/transfer-repo.ts`; a test runs the TypeScript and SQL rules on the same cases), so a flag raised after the page loaded still refuses. A platform clear lifts the stamp only: while a PEP or watchlist boolean is still set, partner staff stay refused and platform staff decide.
 
-Only SmartRemit platform admins clear it (`clearSenderScreeningHoldAction`, `src/app/admin-dashboard/customers/actions.ts`), with a typed reason, under either `kycMode` (`platform` or delegated) and in any KYC status. One transaction writes the clear time and the `customer.screening_hold.clear` audit row. The Persona flags stay as evidence. Clearing does not release held transfers: staff release them afterwards.
+Only SmartRemit platform admins clear it (`clearSenderScreeningHoldAction`, `src/app/admin-dashboard/customers/actions.ts`), with a typed reason, under either `kycMode` (`platform` or delegated) and in any KYC status. One transaction writes the clear time and the `customer.screening_hold.clear` audit row. The form posts the flag time the page showed; under the row lock the action refuses ("The screening for this customer changed since this page loaded. Reload the page and review it again.", nothing written, no audit row) unless the locked flag time is that one, so only the match the admin reviewed is cleared. The clear time is taken after the lock and kept at least 1 ms after the locked flag time (`clearScreeningHold`). The Persona flags stay as evidence. Clearing does not release held transfers: staff release them afterwards.
 
 ## 6. Block notices (R04)
 

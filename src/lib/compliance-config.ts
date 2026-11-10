@@ -230,6 +230,18 @@ export function isScreeningCustomerHold(c: CustomerScreeningFlags): boolean {
   return c.watchlistHit === true || c.pepHit === true || senderScreeningHoldActive(c);
 }
 
+/**
+ * Pack 2 review R3 (H1 display truth): the one screening label for staff views
+ * and the advisory KYC prompt. A boolean hit names itself (it stays as evidence
+ * after a clear); otherwise the shared rule decides, so a stamped, uncleared
+ * hold whose booleans a stale upsert nulled reads 'hold', never 'clear'.
+ */
+export function senderScreeningLabel(c: CustomerScreeningFlags): 'watchlist' | 'pep' | 'hold' | 'clear' {
+  if (c.watchlistHit === true) return 'watchlist';
+  if (c.pepHit === true) return 'pep';
+  return isScreeningCustomerHold(c) ? 'hold' : 'clear';
+}
+
 /** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold. */
 export function canDecideCustomerKyc(
   scope: { kind: 'platform' | 'partner' },

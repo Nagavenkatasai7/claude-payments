@@ -112,6 +112,43 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     expect(c?.screeningClearedAt).toBe(cleared.toISOString());
   });
 
+  // Pack 2 review R3 (H1 b): the ORDER comes from the locked row, not from a
+  // clock read before the lock. A stamp committed after a clear always sorts
+  // later (re-arms); a clear committed after a stamp always sorts later (lifts).
+  it('a stamp whose time was read before a committed clear still re-arms the hold', async () => {
+    await seedCustomer('pa', PHONE, { watch: true });
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - 2 * HOUR));
+    const cleared = new Date();
+    await repo().clearScreeningHold('pa', PHONE, cleared);
+    expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'pa', PHONE))).toBe(false);
+    // The webhook read its clock (an hour ago) before the clear won the lock.
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR));
+    const after = await readSenderScreeningFlags(db, 'pa', PHONE);
+    expect(after!.screeningFlaggedAt!.getTime()).toBeGreaterThan(cleared.getTime());
+    expect(senderScreeningHoldActive(after)).toBe(true);
+  });
+
+  it('a clear whose time was read before the flag it locked still lifts that flag', async () => {
+    await seedCustomer('pa', PHONE, { watch: true });
+    const flagged = new Date(Date.now() + HOUR); // a stamp ahead of the clearing clock
+    await repo().stampScreeningFlagged('pa', PHONE, flagged);
+    await repo().clearScreeningHold('pa', PHONE, new Date());
+    const after = await readSenderScreeningFlags(db, 'pa', PHONE);
+    expect(after!.screeningClearedAt!.getTime()).toBeGreaterThan(flagged.getTime());
+    expect(senderScreeningHoldActive(after)).toBe(false);
+  });
+
+  it('a clear with no time takes it after the FOR UPDATE read', async () => {
+    await seedCustomer('pa', PHONE, { watch: true });
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR));
+    const before = Date.now();
+    await repo().clearScreeningHold('pa', PHONE);
+    const after = await readSenderScreeningFlags(db, 'pa', PHONE);
+    expect(after!.screeningClearedAt!.getTime()).toBeGreaterThanOrEqual(before);
+    expect(after!.screeningClearedAt!.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(senderScreeningHoldActive(after)).toBe(false);
+  });
+
   it('writers are tenant-scoped', async () => {
     await seedCustomer('pa', PHONE, { watch: true });
     await seedCustomer('pb', PHONE, { watch: true });

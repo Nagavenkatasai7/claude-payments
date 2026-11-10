@@ -118,6 +118,15 @@ async function flag(partnerId: string, flaggedAgoMs = H) {
 
 const held = async (partnerId = 'A') => senderScreeningHoldActive(await readSenderScreeningFlags(db, partnerId, PHONE));
 
+/** Pack 2 review R3 (H1 a): the page posts the flag time it showed (ISO, or ''). */
+async function shown(partnerId = 'A'): Promise<string> {
+  return (await cs.getCustomer(partnerId, PHONE))?.screeningFlaggedAt ?? '';
+}
+/** The clear form as the page renders it right now (the reviewed flag time included). */
+async function reviewed(over: Record<string, string> = {}): Promise<FormData> {
+  return form({ ...CLEAR, screeningFlaggedAt: await shown(over.partnerId ?? 'A'), ...over });
+}
+
 beforeEach(async () => {
   redis.dump.clear();
   failAudit = false;
@@ -169,7 +178,7 @@ describe('clearSenderScreeningHoldAction — gate', () => {
 
 describe('clearSenderScreeningHoldAction — the clear', () => {
   it('verified customer cleared + audit without the raw phone', async () => {
-    await clearSenderScreeningHoldAction(form(CLEAR));
+    await clearSenderScreeningHoldAction(await reviewed());
     expect(await held()).toBe(false);
     const c = await cs.getCustomer('A', PHONE);
     expect(c?.kycStatus).toBe('verified'); // nothing else moved
@@ -198,28 +207,57 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
 
   it.each(['pending', 'rejected'] as const)('a %s customer is cleared too (any kycStatus)', async (kycStatus) => {
     await cs.saveCustomer({ ...(await cs.getCustomer('A', PHONE))!, kycStatus });
-    await clearSenderScreeningHoldAction(form(CLEAR));
+    await clearSenderScreeningHoldAction(await reviewed());
     expect(await held()).toBe(false);
     expect((await auditRows())[0].meta.kycStatus).toBe(kycStatus);
   });
 
   it('no active hold -> refused', async () => {
-    await clearSenderScreeningHoldAction(form(CLEAR));
-    await expect(clearSenderScreeningHoldAction(form(CLEAR))).rejects.toThrow('This customer has no active screening hold.');
+    await clearSenderScreeningHoldAction(await reviewed());
+    await expect(clearSenderScreeningHoldAction(await reviewed())).rejects.toThrow('This customer has no active screening hold.');
     await db.execute(sql`UPDATE customers SET watchlist_hit = NULL, screening_flagged_at = NULL, screening_cleared_at = NULL WHERE partner_id = 'A'`);
-    await expect(clearSenderScreeningHoldAction(form(CLEAR))).rejects.toThrow('This customer has no active screening hold.');
+    await expect(clearSenderScreeningHoldAction(await reviewed())).rejects.toThrow('This customer has no active screening hold.');
     expect(await auditRows()).toHaveLength(1);
   });
 
   it('the clear time is taken after the locked read, so it lifts the flag on file at that moment', async () => {
     await flag('A', 1); // a match stamped a moment before the clear
-    await clearSenderScreeningHoldAction(form(CLEAR));
+    await clearSenderScreeningHoldAction(await reviewed());
     expect(await held()).toBe(false);
+  });
+
+  // Pack 2 review R3 (H1 a): the clear lifts only the match the admin saw.
+  it('a newer match than the one shown is refused: nothing written, no audit', async () => {
+    const stale = await reviewed(); // the page as the admin opened it
+    await flag('A', 60_000); // a newer Persona match stamped since
+    const before = await readSenderScreeningFlags(db, 'A', PHONE);
+    await expect(clearSenderScreeningHoldAction(stale)).rejects.toThrow(
+      'The screening for this customer changed since this page loaded. Reload the page and review it again.',
+    );
+    expect(await readSenderScreeningFlags(db, 'A', PHONE)).toEqual(before);
+    expect(await held()).toBe(true);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('a form without the reviewed flag time, or with a different one, is refused', async () => {
+    const msg = 'The screening for this customer changed since this page loaded. Reload the page and review it again.';
+    await expect(clearSenderScreeningHoldAction(form(CLEAR))).rejects.toThrow(msg); // an older page's form
+    await expect(clearSenderScreeningHoldAction(form({ ...CLEAR, screeningFlaggedAt: '' }))).rejects.toThrow(msg);
+    await expect(clearSenderScreeningHoldAction(form({ ...CLEAR, screeningFlaggedAt: 'not a time' }))).rejects.toThrow(msg);
+    expect(await held()).toBe(true);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('a hold with no flag time (booleans only) clears with the empty value the page posts', async () => {
+    await db.execute(sql`UPDATE customers SET screening_flagged_at = NULL WHERE partner_id = 'A'`);
+    expect(await held()).toBe(true);
+    await clearSenderScreeningHoldAction(form({ ...CLEAR, screeningFlaggedAt: '' }));
+    expect(await auditRows()).toHaveLength(1);
   });
 
   it('failed audit rolls back', async () => {
     failAudit = true;
-    await expect(clearSenderScreeningHoldAction(form(CLEAR))).rejects.toThrow('audit insert failed');
+    await expect(clearSenderScreeningHoldAction(await reviewed())).rejects.toThrow('audit insert failed');
     expect(await held()).toBe(true);
     expect((await cs.getCustomer('A', PHONE))?.screeningClearedAt).toBeUndefined();
     expect(await auditRows()).toEqual([]);
@@ -236,7 +274,7 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
     });
     const before = await mint(50);
     expect(before.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
-    await clearSenderScreeningHoldAction(form(CLEAR));
+    await clearSenderScreeningHoldAction(await reviewed());
     const after = await mint(60);
     expect(after.complianceStatus).toBe('cleared');
     expect(after.complianceReasons).toEqual([]);

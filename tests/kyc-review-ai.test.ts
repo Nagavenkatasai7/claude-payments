@@ -247,6 +247,19 @@ describe('suggestKycReview — identity minimisation (Program-Fix 37)', () => {
     expect(text).toContain('Persona inquiry: inq_abc');
   });
 
+  // Pack 2 review R3 (H1 display truth): a stamped, uncleared hold with the
+  // booleans nulled is never "clear" to the advisory model (a state, no time, no PII).
+  it('a stamped, uncleared screening hold is not printed as clear', async () => {
+    const flagged = new Date(Date.now() - 3_600_000).toISOString();
+    const text = await sentText({ ...full, watchlistHit: undefined, pepHit: undefined, screeningFlaggedAt: flagged });
+    expect(text).not.toContain('Screening: clear');
+    expect(text).toContain('Screening: SCREENING HOLD (match on file)');
+    expect(text).not.toContain(flagged);
+    chatMock.mockReset();
+    const lifted = await sentText({ ...full, watchlistHit: undefined, pepHit: undefined, screeningFlaggedAt: flagged, screeningClearedAt: new Date().toISOString() });
+    expect(lifted).toContain('Screening: clear');
+  });
+
   it('prints missing when a name or DOB is absent', async () => {
     const text = await sentText({ ...full, fullName: undefined, dateOfBirth: undefined });
     expect(text).toContain('Declared full name: missing');

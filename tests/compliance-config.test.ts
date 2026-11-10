@@ -96,3 +96,20 @@ describe('resolveCorridorRules — AML (Program-Fix 43)', () => {
     expect(resolveCorridorRules(partner({ GB: { amlHolds: 'yes' as never } }), 'GB').amlHolds).toBe(false);
   });
 });
+
+// Pack 2 review R3 (H1 display truth): the one label every staff view and the
+// advisory KYC prompt use, so a stamped, uncleared hold never reads "clear".
+describe('senderScreeningLabel (pack 2 review R3)', () => {
+  it('names a hit, a stamped hold with no boolean, and clear by the shared rule', async () => {
+    const { senderScreeningLabel } = await import('@/lib/compliance-config');
+    const t0 = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const t1 = new Date(Date.now() - 3_600_000).toISOString();
+    expect(senderScreeningLabel({ watchlistHit: true, pepHit: true })).toBe('watchlist');
+    expect(senderScreeningLabel({ pepHit: true })).toBe('pep');
+    // A stale upsert nulled the booleans; the stamp keeps the hold.
+    expect(senderScreeningLabel({ watchlistHit: null, pepHit: null, screeningFlaggedAt: t0 })).toBe('hold');
+    expect(senderScreeningLabel({ screeningFlaggedAt: t0, screeningClearedAt: t1 })).toBe('clear');
+    expect(senderScreeningLabel({ screeningFlaggedAt: t1, screeningClearedAt: t0 })).toBe('hold');
+    expect(senderScreeningLabel({})).toBe('clear');
+  });
+});

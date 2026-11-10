@@ -22,7 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { clearSenderScreeningHoldAction, manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
-import { canDecideCustomerKyc, senderScreeningHoldActive } from '@/lib/compliance-config';
+import { canDecideCustomerKyc, senderScreeningHoldActive, senderScreeningLabel } from '@/lib/compliance-config';
 import { CustomerLink } from '../../customer-link';
 import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
@@ -34,6 +34,13 @@ const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'Status', primary: true },
   { label: 'Created' },
 ];
+
+const SCREENING_LABEL = {
+  watchlist: '⚠ Watchlist hit',
+  pep: '⚠ PEP hit',
+  hold: '⚠ Screening hold',
+  clear: 'Clear',
+} as const;
 
 const DL_CLASS =
   'grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-sm [&_dt]:text-muted-foreground [&_dd]:min-w-0 [&_dd]:break-words';
@@ -161,7 +168,8 @@ export default async function CustomerDetailPage({
               <dt>Review state</dt><dd>{customer.kycReviewState ?? 'none'}</dd>
               <dt>Inquiry</dt><dd>{customer.kycInquiryId ?? '—'}</dd>
               <dt>ID last 4</dt><dd>{customer.idLast4 ? `••••${customer.idLast4}` : '—'}</dd>
-              <dt>Screening</dt><dd>{customer.watchlistHit ? '⚠ Watchlist hit' : customer.pepHit ? '⚠ PEP hit' : 'Clear'}</dd>
+              {/* Pack 2 review R3: the shared rule, so a stamped, uncleared hold never reads "Clear". */}
+              <dt>Screening</dt><dd>{SCREENING_LABEL[senderScreeningLabel(customer)]}</dd>
               {(customer.screeningFlaggedAt || customer.screeningClearedAt) && (
                 <>
                   <dt>Screening hold</dt>
@@ -203,6 +211,9 @@ export default async function CustomerDetailPage({
                 <form action={clearSenderScreeningHoldAction} className="space-y-3">
                   <input type="hidden" name="phone" value={customer.senderPhone} />
                   <input type="hidden" name="partnerId" value={customer.partnerId} />
+                  {/* Pack 2 review R3 (H1 a): the flag time shown above; the action
+                      refuses the clear if the locked row now carries another. */}
+                  <input type="hidden" name="screeningFlaggedAt" value={customer.screeningFlaggedAt ?? ''} />
                   <textarea
                     name="reason"
                     required

@@ -9,6 +9,8 @@ import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { outbox } from '@/db/schema';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import type { PersonaEvent } from '@/lib/providers/persona-webhook-parse';
 
 // Customers live in Postgres now (PGlite per test); the audit hash + event
@@ -446,6 +448,18 @@ describe('kyc-case-store.applyPersonaEvent (Program-Fix 35)', () => {
     expect(r?.after.kycReviewState).toBe('approved');
     expect(r?.after.watchlistHit).toBe(true);
     expect(await flaggedAt()).not.toBeNull();
+  });
+
+  // Pack 2 review R3 (H1 b): the apply's clock was read before a platform
+  // clear committed (here the test clock is years behind it); the match still
+  // re-arms the hold, because the stamp's order comes from the locked row.
+  it('a match applied after a committed clear re-arms the hold, whatever the apply clock read', async () => {
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true, screening_flagged_at = ${new Date(Date.now() - 2 * 3_600_000).toISOString()}::timestamptz, screening_cleared_at = ${new Date().toISOString()}::timestamptz WHERE partner_id = 'default' AND phone = ${PHONE}`);
+    expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'default', PHONE))).toBe(false);
+    const watch = evt({ eventId: 'evt_rearm', name: 'report/watchlist.matched', referenceId: null, reportId: 'rep_9', matchKind: 'watchlist', status: 'ready' });
+    await store.applyPersonaEvent('default', PHONE, watch, opts());
+    expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'default', PHONE))).toBe(true);
   });
 
   it('no match -> no stamp', async () => {

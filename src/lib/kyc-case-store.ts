@@ -202,8 +202,12 @@ export function createKycCaseStore(
         // screening hold in THIS transaction (an approved customer too: a
         // later match records its flag). The single-column writer, so the
         // stamp survives any stale whole-row save; it re-arms a cleared hold.
+        // Pack 2 review R3 (H1 b): the stamp time is read AFTER lockCustomer
+        // (nowIso was read before it), and the writer keeps it later than any
+        // clear on the locked row, so a clear that won the lock first never
+        // outranks this match.
         if (delta.pepHit === true || delta.watchlistHit === true) {
-          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(nowIso));
+          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(now()));
         }
         if (event.matchKind !== undefined && opts.alertMessage) {
           const message =
