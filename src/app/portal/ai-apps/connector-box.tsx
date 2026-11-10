@@ -34,6 +34,7 @@ export function ConnectorBox({ url }: { url: string }) {
               text={url}
               label={t('portal.agentApps.connector.copy')}
               copiedLabel={t('portal.agentApps.connector.copied')}
+              failedLabel={t('portal.agentApps.connector.copyFailed')}
               ariaLabel={t('portal.agentApps.connector.copyLabel')}
             />
           </div>

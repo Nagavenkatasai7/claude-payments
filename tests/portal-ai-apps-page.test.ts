@@ -79,7 +79,7 @@ const boxUrl = (html: string) => /<code[^>]*data-connector-url[^>]*>([^<]*)<\/co
 
 describe('/portal/ai-apps connector box', () => {
   it('on send.smartremit.ai: the send address, equal to the protected resource metadata', async () => {
-    await grant();
+    await gateOpen();
     const html = await page();
     expect(html).toContain('data-connector-box');
     expect(boxUrl(html)).toBe('https://send.smartremit.ai/api/mcp');
@@ -88,14 +88,15 @@ describe('/portal/ai-apps connector box', () => {
 
   it('on the custom host: the custom host\'s own address', async () => {
     on('smartremitai.tgfl.org', 'tgfl');
-    await grant();
+    await gateOpen();
     const html = await page();
     expect(boxUrl(html)).toBe('https://smartremitai.tgfl.org/api/mcp');
     expect(boxUrl(html)).toBe(protectedResourceMetadata('smartremitai.tgfl.org').resource);
     expect(html).not.toContain('send.smartremit.ai/api/mcp');
   });
 
-  it('shown in the list branch (a live grant) and in the empty branch (gate open, no grant)', async () => {
+  it('shown in the list branch (gate open, a live grant) and in the empty branch (gate open, no grant)', async () => {
+    await gateOpen();
     await grant();
     const list = await page();
     expect(list).toContain('data-connector-box');
@@ -109,13 +110,21 @@ describe('/portal/ai-apps connector box', () => {
   });
 
   it('a section per AI app, the copy button, the disclaimer and the absolute guide link', async () => {
-    await grant();
+    await gateOpen();
     const html = await page();
     for (const id of ['claude', 'chatgpt', 'perplexity']) expect(html).toContain(`id="connect-${id}"`);
     expect(html).toContain('href="https://smartremit.ai/docs/ai-apps"');
     expect(html).toContain('aria-label="Copy the connector address"');
     expect(html).toContain('not affiliated');
     expect(html).not.toMatch(/\b(test|testing)\b/i);
+  });
+
+  it('gate shut but a live grant → the Disconnect list only, no connector box (F2: those steps would end in a 403)', async () => {
+    await grant();
+    const html = await page();
+    expect(html).not.toContain('data-connector-box');
+    expect(html).not.toContain('data-connector-url');
+    expect(html).toContain('Disconnect');
   });
 
   it('404 when the page is not visible (gate shut, no grant)', async () => {

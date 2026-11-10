@@ -211,7 +211,19 @@ describe('Home: Ways to send', () => {
     await createFeatureFlagRepo(db).upsert({ key: 'agent.tools', scopeType: 'partner', scopeId: DEFAULT_PARTNER_ID, enabled: on, reason: 'ways card', updatedBy: 'root' });
     invalidateFlagCache(db);
   }
-  afterEach(() => invalidateFlagCache(db));
+  async function agentToolsFor(partnerId: string) {
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.tools', scopeType: 'partner', scopeId: partnerId, enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+  }
+  async function liveGrant() {
+    const repo = createAgentOAuthRepo(db);
+    await repo.insertClient({ id: AGC, partnerId: DEFAULT_PARTNER_ID, name: 'App', redirectUris: ['https://app.example/cb'], authMethod: 'none', secretHash: null });
+    await repo.insertGrant({ id: AGG, partnerId: DEFAULT_PARTNER_ID, phone, clientId: AGC, scopes: ['quotes:read'], refreshHash: `h-${AGG}`, now: new Date(), expiresAt: new Date(Date.now() + 86_400_000) });
+  }
+  afterEach(() => {
+    delete process.env.DEMO_PHONES;
+    invalidateFlagCache(db);
+  });
 
   it('shown on every portal; on the default tenant WhatsApp opens the SmartRemit bot in a new tab', async () => {
     signIn(DEFAULT_PARTNER_ID, phone);
@@ -223,11 +235,27 @@ describe('Home: Ways to send', () => {
     expect(html).not.toMatch(/\b(test|testing)\b/i);
   });
 
-  it('a partner tenant shows the card without the shared bots', async () => {
+  it('a partner tenant shows the card without the shared bots (agent.tools on there)', async () => {
+    await agentToolsFor('pa');
     const html = await home(); // signed in on 'pa'
     expect(html).toContain('data-ways-to-send');
+    expect(html).toContain('Claude');
     expect(html).not.toContain('data-way="whatsapp"');
     expect(html).not.toContain('api.whatsapp.com');
+  });
+
+  it('a partner tenant with agent.tools off has nothing to list → no card at all (F9)', async () => {
+    const html = await home(); // signed in on 'pa'
+    expect(html).not.toContain('data-ways-to-send');
+    expect(html).not.toContain('An AI app never pays');
+  });
+
+  it('agent.tools off on the default tenant → the card shows WhatsApp but no AI-app pay sentence (F9)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    expect(html).toContain('data-ways-to-send');
+    expect(html).not.toContain('An AI app never pays');
+    expect(html).toContain('SmartRemit pay page');
   });
 
   it('agent.tools off → no AI app is named', async () => {
@@ -246,14 +274,23 @@ describe('Home: Ways to send', () => {
     expect(html).toContain('not affiliated');
   });
 
-  it('agent.tools on and a live grant → each AI app links to its section of /portal/ai-apps', async () => {
+  it('agent.tools on and the gate open (phone in demo mode) → each AI app links to its section of /portal/ai-apps', async () => {
     signIn(DEFAULT_PARTNER_ID, phone);
     await agentTools(true);
-    const repo = createAgentOAuthRepo(db);
-    await repo.insertClient({ id: AGC, partnerId: DEFAULT_PARTNER_ID, name: 'App', redirectUris: ['https://app.example/cb'], authMethod: 'none', secretHash: null });
-    await repo.insertGrant({ id: AGG, partnerId: DEFAULT_PARTNER_ID, phone, clientId: AGC, scopes: ['quotes:read'], refreshHash: `h-${AGG}`, now: new Date(), expiresAt: new Date(Date.now() + 86_400_000) });
+    process.env.DEMO_PHONES = phone;
     const html = await home();
     for (const id of ['claude', 'chatgpt', 'perplexity']) expect(html).toContain(`href="/portal/ai-apps#connect-${id}"`);
+    expect(html).toContain('An AI app never pays');
+  });
+
+  it('agent.tools on, gate shut but a live grant → names only, by invitation: no Set up link that ends in a 403 (F2)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    await liveGrant();
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).toContain(app);
+    expect(html).not.toContain('/portal/ai-apps#connect-');
+    expect(html).toContain('By invitation');
   });
 });
 

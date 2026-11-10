@@ -21,8 +21,7 @@ import { Button, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { TransferRows } from './transfers/transfer-rows';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { loadMyRewards, type MyRewards } from '@/lib/rewards/read';
-import { agentPortal } from '@/lib/agent-auth/portal-wiring';
-import { agentToolsOn } from '@/lib/agent-auth/gate';
+import { agentGateOpen, agentToolsOn } from '@/lib/agent-auth/gate';
 import { telegramConfigured } from '@/lib/telegram';
 import { telegramSwitchOn } from '@/lib/telegram-link';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -116,8 +115,11 @@ export default async function PortalHomePage() {
     getDailyVolumeStore().getTodayCents(owner.partnerId, owner.phone),
     createRecipientRepo(getDb()).listAllForSender(owner.partnerId, owner.phone),
     loadMyRewards(getDb(), getStore(), owner.partnerId, owner.phone, new Date(), (usd) => formatMoney(usd, 'USD')),
-    // "Ways to send" (TGFL custom host, design §5.2): three reads, each fails closed.
-    agentPortal().visible(owner.partnerId, owner.phone),
+    // "Ways to send" (TGFL custom host, design §5.2): three reads, each fails closed. The AI links
+    // need the full gate (switch AND demo phone), not the page's visible(): a customer who only
+    // keeps a live grant could not finish the steps (authorize answers 403), so they get names only.
+    // It also spares the layout's hasCustomerGrants query a second run per render.
+    agentGateOpen(getDb(), owner.partnerId, owner.phone),
     agentToolsOn(getDb(), site.partnerId),
     sharedBot && telegramConfigured() ? telegramSwitchOn().catch(() => false) : false,
   ]);

@@ -79,13 +79,15 @@ export default async function PortalLayout({ children }: { children: ReactNode }
                 <span className="inline-flex items-center gap-2">
                   {skinLogo ? (
                     // A small same-origin static file under /brand/partners/ of known size: a plain <img> is enough.
+                    // Decorative (alt=""): the name follows as text, so the link is read once. No h-auto: the
+                    // height attribute keeps the box reserved while the file loads; max-h caps it.
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={skinLogo.src}
-                      alt={skin.name}
+                      alt=""
                       width={skinLogo.width}
                       height={skinLogo.height}
-                      className="h-auto w-auto max-h-8 sm:max-h-9"
+                      className="w-auto max-h-8 sm:max-h-9"
                     />
                   ) : null}
                   {/* The name stays as text: a logo's own lettering is too small to read at header size. */}

@@ -24,7 +24,10 @@
 // - no partner can claim a skin slug (setPartnerSlug);
 // - portal sessions and AI-app refresh tokens minted on a custom host are bound to it
 //   (customHostBinding), so they never work on a smartremit.ai host; bumping credentialEpoch revokes
-//   them all;
+//   them all. It does NOT end AI-app access tokens (not epoch-bound, they live up to
+//   AGENT_ACCESS_TTL_SEC, 1 h, while their grant row stays live): keep portal.skins off for at least
+//   1 h after switching it off, even once the bump is merged, or revoke those grants. Orphaned
+//   sessions stay listed on the Devices page (dead, not usable) until their idle timeout;
 // - never remove a host from `hosts` while its CNAME may still point at Vercel: it would parse as apex
 //   and serve the staff sign-in (CLAUDE.md "Site skins", docs/ROLLBACK.md).
 // A skin slug is deliberately NOT in RESERVED_SLUGS: a reserved label makes the host "refused"

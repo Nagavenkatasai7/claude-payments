@@ -106,19 +106,23 @@ describe('portal layout', () => {
     });
     // T8: the TGFL emblem (150 x 100). Its own lettering is too small to read at header size, so the
     // name stays next to it as text.
-    it('a logo under /brand/partners/ renders as an <img> with the skin name as its alt text, and the name stays as text', async () => {
+    it('a logo under /brand/partners/ renders as a decorative <img> (alt="", the name follows as text), and the name stays as text', async () => {
       h.site = skinned({ logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 } });
       const html = await renderLayout();
       const header = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
       const img = header.match(/<img[^>]*>/)?.[0] ?? '';
       expect(img).toMatch(/src="\/brand\/partners\/tgfl\.png"/);
-      expect(img).toContain('alt="TGFL"');
+      // The link's accessible name is the text once ("TGFL"), never "TGFL TGFL".
+      expect(img).toContain('alt=""');
+      expect(img).not.toContain('alt="TGFL"');
       // Fixed height that fits the header (never above the natural 100 px), width from the natural
       // aspect, so the layout does not shift while the file loads.
       expect(img).toContain('width="54"');
       expect(img).toContain('height="36"');
-      // CSS only caps the height (max-h): a logo is never stretched above its natural size.
-      expect(img).toMatch(/class="h-auto w-auto max-h-8 sm:max-h-9"/);
+      // CSS only caps the height (max-h): a logo is never stretched above its natural size. No
+      // h-auto: CSS height:auto would cancel the height attribute and the box would not be reserved.
+      expect(img).toMatch(/class="w-auto max-h-8 sm:max-h-9"/);
+      expect(img).not.toContain('h-auto');
       expect(header).toMatch(/<span[^>]*data-skin-brand[^>]*>TGFL<\/span>/);
       expect(header.indexOf('<img')).toBeLessThan(header.indexOf('data-skin-brand'));
       expect(html).not.toContain('smartremit-lockup.png');

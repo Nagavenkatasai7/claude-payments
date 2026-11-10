@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { waysToSend, type WaysInput } from '@/lib/portal-ways-to-send';
 import { t } from '@/lib/i18n';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { WaysToSendCard } from '@/app/portal/ways-to-send-card';
 
 // TGFL custom host, design §5.1 / §6 item 25: the portal home's "Ways to send" list. Honest per
 // tenant (the shared WhatsApp and Telegram bots belong to the 'default' tenant), per switch
@@ -63,5 +66,30 @@ describe('waysToSend', () => {
         expect(text).not.toMatch(/\b(test|testing|beta|pilot|instant)\b|in minutes/i);
       }
     }
+  });
+});
+
+// Whole-branch review F9: the card is honest about what it lists.
+describe('WaysToSendCard', () => {
+  const card = (i: Partial<WaysInput>) => renderToStaticMarkup(createElement(WaysToSendCard, { ways: waysToSend({ ...base, ...i }) }));
+
+  it('nothing to list (a partner tenant, agent.tools off) → no card at all', () => {
+    expect(card({ sharedBot: false, aiSwitchOn: false })).toBe('');
+  });
+
+  it('no AI app listed → the pay-page sentence without the AI-app sentence or the disclaimer', () => {
+    const html = card({ aiSwitchOn: false });
+    expect(html).toContain('data-ways-to-send');
+    expect(html).toContain(t('portal.home.ways.payNote'));
+    expect(html).not.toContain(t('portal.home.ways.aiPayNote'));
+    expect(html).not.toContain('not affiliated');
+  });
+
+  it('an AI app listed → the AI-app sentence and the disclaimer too', () => {
+    const html = card({ aiSwitchOn: true, aiAppsOn: false });
+    expect(html).toContain(t('portal.home.ways.aiPayNote'));
+    expect(html).toContain(t('portal.home.ways.payNote'));
+    expect(html).toContain('not affiliated');
+    expect(`${t('portal.home.ways.aiPayNote')} ${t('portal.home.ways.payNote')}`).not.toMatch(/\b(test|testing)\b/i);
   });
 });

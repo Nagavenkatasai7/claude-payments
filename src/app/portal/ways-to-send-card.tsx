@@ -46,6 +46,8 @@ function WayLink({ way }: { way: WayToSend & { href: string } }) {
 }
 
 export function WaysToSendCard({ ways }: { ways: readonly WayToSend[] }) {
+  // Nothing to offer (a partner tenant with agent.tools off): no empty card.
+  if (ways.length === 0) return null;
   const anyAi = ways.some((w) => w.id === 'claude' || w.id === 'chatgpt' || w.id === 'perplexity');
   return (
     <section data-ways-to-send aria-labelledby="ways-title">
@@ -56,26 +58,27 @@ export function WaysToSendCard({ ways }: { ways: readonly WayToSend[] }) {
           </h2>
           <p className="mt-1 text-[14px] text-ds-ink-muted">{t('portal.home.ways.body')}</p>
         </div>
-        {ways.length > 0 ? (
-          <ul className="flex flex-col gap-3">
-            {ways.map((w) => {
-              const badge = BADGE[w.badge];
-              return (
-                <li key={w.id} data-way={w.id} className="flex flex-col gap-2 rounded-ds-card border border-ds-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="flex flex-wrap items-center gap-2 text-[15px] font-semibold text-ds-ink">
-                      {t(w.nameKey)}
-                      <Badge tone={badge.tone}>{t(badge.key)}</Badge>
-                    </p>
-                    <p className="mt-1 text-[13.5px] text-ds-ink-muted">{t(w.noteKey)}</p>
-                  </div>
-                  {w.href !== null ? <WayLink way={{ ...w, href: w.href }} /> : null}
-                </li>
-              );
-            })}
-          </ul>
-        ) : null}
-        <p className="text-[13px] text-ds-ink-muted">{t('portal.home.ways.payNote')}</p>
+        <ul className="flex flex-col gap-3">
+          {ways.map((w) => {
+            const badge = BADGE[w.badge];
+            return (
+              <li key={w.id} data-way={w.id} className="flex flex-col gap-2 rounded-ds-card border border-ds-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="flex flex-wrap items-center gap-2 text-[15px] font-semibold text-ds-ink">
+                    {t(w.nameKey)}
+                    <Badge tone={badge.tone}>{t(badge.key)}</Badge>
+                  </p>
+                  <p className="mt-1 text-[13.5px] text-ds-ink-muted">{t(w.noteKey)}</p>
+                </div>
+                {w.href !== null ? <WayLink way={{ ...w, href: w.href }} /> : null}
+              </li>
+            );
+          })}
+        </ul>
+        <p className="text-[13px] text-ds-ink-muted">
+          {anyAi ? `${t('portal.home.ways.aiPayNote')} ` : null}
+          {t('portal.home.ways.payNote')}
+        </p>
         {anyAi ? <p className="text-[12px] text-ds-ink-muted">{t('portal.home.ways.disclaimer')}</p> : null}
       </Card>
     </section>
