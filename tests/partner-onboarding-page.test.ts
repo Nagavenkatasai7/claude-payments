@@ -205,6 +205,15 @@ describe('/partner/onboarding: the posture card', () => {
     expect(card).toContain(t('partner.live.posture.sign'));
     expect(card).not.toContain(t('partner.live.posture.forcedNote'));
   });
+  // Pack 3 review Q1 (H1): the default tenant never signs a posture, so the card has no form.
+  it("the default tenant -> one neutral line, no form", async () => {
+    await signInAs({ username: 'def-admin', partnerId: 'default' });
+    const html = decode(await render());
+    const card = html.slice(html.indexOf(POSTURE));
+    expect(card).toContain(t('partner.live.posture.defaultTenant'));
+    expect(card).not.toContain('data-testid="partner-live-posture-form"');
+    expect(card).not.toContain(t('partner.live.posture.sign'));
+  });
   it("a delegated partner's form pre-checks 'partner'", async () => {
     await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'pa'`);
     await signInAs({});

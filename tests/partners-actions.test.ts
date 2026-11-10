@@ -1728,4 +1728,67 @@ describe('updatePartnerAction: kycMode under a signed posture or a live certific
     }
     expect(await kycAudits()).toEqual([]);
   });
+
+  // Pack 3 review Q1 (F1): the lock is on the certification RECORD, whatever the status, so
+  // suspend -> flip -> reactivate cannot leave a standing certification on a different kycMode.
+  it('a SUSPENDED partner with a standing certification: a kycMode flip is refused, nothing written', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk6');
+    await certifyPartnerForTest(db, 'pk6', { posture: true });
+    await ps.savePartner({ ...(await ps.getPartner('pk6'))!, status: 'suspended' });
+    const before = await ps.getPartner('pk6');
+    await expect(updatePartnerAction(kycForm('pk6', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    const after = await ps.getPartner('pk6');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay');
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  // Pack 3 review Q1 (F2 = H4): the refusal is decided on the row read under the lock inside the
+  // save transaction, not on the first, unlocked read. Here the row is certified after that read.
+  it('certified between the first read and the save: the flip is refused on the locked row, nothing written', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk7');
+    const realGet = ps.getPartner.bind(ps);
+    const spy = vi.spyOn(ps, 'getPartner').mockImplementationOnce(async (pid) => {
+      const snap = await realGet(pid); // uncertified
+      await certifyPartnerForTest(db, 'pk7', { posture: true }); // a certify commits in between
+      return snap;
+    });
+    await expect(updatePartnerAction(kycForm('pk7', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    spy.mockRestore();
+    const after = await ps.getPartner('pk7');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay');
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  it('the save transaction locks the partners row FOR NO KEY UPDATE before the partners upsert', async () => {
+    const { captureQueries } = await import('./helpers-db');
+    await seedKay('pk8');
+    const stop = captureQueries();
+    await updatePartnerAction(kycForm('pk8', 'delegated', 'Kay Renamed'));
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const lock = qs.findIndex((q) => q.startsWith('select') && q.includes('from "partners"') && q.includes('for no key update'));
+    const upsert = qs.findIndex((q) => q.startsWith('insert into "partners"'));
+    expect(lock).toBeGreaterThan(-1);
+    expect(upsert).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(upsert);
+  });
+
+  it('a REVOKED certification does not lock: the flip is saved with one audit row (from the locked row)', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    await seedKay('pk9');
+    await certifyPartnerForTest(db, 'pk9', { posture: true });
+    const revokedAt = new Date().toISOString();
+    await db.execute(rawSql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{certification}', (live_controls -> 'certification') || jsonb_build_object('revokedAt', ${revokedAt}::text, 'revokedBy', 'admin')) WHERE id = 'pk9'`);
+    await updatePartnerAction(kycForm('pk9', 'delegated'));
+    expect((await ps.getPartner('pk9'))?.kycMode).toBe('delegated');
+    const a = await kycAudits();
+    expect(a).toHaveLength(1);
+    expect(a[0].meta).toEqual({ from: 'ours', to: 'delegated', postureSigned: true });
+  });
 });

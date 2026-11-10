@@ -177,6 +177,20 @@ describe('signPostureAction', () => {
     expect(audit).toEqual([{ partner_id: 'pa', subject_id: 'pa' }]);
   });
 
+  // Pack 3 review Q1 (H1): the default tenant (SmartRemit's own demo tenant) never has a signed
+  // posture: one would force verify-before-send on all default traffic, with no way to undo it.
+  it("a 'default'-scoped admin with MFA and a fresh step-up is refused; live_controls stays {}, no audit row", async () => {
+    await admin({ username: 'def-admin', partnerId: 'default' });
+    staffMfa.enrolled.add('def-admin');
+    const before = await snapshot();
+    expect(await signPostureAction(null, form())).toEqual({ ok: false, error: t('partner.onboarding.failed') });
+    expect(await snapshot()).toBe(before);
+    expect(await rows<{ lc: unknown }>(sql`SELECT live_controls AS lc FROM partners WHERE id = 'default'`)).toEqual([{ lc: {} }]);
+    expect(await rows(sql`SELECT id FROM audit_events WHERE action = 'partner.live.posture.sign'`)).toEqual([]);
+    expect(gate.calls).toEqual([]);
+    expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
   it('a mismatch with the platform kycMode -> the mismatch copy, nothing written, no poke', async () => {
     await admin();
     const before = await snapshot();

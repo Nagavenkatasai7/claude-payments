@@ -87,6 +87,14 @@ describe('resolveKycMode', () => {
     expect(resolveKycMode(partner({ liveControls: signed }))).toEqual({ mode: 'ours', requireKyc: true });
   });
 
+  // Pack 3 review Q1 (H1): the default tenant never has a signed posture, so one stored there
+  // anyway is not honoured; its column still decides.
+  it("partner 'default': a stored posture does not force requireKyc; the column still decides", () => {
+    const signed = certifiedLiveControls({ posture: true });
+    expect(resolveKycMode(partner({ id: 'default', kycMode: 'ours', liveControls: signed }))).toEqual({ mode: 'ours', requireKyc: false });
+    expect(resolveKycMode(partner({ id: 'default', requireKycBeforeSend: true, liveControls: signed }))).toEqual({ mode: 'ours', requireKyc: true });
+  });
+
   it('no posture (or a malformed one dropped by the parser) -> the column decides, as today', () => {
     const unsigned = certifiedLiveControls();
     expect(resolveKycMode(partner({ kycMode: 'ours', liveControls: unsigned }))).toEqual({ mode: 'ours', requireKyc: false });

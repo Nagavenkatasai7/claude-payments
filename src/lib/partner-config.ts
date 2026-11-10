@@ -178,10 +178,11 @@ export interface ResolvedKyc {
 export function resolveKycMode(
   // Fix pack 3 T2: widened to the fields it reads (+ liveControls for the
   // posture term, T9) so pure callers (live-certification.ts) can pass a Pick.
-  partner: Pick<Partner, 'kycMode' | 'requireKycBeforeSend' | 'liveControls'> | null | undefined,
+  // Pack 3 review Q1 (H1): + id, because the default tenant's posture is never honoured.
+  partner: Pick<Partner, 'id' | 'kycMode' | 'requireKycBeforeSend' | 'liveControls'> | null | undefined,
 ): ResolvedKyc {
   const mode: KycMode = partner?.kycMode ?? 'ours';
-  return { mode, requireKyc: partner?.requireKycBeforeSend === true || postureSigned(partner?.liveControls) };
+  return { mode, requireKyc: partner?.requireKycBeforeSend === true || (partner?.id !== DEFAULT_PARTNER_ID && postureSigned(partner?.liveControls)) };
 }
 
 /**

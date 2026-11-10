@@ -13,6 +13,7 @@ import { PARTNER_ROUTES, type PartnerRouteKey } from '../../routes';
 import { getPartnerStore } from '@/lib/partner-store';
 import type { KycDecider, PostureRecord } from '@/lib/live-controls';
 import type { Partner } from '@/lib/types';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { AttestTemplatesForm, PostureForm, RequestGoLiveForm } from './onboarding-forms';
 
 export const metadata: Metadata = {
@@ -165,6 +166,10 @@ function PostureCard({ partner }: { partner: Partner | null | undefined }) {
         {t(partner === undefined ? 'partner.live.posture.unavailable' : 'partner.onboarding.failed')}
       </p>
     );
+  } else if (partner.id === DEFAULT_PARTNER_ID) {
+    // Pack 3 review Q1 (H1): SmartRemit's own default tenant never signs a posture (the action and
+    // the writer refuse it too), so no form is rendered.
+    body = <p className="mt-2 text-[14px] leading-relaxed text-ds-ink">{t('partner.live.posture.defaultTenant')}</p>;
   } else if (posture) {
     body = (
       <div className="mt-2 flex flex-col gap-2 text-[14px] leading-relaxed text-ds-ink">
@@ -187,7 +192,7 @@ function PostureCard({ partner }: { partner: Partner | null | undefined }) {
       <div data-testid="partner-live-posture">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-[16px] font-semibold text-ds-ink">{t('partner.live.posture.title')}</h2>
-          {posture ? <Badge tone="success">{t('partner.onboarding.done')}</Badge> : null}
+          {posture && partner?.id !== DEFAULT_PARTNER_ID ? <Badge tone="success">{t('partner.onboarding.done')}</Badge> : null}
         </div>
         <p className="mt-1 text-[14px] leading-relaxed text-ds-ink-muted">{t('partner.live.posture.sub')}</p>
         {body}

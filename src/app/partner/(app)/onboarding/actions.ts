@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { and, eq } from 'drizzle-orm';
 import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { scopeOf } from '@/lib/staff-scope';
 import { getDb, type DbOrTx } from '@/db/client';
 import { auditEvents, partners } from '@/db/schema';
@@ -143,6 +144,9 @@ const POSTURE_REFUSAL: Record<Exclude<LiveWriteResult, { ok: true }>['code'], Me
 export async function signPostureAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.onboarding.policy);
+  // Pack 3 review Q1 (H1): SmartRemit's own default tenant never signs a posture (it would force
+  // verify-before-send on all default traffic); refused before the MFA check and the step-up.
+  if (ctx.partnerId === DEFAULT_PARTNER_ID) return refused('partner.onboarding.failed');
   if (!(await staffMfaEnrolled(ctx.username))) return refused('partner.live.posture.needMfa');
   const kyc = formData.get('kycDecider');
   const hold = formData.get('holdDecider');

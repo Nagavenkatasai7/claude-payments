@@ -52,7 +52,8 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
-import { isLiveCertified, settlementTargetUrl } from '@/lib/live-gate';
+import { hasStandingCertification, settlementTargetUrl } from '@/lib/live-gate';
+import { lockPartner } from '@/lib/live-controls-write';
 import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
@@ -130,23 +131,8 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   // partner admin must not be able to flip it (or the send gate) for their own
   // tenant — their submitted values are ignored and the stored posture kept.
   const isPlatform = scopeOf(staff).kind === 'platform';
-  const kycMode: KycMode = isPlatform
-    ? (formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours')
-    : (existing.kycMode ?? 'ours');
-  // Pack 3 review C3: kycMode names the KYC decider a signed posture was signed against, and a
-  // live certification rests on that posture. While the partner is certified, a kycMode change
-  // is refused (the whole submit, before any write): revoke the certification first. Every
-  // accepted change is audited below, in the save's transaction.
-  const previousKycMode: KycMode = existing.kycMode ?? 'ours';
-  const kycModeChanged = kycMode !== previousKycMode;
-  if (kycModeChanged && isLiveCertified(existing)) throw new Error(t('partner.live.kycModeLocked'));
-  // Fix pack 3 (contract 14): while the partner's compliance posture is signed the admin
-  // checkbox is rendered disabled (a disabled box posts nothing), so the stored column is
-  // kept as is; the posture forces the gate on in resolveKycMode regardless.
-  const requireKycBeforeSend =
-    isPlatform && !postureSigned(existing.liveControls)
-      ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
-      : existing.requireKycBeforeSend;
+  const submittedKycMode: KycMode = formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours';
+  const submittedRequireKyc = formData.get('requireKycBeforeSend') === 'on'; // OPT-IN gate, either mode
   // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
   // partner-scoped admin can set it for their own tenant — strip control
   // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
@@ -166,15 +152,32 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
-    kycMode,
-    requireKycBeforeSend,
     updatedAt: new Date().toISOString(),
   };
   // Program-Fix 38: a persona change is audited in the SAME transaction as the
   // save (tx-bound repos only inside it), so a saved change always has its row.
   const personaChanged = (existing.botPersona ?? '') !== (botPersona ?? '');
   await getDb().transaction(async (tx) => {
-    await createPartnerStore(tx).savePartner(updated);
+    // Pack 3 review C3 + Q1 (F1, F2/H4): kycMode names the KYC decider a signed posture was
+    // signed against, and a live certification rests on that posture. The KYC fields are decided
+    // on the partner row read UNDER the row lock (FOR NO KEY UPDATE, taken first, like
+    // certifyLiveAction), so a certify cannot commit between this check and the save. While a
+    // certification stands (not revoked; WHATEVER the status, so suspend -> flip -> reactivate
+    // cannot slip past), a kycMode change is refused by a throw here: the transaction rolls back
+    // and nothing is saved. Revoke the certification first. Every accepted change is audited.
+    if (!(await lockPartner(tx, id))) throw new Error('Partner not found.');
+    const locked = await createPartnerStore(tx).getPartner(id);
+    if (!locked) throw new Error('Partner not found.');
+    const previousKycMode: KycMode = locked.kycMode ?? 'ours';
+    const kycMode: KycMode = isPlatform ? submittedKycMode : previousKycMode;
+    const kycModeChanged = kycMode !== previousKycMode;
+    if (kycModeChanged && hasStandingCertification(locked.liveControls)) throw new Error(t('partner.live.kycModeLocked'));
+    // Fix pack 3 (contract 14): while the partner's compliance posture is signed the admin
+    // checkbox is rendered disabled (a disabled box posts nothing), so the stored column is
+    // kept as is; the posture forces the gate on in resolveKycMode regardless.
+    const signed = postureSigned(locked.liveControls);
+    const requireKycBeforeSend = isPlatform && !signed ? submittedRequireKyc : locked.requireKycBeforeSend;
+    await createPartnerStore(tx).savePartner({ ...updated, kycMode, requireKycBeforeSend });
     if (personaChanged) {
       await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, existing.botPersona, botPersona));
     }
@@ -185,7 +188,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
         actorType: 'staff',
         action: 'partner.kyc_mode.change',
         subjectId: id,
-        meta: { from: previousKycMode, to: kycMode, postureSigned: postureSigned(existing.liveControls) },
+        meta: { from: previousKycMode, to: kycMode, postureSigned: signed },
       });
     }
   });

@@ -1751,6 +1751,7 @@ export const en = {
   'partner.live.posture.invalid': 'Answer both questions before you sign.',
   'partner.live.posture.needMfa': 'Turn on two-step sign-in for your own account before you sign the posture.',
   'partner.live.posture.unavailable': 'We could not load your compliance posture right now. Please try again in a moment.',
+  'partner.live.posture.defaultTenant': 'This workspace does not use a compliance posture.',
   // Merge plan 2d: /partner/analytics.
   'partner.nav.analytics': 'Analytics',
   'partner.analytics.title': 'Analytics',

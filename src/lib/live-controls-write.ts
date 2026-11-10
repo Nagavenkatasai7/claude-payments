@@ -16,7 +16,7 @@ import {
   type LiveControlsKey,
   type PostureRecord,
 } from './live-controls';
-import { isLiveCertified } from './live-gate';
+import { hasStandingCertification, isLiveCertified } from './live-gate';
 import { sanctionsNoticeAddress } from './sanctions/notices';
 import type { PartnerId, PartnerSupportConfig } from './types';
 
@@ -118,7 +118,7 @@ async function recordLiveChange(
  * The KYC decider must match the platform's kycMode on the LOCKED row
  * ('delegated' -> 'partner', else 'smartremit_procedures'); a mismatch is
  * refused. A signed posture forces verify-before-send (resolveKycMode); the
- * requireKycBeforeSend column is never rewritten.
+ * requireKycBeforeSend column is never rewritten. The default tenant is refused (not_found).
  */
 export async function writePosture(
   tx: DbOrTx,
@@ -129,6 +129,9 @@ export async function writePosture(
   if (!KYC_DECIDERS.has(i.kycDecider) || !HOLD_DECIDERS.has(i.holdDecider) || typeof i.fourEyesNonSanctions !== 'boolean') {
     return { ok: false, code: 'bad_input' };
   }
+  // Pack 3 review Q1 (H1): the default tenant never has a signed posture (it would force
+  // verify-before-send on all of SmartRemit's own demo traffic, and no writer clears a posture).
+  if (partnerId === DEFAULT_PARTNER_ID) return { ok: false, code: 'not_found' };
   const locked = await tx
     .select({ kycMode: partners.kycMode, supportConfig: partners.supportConfig })
     .from(partners)
@@ -226,7 +229,7 @@ function boundedRef(raw: unknown): string | null {
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** Takes the partner row lock (FOR NO KEY UPDATE, the same lock updateLiveControlsKey takes); false when no row. */
-async function lockPartner(tx: DbOrTx, partnerId: PartnerId): Promise<boolean> {
+export async function lockPartner(tx: DbOrTx, partnerId: PartnerId): Promise<boolean> {
   const rows = await tx.select({ id: partners.id }).from(partners).where(eq(partners.id, partnerId)).limit(1).for('no key update');
   return rows.length === 1;
 }
@@ -298,9 +301,7 @@ export async function writeCertification(
   const p = await createPartnerRepo(tx).getPartner(partnerId);
   if (!p) return { ok: false, code: 'not_found' };
   const cur = p.liveControls?.certification;
-  const revoked =
-    cur?.revokedAt !== undefined && !(Date.parse(cur.revokedAt) < Date.parse(cur.certifiedAt)); // as isLiveCertified
-  if (!cur || revoked) return { ok: false, code: 'not_certified' };
+  if (!cur || !hasStandingCertification(p.liveControls)) return { ok: false, code: 'not_certified' };
   // Pack 3 review C4: never earlier than certifiedAt + 1 ms (clock skew, or a certifiedAt in the
   // future), or isLiveCertified would still read the partner as certified after a reported revoke.
   const revokedAt = stampAfter(cur.certifiedAt);

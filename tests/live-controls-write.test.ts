@@ -133,9 +133,35 @@ describe('writePosture', () => {
     await seedPartner(db, 'globex');
     expect(await posture(POSTURE_IN, 'globex')).toEqual({ ok: true });
     expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert']);
+    // The default tenant never has a posture (review Q1, H1), so its no-email rule is pinned on
+    // the compliance-user writer, which shares recordLiveChange.
     await setAddress('default');
-    expect(await posture(POSTURE_IN, 'default')).toEqual({ ok: true });
+    expect(await compliance('acme-comp1', true, 'default')).toEqual({ ok: true });
     expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert', 'ops.alert']);
+  });
+
+  // Pack 3 review Q1 (H1): a posture would force verify-before-send on all of SmartRemit's own
+  // default-tenant traffic, and nothing can undo it, so the writer refuses 'default' itself.
+  it("partner 'default' -> not_found, nothing written", async () => {
+    await setAddress('default');
+    const before = await column('default');
+    expect(await posture(POSTURE_IN, 'default')).toEqual({ ok: false, code: 'not_found' });
+    expect(await column('default')).toEqual(before);
+    expect(await audits()).toEqual([]);
+    expect(await outboxRows()).toEqual([]);
+  });
+
+  // Pack 3 review Q1 (G1): the kycMode the decider is checked against is read under the row lock.
+  it('the kycMode read is the partners row lock (FOR NO KEY UPDATE), with no plain partners read before it', async () => {
+    const stop = captureQueries();
+    expect(await posture()).toEqual({ ok: true });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const onPartners = (q: string) => q.startsWith('select') && q.includes('from "partners"');
+    const kycRead = qs.findIndex((q) => onPartners(q) && q.includes('"kyc_mode"'));
+    expect(kycRead).toBeGreaterThan(-1);
+    expect(qs[kycRead]).toContain('for no key update');
+    const plainBefore = qs.slice(0, kycRead).filter((q) => onPartners(q) && !q.includes('for no key update'));
+    expect(plainBefore).toEqual([]);
   });
 
   it('a platform actor reads as platform staff and SmartRemit', async () => {
@@ -456,6 +482,21 @@ describe('writeOptIn', () => {
     expect(await counsel('b2b', '  ')).toEqual({ ok: false, code: 'bad_input' });
     expect(await counsel('b2b', 'x'.repeat(201))).toEqual({ ok: false, code: 'bad_input' });
     await expectNothingWritten(before);
+  });
+
+  // Pack 3 review Q1 (G1): the approval decides on a read taken AFTER the row lock (lockPartner).
+  it('approval on takes the partners row lock before its read of the partner', async () => {
+    await certifyPartnerForTest(db, 'acme', { optIns: [] });
+    expect(await counsel('b2b', 'COUNSEL-B2B-9')).toEqual({ ok: true });
+    const stop = captureQueries();
+    expect(await approval('b2b', true)).toEqual({ ok: true });
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const onPartners = (q: string) => q.startsWith('select') && q.includes('from "partners"');
+    const firstRead = qs.findIndex((q) => onPartners(q) && !q.includes('for no key update'));
+    const firstLock = qs.findIndex((q) => onPartners(q) && q.includes('for no key update'));
+    expect(firstRead).toBeGreaterThan(-1);
+    expect(firstLock).toBeGreaterThan(-1);
+    expect(firstLock).toBeLessThan(firstRead);
   });
 
   it('approval: uncertified -> not_certified; no counselRef -> not_ready; nothing written', async () => {

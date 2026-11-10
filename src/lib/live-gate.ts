@@ -16,7 +16,7 @@ import type { DbOrTx } from '@/db/client';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import { logWarn } from './log';
-import type { LiveCapability } from './live-controls';
+import type { LiveCapability, LiveControls } from './live-controls';
 import type { PartnerIntegrations } from './partner-integrations';
 import type { Partner, PartnerId, Transfer, TransferEnvironment } from './types';
 
@@ -93,14 +93,20 @@ export type LiveRefusalCode = 'live_not_certified' | 'default_on_live_rail';
 export function isLiveCertified(p: LivePartner): boolean {
   if (!p || p.id === DEFAULT_PARTNER_ID || p.status !== 'active') return false;
   const c = p.liveControls?.certification;
+  if (!c || Number.isNaN(Date.parse(c.certifiedAt))) return false;
+  return hasStandingCertification(p.liveControls);
+}
+
+/**
+ * A certification record is on file and not revoked: no revokedAt, or a revokedAt strictly
+ * before certifiedAt (a later re-certification lifts it; an unparseable stamp counts as revoked).
+ * Ignores the partner's status and id: isLiveCertified adds those, the revoke writer and the
+ * platform's kycMode lock (pack 3 review Q1) use this alone. Pure.
+ */
+export function hasStandingCertification(lc: Pick<LiveControls, 'certification'> | null | undefined): boolean {
+  const c = lc?.certification;
   if (!c) return false;
-  const certifiedAt = Date.parse(c.certifiedAt);
-  if (Number.isNaN(certifiedAt)) return false;
-  if (c.revokedAt !== undefined) {
-    const revokedAt = Date.parse(c.revokedAt);
-    if (Number.isNaN(revokedAt) || revokedAt >= certifiedAt) return false;
-  }
-  return true;
+  return c.revokedAt === undefined || Date.parse(c.revokedAt) < Date.parse(c.certifiedAt);
 }
 
 /** Not real money -> null; owner 'default' -> default_on_live_rail; uncertified rail -> live_not_certified. Pure. */
