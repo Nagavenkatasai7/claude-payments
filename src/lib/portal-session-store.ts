@@ -82,6 +82,12 @@ const sha256hex = (s: string) => createHash('sha256').update(s).digest('hex');
 const recordKey = (tokenHash: string) => `psess:${tokenHash}`;
 /** The token's key hash under its host binding (null = every smartremit.ai host: today's hash). */
 const tokenKeyHash = (token: string, binding: string | null) => sha256hex(binding === null ? token : `${binding}\n${token}`);
+/**
+ * A binding is null (every smartremit.ai host) or a non-empty string (customHostBinding). Anything
+ * else (an omitted argument from an untyped caller) is refused: create throws, so no session is
+ * minted under an orphan key; resolve, markStepUp and destroy match nothing.
+ */
+const validBinding = (binding: unknown): binding is string | null => binding === null || (typeof binding === 'string' && binding.length > 0);
 // The phone is digits only, so the last '|' separates the two parts unambiguously.
 const indexKey = (partnerId: PartnerId, phone: string) => `psess_ix:${sha256hex(`${partnerId}|${phone}`)}`;
 
@@ -173,7 +179,7 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
     hostPartnerId: PartnerId,
     binding: string | null,
   ): Promise<{ rec: PortalSession; tokenHash: string; t: number } | null> {
-    if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validPartner(hostPartnerId)) return null;
+    if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validPartner(hostPartnerId) || !validBinding(binding)) return null;
     const tokenHash = tokenKeyHash(token, binding);
     const rec = parseRecord(await redis.get(recordKey(tokenHash)));
     if (!rec) return null;
@@ -226,6 +232,7 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
       replaceToken?: string,
     ): Promise<{ token: string; sid: string }> {
       if (!validPartner(partnerId)) throw new Error('portal session: invalid partner');
+      if (!validBinding(binding)) throw new Error('portal session: invalid binding');
       const phone = customerPhone(phoneRaw);
       if (!phone) throw new Error('portal session: invalid phone');
       if (replaceToken) await store.destroy(replaceToken, binding);
@@ -346,7 +353,7 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
      * so is a token under another host binding (its key hash finds nothing).
      */
     async destroy(token: string, binding: string | null): Promise<void> {
-      if (typeof token !== 'string' || !TOKEN_RE.test(token)) return;
+      if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validBinding(binding)) return;
       const tokenHash = tokenKeyHash(token, binding);
       const rec = parseRecord(await redis.get(recordKey(tokenHash)));
       if (rec) await redis.hdel(indexKey(rec.partnerId, rec.phone), rec.sid);

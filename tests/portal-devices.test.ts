@@ -83,6 +83,7 @@ import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-se
 import { listPortalDevices } from '@/lib/portal-devices';
 import { signOutDeviceAction, signOutEverywhereAction } from '@/app/portal/devices/actions';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { customHostBinding } from '@/lib/site-skins';
 
 const PHONE = TWO_PARTNER_PHONE;
 let db: Db;
@@ -233,6 +234,45 @@ describe('signOutEverywhereAction', () => {
     await expect(signOutEverywhereAction()).rejects.toThrow('REDIRECT:/portal/login');
     const rows = await db.select().from(auditEvents).where(eq(auditEvents.action, 'portal.auth.signout_all'));
     expect(JSON.stringify(rows)).not.toContain(PHONE);
+  });
+});
+
+// TGFL custom host (D8): on smartremitai.tgfl.org the session is bound to the host, so the sign-out
+// actions must destroy it under that binding (a null binding would leave the bound session live).
+describe('sign-out on the custom host destroys the bound session', () => {
+  const CUSTOM_HOST = 'smartremitai.tgfl.org';
+  const B = customHostBinding(CUSTOM_HOST)!;
+  beforeEach(() => {
+    h.site = { ...SITE('pa', 'tgfl'), host: CUSTOM_HOST };
+  });
+
+  it('signOutDeviceAction on my current sid ends the bound session', async () => {
+    expect(B).toBe('smartremitai.tgfl.org#1');
+    const mine = await sessions().create('pa', PHONE, 'Safari on iPhone', B);
+    await useCookie(mine.token);
+    await expect(signOutDeviceAction(null, fd({ sid: mine.sid }))).rejects.toThrow('REDIRECT:/portal/login');
+    expect(await sessions().resolve(mine.token, 'pa', B)).toBeNull();
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+  });
+
+  it('signOutEverywhereAction ends the bound session even when ending the others fails', async () => {
+    const mine = await sessions().create('pa', PHONE, 'Safari on iPhone', B);
+    await useCookie(mine.token);
+    const store = (await import('@/lib/portal-session-store')).getPortalSessionStore();
+    const spy = vi.spyOn(store, 'revokeAll').mockRejectedValueOnce(new Error('redis down'));
+    await expect(signOutEverywhereAction()).rejects.toThrow('redis down');
+    spy.mockRestore();
+    expect(await sessions().resolve(mine.token, 'pa', B)).toBeNull();
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+  });
+
+  it('signOutEverywhereAction ends every session, the bound one included', async () => {
+    const other = await sessions().create('pa', PHONE, 'Chrome on Windows', null);
+    const mine = await sessions().create('pa', PHONE, 'Safari on iPhone', B);
+    await useCookie(mine.token);
+    await expect(signOutEverywhereAction()).rejects.toThrow('REDIRECT:/portal/login');
+    expect(await sessions().resolve(mine.token, 'pa', B)).toBeNull();
+    expect(await sessions().resolve(other.token, 'pa', null)).toBeNull();
   });
 });
 

@@ -469,6 +469,22 @@ describe('portal session host binding (D8)', () => {
     // @ts-expect-error binding is a required parameter
     expect(await s.resolve(token, 'pa')).toBeNull();
   });
+
+  it('create refuses an omitted or malformed binding and mints nothing (no orphan session key)', async () => {
+    const { s } = mk();
+    for (const bad of [undefined, '', 1, {}] as unknown[]) {
+      await expect(s.create('pa', P, 'Chrome on macOS', bad as string | null)).rejects.toThrow('portal session: invalid binding');
+    }
+    expect(await s.list('pa', P)).toEqual([]);
+  });
+
+  it('destroy with an omitted binding is a no-op (it never deletes under a guessed key)', async () => {
+    const { s } = mk();
+    const { token } = await s.create('pa', P, 'Chrome on macOS', B);
+    // @ts-expect-error binding is a required parameter
+    await s.destroy(token);
+    expect(await s.resolve(token, 'pa', B)).not.toBeNull();
+  });
 });
 
 describe('portal session cookie options', () => {
