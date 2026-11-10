@@ -14,6 +14,7 @@ import { sanctionsAuditEvent } from './sanctions/evidence';
 import { listScreenEvidence, uncoveredRoles } from './sanctions/evidence-read';
 import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { railPartnerOf } from './live-gate';
+import { senderWasCharged } from './funding-method';
 import { pokeWorker } from './outbox';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createPartnerStore } from './partner-store';
@@ -134,6 +135,8 @@ export async function rescreenBeforePay(
         environment: transfer.environment ?? 'live',
         realMoney,
         evidence: result.evidence,
+        // Review round 3 (M2): a charged row (the crash-resume) says so.
+        charged: senderWasCharged(updated ?? transfer),
       });
       return { kind: 'blocked' };
     }

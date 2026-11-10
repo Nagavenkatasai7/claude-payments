@@ -288,7 +288,8 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
   it('match -> blocked, LIST_UNAVAILABLE dropped, listrescreenblock alert; never selected again; staff release refused', async () => {
     primeOfacSource({ checkedAgoMs: H });
     await setRailProviderType(db, 'acme', 'http');
-    await heldRow({ id: 'lh_match', recipientName: 'Testa Fixturelli' });
+    // A card-charged hold (review round 3, M6: the charged copy needs a charge).
+    await heldRow({ id: 'lh_match', recipientName: 'Testa Fixturelli', fundingMethod: 'credit_card', fundingRef: 'pi_lh_match' });
     expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
     const after = await store.getTransfer('lh_match');
     expect(after?.status).toBe('in_review'); // charged: Reject cancels and refunds it
@@ -310,6 +311,40 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     await expect(releaseTransfer(store, db, 'lh_match', REL)).rejects.toThrow(/Cannot release/);
     expect((await store.getTransfer('lh_match'))?.status).toBe('in_review');
     expect(await outbox()).toEqual(ob);
+  });
+
+  // Review round 3 (M6): a partner-pulled hold was never charged here, so the
+  // alert says nothing was charged or paid out and the transfer must be rejected.
+  it('M6: a partner-pulled (ach_pull) hold with no fundingRef matches: the alert says nothing was charged, never "It is charged" or refund', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldRow({ id: 'lh_pull', recipientName: 'Testa Fixturelli', fundingMethod: 'ach_pull', transferType: 'b2b' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
+    const rows = await outbox();
+    const alert = String(rows.find((r) => r.dedupe_key === 'listrescreenblock:lh_pull')?.payload.message);
+    expect(alert).not.toContain('It is charged');
+    expect(alert).not.toMatch(/refund/i);
+    expect(alert).toContain('Nothing was charged or paid out; reject it.');
+    // The block notices keep the uncharged copy too.
+    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblock:lh_pull')?.payload.message)).toContain('Nothing paid out');
+    expect(String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_pull:acme')?.payload.text)).not.toContain('charged');
+    for (const m of [alert]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+  });
+
+  // Review round 3 (M2): a charged hold's block notices say the sender was charged.
+  it('M2: a card-charged LIST_UNAVAILABLE hold matches: the block alert and the partner email say the sender was charged', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldRow({ id: 'lh_card', recipientName: 'Testa Fixturelli', fundingMethod: 'credit_card', fundingRef: 'pi_lh_card' });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 1 });
+    const rows = await outbox();
+    const block = String(rows.find((r) => r.dedupe_key === 'sanctionsblock:lh_card')?.payload.message);
+    const mail = String(rows.find((r) => r.dedupe_key === 'sanctionsblockmail:lh_card:acme')?.payload.text);
+    expect(block).toContain('the sender was charged');
+    expect(block).not.toContain('Nothing paid out');
+    expect(mail).toContain('after the sender was charged');
   });
 
   it('hold re-screen match -> notices stage hold_rescreen', async () => {

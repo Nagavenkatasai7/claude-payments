@@ -33,7 +33,7 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, reinstructLocked } from '@/lib/reconcile';
-import { healPaidRowScreen } from '@/lib/list-hold-rescreen';
+import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 
 vi.mock('@/lib/outbox', async (orig) => {
@@ -133,6 +133,12 @@ async function auditRows(subject: string): Promise<AuditRow[]> {
   const r = await db.execute(sql`SELECT actor, actor_type, action, subject_id, meta FROM audit_events WHERE subject_id = ${subject} ORDER BY id`);
   return (r as unknown as { rows: AuditRow[] }).rows;
 }
+async function outboxText(key: string, field: 'message' | 'text'): Promise<string> {
+  const r = await db.execute(sql`SELECT payload->>${field} AS v FROM outbox WHERE dedupe_key = ${key}`);
+  const rows = (r as unknown as { rows: Array<{ v: string }> }).rows;
+  expect(rows, key).toHaveLength(1);
+  return rows[0].v;
+}
 async function keys(): Promise<Array<string | null>> {
   const r = await db.execute(sql`SELECT dedupe_key FROM outbox ORDER BY id`);
   return (r as unknown as { rows: Array<{ dedupe_key: string | null }> }).rows.map((x) => x.dedupe_key);
@@ -212,6 +218,35 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     expect(k).toContain('sanctionsblock:rr_match');
     expect(k.filter((x) => x?.startsWith('instruct:'))).toEqual([]);
     expect((await auditRows('rr_match')).map((a) => a.action)).toContain('sanctions.block');
+  });
+
+  // Review round 3 (M2): the block notices of a charged row say so; an uncharged row keeps "Nothing paid out".
+  it('M2: re-screen at release matches a CARD-charged hold: the block alert and the partner email say the sender was charged', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldLarge(
+      { id: 'rr_m2_card', recipientName: 'Testa Fixturelli', fundingMethod: 'credit_card', fundingRef: 'pi_rr_m2' },
+      { recipientName: 'Testa Fixturelli' },
+    );
+    await expect(releaseTransfer(store, db, 'rr_m2_card', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    const alert = await outboxText('sanctionsblock:rr_m2_card', 'message');
+    const mail = await outboxText('sanctionsblockmail:rr_m2_card:acme', 'text');
+    expect(alert).toContain('the sender was charged');
+    expect(alert).not.toContain('Nothing paid out');
+    expect(mail).toContain('after the sender was charged');
+    for (const m of [alert, mail]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+  });
+
+  it('M2: re-screen at release matches an UNCHARGED hold (no fundingRef): the old "nothing paid out" copy', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    await heldLarge({ id: 'rr_m2_none', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
+    await expect(releaseTransfer(store, db, 'rr_m2_none', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).toContain('Nothing paid out');
+    expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).not.toContain('charged');
+    expect(await outboxText('sanctionsblockmail:rr_m2_none:acme', 'text')).not.toContain('charged');
   });
 
   it('http, 40 h old screen, a name screened before cannot be screened again: held with SENDER_IDENTITY_MISSING, the review platform text', async () => {
@@ -370,12 +405,64 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_2_m', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
     await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
-    await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(/^Cannot release/);
+    // Review round 3 (M3): the second click says the transfer is blocked (not
+    // "it moved concurrently"), before any write.
+    const auditBefore = await auditRows('rr_2_m');
+    const outboxBefore = await keys();
+    await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    expect(await auditRows('rr_2_m')).toEqual(auditBefore);
+    expect(await keys()).toEqual(outboxBefore);
     const after = await store.getTransfer('rr_2_m');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceStatus).toBe('blocked');
     expect((await auditRows('rr_2_m')).filter((a) => a.action === 'transfer.release')).toEqual([]);
     expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+  });
+
+  it('M3: a match, partner staff: both clicks get the one partner text (a match looks like an outage), nothing written by the second', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_2_pm_b', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
+    await expect(releaseTransfer(store, db, 'rr_2_pm_b', REL, { partnerId: 'acme' })).rejects.toThrow(RESCREEN_RELEASE_REFUSAL);
+    const auditBefore = await auditRows('rr_2_pm_b');
+    const outboxBefore = await keys();
+    let msg = '';
+    try {
+      await releaseTransfer(store, db, 'rr_2_pm_b', REL, { partnerId: 'acme' });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toBe(RESCREEN_RELEASE_REFUSAL);
+    expect(await auditRows('rr_2_pm_b')).toEqual(auditBefore);
+    expect(await keys()).toEqual(outboxBefore);
+    expect((await store.getTransfer('rr_2_pm_b'))?.complianceStatus).toBe('blocked');
+  });
+
+  // Review round 3 (K2): a staff-released row keeps its own hold reason, so the
+  // automatic re-screen never releases it: the text says a platform person
+  // releases it after that re-screen.
+  it('K2: list not live at release -> the sweep re-screens it once the list is live, keeps LARGE, drops LIST_UNAVAILABLE, stays in_review for a platform release', async () => {
+    expect(PLATFORM_RESCREEN_REFUSALS.listNotLive).toBe(
+      'Cannot release: the sanctions list is not live, so the re-screen at release could not clear this transfer. ' +
+        'The system re-screens it automatically once the list is live again; it then returns to the review queue for a platform release.',
+    );
+    primeOfacSource({ checkedAgoMs: 40 * H });
+    await rail('acme', 'http');
+    await heldLarge({ id: 'rr_k2' });
+    await expect(releaseTransfer(store, db, 'rr_k2', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
+    expect((await store.getTransfer('rr_k2'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+
+    primeOfacSource({ checkedAgoMs: H });
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
+    const after = await store.getTransfer('rr_k2');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceStatus).toBe('flagged');
+    expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON]);
+    expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
+
+    // Back in the review queue: a platform release now releases it.
+    await releaseTransfer(store, db, 'rr_k2', { actor: 'plat2', reason: 'reviewed after the re-screen' });
+    expect((await store.getTransfer('rr_k2'))?.status).toBe('paid');
   });
 });
 

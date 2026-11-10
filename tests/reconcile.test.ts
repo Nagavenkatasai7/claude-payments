@@ -14,7 +14,7 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
-import { seedLiveEvidence } from './helpers-sanctions';
+import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
@@ -825,6 +825,31 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
     expect(m).toContain('released automatically');
     expect(m).toContain('list loader');
     expect(await screens('rc_lv1')).toBe(2);
+  });
+
+  // Review round 3 (M2): the resumed row is charged by definition, so its
+  // block notices say the sender was charged (ops alert and partner email).
+  it('M2: a charged http row whose resume re-screen matches: the block alert and the partner email say the sender was charged', async () => {
+    const originalList = process.env.SANCTIONS_LIST;
+    try {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      await rail('http');
+      await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+      await store.saveTransfer(victim({ recipientName: 'Testa Fixturelli' }));
+      await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Testa Fixturelli' }, { screenedAgoMs: 40 * 3_600_000 });
+      await reconcileSweep(db);
+      expect((await store.getTransfer('rc_lv1'))?.complianceStatus).toBe('blocked');
+      const block = await message('sanctionsblock:rc_lv1');
+      expect(block).toContain('the sender was charged');
+      expect(block).not.toContain('Nothing paid out');
+      const mail = ((await db.execute(sql`SELECT payload->>'text' AS t FROM outbox WHERE dedupe_key = 'sanctionsblockmail:rc_lv1:acme'`)) as unknown as {
+        rows: Array<{ t: string }>;
+      }).rows[0]?.t;
+      expect(mail).toContain('after the sender was charged');
+      for (const m of [block, mail]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+    } finally {
+      restoreOfacSource(originalList);
+    }
   });
 
   it('a mock rail resumes as before: no re-screen, paid', async () => {

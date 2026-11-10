@@ -9,6 +9,7 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { PartnerId, Transfer } from '@/lib/types';
 import { railPartnerOf, realMoneyRail } from '@/lib/live-gate';
 import { enqueueSanctionsBlockNotices } from '@/lib/sanctions/notices';
+import { senderWasCharged } from '@/lib/funding-method';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
 import {
   LIST_UNAVAILABLE_REASON,
@@ -472,6 +473,8 @@ export async function releaseHoldAfterRescreen(
         environment: t.environment ?? 'live',
         realMoney: true,
         evidence: result.evidence,
+        // Review round 3 (M2): from the locked row.
+        charged: senderWasCharged(t),
       });
       return { kind: 'blocked' };
     }
@@ -533,8 +536,10 @@ export type RescreenReleaseResult = { kind: 'released' | 'still_held' | 'blocked
  *      sweep got there first).
  *   2. the re-screen's sanctions.screen evidence row.
  *   3. a match ⇒ compliance 'blocked' (LIST_UNAVAILABLE replaced by the
- *      screen's reasons), status stays in_review (charged: Reject cancels and
- *      refunds; markPaidIfInReview refuses blocked) + one deduped ops alert.
+ *      screen's reasons), status stays in_review (Reject cancels it and
+ *      refunds a charged row; markPaidIfInReview refuses blocked) + one
+ *      deduped ops alert whose copy says whether the sender was charged
+ *      (senderWasCharged on the locked row, review round 3 M6).
  *   4. any reason left — the row's other reasons, the screen's (a possible
  *      match, LARGE re-derived), a sender hold (on real money re-read here
  *      under the lock, review round 3 M1), an uncovered name ⇒ 'flagged'
@@ -572,12 +577,17 @@ export async function releaseRescreenedHold(
       const reasons = [...new Set([...kept, ...result.reasons])];
       const blocked = await repo.applyListRescreenInReview(t.id, t.partnerId, { complianceStatus: 'blocked', reasons });
       if (!blocked) throw new Error('list re-screen: the locked row refused the block');
+      // Review round 3 (M6): the copy follows the locked row. A partner-pulled
+      // hold, or one with no charge reference, was never charged here.
+      const charged = senderWasCharged(t);
       await createOutboxRepo(tx).enqueue(
         'ops.alert',
         {
-          message:
-            `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
-            'the automatic re-screen on a fresh list found a sanctions match. It is charged, blocked by the re-screen, not paid out; reject and refund it.',
+          message: charged
+            ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
+              'the automatic re-screen on a fresh list found a sanctions match. It is charged, blocked by the re-screen, not paid out; reject and refund it.'
+            : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was held because the sanctions list was not live; ` +
+              'the automatic re-screen on a fresh list found a sanctions match. It is blocked by the re-screen. Nothing was charged or paid out; reject it.',
         },
         { dedupeKey: `listrescreenblock:${t.id}` },
       );
@@ -591,6 +601,7 @@ export async function releaseRescreenedHold(
         environment: t.environment ?? 'live',
         realMoney: input.realMoney,
         evidence: result.evidence,
+        charged, // review round 3 (M2)
       });
       return { kind: 'blocked' };
     }

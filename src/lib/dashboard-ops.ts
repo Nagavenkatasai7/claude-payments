@@ -48,8 +48,11 @@ export const RESCREEN_RELEASE_REFUSAL =
 /**
  * Review R2 (J2): the same refusal for PLATFORM staff, one text per outcome
  * class, saying what to do next; none names a person or a list entry.
- *   • listNotLive: the row now waits on LIST_UNAVAILABLE; only the automatic
- *     list re-screen may release it (a person's click is refused).
+ *   • listNotLive: the row now waits on LIST_UNAVAILABLE (a person's click is
+ *     refused). The automatic list re-screen screens it again once the list is
+ *     live, but the row keeps the reason it was held for (it reached a person's
+ *     release), so it returns to the review queue for a platform release
+ *     (review round 3, K2).
  *   • review: a possible match or a name that could not be screened again
  *     added a review reason. The row is never released automatically; a
  *     second platform click (after reading the reasons) is the human review
@@ -59,7 +62,7 @@ export const RESCREEN_RELEASE_REFUSAL =
 export const PLATFORM_RESCREEN_REFUSALS = {
   listNotLive:
     'Cannot release: the sanctions list is not live, so the re-screen at release could not clear this transfer. ' +
-    'The system re-screens it automatically once the list is live again and releases it if that screen clears it.',
+    'The system re-screens it automatically once the list is live again; it then returns to the review queue for a platform release.',
   review:
     'Cannot release yet: the sanctions re-screen at release added a review reason. ' +
     'Read the reasons on the compliance page, and release again only after that review.',
@@ -363,6 +366,13 @@ export async function releaseTransfer(
   }
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
+  }
+  // Review round 3 (M3): a blocked hold (a re-screen match) is never released;
+  // say so before any write instead of losing the claim as "moved
+  // concurrently". Partner staff get the one re-screen text, so a match looks
+  // the same as a list outage to them.
+  if (transfer.complianceStatus === 'blocked') {
+    throw new Error(partnerRelease ? RESCREEN_RELEASE_REFUSAL : PLATFORM_RESCREEN_REFUSALS.blocked);
   }
   // Fix pack 2 T4: a hold waiting on a fresh sanctions list is never released
   // by a person (every caller, platform included), before any write. A row

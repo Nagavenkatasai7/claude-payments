@@ -9,6 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { PLATFORM_RESCREEN_REFUSALS, RESCREEN_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
 
 const ROOT = join(__dirname, '..');
 const spec = readFileSync(join(ROOT, 'docs/compliance/sanctions-screening-spec.md'), 'utf8');
@@ -62,6 +63,23 @@ describe('sanctions screening spec says what the code does', () => {
     }
     expect(round2).toMatch(/^- \*\*E1\*\*: refuted/m);
     expect(round2).toMatch(/^- \*\*E3\*\*: refuted/m);
+  });
+
+  // Review round 3 (K2): rule 3a quotes the release refusals exactly as the code has them.
+  it('rule 3a quotes the partner refusal and the three platform refusals verbatim (K2)', () => {
+    for (const text of [RESCREEN_RELEASE_REFUSAL, ...Object.values(PLATFORM_RESCREEN_REFUSALS)]) {
+      expect(spec, text).toContain(`"${text}"`);
+    }
+    expect(spec).not.toContain('releases it if that screen clears it');
+  });
+
+  // Review round 3 (M6): the listrescreenblock row quotes the charged and the uncharged text.
+  it('the listrescreenblock row quotes both texts (M6)', () => {
+    const row = section('## 11.').split('\n').find((l) => l.startsWith('| `listrescreenblock:'))!;
+    const texts = [...row.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain('It is charged, blocked by the re-screen, not paid out; reject and refund it.');
+    expect(texts[1]).toContain('Nothing was charged or paid out; reject it.');
   });
 
   it('the ops-alert table names every new key, and its keys and texts are in the code', () => {
