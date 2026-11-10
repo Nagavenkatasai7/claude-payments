@@ -144,12 +144,13 @@ export function isRescreenOnlyHold(t: { complianceReasons?: readonly string[] | 
  * PEP or watchlist hit on the sender (isScreeningCustomerHold) is a screening
  * matter, so it stays PLATFORM-only even when every transfer reason is
  * KYC-class. REQUIRED, and a missing row or failed lookup (null / undefined)
- * ⇒ false.
+ * ⇒ false. Fix pack 2 review F2: `sender` carries the stamp times too, and a
+ * stamped, uncleared hold refuses like a boolean hit (isScreeningCustomerHold).
  */
 export function isPartnerReleasableHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
   owner: { kycMode?: string | null } | null | undefined,
-  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
+  sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   if (!owner || owner.kycMode !== 'delegated') return false;
   if (!sender || isScreeningCustomerHold(sender)) return false;
@@ -202,21 +203,37 @@ function toMs(v: string | Date): number {
   return v instanceof Date ? v.getTime() : Date.parse(v);
 }
 
+/** The customer-row screening fields the hold rules read (SenderScreeningFlags or a Customer). */
+export interface CustomerScreeningFlags {
+  watchlistHit?: boolean | null;
+  pepHit?: boolean | null;
+  screeningFlaggedAt?: string | Date | null;
+  screeningClearedAt?: string | Date | null;
+}
+
 /**
  * Program-Fix 43 follow-up: a CUSTOMER-level screening hold — a Persona
  * watchlist/sanctions or PEP report matched (kyc-state-machine sets the flag).
  * Deciding such a customer (approve / reject / manual override) is
  * PLATFORM-only. Known residual: Persona "other" matches (e.g. adverse media)
  * set needs_review with no flag, so they are not distinguishable here.
+ *
+ * Fix pack 2 review F2 (A2, B1): THE partner-staff rule — a boolean hit, OR a
+ * stamped screeningFlaggedAt that no LATER screeningClearedAt covers
+ * (senderScreeningHoldActive; a stale whole-row saveCustomer can null the
+ * booleans, the stamp survives it). A platform clear lifts the stamp only: a
+ * boolean hit still refuses partner staff. The SQL twin is
+ * senderClearForPartnerRelease (transfer-repo.ts); a table-driven test
+ * (tests/sender-screening-hold-parity.test.ts) runs both on the same cases.
  */
-export function isScreeningCustomerHold(c: { watchlistHit?: boolean | null; pepHit?: boolean | null }): boolean {
-  return c.watchlistHit === true || c.pepHit === true;
+export function isScreeningCustomerHold(c: CustomerScreeningFlags): boolean {
+  return c.watchlistHit === true || c.pepHit === true || senderScreeningHoldActive(c);
 }
 
-/** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hit. */
+/** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold. */
 export function canDecideCustomerKyc(
   scope: { kind: 'platform' | 'partner' },
-  c: { watchlistHit?: boolean | null; pepHit?: boolean | null },
+  c: CustomerScreeningFlags,
 ): boolean {
   if (scope.kind === 'platform') return true;
   return !isScreeningCustomerHold(c);

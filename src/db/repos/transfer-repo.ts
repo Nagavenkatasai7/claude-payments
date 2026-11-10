@@ -105,10 +105,13 @@ const fundingGate = () =>
 /**
  * M3-10 follow-up: the partner-release predicates for markPaidIfInReview — the transfer is in
  * `partnerId`'s tenant AND its sender's customer row there exists with no PEP / watchlist hit.
+ * Fix pack 2 review F2 (A2, B1): AND no stamped screening hold that a LATER clear does not cover
+ * (a tie stays held) — the SQL twin of isScreeningCustomerHold (compliance-config.ts), pinned
+ * equal by tests/sender-screening-hold-parity.test.ts. Also guards cancelInReviewForPartner.
  */
 const senderClearForPartnerRelease = (partnerId: PartnerId) => [
   eq(transfers.partnerId, partnerId),
-  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE)`,
+  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
 ];
 
 /**
@@ -878,7 +881,8 @@ export function createTransferRepo(
      * the row belongs to that tenant, and the SENDER's customer row (same
      * tenant, same phone; PK (partner_id, phone)) EXISTS with pep_hit and
      * watchlist_hit both NOT TRUE (NULL = never flagged, as in
-     * isScreeningCustomerHold). A flag raised after the caller's pre-check
+     * isScreeningCustomerHold) and, fix pack 2 review F2, no uncleared
+     * screening_flagged_at stamp. A flag raised after the caller's pre-check
      * (loadSenderScreening) but before this statement therefore refuses the
      * claim, and a missing row refuses it (fail closed). Deliberately no
      * FOR SHARE on the customer row: a flag write committing after this

@@ -298,6 +298,18 @@ describe('kyc-case-store.review with a db (Program-Fix 28)', () => {
     expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
   });
 
+  // Pack 2 review F2 (A2, B1): a stamped, uncleared screening hold whose booleans a stale
+  // whole-row save nulled is still a screening hold on the LOCKED row.
+  it('refuses a stamp-only screening hold (booleans NULL, screening_flagged_at set, not cleared) unless allowScreeningHold', async () => {
+    await seed({ kycReviewState: 'needs_review' });
+    await db.execute(sql`UPDATE customers SET screening_flagged_at = ${new Date(Date.now() - 60_000)} WHERE partner_id = 'default' AND phone = ${PHONE}`);
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', { ...opts(), allowScreeningHold: false })).rejects.toThrow(/permission/i);
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('pending');
+    expect(await auditRows()).toEqual([]);
+    await store.review('default', PHONE, 'approve', 'plat', 'docs look good', { ...opts(), allowScreeningHold: true });
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
+  });
+
   it('an unknown customer ⇒ null, nothing written', async () => {
     expect(await store.review('default', '15550000009', 'approve', 'plat', 'docs look good', opts())).toBeNull();
     expect(await auditRows()).toEqual([]);

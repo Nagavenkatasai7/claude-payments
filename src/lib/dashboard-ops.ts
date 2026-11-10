@@ -14,7 +14,7 @@ import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive } from './compliance-config';
+import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
 import { realMoneyRail } from './live-gate';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
@@ -282,7 +282,8 @@ export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the
  * /partner rule, isPartnerReleasableHold — a delegated partner's in_review,
  * non-blocked hold whose EVERY reason is in PARTNER_RELEASABLE_REASONS (so the
  * AML hold and any unknown reason are refused), and whose SENDER customer row
- * (`sender`, read in the owning tenant) exists with no PEP / watchlist hit.
+ * (`sender`, read in the owning tenant) exists with no PEP / watchlist hit and
+ * (fix pack 2 review F2) no uncleared screening stamp.
  * PLATFORM staff are unchanged: `sender` is ignored for them.
  * Sanctions-blocked rows stay unreleasable for everyone regardless of this
  * (markPaidIfInReview carries compliance_status <> 'blocked').
@@ -297,7 +298,7 @@ export function canReleaseHeld(
   scope: Scope,
   owner: Pick<Partner, 'kycMode'> | null | undefined,
   transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
-  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
+  sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   if (isRescreenOnlyHold(transfer)) return false;
   if (scope.kind === 'platform') return true;
@@ -353,7 +354,8 @@ export async function releaseTransfer(
   // sender's screening hold first (the audited clearSenderScreeningHoldAction
   // on the customer page), then release. The flags are the OWNING tenant's
   // row; a read error throws (nothing released). The partner path is already
-  // refused in markPaidIfInReview (partnerRelease) for a flagged sender.
+  // refused in markPaidIfInReview (partnerRelease) for a flagged sender, a
+  // stamp-only hold included (pack 2 review F2: senderClearForPartnerRelease).
   if (
     !partnerRelease &&
     realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&

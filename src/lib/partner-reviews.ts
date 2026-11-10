@@ -1,4 +1,4 @@
-import { isPartnerReleasableHold, isScreeningCustomerHold } from '@/lib/compliance-config';
+import { isPartnerReleasableHold, isScreeningCustomerHold, type CustomerScreeningFlags } from '@/lib/compliance-config';
 import type { MessageKey } from '@/lib/i18n';
 import type { AmlRule } from '@/lib/aml-rules';
 import type { Customer, PartnerId } from '@/lib/types';
@@ -50,13 +50,13 @@ export function partnerKycOfferedDecisions(
 }
 
 /**
- * D3, the DECISION: may a partner admin record it? The offer above AND no PEP / watchlist hit on
- * the customer (isScreeningCustomerHold; the writer re-checks this on the LOCKED row with
- * allowScreeningHold:false).
+ * D3, the DECISION: may a partner admin record it? The offer above AND no PEP / watchlist hit and
+ * no uncleared screening stamp on the customer (isScreeningCustomerHold; the writer re-checks this
+ * on the LOCKED row with allowScreeningHold:false).
  */
 export function partnerKycDecision(
   owner: { kycMode?: string | null } | null | undefined,
-  customer: Pick<Customer, 'kycStatus' | 'kycReviewState' | 'pepHit' | 'watchlistHit'> | null | undefined,
+  customer: (Pick<Customer, 'kycStatus' | 'kycReviewState'> & CustomerScreeningFlags) | null | undefined,
   decision: KycDecision,
 ): PartnerKycDecision {
   if (!customer || isScreeningCustomerHold(customer)) return { ok: false };
@@ -72,7 +72,7 @@ export function partnerKycDecision(
 export function partnerMayRejectHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
   owner: { kycMode?: string | null } | null | undefined,
-  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
+  sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   return isPartnerReleasableHold(t, owner, sender);
 }
