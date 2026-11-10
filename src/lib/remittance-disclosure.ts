@@ -219,3 +219,107 @@ export function isDisclosureAckVersion(v: unknown): v is string {
 export function disclosureProviderKind(d: ResolvedDisclosure): DisclosureProvider['kind'] {
   return providerBlock(d).kind;
 }
+
+// ── Fix pack 4 (C16): the disclosure snapshot stored on the transfer ────────────
+//
+// What the customer acknowledged at the pay step, written once by
+// commitPaymentEvidence (C8) into transfers.disclosure_snapshot and frozen once
+// the row is paid or in review. Figures and provider details only: no recipient
+// name, masked account, phone or static legal text. The type and its parser land
+// with the repo that is typed by them (T2); the builder is T7's.
+
+export interface DisclosureSnapshotV1 {
+  v: 1;
+  version: string;
+  configHash: string | null;
+  shownHash: string | null;
+  figures: {
+    amountSource: number;
+    feeSource: number;
+    totalChargeSource: number;
+    sourceCurrency: string;
+    amountDest: number;
+    destinationCurrency: string;
+    fxRate: number;
+  };
+  provider: {
+    kind: 'demo' | 'pending' | 'configured';
+    licensedEntity: string | null;
+    licenceIds: string[];
+    phone: string | null;
+    website: string | null;
+    regulator: string | null;
+    approved: boolean;
+  };
+  deliveryBusinessDays: number;
+  dateAvailable: string;
+  acknowledgedAt: string;
+  surface: 'transfer' | 'link';
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
+const PROVIDER_KINDS: ReadonlySet<unknown> = new Set(['demo', 'pending', 'configured']);
+const SNAPSHOT_SURFACES: ReadonlySet<unknown> = new Set(['transfer', 'link']);
+
+/**
+ * Parse a stored snapshot (jsonb, so untrusted shape). Returns a FRESH object
+ * with only the V1 keys, or null for anything that is not a complete V1
+ * snapshot. Pure; never throws.
+ */
+export function parseDisclosureSnapshot(raw: unknown): DisclosureSnapshotV1 | null {
+  try {
+    if (!isRecord(raw) || raw.v !== 1) return null;
+    const { version, configHash, shownHash, figures: f, provider: p } = raw;
+    if (typeof version !== 'string' || version === '') return null;
+    if (!isStringOrNull(configHash) || !isStringOrNull(shownHash)) return null;
+    if (!isRecord(f) || !isRecord(p)) return null;
+    const { amountSource, feeSource, totalChargeSource, amountDest, fxRate, sourceCurrency, destinationCurrency } = f;
+    if (![amountSource, feeSource, totalChargeSource, amountDest, fxRate].every(isFiniteNumber)) return null;
+    if (typeof sourceCurrency !== 'string' || typeof destinationCurrency !== 'string') return null;
+    const { kind, licensedEntity, licenceIds, phone, website, regulator, approved } = p;
+    if (!PROVIDER_KINDS.has(kind)) return null;
+    if (![licensedEntity, phone, website, regulator].every(isStringOrNull)) return null;
+    if (!Array.isArray(licenceIds) || !licenceIds.every((x) => typeof x === 'string')) return null;
+    if (typeof approved !== 'boolean') return null;
+    const { deliveryBusinessDays, dateAvailable, acknowledgedAt, surface } = raw;
+    if (!Number.isInteger(deliveryBusinessDays)) return null;
+    const days = deliveryBusinessDays as number;
+    if (days < 0 || days > 10) return null;
+    if (typeof dateAvailable !== 'string' || typeof acknowledgedAt !== 'string') return null;
+    if (!Number.isFinite(Date.parse(acknowledgedAt))) return null;
+    if (!SNAPSHOT_SURFACES.has(surface)) return null;
+    return {
+      v: 1,
+      version,
+      configHash,
+      shownHash,
+      figures: {
+        amountSource: amountSource as number,
+        feeSource: feeSource as number,
+        totalChargeSource: totalChargeSource as number,
+        sourceCurrency,
+        amountDest: amountDest as number,
+        destinationCurrency,
+        fxRate: fxRate as number,
+      },
+      provider: {
+        kind: kind as DisclosureSnapshotV1['provider']['kind'],
+        licensedEntity: licensedEntity as string | null,
+        licenceIds: [...(licenceIds as string[])],
+        phone: phone as string | null,
+        website: website as string | null,
+        regulator: regulator as string | null,
+        approved,
+      },
+      deliveryBusinessDays: days,
+      dateAvailable,
+      acknowledgedAt,
+      surface: surface as DisclosureSnapshotV1['surface'],
+    };
+  } catch {
+    return null;
+  }
+}

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lt, notExists, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lt, notExists, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
@@ -79,14 +79,36 @@ export function createRecipientRepo(
         ),
     );
 
+  // Fix pack 4 (C3): the recipient's account-holder name, sealed under recipients|legal_name_enc
+  // for the row key AS WRITTEN. A blank name is no name.
+  const sealLegalName = (
+    key: { partnerId: PartnerId; senderPhone: string; recipientPhone: string },
+    legalName: string | undefined,
+  ): string | undefined => {
+    const name = legalName?.trim();
+    return name ? encryptField(name, provider, recipientRowCtx(key, 'legal_name_enc')) : undefined;
+  };
+
   return {
     /**
+     * Fix pack 4 (C3): `legalName` (trimmed, non-empty) is sealed and set, whatever the account.
+     * Without one, the saved name stays bound to the account it was typed for: the full branch's
+     * conflict set keeps it only while the payout method and last 4 are unchanged AND the row is
+     * not being un-deleted, else NULL (no decrypt). The tombstone test works inside this one
+     * statement because the O5 CTE's DELETE is not visible to the main INSERT (all sub-statements
+     * of a WITH see the same snapshot), so a row being un-deleted still sees its tombstone.
+     *
      * `keepTombstone` (UI redesign M2-10, #398 review L2): a SCHEDULED mint's address-book refresh.
      * It writes the row exactly as below but never clears a tombstone, so a delete that races the
      * run keeps the recipient deleted in either order (the row is kept and hidden anyway). Every
      * other caller (pay page, bot) keeps the O5 un-delete.
      */
-    async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient, opts: { keepTombstone?: boolean } = {}): Promise<void> {
+    async upsertRecipient(
+      partnerId: PartnerId,
+      senderPhone: string,
+      r: Recipient,
+      opts: { keepTombstone?: boolean; legalName?: string } = {},
+    ): Promise<void> {
       // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
       const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
       const row = {
@@ -99,6 +121,9 @@ export function createRecipientRepo(
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
+      const legalNameEnc = sealLegalName(key, opts.legalName);
+      // VALUES: the sealed name when given; otherwise no legal_name_enc (NULL on insert).
+      const values = legalNameEnc ? { ...row, legalNameEnc } : row;
       // O5: saving the recipient again (a new payment with bank details) un-deletes it. The
       // tombstone clear rides in a data-modifying CTE so the upsert stays ONE statement: the mint
       // (transfer-create.ts) calls this after its READ COMMITTED transaction and must not open a
@@ -112,31 +137,45 @@ export function createRecipientRepo(
         // A scheduled run's refresh: never un-delete, and never overwrite the book with the
         // schedule's own (possibly older) account — a customer edit after the schedule was created
         // must survive. An existing row only gets lastUsedAt; a missing row is saved in full.
+        // A given legal name rides VALUES only (fix pack 4, C3).
         await db
           .insert(recipients)
-          .values(row)
+          .values(values)
           .onConflictDoUpdate({
             target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
             set: { lastUsedAt: row.lastUsedAt },
           });
         return;
       }
+      // `set` takes SQL per column (PgUpdateSetSource, drizzle-orm/pg-core/query-builders/update.d.ts:28-30).
+      const keepNameForSameAccount = sql`CASE WHEN ${recipients.payoutMethod} = excluded.payout_method AND ${recipients.payoutDestinationLast4} IS NOT DISTINCT FROM excluded.payout_destination_last4 AND NOT EXISTS (SELECT 1 FROM ${recipientTombstones} tb WHERE tb.partner_id = ${recipients.partnerId} AND tb.sender_phone = ${recipients.senderPhone} AND tb.recipient_phone = ${recipients.recipientPhone}) THEN ${recipients.legalNameEnc} ELSE NULL END`;
       await db
         .with(clearTombstone)
         .insert(recipients)
-        .values(row)
+        .values(values)
         .onConflictDoUpdate({
           target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
-          set: row,
+          set: legalNameEnc ? values : { ...row, legalNameEnc: keepNameForSameAccount },
         });
     },
 
     /**
      * Edit a LIVE saved recipient in place (the portal's edit). Never touches tombstones: an edit
      * that lands after a concurrent delete updates nothing and returns false, so the delete wins.
+     * Fix pack 4 (C3): a given `legalName` is sealed and set; without one the saved name is kept
+     * only while the payout method and last 4 are unchanged (the row is live by the WHERE).
      */
-    async updateLiveRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<boolean> {
+    async updateLiveRecipient(
+      partnerId: PartnerId,
+      senderPhone: string,
+      r: Recipient,
+      opts: { legalName?: string } = {},
+    ): Promise<boolean> {
       const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
+      const newLast4 = last4(r.payoutDestination ?? '');
+      const legalNameEnc =
+        sealLegalName(key, opts.legalName) ??
+        sql`CASE WHEN ${recipients.payoutMethod} = ${r.payoutMethod} AND ${recipients.payoutDestinationLast4} IS NOT DISTINCT FROM ${newLast4} THEN ${recipients.legalNameEnc} ELSE NULL END`;
       const updated = await db
         .update(recipients)
         .set({
@@ -145,8 +184,9 @@ export function createRecipientRepo(
           payoutDestinationEnc: r.payoutDestination
             ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
             : '',
-          payoutDestinationLast4: last4(r.payoutDestination ?? ''),
+          payoutDestinationLast4: newLast4,
           lastUsedAt: new Date(r.lastUsedAt),
+          legalNameEnc,
         })
         .where(
           and(
@@ -158,6 +198,69 @@ export function createRecipientRepo(
         )
         .returning({ one: recipients.recipientPhone });
       return updated.length > 0;
+    },
+
+    /**
+     * Fix pack 4 (C3): the saved account-holder name of one LIVE recipient (decrypted), or null
+     * (missing, tombstoned, out of scope, no name). With `match`, only a row whose payout method
+     * equals it AND whose stored last 4 equals last4(match.payoutDestination) counts, so a name
+     * typed for another account never rides a mint. Never decrypts the destination. A decrypt
+     * failure throws, like every other decrypted read.
+     */
+    async getRecipientLegalName(
+      partnerId: PartnerId,
+      senderPhone: string,
+      recipientPhone: string,
+      match?: { payoutMethod: PayoutMethod; payoutDestination: string },
+    ): Promise<string | null> {
+      const conds = [
+        eq(recipients.partnerId, partnerId),
+        eq(recipients.senderPhone, senderPhone),
+        eq(recipients.recipientPhone, recipientPhone),
+        live(db),
+      ];
+      if (match) {
+        const want = last4(match.payoutDestination ?? '');
+        if (!want) return null; // an empty account matches no saved name
+        conds.push(eq(recipients.payoutMethod, match.payoutMethod), eq(recipients.payoutDestinationLast4, want));
+      }
+      const rows = await db
+        .select({ v: recipients.legalNameEnc })
+        .from(recipients)
+        .where(and(...conds))
+        .limit(1);
+      const v = rows[0]?.v;
+      return openOptional(v, provider, recipientRowCtx({ partnerId, senderPhone, recipientPhone }, 'legal_name_enc')) || null;
+    },
+
+    /**
+     * Fix pack 4 (C3): set the saved account-holder name only on a LIVE row that has none. Never
+     * un-deletes, never touches lastUsedAt. False for a blank name (no query), an existing name,
+     * a tombstoned or missing row.
+     */
+    async fillRecipientLegalName(
+      partnerId: PartnerId,
+      senderPhone: string,
+      recipientPhone: string,
+      legalName: string,
+    ): Promise<boolean> {
+      const key = { partnerId, senderPhone, recipientPhone };
+      const legalNameEnc = sealLegalName(key, legalName);
+      if (!legalNameEnc) return false;
+      const rows = await db
+        .update(recipients)
+        .set({ legalNameEnc })
+        .where(
+          and(
+            eq(recipients.partnerId, partnerId),
+            eq(recipients.senderPhone, senderPhone),
+            eq(recipients.recipientPhone, recipientPhone),
+            isNull(recipients.legalNameEnc),
+            live(db),
+          ),
+        )
+        .returning({ one: recipients.recipientPhone });
+      return rows.length > 0;
     },
 
     async listRecipients(partnerId: PartnerId, senderPhone: string, limit: number): Promise<Recipient[]> {

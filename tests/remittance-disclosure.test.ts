@@ -320,3 +320,82 @@ describe('the disclosure drafts', () => {
     expect(d.DISCLOSURE_DRAFT_BADGE).toMatch(/draft/i);
   });
 });
+
+// Fix pack 4 (C16, landed by T2 because the transfer repo is typed by it): the stored
+// disclosure snapshot's parser. Pure; never throws; returns a fresh object with V1 keys only.
+describe('parseDisclosureSnapshot (fix pack 4, C16)', () => {
+  const ACK_AT = new Date(Date.now() - 60_000).toISOString();
+  const full = () => ({
+    v: 1,
+    version: 'draft-2026-09',
+    configHash: 'abc123',
+    shownHash: null,
+    figures: {
+      amountSource: 100, feeSource: 2.99, totalChargeSource: 102.99, sourceCurrency: 'USD',
+      amountDest: 8350.5, destinationCurrency: 'INR', fxRate: 83.505,
+    },
+    provider: {
+      kind: 'configured', licensedEntity: 'Acme Money Services LLC', licenceIds: ['NMLS 000000'],
+      phone: '+1 800 555 0100', website: 'https://acme.example', regulator: 'State Dept', approved: true,
+    },
+    deliveryBusinessDays: 2,
+    dateAvailable: 'on or about 2 business days',
+    acknowledgedAt: ACK_AT,
+    surface: 'transfer',
+  });
+
+  it('accepts a full V1 object and returns a fresh object with only V1 keys', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    const raw = { ...full(), extra: 'x', figures: { ...full().figures, junk: 1 }, provider: { ...full().provider, more: 2 } };
+    const out = parseDisclosureSnapshot(raw);
+    expect(out).toEqual(full());
+    expect(out).not.toBe(raw);
+    expect(out!.figures).not.toBe(raw.figures);
+    expect(out!.provider.licenceIds).not.toBe(raw.provider.licenceIds);
+    expect(out).not.toHaveProperty('extra');
+    expect(out!.figures).not.toHaveProperty('junk');
+    expect(out!.provider).not.toHaveProperty('more');
+  });
+
+  it('accepts the demo / pending kinds, the link surface, null provider fields and 0 delivery days', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    const s = { ...full(), surface: 'link', deliveryBusinessDays: 0, configHash: null,
+      provider: { kind: 'demo', licensedEntity: null, licenceIds: [], phone: null, website: null, regulator: null, approved: false } };
+    expect(parseDisclosureSnapshot(s)).toEqual(s);
+    expect(parseDisclosureSnapshot({ ...full(), provider: { ...full().provider, kind: 'pending' } })?.provider.kind).toBe('pending');
+  });
+
+  it.each<[string, (s: Record<string, unknown>) => unknown]>([
+    ['v !== 1', (s) => ({ ...s, v: 2 })],
+    ['v as a string', (s) => ({ ...s, v: '1' })],
+    ['an empty version', (s) => ({ ...s, version: '' })],
+    ['a numeric configHash', (s) => ({ ...s, configHash: 5 })],
+    ['a missing figure', (s) => { const f = { ...(s.figures as object) } as Record<string, unknown>; delete f.fxRate; return { ...s, figures: f }; }],
+    ['a non-finite number', (s) => ({ ...s, figures: { ...(s.figures as object), amountSource: Number.POSITIVE_INFINITY } })],
+    ['a NaN figure', (s) => ({ ...s, figures: { ...(s.figures as object), feeSource: Number.NaN } })],
+    ['a numeric currency', (s) => ({ ...s, figures: { ...(s.figures as object), sourceCurrency: 840 } })],
+    ['a bad provider kind', (s) => ({ ...s, provider: { ...(s.provider as object), kind: 'licensed' } })],
+    ['a non-string licence id', (s) => ({ ...s, provider: { ...(s.provider as object), licenceIds: [1] } })],
+    ['a non-boolean approved', (s) => ({ ...s, provider: { ...(s.provider as object), approved: 'yes' } })],
+    ['a missing provider', (s) => { const c = { ...s }; delete c.provider; return c; }],
+    ['fractional delivery days', (s) => ({ ...s, deliveryBusinessDays: 1.5 })],
+    ['delivery days above 10', (s) => ({ ...s, deliveryBusinessDays: 11 })],
+    ['negative delivery days', (s) => ({ ...s, deliveryBusinessDays: -1 })],
+    ['a non-date acknowledgedAt', (s) => ({ ...s, acknowledgedAt: 'yesterday-ish' })],
+    ['a numeric dateAvailable', (s) => ({ ...s, dateAvailable: 3 })],
+    ['a bad surface', (s) => ({ ...s, surface: 'portal' })],
+  ])('returns null for %s', async (_n, mutate) => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    expect(parseDisclosureSnapshot(mutate(full() as unknown as Record<string, unknown>))).toBeNull();
+  });
+
+  it('returns null for non-object input and never throws', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    for (const raw of [null, undefined, 1, 'x', true, [], [full()]]) {
+      expect(parseDisclosureSnapshot(raw)).toBeNull();
+    }
+    const hostile = { get v() { throw new Error('boom'); } };
+    expect(() => parseDisclosureSnapshot(hostile)).not.toThrow();
+    expect(parseDisclosureSnapshot(hostile)).toBeNull();
+  });
+});

@@ -28,6 +28,8 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['customer mfa', ctx.customer('acme', '15550001111', 'mfa_totp_enc'), 'v2|k0|customers|mfa_totp_enc|acme|15550001111'],
     ['seller', ctx.seller('acme', '919800000000'), 'v2|k0|sellers|payout_destination_enc|acme|919800000000'],
     ['recipient', ctx.recipient('acme', '15550001111', '919800000000'), 'v2|k0|recipients|payout_destination_enc|acme|15550001111|919800000000'],
+    // Fix pack 4 (C3): the recipient's account-holder name, bound to the same three-part key.
+    ['recipient legal name', ctx.recipient('acme', '15550001111', '919800000000', 'legal_name_enc'), 'v2|k0|recipients|legal_name_enc|acme|15550001111|919800000000'],
     ['beneficiary', ctx.beneficiary('ben_1'), 'v2|k0|beneficiaries|payout_destination_enc|ben_1'],
     ['schedule', ctx.schedule('sch_1'), 'v2|k0|schedules|payout_destination_enc|sch_1'],
     // Batch B follow-up A2: the reason for purpose `other`, on a transfer and on a schedule.
@@ -106,6 +108,12 @@ describe('row-shaped helpers (one per table, used by BOTH the write and the read
       ctx.recipient('acme', '1', '2'),
     );
     expect(sellerRowCtx({ partnerId: 'acme', phone: '9' })).toEqual(ctx.seller('acme', '9'));
+  });
+
+  it('recipientRowCtx passes the legal_name_enc column through (fix pack 4, C3)', () => {
+    expect(recipientRowCtx({ partnerId: 'acme', senderPhone: '1', recipientPhone: '2' }, 'legal_name_enc')).toEqual(
+      ctx.recipient('acme', '1', '2', 'legal_name_enc'),
+    );
   });
 
   it('outboxSealedCtx maps a placeholder key to its purpose (the one mapping)', () => {

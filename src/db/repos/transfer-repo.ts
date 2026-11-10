@@ -6,6 +6,7 @@ import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib
 import { last4, openOptional, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
+import { parseDisclosureSnapshot, type DisclosureSnapshotV1 } from '@/lib/remittance-disclosure';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
@@ -317,6 +318,13 @@ export function createTransferRepo(
      * encrypted columns at rest. When the incoming destination is the mask, the
      * conflict-update leaves payout_destination_enc/_last4 and
      * recipient_legal_name_enc untouched.
+     *
+     * Fix pack 4 (C4, critic P14): recipient_legal_name_enc is FILL-OR-KEEP on
+     * every read-modify-write: it is in the conflict set only when the incoming
+     * transfer carries a non-empty recipientLegalName. A masked read of an
+     * EMPTY-destination row is not '****'-prefixed, so without this it re-saved
+     * the column as NULL. disclosure_snapshot is not on Transfer and never in
+     * the set (setDisclosureSnapshotIfAwaiting is its only writer).
      */
     async saveTransfer(t: Transfer, opts: InsertOnlyColumns = {}): Promise<void> {
       const row = transferToRow(t, provider);
@@ -359,6 +367,10 @@ export function createTransferRepo(
         } = updatable;
         void _enc; void _l4; void _legal;
         void _sbEnc; void _sbL4; void _rbEnc; void _rbL4;
+        set = rest;
+      } else if (!t.recipientLegalName?.trim()) {
+        const { recipientLegalNameEnc: _legal, ...rest } = updatable;
+        void _legal;
         set = rest;
       }
       // Program-Fix 14 PR C: `screening` is INSERT-ONLY — it goes into the
@@ -1196,6 +1208,75 @@ export function createTransferRepo(
         .where(payoutEditable(id, partnerId))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Fix pack 4 (C4): the pay step's account-holder name write. Sets
+     * recipient_legal_name_enc and NOTHING else, only while the payout is
+     * editable (payoutEditable: this tenant's awaiting_payment, unfunded b2c
+     * row, not partner-API, not a payment link) AND no name is stored yet
+     * (fill-only). False for a blank name (no query) or any failed guard.
+     */
+    async setRecipientLegalNameIfEditable(id: string, partnerId: PartnerId, legalName: string): Promise<boolean> {
+      const name = legalName.trim();
+      if (!name) return false;
+      const rows = await db
+        .update(transfers)
+        .set({
+          recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')), // row id = the WHERE's id
+        })
+        .where(and(payoutEditable(id, partnerId), isNull(transfers.recipientLegalNameEnc)))
+        .returning({ id: transfers.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 4 (C4): true when this tenant's b2c transfer has no recipient
+     * legal name and was minted neither through the partner API nor by a
+     * payment link (those rows carry their own identity). False for a missing
+     * row or another tenant. Never decrypts.
+     */
+    async recipientIdentityMissing(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.id, id),
+            eq(transfers.partnerId, partnerId),
+            eq(transfers.transferType, 'b2c'),
+            isNull(transfers.recipientLegalNameEnc),
+            sql`NOT ${partnerApiMintedSql()}`,
+            sql`NOT ${paymentLinkSql()}`,
+          ),
+        )
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 4 (C4): store the disclosure snapshot the customer acknowledged.
+     * Only commitPaymentEvidence (C8) calls this; once paid or in_review the
+     * snapshot is frozen. Writes only while this tenant's row is
+     * awaiting_payment, and overwrites a previous snapshot (a retried pay step).
+     */
+    async setDisclosureSnapshotIfAwaiting(id: string, partnerId: PartnerId, snap: DisclosureSnapshotV1): Promise<boolean> {
+      const rows = await db
+        .update(transfers)
+        .set({ disclosureSnapshot: snap })
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId), eq(transfers.status, 'awaiting_payment')))
+        .returning({ id: transfers.id });
+      return rows.length > 0;
+    },
+
+    /** Fix pack 4 (C4): the stored snapshot, parsed; null for another tenant (404-never-403), a missing row, NULL or a malformed value. */
+    async getDisclosureSnapshot(id: string, partnerId: PartnerId): Promise<DisclosureSnapshotV1 | null> {
+      const rows = await db
+        .select({ s: transfers.disclosureSnapshot })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId)))
+        .limit(1);
+      return rows[0] ? parseDisclosureSnapshot(rows[0].s) : null;
     },
 
     /**

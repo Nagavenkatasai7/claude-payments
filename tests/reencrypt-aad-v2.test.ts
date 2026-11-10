@@ -118,6 +118,7 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
         'partner_integrations.kyc_api_key_enc', 'partner_integrations.kyc_webhook_secret_enc',
         'partner_integrations.payment_credentials_enc', 'partner_integrations.payment_webhook_secret_enc',
         'partner_integrations.wa_app_secret_enc', 'partner_integrations.wa_token_enc', 'partner_integrations.wa_verify_token_enc',
+        'recipients.legal_name_enc', // fix pack 4 (born v2; registered for key-ring rotation)
         'recipients.payout_destination_enc',
         'schedules.payout_destination_enc', 'schedules.purpose_detail_enc', // Batch B follow-up A2 (born v2)
         'sellers.payout_destination_enc',
@@ -173,6 +174,22 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
     expect(integ.payment.credentials).toEqual({ settlementUrl: 'https://rail' });
     const [w] = await createWaitlistRepo(db, provider).listDecrypted();
     expect([w.fullName, w.email, w.phone, w.location]).toEqual(['Asha Patel', 'asha.patel@example.com', '+15551234567', 'Fairfax, VA']);
+  });
+
+  it('fix pack 4: a v1 recipients.legal_name_enc value is resealed v2 under the legal_name_enc context and opens through getRecipientLegalName', async () => {
+    await seedPartner(db, 'acme');
+    const recipientsRepo = createRecipientRepo(db, provider);
+    await recipientsRepo.upsertRecipient('acme', '15551230000', {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '111122223333', lastUsedAt: now,
+    }, { legalName: 'Anita Sharma' });
+    await db.execute(sql`UPDATE recipients SET legal_name_enc = ${encryptField('Anita Sharma', provider)}`);
+    const report = await reencryptAadV2(db, { apply: true, provider, table: 'recipients' });
+    expect(report.find((r) => r.column === 'legal_name_enc')).toMatchObject({ v1: 1, resealed: 1, failed: 0 });
+    const [row] = await raw(`SELECT legal_name_enc FROM recipients`);
+    expect(row.legal_name_enc?.startsWith('v2.k0.')).toBe(true);
+    // Sealed for its own column: the payout context does not open it, the legal-name one does.
+    expect(() => decryptField(row.legal_name_enc!, provider, ctx.recipient('acme', '15551230000', '919876543210'))).toThrow();
+    expect(await recipientsRepo.getRecipientLegalName('acme', '15551230000', '919876543210')).toBe('Anita Sharma');
   });
 
   it('--table limits the run to one table', async () => {
