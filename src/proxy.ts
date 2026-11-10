@@ -15,9 +15,10 @@ import { REFERRAL_COOKIE, referralCodeToStore, referralCookieOptions } from '@/l
 // UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) or a custom
 // skin host (src/lib/site-skins.ts `hosts`, e.g. smartremitai.tgfl.org) is dispatched FIRST to
 // siteProxy, before any cookie gate; any other smartremit.ai subdomain except www, and the trailing-dot
-// form or a sub-label of a custom skin host, is refused (404), so the apex app is never served on it. The apex (smartremit.ai, www, previews, localhost)
-// runs the unchanged legacy gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
-// headers are stripped from every request this proxy sees; only siteProxy sets them.
+// form or a sub-label of a custom skin host, is refused (404), so the apex app is never served on it.
+// The apex (smartremit.ai, www, previews, localhost) runs the unchanged legacy gate, synchronously
+// (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant headers are stripped from
+// every request this proxy sees; only siteProxy sets them.
 
 /**
  * /account sub-paths that must stay PUBLIC (they ARE the auth entry points). /account/continue is the
