@@ -1,10 +1,14 @@
-// site-skins — a partner-branded LOOK on a <slug>.smartremit.ai host that an EXISTING tenant serves
-// (owner go 2026-11-09, "create the URL first": tgfl.smartremit.ai for the TGFL demo).
+// site-skins — a partner-branded LOOK on a host that an EXISTING tenant serves (owner go 2026-11-09,
+// "create the URL first": tgfl.smartremit.ai for the TGFL demo). A skin answers on
+// `<slug>.smartremit.ai` and on its exact custom hosts (`hosts`, e.g. smartremitai.tgfl.org, a CNAME
+// on TGFL's DNS); both serve the same skinned portal.
 //
-// PURE and dependency-free (like site-host.ts): the resolver, the portal loader, the slug writer and
-// the portal layout all import it.
+// PURE: no I/O, and its only import is DEFAULT_PARTNER_ID from ./defaults (type imports and constants
+// only). site-host.ts (and through it src/proxy.ts) imports it on the hot path; the resolver, the
+// portal loader, the slug writer, the portal sign-in and sign-out code, the referral reader, the agent
+// auth server and the portal layout import it too. It never imports site-host.ts, so there is no cycle.
 //
-// A skin is NOT a partner. It changes only what the portal chrome shows (the name or logo in the
+// A skin is NOT a partner. It changes only what the portal chrome shows (the logo plus the name in the
 // header, optional colours, the tab title, a demo line, "Powered by SmartRemit"). The tenant, the
 // accounts, the sign-in code, the bot, the pay page, receipts and every money path stay those of
 // `partnerId`, and PortalSite.brand stays SmartRemit (owner decision 2026-10-04), because those
@@ -12,19 +16,26 @@
 //
 // The list is CODE, not data: adding or changing a skin is a reviewed PR, and tests/site-skins.test.ts
 // checks every entry. Rules the rest of the code keeps:
-// - the host answers only while the "TGFL demo portal" switch (flag `portal.skins`) is on;
-// - a real partner that holds, or ever held, the slug always wins (site-tenant-resolver.ts);
-// - no partner can claim a skin slug (setPartnerSlug).
+// - every host of the skin answers only while the "TGFL demo portal" switch (flag `portal.skins`) is on;
+// - a real partner that holds, or ever held, the slug always wins on `<slug>.smartremit.ai`
+//   (site-tenant-resolver.ts); a custom host resolves the skin ONLY (resolveSkinHost) and answers 404
+//   when it does not resolve, never another tenant and never the apex app;
+// - no partner can claim a skin slug (setPartnerSlug);
+// - portal sessions and AI-app refresh tokens minted on a custom host are bound to it
+//   (customHostBinding), so they never work on a smartremit.ai host; bumping credentialEpoch revokes
+//   them all;
+// - never remove a host from `hosts` while its CNAME may still point at Vercel: it would parse as apex
+//   and serve the staff sign-in (CLAUDE.md "Site skins", docs/ROLLBACK.md).
 // A skin slug is deliberately NOT in RESERVED_SLUGS: a reserved label makes the host "refused"
 // (404 in the proxy) and would never reach the resolver.
 import { DEFAULT_PARTNER_ID } from './defaults';
 
 export interface SiteSkin {
-  /** The host label: `<slug>.smartremit.ai`. Equal to its key in SITE_SKINS. */
+  /** The label of the skin's smartremit.ai host, `<slug>.smartremit.ai`. Equal to its key in SITE_SKINS. */
   slug: string;
   /** The EXISTING tenant that serves this host. */
   partnerId: string;
-  /** Shown in the header (as text, or as the logo's alt text), the tab title and the demo line. */
+  /** Shown in the header (as text, after the logo when there is one, and as the logo's alt text), the tab title and the demo line. */
   name: string;
   /** A file under /public/brand/partners/ (see skinLogoSrc), or null for a text wordmark. */
   logoSrc: string | null;

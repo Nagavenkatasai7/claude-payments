@@ -16,6 +16,14 @@
  * signs in on each), but the server record is bound to the TENANT, not the host:
  * the two hosts are two doors to the same account, by design.
  *
+ * A custom skin host (site-skins.ts `hosts`, e.g. smartremitai.tgfl.org) is another
+ * door to the same tenant, but its sessions are also bound to the HOST: the Redis
+ * key hashes customHostBinding(host) with the token (portal-session-store.ts), so a
+ * cookie minted there never resolves on a smartremit.ai host, and the reverse. This
+ * cookie stays host-only with no Domain, so tgfl.org pages never receive it.
+ * SameSite=Lax treats every tgfl.org page as same-site with the custom host; the
+ * Origin checks stay host-exact.
+ *
  * SameSite=Lax: a WhatsApp link opening the portal is a top-level cross-site GET
  * and must arrive signed in. POSTs from other sites carry no cookie.
  *

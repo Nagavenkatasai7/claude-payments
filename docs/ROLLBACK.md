@@ -21,6 +21,16 @@ A rollback swaps code, never the database. The older build must work with every 
 
 Check quickly: `git log --oneline <target-sha>..origin/main -- drizzle/` lists every migration added since the target build.
 
+## Before you roll back: the TGFL custom address
+
+The custom-host PR (`smartremitai.tgfl.org`, CLAUDE.md "Site skins") taught the code that this host is the TGFL skin. An older build parses it as the apex and would serve the staff `/login` and the rest of the apex app on TGFL's address. So, while the domain is attached in Vercel and TGFL's CNAME points at it:
+
+1. **Switch "TGFL demo portal" off first** (`/admin-dashboard/switches`). Within about 15 seconds the custom host answers 404 on every page and API route, and every sign-in and AI-app connection made there is useless. Keep the domain **attached**, so no other Vercel account can claim the name.
+2. **Ask TGFL to delete the CNAME** for `smartremitai.tgfl.org`. Confirm it is gone: `dig +short CNAME smartremitai.tgfl.org` prints nothing. Only then remove the domain in Vercel (Settings, Domains). Never detach while the CNAME is live: a detached domain with a live CNAME may be claimed by another Vercel account (the owner confirms against Vercel's current domain rules).
+3. **Only after step 2**, Instant Rollback or revert to a build older than the custom-host PR. If TGFL cannot be reached, do not detach and do not roll back past that PR: stay on step 1 and roll forward with a fix.
+
+A rollback to a build that still has the custom-host code needs none of this. Never remove a host from `SITE_SKINS.<slug>.hosts` while its CNAME may point at Vercel, for the same reason. The PR adds no migration, so a revert is safe for the data.
+
 ## How
 
 1. Pick the target: the last production deployment whose smoke run was green (Actions, workflow "Smoke", push runs on main).
