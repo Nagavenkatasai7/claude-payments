@@ -143,6 +143,7 @@ export interface Transfer {
   // ── Batch B1: order references. WRITE-ONCE, both optional (absent on older rows).
   clientReference?: string;     // the partner's own order number (Partner API client_reference)
   payoutReference?: string;     // the payout partner's confirmation (e.g. a UTR), from a signed callback
+  deliveryBusinessDays?: number; // fix pack 4 (C2): the owner's disclosed business days, stamped at mint, WRITE-ONCE; absent on older and blocked rows (0 = same business day)
 }
 
 /**

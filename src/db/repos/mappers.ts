@@ -144,6 +144,8 @@ export function transferToRow(
     // Batch B1: write-once — saveTransfer strips both from its conflict-update.
     clientReference: t.clientReference ?? null,
     payoutReference: t.payoutReference ?? null,
+    // Fix pack 4 (C2): write-once — saveTransfer strips it from its conflict-update.
+    deliveryBusinessDays: t.deliveryBusinessDays ?? null,
     createdAt: new Date(t.createdAt),
     paidAt: t.paidAt ? new Date(t.paidAt) : null,
     deliveredAt: t.deliveredAt ? new Date(t.deliveredAt) : null,
@@ -257,5 +259,8 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   // Batch B1: absent on every older row.
   if (row.clientReference) t.clientReference = row.clientReference;
   if (row.payoutReference) t.payoutReference = row.payoutReference;
+  // Fix pack 4 (C2): 0 is valid (same business day): != null, never truthiness.
+  // disclosure_snapshot is deliberately NOT mapped (like `screening`).
+  if (row.deliveryBusinessDays != null) t.deliveryBusinessDays = row.deliveryBusinessDays;
   return t;
 }

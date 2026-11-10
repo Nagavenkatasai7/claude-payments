@@ -172,6 +172,13 @@ export const transfers = pgTable(
     // conflict-update never sets them).
     clientReference: text('client_reference'),
     payoutReference: text('payout_reference'),
+    // Fix pack 4 (0038). delivery_business_days: the owner's disclosed
+    // estimate, stamped once at mint (write-once; NULL on older and blocked
+    // rows; readers fall back, C21). disclosure_snapshot: written ONLY by
+    // setDisclosureSnapshotIfAwaiting (C4/C8), NOT mapped onto Transfer (like
+    // `screening`), never in an API response.
+    deliveryBusinessDays: smallint('delivery_business_days'),
+    disclosureSnapshot: jsonb('disclosure_snapshot'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -526,6 +533,7 @@ export const recipients = pgTable(
     payoutMethod: text('payout_method').notNull(),
     payoutDestinationEnc: text('payout_destination_enc').notNull(), // ENCRYPTED
     payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
+    legalNameEnc: text('legal_name_enc'), // ENCRYPTED (fix pack 4, C3); never named in an upsert's set unless a name is given
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.partnerId, t.senderPhone, t.recipientPhone] })],

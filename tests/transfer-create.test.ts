@@ -1548,3 +1548,59 @@ describe('createTransfer — first-transfer fee tier is re-read under the sender
     expect(t.feeUsd).toBe(0);
   });
 });
+
+// Fix pack 4 T1 (C2): the owner's disclosed delivery days are stamped on the
+// row at mint, from the owner read the mint already makes before the lock.
+describe('pack 4 (C2): delivery days stored at mint from the owner', () => {
+  type TestDb = Awaited<ReturnType<typeof freshDb>>;
+  const storedDays = async (db: TestDb, id: string): Promise<number | null> => {
+    const r = (await db.execute(sql.raw(`SELECT delivery_business_days FROM transfers WHERE id = '${id}'`))) as unknown as {
+      rows: Array<{ delivery_business_days: number | null }>;
+    };
+    return r.rows[0].delivery_business_days;
+  };
+  const setDays = async (db: TestDb, id: string, n: number) => {
+    const json = JSON.stringify({ disclosure: { licensedEntity: 'Acme LLC', deliveryEstimate: { businessDays: n } } });
+    await db.execute(sql.raw(`UPDATE partners SET support_config = '${json}'::jsonb WHERE id = '${id}'`));
+  };
+
+  it('the default tenant stores 1', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, base);
+    expect(await storedDays(db, t.id)).toBe(1);
+    expect(t.deliveryBusinessDays).toBe(1);
+  });
+
+  it('a partner whose block says 3 stores 3; one that says 0 stores 0', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'acme');
+    await setDays(db, 'acme', 3);
+    const t3 = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    expect(await storedDays(db, t3.id)).toBe(3);
+    await setDays(db, 'acme', 0);
+    const t0 = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', recipientPhone: '919133001841' });
+    expect(await storedDays(db, t0.id)).toBe(0);
+    expect((await store.getTransfer(t0.id))?.deliveryBusinessDays).toBe(0);
+  });
+
+  it('a sanctions-blocked mint leaves it NULL', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John Doe' });
+    expect(t.status).toBe('blocked');
+    expect(await storedDays(db, t.id)).toBeNull();
+    expect(t).not.toHaveProperty('deliveryBusinessDays');
+  });
+
+  it("the value is the OWNER's, not the settlement partner's", async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'railco');
+    await setDays(db, 'railco', 4);
+    const quote = {
+      amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17_000,
+      amountSource: 200, feeSource: 0, totalChargeSource: 200,
+    };
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, quote, settlementPartnerId: 'railco' });
+    expect(t.settlementPartnerId).toBe('railco');
+    expect(await storedDays(db, t.id)).toBe(1);
+  });
+});

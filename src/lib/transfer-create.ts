@@ -14,6 +14,7 @@ import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { sourceCountryFor } from './partner-currency';
+import { resolvePartnerDisclosure } from './partner-config';
 import { feeTierCount, isFirstTransferFree } from './fee-tier';
 import { easternMonth, easternMonthStart } from './dates';
 import { budgetAllows, discountFor, giveBackFor, qualifies } from './rewards/engine';
@@ -430,6 +431,9 @@ export async function createTransferWithOutcome(
   // is now the sender's EFFECTIVE per-transfer cap (customer override, else
   // partner default, else platform), never above the $10,000 hard ceiling.
   const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
+  // Fix pack 4 (C2): the OWNER's disclosed delivery days, stamped on the row at
+  // mint from this read (never the settlement partner's; no read under the lock).
+  const deliveryBusinessDays = resolvePartnerDisclosure(partner).deliveryBusinessDays;
   // P4 symbol. EUR: the sender's euro country, kept inside the partner's own countries so its corridor rules apply.
   const sourceCountry = sourceCountryFor(partner, input.sourceCurrency, input.phone);
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
@@ -555,7 +559,7 @@ export async function createTransferWithOutcome(
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
-      requote, quotedCount, rewardPlan, railProviderType, realMoney,
+      requote, quotedCount, rewardPlan, railProviderType, realMoney, deliveryBusinessDays,
     }),
   );
   const transfer = minted.transfer;
@@ -614,6 +618,8 @@ interface PreparedMint {
   railProviderType: string | null | undefined;
   /** Fix pack 2 (R02): realMoneyRail — the screen then requires a live sanctions list. */
   realMoney: boolean;
+  /** Fix pack 4 (C2): the owner's disclosed business days, from the owner read above the lock (no read under the lock). */
+  deliveryBusinessDays: number;
 }
 
 /** B3: a reward the mint will re-check under the lock and record. */
@@ -896,6 +902,7 @@ async function mintLocked(
     environment: input.environment ?? 'live',        // Program-Fix 44 P2
     ...p.provenance,                                 // Step 0 FX-7 (write-once)
     ...(input.clientReference ? { clientReference: input.clientReference } : {}), // Batch B1
+    ...(complianceStatus === 'blocked' ? {} : { deliveryBusinessDays: p.deliveryBusinessDays }), // fix pack 4 (C2); a blocked row is never delivered: NULL
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the

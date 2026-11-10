@@ -336,14 +336,15 @@ export function createTransferRepo(
       // payout reference is set only by setPayoutReference, from a signed callback).
       // Batch B follow-up A2: purpose_detail_enc is write-once as well (a masked read
       // never carries the reason, so re-saving one must not erase it).
+      // Fix pack 4 (C2): delivery_business_days is write-once too (stamped at mint).
       const {
         environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
         fxExpiresAt: _fxExp, clientReference: _clientRef, payoutReference: _payoutRef,
-        purposeDetailEnc: _purposeDetail,
+        purposeDetailEnc: _purposeDetail, deliveryBusinessDays: _days,
         ...updatable
       } = row;
       void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp; void _clientRef; void _payoutRef;
-      void _purposeDetail;
+      void _purposeDetail; void _days;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {
