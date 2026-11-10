@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { payOkStatus } from '@/lib/pay-outcome';
+import { payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/payout-format';
 
@@ -109,16 +110,23 @@ function OtpFields({
   sent,
   otpError,
   otp,
+  approvingText = null,
 }: {
   code: string;
   setCode: (v: string) => void;
   sent: boolean;
   otpError?: string;
   otp: OtpRequest;
+  /** Fix pack 4 (C15): what the code approves, shown above the send button and above the code box. */
+  approvingText?: string | null;
 }) {
+  const approvingEl = approvingText ? (
+    <p data-testid="approving-line" className="mb-2 text-[13px] leading-normal text-[#e9edef]">{approvingText}</p>
+  ) : null;
   if (!sent) {
     return (
       <div>
+        {approvingEl}
         <button type="button" className={secondaryBtnClasses} onClick={otp.requestCode} disabled={otp.requesting}>
           {otp.requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
         </button>
@@ -128,6 +136,7 @@ function OtpFields({
   }
   return (
     <div>
+      {approvingEl}
       <label className={labelClasses}>
         Confirmation code
         <input
@@ -185,6 +194,8 @@ export function BillPayForm({
   const [sent, setSent] = useState(false);
   const otp = useOtpRequest(invoiceId, setSent);
   const [otpError, setOtpError] = useState('');
+  // Fix pack 4 (C14, critic P6c): only the approval-not-recorded 503 gets its own copy.
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -205,6 +216,7 @@ export function BillPayForm({
   async function handlePay() {
     setStatus('paying');
     setOtpError('');
+    setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/b2b/${invoiceId}`, {
         method: 'POST',
@@ -226,6 +238,10 @@ export function BillPayForm({
         }
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
+        } else if (data.reason === 'approval_not_recorded') {
+          // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
+          setErrorMessage(payErrorMessage(data));
+          setCode('');
         } else if (data.fieldErrors) {
           setErrors(data.fieldErrors);
           setStep('details');
@@ -260,7 +276,21 @@ export function BillPayForm({
           We&rsquo;ll debit {formatMoney(buyerTotal, buyerCurrency)} from your bank to settle your bill with{' '}
           {sellerBusinessName}.
         </p>
-        <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
+        <OtpFields
+          code={code}
+          setCode={setCode}
+          sent={sent}
+          otpError={otpError}
+          otp={otp}
+          // Fix pack 4 (C15, critic P13): the seller's business name in full, never an account.
+          approvingText={approvingLine({
+            amountText: approvingAmountText(buyerTotal),
+            currency: buyerCurrency,
+            recipientName: sellerBusinessName,
+            accountLast4: null,
+            wholeName: true,
+          })}
+        />
         <button
           type="button"
           className={primaryBtnClasses}
@@ -282,7 +312,7 @@ export function BillPayForm({
           Edit bank details
         </button>
         {status === 'error' && !otpError && (
-          <p className={formErrorClasses}>Something went wrong. Please try again.</p>
+          <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
         )}
       </div>
     );

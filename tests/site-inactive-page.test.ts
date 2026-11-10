@@ -32,6 +32,7 @@ describe('/site-inactive', () => {
     expect(pay).toContain('This link is no longer active'); // the harness really rendered the dead-link sheet
     expect(main(site)).toBe(main(pay));
     expect(site).toContain('This link is no longer active');
+    expect(site).not.toContain('Approving'); // fix pack 4 (C15): nothing on dead-link sheets
   });
   it('is noindex, nofollow', async () => {
     const { metadata } = await import('@/app/site-inactive/page');

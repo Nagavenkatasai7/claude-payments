@@ -53,9 +53,27 @@ vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }))
 // Program-Fix 45: the limiter-down ops signal stays hermetic (never the real outbox).
 const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
+// Fix pack 4 (T11): `editable.value` lets a case make the row payout-editable;
+// like the repo's payoutEditable it is never true for a b2b row.
+const editable = vi.hoisted(() => ({ value: false }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable: async () => false, isPaymentLinkTransfer: async () => false }),
+  createTransferRepo: () => ({
+    isPayoutEditable: async () => editable.value && current.transferType !== 'b2b',
+    isPaymentLinkTransfer: async () => false,
+  }),
 }));
+// Fix pack 4 (T11): the real form renders; its props are recorded (as tests/payment-link-page.test.ts does).
+const payFormProps = vi.hoisted(() => ({ last: null as null | Record<string, unknown> }));
+vi.mock('@/app/pay/[transferId]/pay-form', async (orig) => {
+  const real = await orig<typeof import('@/app/pay/[transferId]/pay-form')>();
+  return {
+    ...real,
+    PayForm: (props: Parameters<typeof real.PayForm>[0]) => {
+      payFormProps.last = props as unknown as Record<string, unknown>;
+      return real.PayForm(props);
+    },
+  };
+});
 
 // B3 rewards v1: the minted transfer's reward row (none unless a test sets it).
 const transferReward = vi.hoisted(() => vi.fn().mockResolvedValue(null));
@@ -63,6 +81,7 @@ vi.mock('@/lib/rewards/read', () => ({ transferRewardOrNull: transferReward }));
 
 import PayPage from '@/app/pay/[transferId]/page';
 import { PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
+import { disclosureHash } from '@/lib/disclosure-hash';
 
 const FULL = {
   licensedEntity: 'Acme Money Services LLC',
@@ -101,6 +120,8 @@ beforeEach(() => {
   vi.useFakeTimers({ now: T0, toFake: ['Date'] });
   current = {};
   decryptedDest = '';
+  editable.value = false;
+  payFormProps.last = null;
   limiter.dump.clear();
   getTransfer.mockReset();
   getTransferDecrypted.mockReset();
@@ -228,5 +249,98 @@ describe('/pay/[transferId] — Reg E pre-payment disclosure', { retry: 0 }, () 
     transferReward.mockResolvedValue({ kind: 'first_transfer', discountUsd: 2.99, detail: {} });
     expect(await render()).not.toContain('data-reward-note');
     transferReward.mockResolvedValue(null);
+  });
+});
+
+// Fix pack 4 (C15, C10): the 'Approving ...' line beside the code box and the
+// disclosure hash the form posts. last4 only where the page shows the saved
+// account label today, and only for a bank account.
+describe('/pay/[transferId]: fix pack 4 Approving line and disclosure hash', { retry: 0 }, () => {
+  const approvingLineOf = (html: string) => html.match(/<p data-testid="approving-line"[^>]*>([^<]*)<\/p>/)?.[1] ?? null;
+
+  it('the single-step form shows the Approving line with the total, the first name and the saved last4', async () => {
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    current = { payoutMethod: 'bank' };
+    editable.value = true;
+    const html = await render();
+    expect(html).toContain('data-testid="approving-line"');
+    expect(approvingLineOf(html)).toBe('Approving 202.99 USD to Mom, account ending 9012.');
+  });
+
+  it("a recipient 'Priya Sharma' shows only 'Priya'; the full destination never appears in the markup", async () => {
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    current = { recipientName: 'Priya Sharma' };
+    editable.value = true;
+    const html = await render();
+    expect(approvingLineOf(html)).toBe('Approving 202.99 USD to Priya, account ending 9012.');
+    expect(html).not.toContain('123456789012');
+    expect(html).not.toContain('HDFC0001234');
+  });
+
+  it("a minted b2b transfer shows no 'account ending'", async () => {
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    current = { transferType: 'b2b' };
+    editable.value = true; // the repo never calls a b2b row editable
+    const html = await render();
+    expect(approvingLineOf(html)).toBe('Approving 202.99 USD to Mom.');
+    expect(html).not.toContain('account ending');
+  });
+
+  it("a NON-editable b2c transfer (Partner-API claim, or funded) shows no 'account ending'", async () => {
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    editable.value = false;
+    const html = await render();
+    expect(approvingLineOf(html)).toBe('Approving 202.99 USD to Mom.');
+    expect(html).not.toContain('account ending');
+    expect((payFormProps.last?.approving as { accountLast4: unknown }).accountLast4).toBeNull();
+  });
+
+  it("a UPI destination with digits (a phone-number UPI id) never shows 'account ending' in the line", async () => {
+    decryptedDest = '9876543210@ybl';
+    current = { payoutMethod: 'upi' };
+    editable.value = true;
+    const html = await render();
+    expect(approvingLineOf(html)).toBe('Approving 202.99 USD to Mom.');
+    expect((payFormProps.last?.approving as { accountLast4: unknown }).accountLast4).toBeNull();
+  });
+
+  it('a draft with a stored bank account gets the last4; a b2b or UPI draft gets none', async () => {
+    getTransfer.mockResolvedValue(null);
+    getTransferDecrypted.mockResolvedValue(null);
+    const draft = (o: Record<string, unknown>, r: Record<string, unknown>) => ({
+      senderPhone: '15551234567',
+      partnerId: 'p_acme',
+      recipient: { name: 'Priya Sharma', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: 'IFSC:HDFC0001234|ACCT:123456789012', ...r },
+      amountUsd: 1000, amountSource: 1000, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 50, fxRate: 84.5, amountInr: 84500, feeSource: 50, totalChargeSource: 1050 },
+      ...o,
+    }) as unknown as Draft;
+    getDraft.mockResolvedValue(draft({}, {}));
+    expect(approvingLineOf(await render())).toBe('Approving 1,050.00 USD to Priya, account ending 9012.');
+    getDraft.mockResolvedValue(draft({ transferType: 'b2b' }, {}));
+    expect(approvingLineOf(await render())).toBe('Approving 1,050.00 USD to Priya.');
+    getDraft.mockResolvedValue(draft({}, { payoutMethod: 'upi', payoutDestination: '9876543210@ybl' }));
+    expect(approvingLineOf(await render())).toBe('Approving 1,050.00 USD to Priya.');
+  });
+
+  it('the cold-start form (no stored destination) shows no Approving line on step 1; a paid transfer shows none', async () => {
+    decryptedDest = '';
+    const cold = await render();
+    expect(cold).toContain('Step 1 of 2');
+    expect(cold).not.toContain('Approving');
+    current = { status: 'paid' };
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    expect(await render()).not.toContain('Approving');
+  });
+
+  it("the page hands PayForm the configured block's hash; the default tenant passes null", async () => {
+    decryptedDest = 'IFSC:HDFC0001234|ACCT:123456789012';
+    await render();
+    expect(payFormProps.last?.disclosureHash).toBe(disclosureHash(FULL));
+    expect(payFormProps.last?.approving).toEqual({ amountText: '202.99', currency: 'USD', recipientName: 'Mom', accountLast4: null });
+    current = { partnerId: 'default' };
+    await render();
+    expect(payFormProps.last?.disclosureHash).toBeNull();
   });
 });

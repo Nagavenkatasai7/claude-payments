@@ -14,3 +14,10 @@ export function approvingLine(i: {
   const last4 = i.accountLast4 && /^[0-9]{4}$/.test(i.accountLast4) ? i.accountLast4 : null;
   return `Approving ${i.amountText} ${i.currency}` + (name ? ` to ${name}` : '') + (last4 ? `, account ending ${last4}` : '') + '.';
 }
+
+/** The page's Total charge number as the line's amount: en-US, 2 decimals ('1,050.00'); non-finite -> ''. */
+export function approvingAmountText(amount: number): string {
+  return Number.isFinite(amount)
+    ? new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount)
+    : '';
+}

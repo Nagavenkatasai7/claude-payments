@@ -106,4 +106,16 @@ describe('/pay/l/[token] page', () => {
     expect(html).toContain('1 USD = 84.00 INR');
     expect(formProps.last?.quoteLockedAt).toBeNull();
   });
+
+  // Fix pack 4 (C15, C10; critic P13): the line beside the code box names the
+  // WHOLE payee and no account; the form posts the block hash it was rendered with.
+  it('the link form gets the payee name and the block hash, and shows the Approving line for the first option', async () => {
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    expect(formProps.last?.approvingName).toBe('Sunrise Public School');
+    expect(formProps.last?.disclosureHash).toBeNull(); // the spec's partner read gives no block
+    const line = html.match(/<p data-testid="approving-line"[^>]*>([^<]*)<\/p>/)?.[1];
+    expect(line).toBe('Approving 296.11 USD to Sunrise Public School.');
+    expect(html).not.toContain('account ending');
+  });
 });

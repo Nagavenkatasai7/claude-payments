@@ -72,3 +72,18 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.reason === 'approval_not_recorded') return PAY_APPROVAL_NOT_RECORDED_COPY;
   return null;
 }
+
+// Fix pack 4 (C14, C10): the acknowledgement fields a pay form posts. The
+// version only when the box is ticked; the hash of the block the page was
+// rendered with only when it is a dh1 hash (optional for one release: the
+// server ignores an absent one). Client-safe.
+const DISCLOSURE_HASH_RE = /^dh1:[0-9a-f]{64}$/;
+
+export function disclosureAckBody(
+  version: string | null,
+  hash: string | null,
+  acked: boolean,
+): { disclosureVersion?: string; disclosureHash?: string } {
+  if (!acked || version === null) return {};
+  return hash !== null && DISCLOSURE_HASH_RE.test(hash) ? { disclosureVersion: version, disclosureHash: hash } : { disclosureVersion: version };
+}

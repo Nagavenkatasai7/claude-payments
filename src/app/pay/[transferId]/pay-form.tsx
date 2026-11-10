@@ -2,12 +2,14 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { disclosureAckBody, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 import {
   BANK_FIELDS_BY_COUNTRY,
   accountConfirmErrors,
+  accountLast4,
   accountConfirmKey,
   accountConfirmLabel,
   composePayoutDestination,
@@ -25,6 +27,18 @@ export interface PaySummary {
   sourceAmount: number;
   sourceCurrency: string;
   sourceTotalCharge: number;
+}
+
+/**
+ * Fix pack 4 (C15): the figures of the 'Approving ...' line, from the server
+ * page (the total it shows, the recipient name it shows, and a last4 only
+ * where it shows the saved account label today, for a bank account).
+ */
+export interface PayApproving {
+  amountText: string;
+  currency: string;
+  recipientName: string;
+  accountLast4: string | null;
 }
 
 function formatMoney(amount: number, currency: string): string {
@@ -83,6 +97,8 @@ export function PayForm({
   savedAccountLabel = null,
   bankDetailsLocked = false,
   disclosureVersion = null,
+  disclosureHash = null,
+  approving = null,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -95,6 +111,10 @@ export function PayForm({
   bankDetailsLocked?: boolean;
   /** Program-Fix 15 PR B: non-null ⇒ the page shows the Reg E disclosure and "Pay now" needs the acknowledgement. */
   disclosureVersion?: string | null;
+  /** Fix pack 4 (C10): the hash of the provider block the page was rendered with (posted with the acknowledgement). */
+  disclosureHash?: string | null;
+  /** Fix pack 4 (C15): the 'Approving ...' line's figures; null shows no line. */
+  approving?: PayApproving | null;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -107,6 +127,8 @@ export function PayForm({
         transferId={transferId}
         recipientName={recipientName}
         summary={summary}
+        // C15: the ACH form never names an account (the payee account is not the payer's to see).
+        approvingText={approving ? approvingLine({ ...approving, accountLast4: null }) : null}
       />
     );
   }
@@ -119,6 +141,8 @@ export function PayForm({
       <SimplePayForm
         transferId={transferId}
         disclosureVersion={disclosureVersion}
+        disclosureHash={disclosureHash}
+        approvingText={approving ? approvingLine(approving) : null}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -129,6 +153,8 @@ export function PayForm({
     <BankDetailsPayForm
       transferId={transferId}
       disclosureVersion={disclosureVersion}
+      disclosureHash={disclosureHash}
+      approving={approving}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -184,16 +210,23 @@ function OtpFields({
   sent,
   otpError,
   otp,
+  approvingText = null,
 }: {
   code: string;
   setCode: (v: string) => void;
   sent: boolean;
   otpError?: string;
   otp: OtpRequest;
+  /** Fix pack 4 (C15): what the code approves, shown above the send button and above the code box. */
+  approvingText?: string | null;
 }) {
+  const approvingEl = approvingText ? (
+    <p data-testid="approving-line" className="mb-2 text-[13px] leading-normal text-[#e9edef]">{approvingText}</p>
+  ) : null;
   if (!sent) {
     return (
       <div>
+        {approvingEl}
         <button type="button" className={secondaryBtnClasses} onClick={otp.requestCode} disabled={otp.requesting}>
           {otp.requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
         </button>
@@ -203,6 +236,7 @@ function OtpFields({
   }
   return (
     <div>
+      {approvingEl}
       <label className={labelClasses}>
         Confirmation code
         <input
@@ -255,11 +289,6 @@ function DisclosureAck({ checked, onChange }: { checked: boolean; onChange: (v: 
   );
 }
 
-/** The optional POST field: sent only when a disclosure was shown AND acknowledged. */
-function ackField(disclosureVersion: string | null, acked: boolean): { disclosureVersion?: string } {
-  return disclosureVersion && acked ? { disclosureVersion } : {};
-}
-
 // ── Single-step path (scheduled / re-opened links) ──────────────────────────
 
 function SimplePayForm({
@@ -267,11 +296,15 @@ function SimplePayForm({
   savedAccountLabel = null,
   onEditBankDetails,
   disclosureVersion = null,
+  disclosureHash = null,
+  approvingText = null,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
   onEditBankDetails?: () => void;
   disclosureVersion?: string | null;
+  disclosureHash?: string | null;
+  approvingText?: string | null;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [acked, setAcked] = useState(false);
@@ -292,7 +325,7 @@ function SimplePayForm({
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ otp: code, ...ackField(disclosureVersion, acked) }),
+        body: JSON.stringify({ otp: code, ...disclosureAckBody(disclosureVersion, disclosureHash, acked) }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
@@ -303,6 +336,8 @@ function SimplePayForm({
         const data = (await res.json()) as { reason?: string };
         setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') setOtpError('That code is incorrect or expired — resend and try again.');
+        // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
+        if (data.reason === 'approval_not_recorded') setCode('');
       } catch {
         /* generic */
       }
@@ -352,7 +387,7 @@ function SimplePayForm({
           </div>
         </div>
       )}
-      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
+      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
       {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
@@ -378,12 +413,16 @@ function BankDetailsPayForm({
   recipientName,
   summary,
   disclosureVersion = null,
+  disclosureHash = null,
+  approving = null,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
   recipientName: string;
   summary: PaySummary;
   disclosureVersion?: string | null;
+  disclosureHash?: string | null;
+  approving?: PayApproving | null;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
@@ -440,7 +479,12 @@ function BankDetailsPayForm({
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ country: destinationCountry, fields: values, otp: code, ...ackField(disclosureVersion, acked) }),
+        body: JSON.stringify({
+          country: destinationCountry,
+          fields: values,
+          otp: code,
+          ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
+        }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
@@ -454,6 +498,8 @@ function BankDetailsPayForm({
         setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
+        } else if (data.reason === 'approval_not_recorded') {
+          setCode(''); // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
         } else if (data.fieldErrors) {
           setErrors(data.fieldErrors);
           setStep('details');
@@ -498,7 +544,15 @@ function BankDetailsPayForm({
   }
 
   if (step === 'review') {
-    const masked = maskAccountDisplay(composePayoutDestination(destinationCountry, values));
+    const composed = composePayoutDestination(destinationCountry, values);
+    const masked = maskAccountDisplay(composed);
+    // Fix pack 4 (C15): the typed account's last 4 (already in this browser),
+    // only when this form collects a bank account (every country's field list
+    // marks one; a UPI id is never entered here).
+    const isBankAccount = defs.some((d) => d.isAccount);
+    const approvingText = approving
+      ? approvingLine({ ...approving, accountLast4: isBankAccount ? accountLast4(composed) || null : null })
+      : null;
     return (
       <div>
         <div className={stepLabelClasses}>Step 2 of 2 · Review &amp; pay</div>
@@ -520,7 +574,7 @@ function BankDetailsPayForm({
             <span>{formatMoney(summary.sourceTotalCharge, summary.sourceCurrency)}</span>
           </div>
         </div>
-        <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
+        <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
         {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
         <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
@@ -638,10 +692,12 @@ function AchDebitPayForm({
   transferId,
   recipientName,
   summary,
+  approvingText = null,
 }: {
   transferId: string;
   recipientName: string;
   summary: PaySummary;
+  approvingText?: string | null;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [routingNumber, setRoutingNumber] = useState('');
@@ -689,6 +745,8 @@ function AchDebitPayForm({
         setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
+        } else if (data.reason === 'approval_not_recorded') {
+          setCode(''); // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
         } else if (data.fieldErrors) {
           setErrors(data.fieldErrors);
         }
@@ -785,7 +843,7 @@ function AchDebitPayForm({
         </select>
         {errors.accountType && <span className={fieldErrorClasses}>{errors.accountType}</span>}
       </label>
-      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} />
+      <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Authorize & pay'}
       </button>

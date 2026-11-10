@@ -182,6 +182,8 @@ async function renderPage(token: string): Promise<React.ReactNode> {
         disclosureVersion={disclosureVersion}
         quoteLockedAt={quoteLockedAt}
         receipt={{ payeeName: payee.legalName, reference: link.reference, amountInr: link.amountInr }}
+        approvingName={payee.legalName}
+        disclosureHash={disclosureConfig.hash}
       />
     </Sheet>
   );

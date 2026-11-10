@@ -4,6 +4,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
+import { approvingAmountText } from '@/lib/approving-line';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
@@ -188,6 +189,10 @@ async function renderPayPage(transferId: string) {
     // Stage C2: "Prepared in <app>" for a draft an AI app prepared (MCP). Null: none.
     preparedByNote: string | null;
     bankDetailsLocked: boolean; // true ⇒ no "Edit bank details" (Stage C2)
+    // Fix pack 4 (C15, critic P2/C10): the 'Approving ...' line's last 4 digits,
+    // only where savedAccountLabel is shown today and only for a bank account
+    // (a UPI id's digits can be a phone number). Null: no 'account ending'.
+    approvingLast4: string | null;
   };
 
   let view: View | null = null;
@@ -241,6 +246,7 @@ async function renderPayPage(transferId: string) {
       // 2: never collected in chat) — collect the recipient's bank details here.
       needsBankDetails: transferNeedsDetails,
       savedAccountLabel: transferEditable ? savedAccountLabelFor(storedTransferDest) : null,
+      approvingLast4: transferEditable && transfer.payoutMethod === 'bank' ? accountLast4(storedTransferDest) || null : null,
       rewardNote: reward
         ? rewardPayNote(reward, (usd) =>
             formatMoney(usdToSource(usd, sourceCurrency, transfer.amountSource, transfer.amountUsd), sourceCurrency),
@@ -282,6 +288,10 @@ async function renderPayPage(transferId: string) {
       awaitingPayment: true, // a draft is always awaiting payment
       needsBankDetails: !hasStoredDest,
       savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
+      approvingLast4:
+        hasStoredDest && draft.transferType !== 'b2b' && draft.recipient.payoutMethod === 'bank'
+          ? accountLast4(storedDraftDest) || null
+          : null,
       bankDetailsLocked: bankDetailsLocked(draft), // Stage C2: an app-prepared draft pays only its stored account
       rewardNote: draft.reward
         ? rewardPayNote(draft.reward, (usd) =>
@@ -300,8 +310,10 @@ async function renderPayPage(transferId: string) {
 
   // Program-Fix 15 PR B: the Reg E pre-payment disclosure (null for B2B). The
   // amounts are the view's own — the card can never disagree with the form.
+  // Fix pack 4 (C10): one resolve feeds the card and the hash the form posts.
+  const resolvedDisclosure = resolvePartnerDisclosure(partner);
   const disclosure = view.awaitingPayment
-    ? buildPrepaymentDisclosure(view, resolvePartnerDisclosure(partner))
+    ? buildPrepaymentDisclosure(view, resolvedDisclosure)
     : null;
 
   const feeLabel =
@@ -349,6 +361,13 @@ async function renderPayPage(transferId: string) {
         {view.awaitingPayment ? (
           <PayForm
             disclosureVersion={disclosure?.version ?? null}
+            disclosureHash={disclosure ? resolvedDisclosure.hash : null}
+            approving={{
+              amountText: approvingAmountText(view.sourceTotalCharge),
+              currency: view.sourceCurrency,
+              recipientName: view.recipientName,
+              accountLast4: view.approvingLast4,
+            }}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

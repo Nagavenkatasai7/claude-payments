@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { approvingLine } from '@/lib/approving-line';
+import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 
 // Fix pack 4 (C15): the line beside every code box that says what the code approves.
 describe('approvingLine', () => {
@@ -21,5 +21,20 @@ describe('approvingLine', () => {
   it("wholeName: true keeps 'Sri Lakshmi Traders' whole (whitespace runs flattened)", () => {
     expect(approvingLine({ amountText: '1,050.00', currency: 'USD', recipientName: ' Sri  Lakshmi\tTraders ', accountLast4: null, wholeName: true }))
       .toBe('Approving 1,050.00 USD to Sri Lakshmi Traders.');
+  });
+});
+
+describe('approvingAmountText', () => {
+  it("en-US with 2 decimals: 202.99 -> '202.99', 1050 -> '1,050.00', 0.5 -> '0.50'", () => {
+    expect(approvingAmountText(202.99)).toBe('202.99');
+    expect(approvingAmountText(1050)).toBe('1,050.00');
+    expect(approvingAmountText(0.5)).toBe('0.50');
+  });
+
+  it("a non-finite amount gives '' and the line still ends with a full stop", () => {
+    expect(approvingAmountText(NaN)).toBe('');
+    expect(approvingAmountText(Infinity)).toBe('');
+    const line = approvingLine({ amountText: approvingAmountText(NaN), currency: 'USD', recipientName: 'Priya', accountLast4: null });
+    expect(line.endsWith('.')).toBe(true);
   });
 });

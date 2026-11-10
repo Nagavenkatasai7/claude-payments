@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
-  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
@@ -98,6 +98,26 @@ describe('payErrorMessage: fix pack 4 copy', () => {
     expect(PAY_ACCOUNT_HOLDER_COPY).toBe("Enter the account holder's name as it appears at the recipient's bank.");
     for (const body of [{ reason: 'account_holder' }, { reason: 'account_holder_required' }, { fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } }]) {
       expect(payErrorMessage(body), JSON.stringify(body)).toBeNull();
+    }
+  });
+});
+
+// Fix pack 4 (C14): the client helper that replaces pay-form's ackField and the
+// link form's inline object.
+describe('disclosureAckBody', () => {
+  const HASH = 'dh1:' + 'a'.repeat(64);
+
+  it('not acked, or no version, is {}', () => {
+    expect(disclosureAckBody('2026-10-v1', HASH, false)).toEqual({});
+    expect(disclosureAckBody(null, HASH, true)).toEqual({});
+    expect(disclosureAckBody(null, null, false)).toEqual({});
+  });
+
+  it('acked carries the version, and the hash only when it is a dh1 hash', () => {
+    expect(disclosureAckBody('2026-10-v1', null, true)).toEqual({ disclosureVersion: '2026-10-v1' });
+    expect(disclosureAckBody('2026-10-v1', HASH, true)).toEqual({ disclosureVersion: '2026-10-v1', disclosureHash: HASH });
+    for (const bad of ['', 'dh1:', 'dh1:' + 'A'.repeat(64), 'dh2:' + 'a'.repeat(64), 'dh1:' + 'a'.repeat(63), ' ' + HASH]) {
+      expect(disclosureAckBody('2026-10-v1', bad, true), bad).toEqual({ disclosureVersion: '2026-10-v1' });
     }
   });
 });
