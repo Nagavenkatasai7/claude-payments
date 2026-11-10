@@ -10,6 +10,7 @@ import {
   SENDER_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
+  RECIPIENT_IDENTITY_MISSING_REASON,
   LARGE_AMOUNT_REASON,
   VELOCITY_REASON,
   EDD_REQUIRED_REASON,
@@ -17,6 +18,7 @@ import {
   CUSTOMER_SCREENING_FLAGS,
   holdReleasableBy,
   isRescreenOnlyHold,
+  isScreeningHold,
   senderScreeningHoldActive,
 } from '@/lib/compliance-config';
 import * as complianceReexports from '@/lib/compliance';
@@ -25,6 +27,7 @@ import { FIXED_REPLIES } from '@/lib/hold-replies';
 import { holdReasonKeys } from '@/lib/partner-transfers';
 import { HOLD_REASON_CODES } from '@/lib/aml-explain-ai';
 import { canReleaseHeld } from '@/lib/dashboard-ops';
+import { t } from '@/lib/i18n';
 
 // Fix pack 2 (R04, R06): ONE registry of every stored hold reason: its class,
 // who may release it, and the customer copy. The older lists are derived.
@@ -38,6 +41,7 @@ describe('HOLD_REASONS registry', () => {
       'Sender is on the compliance watchlist.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'block' },
       'Sender identity missing.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
       'Sender screening needs manual review.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+      'Recipient identity missing.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
       'Large transfer amount.': { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
       'High transfer velocity.': { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
       edd_required: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
@@ -48,6 +52,7 @@ describe('HOLD_REASONS registry', () => {
     expect(SENDER_WATCHLIST_REASON).toBe('Sender is on the compliance watchlist.');
     expect(SENDER_IDENTITY_MISSING_REASON).toBe('Sender identity missing.');
     expect(SENDER_SCREENING_REASON).toBe('Sender screening needs manual review.');
+    expect(RECIPIENT_IDENTITY_MISSING_REASON).toBe('Recipient identity missing.');
     expect(LARGE_AMOUNT_REASON).toBe('Large transfer amount.');
     expect(VELOCITY_REASON).toBe('High transfer velocity.');
     expect(EDD_REQUIRED_REASON).toBe('edd_required');
@@ -84,8 +89,21 @@ describe('HOLD_REASONS registry', () => {
     expect(HOLD_REASON_CODES[SENDER_SCREENING_REASON]).toBe('screening');
   });
 
+  // Pack 4 T12 (R03, C19): a real-money b2c transfer with no account-holder name on file.
+  it('the recipient-identity reason is platform-only, never partner-releasable, and has its own staff labels', () => {
+    const r = RECIPIENT_IDENTITY_MISSING_REASON;
+    expect(holdReleasableBy([r])).toBe('platform');
+    expect(holdReleasableBy([LARGE_AMOUNT_REASON, r])).toBe('platform');
+    expect(PARTNER_RELEASABLE_REASONS).not.toContain(r);
+    expect(isScreeningHold({ complianceReasons: [r] })).toBe(true);
+    expect(holdReasonKeys([r])).toEqual(['partner.transfers.reason.recipientIdentity']);
+    expect(HOLD_REASON_CODES[r]).toBe('recipient_identity_missing');
+    expect(t('partner.transfers.reason.recipientIdentity')).toBe('Recipient identity missing');
+  });
+
   it('compliance.ts re-exports the new registry names', () => {
     expect(complianceReexports.SENDER_SCREENING_REASON).toBe(SENDER_SCREENING_REASON);
+    expect(complianceReexports.RECIPIENT_IDENTITY_MISSING_REASON).toBe(RECIPIENT_IDENTITY_MISSING_REASON);
     expect(complianceReexports.HOLD_REASONS).toBe(HOLD_REASONS);
     expect(complianceReexports.holdReleasableBy).toBe(holdReleasableBy);
     expect(complianceReexports.isRescreenOnlyHold).toBe(isRescreenOnlyHold);

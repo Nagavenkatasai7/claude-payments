@@ -428,6 +428,7 @@ export const en = {
   'partner.transfers.holdRelease': 'SmartRemit compliance reviews and releases this hold.',
   'partner.transfers.reason.screening': 'Name screening needs manual review',
   'partner.transfers.reason.identity': 'Sender identity missing',
+  'partner.transfers.reason.recipientIdentity': 'Recipient identity missing',
   'partner.transfers.reason.large': 'Large transfer amount',
   'partner.transfers.reason.velocity': 'High transfer velocity',
   'partner.transfers.reason.additional': 'Additional review required',

@@ -20,6 +20,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLATFORM_RESCREEN_REFUSALS, RESCREEN_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
+import * as complianceConfig from '@/lib/compliance-config';
+import { HOLD_REASONS } from '@/lib/compliance-config';
 import {
   SANCTIONS_FUNDS_RULE,
   SANCTIONS_FUNDS_SENTENCE,
@@ -349,6 +351,36 @@ describe('sanctions screening spec says what pack 3 does', () => {
           expect(src, `${key} text piece "${piece}"`).toContain(piece);
         }
       }
+    }
+  });
+
+  // Pack 4 T12 (C19): the spec's hold-reason registry table matches HOLD_REASONS row for row.
+  it('the hold-reason registry table lists every HOLD_REASONS constant with its class, releaser and copy', () => {
+    const title = '### Hold-reason registry';
+    const start = spec.indexOf(title);
+    expect(start, title).toBeGreaterThanOrEqual(0);
+    const next = spec.indexOf('\n#', start + title.length);
+    const table = spec.slice(start, next === -1 ? undefined : next);
+    const rows = table.split('\n').filter((l) => /^\| `[A-Z_]+_REASON` \|/.test(l));
+    const named = Object.entries(complianceConfig).filter(
+      ([name, value]) => name.endsWith('_REASON') && typeof value === 'string' && Object.hasOwn(HOLD_REASONS, value),
+    ) as [string, string][];
+    const names = named.map(([n]) => n);
+    expect(names).toEqual(expect.arrayContaining(['EDD_REQUIRED_REASON', 'AML_HOLD_REASON']));
+    // every registry key has an exported constant, and the table has exactly one row per constant
+    expect(new Set(named.map(([, v]) => v))).toEqual(new Set(Object.keys(HOLD_REASONS)));
+    expect(rows).toHaveLength(names.length);
+    for (const [name, value] of named) {
+      const row = rows.find((l) => l.startsWith(`| \`${name}\` |`));
+      expect(row, name).toBeDefined();
+      const cells = row!.split('|').slice(1, -1).map((c) => c.trim());
+      const e = HOLD_REASONS[value]!;
+      expect(cells, name).toEqual([
+        `\`${name}\``,
+        e.class,
+        e.releasableBy === 'rescreen' ? 'rescreen (no person)' : e.releasableBy,
+        e.customerCopyKey,
+      ]);
     }
   });
 });

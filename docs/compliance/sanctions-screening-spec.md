@@ -100,12 +100,15 @@ Rules:
 | `SENDER_WATCHLIST_REASON` | screening | platform | block |
 | `SENDER_IDENTITY_MISSING_REASON` | screening | platform | hold |
 | `SENDER_SCREENING_REASON` | screening | platform | hold |
+| `RECIPIENT_IDENTITY_MISSING_REASON` | screening | platform | hold |
 | `LARGE_AMOUNT_REASON` | kyc | partner | hold |
 | `VELOCITY_REASON` | kyc | partner | hold |
 | `EDD_REQUIRED_REASON` | kyc | partner | hold |
 | `AML_HOLD_REASON` | aml | platform | hold |
 
 The strictest reason wins (rescreen, then platform, then partner). An empty list or a reason outside the registry counts as platform-only. "Partner" means a delegated partner's admin, and platform staff too.
+
+`RECIPIENT_IDENTITY_MISSING` (pack 4, R03) holds a real-money consumer transfer that reaches settlement with no account-holder name on file; Partner-API and payment-link transfers are exempt (their payee name is attested elsewhere), and a release is refused while the name is missing.
 
 ## 5. Sender screening hold (R06)
 
