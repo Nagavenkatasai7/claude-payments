@@ -15,6 +15,7 @@ import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
 import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
 import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
+import { RECIPIENT_WATCHLIST_REASON } from '@/lib/compliance-config';
 
 function stubFetch85() {
   vi.stubGlobal(
@@ -1313,6 +1314,58 @@ describe('createTransfer — sanctions.screen evidence (Program-Fix 14)', () => 
     const rows = await screenRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0].subject_id).toBe('ev_replay_1');
+  });
+
+  // ── Fix pack 4 T13 (R03, C20): the recipient's legal name is screened at mint ──
+  const roles = (row: AuditRow): string[] => (row.meta.parties as Array<{ role: string }>).map((p) => p.role);
+
+  it('a mint with a recipient legal name screens it as a further recipient party (roles recipient, sender, recipient)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, senderName: 'Clean Person', recipientLegalName: 'Mother Legal Name',
+    });
+    expect(t.complianceStatus).toBe('cleared');
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(roles(rows[0])).toEqual(['recipient', 'sender', 'recipient']);
+    const persisted = JSON.stringify(rows[0].meta).toLowerCase();
+    expect(persisted).not.toContain('mother');
+    expect(persisted).not.toContain('legal name');
+    expect(persisted).not.toContain('clean person');
+  });
+
+  it('a legal name on the watchlist blocks the mint (RECIPIENT_WATCHLIST)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, recipientName: 'Mom', recipientLegalName: 'John Doe',
+    });
+    expect(t.status).toBe('blocked');
+    expect(t.complianceReasons).toContain(RECIPIENT_WATCHLIST_REASON);
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ decision: 'match' });
+    const persisted = JSON.stringify(rows[0].meta).toLowerCase();
+    expect(persisted).not.toContain('john');
+  });
+
+  it('a legal name equal to the chat name (any case or spacing) adds no party', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, {
+      ...base, senderName: 'Clean Person', recipientName: 'Asha Rao', recipientLegalName: '  asha  RAO ',
+    });
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(roles(rows[0])).toEqual(['recipient', 'sender']);
+  });
+
+  it('no legal name: the evidence is exactly today\'s', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, { ...base, senderName: 'Clean Person' });
+    await createTransfer(store, partnerStore, mvs, { ...base, id: 'ev_blank_legal', senderName: 'Clean Person', recipientLegalName: '   ' });
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(2);
+    expect(roles(rows[0])).toEqual(['recipient', 'sender']);
+    expect(roles(rows[1])).toEqual(['recipient', 'sender']);
   });
 });
 

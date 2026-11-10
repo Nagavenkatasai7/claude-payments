@@ -785,6 +785,10 @@ async function mintLocked(
     sourceCountry: p.sourceCountry,    // NEW (P5)
     rules: p.rules,                    // NEW (P5)
     senderName: input.senderName,      // NEW (KYC) — screened via the same seam (undefined ⇒ no-op)
+    // Fix pack 4 (R03, C20): the legal name is screened at mint, role 'recipient' like every
+    // recipient name (a new role would make evidence-read drop the row). A name equal to the
+    // chat name after normalising adds no party (extraRecipientNames).
+    alsoRecipientNames: input.recipientLegalName?.trim() ? [input.recipientLegalName.trim()] : undefined,
     requireLiveList: p.realMoney,      // Fix pack 2 (R02): real money clears only on a live list
     now,
   });

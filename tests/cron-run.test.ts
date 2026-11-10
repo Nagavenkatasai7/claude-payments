@@ -12,6 +12,7 @@ import { certifyPartnerForTest } from './helpers-live';
 import { SendBusyError } from '@/lib/send-limits';
 import { MintRefusedError } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
+import { createRecipientRepo } from '@/db/repos/aux-repos';
 import type { Schedule } from '@/lib/types';
 import type { CustomerStore } from '@/lib/customer-store';
 import type { KycProvider } from '@/lib/providers/kyc-provider';
@@ -933,5 +934,145 @@ describe('runDueSchedules: MintRefusedError (pack 3)', () => {
     expect(alerts).toHaveLength(1);
     expect(alerts[0].dedupe_key).toMatch(/^schedule-refused:due:/);
     expect(alerts[0].payload.message).toContain('(capability_off)');
+  });
+});
+
+describe('runDueSchedules: the saved recipient legal name rides the mint (pack 4 T13, C20)', () => {
+  // C3's account match compares the payout method and the repo's last4 of the destination;
+  // the saved row uses the SAME method and destination as sched() ('upi', 'mom@upi').
+  const ACCOUNT = 'mom@upi';
+  const SENDER = '15551234567';
+  const RECIPIENT = '919133001840';
+  async function saveRecipient(
+    db: Awaited<ReturnType<typeof makeDeps>>['db'],
+    o: { payoutDestination?: string; legalName?: string } = {},
+  ): Promise<void> {
+    await createRecipientRepo(db).upsertRecipient(
+      'default',
+      SENDER,
+      {
+        name: 'Mom', recipientPhone: RECIPIENT, payoutMethod: 'upi',
+        payoutDestination: o.payoutDestination ?? ACCOUNT, lastUsedAt: new Date().toISOString(),
+      },
+      o.legalName === undefined ? {} : { legalName: o.legalName },
+    );
+  }
+  async function screenParties(db: Awaited<ReturnType<typeof makeDeps>>['db'], id: string): Promise<string[]> {
+    const r = (await db.execute(
+      sql`SELECT meta FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id} ORDER BY id`,
+    )) as unknown as { rows: Array<{ meta: { parties: Array<{ role: string }> } }> };
+    expect(r.rows).toHaveLength(1);
+    return r.rows[0].meta.parties.map((p) => p.role);
+  }
+  async function runOnce(deps: Awaited<ReturnType<typeof makeDeps>>, notified: string[] = []) {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = deps;
+    return runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+  }
+
+  it("a scheduled run carries the saved recipient's legal name into the mint", async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('legal', 21), payoutDestination: ACCOUNT });
+    await saveRecipient(deps.db, { legalName: 'Mother Legal Name' });
+
+    expect(await runOnce(deps)).toEqual({ fired: 1, failed: 0 });
+    const [t] = await deps.store.listTransfers();
+    expect((await deps.store.getTransferDecrypted(t.id))?.recipientLegalName).toBe('Mother Legal Name');
+    expect(await screenParties(deps.db, t.id)).toEqual(['recipient', 'sender', 'recipient']);
+  });
+
+  it.each([
+    ['no saved recipient', async () => {}],
+    ['a saved recipient with no legal name', async (db: Awaited<ReturnType<typeof makeDeps>>['db']) => saveRecipient(db)],
+  ])('%s: the mint has no legal name and fires as today', async (_label, seed) => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('plain', 21), payoutDestination: ACCOUNT });
+    await seed(deps.db);
+    const notified: string[] = [];
+
+    expect(await runOnce(deps, notified)).toEqual({ fired: 1, failed: 0 });
+    expect(notified).toHaveLength(1);
+    const [t] = await deps.store.listTransfers();
+    expect((await deps.store.getTransferDecrypted(t.id))?.recipientLegalName).toBeUndefined();
+    expect(await screenParties(deps.db, t.id)).toEqual(['recipient', 'sender']);
+  });
+
+  it('a saved legal name for ANOTHER account (last4 differs) is NOT carried', async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    // The schedule pays 'mom@upi' (no digits); the book's name was typed for a different account.
+    await deps.scheduleStore.saveSchedule({ ...sched('other', 21), payoutDestination: 'mom1234@upi' });
+    await saveRecipient(deps.db, { payoutDestination: 'mom5678@upi', legalName: 'Other Account Holder' });
+
+    expect(await runOnce(deps)).toEqual({ fired: 1, failed: 0 });
+    const [t] = await deps.store.listTransfers();
+    expect((await deps.store.getTransferDecrypted(t.id))?.recipientLegalName).toBeUndefined();
+    expect(await screenParties(deps.db, t.id)).toEqual(['recipient', 'sender']);
+  });
+
+  it("a schedule with an empty destination carries no book name (C3: an empty account matches none)", async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('empty', 21), payoutDestination: '' });
+    await saveRecipient(deps.db, { legalName: 'Mother Legal Name' });
+
+    expect(await runOnce(deps)).toEqual({ fired: 1, failed: 0 });
+    const [t] = await deps.store.listTransfers();
+    expect((await deps.store.getTransferDecrypted(t.id))?.recipientLegalName).toBeUndefined();
+    expect(await screenParties(deps.db, t.id)).toEqual(['recipient', 'sender']);
+  });
+
+  it('a tombstoned recipient: no name is read, and the run is refused as today (recipient_deleted, M2-10)', async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('gone', 21), payoutDestination: ACCOUNT });
+    await saveRecipient(deps.db, { legalName: 'Mother Legal Name' });
+    await createRecipientRepo(deps.db).tombstoneRecipient('default', SENDER, RECIPIENT);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await createRecipientRepo(deps.db).getRecipientLegalName('default', SENDER, RECIPIENT, {
+      payoutMethod: 'upi', payoutDestination: ACCOUNT,
+    })).toBeNull();
+
+    expect(await runOnce(deps)).toEqual({ fired: 0, failed: 1 });
+    expect(await deps.store.listTransfers()).toHaveLength(0);
+  });
+
+  it('the legal-name read throws: the run still fires without it, and one warn names the schedule id only', async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('readfail', 21), payoutDestination: ACCOUNT });
+    await saveRecipient(deps.db, { legalName: 'Mother Legal Name' });
+    // A ciphertext sealed for another column fails its AAD check, so the decrypting read throws.
+    await deps.db.execute(sql`UPDATE recipients SET legal_name_enc = payout_destination_enc`);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const notified: string[] = [];
+
+    expect(await runOnce(deps, notified)).toEqual({ fired: 1, failed: 0 });
+    expect(notified).toHaveLength(1);
+    const [t] = await deps.store.listTransfers();
+    expect((await deps.store.getTransferDecrypted(t.id))?.recipientLegalName).toBeUndefined();
+    const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('cron.legal_name_read'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('readfail');
+    expect(lines[0]).not.toMatch(/mother|legal name|mom@upi/i);
+    expect(lines[0]).not.toContain(SENDER);
+    expect(lines[0]).not.toContain(RECIPIENT);
+  });
+
+  it('a saved legal name on the watchlist: the run\'s transfer is blocked and no link is sent', async () => {
+    const deps = await makeDeps();
+    await seedVerified(deps.customerStore);
+    await deps.scheduleStore.saveSchedule({ ...sched('listed', 21), payoutDestination: ACCOUNT });
+    await saveRecipient(deps.db, { legalName: 'John Doe' });
+    const notified: string[] = [];
+
+    expect(await runOnce(deps, notified)).toEqual({ fired: 1, failed: 0 });
+    expect(notified).toHaveLength(0);
+    const [t] = await deps.store.listTransfers();
+    expect(t.status).toBe('blocked');
   });
 });
