@@ -230,7 +230,7 @@ export async function assignTransfer(
  */
 export async function resendPaymentLink(
   store: Store,
-  sendText: (to: string, text: string) => Promise<void>,
+  sendText: (to: string, text: string) => Promise<unknown>, // fix pack 4 (C5): the channel it resolves is ignored
   id: string,
   consent?: OptOutLookup,
 ): Promise<void> {

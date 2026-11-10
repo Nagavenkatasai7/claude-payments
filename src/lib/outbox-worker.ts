@@ -97,7 +97,7 @@ import {
 export interface WorkerDeps {
   db: Db;
   store: Store;
-  sendText: (to: string, text: string, creds?: WaCreds) => Promise<void>;
+  sendText: (to: string, text: string, creds?: WaCreds) => Promise<unknown>; // fix pack 4 (C5): the channel it resolves is ignored
   sendTemplate: (
     to: string,
     template: string,

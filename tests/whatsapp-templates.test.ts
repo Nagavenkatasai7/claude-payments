@@ -281,6 +281,27 @@ describe('transactionOtpMessage — never-share wording (fix 45)', () => {
   it('a blank brand falls back to SmartRemit', () => {
     expect(transactionOtpMessage('123456', '   ')).toContain('SmartRemit will never ask for it');
   });
+
+  // Fix pack 4 (C5): an optional provider line, appended on its own line.
+  const LINE = 'Your transfer is provided by Example Licensed Partner LLC.';
+  it('with a provider line: the no-line text, a newline, then the line', () => {
+    expect(transactionOtpMessage('123456', 'Acme Pay', LINE)).toBe(
+      `${transactionOtpMessage('123456', 'Acme Pay')}\n${LINE}`,
+    );
+  });
+
+  it("undefined, '' and whitespace-only lines are byte-identical to the two-argument call", () => {
+    const base = transactionOtpMessage('123456', 'Acme Pay');
+    expect(transactionOtpMessage('123456', 'Acme Pay', undefined)).toBe(base);
+    expect(transactionOtpMessage('123456', 'Acme Pay', '')).toBe(base);
+    expect(transactionOtpMessage('123456', 'Acme Pay', '  \n ')).toBe(base);
+  });
+
+  it('with a line the code still appears exactly once and "<brand> will never ask for it" stays', () => {
+    const msg = transactionOtpMessage('123456', 'Acme Pay', LINE);
+    expect(msg.split('123456').length - 1).toBe(1);
+    expect(msg).toContain('Acme Pay will never ask for it');
+  });
 });
 
 // Scheduled-send name nudge (2026-10-02): fixed copy, the partner's brand and

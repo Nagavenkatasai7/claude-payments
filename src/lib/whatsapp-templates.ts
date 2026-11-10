@@ -348,12 +348,16 @@ export function verificationStatusFallbackText(
  * Program-Fix 45: ends with the "never share" line. `brand` is optional (every
  * caller today sends the SmartRemit default); a blank brand falls back to it.
  */
-export function transactionOtpMessage(code: string, brand?: string): string {
+export function transactionOtpMessage(code: string, brand?: string, providerLine?: string): string {
   const name = brandOr(brand);
-  return (
+  const base =
     `Your ${name} confirmation code is ${code}. Enter it on the payment page to send this transfer. ` +
-    `It expires in 10 minutes. Never share this code; ${name} will never ask for it.`
-  );
+    `It expires in 10 minutes. Never share this code; ${name} will never ask for it.`;
+  // Fix pack 4 (C5, C22): the approved provider line, on its own line. Absent or
+  // blank -> byte-identical to the text above. A Meta AUTHENTICATION template
+  // send cannot carry the line (known limit): only the free-form text does.
+  const line = providerLine?.trim();
+  return line ? `${base}\n${line}` : base;
 }
 
 /**

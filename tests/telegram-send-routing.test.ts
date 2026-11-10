@@ -28,8 +28,10 @@ import {
   sendTemplate,
   sendTemplateOrText,
   sendText,
+  sendTransactionOtp,
   TelegramNoTemplateError,
 } from '@/lib/whatsapp';
+import { otpMessage, transactionOtpMessage } from '@/lib/whatsapp-templates';
 
 const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true, result: {}, messages: [{ id: 'wamid.x' }] }), { status: 200 }));
 const calls = () => fetchMock.mock.calls.map(([url, init]) => ({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> }));
@@ -107,6 +109,36 @@ describe('routed to Telegram', () => {
     expect(graphCalls()).toEqual([]);
     expect(String(telegramCalls()[0].body.text)).toContain('482913');
   });
+
+  // Fix pack 4 (C5): the send reports its channel; a PAYMENT code on a Telegram
+  // chat gets the 10-minute transaction text; seller codes are unchanged.
+  it("sendText resolves 'tg' on the chat", async () => {
+    await expect(sendText(PHONE, 'hi')).resolves.toBe('tg');
+  });
+
+  it("sendTransactionOtp with { purpose: 'payment' } sends the 10-minute transaction text, never the sign-in text, and resolves 'tg'", async () => {
+    vi.stubEnv('WHATSAPP_AUTH_TEMPLATE', 'otp_auth');
+    await expect(sendTransactionOtp(PHONE, '482913', undefined, undefined, undefined, { purpose: 'payment' })).resolves.toBe('tg');
+    expect(graphCalls()).toEqual([]);
+    expect(telegramCalls().map((c) => c.body.text)).toEqual([transactionOtpMessage('482913')]);
+    expect(String(telegramCalls()[0].body.text)).toContain('expires in 10 minutes');
+    expect(String(telegramCalls()[0].body.text)).not.toBe(otpMessage('482913'));
+  });
+
+  it('with hooks.providerLine the Telegram payment text ends with the line', async () => {
+    const line = 'Your transfer is provided by Example Licensed Partner LLC.';
+    await sendTransactionOtp(PHONE, '482913', undefined, undefined, undefined, { purpose: 'payment', providerLine: line });
+    expect(telegramCalls().map((c) => c.body.text)).toEqual([`${transactionOtpMessage('482913')}\n${line}`]);
+  });
+
+  it('WITHOUT purpose (seller onboarding) the Telegram send is byte-identical to today: otpMessage via the auth-template branch', async () => {
+    vi.stubEnv('WHATSAPP_AUTH_TEMPLATE', 'otp_auth');
+    await sendTransactionOtp(PHONE, '482913');
+    expect(graphCalls()).toEqual([]);
+    expect(telegramCalls()).toEqual([
+      { url: 'https://api.telegram.org/bot123:test/sendMessage', body: { chat_id: CHAT, text: otpMessage('482913') } },
+    ]);
+  });
 });
 
 describe('stays on WhatsApp', () => {
@@ -115,6 +147,11 @@ describe('stays on WhatsApp', () => {
     await sendText(PHONE, 'hi');
     expect(telegramCalls()).toEqual([]);
     expect(graphCalls()).toHaveLength(1);
+  });
+
+  it("sendText resolves 'wa' on Meta (fix pack 4, C5)", async () => {
+    redis.dump.clear();
+    await expect(sendText(PHONE, 'hi')).resolves.toBe('wa');
   });
 
   it("a partner's own number (other creds), even with a route mark", async () => {

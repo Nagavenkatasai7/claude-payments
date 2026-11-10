@@ -11,8 +11,17 @@ import { DEFAULT_PARTNER_ID } from './defaults';
  * sender phone, so a code issued for one transaction can't authorize another and
  * can't be redirected to a different number. Reuses the same primitives as
  * otp-store (CSPRNG, sha256-at-rest, constant-time compare, attempt cap) but a
- * transaction-scoped key. The code is delivered IN-SESSION (free-form WhatsApp),
- * so it needs no Meta AUTHENTICATION template. Never logged.
+ * transaction-scoped key. The code goes out as free-form text in-session, or
+ * through a Meta AUTHENTICATION template outside the 24-hour window (see
+ * sendTransactionOtp). Never logged.
+ *
+ * Authorisation record (fix pack 4, C5): the record carries `issuedAt`, and a
+ * successful verify reports `issuedAt`, the per-code `attempt` and the delivery
+ * `channel`. The channel is NOT in the record: the route notes it afterwards in
+ * a separate `txotp:ch:<sha(txId)>` key (`noteDelivery`, value
+ * `<issuedAt>|<wa|tg>`), so a late note can never recreate a consumed code or
+ * tag a newer one. A correct code is consumed atomically with GETDEL; the
+ * record is never rewritten after issue.
  *
  * Attempt caps (Program-Fix 19, F59/F60): every verify RESERVES its attempt with
  * an atomic INCR before any compare — a parallel burst cannot read one stale
@@ -59,6 +68,8 @@ const cdKey = (txId: string) => `txotp:cd:${sha(txId)}`;
 const attKey = (txId: string) => `txotp:att:${sha(txId)}`;
 const failKey = (txId: string, t: number) => `txotp:fail:${sha(txId)}:${Math.floor(t / DAY_MS)}`;
 const issuedKey = (txId: string) => `txotp:issued:${sha(txId)}`;
+/** Fix pack 4 (C5): the delivery channel of the live code, `<issuedAt>|<wa|tg>`. */
+const chKey = (txId: string) => `txotp:ch:${sha(txId)}`;
 /**
  * Which per-phone daily budget an issue draws from. Budgets are separate per
  * caller kind AND per partner, so one flow (or one tenant) reaching its cap can
@@ -85,11 +96,19 @@ interface Rec {
   /** Legacy per-code counter. Always written as 0 so a pre-fix-19 build reads a number during a rolling release; the `txotp:att:` key is authoritative. */
   attempts: number;
   expiresAt: number;
+  /** Fix pack 4 (C5): when the code was issued. Always written now; optional so a previous-build record parses (then `expiresAt - TTL`). */
+  issuedAt?: number;
 }
 
-export type IssueResult = { ok: true; code: string } | { ok: false; reason: 'cooldown' | 'locked' };
+/** Fix pack 4 (C5): the channel a code was delivered on. */
+export type TxOtpChannel = 'wa' | 'tg';
+
+export type IssueResult =
+  | { ok: true; code: string; issuedAt: number }
+  | { ok: false; reason: 'cooldown' | 'locked' };
 export type VerifyResult =
-  | { ok: true }
+  // The extras are optional so route-spec mocks returning `{ ok: true }` stay valid.
+  | { ok: true; issuedAt?: number; attempt?: number; channel?: TxOtpChannel | null }
   | { ok: false; reason: 'no_code' | 'expired' | 'locked' | 'wrong' };
 
 export interface TxOtpOptions {
@@ -153,14 +172,17 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       phoneHash: sha(phone),
       attempts: 0,
       expiresAt: t + TTL_S * 1000,
+      issuedAt: t,
     };
     // Fresh code ⇒ fresh per-code budget. The counter is cleared BEFORE the
     // record lands so a reservation racing this issue counts against the new
     // code rather than being erased.
     await redis.del(attKey(txId));
+    // A channel noted for an earlier code never carries over (C5).
+    await redis.del(chKey(txId));
     await redis.set(key(txId), JSON.stringify(rec), { ex: TTL_S });
     await redis.set(cdKey(txId), String(t), { ex: COOLDOWN_S });
-    return { ok: true, code }; // caller delivers it; never logged here
+    return { ok: true, code, issuedAt: t }; // caller delivers it; never logged here
   }
 
   return {
@@ -196,6 +218,22 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       await redis.set(cdKey(txId), String(t - (COOLDOWN_S - SEND_FAIL_COOLDOWN_S) * 1000), {
         ex: SEND_FAIL_COOLDOWN_S,
       });
+    },
+
+    /**
+     * Fix pack 4 (C5): record the channel the code issued at `issuedAt` went out
+     * on. Best-effort and never throws: a null channel or a non-finite issuedAt
+     * (a mocked issue without it) writes nothing, and a Redis error is swallowed
+     * without a log. It never touches the code record, so a late note cannot
+     * recreate a consumed code; verify takes it only when its issuedAt matches.
+     */
+    async noteDelivery(txId: string, issuedAt: number, channel: TxOtpChannel | null): Promise<void> {
+      if (channel === null || !Number.isFinite(issuedAt)) return;
+      try {
+        await redis.set(chKey(txId), `${issuedAt}|${channel}`, { ex: TTL_S });
+      } catch {
+        /* best-effort: never blocks the send; nothing logged */
+      }
     },
 
     async verify(txId: string, phone: string, code: string): Promise<VerifyResult> {
@@ -237,9 +275,34 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       const b = Buffer.from(rec.codeHash, 'utf8');
       const okCode = a.length === b.length && timingSafeEqual(a, b);
       if (okPhone && okCode) {
-        await redis.del(key(txId)); // single-use
+        // Single-use, atomically (C5): only the request whose GETDEL returns the
+        // exact record it compared is accepted.
+        const taken = await redis.getdel(key(txId));
+        if (taken === null) return { ok: false, reason: 'no_code' }; // another request consumed it
+        if (taken !== raw) {
+          // A Resend re-issued between the GET and the GETDEL: put the newer
+          // record back (it was never compared, so this cannot double-accept).
+          // Its per-code counter belongs to the new code: left alone.
+          try {
+            const newer = JSON.parse(taken) as Rec;
+            const ttl = Math.ceil((newer.expiresAt - t) / 1000);
+            if (ttl > 0) await redis.set(key(txId), taken, { ex: ttl, nx: true });
+          } catch {
+            /* an unparseable record is not restored */
+          }
+          return { ok: false, reason: 'no_code' };
+        }
         await redis.del(attKey(txId));
-        return { ok: true };
+        const issuedAt = typeof rec.issuedAt === 'number' ? rec.issuedAt : rec.expiresAt - TTL_S * 1000;
+        let channel: TxOtpChannel | null = null;
+        try {
+          const noted = await redis.getdel(chKey(txId));
+          if (noted === `${issuedAt}|wa`) channel = 'wa';
+          else if (noted === `${issuedAt}|tg`) channel = 'tg';
+        } catch {
+          channel = null;
+        }
+        return { ok: true, issuedAt, attempt: n, channel };
       }
       return { ok: false, reason: 'wrong' }; // the reservations above already counted it
     },

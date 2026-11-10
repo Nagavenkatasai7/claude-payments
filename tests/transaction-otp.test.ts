@@ -98,7 +98,7 @@ describe('transaction-otp — atomic attempt caps (fix 19)', () => {
     nowMs += DAY_MS + 1_000;
     const again = await store.issue(TX, PHONE);
     expect(again.ok).toBe(true);
-    expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: true });
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true });
   });
 
   it('the daily ceiling is reserved too: a burst at 14 misses gets at most 1 more compare', async () => {
@@ -341,5 +341,156 @@ describe('transaction-otp shortenCooldown (Program-Fix 25 PR B)', { retry: 0 }, 
     await store.shortenCooldown(TX);
     nowMs += 5_001;
     expect((await store.issue(TX, PHONE)).ok).toBe(true);
+  });
+});
+
+// Fix pack 4 (C5): a payment code is an authorisation record. The record carries
+// issuedAt, verify reports issuedAt / attempt / channel, the delivery channel
+// lives in a separate key, and a code is consumed atomically with GETDEL.
+describe('transaction-otp - authorisation record (fix pack 4, C5)', () => {
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const recKey = (tx: string) => `txotp:${sha(tx)}`;
+  const chKey = (tx: string) => `txotp:ch:${sha(tx)}`;
+  const chKeys = () => [...redis.dump.keys()].filter((k) => k.startsWith('txotp:ch:'));
+
+  it('issue returns issuedAt = now and the record stores it', async () => {
+    const issued = await store.issue(TX, PHONE);
+    expect(issued).toEqual({ ok: true, code: '123456', issuedAt: nowMs });
+    expect(JSON.parse(redis.dump.get(recKey(TX))!).issuedAt).toBe(nowMs);
+  });
+
+  it('verify ok returns { ok: true, issuedAt, attempt: 1, channel: null } when no delivery was noted', async () => {
+    const issuedAt = nowMs;
+    await store.issue(TX, PHONE);
+    nowMs += 5_000;
+    expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: true, issuedAt, attempt: 1, channel: null });
+  });
+
+  it('attempt is the per-code counter: one wrong guess then the right code -> attempt 2', async () => {
+    await store.issue(TX, PHONE);
+    expect((await store.verify(TX, PHONE, '000000')).ok).toBe(false);
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, attempt: 2 });
+  });
+
+  it("noteDelivery(tx, issuedAt, 'tg') then verify -> channel 'tg'; the txotp:ch: key is gone afterwards", async () => {
+    const issued = await store.issue(TX, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    await store.noteDelivery(TX, issued.issuedAt, 'tg');
+    expect(redis.dump.has(chKey(TX))).toBe(true);
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: 'tg' });
+    expect(chKeys()).toEqual([]);
+  });
+
+  it('a stale noteDelivery (the issuedAt of an earlier code) never tags a newer code', async () => {
+    const first = await store.issue(TX, PHONE);
+    if (!first.ok) throw new Error('issue failed');
+    nowMs += 31_000;
+    expect((await store.issue(TX, PHONE)).ok).toBe(true);
+    await store.noteDelivery(TX, first.issuedAt, 'wa');
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: null });
+  });
+
+  it('issue deletes an earlier channel key before it writes the record', async () => {
+    const first = await store.issue(TX, PHONE);
+    if (!first.ok) throw new Error('issue failed');
+    await store.noteDelivery(TX, first.issuedAt, 'wa');
+    expect(chKeys()).toHaveLength(1);
+    nowMs += 31_000;
+    expect((await store.issue(TX, PHONE)).ok).toBe(true);
+    expect(chKeys()).toEqual([]);
+  });
+
+  it("noteDelivery with a null channel or a missing issuedAt writes nothing; a throwing redis.set never escapes", async () => {
+    await store.issue(TX, PHONE);
+    await store.noteDelivery(TX, nowMs, null);
+    await store.noteDelivery(TX, undefined as never, 'wa');
+    await store.noteDelivery(TX, Number.NaN, 'tg');
+    expect(chKeys()).toEqual([]);
+    for (const v of redis.dump.values()) expect(v).not.toContain('undefined|');
+    const throwing = createTransactionOtpStore(
+      { ...redis, set: async () => { throw new Error('redis down'); } },
+      { now: () => nowMs },
+    );
+    await expect(throwing.noteDelivery(TX, nowMs, 'wa')).resolves.toBeUndefined();
+  });
+
+  it('a late noteDelivery after a successful verify never recreates the code', async () => {
+    const issued = await store.issue(TX, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    expect((await store.verify(TX, PHONE, '123456')).ok).toBe(true);
+    await store.noteDelivery(TX, issued.issuedAt, 'wa');
+    expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'no_code' });
+    expect(redis.dump.has(recKey(TX))).toBe(false);
+  });
+
+  it('consumption is atomic: two parallel verifies of the right code -> exactly one ok', async () => {
+    await store.issue(TX, PHONE);
+    const results = await Promise.all([
+      store.verify(TX, PHONE, '123456'),
+      store.verify(TX, PHONE, '123456'),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, reason: 'no_code' }]);
+  });
+
+  it('a re-issue racing a verify keeps the NEW code valid (critic C8/M5)', async () => {
+    const reissuer = createTransactionOtpStore(redis, { now: () => nowMs, randomInt: () => 654321 });
+    let raced = false;
+    const sets: Array<{ key: string; ex?: number; nx?: boolean }> = [];
+    const racing = {
+      ...redis,
+      async set(k: string, v: string, o?: { ex?: number; nx?: boolean }) {
+        sets.push({ key: k, ex: o?.ex, nx: o?.nx });
+        return redis.set(k, v, o);
+      },
+      async getdel(k: string) {
+        if (!raced && k === recKey(TX)) {
+          raced = true;
+          nowMs += 31_000;
+          const again = await reissuer.issue(TX, PHONE);
+          expect(again.ok).toBe(true);
+        }
+        return redis.getdel(k);
+      },
+    };
+    const racingStore = createTransactionOtpStore(racing, { now: () => nowMs, randomInt: () => 123456 });
+    await racingStore.issue(TX, PHONE);
+    sets.length = 0;
+    expect(await racingStore.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'no_code' });
+    const rec = JSON.parse(redis.dump.get(recKey(TX))!);
+    expect(rec.codeHash).toBe(sha('654321'));
+    expect(rec.issuedAt).toBe(nowMs);
+    const restore = sets.find((s) => s.key === recKey(TX));
+    expect(restore?.nx).toBe(true);
+    expect(restore?.ex).toBeGreaterThan(0);
+    expect(await store.verify(TX, PHONE, '654321')).toMatchObject({ ok: true });
+  });
+
+  it('a legacy record (no issuedAt, written by the previous build) verifies with issuedAt = expiresAt - 600000', async () => {
+    const expiresAt = nowMs + 9 * 60 * 1000;
+    redis.dump.set(
+      recKey(TX),
+      JSON.stringify({ codeHash: sha('123456'), phoneHash: sha(PHONE), attempts: 0, expiresAt }),
+    );
+    expect(await store.verify(TX, PHONE, '123456')).toEqual({
+      ok: true,
+      issuedAt: expiresAt - 600_000,
+      attempt: 1,
+      channel: null,
+    });
+  });
+
+  it('the channel key holds only "<issuedAt>|wa|tg": never the id, phone or code', async () => {
+    const issued = await store.issue(TX, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    await store.noteDelivery(TX, issued.issuedAt, 'wa');
+    const [k] = chKeys();
+    expect(k).toBe(chKey(TX));
+    const v = redis.dump.get(k)!;
+    expect(v).toBe(`${issued.issuedAt}|wa`);
+    for (const s of [TX, PHONE, '123456']) {
+      expect(k).not.toContain(s);
+      expect(v).not.toContain(s);
+    }
   });
 });
