@@ -24,6 +24,7 @@ import { getDb } from '@/db/client';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { checkSettlementUrl, isPublicAddress } from '@/lib/settlement-url';
+import { scrub } from '@/lib/log';
 
 const PROD_ORIGIN = 'https://smartremit.ai';
 const WEBHOOK_DRIVEN = new Set(['http', 'simulator']);
@@ -97,4 +98,4 @@ async function main() {
   return 1;
 }
 
-main().then((code) => process.exit(code)).catch((e) => { console.error('audit-settlement-urls failed:', e instanceof Error ? e.message : e); process.exit(1); });
+main().then((code) => process.exit(code)).catch((e) => { console.error('audit-settlement-urls failed:', scrub(e)); process.exit(1); });

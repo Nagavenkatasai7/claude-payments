@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, onTestFinished } from 'vitest';
 import { inspect } from 'node:util';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -222,13 +222,15 @@ describe('registerAction', () => {
     const spy = vi
       .spyOn(authStore, 'registerCustomer')
       .mockRejectedValueOnce(new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes'));
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
     const state = await register();
     expect(state.step).toBe('register');
     expect(state.error).toBe('Could not create your account. Please try again.');
     expect(state.error).not.toMatch(/FIELD_ENCRYPTION_KEY/);
     expect(state.error).not.toMatch(/32 bytes/);
-    spy.mockRestore();
-    errSpy.mockRestore();
   });
 
   it('still surfaces an intentional CustomerInputError message verbatim', async () => {
@@ -1022,16 +1024,24 @@ describe('register/reset unexpected failures are logged without query values', (
     expect(lines).toHaveLength(1);
     expect(lines[0].level).toBe('error');
     expect(String(lines[0].msg)).toContain('[23505]');
+    // Review 2026-11-10: the stack frames stay (without the header, which
+    // repeats the message with the params).
+    expect(String(lines[0].stack)).toMatch(/^at /);
+    expect(String(lines[0].stack)).not.toContain('Failed query');
+    // The field must not be named `at`: that is the log line's own timestamp.
+    expect(String(lines[0].at)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   }
 
   it('registerAction', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const spy = vi.spyOn(authStore, 'registerCustomer').mockRejectedValueOnce(await queryError());
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
     const state = await register();
     expect(state).toEqual({ step: 'register', error: 'Could not create your account. Please try again.' });
     expectSafe(errSpy.mock.calls, 'account.register');
-    spy.mockRestore();
-    errSpy.mockRestore();
   });
 
   it('resetAction', async () => {
@@ -1042,11 +1052,13 @@ describe('register/reset unexpected failures are logged without query values', (
     await runAfter();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const spy = vi.spyOn(authStore, 'setPassword').mockRejectedValueOnce(await queryError());
+    onTestFinished(() => {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    });
     const s = await resetAction(null, form({ pendingToken: req.pendingToken!, code: sentCodes[0].code, password: 'staple battery horse' }));
     expect(s.step).toBe('otp');
     expect(s.error).toBe('Could not reset your password. Please try again.');
     expectSafe(errSpy.mock.calls, 'account.reset');
-    spy.mockRestore();
-    errSpy.mockRestore();
   });
 });

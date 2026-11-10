@@ -3225,6 +3225,22 @@ describe('drainOnce — stored error text holds no customer data (2026-11-10)', 
     expect(text).toContain('params: <redacted>');
   });
 
+  // Review 2026-11-10 (R1-F1): the handler must not run the full scrub() on
+  // the alert text. Its 7-digit mask would turn a row id of 1,000,000 or more
+  // and an all-digit short SHA into `…4567` on the ops phone.
+  it('the ops.alert handler keeps a 7-digit row id and an all-digit short SHA readable', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
+    await outbox.enqueue('ops.alert', { message: 'DEAD outbox #1234567 (whatsapp.text) on build 7654321: boom' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const text = String(sendText.mock.calls[0][1]);
+    expect(text).toContain('outbox #1234567');
+    expect(text).toContain('build 7654321');
+  });
+
   it('mock.settle logs a failed recipient template through the scrubbing logger, never the raw error', async () => {
     await store.saveTransfer(transferFixture());
     await store.recordInboundNow('acme', '15551230000');

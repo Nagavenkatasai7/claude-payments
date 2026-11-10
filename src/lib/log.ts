@@ -8,11 +8,34 @@
 // (e.g. a provider echoing the request back in its error body).
 
 import { redactSensitive } from './inbound-redact';
-import { isQueryError, queryErrorText, stripQueryParams } from './db-error';
+import { driverErrorText, isDriverError, isQueryError, queryErrorText, stripQueryParams } from './db-error';
 
-/** JSON.stringify replacer: a query error inside an object becomes its fixed description. */
+/** JSON.stringify replacer: a query or driver error inside an object becomes its fixed description. */
 function nestedQueryErrors(_key: string, v: unknown): unknown {
-  return isQueryError(v) ? queryErrorText(v) : v;
+  return isQueryError(v) ? queryErrorText(v) : isDriverError(v) ? driverErrorText(v) : v;
+}
+
+/**
+ * The first stack frames of an error (`    at fn (file:line)`), never the stack
+ * header: the header repeats the message, and a message can hold customer data.
+ * When the header cannot be found (the message changed after the stack was
+ * taken) nothing is returned, because a message line can itself look like a frame.
+ */
+export function stackFrames(err: unknown, max = 3): string {
+  try {
+    if (!(err instanceof Error) || typeof err.stack !== 'string') return '';
+    const header = `${err.name}: ${err.message}`;
+    if (!err.stack.startsWith(header)) return '';
+    return err.stack
+      .slice(header.length)
+      .split('\n')
+      .filter((l) => /^\s+at /.test(l))
+      .slice(0, max)
+      .map((l) => l.trim())
+      .join(' | ');
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -37,7 +60,9 @@ export function scrub(value: unknown): string {
       ? stripQueryParams(value)
       : isQueryError(value)
         ? queryErrorText(value)
-        : value instanceof Error
+        : isDriverError(value)
+          ? driverErrorText(value)
+          : value instanceof Error
           ? stripQueryParams(`${value.name}: ${value.message}`)
           : stripQueryParams(JSON.stringify(value, nestedQueryErrors) ?? String(value));
   const capped = capInput(s);

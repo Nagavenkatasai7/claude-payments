@@ -34,9 +34,10 @@ function framesOf(err: Error): string[] {
   if (stack.startsWith(header)) {
     return stack.slice(header.length).split('\n').filter((l) => FRAME.test(l));
   }
-  // The message changed after the stack was taken: the header cannot be found,
-  // so every frame-looking line also goes through the scrubber.
-  return stack.split('\n').filter((l) => FRAME.test(l)).map((l) => scrub(l));
+  // The message changed after the stack was taken: the header cannot be cut
+  // off exactly, and a line of the params can itself look like a frame
+  // (`    at Ravi Traders ...`). No frames are better than a leaked value.
+  return [];
 }
 
 function inspectQueryError(this: Error): string {

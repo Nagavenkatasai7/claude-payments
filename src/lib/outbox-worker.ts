@@ -30,7 +30,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
-import { isQueryError } from '@/lib/db-error';
+import { isQueryError, stripQueryParams } from '@/lib/db-error';
 import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
@@ -1045,9 +1045,13 @@ async function handle(
       // phone check, so it still goes out when OPS_ALERT_PHONE is empty, and
       // before sendText, so a WhatsApp outage cannot stop it. Its dedupe keys
       // (opsmail:/opshook:<row.id>) make a WhatsApp retry re-enqueue nothing.
-      // 2026-11-10: scrubbed again here, because rows queued by an older build
-      // can carry a raw error text (a query error's params, a phone, an email).
-      const alertText = scrub(str(p.message));
+      // 2026-11-10: rows queued by an older build can carry a raw query-error
+      // text, so its params are cut again here. Not the full scrub(): its
+      // 7-digit mask would turn `outbox #1234567` and an all-digit short SHA
+      // into `…4567` on the ops phone. New alerts are built from text that is
+      // already scrubbed (see drainOnce); the email and webhook mirror scrub
+      // their own copy.
+      const alertText = stripQueryParams(str(p.message));
       await enqueueAlertMirror(deps, row, alertText);
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)

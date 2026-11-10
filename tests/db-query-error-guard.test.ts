@@ -111,6 +111,18 @@ describe('guardQueryErrors: printing a query error never shows params or detail'
     expect(desc?.enumerable).toBe(false);
   });
 
+  // Review 2026-11-10 (L4): when the message changed after the stack was
+  // taken, the header cannot be cut off exactly, and a line of the params can
+  // look like a frame. Then no frame is printed at all.
+  it('prints no frames when the stack header cannot be found', () => {
+    const err = queryError();
+    err.stack = `Error: Failed query: select 1\nparams: x\n    at ${NAME} (${PHONE})\n    at real (file.ts:1:1)`;
+    const out = util.inspect(err);
+    for (const v of FAKES) expect(out).not.toContain(v);
+    expect(out).toMatch(/^DrizzleQueryError: db query failed \[23505\]/);
+    expect(out).not.toContain('\n');
+  });
+
   it('does not change String(err) or err.message: those go through scrub()', () => {
     const err = queryError();
     expect(err.message).toContain(`params: ${PHONE},${NAME},${EMAIL}`);

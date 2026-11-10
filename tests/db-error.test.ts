@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { sql } from 'drizzle-orm';
-import { isQueryError, stripQueryParams, queryErrorText, sqlState } from '@/lib/db-error';
+import {
+  isQueryError,
+  stripQueryParams,
+  queryErrorText,
+  sqlState,
+  isDriverError,
+  driverErrorText,
+} from '@/lib/db-error';
 import { sellers } from '@/db/schema';
 import { freshDb } from './helpers-db';
 
@@ -204,5 +211,76 @@ describe('queryErrorText', () => {
       expect(out.startsWith('db query failed [no SQLSTATE]')).toBe(true);
       expectNoFakes(out);
     }
+  });
+});
+
+// 2026-11-10 (review): a copy of the error can lose the SQLSTATE and keep the
+// message (structuredClone, a re-wrap), and a bare driver error can reach a
+// log without the drizzle wrapper.
+describe('queryErrorText: the value echo is hidden without the SQLSTATE too', () => {
+  it('hides an "invalid input" reason when the cause has no code', () => {
+    const cause = new Error(`invalid input syntax for type integer: "${NAME}"`);
+    const out = queryErrorText(fakeQueryError(cause));
+    expect(out).toContain('[no SQLSTATE] data exception (value hidden) |');
+    expectNoFakes(out);
+  });
+
+  it('hides "out of range", "malformed" and "invalid byte sequence" reasons', () => {
+    for (const message of [
+      `value "${PHONE}" is out of range for type integer`,
+      `malformed array literal: "${NAME}"`,
+      `invalid byte sequence for encoding "UTF8": ${EMAIL}`,
+    ]) {
+      const out = queryErrorText(fakeQueryError(Object.assign(new Error(message), { code: 'XX000' })));
+      expect(out).toContain('data exception (value hidden)');
+      expectNoFakes(out);
+    }
+  });
+
+  it('a structuredClone of the real class-22 failure keeps no value', () => {
+    const clone = structuredClone(realData);
+    expectNoFakes(queryErrorText(clone));
+  });
+});
+
+describe('isDriverError / driverErrorText: a bare Postgres driver error', () => {
+  const bare = () => Object.assign(fakeCause(), { severity: 'ERROR' });
+
+  it('knows an Error with a SQLSTATE and a severity', () => {
+    expect(isDriverError(bare())).toBe(true);
+    const real = (realUnique as { cause?: unknown }).cause;
+    expect(isDriverError(real)).toBe(true);
+  });
+
+  it('says no to other errors, to a query error and to non-errors', () => {
+    expect(isDriverError(new Error('boom'))).toBe(false);
+    expect(isDriverError(Object.assign(new Error('x'), { code: 'ECONNRESET', severity: 'ERROR' }))).toBe(false);
+    expect(isDriverError(Object.assign(new Error('x'), { code: '23505' }))).toBe(false); // no severity
+    expect(isDriverError({ code: '23505', severity: 'ERROR' })).toBe(false); // not an Error
+    for (const v of [null, undefined, 'text', 42]) expect(isDriverError(v)).toBe(false);
+  });
+
+  it('keeps the SQLSTATE, the reason and the ids; drops detail, where and hint', () => {
+    const out = driverErrorText(bare());
+    expect(out).toBe(
+      'db error [23505] duplicate key value violates unique constraint "customers_phone_key" constraint=customers_phone_key table=customers',
+    );
+    expectNoFakes(out);
+  });
+
+  it('describes the real PGlite cause without the phone or the business name', () => {
+    const out = driverErrorText((realUnique as { cause?: unknown }).cause);
+    expect(out).toContain('db error [23505]');
+    expect(out).toContain('constraint=sellers_partner_phone');
+    expectNoFakes(out);
+  });
+
+  it('hides the class-22 reason and never throws', () => {
+    const data = Object.assign(new Error(`invalid input syntax for type integer: "${NAME}"`), {
+      code: '22P02',
+      severity: 'ERROR',
+    });
+    expect(driverErrorText(data)).toBe('db error [22P02] data exception (value hidden)');
+    for (const v of [null, undefined, 'text', 42, {}]) expect(() => driverErrorText(v)).not.toThrow();
   });
 });

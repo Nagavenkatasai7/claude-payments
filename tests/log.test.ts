@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
-import { scrub, logError, logWarn, SCRUB_MAX_CHARS } from '@/lib/log';
+import { scrub, logError, logWarn, stackFrames, SCRUB_MAX_CHARS } from '@/lib/log';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -256,5 +256,88 @@ describe('scrub — database query errors keep no params and no detail', () => {
     expect(scrub(new TypeError('fetch failed'))).toBe('TypeError: fetch failed');
     const e = new Error('worker: Failed query: select 1\nparams: Ravi Traders');
     expect(scrub(e)).not.toContain('Ravi');
+  });
+
+  // Review 2026-11-10: a bare Postgres driver error (no drizzle wrapper) has
+  // `detail` and `where` as own enumerable properties, so a JSON.stringify of
+  // an object that holds it prints them.
+  function driverError() {
+    return Object.assign(new Error('duplicate key value violates unique constraint "customers_phone_key"'), {
+      code: '23505',
+      severity: 'ERROR',
+      detail: 'Key (phone)=(+15551234567) already exists.',
+      where: 'SQL statement with Ravi Traders',
+      constraint: 'customers_phone_key',
+      table: 'customers',
+    });
+  }
+
+  it('a bare driver error becomes its fixed description', () => {
+    const out = scrub(driverError());
+    clean(out);
+    expect(out).toBe(
+      'db error [23505] duplicate key value violates unique constraint "customers_phone_key" constraint=customers_phone_key table=customers',
+    );
+  });
+
+  it('a driver error nested in an object loses detail and where', () => {
+    const out = scrub({ step: 'mint', err: driverError() });
+    clean(out);
+    expect(out).toContain('db error [23505]');
+    expect(out).not.toContain('detail');
+  });
+
+  it('logWarn with a bare driver error as a field', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logWarn('transfer.upsert_recipient', 'failed', { err: driverError() });
+    const raw = spy.mock.calls[0][0] as string;
+    clean(raw);
+    expect((JSON.parse(raw) as Record<string, string>).err).toContain('db error [23505]');
+  });
+});
+
+// Review 2026-11-10: the two catch-alls in src/app/account/actions.ts lost the
+// stack when they stopped printing the error object. stackFrames() gives the
+// frames back without the header, because the header repeats the message.
+describe('stackFrames: frames only, never the header', () => {
+  it('returns the first frames of a normal error, joined on one line', () => {
+    const out = stackFrames(new Error('boom'));
+    expect(out).toMatch(/^at /);
+    expect(out).not.toContain('boom');
+    expect(out).not.toContain('\n');
+    expect(out.split(' | ').length).toBeLessThanOrEqual(3);
+    expect(stackFrames(new Error('boom'), 1).split(' | ').length).toBe(1);
+  });
+
+  it('a query error gives frames with none of the bound values', () => {
+    const err = new DrizzleQueryError('select * from "customers" where "phone" = $1', ['+15551234567', 'Ravi Traders']);
+    expect(err.stack).toContain('+15551234567'); // the raw stack does hold them
+    const out = stackFrames(err);
+    expect(out).toMatch(/^at /);
+    expect(out).not.toContain('15551234567');
+    expect(out).not.toContain('Ravi Traders');
+    expect(out).not.toContain('Failed query');
+  });
+
+  it('returns nothing when the header cannot be found', () => {
+    const err = new Error('first');
+    void err.stack; // V8 formats the header on the first read of .stack
+    err.message = 'changed after the stack was taken';
+    expect(stackFrames(err)).toBe('');
+    // A message line that looks like a frame must not come back as one.
+    const tricky = new Error('x');
+    tricky.stack = 'Error: other\n    at Ravi Traders (+15551234567)\n    at real (file.ts:1:1)';
+    expect(stackFrames(tricky)).toBe('');
+  });
+
+  it('returns nothing for a non-error and never throws', () => {
+    for (const v of [null, undefined, 'text', 42, {}, { stack: 'Error: x\n    at y' }]) expect(stackFrames(v)).toBe('');
+    const hostile = new Error('x');
+    Object.defineProperty(hostile, 'stack', {
+      get() {
+        throw new Error('no');
+      },
+    });
+    expect(stackFrames(hostile)).toBe('');
   });
 });

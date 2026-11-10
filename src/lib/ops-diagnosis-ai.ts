@@ -207,6 +207,9 @@ function bundleText(bundle: OpsDiagnosisBundle): string {
   return `Subject: an unspecified stuck operations item. Diagnose conservatively and suggest the next ops action.`;
 }
 
+const DB_QUERY_FAILED = 'db query failed';
+const DB_QUERY_PREFIX_LENGTH = 120;
+
 /**
  * Deterministic error-prefix used for sibling clustering (NOT the model's job).
  * Takes the leading slice of a last_error, lower-cased and whitespace-collapsed,
@@ -216,5 +219,11 @@ function bundleText(bundle: OpsDiagnosisBundle): string {
  */
 export function errorPrefix(lastError: string | null | undefined, length = 40): string {
   const normalized = (lastError ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-  return normalized.slice(0, length);
+  // 2026-11-10: a query failure is stored as `db query failed [SQLSTATE]
+  // <reason> ... | query: <sql head>` (src/lib/db-error.ts). 40 characters end
+  // inside the reason, so every unique violation would look like one cluster;
+  // 120 reach the constraint or the statement.
+  const take = normalized.startsWith(DB_QUERY_FAILED) ? Math.max(length, DB_QUERY_PREFIX_LENGTH) : length;
+  return normalized.slice(0, take);
 }
+

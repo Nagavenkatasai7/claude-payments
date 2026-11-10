@@ -108,12 +108,21 @@ function sqlHead(err: Obj): string {
   return cut(collapse(end < 0 ? body : body.slice(0, end)), SQL_MAX);
 }
 
+/**
+ * Primary messages in which Postgres echoes the offending VALUE. Checked on the
+ * text as well as on the SQLSTATE class, because a copy of the error
+ * (structuredClone, a re-wrap) can lose the code and keep the message.
+ */
+const VALUE_ECHO = /invalid input|out of range|malformed|invalid byte sequence/i;
+const VALUE_HIDDEN = 'data exception (value hidden)';
+
 function reasonOf(driver: Obj | undefined, err: Obj, state: string | undefined): string {
   // Class 22 (data exception): Postgres echoes the offending VALUE in the
   // primary message (`invalid input syntax for type integer: "Ravi Traders"`).
-  if (state?.startsWith('22')) return 'data exception (value hidden)';
+  if (state?.startsWith('22')) return VALUE_HIDDEN;
   if (!driver) return 'unknown cause';
   const message = str(driver, 'message');
+  if (message && VALUE_ECHO.test(message)) return VALUE_HIDDEN;
   // A bare driver error that is itself the query error has the drizzle
   // message: never use it as the reason.
   if (message && !(driver === err && message.includes(FAILED_QUERY))) {
@@ -146,5 +155,31 @@ export function queryErrorText(err: unknown): string {
     );
   } catch {
     return 'db query failed [no SQLSTATE] unknown cause | query:  | params: <redacted>';
+  }
+}
+
+/**
+ * A bare Postgres driver error (no drizzle wrapper): an Error with a SQLSTATE
+ * `code` and the driver's `severity`. Its `detail` and `where` echo row values,
+ * and they are own enumerable properties, so JSON.stringify prints them.
+ */
+export function isDriverError(err: unknown): err is Error & { code: string } {
+  try {
+    if (!(err instanceof Error) || !isObj(err)) return false;
+    const code = str(err, 'code');
+    return !!code && SQLSTATE.test(code) && typeof read(err, 'severity') === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/** The fixed description of a bare driver error: SQLSTATE, reason, ids. Never `detail`/`where`. Never throws. */
+export function driverErrorText(err: unknown): string {
+  try {
+    const e = isObj(err) ? err : {};
+    const state = sqlState(e);
+    return `db error [${state ?? 'no SQLSTATE'}] ${reasonOf(e, {}, state)}${idsOf(e)}`;
+  } catch {
+    return 'db error [no SQLSTATE] unknown cause';
   }
 }

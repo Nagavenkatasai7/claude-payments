@@ -1,6 +1,13 @@
 import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
 
 // Next.js shared config (flat).
+// 2026-11-10: names a caught error usually has in this code base (err, error,
+// e, cause, reason, ex, exception, and anything that ends in Err/Error such as
+// dbErr or saveError). Used by the console rule for src/ below.
+const ERROR_NAME = '/^(e|err|error|cause|reason|ex|exception)$|Err(or)?$/';
+const CONSOLE_ERROR_MESSAGE =
+  'Do not pass an error to console.* (as an argument, in a template, in a concatenation or a cast): use logWarn/logError(scope, err, fields) from src/lib/log.ts.';
+
 const config = [
   // .claude/** holds agent worktrees (full repo copies incl. their .next builds).
   // workflows/** = ultracode dynamic-workflow scripts (Workflow-runtime globals
@@ -34,18 +41,21 @@ const config = [
       'no-restricted-syntax': [
         'error',
         {
-          selector:
-            "CallExpression[callee.object.name='console'] > Identifier.arguments[name=/^(e|err|error|cause|reason|ex|exception)$/]",
-          message: 'Do not pass an error object to console.*: use logWarn/logError(scope, err, fields) from src/lib/log.ts.',
+          // An error-looking identifier as an argument: err, error, e, cause,
+          // dbErr, saveError ...
+          selector: `CallExpression[callee.object.name='console'] > Identifier.arguments[name=${ERROR_NAME}]`,
+          message: CONSOLE_ERROR_MESSAGE,
+        },
+        {
+          // ... or anywhere inside an argument: a template literal, 'x' + err,
+          // err as Error, err!, cond ? err : y, { ...err }, JSON.stringify(err).
+          selector: `CallExpression[callee.object.name='console'] > .arguments Identifier[name=${ERROR_NAME}]`,
+          message: CONSOLE_ERROR_MESSAGE,
         },
         {
           selector:
-            "CallExpression[callee.object.name='console'] > :matches(ConditionalExpression, LogicalExpression).arguments > Identifier[name=/^(e|err|error|cause|reason|ex|exception)$/]",
-          message: 'Do not pass an error object to console.*: use logWarn/logError(scope, err, fields) from src/lib/log.ts.',
-        },
-        {
-          selector: "CallExpression[callee.object.name='console'] MemberExpression[property.name=/^(message|stack)$/]",
-          message: 'Do not print err.message or err.stack with console.*: use logWarn/logError(scope, err, fields) from src/lib/log.ts.',
+            "CallExpression[callee.object.name='console'] MemberExpression[property.name=/^(message|stack|cause|detail|params|query)$/]",
+          message: 'Do not print err.message, err.stack, err.cause or query values with console.*: use logWarn/logError(scope, err, fields) from src/lib/log.ts.',
         },
         {
           selector: "CallExpression[callee.object.name='console'] > CallExpression.arguments[callee.name='String']",
