@@ -41,7 +41,7 @@ function Outcome({ state, done }: { state: Result; done: string }) {
   );
 }
 
-function CodeField({ id }: { id: string }) {
+export function CodeField({ id }: { id: string }) {
   return (
     <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor={id}>
       Your authenticator code

@@ -35,6 +35,7 @@ import { SANCTIONS_LIST_MAX_AGE_MS } from '@/lib/sanctions/list-policy';
 import { createSanctionsListRepo, type ArchiveSummary } from '@/db/repos/sanctions-list-repo';
 import { isBlobConfigured } from '@/lib/blob';
 import { logError } from '@/lib/log';
+import { t as tr } from '@/lib/i18n';
 
 /** "3 h ago" / "2 d ago" from an ISO time (read-only display). */
 function ageText(iso: string, nowMs: number): string {
@@ -494,6 +495,9 @@ export default async function CompliancePage() {
                 <dt className="text-muted-foreground">Blob store configured</dt>
                 <dd>{listCard.blobConfigured ? 'yes' : 'no'}</dd>
               </dl>
+              <Link href="/admin-dashboard/compliance/sanctions-lists" className={`${buttonVariants({ variant: 'outline', size: 'sm' })} mt-4`}>
+                {tr('admin.compliance.sanctionsLists.link')}
+              </Link>
             </CardContent>
           </Card>
         )}

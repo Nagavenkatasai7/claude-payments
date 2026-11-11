@@ -358,3 +358,46 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(res.entryCount).toBe(5);
   });
 });
+
+describe('pack 5 T31: touchActiveCheckedAt (the MHA "confirm still current")', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+
+  const mha = (version: string, inactiveCopy = false): SanctionsList => {
+    const entries = [{ id: `inmha:${inactiveCopy ? 'b' : 'a'}1`, names: ['Invented Curated Org'], type: 'Entity', programs: ['UAPA-1'] }];
+    return { source: 'in-mha-uapa', version, hash: hashEntries(entries), entries };
+  };
+  const stamps = async () =>
+    ((await db.execute(sql`SELECT source, version, hash, active, checked_at, entry_count FROM sanctions_list_versions ORDER BY id`)) as unknown as {
+      rows: Array<{ source: string; version: string; hash: string; active: boolean; checked_at: string | Date; entry_count: number }>;
+    }).rows;
+
+  it('updates only the active row of that source and returns { version, hash }; another source untouched', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(mha('2026-01-01'));
+    await repo.storeList(mha('2026-01-02', true)); // the first is now inactive
+    await repo.storeList(LIST);
+    await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = now() - interval '5 days'`);
+    const before = await stamps();
+    const at = new Date();
+    const r = await repo.touchActiveCheckedAt('in-mha-uapa', at);
+    expect(r).toEqual({ version: '2026-01-02', hash: mha('2026-01-02', true).hash });
+    const after = await stamps();
+    expect(after.map((x) => ({ ...x, checked_at: undefined }))).toEqual(before.map((x) => ({ ...x, checked_at: undefined })));
+    const changed = after.filter((x, i) => new Date(x.checked_at).getTime() !== new Date(before[i].checked_at).getTime());
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({ source: 'in-mha-uapa', version: '2026-01-02', active: true });
+    expect(new Date(changed[0].checked_at).getTime()).toBe(at.getTime());
+    expect((await repo.activeVersion('ofac-sdn'))!.checkedAt!.getTime()).toBeLessThan(Date.now() - 4 * 86_400_000);
+  });
+
+  it('no active row -> null, nothing written', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    const before = await stamps();
+    expect(await repo.touchActiveCheckedAt('in-mha-uapa', new Date())).toBeNull();
+    expect(await stamps()).toEqual(before);
+  });
+});

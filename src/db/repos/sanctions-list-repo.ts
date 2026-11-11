@@ -298,6 +298,25 @@ export function createSanctionsListRepo(db: Db) {
       });
     },
 
+    /**
+     * Fix pack 5 (R08, P28): "confirm still current" for a curated list (India
+     * MHA). Re-stamps checked_at of the ACTIVE version of `source` only, under
+     * the same per-source advisory lock as storeList; version, hash and entries
+     * are untouched. Returns the confirmed { version, hash }, or null when the
+     * source has no active version (nothing written).
+     */
+    async touchActiveCheckedAt(source: string, now: Date): Promise<{ version: string; hash: string } | null> {
+      return db.transaction(async (tx) => {
+        await lockSource(tx, source);
+        const rows = await tx
+          .update(sanctionsListVersions)
+          .set({ checkedAt: now })
+          .where(and(eq(sanctionsListVersions.source, source), eq(sanctionsListVersions.active, true)))
+          .returning({ version: sanctionsListVersions.version, hash: sanctionsListVersions.hash });
+        return rows[0] ?? null;
+      });
+    },
+
     // ---- Fix pack 2 (R07): the verified Blob archive (src/lib/sanctions/list-archive.ts) ----
 
     /**
