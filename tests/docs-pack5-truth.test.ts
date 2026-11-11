@@ -506,6 +506,21 @@ describe('pack 5 documents say what the code does', () => {
     }
   });
 
+  it('funding.mdx Refunds: no reverse for a transfer never sent to the rail, and a partner_psp card payment is refunded in the partner\'s own Stripe dashboard (final check F9, U2)', () => {
+    const refunds = section(FUNDING, '## Refunds');
+    expect(refunds).toContain('For a transfer that was never sent to your rail, that was settled before you went live, or that another partner pays out, no reverse is sent and SmartRemit staff arrange the return with you.');
+    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. The transfer then stays paid and held in SmartRemit until a later release can record that refund.');
+    expect(FUNDING).not.toContain('is refunded through Stripe');
+  });
+
+  it('spec: the fundrefund:<id> row names the true exits, not a Stripe refund (final check F9, U3)', () => {
+    const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `fundrefund:<id>`'));
+    expect(row).toBeDefined();
+    expect(row!).toContain("A refund completes here only on the partner's signed reverse. A card payment is refunded in the partner's Stripe dashboard and is not recorded here; a partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>).");
+    expect(row!).not.toContain('the Stripe refund completes');
+    expectQuotedInSrc(row!, srcText(), 'fundrefund');
+  });
+
   it('the changelog, funding.mdx and webhooks.mdx limit the partner_collected reverse to a settle sent to the rail after go-live (review round 1 R1, F2-D1)', () => {
     const line = section(CHANGELOG, '## 2026-11').split('\n').find((l) => l.includes('**Refunds of partner-collected funds.**'));
     expect(line).toBeDefined();

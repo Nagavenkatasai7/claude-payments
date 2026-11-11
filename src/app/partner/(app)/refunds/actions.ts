@@ -15,12 +15,18 @@ import { isReasonValid } from '@/lib/ui/confirm-reason';
 import { isPartnerNoteShaped, isTransferId } from '@/lib/partner-transfers';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
+import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 import type { StepUpRequired } from '@/lib/staff-step-up-result';
 import { PARTNER_ROUTES } from '../../routes';
 import type { ActionResult } from '../../action-result';
 
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 const refused = (key: MessageKey, vars?: Record<string, string | number>): ActionResult => ({ ok: false, error: t(key, vars) });
+/** Final check F9 (X2): the fixed reason approve / retry give for a real-money card payment. */
+const CARD_REFUND_REFUSAL: ActionResult = {
+  ok: false,
+  error: CARD_REFUND_UNAVAILABLE.charAt(0).toUpperCase() + CARD_REFUND_UNAVAILABLE.slice(1),
+};
 
 /**
  * Approve, dismiss or retry a refund on one of THIS tenant's transfers (merge plan 2b). A MONEY
@@ -81,6 +87,11 @@ export async function refundOpAction(formData: FormData): Promise<ActionResult |
   } catch (err) {
     // The state re-check or the guarded claim refused (a double submit or a concurrent decision):
     // nothing was written.
+    // Final check F9 (X2): a real-money card payment cannot be refunded from SmartRemit; say why
+    // (a fixed staff text, no id or amount) instead of the generic refusal.
+    if (err instanceof Error && err.message.startsWith('Cannot ') && err.message.endsWith(CARD_REFUND_UNAVAILABLE)) {
+      return CARD_REFUND_REFUSAL;
+    }
     if (err instanceof Error && err.message.startsWith('Cannot ')) return notAllowed;
     // The error NAME only: a failed query's message carries its bound params.
     logWarn('partner.refunds', errName(err), { transferId: transfer.id, op });

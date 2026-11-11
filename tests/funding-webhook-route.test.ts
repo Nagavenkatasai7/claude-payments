@@ -337,6 +337,15 @@ describe('pack 5 (T13a): no mock confirmation or refund on real money', () => {
     expect(a[0].payload.message).toContain('rf1');
     expect(a[0].payload.message).toContain('acme');
     for (const v of ['15551234567', 'Mom', '919876543210', '123456789', 'rf-001', 'fund-rf1']) expect(a[0].payload.message).not.toContain(v);
+    // Final check F9 (U3): the whole text. No Stripe refund exists and a partner-collected refund with
+    // no reverse never completes by itself, so the tail names the exits that are true.
+    expect(a[0].payload.message).toBe(
+      '⚠️ SmartRemit ops: a funding "refunded" callback for transfer rf1 (partner acme) was refused: ' +
+        'its rail moves real money, and the generic funding webhook cannot confirm a real refund. The refund stays pending; ' +
+        "A refund completes here only on the partner's signed reverse. A card payment is refunded in the partner's Stripe dashboard and is not recorded here; " +
+        'a partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>). Check the payment provider and the partner before acting.',
+    );
+    expect(a[0].payload.message).not.toContain('the Stripe refund completes');
 
     expect((await signedMock({ transfer_id: 'rf1', event: 'refunded', ref: 'rf-002' })).status).toBe(200);
     a = await alerts();

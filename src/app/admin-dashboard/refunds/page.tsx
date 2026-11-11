@@ -16,6 +16,8 @@ import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../
 import { SenderCell, FundingRefs } from '../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import type { RefundStatus, Transfer } from '@/lib/types';
+import { cardRefundBlockedIds } from '@/lib/refund-row-flags';
+import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 
 // /admin-dashboard/refunds — the always-on refund ledger. Unlike the Operations
 // page (platform-only, shows only refunds that NEED a decision), this surface is
@@ -54,6 +56,10 @@ export default async function RefundsPage() {
   // Batch-resolve decrypted sender names (one query) so each row can show WHO is
   // being refunded; phones with no KYC name fall back to the phone in SenderCell.
   const senderNames = await resolveSenderNames(getDb(), all);
+  // Final check F9 (X2): a real-money card payment cannot be approved or retried
+  // here; its row shows the reason instead. Admins only (others see no buttons),
+  // and a rail read per listed requested / failed card row only.
+  const cardBlocked = isAdmin ? await cardRefundBlockedIds(getDb(), all) : new Set<string>();
 
   const counts = {
     requested: all.filter((t) => t.refundStatus === 'requested').length,
@@ -156,11 +162,15 @@ export default async function RefundsPage() {
                           <div className="flex justify-end gap-2">
                             {isAdmin && t.refundStatus === 'requested' && (
                               <>
-                                <form action={approveRefundAction} className="flex items-center gap-1">
-                                  <input type="hidden" name="id" value={t.id} />
-                                  <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                                  <Button type="submit" size="sm" variant="default">Approve</Button>
-                                </form>
+                                {cardBlocked.has(t.id) ? (
+                                  <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot approve: {CARD_REFUND_UNAVAILABLE}</span>
+                                ) : (
+                                  <form action={approveRefundAction} className="flex items-center gap-1">
+                                    <input type="hidden" name="id" value={t.id} />
+                                    <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                                    <Button type="submit" size="sm" variant="default">Approve</Button>
+                                  </form>
+                                )}
                                 <form action={dismissRefundAction} className="flex items-center gap-1">
                                   <input type="hidden" name="id" value={t.id} />
                                   <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
@@ -168,13 +178,15 @@ export default async function RefundsPage() {
                                 </form>
                               </>
                             )}
-                            {isAdmin && t.refundStatus === 'failed' && (
+                            {isAdmin && t.refundStatus === 'failed' && (cardBlocked.has(t.id) ? (
+                              <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot retry: {CARD_REFUND_UNAVAILABLE}</span>
+                            ) : (
                               <form action={retryRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />
                                 <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                                 <Button type="submit" size="sm" variant="default">Retry</Button>
                               </form>
-                            )}
+                            ))}
                             {/* Non-admins (and pending/completed rows) see a read-only status word, not dead buttons. */}
                             {(!isAdmin || t.refundStatus === 'pending' || t.refundStatus === 'completed') && (
                               <span className="text-xs text-muted-foreground">

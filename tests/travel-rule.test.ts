@@ -120,6 +120,8 @@ describe('validateSenderAddress', () => {
       // Review round 2 R2 (F5-D2): a period that only closes the code.
       '12 Elm St, Denver.CO. 80202',
       'Indianapolis.IN.',
+      // Final check F9 (R2-T1): an ideographic full stop before the code folds to "." and is accepted.
+      'Denver\u3002CO 80202',
     ]) {
       expect(validateSenderAddress(v), v).toEqual({ ok: true, value: v });
     }
@@ -148,6 +150,9 @@ describe('validateSenderAddress', () => {
       'evil.co./path',
       'evil.co]/path',
       'evil\u3002co/path',
+      // Final check F9 (R2-T1): pins the ideographic-dot fold and the bracket in the lookbehind.
+      'evil.co\u3002/path',
+      'pay.[]evil.co here',
     ]) {
       expect(validateSenderAddress(v), v).toEqual({ ok: false });
     }

@@ -20,4 +20,4 @@ It carries no card or bank digits and no personal data.
 
 ## Refunds
 
-A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`, when its settlement instruction went to your rail after you went live: return the sender's money on your side. For a transfer settled before you went live, or on another partner's rail, no reverse is sent and SmartRemit staff arrange the return with you. A `partner_psp` charge is refunded through Stripe.
+A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`, when its settlement instruction went to your rail after you went live: return the sender's money on your side. For a transfer that was never sent to your rail, that was settled before you went live, or that another partner pays out, no reverse is sent and SmartRemit staff arrange the return with you. SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. The transfer then stays paid and held in SmartRemit until a later release can record that refund.
