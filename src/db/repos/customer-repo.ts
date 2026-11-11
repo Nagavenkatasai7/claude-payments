@@ -257,13 +257,24 @@ export function createCustomerRepo(
       // set_sender_name landed can never write the old empty name back and
       // stop the owner's scheduled sends again (2026-10-02). A save that
       // carries a name still writes it.
+      // Fix pack 5 (P20): the address and the date of birth are kept the same
+      // way; they are written only by the set-if-unset setters
+      // (setResidentialAddressIfUnset / setDateOfBirthIfUnset), so a stale copy
+      // never clears travel-rule originator data.
       const carriesName = (customer.fullName ?? '').trim() !== '';
+      const carriesAddress = (customer.residentialAddress ?? '').trim() !== '';
+      const carriesDob = (customer.dateOfBirth ?? '').trim() !== '';
       await db
         .insert(customers)
         .values(row)
         .onConflictDoUpdate({
           target: [customers.partnerId, customers.phone],
-          set: carriesName ? row : { ...row, fullNameEnc: sql`${customers.fullNameEnc}` },
+          set: {
+            ...row,
+            ...(carriesName ? {} : { fullNameEnc: sql`${customers.fullNameEnc}` }),
+            ...(carriesAddress ? {} : { residentialAddressEnc: sql`${customers.residentialAddressEnc}` }),
+            ...(carriesDob ? {} : { dateOfBirthEnc: sql`${customers.dateOfBirthEnc}` }),
+          },
         });
     },
 
@@ -507,6 +518,70 @@ export function createCustomerRepo(
         .where(and(tenantKey(partnerId, senderPhone), or(isNull(customers.fullNameEnc), eq(customers.fullNameEnc, ''))))
         .returning({ phone: customers.phone });
       return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 5 (P20): the set-once writer of the sender's home address
+     * (travel-rule originator data), the setFullNameIfUnset pattern on
+     * residential_address_enc: one conditional UPDATE keyed (partner_id, phone)
+     * that lands only while no address is on file (NULL or ''), sealed under
+     * customerRowCtx(row, 'residential_address_enc') as customerToRow seals it.
+     * Touches no other column; never replaces a value. Returns whether this call
+     * wrote it. The value is never logged.
+     */
+    async setResidentialAddressIfUnset(partnerId: PartnerId, senderPhone: string, address: string): Promise<boolean> {
+      const sealed = sealOptional(
+        address,
+        provider,
+        customerRowCtx({ partnerId, phone: senderPhone }, 'residential_address_enc'),
+      );
+      if (!sealed) return false;
+      const rows = await db
+        .update(customers)
+        .set({ residentialAddressEnc: sealed, updatedAt: new Date() })
+        .where(
+          and(
+            tenantKey(partnerId, senderPhone),
+            or(isNull(customers.residentialAddressEnc), eq(customers.residentialAddressEnc, '')),
+          ),
+        )
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 5 (P20): the set-once writer of the sender's date of birth
+     * (YYYY-MM-DD, validated by the caller), the same pattern on
+     * date_of_birth_enc under customerRowCtx(row, 'date_of_birth_enc'). Returns
+     * whether this call wrote it. The value is never logged.
+     */
+    async setDateOfBirthIfUnset(partnerId: PartnerId, senderPhone: string, dateOfBirth: string): Promise<boolean> {
+      const sealed = sealOptional(dateOfBirth, provider, customerRowCtx({ partnerId, phone: senderPhone }, 'date_of_birth_enc'));
+      if (!sealed) return false;
+      const rows = await db
+        .update(customers)
+        .set({ dateOfBirthEnc: sealed, updatedAt: new Date() })
+        .where(and(tenantKey(partnerId, senderPhone), or(isNull(customers.dateOfBirthEnc), eq(customers.dateOfBirthEnc, ''))))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 5 (P20): is the sender's address / date of birth on file? A
+     * NULL-and-'' test in SQL on this tenant's row: never decrypts, so a value
+     * never enters memory here and is never logged. A missing row -> both false.
+     */
+    async originatorOnFile(partnerId: PartnerId, senderPhone: string): Promise<{ address: boolean; dateOfBirth: boolean }> {
+      const rows = await db
+        .select({
+          address: sql<boolean>`(${customers.residentialAddressEnc} IS NOT NULL AND ${customers.residentialAddressEnc} <> '')`,
+          dateOfBirth: sql<boolean>`(${customers.dateOfBirthEnc} IS NOT NULL AND ${customers.dateOfBirthEnc} <> '')`,
+        })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1);
+      const r = rows[0];
+      return { address: r?.address === true, dateOfBirth: r?.dateOfBirth === true };
     },
 
     /**
