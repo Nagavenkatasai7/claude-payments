@@ -8,7 +8,11 @@ import {
   applyAmlHold,
   applyPurposeHold,
   addHoldReason,
+  amlHoldRulesEntry,
+  amlHoldRulesSummary,
+  hasAmlHoldEntry,
 } from '@/lib/aml-hold';
+import { resolveAmlHoldRules } from '@/lib/compliance-config';
 import { AML_DEFAULTS, type SenderAmlStats } from '@/lib/aml-rules';
 import type { PriorSends } from '@/db/repos/transfer-repo';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -199,5 +203,58 @@ describe('addHoldReason (pack 6 P15)', { retry: 0 }, () => {
   it('extra fields of the verdict are kept', () => {
     const v = { complianceStatus: 'cleared' as const, complianceReasons: [] as string[], extra: 42 };
     expect(addHoldReason(v)).toEqual({ complianceStatus: 'flagged', complianceReasons: [AML_HOLD_REASON], extra: 42 });
+  });
+});
+
+// Fix pack 6 T19 (P13, P17): the partner writer's next corridor entry, the "no entry" test the
+// go-live default keys on, and the admin compliance page's resolved-rule label.
+describe('hasAmlHoldEntry (P13 "no entry")', () => {
+  it('neither key stored -> false; either key stored (any value) -> true', () => {
+    expect(hasAmlHoldEntry(undefined)).toBe(false);
+    expect(hasAmlHoldEntry({})).toBe(false);
+    expect(hasAmlHoldEntry({ largeAmountUsd: 5000, watchlistExtra: ['x'] })).toBe(false);
+    expect(hasAmlHoldEntry({ amlHolds: true })).toBe(true);
+    expect(hasAmlHoldEntry({ amlHolds: false })).toBe(true);
+    expect(hasAmlHoldEntry({ amlHoldRules: [] })).toBe(true);
+    expect(hasAmlHoldEntry({ amlHoldRules: ['structuring'] })).toBe(true);
+  });
+});
+
+describe('amlHoldRulesEntry (P17)', () => {
+  it('non-empty -> amlHolds true + the list; other keys kept; the input is not mutated', () => {
+    const prev = { largeAmountUsd: 5000, watchlistExtra: ['x y'], amlHoldRules: ['bogus'] };
+    const copy = JSON.parse(JSON.stringify(prev));
+    expect(amlHoldRulesEntry(prev, ['structuring', 'new_beneficiary'])).toEqual({
+      largeAmountUsd: 5000, watchlistExtra: ['x y'], amlHolds: true, amlHoldRules: ['structuring', 'new_beneficiary'],
+    });
+    expect(prev).toEqual(copy);
+  });
+  it('empty -> amlHolds DELETED (never false) and [] stored; resolves to holds off', () => {
+    const e = amlHoldRulesEntry({ amlHolds: true, amlHoldRules: ['structuring'], velocityLimit: 9 }, []);
+    expect(e).toEqual({ velocityLimit: 9, amlHoldRules: [] });
+    expect(Object.hasOwn(e, 'amlHolds')).toBe(false);
+    expect(hasAmlHoldEntry(e)).toBe(true);
+    expect(resolveAmlHoldRules(e.amlHolds === true, e.amlHoldRules)).toEqual([]);
+  });
+  it('no previous entry', () => {
+    expect(amlHoldRulesEntry(undefined, ['first_transfer'])).toEqual({ amlHolds: true, amlHoldRules: ['first_transfer'] });
+    expect(amlHoldRulesEntry(undefined, [])).toEqual({ amlHoldRules: [] });
+  });
+  it('the stored list is a fresh plain array (never the caller\'s or a frozen one)', () => {
+    const e = amlHoldRulesEntry(undefined, AML_HOLD_RULES);
+    expect(e.amlHoldRules).toEqual([...AML_HOLD_RULES]);
+    expect(e.amlHoldRules).not.toBe(AML_HOLD_RULES);
+    expect(Object.isFrozen(e.amlHoldRules)).toBe(false);
+  });
+});
+
+describe('amlHoldRulesSummary (admin compliance page, P13)', () => {
+  it('the resolved rule list as inline staff English', () => {
+    expect(amlHoldRulesSummary(false, [])).toBe('Off');
+    expect(amlHoldRulesSummary(false, AML_HOLD_RULES)).toBe('Off');
+    expect(amlHoldRulesSummary(true, AML_HOLD_RULES)).toBe('On: all rules');
+    expect(amlHoldRulesSummary(true, ['structuring', 'first_transfer'])).toBe('On: structuring, first transfer');
+    expect(amlHoldRulesSummary(true, ['new_beneficiary'])).toBe('On: new beneficiary');
+    expect(amlHoldRulesSummary(true, [])).toBe('On: no rules');
   });
 });

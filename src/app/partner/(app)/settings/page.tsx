@@ -9,12 +9,15 @@ import { setupView, type SetupView } from '@/lib/partner-setup-view';
 import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { isLiveCertified } from '@/lib/live-gate';
+import { AML_HOLD_RULES } from '@/lib/aml-hold';
+import { resolveCorridorRules } from '@/lib/compliance-config';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import type { PartnerDisclosureConfig } from '@/lib/types';
 import { Badge, Card, EmptyState, ErrorState, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
-import { AlertEmailForm, ComplianceAlertEmailForm, DisclosureForm, SupportPortalForm, type DisclosureValues } from './settings-forms';
+import { AlertEmailForm, AmlHoldRulesForm, ComplianceAlertEmailForm, DisclosureForm, SupportPortalForm, type DisclosureValues } from './settings-forms';
 
 export const metadata: Metadata = { title: t('partner.settings.title'), robots: { index: false, follow: false } };
 
@@ -34,6 +37,11 @@ export const metadata: Metadata = { title: t('partner.settings.title'), robots: 
 // Pack 4 review R2 (I1, I3): a viewer without two-step sign-in who looks at an APPROVED block is
 // warned that a save clears the approval (a stronger line when the partner is live-certified). The
 // default tenant is never stamped (setDisclosure), so it shows no approval line, hint or warning.
+// Fix pack 6 T19 (P17): "AML holds before payout", one step-up form per corridor the partner sends
+// from (never IN) with the RESOLVED rules ticked; the rule ids, labels and ticks are computed HERE
+// and passed as props (the client form imports no compliance module, P0 rule 13). A viewer without
+// two-step sign-in sees the hint and no form (the action refuses them anyway). The default (demo)
+// tenant is never held, so it gets no section.
 
 const H2 = 'text-[18px] font-extrabold text-ds-ink';
 const day = (iso: string | undefined): string => (iso ? iso.slice(0, 10) : '');
@@ -47,6 +55,13 @@ async function viewerEnrolled(username: string, partnerId: string): Promise<bool
   }
 }
 const INTRO = 'mt-1 mb-4 text-[14px] text-ds-ink-muted';
+
+const AML_RULE_LABELS = {
+  structuring: 'partner.settings.amlHolds.rule.structuring',
+  first_transfer: 'partner.settings.amlHolds.rule.first_transfer',
+  new_beneficiary: 'partner.settings.amlHolds.rule.new_beneficiary',
+} as const;
+const amlRuleOptions = (): Array<{ id: string; label: string }> => AML_HOLD_RULES.map((id) => ({ id, label: t(AML_RULE_LABELS[id]) }));
 
 function disclosureValues(d: PartnerDisclosureConfig | undefined): DisclosureValues {
   return {
@@ -179,6 +194,27 @@ export default async function PartnerSettingsPage() {
           ) : null}
           <DisclosureForm current={disclosureValues(sc.disclosure)} maxDays={MAX_DELIVERY_BUSINESS_DAYS} />
         </Card>
+        {partner.id !== DEFAULT_PARTNER_ID ? (
+          <div data-testid="settings-aml-holds">
+            <Card as="section" className="p-5 sm:p-6">
+              <h2 className={H2}>{t('partner.settings.amlHolds.title')}</h2>
+              <p className={INTRO}>{t('partner.settings.amlHolds.body')}</p>
+              {enrolled ? (
+                <div className="flex flex-col gap-6">
+                  {(partner.countries ?? [])
+                    .filter((c) => c !== 'IN')
+                    .map((c) => (
+                      <AmlHoldRulesForm key={c} country={c} rules={amlRuleOptions()} ticked={[...resolveCorridorRules(partner, c).amlHoldRules]} />
+                    ))}
+                </div>
+              ) : (
+                <p data-testid="settings-aml-holds-enrol" className="text-[13px] text-ds-ink-muted">
+                  {t('partner.settings.amlHolds.mfaRequired')}
+                </p>
+              )}
+            </Card>
+          </div>
+        ) : null}
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.settings.pricing.title')}</h2>
           <p className={INTRO}>{t('partner.settings.pricing.intro')}</p>

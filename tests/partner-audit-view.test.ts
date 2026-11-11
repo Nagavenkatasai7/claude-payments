@@ -122,6 +122,25 @@ describe('TENANT_AUDIT_ACTIONS', () => {
       expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
     }
   });
+  // Fix pack 6 T19 (P21): the partner's own AML hold rule changes (and SmartRemit's go-live
+  // default) are in the feed; the platform switch, the per-transfer hold and the rule names that
+  // held a transfer are not.
+  it('aml.hold_rules_set is in the tenant feed with country and to only; aml.holds_set and aml.hold stay out', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('aml.hold_rules_set');
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('aml.holds_set');
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('aml.hold');
+    expect(TENANT_OWN_ONLY_ACTIONS).not.toContain('aml.hold_rules_set');
+    expect(t(actionLabelKey('aml.hold_rules_set'))).toBe('AML hold rules changed');
+    const meta = { country: 'US', from: ['structuring', 'first_transfer', 'new_beneficiary'], to: ['structuring'], actorScope: 'partner', extra: 'x' };
+    const own = projectAuditRow(row({ action: 'aml.hold_rules_set', actor: 'pa-admin', subjectId: 'pa', meta }), tenant);
+    expect(own.actor).toBe('pa-admin');
+    expect(own.detail).toBe('country=US, to=structuring');
+    for (const v of ['first_transfer', 'new_beneficiary', 'extra', 'actorScope', 'from=']) expect(JSON.stringify(own)).not.toContain(v);
+    const platformRow = projectAuditRow(row({ action: 'aml.hold_rules_set', actor: 'owner-admin', subjectId: 'pa', meta: { ...meta, actorScope: 'platform', reason: 'go_live_default' } }), tenant, platform);
+    expect(platformRow.actor).toBe(t('partner.audit.smartremit'));
+    expect(JSON.stringify(platformRow)).not.toContain('owner-admin');
+    expect(JSON.stringify(platformRow)).not.toContain('go_live_default');
+  });
   it('holds the plan list, and every action has a label', () => {
     expect(TENANT_AUDIT_ACTIONS).toContain('transfer.release');
     expect(TENANT_AUDIT_ACTIONS).toContain('api_key.issue');

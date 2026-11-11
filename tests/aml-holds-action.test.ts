@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore } from '@/lib/partner-store';
 import { resolveCorridorRules, GLOBAL_DEFAULTS } from '@/lib/compliance-config';
+import { hasAmlHoldEntry } from '@/lib/aml-hold';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
@@ -150,6 +151,54 @@ describe('setAmlHoldsAction — the write', { retry: 0 }, () => {
     expect(await stored('acme')).toEqual({ US: { largeAmountUsd: 5000, watchlistExtra: ['x y'], amlHolds: true } });
     await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'off' }));
     expect(await stored('acme')).toEqual({ US: { largeAmountUsd: 5000, watchlistExtra: ['x y'] } });
+  });
+});
+
+// Fix pack 6 T19 (P13, critics C4/M1/P6): the switch and the partner's rule list. ON drops a
+// stored list that resolves to [] (so the switch can never be On with nothing held) and keeps a
+// valid non-empty one; OFF deletes BOTH keys, so the corridor is "no entry" again.
+describe('setAmlHoldsAction — the partner rule list (pack 6 P13)', { retry: 0 }, () => {
+  const setStored = (json: string) => db.execute(sql`UPDATE partners SET corridor_compliance = ${json}::jsonb WHERE id = 'acme'`);
+  const lastMeta = async () => (await audits()).at(-1)!.meta;
+
+  it('ON with a stored amlHoldRules [] -> the list is deleted, rulesReset in the meta', async () => {
+    await setStored('{"US":{"amlHoldRules":[]}}');
+    await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'on' }));
+    expect(await stored('acme')).toEqual({ US: { amlHolds: true } });
+    expect(await lastMeta()).toEqual({ country: 'US', from: false, to: true, rulesReset: true });
+    const rules = resolveCorridorRules(await createPartnerStore(db).getPartner('acme'), 'US');
+    expect(rules.amlHolds).toBe(true);
+    expect(rules.amlHoldRules).toEqual(['structuring', 'first_transfer', 'new_beneficiary']);
+  });
+
+  it("ON with ['bogus'] -> same (all-garbage resolves to [])", async () => {
+    await setStored('{"US":{"amlHoldRules":["bogus"],"velocityLimit":3}}');
+    await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'on' }));
+    expect(await stored('acme')).toEqual({ US: { velocityLimit: 3, amlHolds: true } });
+    expect(await lastMeta()).toEqual({ country: 'US', from: false, to: true, rulesReset: true });
+  });
+
+  it("ON with ['structuring'] -> the list is kept, no rulesReset key", async () => {
+    await setStored('{"US":{"amlHoldRules":["structuring"]}}');
+    await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'on' }));
+    expect(await stored('acme')).toEqual({ US: { amlHoldRules: ['structuring'], amlHolds: true } });
+    expect(await lastMeta()).toEqual({ country: 'US', from: false, to: true });
+  });
+
+  it("OFF with { amlHolds: true, amlHoldRules: ['structuring'] } -> both keys deleted (entry dropped when empty)", async () => {
+    await setStored('{"US":{"amlHolds":true,"amlHoldRules":["structuring"]}}');
+    await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'off' }));
+    expect(await stored('acme')).toEqual({});
+    expect(await lastMeta()).toEqual({ country: 'US', from: true, to: false });
+  });
+
+  it('OFF on a partner-turned-off entry ({ amlHoldRules: [] }) -> the list is deleted too ("no entry" again)', async () => {
+    await setStored('{"US":{"amlHoldRules":[],"largeAmountUsd":5000}}');
+    await setAmlHoldsAction(form({ partnerId: 'acme', country: 'US', on: 'off' }));
+    expect(await stored('acme')).toEqual({ US: { largeAmountUsd: 5000 } });
+    const p = await createPartnerStore(db).getPartner('acme');
+    expect(hasAmlHoldEntry(p?.corridorCompliance?.US)).toBe(false);
+    expect(await lastMeta()).toEqual({ country: 'US', from: false, to: false });
   });
 });
 

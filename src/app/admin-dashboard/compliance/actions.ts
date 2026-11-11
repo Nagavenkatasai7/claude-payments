@@ -10,6 +10,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { isAmlDisposition, parseAmlAlertId } from '@/lib/partner-reviews';
+import { resolveAmlHoldRules } from '@/lib/compliance-config';
 
 /**
  * Program-Fix 43 (compliance-09, partial): close an AML review item.
@@ -92,6 +93,15 @@ export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
  *      the `aml.holds_set` audit row commit in ONE transaction. OFF removes
  *      the key (and an emptied corridor entry), so the stored jsonb returns to
  *      what it was before the switch was first turned on.
+ *
+ * Fix pack 6 (P13, critics C4/M1/P6) and the partner's rule list
+ * (amlHoldRules, written by the partner's setAmlHoldRulesAction):
+ *   • ON also DELETES a stored list that resolves to [] (empty or all
+ *     garbage: a partner's earlier "all off"), so the switch can never be On
+ *     with nothing held (the corridor then holds on all three rules); a valid
+ *     non-empty list is kept. The meta gains `rulesReset: true` only then.
+ *   • OFF deletes BOTH amlHolds and amlHoldRules, so the corridor is "no
+ *     entry" again (hasAmlHoldEntry false) and the go-live default applies.
  */
 export async function setAmlHoldsAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
@@ -111,10 +121,19 @@ export async function setAmlHoldsAction(formData: FormData): Promise<void> {
     const partner = await partners.getPartner(partnerId);
     if (!partner) throw new Error('Partner not found');
     if (!(partner.countries ?? []).includes(country)) throw new Error('Invalid corridor');
+    let rulesReset = false;
     const { found, previous } = await partners.updateCorridorCompliance(partnerId, (prev) => {
       const entry = { ...(prev[country] ?? {}) };
-      if (on) entry.amlHolds = true;
-      else delete entry.amlHolds;
+      if (on) {
+        entry.amlHolds = true;
+        if ('amlHoldRules' in entry && resolveAmlHoldRules(true, entry.amlHoldRules).length === 0) {
+          delete entry.amlHoldRules;
+          rulesReset = true;
+        }
+      } else {
+        delete entry.amlHolds;
+        delete entry.amlHoldRules;
+      }
       const next = { ...prev };
       if (Object.keys(entry).length === 0) delete next[country];
       else next[country] = entry;
@@ -127,7 +146,7 @@ export async function setAmlHoldsAction(formData: FormData): Promise<void> {
       actorType: 'staff',
       action: 'aml.holds_set',
       subjectId: partnerId,
-      meta: { country, from: previous[country]?.amlHolds === true, to: on },
+      meta: { country, from: previous[country]?.amlHolds === true, to: on, ...(rulesReset ? { rulesReset: true } : {}) },
     });
   });
   revalidatePath('/admin-dashboard/compliance');

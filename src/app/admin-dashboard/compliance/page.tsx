@@ -10,6 +10,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { reviewAmlAlertAction, setAmlHoldsAction } from './actions';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { amlHoldRulesSummary } from '@/lib/aml-hold';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
@@ -226,6 +227,7 @@ export default async function CompliancePage() {
           partnerName: p.name ?? '',
           corridor: `${country} → IN`,
           amlHolds: rules.amlHolds,
+          amlHoldRules: rules.amlHoldRules, // fix pack 6 (P13): the RESOLVED rule list
           largeAmountUsd: rules.largeAmountUsd,
           velocityLimit: rules.velocityLimit,
           watchlistSize: rules.baseWatchlist.length + rules.watchlistExtra.length,
@@ -538,7 +540,7 @@ export default async function CompliancePage() {
                     <span key="aml-holds" className="text-muted-foreground">Never (demo)</span>
                   ) : (
                     <span key="aml-holds" className="inline-flex flex-wrap items-center gap-2">
-                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{r.amlHolds ? 'On' : 'Off'}</Badge>
+                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{amlHoldRulesSummary(r.amlHolds, r.amlHoldRules)}</Badge>
                       {canSetAmlHolds && (
                         <form action={setAmlHoldsAction}>
                           <input type="hidden" name="partnerId" value={r.partnerId} />

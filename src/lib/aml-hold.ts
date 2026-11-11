@@ -24,9 +24,9 @@
 
 import { AML_HOLD_REASON } from './compliance-config';
 import { DEFAULT_PARTNER_ID } from './defaults';
-import { firstTransfer, structuring, type AmlHit, type AmlHoldRule, type AmlRuleConfig, type SenderAmlStats } from './aml-rules';
+import { AML_HOLD_RULES, firstTransfer, structuring, type AmlHit, type AmlHoldRule, type AmlRuleConfig, type SenderAmlStats } from './aml-rules';
 import type { PriorSends } from '@/db/repos/transfer-repo';
-import type { ComplianceStatus, PartnerId } from './types';
+import type { ComplianceStatus, CorridorComplianceRule, PartnerId } from './types';
 
 /** The only reason a hold adds. Deliberately generic (no rule name). Lives in the registry (compliance-config.ts). */
 export { AML_HOLD_REASON };
@@ -117,4 +117,51 @@ export function applyAmlHold<V extends Verdict>(v: V, hit: AmlHit | null): V {
  */
 export function applyPurposeHold<V extends Verdict>(v: V, risk: string | undefined): V {
   return risk ? addHoldReason(v) : v;
+}
+
+/**
+ * Fix pack 6 (P13 "no entry"): neither `amlHolds` nor `amlHoldRules` is stored
+ * for the corridor (whatever their values). The go-live default (T20) writes
+ * only such corridors, so a partner's or the platform's choice is never
+ * overwritten; the platform switch OFF deletes both keys to return here.
+ */
+export function hasAmlHoldEntry(e: CorridorComplianceRule | undefined): boolean {
+  return e !== undefined && (Object.hasOwn(e, 'amlHolds') || Object.hasOwn(e, 'amlHoldRules'));
+}
+
+/**
+ * Fix pack 6 (P17): the partner rule writer's next corridor entry. A non-empty
+ * list -> `amlHolds: true` + the list; an empty list -> `amlHolds` DELETED and
+ * `amlHoldRules: []` stored (never `amlHolds: false`: an older build ignores
+ * the list and reads only `amlHolds`, so a deleted key is "off" for every
+ * build, while the stored `[]` keeps the corridor out of "no entry" so the
+ * go-live default never turns it back on). Every other key is kept; `prev` is
+ * not mutated. `rules` are already validated and canonical (the action's parse).
+ */
+export function amlHoldRulesEntry(
+  prev: CorridorComplianceRule | undefined,
+  rules: readonly AmlHoldRule[],
+): CorridorComplianceRule {
+  const entry: CorridorComplianceRule = { ...(prev ?? {}) };
+  if (rules.length > 0) {
+    entry.amlHolds = true;
+  } else {
+    delete entry.amlHolds;
+  }
+  entry.amlHoldRules = [...rules];
+  return entry;
+}
+
+/**
+ * Fix pack 6 (P13): the admin compliance page's label for a corridor's
+ * RESOLVED rules (resolveCorridorRules): 'Off', 'On: all rules' or
+ * 'On: <rule>, <rule>' (ids with '_' read as spaces). Inline staff English
+ * (P20). 'On: no rules' only for a hand-written jsonb: neither writer stores
+ * holds on with an empty list.
+ */
+export function amlHoldRulesSummary(on: boolean, rules: readonly AmlHoldRule[]): string {
+  if (!on) return 'Off';
+  if (rules.length === 0) return 'On: no rules';
+  if (AML_HOLD_RULES.every((r) => rules.includes(r))) return 'On: all rules';
+  return `On: ${rules.map((r) => r.replace(/_/g, ' ')).join(', ')}`;
 }

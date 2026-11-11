@@ -611,6 +611,23 @@ describe('notifyLiveChange', () => {
     expect(await audits()).toEqual([]);
   });
 
+  // Fix pack 6 T19 (P17, P23): the partner's AML hold rule writer on a certified partner.
+  it('notifyLiveChange with amlHoldRules: label "Your AML hold rule setting"', async () => {
+    await db.transaction((tx) =>
+      notifyLiveChange(tx, 'acme', { username: 'acme-admin', scope: 'partner' }, { key: 'amlHoldRules', action: 'aml.hold_rules_set', word: 'updated' }),
+    );
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:amlHoldRules:acme:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: aml.hold_rules_set on partner acme by partner staff.' });
+    expect(o[1].dedupe_key).toMatch(new RegExp(`^livectlmail:amlHoldRules:acme:${UUID}$`));
+    expect(o[1].payload).toEqual({
+      to: ['compliance@acme.example'],
+      subject: 'SmartRemit: a live control changed for your workspace',
+      text: 'Your AML hold rule setting was changed by your team (updated). Details are in your SmartRemit workspace.',
+    });
+  });
+
   it('uses a supportConfig given by the caller instead of reading the row', async () => {
     await db.transaction((tx) => notifyLiveChange(tx, 'acme', { username: 'ops-ana', scope: 'platform' }, NOTICE, { complianceAlertEmail: 'other@acme.example' }));
     const o = await outboxRows();

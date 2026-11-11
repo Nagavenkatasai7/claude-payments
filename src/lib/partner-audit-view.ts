@@ -115,6 +115,12 @@ const ACTION_LABELS = Object.freeze({
   // route ids: only the closed `channel` enum ('wa' | 'tg') is safe, so DETAIL_KEYS lists only that.
   // remittance.disclosure_ack and transfer.legal_name_set stay OUT of the feed.
   'otp.verified': 'partner.audit.action.otpVerified',
+  // Fix pack 6 T19 (P21): the partner's own AML hold rule changes (actorScope 'partner') and
+  // SmartRemit's go-live default (actorScope 'platform', reads "SmartRemit"; subject = the partner
+  // id). Meta { country, from, to, actorScope, reason? }: only the corridor and the new closed rule
+  // list are shown. The platform switch aml.holds_set and the per-transfer aml.hold (which names
+  // the rules that held a transfer) stay OUT of the feed (D6).
+  'aml.hold_rules_set': 'partner.audit.action.amlHoldRulesSet',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -166,6 +172,8 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'partner.live.optin.approve': ['capability', 'on'],
   // Fix pack 4 T20 (C17): the closed channel enum only (never a hash, time, attempt or route id).
   'otp.verified': ['channel'],
+  // Fix pack 6 T19 (P21): the corridor and the closed rule-id list (never from, reason or actorScope).
+  'aml.hold_rules_set': ['country', 'to'],
 });
 
 /**
