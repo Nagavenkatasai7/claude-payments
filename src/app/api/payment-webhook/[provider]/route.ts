@@ -212,12 +212,17 @@ async function handleVerified(
     }
     if (amountCheck === 'missing') {
       // The pokeWorker() above already ran, so this alert row is picked up.
+      // The id comes from the ledger row (`refTransfer.id`, proven equal to
+      // `result.transferId` by the reference check above), never from `result`:
+      // `result` is built by a provider that holds the rail's integrations, and
+      // the static outbox gate (tests/outbox-payload-secrets.test.ts) refuses a
+      // payload whose local dataflow reaches a PartnerIntegrations field.
       const rail = railPartnerId ?? 'unresolved';
       await outbox.enqueue(
         'ops.alert',
         {
           message:
-            `⚠️ SmartRemit ops: a paid_out callback from rail partner ${rail} for transfer ${result.transferId} was refused (422 amount_required): ` +
+            `⚠️ SmartRemit ops: a paid_out callback from rail partner ${rail} for transfer ${refTransfer.id} was refused (422 amount_required): ` +
             'it carried no amount block, so the transfer was not marked delivered. Ask the rail partner to report amount.destination and ' +
             'amount.destination_currency (see the webhooks docs); the rail keeps retrying until it does. ' +
             'Further refusals for this rail this hour are coalesced into this alert.',
