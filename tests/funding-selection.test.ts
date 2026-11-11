@@ -18,7 +18,8 @@ import {
 import { StripeFundingProvider } from '@/lib/providers/stripe-funding-provider';
 import type { Transfer } from '@/lib/types';
 
-const KEY = ['sk', 'test', 'unitonly'].join('_');
+// Fix pack 5 T16 (P16): only a restricted key is ever used.
+const KEY = ['rk', 'test', 'unitonly'].join('_');
 const STRIPE = { providerType: 'stripe' as const, secretKey: KEY, webhookSecrets: ['w'] };
 
 function t(o: Partial<Transfer> = {}): Transfer {
@@ -66,6 +67,31 @@ describe('selectFundingProvider', () => {
     expect(selectFundingProvider(t(), { enabled: true, config: { providerType: 'stripe', secretKey: '' } })).toEqual({
       kind: 'refused', reason: 'unconfigured',
     });
+  });
+
+  it('fix pack 5 T16 (P16): an unrestricted or malformed key is refused with unrestricted_key', () => {
+    const bad = [
+      ['sk', 'test', 'x'].join('_'), ['sk', 'live', 'x'].join('_'), ['sk', 'org', 'x'].join('_'),
+      ['pk', 'test', 'x'].join('_'), ['rk', 'x'].join('_'), ['rk', 'test', ''].join('_'),
+      ['rk', 'test', 'a b'].join('_'), ' ' + ['rk', 'test', 'abc'].join('_'),
+    ];
+    for (const secretKey of bad) {
+      expect(selectFundingProvider(t(), { enabled: true, config: { providerType: 'stripe', secretKey } })).toEqual({
+        kind: 'refused', reason: 'unrestricted_key',
+      });
+    }
+    for (const secretKey of [['rk', 'live', 'abc'].join('_'), ['rk', 'test', 'abc'].join('_')]) {
+      expect(selectFundingProvider(t(), { enabled: true, config: { providerType: 'stripe', secretKey } }).kind).toBe('stripe');
+    }
+  });
+
+  it('fix pack 5 T16: the default-tenant and routed refusals still win over the key check; flag off or no Stripe config never inspects the key', () => {
+    const sk = { providerType: 'stripe' as const, secretKey: ['sk', 'test', 'x'].join('_') };
+    expect(selectFundingProvider(t({ partnerId: 'default' }), { enabled: true, config: sk })).toEqual({ kind: 'refused', reason: 'default_tenant' });
+    expect(selectFundingProvider(t({ settlementPartnerId: 'other' }), { enabled: true, config: sk })).toEqual({ kind: 'refused', reason: 'routed' });
+    expect(selectFundingProvider(t(), { enabled: false, config: sk }).kind).toBe('mock');
+    expect(selectFundingProvider(t({ environment: 'test' }), { enabled: true, config: sk }).kind).toBe('mock');
+    expect(selectFundingProvider(t(), { enabled: true, config: {} }).kind).toBe('mock');
   });
 
   it('sandbox and B2B transfers keep the mock / partner-pulled path', () => {

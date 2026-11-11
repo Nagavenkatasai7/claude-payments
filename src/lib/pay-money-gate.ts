@@ -5,6 +5,8 @@ import { logWarn } from './log';
 import type { PayGateContext } from './pay-gate-context';
 import { railSecrets, type PartnerFundingConfig, type PartnerIntegrations } from './partner-integrations';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
+import { alertUnrestrictedStripeKey } from './pay-process';
+import { isRestrictedStripeKey } from './providers/funding-provider';
 import type { PartnerId } from './types';
 
 // fix pack 5 (P13, M5): the pre-verify copy of pay-process steps 5 and 7, so no
@@ -52,6 +54,11 @@ export async function payMoneyGateRefusal(
     }
   }
   if (payFundingRefusal(i.subject, { realMoney: true, stripeEnabled: env.stripeFundingEnabled, config })) {
+    // Fix pack 5 T16 (P16): the route refuses here before pay-process runs, so
+    // a stored key that is not restricted raises the stripekey alert here too.
+    if (config?.providerType === 'stripe' && !isRestrictedStripeKey(config.secretKey ?? '')) {
+      await alertUnrestrictedStripeKey(i.subject.partnerId);
+    }
     return 'mock_on_real_money';
   }
   return null;

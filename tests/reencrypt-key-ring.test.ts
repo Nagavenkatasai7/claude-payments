@@ -152,6 +152,20 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     expect(await createRecipientRepo(db, defaultProvider()).getRecipientLegalName('acme', '15551230000', '919876543210')).toBe('Anita Sharma');
   });
 
+  it('fix pack 5 T16 (P3): a funding config sealed under k0 is resealed under k1 and getFundingConfig opens it', async () => {
+    await seedPartner(db, 'acme');
+    const key = ['rk', 'test', 'keyringonly'].join('_');
+    await createIntegrationsRepo(db, new EnvKeyRing(KEY_0)).setFundingConfig('acme', { providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_k'] });
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'partner_integrations' });
+    expect(report.find((x) => x.column === 'funding_credentials_enc')).toMatchObject({ stale: 1, resealed: 1, failed: 0 });
+    const [row] = await raw(`SELECT funding_credentials_enc FROM partner_integrations`);
+    expect(row.funding_credentials_enc?.startsWith('v2.k1.')).toBe(true);
+    expect(await createIntegrationsRepo(db, defaultProvider()).getFundingConfig('acme')).toEqual({
+      providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_k'],
+    });
+  });
+
   it('pack 5: a k0 rail_messages body is resealed under k1 through the append-only trigger and still opens', async () => {
     await seedPartner(db, 'pa');
     const body = '{"transfer_id":"tr_rm1","amount":{"destination":16600}}';

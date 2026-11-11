@@ -11,6 +11,7 @@ import {
 } from '@/lib/partner-integrations';
 import type { PartnerId } from '@/lib/types';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { isRestrictedStripeKey } from '@/lib/providers/funding-provider';
 
 // integrations-repo — mirrors partner-integrations-store (getIntegrations /
 // saveIntegrations / deleteIntegrations). Secrets are envelope-encrypted into
@@ -132,6 +133,12 @@ export function createIntegrationsRepo(
       // selector refuses it too (selectFundingProvider); this stops it at write.
       if (config?.providerType === 'stripe' && partnerId === DEFAULT_PARTNER_ID) {
         throw new Error('funding config refused: the default tenant can never hold a PSP account');
+      }
+      // Fix pack 5 (P16): only a restricted Stripe key is ever stored
+      // (https://docs.stripe.com/keys); the selector refuses any other key too.
+      // The message never holds the key.
+      if (config?.providerType === 'stripe' && !isRestrictedStripeKey(config.secretKey ?? '')) {
+        throw new Error('funding config refused: only a restricted Stripe key (rk_live_ / rk_test_) is accepted');
       }
       const set = config?.providerType === 'stripe'
         ? {

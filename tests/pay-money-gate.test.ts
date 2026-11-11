@@ -5,6 +5,7 @@
  * makes a read; everything else answers null with no read at all.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { seedRealMoneyRail } from './helpers-live';
 import { setRailProviderType } from './helpers-sanctions';
@@ -17,7 +18,10 @@ const seam = vi.hoisted(() => ({
   fundingCalls: 0,
   integrationsThrows: false,
   fundingThrows: false,
+  /** Fix pack 5 T16: a stored config the repo would now refuse to write. */
+  fundingOverride: null as null | { providerType: 'stripe'; secretKey: string },
 }));
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
 vi.mock('@/lib/partner-integrations-store', async (orig) => {
   const real = await orig<typeof import('@/lib/partner-integrations-store')>();
   return {
@@ -34,6 +38,7 @@ vi.mock('@/lib/partner-integrations-store', async (orig) => {
         getFundingConfig: async (id: string) => {
           seam.fundingCalls++;
           if (seam.fundingThrows) throw new Error('funding-read-leak postgres://user:pw@host/db');
+          if (seam.fundingOverride) return seam.fundingOverride;
           return s.getFundingConfig(id);
         },
       };
@@ -66,6 +71,7 @@ beforeEach(async () => {
   seam.fundingCalls = 0;
   seam.integrationsThrows = false;
   seam.fundingThrows = false;
+  seam.fundingOverride = null;
   logWarn.mockReset();
   delete process.env.STRIPE_FUNDING_ENABLED;
 });
@@ -134,5 +140,30 @@ describe('payMoneyGateRefusal (P13 route pre-verify)', { retry: 0 }, () => {
     expect(await payMoneyGateRefusal(db, { ctx, railPartnerId: 'acme', subject: b2c() })).toBe('mock_on_real_money');
     expect(logWarn).toHaveBeenCalledWith('pay.funding-config', 'Error', { railPartnerId: 'acme' });
     expect(JSON.stringify(logWarn.mock.calls)).not.toContain('postgres://');
+  });
+
+  it("fix pack 5 T16 (P16): a stored unrestricted Stripe key: 'mock_on_real_money' and one stripekey:<partner>:<hour> alert with no key fragment", async () => {
+    await seedRealMoneyRail(db, 'acme');
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    seam.fundingOverride = { providerType: 'stripe', secretKey: ['sk', 'test', 'moneygatesecret'].join('_') };
+    const ctx = await ctxFor();
+    expect(await payMoneyGateRefusal(db, { ctx, railPartnerId: 'acme', subject: b2c() })).toBe('mock_on_real_money');
+    expect(await payMoneyGateRefusal(db, { ctx, railPartnerId: 'acme', subject: b2c() })).toBe('mock_on_real_money');
+    const r = (await db.execute(sql`SELECT kind, dedupe_key, payload FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ kind: string; dedupe_key: string; payload: { message: string } }>;
+    };
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].kind).toBe('ops.alert');
+    expect(r.rows[0].dedupe_key).toMatch(/^stripekey:acme:\d+$/);
+    expect(r.rows[0].payload.message).not.toContain('moneygatesecret');
+  });
+
+  it('fix pack 5 T16: no Stripe config (mock funding) raises no stripekey alert', async () => {
+    await seedRealMoneyRail(db, 'acme');
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    const ctx = await ctxFor();
+    expect(await payMoneyGateRefusal(db, { ctx, railPartnerId: 'acme', subject: b2c() })).toBe('mock_on_real_money');
+    const r = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as { rows: Array<{ n: number }> };
+    expect(r.rows[0].n).toBe(0);
   });
 });

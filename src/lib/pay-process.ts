@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { getFundingProvider, isPendingCapture, selectFundingProvider } from './providers/funding-provider';
+import { getFundingProvider, isPendingCapture, isRestrictedStripeKey, selectFundingProvider } from './providers/funding-provider';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
@@ -21,7 +22,7 @@ import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommit
 import { payFundingRefusal } from './funding-class';
 import type { PartnerFundingConfig } from './partner-integrations';
 import type { Store } from './store';
-import type { Partner, Transfer } from './types';
+import type { Partner, PartnerId, Transfer } from './types';
 
 // pay-process — Batch B2: the shared payment steps of the two hosted pay pages,
 // MOVED unchanged out of src/app/api/pay/[transferId]/route.ts so that route and
@@ -55,6 +56,31 @@ export async function captureFunding(transfer: Transfer): Promise<void> {
 }
 
 /**
+ * Fix pack 5 (P16): the partner's stored Stripe key is not a restricted key
+ * (rk_live_ / rk_test_, https://docs.stripe.com/keys), so Stripe is refused
+ * for it (fail closed). One ops alert per partner per hour
+ * (`stripekey:<partnerId>:<hour>`); the text names the partner id only, never
+ * the key or any part of it. Best effort: a failed enqueue is logged by the
+ * error name and never changes the pay answer. Called from fundTransfer's
+ * refusal, the step-7 refusal (processTransferPayment) and the route
+ * pre-verify (payMoneyGateRefusal, pay-money-gate.ts).
+ */
+export async function alertUnrestrictedStripeKey(partnerId: PartnerId): Promise<void> {
+  try {
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      {
+        message: `⚠️ SmartRemit ops: Stripe funding for partner ${partnerId} is refused: its stored Stripe key is not a restricted key (rk_live_ / rk_test_). No sender can pay by card for this partner until a restricted key is stored.`,
+      },
+      { dedupeKey: `stripekey:${partnerId}:${Math.floor(Date.now() / 3_600_000)}` },
+    );
+    pokeWorker();
+  } catch (err) {
+    logWarn('pay.stripekey-alert', err instanceof Error ? err.name : 'error', { partnerId });
+  }
+}
+
+/**
  * Program-Fix 7 — the funding decision for THIS transfer:
  *  - 'settle'  : money is (or is treated as) captured — continue to
  *                settleOrHold exactly as before (legacy mock / partner-settled
@@ -85,6 +111,7 @@ export async function fundTransfer(transfer: Transfer): Promise<'settle' | NextR
   const selection = selectFundingProvider(transfer, { enabled: env.stripeFundingEnabled, config });
   if (selection.kind === 'refused') {
     logError('pay.funding-refused', new Error(`funding refused: ${selection.reason}`), { transferId: transfer.id });
+    if (selection.reason === 'unrestricted_key') await alertUnrestrictedStripeKey(transfer.partnerId);
     return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
   }
   if (selection.kind === 'mock') {
@@ -289,6 +316,11 @@ export async function processTransferPayment(
       }
     }
     if (payFundingRefusal(transfer, { realMoney: true, stripeEnabled: env.stripeFundingEnabled, config: fundingConfig })) {
+      // Fix pack 5 T16 (P16): a stored key that is not restricted is why Stripe
+      // was refused here; raise the stripekey alert before the 409.
+      if (fundingConfig?.providerType === 'stripe' && !isRestrictedStripeKey(fundingConfig.secretKey ?? '')) {
+        await alertUnrestrictedStripeKey(transfer.partnerId);
+      }
       logWarn('pay.funding-refused', 'mock funding refused on a real-money rail', {
         transferId: transfer.id,
         code: 'mock_on_real_money',

@@ -111,6 +111,8 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
     columns: [
       'kyc_api_key_enc', 'kyc_webhook_secret_enc', 'payment_credentials_enc', 'payment_webhook_secret_enc',
       'wa_token_enc', 'wa_verify_token_enc', 'wa_app_secret_enc',
+      // fix pack 5 T16 (P3): Program-Fix 7's sealed funding config was missing from rotation.
+      'funding_credentials_enc',
     ],
     ctxFor: ([partnerId], column) => ctx.integration(partnerId, column as IntegrationEncColumn),
   },

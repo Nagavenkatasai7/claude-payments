@@ -196,7 +196,7 @@ describe('real money, mock funded (P13 route pre-verify)', { retry: 0 }, () => {
     expect(refusalLogs()).toEqual([['pay.preverify-refused', 'money gate', { transferId: TID, code: 'mock_on_real_money' }]]);
 
     // Lift the gate in the same test: the owner gets a Stripe funding config.
-    await createIntegrationsRepo(db).setFundingConfig('acme', { providerType: 'stripe', secretKey: 'rk_test_money_gate' });
+    await createIntegrationsRepo(db).setFundingConfig('acme', { providerType: 'stripe', secretKey: 'rk_test_moneygate' });
     process.env.STRIPE_FUNDING_ENABLED = 'true';
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { message: 'stubbed' } }), { status: 500 })));
     const again = await post(TID, realMoneyPayBody());

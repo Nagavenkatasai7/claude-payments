@@ -281,4 +281,25 @@ describe('processTransferPayment step 7: no mock funding on real money', () => {
     expect(capture).toHaveBeenCalledTimes(2);
     expect(rails.fundingReads).toEqual([]);
   });
+
+  it('fix pack 5 T16 (P16): an unrestricted Stripe key at step 7: 409, nothing captured, one stripekey:<partner>:<hour> alert with no key fragment; a second pay this hour adds none', async () => {
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    await acmeLive();
+    rails.fundingConfig = { providerType: 'stripe', secretKey: ['sk', 'live', 'stepseven'].join('_') };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const t = makeTransfer({ id: 'k7', partnerId: 'acme' });
+    await store.saveTransfer(t);
+    expect(await pay(t, testEvidence({ routeId: 'k7' }))).toEqual({ status: 409, body: PAY_NOT_AVAILABLE.body });
+    expect(await pay(t, testEvidence({ routeId: 'k7' }))).toEqual({ status: 409, body: PAY_NOT_AVAILABLE.body });
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceRows()).toEqual([]);
+    const r = (await db.execute(sql`SELECT kind, dedupe_key, payload FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ kind: string; dedupe_key: string; payload: { message: string } }>;
+    };
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].kind).toBe('ops.alert');
+    expect(r.rows[0].dedupe_key).toMatch(/^stripekey:acme:\d+$/);
+    expect(r.rows[0].payload.message).not.toContain('stepseven');
+    // A restricted key passes step 7 and raises no alert (the default flag-on case above).
+  });
 });
