@@ -84,6 +84,7 @@ const ALL_TABLES = [
   'partner_report_jobs',
   'partner_slug_tombstones',
   'partner_webhook_deliveries',
+  'rail_messages', // fix pack 5 (0039): FK child of partners; append-only, TRUNCATE allowed
   'partners',
   'waitlist_signups',
   'sanctions_list_entries',

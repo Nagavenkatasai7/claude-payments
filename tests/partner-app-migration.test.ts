@@ -123,6 +123,8 @@ describe('migration 0028: the four new tables', () => {
       ['http_status', 'integer', 'YES'],
       ['latency_ms', 'integer', 'YES'],
       ['created_at', TS, 'NO'],
+      // 0039 (fix pack 5) appends one NULLABLE column.
+      ['body_sha256', 'text', 'YES'],
     ]);
     const [idCol] = await rows<{ is_identity: string; identity_generation: string }>(db,
       `SELECT is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'partner_webhook_deliveries' AND column_name = 'id'`);
@@ -164,8 +166,9 @@ describe('migration 0028: the four new tables', () => {
 
   it('no plaintext-PII column: the report body is only ever the sealed content_enc', async () => {
     const all = (await Promise.all(NEW_TABLES.map((t) => columns(db, t)))).flat().map((c) => c[0]);
-    expect(all.length).toBe(33); // guards a vacuous pass if a table name is wrong
-    expect(all.filter((c) => /phone|name|email|address|dob|content(?!_enc)|body|csv/.test(String(c)))).toEqual([]);
+    // 34 since 0039 (fix pack 5) added partner_webhook_deliveries.body_sha256: a hash, never a body.
+    expect(all.length).toBe(34); // guards a vacuous pass if a table name is wrong
+    expect(all.filter((c) => /phone|name|email|address|dob|content(?!_enc)|body(?!_sha256$)|csv/.test(String(c)))).toEqual([]);
   });
 });
 

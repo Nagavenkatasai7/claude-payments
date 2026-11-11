@@ -43,8 +43,8 @@ describe('recordInstructDelivery', () => {
     const r = await rows();
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ partnerId: 'pa', kind: 'settlement.instruct', subjectId: 'tr_1', outboxId: 42, attempt: 3, outcome: 'ok', httpStatus: 200, latencyMs: 13 });
-    // The table has no URL / body / error column; the row carries nothing else.
-    expect(Object.keys(r[0]).sort()).toEqual(['attempt', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outboxId', 'outcome', 'partnerId', 'subjectId']);
+    // The table has no URL / body / error column; body_sha256 (0039) is a hash, never a body.
+    expect(Object.keys(r[0]).sort()).toEqual(['attempt', 'bodySha256', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outboxId', 'outcome', 'partnerId', 'subjectId']);
   });
 
   it('a non-integer or out-of-range status is stored as null; a negative latency as 0', async () => {
