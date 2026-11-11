@@ -19,7 +19,6 @@ import type { CountryCode, PartnerId, Recipient } from '@/lib/types';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { providerLineFor } from '@/lib/legal/provider-line';
-import { logWarn } from '@/lib/log';
 import type { ToolOutcome } from './guard';
 
 // Stage C1: the five READ tools an AI app can call for a signed-in customer (Stage C2's
