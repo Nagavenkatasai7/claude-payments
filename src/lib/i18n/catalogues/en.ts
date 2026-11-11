@@ -1405,6 +1405,12 @@ export const en = {
   'portal.profile.email': 'Email',
   'portal.profile.notOnFile': 'Not on file',
   'portal.profile.manageEmail': 'Add or change your email',
+  // Fix pack 6 (R46, P9): the Electronic records card's UI chrome only. The card's title and
+  // withdrawal text come from src/lib/legal/esign-consent.ts (version-pinned counsel draft).
+  'portal.profile.esign.on': 'You agreed to get your transfer disclosures, receipts and notices electronically.',
+  'portal.profile.esign.off': 'You have not agreed to get them electronically. Your next payment on a pay page will ask you.',
+  'portal.profile.esign.withdraw': 'Withdraw consent',
+  'portal.profile.esign.withdrawn': 'Consent withdrawn. Your next payment on a pay page will ask you again.',
   'portal.kyc.title': 'Identity verification',
   'portal.kyc.status.verified': 'Verified',
   'portal.kyc.status.review': 'In review',

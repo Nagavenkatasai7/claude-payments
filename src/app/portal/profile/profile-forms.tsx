@@ -7,6 +7,7 @@ import {
   beginPortalMfaEnrolmentAction,
   confirmPortalMfaEnrolmentAction,
   startPortalVerificationAction,
+  withdrawEsignConsentAction,
   type PortalMfaState,
   type ProfileActionState,
 } from './actions';
@@ -106,5 +107,22 @@ export function MfaEnrolForm() {
         </>
       ) : null}
     </div>
+  );
+}
+
+/** Fix pack 6 (R46, P9): withdraw E-SIGN consent (shown only while a current consent is on file). */
+export function EsignWithdrawForm() {
+  const [state, action, pending] = useActionState<ProfileActionState, FormData>(withdrawEsignConsentAction, null);
+  return (
+    <form action={action} className="flex flex-col gap-3">
+      <div>
+        <Button type="submit" variant="ghost" size="md" disabled={pending}>
+          {pending ? t('portal.detail.working') : t('portal.profile.esign.withdraw')}
+        </Button>
+      </div>
+      <div aria-live="polite">
+        <Notice state={state} />
+      </div>
+    </form>
   );
 }

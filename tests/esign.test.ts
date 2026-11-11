@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createCustomerRepo, recordEsignConsent, withdrawEsignConsent, type EsignConsentState } from '@/db/repos/customer-repo';
 import type { Db, DbOrTx } from '@/db/client';
 import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
-import { esignConsentNeeded, isCurrentEsignVersion, readEsignConsentNeeded } from '@/lib/esign';
+import { esignConsentNeeded, esignStateFromCustomer, isCurrentEsignVersion, readEsignConsentNeeded } from '@/lib/esign';
 import { freshDb } from './helpers-db';
 
 // Fix pack 6 T2 (R46, P2 reader, P3 predicate). Relative dates only; the phone is an
@@ -56,6 +56,24 @@ describe('isCurrentEsignVersion', () => {
     for (const v of ['', ` ${ESIGN_CONSENT_VERSION}`, `${ESIGN_CONSENT_VERSION} `, 'esign-older', null, undefined, 1, {}, [ESIGN_CONSENT_VERSION]]) {
       expect(isCurrentEsignVersion(v)).toBe(false);
     }
+  });
+});
+
+describe('esignStateFromCustomer (pure, T8)', () => {
+  it('ISO strings -> Dates; the predicate reads the same rule as the repo state', () => {
+    const consentedAt = minutesAgo(10).toISOString();
+    const withdrawnAt = minutesAgo(5).toISOString();
+    const s = esignStateFromCustomer({ esignConsentVersion: ESIGN_CONSENT_VERSION, esignConsentedAt: consentedAt, esignWithdrawnAt: withdrawnAt });
+    expect(s).toEqual({ version: ESIGN_CONSENT_VERSION, consentedAt: new Date(consentedAt), withdrawnAt: new Date(withdrawnAt) });
+    expect(esignConsentNeeded(s)).toBe(true);
+    const on = esignStateFromCustomer({ esignConsentVersion: ESIGN_CONSENT_VERSION, esignConsentedAt: consentedAt });
+    expect(on).toEqual({ version: ESIGN_CONSENT_VERSION, consentedAt: new Date(consentedAt), withdrawnAt: null });
+    expect(esignConsentNeeded(on)).toBe(false);
+  });
+
+  it('absent fields -> null (nothing on file asks)', () => {
+    expect(esignStateFromCustomer({})).toEqual({ version: null, consentedAt: null, withdrawnAt: null });
+    expect(esignConsentNeeded(esignStateFromCustomer({}))).toBe(true);
   });
 });
 

@@ -7,7 +7,7 @@ import type { DbOrTx } from '@/db/client';
 import { readEsignConsent, type EsignConsentState } from '@/db/repos/customer-repo';
 import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { logWarn } from '@/lib/log';
-import type { PartnerId } from '@/lib/types';
+import type { Customer, PartnerId } from '@/lib/types';
 
 /**
  * true = ask for consent: no row, no or another version on file (a version bump re-asks
@@ -38,4 +38,18 @@ export async function readEsignConsentNeeded(db: DbOrTx, partnerId: PartnerId, p
     logWarn('pay.esign-read', err instanceof Error ? err.name : 'error', { partnerId });
     return true;
   }
+}
+
+/**
+ * Pure (T8): the consent state from a loaded `Customer` (its read-only ISO fields), so the
+ * portal's Profile card needs no second read. Absent -> null.
+ */
+export function esignStateFromCustomer(
+  c: Pick<Customer, 'esignConsentVersion' | 'esignConsentedAt' | 'esignWithdrawnAt'>,
+): EsignConsentState {
+  return {
+    version: c.esignConsentVersion ?? null,
+    consentedAt: c.esignConsentedAt ? new Date(c.esignConsentedAt) : null,
+    withdrawnAt: c.esignWithdrawnAt ? new Date(c.esignWithdrawnAt) : null,
+  };
 }

@@ -3,6 +3,8 @@
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { withdrawEsignConsent } from '@/db/repos/customer-repo';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requireFreshPortalAuth, requirePortalCustomer } from '@/lib/portal-auth';
 import { getPortalSessionStore } from '@/lib/portal-session-store';
@@ -164,4 +166,39 @@ export async function confirmPortalMfaEnrolmentAction(_prev: PortalMfaState, for
   }
   revalidatePath(PROFILE_PATH);
   return { ok: true, notice: revoked ? 'portal.mfa.on' : 'portal.mfa.on_revoke_failed' };
+}
+
+/**
+ * Fix pack 6 (R46, P9, P21 row 2): withdraw the customer's E-SIGN consent on THIS tenant. Scope is
+ * the HOST partner and the SESSION phone; the form carries nothing that is read. In ONE transaction
+ * it stamps `esign_withdrawn_at` (withdrawEsignConsent) and, only when a consent was on file, writes
+ * the audit row `customer.consent.esign` { version, on: false, via: 'portal' } (no phone, no name).
+ * Idempotent: nothing on file (or already withdrawn) writes nothing and returns the same notice. No
+ * outbox row (nothing is sent), so no poke. The next pay-page payment asks again (esignConsentNeeded).
+ */
+export async function withdrawEsignConsentAction(_prev: ProfileActionState, _formData: FormData): Promise<ProfileActionState> {
+  await requirePortalSite();
+  const ctx = await requirePortalCustomer();
+  const { partnerId } = ctx.site;
+  const phone = ctx.session.phone;
+  try {
+    await getDb().transaction(async (tx) => {
+      const version = await withdrawEsignConsent(tx, partnerId, phone, new Date());
+      if (version) {
+        await createAuditRepo(tx).record({
+          partnerId,
+          actor: PORTAL_AUTH_ACTOR,
+          actorType: 'system',
+          action: 'customer.consent.esign',
+          subjectId: auditSubjectId(partnerId, phone),
+          meta: { version, on: false, via: 'portal' },
+        });
+      }
+    });
+  } catch (err) {
+    logWarn('portal.profile.esign', err instanceof Error ? err.name : 'error');
+    return { error: 'portal.action.failed' };
+  }
+  revalidatePath(PROFILE_PATH);
+  return { notice: 'portal.profile.esign.withdrawn' };
 }
