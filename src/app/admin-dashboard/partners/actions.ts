@@ -691,6 +691,8 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, string> = {
   delivery_days: `Delivery estimate must be a whole number of business days from 0 to ${MAX_DELIVERY_BUSINESS_DAYS}.`,
   regulator_name_required: 'Enter the state regulator name before its phone or website.',
   entity_required: 'Enter the licensed entity name before its other details.',
+  provider_name:
+    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks or instructions.',
 };
 
 export async function saveDisclosureConfigAction(formData: FormData): Promise<void> {

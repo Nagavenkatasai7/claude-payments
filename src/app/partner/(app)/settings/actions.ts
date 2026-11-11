@@ -58,6 +58,7 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, MessageKey> = {
   delivery_days: 'partner.settings.disclosure.error.deliveryDays',
   regulator_name_required: 'partner.settings.disclosure.error.regulatorNameRequired',
   entity_required: 'partner.settings.disclosure.error.entityRequired',
+  provider_name: 'partner.settings.disclosure.error.providerName',
 };
 
 async function tenantExists(ctx: PartnerCtx): Promise<boolean> {

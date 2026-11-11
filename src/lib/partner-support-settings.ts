@@ -16,6 +16,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { boundUntrustedText } from '@/lib/untrusted-text';
+import { isProviderNameText } from '@/lib/legal/provider-line';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { disclosureHash } from './disclosure-hash';
 import { isLiveCertified } from './live-gate';
@@ -32,7 +33,8 @@ export type DisclosureParseReason =
   | 'regulator_website'
   | 'delivery_days'
   | 'regulator_name_required'
-  | 'entity_required';
+  | 'entity_required'
+  | 'provider_name';
 export type DisclosureParse = { ok: true; value: PartnerDisclosureConfig | undefined } | { ok: false; reason: DisclosureParseReason };
 export type AlertEmailParse = { ok: true; value: string | null } | { ok: false; reason: 'invalid_email' };
 
@@ -71,11 +73,20 @@ function optionalBusinessDays(formData: FormData): Field<number> {
   return Number.isInteger(n) && n >= 0 && n <= MAX_DELIVERY_BUSINESS_DAYS ? { ok: true, value: n } : { ok: false };
 }
 
+/** Review R1-P5 (C1): a name the provider line is built from, checked on the RAW form text. */
+const badProviderName = (formData: FormData, key: string): boolean => {
+  const v = raw(formData.get(key));
+  return v !== '' && !isProviderNameText(v);
+};
+
 /**
  * Form → disclosure config. `value: undefined` is an all-blank form (clear the block). Checks run
  * in the legacy order, so the first failing field is the one reported.
  */
 export function parseDisclosureForm(formData: FormData): DisclosureParse {
+  // Review R1-P5 (C1): the entity and regulator names build the provider line the bot quotes, so a
+  // double quote, a backtick, a line break or a rule-override phrase is refused (reason provider_name).
+  if (badProviderName(formData, 'licensedEntity')) return { ok: false, reason: 'provider_name' };
   const licensedEntity = optionalText(formData, 'licensedEntity');
   const licenseIds = raw(formData.get('licenseIds'))
     .split(/[,\n]/)
@@ -86,6 +97,7 @@ export function parseDisclosureForm(formData: FormData): DisclosureParse {
   if (!phone.ok) return { ok: false, reason: 'provider_phone' };
   const website = optionalHttps(formData, 'website');
   if (!website.ok) return { ok: false, reason: 'provider_website' };
+  if (badProviderName(formData, 'regulatorName')) return { ok: false, reason: 'provider_name' };
   const regulatorName = optionalText(formData, 'regulatorName');
   const regulatorPhone = optionalPhone(formData, 'regulatorPhone');
   if (!regulatorPhone.ok) return { ok: false, reason: 'regulator_phone' };

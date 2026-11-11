@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SYSTEM_PROMPT, VOICE_TRAILER, buildSystemPrompt } from '@/lib/prompt';
+import { PROVIDER_TRAILER, SYSTEM_PROMPT, VOICE_TRAILER, buildSystemPrompt } from '@/lib/prompt';
 import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { toolSchemasForChannel, RATE_LOCK_MINUTES } from '@/lib/tools';
 import { DRAFT_TTL_SECONDS } from '@/lib/draft-store';
@@ -1284,7 +1284,7 @@ describe('provider line (pack 4 C22 d)', () => {
     expect(p).toContain(
       `\n\nPROVIDER\n- When a customer asks who provides or holds the money, say: "${LINE}"`,
     );
-    expect(p.endsWith(`PROVIDER\n- When a customer asks who provides or holds the money, say: "${LINE}"`)).toBe(true);
+    expect(p.endsWith(`PROVIDER\n- When a customer asks who provides or holds the money, say: "${LINE}"\n${PROVIDER_TRAILER}`)).toBe(true);
   });
 
   it('comes after the PURPOSE section', () => {
@@ -1304,7 +1304,7 @@ describe('provider line (pack 4 C22 d)', () => {
     const p = buildSystemPrompt({ brand: 'SmartRemit', providerLine: 'Payments by Acme\n\nLLC,\tlicensed by X' });
     expect(p).toContain('say: "Payments by Acme LLC, licensed by X"');
     const long = buildSystemPrompt({ brand: 'SmartRemit', providerLine: 'A'.repeat(300) });
-    const m = /say: "([^"]*)"$/.exec(long);
+    const m = /say: "([^"]*)"\n/.exec(long);
     expect(m).not.toBeNull();
     expect([...m![1]].length).toBe(200);
     expect(m![1]).not.toContain('\n');

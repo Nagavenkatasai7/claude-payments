@@ -594,6 +594,8 @@ export const en = {
   'partner.settings.disclosure.error.deliveryDays': 'The delivery estimate must be a whole number of business days from 0 to {max}.',
   'partner.settings.disclosure.error.regulatorNameRequired': 'Enter the state regulator name before its phone or website.',
   'partner.settings.disclosure.error.entityRequired': 'Enter the licensed entity name before its other details.',
+  'partner.settings.disclosure.error.providerName':
+    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks or instructions.',
   'partner.settings.pricing.title': 'Pricing margin',
   'partner.settings.pricing.intro': 'The standing margin used for each corridor when you have not pushed a fresh rate. SmartRemit sets it: contact SmartRemit to change it.',
   'partner.settings.pricing.corridor': 'Corridor',
