@@ -109,8 +109,10 @@ export function isDisclosurePhone(v: unknown): v is string {
   return digits >= 7 && digits <= 15;
 }
 
+// Review R4-Z2 A1: the cap counts code points, as the form's clamp (DISCLOSURE_TEXT_MAX) and
+// providerLineFits do, so a stored name of astral characters is never dropped on read.
 function text(v: unknown, max = 200): string | null {
-  return typeof v === 'string' && v.trim() !== '' && v.length <= max ? v.trim() : null;
+  return typeof v === 'string' && v.trim() !== '' && [...v].length <= max ? v.trim() : null;
 }
 
 function isBusinessDays(v: unknown): v is number {
