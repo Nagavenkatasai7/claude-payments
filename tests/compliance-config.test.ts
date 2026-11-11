@@ -3,6 +3,7 @@ import {
   resolveCorridorRules,
   GLOBAL_DEFAULTS,
   CORRIDOR_DEFAULTS,
+  resolveAmlHoldRules,
 } from '@/lib/compliance-config';
 import { WATCHLIST, LARGE_AMOUNT_USD, VELOCITY_LIMIT } from '@/lib/compliance';
 import type { Partner } from '@/lib/types';
@@ -111,5 +112,73 @@ describe('senderScreeningLabel (pack 2 review R3)', () => {
     expect(senderScreeningLabel({ screeningFlaggedAt: t0, screeningClearedAt: t1 })).toBe('clear');
     expect(senderScreeningLabel({ screeningFlaggedAt: t1, screeningClearedAt: t0 })).toBe('hold');
     expect(senderScreeningLabel({})).toBe('clear');
+  });
+});
+
+// Fix pack 6 (P13): per corridor, WHICH in-mint AML rules hold when amlHolds
+// is on. The stored list is untrusted jsonb; the resolved one is a closed,
+// canonical, frozen list (empty unless amlHolds is literally true).
+describe('resolveCorridorRules - amlHoldRules (pack 6 P13)', () => {
+  const ALL = ['structuring', 'first_transfer', 'new_beneficiary'];
+  const rulesOf = (entry: unknown) =>
+    resolveCorridorRules(partner({ GB: entry as never }), 'GB').amlHoldRules;
+
+  it('GLOBAL_DEFAULTS.amlHoldRules is [] and frozen', () => {
+    expect(GLOBAL_DEFAULTS.amlHoldRules).toEqual([]);
+    expect(Object.isFrozen(GLOBAL_DEFAULTS.amlHoldRules)).toBe(true);
+  });
+  it('fast path still returns the shared GLOBAL_DEFAULTS object', () => {
+    expect(resolveCorridorRules(null, 'US')).toBe(GLOBAL_DEFAULTS);
+    expect(resolveCorridorRules(partner({ GB: { amlHolds: true } }), 'US')).toBe(GLOBAL_DEFAULTS);
+    expect(resolveCorridorRules(partner({ IN: { amlHolds: true, amlHoldRules: ['structuring'] } }), 'IN')).toBe(GLOBAL_DEFAULTS);
+  });
+  it("amlHolds true, no amlHoldRules stored -> ['structuring', 'first_transfer', 'new_beneficiary']", () => {
+    expect(rulesOf({ amlHolds: true })).toEqual(ALL);
+  });
+  it("amlHolds true + ['new_beneficiary', 'structuring', 'structuring'] -> ['structuring', 'new_beneficiary']", () => {
+    expect(rulesOf({ amlHolds: true, amlHoldRules: ['new_beneficiary', 'structuring', 'structuring'] }))
+      .toEqual(['structuring', 'new_beneficiary']);
+  });
+  it("amlHolds true + ['cluster', 'bogus', 7, null] -> []; amlHolds true + [] -> []", () => {
+    expect(rulesOf({ amlHolds: true, amlHoldRules: ['cluster', 'bogus', 7, null] })).toEqual([]);
+    expect(rulesOf({ amlHolds: true, amlHoldRules: [] })).toEqual([]);
+  });
+  it("amlHolds true + a non-array value ('structuring', {}, 5) -> all three", () => {
+    for (const bad of ['structuring', {}, 5]) {
+      expect(rulesOf({ amlHolds: true, amlHoldRules: bad })).toEqual(ALL);
+    }
+  });
+  it('amlHolds absent or false + any stored list -> []', () => {
+    expect(rulesOf({ amlHoldRules: ['structuring'] })).toEqual([]);
+    expect(rulesOf({ amlHolds: false, amlHoldRules: ALL })).toEqual([]);
+    expect(rulesOf({ amlHolds: false })).toEqual([]);
+  });
+  it("amlHolds 'true' (string) + a list -> [] (only a literal true switches holds on)", () => {
+    expect(rulesOf({ amlHolds: 'true', amlHoldRules: ['structuring'] })).toEqual([]);
+  });
+  it('the resolved array is a fresh, frozen array, never the stored jsonb array', () => {
+    const stored = ['first_transfer'];
+    const r = rulesOf({ amlHolds: true, amlHoldRules: stored });
+    expect(r).not.toBe(stored);
+    expect(Object.isFrozen(r)).toBe(true);
+    stored.push('structuring');
+    expect(r).toEqual(['first_transfer']);
+    const all = rulesOf({ amlHolds: true });
+    expect(Object.isFrozen(all)).toBe(true);
+  });
+  it('other fields are unchanged by the new key', () => {
+    const r = resolveCorridorRules(partner({ GB: { amlHoldRules: ['structuring'] } }), 'GB');
+    expect(r.amlHolds).toBe(false);
+    expect(r.amlHoldRules).toEqual([]);
+    expect(r.aml).toEqual(GLOBAL_DEFAULTS.aml);
+    expect(r.largeAmountUsd).toBe(GLOBAL_DEFAULTS.largeAmountUsd);
+    expect(r.velocityLimit).toBe(GLOBAL_DEFAULTS.velocityLimit);
+    expect(r.watchlistExtra).toEqual([]);
+  });
+  it('resolveAmlHoldRules is exported with the same rules', () => {
+    expect(resolveAmlHoldRules(false, ALL)).toBe(GLOBAL_DEFAULTS.amlHoldRules);
+    expect(resolveAmlHoldRules(true, undefined)).toEqual(ALL);
+    expect(resolveAmlHoldRules(true, 'x')).toEqual(ALL);
+    expect(resolveAmlHoldRules(true, ['new_beneficiary', 'first_transfer'])).toEqual(['first_transfer', 'new_beneficiary']);
   });
 });

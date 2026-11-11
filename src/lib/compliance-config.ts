@@ -1,5 +1,5 @@
 import type { CountryCode, Partner } from './types';
-import { AML_DEFAULTS, type AmlConfig } from './aml-rules';
+import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
 
 // Canonical screening constants — single source of truth.
@@ -286,6 +286,10 @@ export interface ResolvedCorridorRules {
   // through aml-hold.ts amlHoldGate, which never holds a demo transfer).
   aml: AmlConfig;
   amlHolds: boolean;
+  // Fix pack 6 (P13): the in-mint rules that hold on this corridor. Empty
+  // unless amlHolds; canonical order, frozen (resolveAmlHoldRules). The mint
+  // holds only on these (T17).
+  amlHoldRules: readonly AmlHoldRule[];
 }
 
 // Today's globals, named so the dormant path is PROVABLY equal to current
@@ -298,6 +302,7 @@ export const GLOBAL_DEFAULTS: ResolvedCorridorRules = {
   velocityLimit: VELOCITY_LIMIT,      // 3
   aml: AML_DEFAULTS,
   amlHolds: false,
+  amlHoldRules: Object.freeze([]) as readonly AmlHoldRule[],
 };
 
 // corridor_compliance is untrusted jsonb: every AML field is validated and
@@ -333,6 +338,23 @@ function resolveAml(...layers: Array<Partial<AmlConfig> | undefined>): AmlConfig
 // US is intentionally absent → falls through to GLOBAL_DEFAULTS → byte-for-byte.
 export const CORRIDOR_DEFAULTS: Partial<Record<CountryCode, Partial<ResolvedCorridorRules>>> = {};
 
+/**
+ * Fix pack 6 (P13): the resolved hold rules of one corridor entry.
+ * - holds off (`on` false) -> [] (the shared frozen GLOBAL_DEFAULTS list);
+ * - `stored` not an array (absent, or malformed jsonb: a string, an object, a
+ *   number) -> all three rules: absent is the Q-R47.3 default, and a malformed
+ *   value takes the same stricter default so bad data never weakens holds;
+ * - an array -> its valid members, de-duplicated, in canonical order, frozen
+ *   (an empty or all-garbage array -> [], "no rule holds" with the switch on).
+ * Exported for the partner writer and the admin page (T19).
+ */
+export function resolveAmlHoldRules(on: boolean, stored: unknown): readonly AmlHoldRule[] {
+  if (!on) return GLOBAL_DEFAULTS.amlHoldRules;
+  if (!Array.isArray(stored)) return AML_HOLD_RULES;
+  const list: readonly unknown[] = stored;
+  return Object.freeze(AML_HOLD_RULES.filter((r) => list.includes(r)));
+}
+
 export function resolveCorridorRules(
   partner: Partner | null,
   sourceCountry: CountryCode,
@@ -353,6 +375,8 @@ export function resolveCorridorRules(
   const hasOverride = partner?.corridorCompliance?.[sourceCountry] !== undefined;
   if (!hasCorridorDefault && !hasOverride) return GLOBAL_DEFAULTS;
 
+  // Only a literal true switches holds on (PR B); anything else is OFF.
+  const amlHolds = (override.amlHolds ?? corridorDefault.amlHolds) === true;
   return {
     baseWatchlist: GLOBAL_DEFAULTS.baseWatchlist,
     watchlistExtra,
@@ -360,7 +384,7 @@ export function resolveCorridorRules(
     velocityLimit: override.velocityLimit ?? corridorDefault.velocityLimit ?? GLOBAL_DEFAULTS.velocityLimit,
     kycCapHintUsd: override.kycCapHintUsd ?? corridorDefault.kycCapHintUsd,
     aml: resolveAml(override.aml, corridorDefault.aml),
-    // Only a literal true switches holds on (PR B); anything else is OFF.
-    amlHolds: (override.amlHolds ?? corridorDefault.amlHolds) === true,
+    amlHolds,
+    amlHoldRules: resolveAmlHoldRules(amlHolds, override.amlHoldRules ?? corridorDefault.amlHoldRules),
   };
 }

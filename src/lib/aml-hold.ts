@@ -26,6 +26,8 @@ import type { ComplianceStatus, PartnerId } from './types';
 
 /** The only reason a hold adds. Deliberately generic (no rule name). Lives in the registry (compliance-config.ts). */
 export { AML_HOLD_REASON };
+// Fix pack 6 (P13): the closed in-mint hold rule list (defined in the pure aml-rules.ts).
+export { AML_HOLD_RULES, isAmlHoldRule, type AmlHoldRule } from './aml-rules';
 
 /**
  * The pre-read gate. False ⇒ mintLocked runs ZERO extra statements (no
