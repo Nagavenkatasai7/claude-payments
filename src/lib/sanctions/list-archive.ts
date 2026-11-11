@@ -55,6 +55,12 @@ export const MAX_ARCHIVES_PER_RUN = 3;
  * left, so the Blob calls end inside the budget; the rest wait for the next run.
  */
 export const ARCHIVE_BUDGET_MS = 150_000;
+/**
+ * Pack 5 review LC2: in lists mode the cron raises one deduped alert per source
+ * per Eastern day when that source's oldest unarchived version is older than
+ * this many days (the per-source archive loop shares one budget, ofac-sdn first).
+ */
+export const ARCHIVE_LAG_ALERT_DAYS = 3;
 
 const DEFAULT_SOURCE = 'ofac-sdn';
 
@@ -145,7 +151,9 @@ export async function archivePending(
           db,
           `⚠️ SmartRemit ops: the sanctions list archive cannot run: the private partner-docs Blob store is not ` +
             `configured. ${source} list versions are kept in the database (none is pruned) until it is.`,
-          `sanctions-archive-unconfigured:${day}`,
+          // Pack 5 review LC3: a source other than ofac-sdn carries its own key, so each
+          // pending source is named once a day; the ofac-sdn key is the 72ecdde one.
+          source === DEFAULT_SOURCE ? `sanctions-archive-unconfigured:${day}` : `sanctions-archive-unconfigured:${source}:${day}`,
         );
       }
     } catch (err) {
@@ -232,4 +240,37 @@ export async function archivePending(
     logError('sanctions.archive', err instanceof Error ? err.name : 'unknown', { source });
   }
   return result;
+}
+
+/**
+ * Pack 5 review LC2 (lists mode only, called by the cron after the archive
+ * loop): ONE ops.alert per source per Eastern day when the oldest version of
+ * `source` with no stamped archive is older than ARCHIVE_LAG_ALERT_DAYS. Text:
+ * the source id, the age in whole days and the pending count, nothing else.
+ * True when the lag is over the limit (an alert was enqueued or deduped).
+ * Never throws.
+ */
+export async function alertArchiveLag(db: Db, source: string, now: Date = new Date()): Promise<boolean> {
+  try {
+    const { pending, oldestLoadedAt } = await createSanctionsListRepo(db).pendingArchiveAge(source);
+    if (pending === 0 || oldestLoadedAt === null) return false;
+    const ageMs = now.getTime() - oldestLoadedAt.getTime();
+    if (ageMs <= ARCHIVE_LAG_ALERT_DAYS * 86_400_000) return false;
+    const ageDays = Math.floor(ageMs / 86_400_000);
+    const day = easternDay(now.getTime());
+    await createOutboxRepo(db).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: the sanctions list archive is behind for ${source}: the oldest unarchived version is ${ageDays} day(s) old ` +
+          `and ${pending} version(s) wait. They keep their entries (nothing unarchived is pruned). ` +
+          `Check the sanctions lists page and the logs.`,
+      },
+      { dedupeKey: `sanctions-archive-lag:${source}:${day}` },
+    );
+    return true;
+  } catch (err) {
+    logError('sanctions.archive-lag', err instanceof Error ? err.name : 'unknown', { source });
+    return false;
+  }
 }

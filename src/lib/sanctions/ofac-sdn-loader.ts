@@ -16,6 +16,7 @@
 
 import { createHash } from 'node:crypto';
 import type { SanctionsList, SanctionsListEntry } from './list-source';
+import type { SanctionsSourceId } from './list-sets';
 
 export const OFAC_SDN_XML_URL =
   'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML';
@@ -56,9 +57,9 @@ function stripNestedLists(entry: string): string {
   return entry.replace(/<(\w+List)>[\s\S]*?<\/\1>/g, '').replace(/<vesselInfo>[\s\S]*?<\/vesselInfo>/g, '');
 }
 
-function toIsoDate(publishDate: string): string {
+function toIsoDate(publishDate: string, errorPrefix: string): string {
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(publishDate.trim());
-  if (!m) throw new Error('OFAC SDN: unrecognised Publish_Date');
+  if (!m) throw new Error(`${errorPrefix} unrecognised Publish_Date`);
   return `${m[3]}-${m[1]}-${m[2]}`;
 }
 
@@ -85,27 +86,208 @@ export function hashEntries(entries: SanctionsListEntry[]): string {
   return createHash('sha256').update(canonicalLines(entries), 'utf8').digest('hex');
 }
 
+/**
+ * Fix pack 5 T26b: the legacy-XML parse options. One XSD serves SDN.XML and
+ * CONSOLIDATED.XML (https://ofac.treasury.gov/recent-actions/20240507_44), so
+ * the OFAC consolidated loader (ofac-cons-loader.ts) reuses this parser with
+ * its own source, id prefix and error prefix, and `strict: true`. The default
+ * is the SDN list exactly as before (every existing caller, the golden test).
+ */
+export interface SdnXmlParseOptions {
+  source: SanctionsSourceId;
+  /** Entry ids are `<idPrefix>:<uid>`. */
+  idPrefix: string;
+  /** Every parse error message starts with this ('OFAC SDN:'). */
+  errorPrefix: string;
+  /**
+   * Strict (ofac-cons, orchestrator decision D11): the document must open with
+   * an `<sdnList ...>` root start tag, and EVERY <sdnEntry> must give a uid and
+   * a non-empty primary name, else the WHOLE parse throws (no silent skip).
+   * Off for SDN: its behaviour is unchanged.
+   */
+  strict?: boolean;
+}
+
+const SDN_PARSE: SdnXmlParseOptions = { source: 'ofac-sdn', idPrefix: 'sdn', errorPrefix: 'OFAC SDN:' };
+
+// ---------------------------------------------------------------------------
+// Fix pack 5 L1-LF2 (LB1, LB2, LB3, LB5): helpers for the STRICT parses only
+// (OFAC consolidated through parseOfacSdnXml with strict: true, and the UN SC
+// parser). The SDN (non-strict) path never calls them: its decodeEntities,
+// tag(), output and golden hash stay exactly as they were.
+// ---------------------------------------------------------------------------
+
+/**
+ * Single-pass XML entity decoder (strict parses): each reference is decoded
+ * once, so an encoded '&' followed by 'lt;' ('&#38;lt;') reads '&lt;', never
+ * '<'. A code point out of range throws a RangeError (reported by the
+ * caller as 'unparseable document (RangeError)').
+ */
+export function decodeEntitiesOnce(s: string): string {
+  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|quot|apos|lt|gt|amp);/g, (_, ref: string) => {
+    switch (ref) {
+      case 'quot':
+        return '"';
+      case 'apos':
+        return "'";
+      case 'lt':
+        return '<';
+      case 'gt':
+        return '>';
+      case 'amp':
+        return '&';
+      default:
+        return ref[1] === 'x'
+          ? String.fromCodePoint(parseInt(ref.slice(2), 16))
+          : String.fromCodePoint(parseInt(ref.slice(1), 10));
+    }
+  });
+}
+
+/**
+ * Strict tag(): the text of the first plain <name>…</name>, DECODED BEFORE
+ * the trim (so a part that is only '&#32;' reads ''). A self-closing <name/>
+ * is absent, as in tag().
+ */
+export function strictTag(block: string, name: string): string | undefined {
+  const m = new RegExp(`<${name}>([^<]*)</${name}>`).exec(block);
+  return m ? decodeEntitiesOnce(m[1]).trim() : undefined;
+}
+
+/**
+ * One linear pass over the tags of `block` (strict parses only). For every
+ * name in `leaves` (text elements the parser reads) and `containers`
+ * (elements whose children it reads), each occurrence must be exactly <X>,
+ * <X/> (or <X />) or </X>: an attribute, a namespace prefix or a spaced end
+ * tag is refused. Openings and end tags must alternate (no element of a
+ * checked name opened again before its end tag, none left open, no stray end
+ * tag), and a leaf may hold text only (no other tag before its end tag).
+ * `atMostOnce` names may occur at most once in `block` (a second one would
+ * be dropped by the reader). Returns the first offending name, or null.
+ * Linear (L1-LR1, LF2-D2): one /g regex over the block. Every class stops
+ * at '<', so a match attempt never scans past the next '<'; the name class
+ * and the rest are disjoint (the rest must start with whitespace or '/'), so
+ * a failed attempt backtracks in O(1) per character. Each '<' starts at most
+ * one attempt of length up to the next '<': O(n) for the block. (The earlier
+ * /<(\/?)([A-Za-z_][^\s/>]*)([^>]*)>/ was about cubic on a '<a' run with no
+ * '>'.) The match set on well-formed tags is unchanged.
+ */
+export function malformedElement(
+  block: string,
+  leaves: readonly string[],
+  containers: readonly string[] = [],
+  atMostOnce: readonly string[] = [],
+): string | null {
+  const leafSet = new Set(leaves);
+  const checked = new Set([...leaves, ...containers]);
+  const open = new Map<string, boolean>();
+  const seen = new Map<string, number>();
+  const once = new Set(atMostOnce);
+  let leafOpen: string | null = null;
+  for (const m of block.matchAll(/<(\/?)([A-Za-z_][^\s/<>]*)((?:[\s/][^<>]*)?)>/g)) {
+    const [, slash, qname, rest] = m;
+    const colon = qname.lastIndexOf(':');
+    const local = colon >= 0 ? qname.slice(colon + 1) : qname;
+    if (leafOpen !== null) {
+      // Inside a leaf only its own plain end tag may follow.
+      if (!(slash === '/' && qname === leafOpen && rest === '')) return leafOpen;
+      leafOpen = null;
+      open.set(local, false);
+      continue;
+    }
+    if (!checked.has(local)) continue;
+    if (colon >= 0) return local;
+    if (slash === '/') {
+      if (rest !== '' || !open.get(local)) return local;
+      open.set(local, false);
+      continue;
+    }
+    const selfClosing = /^\s*\/$/.test(rest);
+    if (rest !== '' && !selfClosing) return local;
+    if (open.get(local)) return local;
+    if (once.has(local)) {
+      const n = (seen.get(local) ?? 0) + 1;
+      if (n > 1) return local;
+      seen.set(local, n);
+    }
+    if (selfClosing) continue;
+    open.set(local, true);
+    if (leafSet.has(local)) leafOpen = local;
+  }
+  if (leafOpen !== null) return leafOpen;
+  for (const [name, isOpen] of open) if (isOpen) return name;
+  return null;
+}
+
+/**
+ * Strict entry-element check over the WHOLE document: every opening of
+ * `name` (any shape: plain, attribute, namespace prefix, self-closing) and
+ * every end tag (any shape) must belong to one of the plain blocks matched,
+ * and no matched block may hold another entry opening of any of `entryNames`.
+ * Linear: two /g regexes over the document plus one per block; the prefix
+ * class stops at '<' (L1-LR1, LF2-D2), so an attempt never scans past the
+ * next '<' (it was quadratic on a long '<a' run with no ':' or '>').
+ */
+export function entryElementsMatch(
+  xml: string,
+  name: string,
+  blocks: readonly string[],
+  entryNames: readonly string[],
+): boolean {
+  const opened = xml.match(new RegExp(`<(?:[A-Za-z_][^\\s/<>:]*:)?${name}[\\s>/]`, 'g'))?.length ?? 0;
+  const ended = xml.match(new RegExp(`</(?:[A-Za-z_][^\\s/<>:]*:)?${name}[\\s>]`, 'g'))?.length ?? 0;
+  if (opened !== blocks.length || ended !== blocks.length) return false;
+  const inner = new RegExp(`<(?:[A-Za-z_][^\\s/<>:]*:)?(?:${entryNames.join('|')})[\\s>/]`);
+  return !blocks.some((b) => inner.test(b));
+}
+
+/**
+ * L1-LR1 (LF2-D1, LF2-D2): true when an entry block holds CDATA, a comment, a
+ * DOCTYPE style declaration or a processing instruction ('<!' or '<?'), or a
+ * '<' that does not open a tag closed by '>' before the next '<'. The strict
+ * readers match plain text only, so such markup would make a read element
+ * vanish or be read from a comment: the strict parses refuse the block.
+ * Linear: two indexOf scans, one count of '<' and one /g regex whose classes
+ * all stop at '<' (see malformedElement). The prolog is not checked.
+ */
+export function hasUnsupportedMarkup(block: string): boolean {
+  if (block.includes('<!') || block.includes('<?')) return true;
+  let lt = 0;
+  for (let i = block.indexOf('<'); i !== -1; i = block.indexOf('<', i + 1)) lt += 1;
+  const tags = block.match(/<\/?[A-Za-z_][^\s/<>]*(?:[\s/][^<>]*)?>/g)?.length ?? 0;
+  return tags !== lt;
+}
+
+/** The text elements and containers the OFAC strict parse reads. */
+const OFAC_LEAVES = ['uid', 'firstName', 'lastName', 'sdnType', 'category', 'program'] as const;
+const OFAC_CONTAINERS = ['aka', 'akaList', 'programList'] as const;
+
 /** Pure parser. Throws ('OFAC SDN: …') on a truncated document, or one without a publish date or entries. */
-export function parseOfacSdnXml(xml: string): SanctionsList {
+export function parseOfacSdnXml(xml: string, opts: SdnXmlParseOptions = SDN_PARSE): SanctionsList {
   try {
-    return parseUnchecked(xml);
+    // L1-LF2: the strict parse (ofac-cons) has its own function; the SDN
+    // (non-strict) parse below is unchanged.
+    return opts.strict ? parseStrict(xml, opts) : parseUnchecked(xml, opts);
   } catch (err) {
     // Every parse failure (incl. a RangeError from a malformed entity) is
-    // reported as a parse error, prefixed 'OFAC SDN:'.
-    if (err instanceof Error && err.message.startsWith('OFAC SDN:')) throw err;
-    throw new Error(`OFAC SDN: unparseable document (${err instanceof Error ? err.name : 'unknown'})`);
+    // reported as a parse error, prefixed 'OFAC SDN:' (or opts.errorPrefix).
+    if (err instanceof Error && err.message.startsWith(opts.errorPrefix)) throw err;
+    throw new Error(`${opts.errorPrefix} unparseable document (${err instanceof Error ? err.name : 'unknown'})`);
   }
 }
 
-function parseUnchecked(xml: string): SanctionsList {
+function parseUnchecked(xml: string, opts: SdnXmlParseOptions): SanctionsList {
+  const p = opts.errorPrefix;
   // A body cut off after N whole entries would otherwise parse cleanly.
-  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error('OFAC SDN: truncated document (no closing </sdnList>)');
+  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error(`${p} truncated document (no closing </sdnList>)`);
   const publishDate = tag(xml, 'Publish_Date');
-  if (!publishDate) throw new Error('OFAC SDN: missing Publish_Date');
-  const version = toIsoDate(publishDate);
+  if (!publishDate) throw new Error(`${p} missing Publish_Date`);
+  const version = toIsoDate(publishDate, p);
 
   const entries: SanctionsListEntry[] = [];
+  let position = 0;
   for (const m of xml.matchAll(/<sdnEntry>([\s\S]*?)<\/sdnEntry>/g)) {
+    position += 1;
     const block = m[1];
     const own = stripNestedLists(block);
     const uid = tag(own, 'uid');
@@ -123,7 +305,7 @@ function parseUnchecked(xml: string): SanctionsList {
     }
     const programList = /<programList>([\s\S]*?)<\/programList>/.exec(block)?.[1] ?? '';
     const entry: SanctionsListEntry = {
-      id: `sdn:${uid}`,
+      id: `${opts.idPrefix}:${uid}`,
       names: [primary, ...akas],
       type: tag(own, 'sdnType') ?? 'Unknown',
       programs: tags(programList, 'program'),
@@ -131,13 +313,93 @@ function parseUnchecked(xml: string): SanctionsList {
     if (weak.length > 0) entry.weakNames = weak;
     entries.push(entry);
   }
-  if (entries.length === 0) throw new Error('OFAC SDN: no entries parsed');
-  return { source: 'ofac-sdn', version, hash: hashEntries(entries), entries };
+  if (entries.length === 0) throw new Error(`${p} no entries parsed`);
+  return { source: opts.source, version, hash: hashEntries(entries), entries };
+}
+
+/** Strict personName: decoded before the trim; empty parts are absent. */
+function strictPersonName(block: string): string | undefined {
+  const parts = [strictTag(block, 'firstName'), strictTag(block, 'lastName')].filter((v): v is string => !!v);
+  return parts.length > 0 ? parts.join(' ') : undefined;
+}
+
+/**
+ * The STRICT parse (ofac-cons, orchestrator decision D11, L1-LF2). The WHOLE
+ * parse throws (positions only, never a name) on: no <sdnList ...> root or no
+ * </sdnList> end; no or a malformed Publish_Date; any <sdnEntry> opening or
+ * end tag that is not part of a plain <sdnEntry>…</sdnEntry> block, or a
+ * block holding another entry opening ('unrecognised entry element'); a
+ * malformed element the parser reads ('entry <n> has a malformed <X>
+ * element'); an entry with no uid or no primary name; a repeated uid
+ * ('entry <n> repeats an id'); zero entries. Entities are decoded in one pass,
+ * before the trim. Empty and self-closing optional elements are accepted.
+ */
+function parseStrict(xml: string, opts: SdnXmlParseOptions): SanctionsList {
+  const p = opts.errorPrefix;
+  // The root element OFAC published for both files is <sdnList ...>.
+  if (!/<sdnList[\s>]/.test(xml)) throw new Error(`${p} unexpected document (no <sdnList> root element)`);
+  // A body cut off after N whole entries would otherwise parse cleanly.
+  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error(`${p} truncated document (no closing </sdnList>)`);
+  const publishDate = strictTag(xml, 'Publish_Date');
+  if (!publishDate) throw new Error(`${p} missing Publish_Date`);
+  const version = toIsoDate(publishDate, p);
+
+  const blocks = [...xml.matchAll(/<sdnEntry>([\s\S]*?)<\/sdnEntry>/g)].map((m) => m[1]);
+  if (!entryElementsMatch(xml, 'sdnEntry', blocks, ['sdnEntry'])) throw new Error(`${p} unrecognised entry element`);
+
+  const entries: SanctionsListEntry[] = [];
+  const ids = new Set<string>();
+  let position = 0;
+  for (const block of blocks) {
+    position += 1;
+    // The position only: never a name from the list in an error text.
+    const malformed = (name: string | null) => {
+      if (name !== null) throw new Error(`${p} entry ${position} has a malformed <${name}> element`);
+    };
+    if (hasUnsupportedMarkup(block)) throw new Error(`${p} entry ${position} has unsupported markup`);
+    malformed(malformedElement(block, OFAC_LEAVES, OFAC_CONTAINERS, ['akaList', 'programList']));
+    const own = stripNestedLists(block);
+    malformed(malformedElement(own, OFAC_LEAVES, [], ['uid', 'firstName', 'lastName', 'sdnType']));
+    const uid = strictTag(own, 'uid');
+    if (!uid) throw new Error(`${p} entry ${position} has no uid`);
+    const primary = strictPersonName(own);
+    if (!primary) throw new Error(`${p} entry ${position} has no primary name`);
+    if (ids.has(uid)) throw new Error(`${p} entry ${position} repeats an id`);
+    ids.add(uid);
+    const akas: string[] = [];
+    const weak: string[] = [];
+    const akaList = /<akaList>([\s\S]*?)<\/akaList>/.exec(block)?.[1] ?? '';
+    for (const a of akaList.matchAll(/<aka>([\s\S]*?)<\/aka>/g)) {
+      malformed(malformedElement(a[1], OFAC_LEAVES, [], ['firstName', 'lastName', 'category']));
+      const n = strictPersonName(a[1]);
+      if (!n) continue;
+      // A weak a.k.a. is kept apart — review, never an automatic block.
+      if ((strictTag(a[1], 'category') ?? '').toLowerCase() === 'weak') weak.push(n);
+      else akas.push(n);
+    }
+    const programList = /<programList>([\s\S]*?)<\/programList>/.exec(block)?.[1] ?? '';
+    const programs = [...programList.matchAll(/<program>([^<]*)<\/program>/g)].map((m) => decodeEntitiesOnce(m[1]).trim());
+    const entry: SanctionsListEntry = {
+      id: `${opts.idPrefix}:${uid}`,
+      names: [primary, ...akas],
+      type: strictTag(own, 'sdnType') ?? 'Unknown',
+      programs,
+    };
+    if (weak.length > 0) entry.weakNames = weak;
+    entries.push(entry);
+  }
+  if (entries.length === 0) throw new Error(`${p} no entries parsed`);
+  return { source: opts.source, version, hash: hashEntries(entries), entries };
 }
 
 const SLS_HOST = new URL(OFAC_SDN_XML_URL).hostname;
 
-function allowedFinalUrl(raw: string): boolean {
+/**
+ * True for an https URL on the SLS host or its us-gov-west-1 S3 download
+ * host. Exported (L1-LF3) for the OFAC consolidated loader's hop-by-hop
+ * redirect check (pinned-fetch.ts); fetchSlsExport uses it as before.
+ */
+export function allowedFinalUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'https:') return false;
@@ -158,6 +420,39 @@ export const OFAC_SDN_MAX_BYTES = 150 * 1024 * 1024;
 export const OFAC_SDN_FETCH_TIMEOUT_MS = 120_000;
 
 /**
+ * Fix pack 5 T26b: one bounded download from the Sanctions List Service,
+ * used by fetchOfacSdn. (fetchOfacConsolidated moved to fetchPinnedText,
+ * pinned-fetch.ts, in list review L1-LF3; the SDN download is unchanged.)
+ * Sends the User-Agent (SLS answers 403 without one), an abort signal and a
+ * size cap (declared Content-Length and the actual body), and pins the final
+ * URL to the SLS host or its us-gov-west-1 S3 bucket. Error texts are
+ * `<label> fetch failed: ...` ('OFAC SDN fetch failed: ...' for SDN, as
+ * before). Returns the body text; the caller parses it.
+ */
+export async function fetchSlsExport(
+  url: string,
+  fetchImpl: typeof fetch,
+  opts: { label: string; maxBytes: number; timeoutMs: number },
+): Promise<string> {
+  const { label, maxBytes } = opts;
+  const res = await fetchImpl(url, {
+    headers: { 'User-Agent': USER_AGENT, Accept: 'application/xml' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(opts.timeoutMs),
+  });
+  if (!res.ok) throw new Error(`${label} fetch failed: HTTP ${res.status}`);
+  // Redirect pinning: SLS answers 302 to a signed S3 download in
+  // us-gov-west-1, so the final URL must be https on the SLS host or that S3
+  // region — never anything else. (A stub without res.url is a test.)
+  if (res.url && !allowedFinalUrl(res.url)) throw new Error(`${label} fetch failed: unexpected host after redirect`);
+  const declared = Number(res.headers?.get?.('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`${label} fetch failed: body too large`);
+  const body = await res.text();
+  if (body.length > maxBytes) throw new Error(`${label} fetch failed: body too large`);
+  return body;
+}
+
+/**
  * Download and parse the live SDN list. Called ONLY by the daily list loader
  * (src/lib/sanctions/list-loader.ts, OFF unless SANCTIONS_LOADER_ENABLED) —
  * nothing in the request path calls it. Bounded: an abort signal and a size
@@ -167,20 +462,10 @@ export async function fetchOfacSdn(
   fetchImpl: typeof fetch = fetch,
   opts: { maxBytes?: number; timeoutMs?: number } = {},
 ): Promise<SanctionsList> {
-  const maxBytes = opts.maxBytes ?? OFAC_SDN_MAX_BYTES;
-  const res = await fetchImpl(OFAC_SDN_XML_URL, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/xml' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(opts.timeoutMs ?? OFAC_SDN_FETCH_TIMEOUT_MS),
+  const body = await fetchSlsExport(OFAC_SDN_XML_URL, fetchImpl, {
+    label: 'OFAC SDN',
+    maxBytes: opts.maxBytes ?? OFAC_SDN_MAX_BYTES,
+    timeoutMs: opts.timeoutMs ?? OFAC_SDN_FETCH_TIMEOUT_MS,
   });
-  if (!res.ok) throw new Error(`OFAC SDN fetch failed: HTTP ${res.status}`);
-  // Redirect pinning: SLS answers 302 to a signed S3 download in
-  // us-gov-west-1, so the final URL must be https on the SLS host or that S3
-  // region — never anything else. (A stub without res.url is a test.)
-  if (res.url && !allowedFinalUrl(res.url)) throw new Error('OFAC SDN fetch failed: unexpected host after redirect');
-  const declared = Number(res.headers?.get?.('content-length') ?? NaN);
-  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');
-  const body = await res.text();
-  if (body.length > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');
   return parseOfacSdnXml(body);
 }

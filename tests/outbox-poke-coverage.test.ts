@@ -30,13 +30,13 @@ const HELPERS: Record<string, string[]> = {
   // Callers poke (or are the worker / the cron route, which pokes).
   'src/lib/stale-money.ts': ['escalateStuckPaid', 'expireUnpaidLinks'],
   'src/lib/cron-run.ts': ['runDueSchedules'],
-  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
+  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad', 'runListLoad'],
   // partner-demo R3a: the storage cap-watch — called only from the cron route.
   'src/lib/storage-watch.ts': ['checkStorageCap'],
   // Fix pack 2 (R02): the list-not-live alert — called only from the cron route.
   'src/lib/sanctions/list-health.ts': ['checkSanctionsListHealth'],
-  // Fix pack 2 T7 (R07): the archive-failed / unconfigured alerts — called only from the cron route.
-  'src/lib/sanctions/list-archive.ts': ['archivePending'],
+  // Fix pack 2 T7 (R07): the archive-failed / unconfigured alerts; pack 5 LC2: the lag alert — called only from the cron route.
+  'src/lib/sanctions/list-archive.ts': ['archivePending', 'alertArchiveLag'],
   // Fix pack 2 T5 (R04): the block notices — enqueued inside each block's own
   // transaction; every caller pokes after it commits (store.ts recordSanctionsBlock,
   // pay-rescreen, payment-link-*, tools) or is a listed helper (settlement.ts).

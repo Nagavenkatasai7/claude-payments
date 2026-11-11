@@ -9,7 +9,7 @@
 //
 // Public-domain list data only: no customer data is read or written here.
 
-import { and, asc, count, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, min, sql } from 'drizzle-orm';
 import { sanctionsListEntries, sanctionsListVersions } from '@/db/schema';
 import type { Db, DbOrTx } from '@/db/client';
 import type { SanctionsList, SanctionsListEntry } from '@/lib/sanctions/list-source';
@@ -172,8 +172,15 @@ export function createSanctionsListRepo(db: Db) {
      * version row; a re-activated version whose entries were pruned after
      * its archive gets them re-inserted (same content, same hash).
      * pruneArchivedEntries is the only entry delete.
+     *
+     * Pack 5 review LD2: `refuseOlderContent` is passed ONLY by the curated
+     * upload (India MHA, whose version is a typed date, not read from the
+     * file). With it, content equal to a stored version OLDER than the active
+     * one is refused (SanctionsListStaleError: the active version never moves
+     * backwards), and a re-activated row reports its STORED version. Without
+     * it (every list loader) the statements and the result are unchanged.
      */
-    async storeList(list: SanctionsList, opts: { minEntries?: number } = {}): Promise<StoreListResult> {
+    async storeList(list: SanctionsList, opts: { minEntries?: number; refuseOlderContent?: boolean } = {}): Promise<StoreListResult> {
       // Duplicate ids: first wins (never fail a whole load over one repeat).
       const seen = new Set<string>();
       const entries = list.entries.filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
@@ -243,8 +250,20 @@ export function createSanctionsListRepo(db: Db) {
           .limit(1);
 
         let versionId: number;
+        let storedVersion: string | undefined;
         if (existing[0]) {
           versionId = existing[0].id;
+          if (opts.refuseOlderContent) {
+            const stored = await tx
+              .select({ version: sanctionsListVersions.version })
+              .from(sanctionsListVersions)
+              .where(eq(sanctionsListVersions.id, versionId))
+              .limit(1);
+            storedVersion = stored[0]?.version ?? list.version;
+            if (active && storedVersion < active.version) {
+              throw new SanctionsListStaleError(active.version, storedVersion);
+            }
+          }
           // Fix pack 2 (R07): its entries may have been pruned after the
           // archive. Re-insert the incoming entries (same hash = same
           // content) so loadList's count check passes.
@@ -290,11 +309,30 @@ export function createSanctionsListRepo(db: Db) {
         return {
           status: 'activated' as const,
           versionId,
-          version: list.version,
+          version: storedVersion ?? list.version,
           hash: list.hash,
           entryCount: entries.length,
           nameCount,
         };
+      });
+    },
+
+    /**
+     * Fix pack 5 (R08, P28): "confirm still current" for a curated list (India
+     * MHA). Re-stamps checked_at of the ACTIVE version of `source` only, under
+     * the same per-source advisory lock as storeList; version, hash and entries
+     * are untouched. Returns the confirmed { version, hash }, or null when the
+     * source has no active version (nothing written).
+     */
+    async touchActiveCheckedAt(source: string, now: Date): Promise<{ version: string; hash: string } | null> {
+      return db.transaction(async (tx) => {
+        await lockSource(tx, source);
+        const rows = await tx
+          .update(sanctionsListVersions)
+          .set({ checkedAt: now })
+          .where(and(eq(sanctionsListVersions.source, source), eq(sanctionsListVersions.active, true)))
+          .returning({ version: sanctionsListVersions.version, hash: sanctionsListVersions.hash });
+        return rows[0] ?? null;
       });
     },
 
@@ -397,6 +435,20 @@ export function createSanctionsListRepo(db: Db) {
         await tx.delete(sanctionsListEntries).where(inArray(sanctionsListEntries.versionId, drop));
         return total;
       });
+    },
+
+    /**
+     * Pack 5 review LC2: how far the archive lags for ONE source (platform
+     * table, no tenant): the number of versions with no stamped archive and
+     * the oldest loaded_at among them (null when none is pending).
+     */
+    async pendingArchiveAge(source: string): Promise<{ pending: number; oldestLoadedAt: Date | null }> {
+      const rows = await db
+        .select({ pending: count(), oldest: min(sanctionsListVersions.loadedAt) })
+        .from(sanctionsListVersions)
+        .where(and(eq(sanctionsListVersions.source, source), isNull(sanctionsListVersions.archivedAt)));
+      const oldest = rows[0]?.oldest ?? null;
+      return { pending: Number(rows[0]?.pending ?? 0), oldestLoadedAt: oldest === null ? null : new Date(oldest) };
     },
 
     /** Counts for the compliance page card. */
