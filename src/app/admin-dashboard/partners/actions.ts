@@ -35,6 +35,7 @@ import {
   resolveStaffTenant,
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { sanitizeLogoValue } from '@/lib/logo';
 import { boundUntrustedText, BRAND_MAX } from '@/lib/untrusted-text';
 import { boundedDisplayName, boundedPersona, personaAuditEvent } from '@/lib/partner-brand-text';
@@ -693,7 +694,7 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, string> = {
   regulator_name_required: 'Enter the state regulator name before its phone or website.',
   entity_required: 'Enter the licensed entity name before its other details.',
   provider_name:
-    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks or instructions.',
+    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks, instructions or the SmartRemit name.',
   provider_line_too_long: `The licensed entity name and the state regulator name are too long together for the provider line, which can have at most ${PROVIDER_LINE_MAX} characters. Shorten one of the names.`,
 };
 
@@ -701,7 +702,8 @@ export async function saveDisclosureConfigAction(formData: FormData): Promise<vo
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const parsed = parseDisclosureForm(formData); // validate BEFORE any write
+  // Review R3-Y1 O2 (D4): only the default (demo) tenant's block may name SmartRemit; it is never shown.
+  const parsed = parseDisclosureForm(formData, { platformNameAllowed: id === DEFAULT_PARTNER_ID }); // validate BEFORE any write
   if (!parsed.ok) throw new Error(DISCLOSURE_ERROR[parsed.reason]);
   // Fix pack 4 T5 (C11): a platform save never approves (it strips a partner approval; on a
   // live-certified partner setDisclosure enqueues the live-change notice in its transaction).

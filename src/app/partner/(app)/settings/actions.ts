@@ -129,7 +129,7 @@ export async function saveDisclosureAction(_prev: ActionResult | null, formData:
   const r = await write('partner.settings.disclosure', ctx, () =>
     setDisclosure(getDb(), ctx.partnerId, actorOf(ctx), parsed.value, { approve: enrolled }),
   );
-  // setDisclosure can enqueue (the platform-clear notice); post-response, so after the commit.
+  // setDisclosure can enqueue (the approval-cleared notice, R3-Y1 D2); post-response, so after the commit.
   if (r.ok) pokeWorker();
   return r;
 }

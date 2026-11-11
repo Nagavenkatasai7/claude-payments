@@ -311,6 +311,27 @@ describe('getTransactionOtpStore — wires the fail-closed ops signal (fix 45)',
     await expect(mod.getTransactionOtpStore().issue(TX, PHONE)).rejects.toThrow('redis down');
     expect(raise).toHaveBeenCalledWith('txotp-issue', 'fail-closed');
   });
+
+  // Review R3-Y1 Q2: the code's single-use GETDEL runs on the no-retry consume client
+  // (getConsumeRedis), never on the retrying main client. Both fakes share one store.
+  it("verify's code GETDEL runs on getConsumeRedis(), never on getRedis()", async () => {
+    vi.resetModules();
+    const base = fakeRedis();
+    const mainGetdel = vi.fn((k: string) => base.getdel(k));
+    const consumeGetdel = vi.fn((k: string) => base.getdel(k));
+    const main = { ...base, getdel: mainGetdel };
+    const consumeClient = { ...base, getdel: consumeGetdel };
+    vi.doMock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert: vi.fn().mockResolvedValue(undefined) }));
+    vi.doMock('@/lib/redis', () => ({ getRedis: () => main, getConsumeRedis: () => consumeClient }));
+    const mod = await import('@/lib/transaction-otp');
+    const otp = mod.getTransactionOtpStore();
+    const issued = await otp.issue(TX, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    expect(await otp.verify(TX, PHONE, issued.code)).toMatchObject({ ok: true });
+    const codeKey = `txotp:${createHash('sha256').update(TX).digest('hex')}`;
+    expect(consumeGetdel.mock.calls.filter(([k]) => k === codeKey)).toHaveLength(1);
+    expect(mainGetdel.mock.calls.filter(([k]) => k === codeKey)).toHaveLength(0);
+  });
 });
 
 // Program-Fix 25 PR B (§3.6 cooldown trap, review r1): a code whose SEND failed
@@ -630,5 +651,38 @@ describe('transaction-otp - review R1-P4 (B1 channel note per code, B2 no-retry 
     expect(redis.dump.has(recKey(TX))).toBe(true); // 5 wrong guesses leave it; the 6th reservation burns it
     expect(await s.verify(TX, PHONE, '000000')).toEqual({ ok: false, reason: 'locked' });
     expect(await store.verify(TX, PHONE, '654321')).toMatchObject({ ok: true });
+  });
+});
+
+// Review R3-Y1 O3: burn() runs its GETDEL on the retrying main client. When that GETDEL's response is
+// lost, the retry answers null (the record is already gone). Whatever happens to the record, the
+// expired and attempt-cap answers stay refusals, never ok.
+describe('transaction-otp burn: a lost GETDEL response (R3-Y1 O3)', { retry: 0 }, () => {
+  function lostResponseStore() {
+    const base = fakeRedis();
+    const lost = {
+      ...base,
+      getdel: async (k: string) => {
+        await base.getdel(k); // the server ran it ...
+        return null; // ... and the retried GETDEL answers null
+      },
+    };
+    return createTransactionOtpStore(lost, { now: () => nowMs, randomInt: () => 123456, consume: base });
+  }
+
+  it('an expired code answers expired, never ok', async () => {
+    const s = lostResponseStore();
+    expect((await s.issue(TX, PHONE)).ok).toBe(true);
+    nowMs += 11 * 60_000;
+    expect(await s.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'expired' });
+    expect((await s.verify(TX, PHONE, '123456')).ok).toBe(false);
+  });
+
+  it('past the attempt cap the right code answers locked, never ok', async () => {
+    const s = lostResponseStore();
+    expect((await s.issue(TX, PHONE)).ok).toBe(true);
+    for (let i = 0; i < 5; i++) expect((await s.verify(TX, PHONE, '000000')).ok).toBe(false);
+    expect(await s.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'locked' });
+    expect((await s.verify(TX, PHONE, '123456')).ok).toBe(false);
   });
 });

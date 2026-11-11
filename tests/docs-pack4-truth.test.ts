@@ -176,7 +176,8 @@ describe('pack 4 documents say what the code does', () => {
     expect(rows).toHaveLength(5);
     const livectl = rows.find((l) => l.startsWith('| `livectl:'))!;
     const raisedBy = livectl.split('|')[2];
-    expect(raisedBy).toContain('provider disclosure approval cleared by a SmartRemit save');
+    // Review R3-Y1 D2: a partner save without two-step sign-in clears the approval too, and alerts.
+    expect(raisedBy).toContain('provider disclosure approval cleared on a certified partner, by a SmartRemit save or by a partner save without two-step sign-in');
     expect(raisedBy).toContain('`setDisclosure`');
   });
 

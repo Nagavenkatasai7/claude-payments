@@ -55,7 +55,7 @@ export type LiveWriteResult =
 
 /**
  * Fix pack 4 T5 (C11): the keys a live-change notice can name: the live_controls keys plus
- * 'providerBlock' (a platform save that clears a partner's provider-disclosure approval).
+ * 'providerBlock' (a save that clears a certified partner's provider-disclosure approval).
  */
 export type LiveNoticeKey = LiveControlsKey | 'providerBlock';
 

@@ -170,8 +170,13 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
    * Review R1-P4 (B3): burn the expired or exhausted record `raw` that verify
    * read, and only that one. A Resend that landed after the GET wrote a newer
    * record; a plain DEL would delete it, so take with GETDEL and put a newer
-   * record back (NX). The main client is used: a lost response here only means
-   * the burn already happened.
+   * record back (NX). The main (retrying) client is used. Review R3-Y1 O3: if
+   * the first GETDEL's response is lost, the retry answers null. When that
+   * GETDEL took `raw`, the burn simply happened. When it took a NEWER record
+   * (a Resend that landed after verify's GET), that newer code is gone for good:
+   * its value left with the lost response, so no client choice can restore it,
+   * and the customer taps Resend again. The answer is still the caller's
+   * expired or locked refusal, never ok. Known limit.
    */
   async function burn(txId: string, raw: string, t: number): Promise<void> {
     const taken = await redis.getdel(key(txId));

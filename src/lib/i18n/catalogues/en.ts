@@ -599,7 +599,7 @@ export const en = {
   'partner.settings.disclosure.error.regulatorNameRequired': 'Enter the state regulator name before its phone or website.',
   'partner.settings.disclosure.error.entityRequired': 'Enter the licensed entity name before its other details.',
   'partner.settings.disclosure.error.providerName':
-    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks or instructions.',
+    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks, instructions or the SmartRemit name.',
   'partner.settings.disclosure.error.providerLineTooLong':
     'The licensed entity name and the state regulator name are too long together for the provider line, which can have at most {limit} characters. Shorten one of the names.',
   'partner.settings.pricing.title': 'Pricing margin',

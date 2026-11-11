@@ -16,7 +16,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { boundUntrustedText } from '@/lib/untrusted-text';
-import { isProviderNameText, providerLineFits } from '@/lib/legal/provider-line';
+import { isProviderNameText, namesPlatform, providerLineFits } from '@/lib/legal/provider-line';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { disclosureHash } from './disclosure-hash';
 import { isLiveCertified } from './live-gate';
@@ -74,20 +74,34 @@ function optionalBusinessDays(formData: FormData): Field<number> {
   return Number.isInteger(n) && n >= 0 && n <= MAX_DELIVERY_BUSINESS_DAYS ? { ok: true, value: n } : { ok: false };
 }
 
-/** Review R1-P5 (C1): a name the provider line is built from, checked on the RAW form text. */
-const badProviderName = (formData: FormData, key: string): boolean => {
+/**
+ * Review R1-P5 (C1): a name the provider line is built from, checked on the RAW form text.
+ * Review R3-Y1 O2 (D4): a name with the platform brand is refused too (namesPlatform, the rule
+ * providerLineFor reads null on), unless the save is the platform's own for the default tenant.
+ */
+const badProviderName = (formData: FormData, key: string, platformNameAllowed: boolean): boolean => {
   const v = raw(formData.get(key));
-  return v !== '' && !isProviderNameText(v);
+  return v !== '' && (!isProviderNameText(v) || (!platformNameAllowed && namesPlatform(v)));
 };
+
+export interface DisclosureParseOptions {
+  /**
+   * Only the admin action, for the default (demo) tenant: its stored block is never shown
+   * (resolvePartnerDisclosure answers the demo note) and may name SmartRemit. Default false.
+   */
+  platformNameAllowed?: boolean;
+}
 
 /**
  * Form → disclosure config. `value: undefined` is an all-blank form (clear the block). Checks run
  * in the legacy order, so the first failing field is the one reported.
  */
-export function parseDisclosureForm(formData: FormData): DisclosureParse {
+export function parseDisclosureForm(formData: FormData, opts: DisclosureParseOptions = {}): DisclosureParse {
+  const platformNameAllowed = opts.platformNameAllowed === true;
   // Review R1-P5 (C1): the entity and regulator names build the provider line the bot quotes, so a
-  // double quote, a backtick, a line break or a rule-override phrase is refused (reason provider_name).
-  if (badProviderName(formData, 'licensedEntity')) return { ok: false, reason: 'provider_name' };
+  // double quote, a backtick, a line break, a rule-override phrase or (R3-Y1 O2) the platform name
+  // is refused (reason provider_name).
+  if (badProviderName(formData, 'licensedEntity', platformNameAllowed)) return { ok: false, reason: 'provider_name' };
   const licensedEntity = optionalText(formData, 'licensedEntity');
   const licenseIds = raw(formData.get('licenseIds'))
     .split(/[,\n]/)
@@ -98,7 +112,7 @@ export function parseDisclosureForm(formData: FormData): DisclosureParse {
   if (!phone.ok) return { ok: false, reason: 'provider_phone' };
   const website = optionalHttps(formData, 'website');
   if (!website.ok) return { ok: false, reason: 'provider_website' };
-  if (badProviderName(formData, 'regulatorName')) return { ok: false, reason: 'provider_name' };
+  if (badProviderName(formData, 'regulatorName', platformNameAllowed)) return { ok: false, reason: 'provider_name' };
   const regulatorName = optionalText(formData, 'regulatorName');
   const regulatorPhone = optionalPhone(formData, 'regulatorPhone');
   if (!regulatorPhone.ok) return { ok: false, reason: 'regulator_phone' };
@@ -254,8 +268,9 @@ function hasValidApproval(d: unknown): boolean {
  * TOTP-enrolled admin after a step-up forced for this save) on a partner other than 'default'.
  * Every other save stores the block unstamped. One transaction: the locked merge, one audit row
  * (meta `{ old, new, actorScope, approved, clearedApproval }`; clearedApproval = the previous block
- * carried a VALID stamp and this save stored none) and, when a PLATFORM save cleared an approval on
- * a live-certified partner, pack 3's live-change alert and partner email (notifyLiveChange).
+ * carried a VALID stamp and this save stored none) and, when a save cleared an approval on a
+ * live-certified partner (a platform save, or a partner save without the two-step stamp; R3-Y1 D2),
+ * pack 3's live-change alert and partner email (notifyLiveChange).
  * Errors propagate (the actions log the error name only).
  */
 export function setDisclosure(
@@ -288,14 +303,17 @@ export function setDisclosure(
       subjectId: partnerId,
       meta: { old: previous.disclosure ?? null, new: block ?? null, actorScope: actor.actorScope, approved: stamp, clearedApproval },
     });
-    if (actor.actorScope === 'platform' && clearedApproval) {
+    // Review R3-Y1 D2: EVERY save that clears a valid approval on a live-certified partner tells ops
+    // and the partner, whatever the actor scope (a partner admin without two-step sign-in clears it
+    // too, with the same effect). The notice names the scope only ('by partner staff' / 'your team').
+    if (clearedApproval) {
       // The partner row is already locked by updateSupportConfig: this read is for the certification only.
       const p = await createPartnerRepo(tx).getPartner(partnerId);
       if (isLiveCertified(p)) {
         await notifyLiveChange(
           tx,
           partnerId,
-          { username: actor.username, scope: 'platform' },
+          { username: actor.username, scope: actor.actorScope },
           { key: 'providerBlock', action: 'partner.disclosure.approval_cleared', word: 'approval cleared; payments wait until your admin approves it again' },
           next,
         );
