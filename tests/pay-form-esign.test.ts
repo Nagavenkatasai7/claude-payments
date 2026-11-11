@@ -8,11 +8,12 @@
  *     details step; Continue waits for the tick; the ACH form never asks;
  *   - the pay body carries esignConsentVersion only when ticked; request_otp is unchanged.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { EsignConsent, PayForm } from '@/app/pay/[transferId]/pay-form';
+import { LinkPayForm } from '@/app/pay/l/[token]/link-pay-form';
 import { esignConsentBody } from '@/lib/pay-outcome';
 import {
   ESIGN_CONSENT_LABEL,
@@ -20,6 +21,12 @@ import {
   ESIGN_CONSENT_TITLE,
   ESIGN_CONSENT_VERSION,
 } from '@/lib/legal/esign-consent';
+
+// LinkPayForm calls useRouter (router.refresh on a lapsed rate); no app router mounts here.
+vi.mock('next/navigation', async (orig) => ({
+  ...(await orig<typeof import('next/navigation')>()),
+  useRouter: () => ({ refresh: () => {} }),
+}));
 
 const summary = { destAmount: 17000, destCurrency: 'INR', sourceAmount: 200, sourceCurrency: 'USD', sourceTotalCharge: 200 };
 const SLOT_MARK = 'data-testid="slot-mark"';
@@ -144,5 +151,67 @@ describe('the e2e absent check (P8)', () => {
     expect(m?.[1]).toBe(ESIGN_CONSENT_LABEL);
     // Called in the four dead-link tests.
     expect(spec.match(/await expectNoPack6Text\(page\);/g)).toHaveLength(4);
+  });
+});
+
+// Fix pack 6 T7b (P8): the payment-link form. Links are never exempt (P5).
+describe('LinkPayForm: the consent block above the chosen disclosure (pack 6 T7b, P8)', () => {
+  type LinkProps = Parameters<typeof LinkPayForm>[0];
+  const linkBase: LinkProps = {
+    token: 'AAAAAAAAAAAAAAAAAAAAAA',
+    options: [
+      { method: 'bank_transfer', label: 'Bank transfer', amountUsd: 294.12, feeUsd: 1.99, totalUsd: 296.11 },
+      { method: 'debit_card', label: 'Debit card', amountUsd: 294.12, feeUsd: 2.99, totalUsd: 297.11 },
+    ],
+    disclosures: {
+      bank_transfer: createElement('section', { 'data-testid': 'slot-mark' }, 'bank disclosure'),
+      debit_card: createElement('section', { 'data-testid': 'card-mark' }, 'card disclosure'),
+    },
+    disclosureVersion: 'v1',
+    quoteLockedAt: '2026-10-08T12:00:00.000Z',
+    receipt: { payeeName: 'Sunrise Public School', reference: 'INV-1', amountInr: 25000 },
+    approvingName: 'Sunrise Public School',
+    disclosureHash: null,
+  };
+  const linkForm = (o: Partial<LinkProps> = {}) => renderToStaticMarkup(createElement(LinkPayForm, { ...linkBase, ...o }));
+
+  it('esignVersion set -> the block ABOVE the chosen disclosure node (the first option), not the other one; Pay disabled', () => {
+    const html = linkForm({ esignVersion: ESIGN_CONSENT_VERSION });
+    expectBlockAboveSlot(html);
+    expect(html).not.toContain('card-mark');
+    expect(html.split('data-testid="esign-consent"')).toHaveLength(2);
+    // Directly above the disclosure: after the money panel.
+    expect(html.indexOf('Paying with')).toBeLessThan(html.indexOf('data-testid="esign-consent"'));
+    expect(html).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Pay \$296\.11<\/button>/);
+  });
+
+  it('esignVersion set with no disclosure for the method: the block still renders, before the code button', () => {
+    const html = linkForm({ esignVersion: ESIGN_CONSENT_VERSION, disclosures: {} });
+    expect(html).toContain('data-testid="esign-consent"');
+    expect(html.indexOf('data-testid="esign-consent"')).toBeLessThan(html.indexOf('Send confirmation code to WhatsApp'));
+  });
+
+  it('esignVersion absent or null -> markup unchanged', () => {
+    const base = linkForm();
+    expect(linkForm({ esignVersion: null })).toBe(base);
+    expect(base).not.toContain('esign-consent');
+    expect(base).not.toContain('name="esignConsent"');
+    expect(base).toContain('slot-mark');
+  });
+
+  it('the pay body spreads esignConsentBody beside disclosureAckBody; request_otp stays { action: request_otp }', () => {
+    const src = readFileSync('src/app/pay/l/[token]/link-pay-form.tsx', 'utf8');
+    expect(src.match(/\.\.\.esignConsentBody\(esignVersion, esignTicked\)/g)).toHaveLength(1);
+    const ack = src.indexOf('...disclosureAckBody(');
+    const es = src.indexOf('...esignConsentBody(');
+    expect(es).toBeGreaterThan(ack);
+    expect(src.slice(ack, es).split('\n')).toHaveLength(2); // the next line
+    expect(src).toContain("body: JSON.stringify({ action: 'request_otp' }),");
+    expect(src.match(/action: 'request_otp'/g)).toHaveLength(1);
+    // The pay guard and the Pay button both wait for the tick.
+    expect(src).toMatch(/if \(ackMissing \|\| esignMissing \|\| origMissing \|\| !chosen\) return;/);
+    expect(src).toMatch(/disabled=\{status === 'paying' \|\| !sent \|\| code\.length !== 6 \|\| ackMissing \|\| esignMissing \|\| origMissing\}/);
+    // EsignConsent comes from the transfer pay form (no second copy of the block).
+    expect(src).toMatch(/import \{[^}]*\bEsignConsent\b[^}]*\} from '@\/app\/pay\/\[transferId\]\/pay-form';/);
   });
 });

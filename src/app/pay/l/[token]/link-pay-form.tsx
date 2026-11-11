@@ -2,13 +2,14 @@
 
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { disclosureAckBody, payErrorMessage } from '@/lib/pay-outcome';
+import { disclosureAckBody, esignConsentBody, payErrorMessage } from '@/lib/pay-outcome';
 import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 // Type only: originator-info.ts is server code (database reads) and never enters the client bundle.
 import type { OriginatorView } from '@/lib/originator-info';
 import {
+  EsignConsent,
   OriginatorFields,
   originatorBody,
   originatorFieldErrors,
@@ -24,6 +25,11 @@ import {
 // Fix pack 5 T22 (P19): on a real-money link it also asks the sender's home
 // address and date of birth (the transfer pay page's OriginatorFields), posted
 // only when shown.
+// Fix pack 6 T7b (R46, P8): with no current E-SIGN consent on file the page
+// passes esignVersion; the consent block (the transfer pay form's EsignConsent)
+// sits directly above the chosen disclosure, Pay waits for the tick and the body
+// carries esignConsentVersion. Links are never exempt (P5). Null or absent:
+// the markup is unchanged.
 
 export type LinkPayMethod = 'bank_transfer' | 'debit_card';
 
@@ -87,6 +93,7 @@ export function LinkPayForm({
   approvingName,
   disclosureHash,
   originator,
+  esignVersion = null,
 }: {
   token: string;
   options: LinkPayOption[];
@@ -101,10 +108,13 @@ export function LinkPayForm({
   disclosureHash: string | null;
   /** Fix pack 5 T22 (P19): which travel-rule fields to ask (booleans only); absent = none. */
   originator?: OriginatorView;
+  /** Fix pack 6 (P8): the E-SIGN consent version to ask for; null/absent = consent on file, nothing shown. */
+  esignVersion?: string | null;
 }) {
   const router = useRouter();
   const [method, setMethod] = useState<LinkPayMethod>(options[0]?.method ?? 'bank_transfer');
   const [acked, setAcked] = useState(false);
+  const [esignTicked, setEsignTicked] = useState(false);
   const [sent, setSent] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState('');
@@ -122,6 +132,7 @@ export function LinkPayForm({
   const chosen = options.find((o) => o.method === method) ?? options[0];
   const disclosure = disclosures[method] ?? null;
   const ackMissing = disclosure !== null && disclosureVersion !== null && !acked;
+  const esignMissing = esignVersion !== null && !esignTicked;
   const endpoint = `/api/pay/l/${encodeURIComponent(token)}`;
   // Fix pack 4 (C15): follows the chosen way to pay; never an account (critic P13: the payee in full).
   const approvingText = chosen
@@ -155,7 +166,7 @@ export function LinkPayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing || origMissing || !chosen) return;
+    if (ackMissing || esignMissing || origMissing || !chosen) return;
     setStatus('paying');
     setOtpError('');
     setErrorMessage(null);
@@ -168,6 +179,7 @@ export function LinkPayForm({
           otp: code,
           fundingMethod: chosen.method,
           ...disclosureAckBody(disclosure !== null ? disclosureVersion : null, disclosureHash, acked),
+          ...esignConsentBody(esignVersion, esignTicked),
           ...(quoteLockedAt ? { quoteLockedAt } : {}),
           ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
@@ -275,6 +287,7 @@ export function LinkPayForm({
           <Line label="Paying with" value={chosen.label} />
         </div>
       )}
+      {esignVersion !== null && <EsignConsent checked={esignTicked} onChange={setEsignTicked} />}
       {disclosure}
       <OriginatorFields
         shown={shownOrig}
@@ -324,7 +337,7 @@ export function LinkPayForm({
           <span>{ACKNOWLEDGEMENT_LABEL}</span>
         </label>
       )}
-      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || origMissing}>
+      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || origMissing}>
         {status === 'paying' ? 'Processing…' : chosen ? `Pay ${money(chosen.totalUsd, 'USD')}` : 'Pay now'}
       </button>
       {sent && (

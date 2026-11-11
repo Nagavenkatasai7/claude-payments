@@ -15,6 +15,8 @@ import { QuoteError } from '@/lib/fx';
 import { PURPOSE_LABELS } from '@/lib/purpose-codes';
 import { resolvePayableLink } from '@/lib/payment-link-finalize';
 import { readOriginatorView } from '@/lib/originator-info';
+import { readEsignConsentNeeded } from '@/lib/esign';
+import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { getLinkQuoteStore, lockedOrFreshLinkRate } from '@/lib/payment-link-quote';
 import { LINK_FUNDING_METHODS, linkQuote, type LinkFundingMethod } from '@/lib/payment-links';
 import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
@@ -171,6 +173,13 @@ async function renderPage(token: string): Promise<React.ReactNode> {
       routed: false,
     },
   });
+  // Fix pack 6 T7b (R46, P5, P8): ask the link payer (the link owner + the
+  // link's customer phone) for E-SIGN consent when none current is on file.
+  // Links are never exempt. A read error shows the box (the reader logs
+  // pay.esign-read and answers true). Never read for the sheets above.
+  const esignVersion = (await readEsignConsentNeeded(getDb(), link.partnerId, link.customerPhone))
+    ? ESIGN_CONSENT_VERSION
+    : null;
 
   const disclosures: Partial<Record<LinkFundingMethod, React.ReactNode>> = {};
   let disclosureVersion: string | null = null;
@@ -218,6 +227,7 @@ async function renderPage(token: string): Promise<React.ReactNode> {
         approvingName={payee.legalName}
         disclosureHash={disclosureConfig.hash}
         originator={originator}
+        esignVersion={esignVersion}
       />
     </Sheet>
   );
