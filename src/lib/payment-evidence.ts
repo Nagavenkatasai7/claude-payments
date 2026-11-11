@@ -6,9 +6,12 @@
 import type { Db } from '@/db/client';
 import { createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { DEFAULT_PARTNER_ID } from './defaults';
 import { logWarn } from './log';
-import type { ResolvedDisclosure } from './partner-config';
+import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
+import { disclosureGateRefusal, type DisclosureGateRefusal } from './pay-disclosure-gate';
 import { payloadHashFor, type PaymentAuthEvidence } from './payment-auth-evidence';
 import { buildDisclosureSnapshot, disclosureProviderKind } from './remittance-disclosure';
 import type { Transfer } from './types';
@@ -32,7 +35,19 @@ export interface PaymentEvidence {
   auth: PaymentAuthEvidence | null;
 }
 
-export type EvidenceCommitResult = { kind: 'written' } | { kind: 'not_awaiting' } | { kind: 'nothing' };
+export type EvidenceCommitResult =
+  | { kind: 'written' }
+  | { kind: 'not_awaiting' }
+  | { kind: 'nothing' }
+  // Review R1-P3 C2: a mandatory payment whose R18 gate no longer passes on the
+  // owner row read under the lock. Nothing was written; a correct refusal, not a
+  // write failure (no payevidence alert).
+  | { kind: 'refused'; refusal: DisclosureGateRefusal };
+
+export interface EvidenceCommitOptions {
+  /** The caller's R18 decision (disclosureMandatory). True re-checks the gate under the owner lock. */
+  mandatory?: boolean;
+}
 
 const iso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
 
@@ -46,19 +61,44 @@ const iso = (ms: number | null): string | null => (ms === null ? null : new Date
  * payment writes nothing (`not_awaiting`). A DB error THROWS (rolled back):
  * the caller refuses the charge. No logging here (the caller logs the error
  * name). The audit partner is the OWNER from the locked row (C0 rule 4).
+ *
+ * Review R1-P3 C2: when `opts.mandatory`, the OWNER partner row is read again
+ * inside this transaction under FOR SHARE (lock order: transfer row, then
+ * partner row; it waits on setDisclosure's FOR UPDATE and blocks the next save
+ * until this commit), the disclosure is resolved from that read, and the same
+ * R18 gate (disclosureGateRefusal) runs on it: a refusal returns `refused`
+ * BEFORE anything is written. The ack's provider kind and the snapshot are then
+ * built from the locked read, never the caller's copy. A payment that is not
+ * mandatory takes no partner lock and uses the caller's `disclosure` as before.
  */
 export async function commitPaymentEvidence(
   db: Db,
   t: Transfer,
   ev: PaymentEvidence,
-  disclosure: ResolvedDisclosure | null,
+  callerDisclosure: ResolvedDisclosure | null,
   now: number = Date.now(),
+  opts: EvidenceCommitOptions = {},
 ): Promise<EvidenceCommitResult> {
   if (!ev.auth && !ev.disclosureAck) return { kind: 'nothing' };
   return db.transaction(async (tx): Promise<EvidenceCommitResult> => {
     const repo = createTransferRepo(tx);
     const locked = await repo.getTransferForUpdate(t.id, { partnerId: t.partnerId });
     if (!locked || locked.status !== 'awaiting_payment') return { kind: 'not_awaiting' };
+    let disclosure = callerDisclosure;
+    if (opts.mandatory) {
+      // The default tenant's block is the demo block (pay-process makes no read for it either).
+      disclosure =
+        locked.partnerId === DEFAULT_PARTNER_ID
+          ? resolvePartnerDisclosure(null)
+          : resolvePartnerDisclosure(await createPartnerRepo(tx).getPartnerForShare(locked.partnerId));
+      const refusal = disclosureGateRefusal({
+        mandatory: true,
+        disclosure,
+        ackVersion: ev.disclosureAck?.version ?? null,
+        postedHash: ev.disclosureAck?.shownHash ?? null,
+      });
+      if (refusal) return { kind: 'refused', refusal };
+    }
     const rows: AuditEvent[] = [];
     if (ev.auth) {
       const a = ev.auth;

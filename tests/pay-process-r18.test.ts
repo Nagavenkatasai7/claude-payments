@@ -50,7 +50,9 @@ vi.mock('@/lib/partner-store', () => ({
 }));
 
 // Owner reads are observed, and can be made to throw for one partner id only.
-const owner = vi.hoisted(() => ({ reads: [] as string[], throwFor: null as string | null }));
+// `afterRead` (review R1-P3 C2) runs once after the next owner read: a save that lands between
+// the gate read and the evidence commit.
+const owner = vi.hoisted(() => ({ reads: [] as string[], throwFor: null as string | null, afterRead: null as null | (() => Promise<void>) }));
 vi.mock('@/db/repos/partner-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/partner-repo')>();
   return {
@@ -62,7 +64,11 @@ vi.mock('@/db/repos/partner-repo', async (orig) => {
         getPartner: async (id: string) => {
           owner.reads.push(id);
           if (owner.throwFor === id) throw new Error('owner-read-leak postgres://user:pw@host/db');
-          return r.getPartner(id);
+          const p = await r.getPartner(id);
+          const hook = owner.afterRead;
+          owner.afterRead = null;
+          if (hook) await hook();
+          return p;
         },
       };
     },
@@ -141,6 +147,7 @@ beforeEach(async () => {
   rails.byPartner = {};
   owner.reads = [];
   owner.throwFor = null;
+  owner.afterRead = null;
   capture.mockReset();
   capture.mockResolvedValue({ fundingRef: 'fund-abc' });
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
@@ -437,4 +444,52 @@ describe('pay-process: a funded awaiting row (review R1-P1 A1)', () => {
       await db.execute(sql.raw('DROP FUNCTION IF EXISTS fail_pp_audit_f()'));
     });
   }
+});
+
+// Review R1-P3 C2: a SmartRemit save that strips the approval and commits after
+// the gate read but before the evidence commit is caught by the re-check on the
+// owner row inside the evidence transaction: 409 not_available, never charged.
+describe('pay-process: the approval stripped between the gate read and the commit (review R1-P3 C2)', () => {
+  it('certified owner, approved block, platform strip lands after the gate read -> 409 not_available; no charge, row, snapshot or alert', async () => {
+    await acme({ approve: true });
+    const hash = await acmeHash();
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    const { resolvePartnerDisclosure } = await import('@/lib/partner-config');
+    const resolvePartnerDisclosureNow = (p: Parameters<typeof resolvePartnerDisclosure>[0]) => resolvePartnerDisclosure(p).partnerApproved;
+    // This file mocks partner-store, so the strip goes through setDisclosure's column writer
+    // (updateSupportConfig, FOR UPDATE) directly: the stored block loses its approval stamp.
+    owner.afterRead = async () => {
+      const r = await db.transaction((tx) =>
+        createPartnerRepo(tx).updateSupportConfig('acme', (prev) => {
+          const { approval: _dropped, ...unstamped } = prev.disclosure ?? {};
+          void _dropped;
+          return { ...prev, disclosure: unstamped };
+        }),
+      );
+      expect(r.found).toBe(true);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const t = makeTransfer({ id: 's1', partnerId: 'acme' });
+    await store.saveTransfer(t);
+    expect(await pay(t, testEvidence({ routeId: 's1', shownHash: hash }))).toEqual({ status: 409, body: NOT_AVAILABLE });
+    expect(owner.afterRead).toBeNull(); // the strip did run after the gate read
+    expect(resolvePartnerDisclosureNow(await createPartnerRepo(db).getPartner('acme'))).toBe(false);
+    expect(warnLines(warn, 'pay.owner-read')).toHaveLength(0); // the gate read itself succeeded
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceRows()).toEqual([]);
+    expect(await createTransferRepo(db).getDisclosureSnapshot('s1', 'acme')).toBeNull();
+    expect((await store.getTransfer('s1'))?.status).toBe('awaiting_payment');
+    expect((await alerts()).filter((a) => a.dedupe_key.startsWith('payevidence:'))).toEqual([]);
+    expect(warnLines(warn, 'pay.evidence-unavailable')).toHaveLength(0);
+    expect(warnLines(warn, 'pay.disclosure-refused')).toHaveLength(1);
+  });
+
+  it('the same without the strip -> paid as before', async () => {
+    await acme({ approve: true });
+    const hash = await acmeHash();
+    const t = makeTransfer({ id: 's2', partnerId: 'acme' });
+    await store.saveTransfer(t);
+    expect(await pay(t, testEvidence({ routeId: 's2', shownHash: hash }))).toEqual({ status: 200, body: { ok: true, status: 'paid' } });
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
 });

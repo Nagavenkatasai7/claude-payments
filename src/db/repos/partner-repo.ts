@@ -75,6 +75,17 @@ export function createPartnerRepo(db: DbOrTx) {
       return rows[0] ? rowToPartner(rows[0]) : null;
     },
 
+    /**
+     * Review R1-P3 C2: getPartner under FOR SHARE, for a caller's transaction that
+     * must see the row no writer can change before it commits (updateSupportConfig's
+     * FOR UPDATE and every plain UPDATE wait on it; FK inserts' FOR KEY SHARE do not).
+     * Drizzle LockStrength 'share': node_modules/drizzle-orm/pg-core/query-builders/select.types.d.ts:60.
+     */
+    async getPartnerForShare(id: PartnerId): Promise<Partner | null> {
+      const rows = await db.select().from(partners).where(eq(partners.id, id)).limit(1).for('share');
+      return rows[0] ? rowToPartner(rows[0]) : null;
+    },
+
     async savePartner(partner: Partner): Promise<void> {
       const row = partnerToRow(partner);
       // Program-Fix 15 PR B (review r1): support_config is written on INSERT

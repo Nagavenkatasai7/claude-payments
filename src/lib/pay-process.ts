@@ -15,7 +15,7 @@ import { isPartnerPulled } from './funding-method';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
-import { disclosureGateRefusal, disclosureMandatory } from './pay-disclosure-gate';
+import { disclosureGateRefusal, disclosureMandatory, type DisclosureGateRefusal } from './pay-disclosure-gate';
 import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult, type PaymentEvidence } from './payment-evidence';
 import type { Store } from './store';
 import type { Partner, Transfer } from './types';
@@ -252,6 +252,7 @@ export async function processTransferPayment(
   // approved). A non-default owner read that fails leaves the disclosure null,
   // which refuses only when the payment is mandatory.
   let disclosure: ResolvedDisclosure | null = null;
+  let mandatory = false;
   if (transfer.transferType !== 'b2b') {
     let owner: Partner | null = null;
     if (transfer.partnerId === DEFAULT_PARTNER_ID) {
@@ -267,7 +268,7 @@ export async function processTransferPayment(
         disclosure = null;
       }
     }
-    const mandatory = disclosureMandatory({
+    mandatory = disclosureMandatory({
       ownerCertified: isLiveCertified(owner),
       realMoney: realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null }),
       transferType: 'b2c',
@@ -278,14 +279,7 @@ export async function processTransferPayment(
       ackVersion: evidence?.disclosureAck?.version ?? null,
       postedHash: evidence?.disclosureAck?.shownHash ?? null,
     });
-    if (refusal === 'not_available') {
-      logWarn('pay.disclosure-refused', 'payment refused before capture: provider block not approved', {
-        transferId: transfer.id,
-        partnerId: transfer.partnerId,
-      });
-      return payNotAvailable();
-    }
-    if (refusal === 'reload_required') return payReloadRequired(transferFunded(transfer));
+    if (refusal) return disclosureRefused(transfer, refusal);
   }
 
   // ── AUTHORISE, THEN CAPTURE (fix pack 4, C8) ─────────────────────────────
@@ -294,13 +288,16 @@ export async function processTransferPayment(
   if (evidence) {
     let committed: EvidenceCommitResult;
     try {
-      committed = await commitPaymentEvidence(getDb(), transfer, evidence, disclosure);
+      // Review R1-P3 C2: a mandatory payment's gate runs again under the owner row lock.
+      committed = await commitPaymentEvidence(getDb(), transfer, evidence, disclosure, Date.now(), { mandatory });
     } catch (err) {
       logWarn('pay.evidence-unavailable', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
       await alertPayEvidenceUnavailable(getDb(), evidence.auth?.surface ?? 'transfer'); // never throws
       pokeWorker(); // the ops.alert row is ready now
       return payApprovalNotRecorded(transferFunded(transfer));
     }
+    // An approval stripped (or a block changed) after the gate read: the same answers, nothing written.
+    if (committed.kind === 'refused') return disclosureRefused(transfer, committed.refusal);
     if (committed.kind === 'not_awaiting') {
       // Moved since the caller's read: report current truth, never charge.
       const current = await store.getTransfer(transfer.id);
@@ -374,4 +371,16 @@ export async function processTransferPayment(
       }
       return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
   }
+}
+
+/** The R18 answers (C10), from the gate read or the re-check under the owner lock (review R1-P3 C2). */
+function disclosureRefused(transfer: Transfer, refusal: DisclosureGateRefusal): NextResponse {
+  if (refusal === 'not_available') {
+    logWarn('pay.disclosure-refused', 'payment refused before capture: provider block not approved', {
+      transferId: transfer.id,
+      partnerId: transfer.partnerId,
+    });
+    return payNotAvailable();
+  }
+  return payReloadRequired(transferFunded(transfer));
 }

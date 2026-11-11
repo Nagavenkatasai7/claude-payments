@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, onTestFinished, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { approveDisclosureForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { testEvidence } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { commitPaymentEvidence } from '@/lib/payment-evidence';
+import { setDisclosure } from '@/lib/partner-support-settings';
 import { payloadHashFor } from '@/lib/payment-auth-evidence';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from '@/lib/partner-config';
 import { buildDisclosureSnapshot, parseDisclosureSnapshot } from '@/lib/remittance-disclosure';
@@ -253,5 +254,86 @@ describe('commitPaymentEvidence (C8)', () => {
     const second = await createTransferRepo(db).getDisclosureSnapshot('tr_ev1', 'acme');
     expect(first?.shownHash).toBeNull();
     expect(second?.shownHash).toBe(disclosure.hash);
+  });
+});
+
+// Review R1-P3 C2: a mandatory payment's approval is checked again inside the
+// evidence transaction, on the OWNER row read FOR SHARE (it serialises with
+// setDisclosure's FOR UPDATE), so a SmartRemit save that strips the approval
+// between the caller's gate read and this commit refuses before any write.
+describe('commitPaymentEvidence: the R18 re-check under the owner lock (review R1-P3 C2)', () => {
+  const platform = { username: 'ops-staff', actorScope: 'platform' as const };
+  async function stripApproval(): Promise<void> {
+    const p = await createPartnerRepo(db).getPartner('acme');
+    const block = p!.supportConfig!.disclosure!;
+    expect(await setDisclosure(db, 'acme', platform, block)).toEqual({ ok: true });
+    expect(resolvePartnerDisclosure(await createPartnerRepo(db).getPartner('acme')).partnerApproved).toBe(false);
+  }
+  const ownerShareLocks = (qs: Array<{ sql: string; params: unknown[] }>) => qs.filter((q) => /"partners"/.test(q.sql) && /for share/i.test(q.sql));
+
+  beforeEach(async () => {
+    await certifyPartnerForTest(db, 'acme');
+    expect(disclosure.partnerApproved).toBe(true);
+  });
+
+  it('mandatory, approval stripped after the caller resolved it -> refused not_available; no audit row, no snapshot', async () => {
+    await stripApproval();
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
+    const r = await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true });
+    expect(r).toEqual({ kind: 'refused', refusal: 'not_available' });
+    expect(await auditRows()).toEqual([]);
+    expect(await rawSnapshot('tr_ev1')).toBeNull();
+    expect((await createTransferRepo(db).getTransfer('tr_ev1'))?.status).toBe('awaiting_payment');
+  });
+
+  it('mandatory, the block changed and re-approved (new hash) -> refused reload_required; nothing written', async () => {
+    await approveDisclosureForTest(db, 'acme', { entity: 'Acme Remit Two LLC' });
+    const fresh = resolvePartnerDisclosure(await createPartnerRepo(db).getPartner('acme'));
+    expect(fresh.partnerApproved).toBe(true);
+    expect(fresh.hash).not.toBe(disclosure.hash);
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true })).toEqual({
+      kind: 'refused',
+      refusal: 'reload_required',
+    });
+    expect(await auditRows()).toEqual([]);
+    expect(await rawSnapshot('tr_ev1')).toBeNull();
+  });
+
+  it('mandatory, still approved -> written; the owner row is read FOR SHARE after the transfer lock; snapshot approved', async () => {
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
+    const stop = captureQueries();
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true })).toEqual({ kind: 'written' });
+    const qs = stop();
+    const shares = ownerShareLocks(qs);
+    expect(shares).toHaveLength(1);
+    expect(shares[0].params).toContain('acme');
+    const transferLock = qs.findIndex((q) => /for update/i.test(q.sql) && /"transfers"/.test(q.sql));
+    expect(transferLock).toBeGreaterThanOrEqual(0);
+    expect(qs.indexOf(shares[0])).toBeGreaterThan(transferLock);
+    expect((await auditRows()).map((r) => r.action)).toEqual(['otp.verified', 'remittance.disclosure_ack']);
+    const stored = await createTransferRepo(db).getDisclosureSnapshot('tr_ev1', 'acme');
+    expect(stored).toMatchObject({ configHash: disclosure.hash, provider: { kind: 'configured', approved: true } });
+  });
+
+  it('mandatory: the snapshot is built from the LOCKED read, not the caller\'s object', async () => {
+    // The caller passes a disclosure that claims another hash; the locked read wins.
+    const callerCopy: ResolvedDisclosure = { ...disclosure, hash: `dh1:${'c'.repeat(64)}` };
+    const ev = testEvidence({ routeId: 'tr_ev1' });
+    expect(await commitPaymentEvidence(db, fixture(), ev, callerCopy, Date.now(), { mandatory: true })).toEqual({ kind: 'written' });
+    const stored = await createTransferRepo(db).getDisclosureSnapshot('tr_ev1', 'acme');
+    expect(stored?.configHash).toBe(disclosure.hash);
+  });
+
+  it('not mandatory, approval stripped -> written exactly as before (the caller\'s disclosure); no partner lock', async () => {
+    await stripApproval();
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
+    const stop = captureQueries();
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure)).toEqual({ kind: 'written' });
+    const qs = stop();
+    expect(ownerShareLocks(qs)).toEqual([]);
+    expect(qs.filter((q) => /"partners"/.test(q.sql))).toEqual([]);
+    const stored = await createTransferRepo(db).getDisclosureSnapshot('tr_ev1', 'acme');
+    expect(stored).toMatchObject({ provider: { approved: true } });
   });
 });
