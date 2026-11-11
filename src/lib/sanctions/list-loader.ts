@@ -55,6 +55,12 @@ export interface LoadDeps {
   minEntries?: number;
   /** Test seam: replaces the outbox enqueue of the failure alert. */
   enqueueAlert?: (message: string, dedupeKey: string) => Promise<void>;
+  /**
+   * Fix pack 5 T30 (P33): wraps ONLY the store step, so the cron can fetch
+   * several sources in parallel and store them one after another (one
+   * promise-chain mutex). Absent = the store runs directly (as before).
+   */
+  serialStore?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 /** YYYY-MM-DD in America/New_York — the same day boundary the cron alerts use. */
@@ -143,9 +149,11 @@ export async function runListLoad(
       throw err;
     }
     stage = 'store';
-    const res = await createSanctionsListRepo(deps.db).storeList(list, {
-      minEntries: deps.minEntries ?? def.minEntries,
-    });
+    const store = () =>
+      createSanctionsListRepo(deps.db).storeList(list, {
+        minEntries: deps.minEntries ?? def.minEntries,
+      });
+    const res = deps.serialStore ? await deps.serialStore(store) : await store();
     result = {
       status: res.status,
       version: res.version,

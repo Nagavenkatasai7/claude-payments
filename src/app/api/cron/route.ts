@@ -10,7 +10,10 @@ import { runDueSchedules } from '@/lib/cron-run';
 import { expireUnpaidLinks, expirePaymentLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { createPartnerReportRepo } from '@/db/repos/partner-report-repo';
-import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
+import { runListLoad, runOfacSdnLoad, type ListLoadDef, type LoadResult } from '@/lib/sanctions/list-loader';
+import { fetchOfacConsolidated, OFAC_CONS_MIN_ENTRIES } from '@/lib/sanctions/ofac-cons-loader';
+import { fetchUnScList, UN_SC_MIN_ENTRIES } from '@/lib/sanctions/un-sc-loader';
+import { SANCTIONS_SOURCES, type SanctionsSourceId } from '@/lib/sanctions/list-sets';
 import { checkSanctionsListHealth } from '@/lib/sanctions/list-health';
 import { archivePending, ARCHIVE_BUDGET_MS } from '@/lib/sanctions/list-archive';
 import { withTimeout } from '@/lib/health';
@@ -44,6 +47,42 @@ export const maxDuration = 300;
 // store or database never costs the poke.
 const CRON_TAIL_MS = 20_000;
 const ARCHIVE_GRACE_MS = 10_000;
+
+// Fix pack 5 (R08, P27): under SANCTIONS_LIST=lists, with the loader ON, the
+// daily run also loads OFAC consolidated (non-SDN) and the UN Security Council
+// list next to the SDN load. The three downloads run in parallel
+// (Promise.allSettled); each store waits its turn on ONE promise-chain mutex
+// (serialStore), so two list transactions never run at once. India MHA is
+// never fetched (platform staff upload it). Each load fails soft and the
+// response gains `sanctionsLists` (lists mode only; null for a throw). The
+// archive then runs once per source in SANCTIONS_SOURCES order, each with what
+// is left of the ONE original budget (a source is skipped once it is spent).
+// Outside 'lists' the SDN load, the single archive call and the response are
+// unchanged.
+const OFAC_CONS_DEF: ListLoadDef = {
+  source: 'ofac-cons',
+  label: 'OFAC consolidated (non-SDN)',
+  minEntries: OFAC_CONS_MIN_ENTRIES,
+  parseErrorPrefix: 'OFAC CONS:',
+  fetch: () => fetchOfacConsolidated(),
+};
+const UN_SC_DEF: ListLoadDef = {
+  source: 'un-sc',
+  label: 'UN Security Council',
+  minEntries: UN_SC_MIN_ENTRIES,
+  parseErrorPrefix: 'UN SC:',
+  fetch: () => fetchUnScList(),
+};
+
+/** One promise-chain mutex: each fn starts after the previous one settled. */
+function serialMutex(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = tail.then(fn, fn);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
 
 export async function GET(req: NextRequest) {
   const invocationStart = Date.now();
@@ -213,7 +252,29 @@ export async function GET(req: NextRequest) {
   // contract (it alerts ops through the outbox itself), and a throw anyway is
   // logged here. When OFF the response and the cron.run row are unchanged.
   let sanctionsList: string | null | undefined;
-  if (env.sanctionsLoaderEnabled) {
+  let sanctionsLists: Record<string, string | null> | undefined;
+  const listsMode = env.sanctionsList === 'lists';
+  if (env.sanctionsLoaderEnabled && listsMode) {
+    // Fix pack 5: fetch in parallel, store one after another (see the top).
+    const db = getDb();
+    const serialStore = serialMutex();
+    const loads: Array<[SanctionsSourceId, Promise<LoadResult>]> = [
+      ['ofac-sdn', runOfacSdnLoad({ db, serialStore })],
+      ['ofac-cons', runListLoad({ db, serialStore }, OFAC_CONS_DEF)],
+      ['un-sc', runListLoad({ db, serialStore }, UN_SC_DEF)],
+    ];
+    const settled = await Promise.allSettled(loads.map(([, p]) => p));
+    sanctionsLists = {};
+    settled.forEach((r, i) => {
+      const source = loads[i][0];
+      if (r.status === 'fulfilled') sanctionsLists![source] = r.value.status;
+      else {
+        sanctionsLists![source] = null;
+        logError('cron.sanctions-list', r.reason, { source });
+      }
+    });
+    sanctionsList = sanctionsLists['ofac-sdn'];
+  } else if (env.sanctionsLoaderEnabled) {
     try {
       sanctionsList = (await runOfacSdnLoad({ db: getDb() })).status;
     } catch (err) {
@@ -238,7 +299,20 @@ export async function GET(req: NextRequest) {
   // the health check, before the poke, time-boxed (see CRON_TAIL_MS). Fail-soft
   // (archivePending never throws by contract; a timeout is logged); no
   // response field. A run cut short is healed by the next one (idempotent).
-  if (env.sanctionsLoaderEnabled) {
+  if (env.sanctionsLoaderEnabled && listsMode) {
+    // Fix pack 5: every source, one overall deadline (today's budget).
+    const budgetMs = Math.max(0, Math.min(ARCHIVE_BUDGET_MS, invocationStart + maxDuration * 1000 - CRON_TAIL_MS - ARCHIVE_GRACE_MS - Date.now()));
+    const deadline = Date.now() + budgetMs;
+    for (const source of SANCTIONS_SOURCES) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      try {
+        await withTimeout(archivePending(getDb(), { source, budgetMs: remaining }), remaining + ARCHIVE_GRACE_MS);
+      } catch (err) {
+        logError('cron.sanctions-archive', err instanceof Error ? err.name : 'unknown', { source });
+      }
+    }
+  } else if (env.sanctionsLoaderEnabled) {
     const budgetMs = Math.max(0, Math.min(ARCHIVE_BUDGET_MS, invocationStart + maxDuration * 1000 - CRON_TAIL_MS - ARCHIVE_GRACE_MS - Date.now()));
     try {
       await withTimeout(archivePending(getDb(), { budgetMs }), budgetMs + ARCHIVE_GRACE_MS);
@@ -258,5 +332,6 @@ export async function GET(req: NextRequest) {
     expired,
     scrubbed,
     ...(sanctionsList !== undefined ? { sanctionsList } : {}),
+    ...(sanctionsLists !== undefined ? { sanctionsLists } : {}),
   });
 }

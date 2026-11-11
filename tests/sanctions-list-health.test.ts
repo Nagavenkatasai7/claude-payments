@@ -13,9 +13,10 @@ import {
   sanctionsListStatus,
 } from '@/lib/sanctions/list-health';
 import { easternDay } from '@/lib/sanctions/list-loader';
-import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import { setListSourceForTests, setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import { SANCTIONS_SOURCES, type SanctionsSourceId } from '@/lib/sanctions/list-sets';
 import { WATCHLIST } from '@/lib/compliance-config';
-import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { LIST_SET_NAMES, listSetList, primeListSet, primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 
 // Fix pack 2 T2 (R02): the sanctions list health check. The daily cron (and the
 // mint, through the same dedupe key) raises ONE ops.alert per Eastern day when
@@ -190,5 +191,151 @@ describe('sanctions list health (fix pack 2 R02)', () => {
       checkedAt: () => { throw new Error('boom'); },
     });
     expect(await sanctionsListFitnessNow(new Date())).toBe('not_live');
+  });
+});
+
+// Fix pack 5 T30 (R08, P27): under SANCTIONS_LIST=lists the fitness, the
+// read-only status and the daily alert judge the WHOLE floor set (all four
+// lists when no destination). Outside lists nothing changes.
+describe('sanctions list health over the list set (fix pack 5 T30)', () => {
+  let db: Db;
+  const original = process.env.SANCTIONS_LIST;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+  afterEach(() => {
+    restoreOfacSource(original);
+    vi.restoreAllMocks();
+  });
+
+  /** Store every source's list and set each checked_at relative to now. */
+  async function loadSet(ago: Partial<Record<SanctionsSourceId, number>> = {}, skip: SanctionsSourceId[] = []) {
+    const repo = createSanctionsListRepo(db);
+    for (const source of SANCTIONS_SOURCES) {
+      if (skip.includes(source)) continue;
+      await repo.storeList(listSetList(source));
+      await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = ${new Date(Date.now() - (ago[source] ?? HOUR))}
+        WHERE source = ${source}`);
+    }
+  }
+
+  it('sanctionsListFitnessNow under lists: every floor list live -> live; MHA 9 days -> stale; un-sc never loaded -> not_live; one servedListInfo throws -> not_live', async () => {
+    primeListSet({});
+    expect(await sanctionsListFitnessNow(new Date())).toBe('live');
+    primeListSet({ checkedAgoMs: { 'in-mha-uapa': 9 * 24 * HOUR } });
+    expect(await sanctionsListFitnessNow(new Date())).toBe('stale');
+    primeListSet({ missing: ['un-sc'] });
+    expect(await sanctionsListFitnessNow(new Date())).toBe('not_live');
+    primeListSet({});
+    setListSourceForTests('ofac-cons', { load: async () => LIST, checkedAt: () => { throw new Error('boom'); } });
+    expect(await sanctionsListFitnessNow(new Date())).toBe('not_live');
+  });
+
+  it('sanctionsListStatus under lists: set fitness from the DB rows, four members in SANCTIONS_SOURCES order, top-level fields keep the ofac-sdn values', async () => {
+    process.env.SANCTIONS_LIST = 'lists';
+    await setRail(db, 'acme', 'http');
+    const empty = await sanctionsListStatus(db, new Date());
+    expect(empty).toEqual({
+      listSetting: 'lists', version: null, checkedAt: null, entryCount: null, fitness: 'not_live', httpPartners: 1,
+      members: SANCTIONS_SOURCES.map((source) => ({ source, version: null, checkedAt: null, entryCount: null, fitness: 'not_live' })),
+    });
+
+    await loadSet({ 'ofac-sdn': 2 * HOUR });
+    const s = await sanctionsListStatus(db, new Date());
+    expect(s.fitness).toBe('live');
+    expect(s).toMatchObject({ listSetting: 'lists', version: LIST.version, entryCount: LIST.entries.length, httpPartners: 1 });
+    expect(Math.round((Date.now() - Date.parse(s.checkedAt!)) / HOUR)).toBe(2);
+    expect(s.members!.map((m) => m.source)).toEqual([...SANCTIONS_SOURCES]);
+    for (const m of s.members!) {
+      const list = listSetList(m.source);
+      expect(m).toMatchObject({ version: list.version, entryCount: list.entries.length, fitness: 'live' });
+      expect(typeof m.checkedAt).toBe('string');
+    }
+
+    // MHA 9 days old -> that member stale, and the set stale.
+    await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = ${new Date(Date.now() - 9 * 24 * HOUR)} WHERE source = 'in-mha-uapa'`);
+    const stale = await sanctionsListStatus(db, new Date());
+    expect(stale.fitness).toBe('stale');
+    expect(stale.members!.find((m) => m.source === 'in-mha-uapa')!.fitness).toBe('stale');
+    expect(stale.members!.find((m) => m.source === 'ofac-sdn')!.fitness).toBe('live');
+  });
+
+  it('a member whose stored entries miss its entry_count is not_live, and so is the set', async () => {
+    process.env.SANCTIONS_LIST = 'lists';
+    await loadSet();
+    await db.execute(sql`DELETE FROM sanctions_list_entries WHERE entry_id = 'unsc:1'`);
+    const s = await sanctionsListStatus(db, new Date());
+    expect(s.members!.find((m) => m.source === 'un-sc')).toMatchObject({ fitness: 'not_live', entryCount: 1 });
+    expect(s.members!.find((m) => m.source === 'ofac-cons')!.fitness).toBe('live');
+    expect(s.fitness).toBe('not_live');
+  });
+
+  it('one source never loaded -> that member null and not_live, the set not_live', async () => {
+    process.env.SANCTIONS_LIST = 'lists';
+    await loadSet({}, ['ofac-cons']);
+    const s = await sanctionsListStatus(db, new Date());
+    expect(s.members!.find((m) => m.source === 'ofac-cons')).toEqual({
+      source: 'ofac-cons', version: null, checkedAt: null, entryCount: null, fitness: 'not_live',
+    });
+    expect(s.fitness).toBe('not_live');
+  });
+
+  it('outside lists: members is absent and every field equals today\'s', async () => {
+    await setRail(db, 'acme', 'http');
+    await loadSet();
+    for (const setting of [undefined, 'mock', 'ofac-sdn']) {
+      if (setting === undefined) delete process.env.SANCTIONS_LIST;
+      else process.env.SANCTIONS_LIST = setting;
+      const s = await sanctionsListStatus(db, new Date());
+      expect('members' in s).toBe(false);
+      expect(Object.keys(s)).toEqual(['listSetting', 'version', 'checkedAt', 'entryCount', 'fitness', 'httpPartners']);
+      expect(s.fitness).toBe(setting === 'ofac-sdn' ? 'live' : 'not_live');
+    }
+  });
+
+  it('checkSanctionsListHealth under lists alerts once per day on the same key with the lists text; no names', async () => {
+    process.env.SANCTIONS_LIST = 'lists';
+    await setRail(db, 'acme', 'http');
+    await loadSet({ 'in-mha-uapa': 9 * 24 * HOUR }, ['un-sc']);
+    const now = new Date();
+    expect(await checkSanctionsListHealth(db, now)).toEqual({ alerted: true });
+    expect(await checkSanctionsListHealth(db, now)).toEqual({ alerted: false });
+    const rows = await alertRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toBe(listNotLiveDedupeKey(now));
+    expect(Object.keys(rows[0].payload)).toEqual(['message']);
+    const msg = String(rows[0].payload.message);
+    expect(msg).toBe(
+      `⚠️ SmartRemit ops: the sanctions list set is not live (not_live; setting lists; ` +
+        `ofac-sdn ${LIST.version} checked 1 h ago, ofac-cons 2026-10-01 checked 1 h ago, ` +
+        `un-sc none checked never, in-mha-uapa 2026-10-01 checked 216 h ago). ` +
+        `1 partner(s) on a real-money rail hold every new transfer until every list is live. ` +
+        `Check the sanctions lists page and the loader.`,
+    );
+    const lower = msg.toLowerCase();
+    for (const name of [...WATCHLIST, ...LIST.entries.flatMap((e) => e.names), ...Object.values(LIST_SET_NAMES)]) {
+      expect(lower).not.toContain(name.toLowerCase());
+    }
+  });
+
+  it('under lists a live set raises nothing', async () => {
+    process.env.SANCTIONS_LIST = 'lists';
+    await setRail(db, 'acme', 'http');
+    await loadSet();
+    expect(await checkSanctionsListHealth(db, new Date())).toEqual({ alerted: false });
+    expect(await alertRows(db)).toEqual([]);
+  });
+
+  it('the ofac-sdn text is unchanged outside lists', async () => {
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await setRail(db, 'acme', 'http');
+    await loadList(db, 40 * HOUR);
+    await checkSanctionsListHealth(db, new Date());
+    expect(String((await alertRows(db))[0].payload.message)).toBe(
+      `⚠️ SmartRemit ops: the sanctions list is not live (stale; setting ofac-sdn; ` +
+        `OFAC SDN version ${LIST.version}, last checked 40 h ago). ` +
+        `1 partner(s) on a real-money rail hold every new transfer until it is. ` +
+        `Check the sanctions list card on the compliance page and the loader.`,
+    );
   });
 });

@@ -244,6 +244,28 @@ describe('runListLoad', () => {
     expect(await createSanctionsListRepo(db).activeVersion('un-sc')).toBeNull();
   });
 
+  // Pack 5 T30 (P33): the cron's store mutex wraps ONLY the store step; the
+  // fetch runs before it. Absent = direct (every other caller unchanged).
+  it('pack 5 T30: serialStore wraps only the store step (fetch outside it); runOfacSdnLoad passes it through', async () => {
+    const steps: string[] = [];
+    const serialStore = async <T,>(fn: () => Promise<T>): Promise<T> => {
+      steps.push('enter');
+      const r = await fn();
+      steps.push('leave');
+      return r;
+    };
+    const res = await runListLoad({ db, now: NOW, serialStore }, def(async () => { steps.push('fetch'); return stubList(); }));
+    expect(res.status).toBe('activated');
+    expect(steps).toEqual(['fetch', 'enter', 'leave']);
+    // A failed fetch never takes the store lock.
+    steps.length = 0;
+    await runListLoad({ db, now: NOW, serialStore }, def(async () => { steps.push('fetch'); throw new Error('x'); }));
+    expect(steps).toEqual(['fetch']);
+    steps.length = 0;
+    expect((await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW, serialStore })).status).toBe('activated');
+    expect(steps).toEqual(['enter', 'leave']);
+  });
+
   it('two sources failing on one day -> two alerts (keys differ)', async () => {
     await runListLoad({ db, now: NOW }, def(async () => { throw new Error('x'); }));
     await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: failFetch(503), now: NOW });

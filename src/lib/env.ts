@@ -321,6 +321,14 @@ export const env = {
     // 'ofac-sdn' ⇒ the OFAC SDN list loaded into Postgres by the daily loader
     // (PR C; fails closed to review while no version is loaded); anything else
     // ⇒ the mock plus a warning. Optional; unset in prod.
+    // Fix pack 5 (R08): 'lists' ⇒ every list of the code floor (list-sets.ts):
+    // OFAC SDN and OFAC consolidated for every corridor, plus UN SC and India
+    // MHA UAPA for India (all four when there is no destination); a missing or
+    // stale required list holds real-money transfers. The loader fetches OFAC
+    // consolidated and UN SC only under 'lists'; MHA is uploaded by platform
+    // staff. Set it only after a live load on a preview (owner step). Before an
+    // Instant Rollback past fix pack 5 set it back to 'ofac-sdn': an older
+    // build screens 'lists' with the mock.
     return (process.env.SANCTIONS_LIST ?? '').trim().toLowerCase();
   },
   get sanctionsLoaderEnabled(): boolean {
@@ -329,6 +337,9 @@ export const env = {
     // changed. OFF by default (unset in prod until the owner flips it). It
     // loads the list only; it never turns screening on or off. Optional, NOT in
     // boot-assert.
+    // Fix pack 5 (R08): with SANCTIONS_LIST=lists it also loads OFAC
+    // consolidated and UN SC (downloads in parallel, stores one at a time) and
+    // archives every source; never MHA (uploaded by platform staff).
     const v = (process.env.SANCTIONS_LOADER_ENABLED ?? '').trim().toLowerCase();
     return v === '1' || v === 'true';
   },

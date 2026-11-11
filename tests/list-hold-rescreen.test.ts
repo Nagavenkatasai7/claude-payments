@@ -24,7 +24,7 @@ import {
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
-import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
+import { primeListSet, primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
 
 // The worker poke, observed (the real one schedules via next/server after()).
 const poke = vi.hoisted(() => ({ calls: 0 }));
@@ -62,7 +62,7 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
-import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 
 const H = 3_600_000;
 const SENDER_PHONE = '15551230000';
@@ -617,5 +617,36 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     const qs = stop();
     expect(qs).toHaveLength(1);
     expect(fitnessReads.n).toBe(0);
+  });
+});
+
+// Fix pack 5 T30 (R08, P27): under SANCTIONS_LIST=lists the sweep and the paid
+// heal judge the WHOLE floor set. A stale MHA list makes every real-money row
+// wait, India-bound or not (accepted over-hold, index.md Known limits).
+describe('the list-hold sweep and the paid heal under lists (fix pack 5 T30)', { retry: 0 }, () => {
+  it('under lists with a stale MHA list the sweep runs demo-only for every row (IN and non-IN) and the paid heal skips', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_in' });
+    await heldRow({ id: 'lh_mx', destinationCountry: 'MX', destinationCurrency: 'MXN' } as Partial<Transfer> & { id: string });
+    primeListSet({ checkedAgoMs: { 'in-mha-uapa': 9 * 24 * H } });
+    const au = await auditRows();
+    const ob = await outbox();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(fitnessReads.n).toBe(1);
+    for (const id of ['lh_in', 'lh_mx']) {
+      const after = await store.getTransfer(id);
+      expect(after?.status).toBe('in_review');
+      expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    }
+    expect(await auditRows()).toEqual(au);
+    expect(await outbox()).toEqual(ob);
+
+    // The paid heal: the set is not live, so it does not screen.
+    const paid = base({ id: 'lh_paid', status: 'paid', paidAt: new Date().toISOString() });
+    await store.saveTransfer(paid);
+    expect(await healPaidRowScreen(db, paid, new Date(), { prechecked: true })).toBe('skipped');
+    expect(fitnessReads.n).toBe(2);
+    expect(await auditRows()).toEqual(au);
+    // (A release under lists needs the set fitness inside screenTransfer: T29.)
   });
 });
