@@ -17,7 +17,8 @@ import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
+import { payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, payTemporarilyUnavailable, transferFunded } from '@/lib/pay-not-available';
+import { payEsignGate } from '@/lib/pay-esign-gate';
 import { parsePayBody } from '@/lib/pay-body';
 import { readPayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
@@ -262,6 +263,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     }
     const hasOriginator = originator.address !== undefined || originator.dateOfBirth !== undefined;
 
+    // Fix pack 6 (R46, P5, P7 link order): the E-SIGN consent, after the
+    // originator rule and still BEFORE the code is checked: no code is spent
+    // and nothing is written by its answers (never at request_otp, P0 rule 12).
+    // The customer is the link's OWNER (link.partnerId, link.customerPhone);
+    // links are never exempt. A link payer with no customers row yet (it is
+    // created by ensureCustomer inside finalizeLinkPayment) reads as "needed";
+    // the row exists by the time processTransferPayment commits the evidence.
+    const esign = await payEsignGate(db, { ownerId: link.partnerId, phone, exempt: false, body });
+    if (esign.kind === 'reload_required') return payReloadRequired(linkFunded);
+    if (esign.kind === 'unavailable') return payTemporarilyUnavailable();
+
     const otpCheck = await otpStore.verify(otpKey(link.id), phone, body.otp);
     if (!otpCheck.ok) {
       return NextResponse.json(
@@ -282,6 +294,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       disclosureSnapshot: acked
         ? { surface: 'link', version: acked, shownHash: body.disclosureHash, acknowledgedAt: evidenceAt }
         : null,
+      // Fix pack 6 (P6): the consent the page posted, recorded by the evidence
+      // commit in the same transaction as otp.verified (fail closed).
+      ...(esign.kind === 'consent' ? { esignConsent: { version: esign.version, routeId: link.id } } : {}),
     };
 
     const minted = await finalizeLinkPayment(
@@ -355,10 +370,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     logError('paylink.route', err instanceof Error ? err.name : 'error', {});
     // Review R2-Q1 B4: a failed single-use code consume is retryable whatever its shape.
     if (isInfraError(err) || isOtpConsumeFailure(err)) {
-      return NextResponse.json(
-        { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
-        { status: 503 },
-      );
+      return payTemporarilyUnavailable();
     }
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
