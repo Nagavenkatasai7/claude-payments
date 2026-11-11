@@ -656,6 +656,21 @@ export function createOutboxRepo(db: DbOrTx) {
     },
 
     /**
+     * Fix pack 5 final check R3 (F8-D2): true while a settlement.instruct row for this transfer is
+     * RUNNING right now (status 'processing', whatever its lease): it may have read the row before a
+     * refund went pending and be about to record and POST. A row that is queued or backing off
+     * ('pending' / 'failed') is not counted: its next run reads the refund and skips. Ids only.
+     */
+    async hasRunningInstruction(transferId: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(sql`${outbox.kind} = 'settlement.instruct' AND ${outbox.status} = 'processing' AND (${outbox.payload} ->> 'transferId') = ${transferId}`)
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
      * Pack 2 review round 3 (K1): true when ANY settlement.instruct row for this transfer (the
      * first `instruct:` or the recovery `reinstruct:`) was claimed at least once (attempts > 0) or
      * finished (status 'done'): the rail has, or may have, the instruction. A POST that timed out

@@ -429,7 +429,9 @@ describe('sanctions screening spec says what pack 5 does', () => {
     // a routed one cannot be refunded here.
     for (const k of [
       'its `fundmode:<id>`, `travelrule:<id>` and `fundmode:stuck:<id>` / `travelrule:stuck:<id>` alerts name instead',
-      'For a partner-collected row (final check F8) held at either step, Issue refund sends no reverse (the rail never got the transfer): the refund stays `pending` with one `refundheld:<id>` alert',
+      'For a partner-collected row (final check F8) held at either step before its first instruction, Issue refund sends no reverse (the rail never got the transfer): the refund stays `pending` with one `refundheld:<id>` alert',
+      // Final check R3 (F8-D1): a row held again on the stuck-paid re-instruct after an earlier send gets the signed reverse.
+      'a row held again on the stuck-paid re-instruct after an earlier instruction reached the rail gets the signed reverse instead',
       'a routed partner-collected row cannot be refunded from SmartRemit, so its texts do not offer Issue refund',
     ]) {
       expect(rest, k).toContain(k);

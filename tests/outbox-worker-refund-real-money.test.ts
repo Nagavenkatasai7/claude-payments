@@ -568,6 +568,47 @@ describe('funding.refund: a partner-collected row held before its first instruct
     await expectHeldPending();
   });
 
+  // Final check R3 (F8-D2): Issue refund is admitted while the row's instruct
+  // may be RUNNING (it read the row before the refund went pending and may be
+  // about to record and POST the payout). The refund must not decide "never
+  // instructed" then: it waits (retry) until no instruct row is processing,
+  // and only then reads the settle record.
+  it('an instruct row still PROCESSING: the refund waits (failed, retry), no refundheld:; once the instruct is done with no record, refundheld:<id>', async () => {
+    await heldRow();
+    await db.execute(
+      sql`UPDATE outbox SET status = 'processing', lease_until = now() + interval '10 minutes', locked_at = now() WHERE dedupe_key = ${`instruct:${HID}`}`,
+    );
+    await issueRefund(db, HID);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`]);
+    expect((await refundRow()).last_error).toBe('refund_waits_for_running_instruct');
+
+    // The instruct finishes without a record (held again, or not payable).
+    await db.execute(sql`UPDATE outbox SET status = 'done', lease_until = NULL WHERE dedupe_key = ${`instruct:${HID}`}`);
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'funding.refund'`);
+    await drainOnce(deps(), 'w1');
+    await expectHeldPending();
+  });
+
+  it('an instruct row still PROCESSING that then records and sends the payout: the refund waits, then sends the signed reverse (never refundheld:)', async () => {
+    await heldRow();
+    await db.execute(
+      sql`UPDATE outbox SET status = 'processing', lease_until = now() + interval '10 minutes', locked_at = now() WHERE dedupe_key = ${`instruct:${HID}`}`,
+    );
+    await issueRefund(db, HID);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    // The running instruct records its settle and POSTs, then finishes.
+    await seedSettle({ id: HID });
+    await db.execute(sql`UPDATE outbox SET status = 'done', lease_until = NULL WHERE dedupe_key = ${`instruct:${HID}`}`);
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'funding.refund'`);
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('completed');
+    expect((await alertKeys()).filter((k) => k.startsWith('refundheld:'))).toEqual([]);
+  });
+
   it('a row paid after the go-live WITH a live settle record still gets its signed reverse (no refundheld:)', async () => {
     await paidRealMoneyTransfer(db, { id: HID });
     await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 5_000).toISOString()} WHERE id = ${HID}`);

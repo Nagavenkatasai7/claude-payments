@@ -80,7 +80,7 @@ const travelRuleHead = (id: string, rail: string) =>
   `transfer ${id} (rail ${rail}) is paid but was not instructed: the travel rule needs the sender's address or date of birth, which is not on file or cannot go to a routed rail. It waits and is checked every 15 minutes. `;
 const travelRulePcText = (id: string, rail: string) =>
   travelRuleHead(id, rail) +
-  "Stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): no reverse is sent, because the rail never got this transfer; the refund stays pending and a person arranges the return of the sender's money with the partner.";
+  "Stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if an earlier instruction reached the rail after it went live, the signed reverse goes to the rail.";
 const travelRuleRoutedText = (id: string, rail: string) =>
   travelRuleHead(id, rail) +
   "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.";

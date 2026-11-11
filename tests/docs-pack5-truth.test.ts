@@ -414,6 +414,12 @@ describe('pack 5 documents say what the code does', () => {
     expect([...pcRow!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
     expectQuotedInSrc(pcRow!, src, 'partner-collected');
     expect(pcRow!).toContain('`refundheld:<id>`');
+    // Final check R3 (F8-D1): the rail may have got the transfer before (a row held again on the stuck-paid
+    // re-instruct), so the worker texts and the Meaning cell never state as fact that it did not.
+    expect(pcRow!).not.toContain('no reverse is sent, because the rail never got this transfer');
+    expect(pcRow!).toContain("if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if an earlier instruction reached the rail after it went live, the signed reverse goes to the rail.");
+    expect(pcRow!).toContain('held again on the stuck-paid re-instruct');
+    expect(pcRow!).not.toContain('and the row was held before its first instruction, so the rail has nothing to reverse');
     const pcStuck = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a partner-collected row'));
     expect(pcStuck, 'the partner-collected stuck row').toBeDefined();
     expect([...pcStuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
@@ -509,14 +515,20 @@ describe('pack 5 documents say what the code does', () => {
   it('funding.mdx Refunds: no reverse for a transfer never sent to the rail, and a partner_psp card payment is refunded in the partner\'s own Stripe dashboard (final check F9, U2)', () => {
     const refunds = section(FUNDING, '## Refunds');
     expect(refunds).toContain('For a transfer that was never sent to your rail, that was settled before you went live, or that another partner pays out, no reverse is sent and SmartRemit staff arrange the return with you.');
-    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. The transfer then stays paid and held in SmartRemit until a later release can record that refund.');
+    // Final check R3 (F9-D1): SmartRemit records no Stripe-dashboard refund, so only a transfer with an open
+    // refund request is held; any other unpaid-out transfer can still be paid out.
+    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. SmartRemit does not record that refund: a transfer with an open refund request stays paid and is not paid out, but any other transfer that has not been paid out yet can still be paid out, so ask SmartRemit staff before you refund it.');
+    expect(refunds).not.toContain('The transfer then stays paid and held in SmartRemit');
     expect(FUNDING).not.toContain('is refunded through Stripe');
   });
 
   it('spec: the fundrefund:<id> row names the true exits, not a Stripe refund (final check F9, U3)', () => {
     const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `fundrefund:<id>`'));
     expect(row).toBeDefined();
-    expect(row!).toContain("A refund completes here only on the partner's signed reverse. A card payment is refunded in the partner's Stripe dashboard and is not recorded here; a partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>).");
+    // Final check R3 (F9-D2): the worker also closes a refund with nothing collected as nofunds-<id>.
+    expect(row!).toContain("A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>).");
+    expect(row!).not.toContain("A refund completes here only on the partner's signed reverse.");
+    expect(row!).not.toContain('Only the partner\'s signed reverse completes it');
     expect(row!).not.toContain('the Stripe refund completes');
     expectQuotedInSrc(row!, srcText(), 'fundrefund');
   });

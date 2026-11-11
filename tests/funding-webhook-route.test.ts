@@ -342,8 +342,9 @@ describe('pack 5 (T13a): no mock confirmation or refund on real money', () => {
     expect(a[0].payload.message).toBe(
       '⚠️ SmartRemit ops: a funding "refunded" callback for transfer rf1 (partner acme) was refused: ' +
         'its rail moves real money, and the generic funding webhook cannot confirm a real refund. The refund stays pending; ' +
-        "A refund completes here only on the partner's signed reverse. A card payment is refunded in the partner's Stripe dashboard and is not recorded here; " +
-        'a partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>). Check the payment provider and the partner before acting.',
+        "A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). " +
+        "A card payment is refunded in the partner's Stripe dashboard and is not recorded here; " +
+        'any other partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>). Check the payment provider and the partner before acting.',
     );
     expect(a[0].payload.message).not.toContain('the Stripe refund completes');
 
