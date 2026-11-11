@@ -1,0 +1,128 @@
+import { describe, it, expect } from 'vitest';
+import {
+  DOB_DESTINATIONS,
+  LIMIT_NEEDS_ADDRESS_COPY,
+  TRAVEL_RULE_DOB_FROM_USD,
+  TRAVEL_RULE_FULL_FROM_USD,
+  limitRaiseNeedsAddress,
+  originatorDataMissing,
+  travelRuleRequirement,
+  validateSenderAddress,
+  validateSenderDob,
+} from '@/lib/travel-rule';
+import { PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
+import type { CountryCode } from '@/lib/types';
+
+// Fix pack 5 (R38, P18): the travel-rule bands and the originator validators.
+// Every date is built from Date.now(); no calendar literal touches a window.
+
+const ADDRESS = { band: 'address', address: true, dateOfBirth: false } as const;
+const FULL = { band: 'address_dob', address: true, dateOfBirth: true } as const;
+
+/** YYYY-MM-DD (UTC) of `now` moved by whole years, then by `days`. */
+function ymd(now: Date, years: number, days = 0): string {
+  const d = new Date(now.getTime());
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+describe('travel-rule constants pinned', () => {
+  it('bands, the 14 DOB destinations (frozen), the limit copy and the platform cap it sits on', () => {
+    expect(TRAVEL_RULE_DOB_FROM_USD).toBe(1000);
+    expect(TRAVEL_RULE_FULL_FROM_USD).toBe(3000);
+    expect(Object.isFrozen(DOB_DESTINATIONS)).toBe(true);
+    expect([...DOB_DESTINATIONS]).toEqual(['DE', 'FR', 'NL', 'IE', 'IT', 'ES', 'AT', 'BE', 'GB', 'CA', 'AU', 'SG', 'NZ', 'HK']);
+    expect(LIMIT_NEEDS_ADDRESS_COPY).toBe("Capture the sender's address first: limits above $2,999 need it on file.");
+    expect(PLATFORM_SEND_LIMITS.perTransferCapCents).toBe(299_900);
+  });
+});
+
+describe('travelRuleRequirement boundaries', () => {
+  const table: [CountryCode | null | undefined, number, typeof ADDRESS | typeof FULL][] = [
+    ['IN', 0.01, ADDRESS], ['IN', 999.99, ADDRESS], ['IN', 1000, ADDRESS], ['IN', 2999.99, ADDRESS],
+    ['IN', 3000, FULL], ['IN', 5000, FULL],
+    ['GB', 999.99, ADDRESS], ['GB', 1000, FULL],
+    ['DE', 999.99, ADDRESS], ['DE', 1000, FULL],
+    ['CA', 999.99, ADDRESS], ['CA', 1000, FULL],
+    ['MX', 2999.99, ADDRESS], ['MX', 3000, FULL],
+    ['AE', 2999.99, ADDRESS], ['AE', 3000, FULL],
+    ['US', 2999.99, ADDRESS], ['US', 3000, FULL],
+    [null, 1000, ADDRESS], [null, 3000, FULL],
+    [undefined, 1000, ADDRESS], [undefined, 3000, FULL],
+  ];
+  it.each(table)('%s at %s', (destinationCountry, amountUsd, want) => {
+    expect(travelRuleRequirement({ destinationCountry, amountUsd })).toEqual(want);
+  });
+
+  it('a NaN, infinite or negative amount asks the address only and never throws', () => {
+    for (const amountUsd of [NaN, -1, -5000, Infinity, -Infinity]) {
+      expect(travelRuleRequirement({ destinationCountry: 'GB', amountUsd }), String(amountUsd)).toEqual(ADDRESS);
+    }
+  });
+});
+
+describe('originatorDataMissing', () => {
+  it('address required and not on file; DOB required and missing; both on file; DOB not required', () => {
+    expect(originatorDataMissing(ADDRESS, { address: false, dateOfBirth: true })).toBe(true);
+    expect(originatorDataMissing(FULL, { address: true, dateOfBirth: false })).toBe(true);
+    expect(originatorDataMissing(FULL, { address: true, dateOfBirth: true })).toBe(false);
+    expect(originatorDataMissing(ADDRESS, { address: true, dateOfBirth: false })).toBe(false);
+  });
+});
+
+describe('limitRaiseNeedsAddress', () => {
+  it('only above the $2,999 platform cap, on a real-money owner, with no address on file', () => {
+    expect(limitRaiseNeedsAddress({ perTransferCapCents: 299_900, ownerRealMoney: true, addressOnFile: false })).toBe(false);
+    expect(limitRaiseNeedsAddress({ perTransferCapCents: 299_901, ownerRealMoney: true, addressOnFile: false })).toBe(true);
+    expect(limitRaiseNeedsAddress({ perTransferCapCents: 299_901, ownerRealMoney: true, addressOnFile: true })).toBe(false);
+    expect(limitRaiseNeedsAddress({ perTransferCapCents: 299_901, ownerRealMoney: false, addressOnFile: false })).toBe(false);
+  });
+});
+
+describe('validateSenderAddress', () => {
+  it('trims and accepts 5..300 printable one-line characters with no web address', () => {
+    expect(validateSenderAddress('  1 Test Street, Testville  ')).toEqual({ ok: true, value: '1 Test Street, Testville' });
+    expect(validateSenderAddress('a'.repeat(300))).toEqual({ ok: true, value: 'a'.repeat(300) });
+    expect(validateSenderAddress('1 Tst')).toEqual({ ok: true, value: '1 Tst' });
+  });
+
+  it('refuses empty, blank, too short, too long, a line break, a tab, a zero-width character, a web address and a non-string', () => {
+    const bad: unknown[] = [
+      '', '    ', 'abcd', 'a'.repeat(301), '1 Test Street\nTestville', '1 Test\tStreet',
+      '1 Test​Street', 'see www.example.com', 'https://x.test', 42, null, undefined, {},
+    ];
+    for (const v of bad) {
+      expect(validateSenderAddress(v as string), JSON.stringify(v)).toEqual({ ok: false });
+    }
+  });
+});
+
+describe('validateSenderDob', () => {
+  const now = new Date(Date.now());
+
+  it('accepts exactly 18 and exactly 120 years old at now (UTC)', () => {
+    const at18 = ymd(now, -18);
+    const at120 = ymd(now, -120);
+    expect(validateSenderDob(at18, now)).toEqual({ ok: true, value: at18 });
+    expect(validateSenderDob(at120, now)).toEqual({ ok: true, value: at120 });
+    expect(validateSenderDob(ymd(now, -40), now)).toEqual({ ok: true, value: ymd(now, -40) });
+  });
+
+  it('refuses 17 years 364 days, 121 years, an impossible date, loose formats, padding and a non-string', () => {
+    const bad: unknown[] = [
+      ymd(now, -18, 1), // 17 years and 364 (or 365) days
+      ymd(now, -121),
+      ymd(now, -121, -1),
+      ymd(now, 1),
+      '2020-02-30', '2000-1-01', '01/02/1990', ' 1990-01-02 ', '1990-01-02T00:00:00Z', 19900102, null, undefined,
+    ];
+    for (const v of bad) {
+      expect(validateSenderDob(v as string, now), JSON.stringify(v)).toEqual({ ok: false });
+    }
+  });
+
+  it('a now that is not a valid date refuses every value', () => {
+    expect(validateSenderDob(ymd(new Date(Date.now()), -40), new Date(NaN))).toEqual({ ok: false });
+  });
+});

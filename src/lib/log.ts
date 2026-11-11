@@ -10,8 +10,25 @@
 import { redactSensitive } from './inbound-redact';
 import { driverErrorText, isDriverError, isQueryError, queryErrorText, stripQueryParams } from './db-error';
 
-/** JSON.stringify replacer: a query or driver error inside an object becomes its fixed description. */
-function nestedQueryErrors(_key: string, v: unknown): unknown {
+// fix pack 5 (D8, P18): the travel-rule originator values (the sender's
+// address and date of birth). A backstop, the code never logs them (static
+// guard tests/originator-no-log.test.ts): a non-null value under one of these
+// keys is written '<redacted>' in an object, in JSON text and as a top-level
+// log field. The text rule reads a JSON string value whole, escapes included,
+// and also a value the 8 KB cap cut before its closing quote. It runs on the
+// capped text (bounded work, Program-Fix 47) before every other rule.
+const ORIGINATOR_KEYS: ReadonlySet<string> = new Set([
+  'address', 'date_of_birth', 'senderAddress', 'senderDob', 'residentialAddress', 'dateOfBirth',
+]);
+const ORIGINATOR_JSON =
+  /"(address|date_of_birth|senderAddress|senderDob|residentialAddress|dateOfBirth)"\s*:\s*"(?:[^"\\]|\\.)*(?:"|$)/g;
+
+/**
+ * JSON.stringify replacer: an originator value becomes '<redacted>'; a query
+ * or driver error inside an object becomes its fixed description.
+ */
+function nestedQueryErrors(key: string, v: unknown): unknown {
+  if (ORIGINATOR_KEYS.has(key) && v !== null && v !== undefined) return '<redacted>';
   return isQueryError(v) ? queryErrorText(v) : isDriverError(v) ? driverErrorText(v) : v;
 }
 
@@ -66,9 +83,10 @@ export function scrub(value: unknown): string {
           ? stripQueryParams(`${value.name}: ${value.message}`)
           : stripQueryParams(JSON.stringify(value, nestedQueryErrors) ?? String(value));
   const capped = capInput(s);
+  const unoriginated = capped.text.replace(ORIGINATOR_JSON, '"$1":"<redacted>"');
   // The URL-credentials rule runs FIRST (2026-11-09 DATABASE_URL leak), on the
   // raw text: a later mask must not break a password into parts it cannot see.
-  const text = capped.cut ? capped.text.replace(URL_CUT_TAIL, '$1<redacted>') : capped.text;
+  const text = capped.cut ? unoriginated.replace(URL_CUT_TAIL, '$1<redacted>') : unoriginated;
   const out = redactSensitive(text.replace(URL_USERINFO, '$1<redacted>@'))
     .text.replace(EMAIL, '<email>')
     .replace(/\d{7,}/g, (m) => `…${m.slice(-4)}`);
@@ -129,7 +147,11 @@ function emit(level: 'error' | 'warn', scope: string, message: unknown, fields?:
     msg: scrub(message),
     at: new Date().toISOString(),
   };
-  for (const [k, v] of Object.entries(fields ?? {})) line[k] = scrub(v);
+  // fix pack 5 (D8, P18): a top-level field is scrubbed by value, so its key is
+  // checked here (an originator value never reaches the line).
+  for (const [k, v] of Object.entries(fields ?? {})) {
+    line[k] = ORIGINATOR_KEYS.has(k) && v != null ? '<redacted>' : scrub(v);
+  }
   // One JSON line per event — greppable in Vercel logs, parseable by a drain.
   (level === 'error' ? console.error : console.warn)(JSON.stringify(line));
 }

@@ -10,8 +10,9 @@ describe('parsePayBody', () => {
       for (const surface of ['transfer', 'link', 'b2b'] as const) {
         expect(parsePayBody(raw, surface), `${JSON.stringify(raw)} ${surface}`).toEqual({
           action: null, otp: '', disclosureVersion: null, disclosureHash: null, accountHolder: null,
+          senderAddress: null, senderDob: null,
           country: null, fields: null, ach: null, fundingMethod: null, quoteLockedAt: null,
-          present: { disclosureVersion: false, disclosureHash: false, accountHolder: false },
+          present: { disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false },
         });
       }
     }
@@ -56,8 +57,8 @@ describe('parsePayBody', () => {
     }, 'b2b');
     expect(p).toEqual({
       action: null, otp: '', country: 'IN', fields: { a: 'b' }, ach: null, disclosureVersion: null, disclosureHash: null,
-      accountHolder: null, fundingMethod: null, quoteLockedAt: null,
-      present: { disclosureVersion: false, disclosureHash: false, accountHolder: false },
+      accountHolder: null, senderAddress: null, senderDob: null, fundingMethod: null, quoteLockedAt: null,
+      present: { disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false },
     });
   });
 
@@ -75,6 +76,23 @@ describe('parsePayBody', () => {
     expect(parsePayBody({ accountHolder: '' }, 'transfer')).toMatchObject({ accountHolder: '', present: { accountHolder: true } });
     expect(parsePayBody({ accountHolder: '  Ana  ' }, 'transfer')).toMatchObject({ accountHolder: 'Ana', present: { accountHolder: true } });
     expect(parsePayBody({ accountHolder: 7 }, 'transfer')).toMatchObject({ accountHolder: null, present: { accountHolder: true } });
+  });
+
+  it("fix pack 5 (P19): senderAddress / senderDob presence on transfer AND link: absent -> null, present false; '' -> '' present true; '  1 Test St  ' -> '1 Test St'; a non-string -> null present true", () => {
+    for (const surface of ['transfer', 'link'] as const) {
+      for (const key of ['senderAddress', 'senderDob'] as const) {
+        const tag = `${surface} ${key}`;
+        expect(parsePayBody({}, surface), tag).toMatchObject({ [key]: null, present: { [key]: false } });
+        expect(parsePayBody({ [key]: '' }, surface), tag).toMatchObject({ [key]: '', present: { [key]: true } });
+        expect(parsePayBody({ [key]: '  1 Test St  ' }, surface), tag).toMatchObject({ [key]: '1 Test St', present: { [key]: true } });
+        expect(parsePayBody({ [key]: 7 }, surface), tag).toMatchObject({ [key]: null, present: { [key]: true } });
+      }
+    }
+  });
+
+  it('fix pack 5 (P19): b2b never parses senderAddress / senderDob: both null and not present even when posted', () => {
+    const p = parsePayBody({ senderAddress: '1 Test St', senderDob: '1990-01-02' }, 'b2b');
+    expect(p).toMatchObject({ senderAddress: null, senderDob: null, present: { senderAddress: false, senderDob: false } });
   });
 
   it('fields keeps only string values of a plain object (an array or a non-object -> null)', () => {

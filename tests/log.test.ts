@@ -341,3 +341,44 @@ describe('stackFrames: frames only, never the header', () => {
     expect(stackFrames(hostile)).toBe('');
   });
 });
+
+describe('fix pack 5 (P18): originator keys are redacted', () => {
+  const KEYS = ['address', 'date_of_birth', 'senderAddress', 'senderDob', 'residentialAddress', 'dateOfBirth'];
+
+  it('a value under an originator key becomes <redacted>; the other fields stay', () => {
+    for (const key of KEYS) {
+      const out = scrub({ [key]: '1 Test Street', id: 't1' });
+      expect(out, key).toContain('<redacted>');
+      expect(out, key).toContain('t1');
+      expect(out, key).not.toContain('Test Street');
+    }
+  });
+
+  it('a nested object is redacted too', () => {
+    const out = scrub({ customer: { dateOfBirth: '1990-01-02', id: 'c1' } });
+    expect(out).toBe('{"customer":{"dateOfBirth":"<redacted>","id":"c1"}}');
+  });
+
+  it('JSON text passed as a string is redacted by key', () => {
+    expect(scrub('{"senderDob":"1990-01-02","x":1}')).toBe('{"senderDob":"<redacted>","x":1}');
+    expect(scrub('{"address" : "1 Test Street","x":1}')).toBe('{"address":"<redacted>","x":1}');
+    expect(scrub('{"senderAddress":"1 \\"Test\\" Street","x":1}')).toBe('{"senderAddress":"<redacted>","x":1}');
+    expect(scrub('body {"dateOfBirth":"1990-01-0')).toBe('body {"dateOfBirth":"<redacted>"');
+  });
+
+  it('a top-level log field under an originator key is redacted in the line', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    logWarn('x', 'y', { senderDob: '1990-01-02', transferId: 't1' });
+    const raw = spy.mock.calls[0][0] as string;
+    expect(raw).toContain('"senderDob":"<redacted>"');
+    expect(raw).toContain('t1');
+    expect(raw).not.toContain('1990-01-02');
+  });
+
+  it('a null or absent originator value is not invented; unrelated dates and the existing masks are unchanged', () => {
+    expect(scrub({ address: null, id: 't1' })).toBe('{"address":null,"id":"t1"}');
+    expect(scrub({ paidAt: '2026-01-02' })).toBe('{"paidAt":"2026-01-02"}');
+    expect(scrub('paidAt 2026-01-02')).toBe('paidAt 2026-01-02');
+    expect(scrub({ email: 'a@example.com', phone: '15551234567' })).toBe('{"email":"<email>","phone":"…4567"}');
+  });
+});
