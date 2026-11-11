@@ -16,7 +16,7 @@ import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
 import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
 import { realMoneyRail } from './live-gate';
-import { collectedOnRealMoneyFor } from './funding-class';
+import { CARD_REFUND_UNAVAILABLE, cardRefundUnavailableFor, collectedOnRealMoneyFor } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -610,6 +610,11 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!transfer.fundingRef && !collectedOnRealMoney) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
     }
+    // Review round 2 GE1: a real-money card payment (class 'stripe') cannot be
+    // refunded from SmartRemit yet; refused here, refund_status stays 'none'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot refund: ${CARD_REFUND_UNAVAILABLE}`);
+    }
     // An async debit that is still pending, failed, or was returned is not money we hold.
     if (transfer.fundingState && transfer.fundingState !== 'succeeded') {
       throw new Error(`Cannot refund: the sender debit is ${transfer.fundingState}.`);
@@ -658,6 +663,10 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     const transfer = await loadForRefund(repo, id, scope);
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'requested') {
       throw new Error('Cannot approve: refund is not awaiting approval.');
+    }
+    // Review round 2 GE1: as issueRefund; the request stays 'requested'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot approve: ${CARD_REFUND_UNAVAILABLE}`);
     }
     // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
     // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
@@ -731,6 +740,10 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     const transfer = await loadForRefund(repo, id, scope);
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'failed') {
       throw new Error('Cannot retry: refund is not in a failed state.');
+    }
+    // Review round 2 GE1: as issueRefund; the refund stays 'failed'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot retry: ${CARD_REFUND_UNAVAILABLE}`);
     }
     // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
     // this check (not the key) is what keeps a concurrent second retry from enqueueing a second

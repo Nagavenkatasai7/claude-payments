@@ -5,7 +5,7 @@ import { notFound } from 'next/navigation';
 import { FlaskConical, ShieldAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { collectedOnRealMoneyView } from '@/lib/funding-class';
+import { cardRefundUnavailableView, collectedOnRealMoneyView } from '@/lib/funding-class';
 import { loadPartnerTransferDetail } from '@/db/repos/partner-transfer-reads';
 import { getAuthStore } from '@/lib/auth-store';
 import { PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
@@ -172,7 +172,10 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   // is its exit. The rail is read only when fundingRef is null.
   // Review round 1 (RC2, RF1): not on a routed row, and only when its settle went to the rail after go-live.
   const collectedOnRealMoney = !transfer.fundingRef && (await collectedOnRealMoneyView(getDb(), transfer));
-  const opsFor = transferOpsFor(transfer, ctx, { collectedOnRealMoney });
+  const opsBase = transferOpsFor(transfer, ctx, { collectedOnRealMoney });
+  // Review round 2 GE1: a real-money card payment (class 'stripe') cannot be refunded from
+  // SmartRemit yet (issueRefund refuses it), so no button; the rail is read only for that class.
+  const opsFor = opsBase.refund && (await cardRefundUnavailableView(getDb(), transfer)) ? { ...opsBase, refund: false } : opsBase;
   const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
   const anyOp = opsFor.assign || opsFor.resend || opsFor.cancel;
   // Issue refund (admin only): offered when eligible; a paid or delivered transfer another network

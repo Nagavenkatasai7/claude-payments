@@ -1074,8 +1074,15 @@ async function handle(
               message:
                 `transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is paid but was not instructed: ` +
                 `its funding (${fundingClassOf(transfer)}) does not match the partner's recorded funding mode (${f.recorded ?? 'none'}). ` +
-                "It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, " +
-                "or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).",
+                // Review round 2 GE1: a card payment through the partner's Stripe
+                // key cannot be refunded from SmartRemit yet (issueRefund refuses
+                // it), so its text never names Issue refund.
+                (fundingClassOf(transfer) === 'stripe'
+                  ? "It waits and is checked every 15 minutes. If the partner's own payment provider collects card payments, record the funding mode partner_psp on the partner's go-live card: the transfer then goes out on its next attempt. " +
+                    "Otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer). " +
+                    'The ledger cannot record that refund yet, so the transfer then stays paid and held here.'
+                  : "It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, " +
+                    "or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer)."),
             },
             { dedupeKey: `fundmode:${transferId}` },
           );

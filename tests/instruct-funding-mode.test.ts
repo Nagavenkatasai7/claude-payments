@@ -48,6 +48,11 @@ const mockfundText = (id: string, owner: string, rail: string) =>
 const fundmodeText = (id: string, owner: string, rail: string, cls: string, mode: string) =>
   `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (${cls}) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).`;
 
+// Review round 2 GE1: a stripe-class row's fundmode:<id> text never names Issue
+// refund (a card refund cannot be made from SmartRemit yet).
+const fundmodeStripeText = (id: string, owner: string, rail: string, mode: string) =>
+  `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (stripe) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. If the partner's own payment provider collects card payments, record the funding mode partner_psp on the partner's go-live card: the transfer then goes out on its next attempt. Otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer). The ledger cannot record that refund yet, so the transfer then stays paid and held here.`;
+
 let db: Db;
 let store: ReturnType<typeof createStore>;
 let outbox: ReturnType<typeof createOutboxRepo>;
@@ -186,13 +191,30 @@ describe('settlement.instruct funding_mode gate G14 (pack 5 T14)', { retry: 0 },
     await drainOnce(deps(), 'w1');
     expect(fetchFn).not.toHaveBeenCalled();
     expectDeferred(await rowState());
-    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeText(ID, 'acme', 'acme', 'stripe', 'partner_collected') }]);
+    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeStripeText(ID, 'acme', 'acme', 'partner_collected') }]);
 
     await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
     await dueNow();
     await drainOnce(deps(), 'w1');
     expectPosted();
     expect((await rowState()).status).toBe('done');
+  });
+
+  it('review round 2 GE1: a stripe row with no fundingMode record defers; its fundmode:<id> text never says Issue refund and names partner_psp and the Stripe dashboard', async () => {
+    await certifyPartnerForTest(db, 'acme', { fundingMode: null });
+    await paidRealMoneyTransfer(db, { id: ID, fundingProvider: 'stripe', fundingRef: 'pi_test_2', fundingMethod: 'debit_card' });
+    await db.execute(sql`UPDATE transfers SET funding_state = 'succeeded' WHERE id = ${ID}`);
+    await enqueueInstruct();
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expectDeferred(await rowState());
+    const a = await alerts();
+    expect(a).toEqual([{ k: `fundmode:${ID}`, m: fundmodeStripeText(ID, 'acme', 'acme', 'none') }]);
+    expect(a[0].m).not.toContain('Issue refund');
+    expect(a[0].m).toContain('partner_psp');
+    expect(a[0].m).toContain("in the partner's Stripe dashboard");
+    expect(a[0].m).not.toContain('pi_test_2');
+    await expectNoPii();
   });
 
   it("routed row: the OWNER's record decides, not the rail partner's", async () => {

@@ -420,6 +420,10 @@ describe('sanctions screening spec says what pack 5 does', () => {
     for (const k of ['`mockfund:<id>`', '`fundmode:<id>`', '`mockfund:stuck:<id>`', '`fundmode:stuck:<id>`', '`nofunds-<id>`', 'Issue refund']) {
       expect(rest, k).toContain(k);
     }
+    // Review round 2 GE1: a real-money card payment is refused by Issue refund; its alerts name partner_psp or the Stripe dashboard.
+    for (const k of ['funding class `stripe`', '`partner_psp`', "the partner's Stripe dashboard", 'review round 2 GE1']) {
+      expect(rest, k).toContain(k);
+    }
   });
 });
 

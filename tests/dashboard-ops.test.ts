@@ -776,6 +776,62 @@ describe('issueRefund: real-money partner-collected rows (pack 5 T15)', () => {
   });
 });
 
+// Review round 2 GE1: on a real-money rail a card payment taken through the
+// partner's Stripe key (class 'stripe') cannot be refunded from SmartRemit yet
+// (the Stripe provider's refund always throws, so the refund would stay
+// 'pending' for good). issueRefund, approveRefund and retryRefund refuse it and
+// leave refund_status as it was. Off real money: unchanged.
+describe('refunds of a real-money Stripe-class row (review round 2 GE1)', () => {
+  async function stripeRow(id: string, over: Partial<Transfer> = {}): Promise<void> {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id, status: 'paid', fundingMethod: 'debit_card', fundingRef: `pi_${id}`, ...over }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_state = 'succeeded' WHERE id = ${id}`);
+  }
+  const refundStatusOf = async (id: string) => (await createStore(fakeRedis(), db).getTransfer(id))?.refundStatus ?? 'none';
+
+  it('issueRefund refuses it with the Stripe-dashboard reason, refund_status stays none, nothing enqueued', async () => {
+    await seedRealMoneyRail(db, 'default');
+    await stripeRow('gs1');
+    await expect(issueRefund(db, 'gs1')).rejects.toThrow(/^Cannot refund: .*Stripe dashboard.*cannot refund a card payment yet/);
+    expect(await refundStatusOf('gs1')).toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('approveRefund and retryRefund refuse it too and leave requested / failed as they were', async () => {
+    await seedRealMoneyRail(db, 'default');
+    await stripeRow('gs2', { refundStatus: 'requested' });
+    await stripeRow('gs3', { refundStatus: 'failed' });
+    await expect(approveRefund(db, 'gs2')).rejects.toThrow(/^Cannot approve: .*Stripe dashboard/);
+    await expect(retryRefund(db, 'gs3')).rejects.toThrow(/^Cannot retry: .*Stripe dashboard/);
+    expect(await refundStatusOf('gs2')).toBe('requested');
+    expect(await refundStatusOf('gs3')).toBe('failed');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('the same rows on a simulator rail behave as before', async () => {
+    await createIntegrationsRepo(db).saveIntegrations('default', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 's' }, webhookSecret: 'w' },
+    });
+    await stripeRow('gs4');
+    await stripeRow('gs5', { refundStatus: 'requested' });
+    await stripeRow('gs6', { refundStatus: 'failed' });
+    await issueRefund(db, 'gs4');
+    await approveRefund(db, 'gs5');
+    await retryRefund(db, 'gs6');
+    for (const id of ['gs4', 'gs5', 'gs6']) expect(await refundStatusOf(id)).toBe('pending');
+    expect(await refundPayloads()).toEqual([{ transferId: 'gs4' }, { transferId: 'gs5' }, { transferId: 'gs6' }]);
+  });
+
+  it('a mock-funded charged row on a real-money rail is not affected (Issue refund as before)', async () => {
+    await seedRealMoneyRail(db, 'default');
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'gs7', status: 'paid', fundingRef: 'mockfund-gs7' }));
+    await issueRefund(db, 'gs7');
+    expect(await refundStatusOf('gs7')).toBe('pending');
+  });
+});
+
 describe('issueRefund with a tenant scope (lost-features p1 A7: the /partner Issue refund, BL-2)', () => {
   const AUD = { actor: 'pa-admin', reason: 'customer disputed the charge', actorScope: 'partner' as const };
   const seedPa = () => db.execute(sql`INSERT INTO partners (id, name) VALUES ('pa', 'Partner A') ON CONFLICT DO NOTHING`);

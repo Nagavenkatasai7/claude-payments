@@ -30,6 +30,22 @@ vi.mock('@/db/client', async (orig) => {
 // Fix pack 5 T13a: the route pokes the worker after an ops.alert enqueue.
 vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {}, pokeWorkerDelayed: () => {} }));
 
+// Review round 2 GE2: a toggle that makes ONLY the rail-type read throw (every
+// other integrations call, and the transfer reads, stay real).
+let failRailRead = false;
+vi.mock('@/db/repos/integrations-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/integrations-repo')>();
+  return {
+    ...real,
+    createIntegrationsRepo: (...a: Parameters<typeof real.createIntegrationsRepo>) => {
+      const r = real.createIntegrationsRepo(...a);
+      return failRailRead
+        ? { ...r, paymentProviderType: async () => { throw new Error('connection terminated'); } }
+        : r;
+    },
+  };
+});
+
 // Stage 3 posture: the per-IP limiter would dial Upstash — always allow here.
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 
@@ -70,6 +86,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  failRailRead = false;
   delete process.env.FUNDING_WEBHOOK_SECRET_STRIPE;
   delete process.env.FUNDING_WEBHOOK_SECRET_MOCK;
 });
@@ -357,6 +374,40 @@ describe('pack 5 (T13a): no mock confirmation or refund on real money', () => {
     expect(await repo.getTransfer('sb2')).toMatchObject({ refundStatus: 'completed', refundRef: 'r-sb2' });
     expect((await repo.getTransfer('sb3'))?.refundStatus).toBe('failed');
     expect(await alerts()).toEqual([]);
+  });
+
+  // Review round 2 GE2: an unreadable rail type is not "real money" here. The
+  // route answers 503 with no write and no alert, so the sender retries.
+  it('refunded on a simulator row while the rail-type read fails: 503 { ok: false }, refund stays pending, no fundrefund:<id> alert', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'rr1', partnerId: 'simp', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    failRailRead = true;
+    const res = await signedMock({ transfer_id: 'rr1', event: 'refunded', ref: 'r-rr1' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false });
+    expect((await repo.getTransfer('rr1'))?.refundStatus).toBe('pending');
+    expect(await alerts()).toEqual([]);
+    // The retry after the blip is recorded as today.
+    failRailRead = false;
+    expect(await (await signedMock({ transfer_id: 'rr1', event: 'refunded', ref: 'r-rr1' })).json()).toEqual({ ok: true });
+    expect(await repo.getTransfer('rr1')).toMatchObject({ refundStatus: 'completed', refundRef: 'r-rr1' });
+  });
+
+  it('captured on a real-money row while the rail-type read fails: 503, nothing recorded, no alert', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rr2', partnerId: 'acme' }));
+    failRailRead = true;
+    const res = await signedMock({ transfer_id: 'rr2', event: 'captured', ref: 'fund-rr2' });
+    expect(res.status).toBe(503);
+    expect((await repo.getTransfer('rr2'))?.fundingRef).toBeUndefined();
+    expect(await alerts()).toEqual([]);
+  });
+
+  it("a sandbox row makes no rail read: recorded as today while the read would fail", async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rr3', partnerId: 'acme', environment: 'test', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    failRailRead = true;
+    expect(await (await signedMock({ transfer_id: 'rr3', event: 'refunded', ref: 'r-rr3' })).json()).toEqual({ ok: true });
+    expect((await repo.getTransfer('rr3'))?.refundStatus).toBe('completed');
   });
 
   it('refunded with no ref completes with refund-webhook-<id>, never mockfund-', async () => {

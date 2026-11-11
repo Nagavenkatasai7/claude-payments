@@ -14,7 +14,7 @@ import { RefundConfirmButton } from '../refund-confirm-button';
 import { SenderCell, FundingRefs } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
-import { collectedOnRealMoneyView } from '@/lib/funding-class';
+import { cardRefundUnavailableView, collectedOnRealMoneyView } from '@/lib/funding-class';
 import { purposeView } from '@/lib/purpose-codes';
 import { readPurposeDetailsForStaff } from '@/lib/purpose-detail-staff';
 import type { RefundStatus } from '@/lib/types';
@@ -76,11 +76,14 @@ export default async function TransactionDetailPage({
   const refundStatus = (t.refundStatus ?? 'none') as RefundStatus;
   const refundBadge = refundStatus !== 'none' ? REFUND_BADGE[refundStatus] : null;
 
+  // Review round 2 GE1: a real-money card payment (class 'stripe') cannot be refunded from
+  // SmartRemit yet (issueRefund refuses it), so no button; the rail is read only for that class.
   const canIssueRefund =
     viewer.role === 'admin' &&
     refundable &&
     refundStatus === 'none' &&
-    (t.status === 'paid' || t.status === 'delivered');
+    (t.status === 'paid' || t.status === 'delivered') &&
+    !(await cardRefundUnavailableView(getDb(), t));
 
   const refundAmount = money(t.totalChargeSource ?? t.totalChargeUsd, t.sourceCurrency ?? 'USD');
   // A3: the stated purpose; the RBI code is an UNCONFIRMED suggestion (staff only, never the customer).

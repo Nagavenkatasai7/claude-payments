@@ -5,7 +5,7 @@ import type { PartnerFundingConfig } from './partner-integrations';
 import type { Transfer } from './types';
 import type { DbOrTx } from '@/db/client';
 import { createRailMessageRepo } from '@/db/repos/rail-message-repo';
-import { railGoLiveAt, railPartnerOf, realMoneyFor } from './live-gate';
+import { railGoLiveAt, railPartnerOf, readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
 
 // funding-class (fix pack 5 T12, P12): THE answer to "how was this sender's
@@ -156,5 +156,44 @@ export async function collectedOnRealMoneyView(db: DbOrTx, t: RefundAdmissionRow
   } catch (err) {
     logWarn('funding-class.refund-admission', err instanceof Error ? err.name : 'error', { transferId: t.id });
     return false;
+  }
+}
+
+/**
+ * Review round 2 GE1: why staff cannot refund a real-money card payment from
+ * SmartRemit (the Stripe provider's refund is not built, so a funding.refund
+ * would stay 'pending' for good). Staff-facing; no id, amount or name.
+ */
+export const CARD_REFUND_UNAVAILABLE =
+  "this transfer was paid by card through the partner's Stripe account. Card refunds are made in the partner's Stripe dashboard; SmartRemit cannot refund a card payment yet.";
+
+/**
+ * Review round 2 GE1: is this a card payment (funding class 'stripe') on a
+ * real-money rail? Such a row cannot be refunded from SmartRemit yet, so
+ * issueRefund, approveRefund and retryRefund refuse it. Any other class
+ * (sandbox rows are class 'sandbox') answers false with NO read. A failed
+ * rail-type read THROWS (never read as real money or as demo here).
+ */
+export async function cardRefundUnavailableFor(
+  db: DbOrTx,
+  t: Pick<Transfer, 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId'>,
+): Promise<boolean> {
+  if (fundingClassOf(t) !== 'stripe') return false;
+  const railProviderType = await readRailProviderType(db, railPartnerOf(t));
+  if (railProviderType === undefined) throw new Error('rail_read_failed');
+  return realMoneyRail({ environment: t.environment, railProviderType });
+}
+
+/**
+ * The page mirrors' view of cardRefundUnavailableFor (hide Issue refund): a
+ * failed read hides the button (logged by the error name, ids only); the core
+ * re-checks inside its transaction.
+ */
+export async function cardRefundUnavailableView(db: DbOrTx, t: RefundAdmissionRow): Promise<boolean> {
+  try {
+    return await cardRefundUnavailableFor(db, t);
+  } catch (err) {
+    logWarn('funding-class.card-refund', err instanceof Error ? err.name : 'error', { transferId: t.id });
+    return true;
   }
 }

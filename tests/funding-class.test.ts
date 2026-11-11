@@ -1,7 +1,25 @@
-import { describe, it, expect } from 'vitest';
-import { fundingClassOf, fundingModeMatches, isRoutedRow, refundWithoutCharge } from '@/lib/funding-class';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  cardRefundUnavailableFor,
+  cardRefundUnavailableView,
+  fundingClassOf,
+  fundingModeMatches,
+  isRoutedRow,
+  refundWithoutCharge,
+} from '@/lib/funding-class';
+import type { DbOrTx } from '@/db/client';
 import type { FundingModeRecord } from '@/lib/live-controls';
 import type { Transfer } from '@/lib/types';
+
+// Review round 2 GE1: the rail-type read seam (no other test here reads the store).
+const rail = vi.hoisted(() => ({ type: null as string | null | undefined, calls: [] as string[] }));
+vi.mock('@/lib/live-gate', async (orig) => ({
+  ...(await orig<typeof import('@/lib/live-gate')>()),
+  readRailProviderType: async (_db: unknown, partnerId: string) => {
+    rail.calls.push(partnerId);
+    return rail.type;
+  },
+}));
 
 // Fix pack 5 T12 (P12): how the sender's money was collected, read from
 // transfers.funding_provider (and the intent / ref columns), never from the
@@ -101,5 +119,41 @@ describe('refundWithoutCharge (T15, review round 1 RF1)', { retry: 0 }, () => {
     expect(isRoutedRow(pc({ settlementPartnerId: 'railp' }))).toBe(true);
     expect(isRoutedRow(pc({ settlementPartnerId: 'acme' }))).toBe(false);
     expect(isRoutedRow(pc())).toBe(false);
+  });
+});
+
+describe('cardRefundUnavailableFor / cardRefundUnavailableView (review round 2 GE1)', () => {
+  const db = {} as DbOrTx;
+  const row = (o: Partial<Transfer> = {}) =>
+    ({ id: 'cr1', environment: 'live', fundingMethod: 'debit_card', fundingProvider: 'stripe', fundingRef: 'pi_1', partnerId: 'acme', settlementPartnerId: undefined, ...o }) as Transfer;
+  beforeEach(() => {
+    rail.type = null;
+    rail.calls = [];
+  });
+
+  it('a stripe-class row on an http rail -> true; on a simulator or absent rail -> false', async () => {
+    rail.type = 'http';
+    expect(await cardRefundUnavailableFor(db, row())).toBe(true);
+    expect(await cardRefundUnavailableFor(db, row({ fundingProvider: undefined, fundingRef: undefined, fundingIntentRef: 'pi_2' }))).toBe(true);
+    rail.type = 'simulator';
+    expect(await cardRefundUnavailableFor(db, row())).toBe(false);
+    rail.type = null;
+    expect(await cardRefundUnavailableFor(db, row())).toBe(false);
+  });
+
+  it('the rail read is the settlement partner\'s, and only for a stripe-class row', async () => {
+    rail.type = 'http';
+    await cardRefundUnavailableFor(db, row({ settlementPartnerId: 'railp' }));
+    expect(rail.calls).toEqual(['railp']);
+    for (const o of [{ fundingProvider: 'mock' as const, fundingRef: 'mockfund-x' }, { environment: 'test' as const }, { fundingProvider: undefined, fundingRef: undefined }]) {
+      expect(await cardRefundUnavailableFor(db, row(o))).toBe(false);
+    }
+    expect(rail.calls).toEqual(['railp']);
+  });
+
+  it('a failed rail read throws in the core and hides the button in the view', async () => {
+    rail.type = undefined;
+    await expect(cardRefundUnavailableFor(db, row())).rejects.toThrow('rail_read_failed');
+    expect(await cardRefundUnavailableView(db, row())).toBe(true);
   });
 });

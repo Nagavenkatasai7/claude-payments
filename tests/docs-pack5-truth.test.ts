@@ -307,6 +307,8 @@ describe('pack 5 documents say what the code does', () => {
       'append-only against application code (trigger; not TRUNCATE, not the table-owner role)',
       '`MIGRATE_ON_BUILD_SKIP=1`',
       'Set `SANCTIONS_LIST` back to `ofac-sdn` (or unset) BEFORE rolling back past PR5: an older build treats `lists` as unknown and screens with the mock',
+      // Review round 2 GE1: Issue refund refuses a real-money card payment.
+      "Issue refund refuses a card payment through the partner's Stripe key",
     ]) {
       expect(p, s).toContain(s);
     }
@@ -362,6 +364,16 @@ describe('pack 5 documents say what the code does', () => {
     for (const r of reasons) expect(stuck!).toContain(`\`${r}:stuck:<id>\``);
     expect([...stuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(3);
     expectQuotedInSrc(stuck!, src, 'stuck');
+    // Review round 2 GE1: the card-payment (class stripe) texts never name Issue refund.
+    const fm = rows.find((l) => l.startsWith('| `fundmode:<id>`'))!;
+    expect([...fm.matchAll(/«`([^`]+)`»/g)]).toHaveLength(6);
+    for (const [, text] of [...fm.matchAll(/«`([^`]+)`»/g)].slice(3)) expect(text).not.toContain('Issue refund');
+    const stuckCard = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a card payment'));
+    expect(stuckCard, 'the card-payment stuck row').toBeDefined();
+    const cardTexts = [...stuckCard!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(cardTexts).toHaveLength(2);
+    for (const text of cardTexts) expect(text).not.toContain('Issue refund');
+    expectQuotedInSrc(stuckCard!, src, 'stuck card');
     // The other pack 5 alerts (not compliance alerts) have their rows in section 14.
     const other = section(SPEC, '## 14.').split('\n').filter((l) => l.startsWith('| `'));
     // Review round 1 (RC2, RF1): the two funding.refund alerts.

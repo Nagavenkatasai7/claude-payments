@@ -366,6 +366,32 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
       expect(stuckHeldMessage(ID, r)).not.toMatch(/cancel/i);
     }
   });
+
+  // Review round 2 GE1: a stripe-class row is never sent to Issue refund (it
+  // cannot refund a card payment yet); every other class keeps the text above.
+  it('a stripe-class row: the fundmode and travelrule texts name partner_psp / the Stripe dashboard, never Issue refund', () => {
+    expect(stuckHeldMessage(ID, 'fundmode', 'stripe')).toBe(
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. ` +
+        "If the partner's own payment provider collects card payments, record the funding mode partner_psp on the go-live card (then the stuck-paid sweep re-instructs it once); " +
+        "otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'stripe')).toBe(
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. ` +
+        "Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).",
+    );
+    for (const r of ['fundmode', 'travelrule'] as const) {
+      expect(stuckHeldMessage(ID, r, 'stripe')).not.toContain('Issue refund');
+      expect(stuckHeldMessage(ID, r, 'stripe')).not.toMatch(/cancel/i);
+    }
+    for (const cls of ['mock', 'partner_collected', 'partner_pull', 'sandbox'] as const) {
+      for (const r of REASONS) expect(stuckHeldMessage(ID, r, cls)).toBe(stuckHeldMessage(ID, r));
+    }
+  });
+
+  it('alertStuckHeld reads the class from the row: a stripe-funded row gets the stripe text', async () => {
+    expect(await alertStuckHeld(db, fixture({ fundingProvider: 'stripe', fundingRef: 'pi_x' }), 'fundmode')).toBe(true);
+    expect(await alerts()).toEqual([{ k: `fundmode:stuck:${ID}`, m: stuckHeldMessage(ID, 'fundmode', 'stripe') }]);
+  });
 });
 
 function store() {
