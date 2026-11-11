@@ -91,6 +91,8 @@ export async function rescreenBeforePay(
     requireLiveList: realMoney,
     now,
     ...(also.length > 0 ? { alsoRecipientNames: also } : {}),
+    // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+    destinationCountry: transfer.destinationCountry ?? null,
   });
   const uncovered = realMoney
     ? uncoveredRoles(prior, { senderName: names.senderName, recipientNames: [names.recipientName, ...also] })

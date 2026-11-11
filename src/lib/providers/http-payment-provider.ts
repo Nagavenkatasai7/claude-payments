@@ -5,6 +5,7 @@ import { isPartnerPulled } from '../funding-method';
 import { fundingClassOf } from '../funding-class';
 import type { Customer, Transfer, TransferStatus } from '../types';
 import type { TravelRuleRequirement } from '../travel-rule';
+import type { ListFitness } from '../sanctions/list-policy';
 import { deriveTier } from '../tier-rules';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
@@ -243,6 +244,12 @@ export interface ComplianceScreeningRef {
   screenedAt: string;
   /** Fix pack 5 T5 (P10): counts of the newest screen's parties by role; never names or hashes. */
   namesScreened: { sender: number; recipient: number };
+  /**
+   * Fix pack 5 T29 (P10, P26): each list of a SANCTIONS_LIST=lists set as
+   * { source, version, fitness }; present only when the evidence carries
+   * lists[] (lists mode). The hashes stay in the evidence.
+   */
+  lists?: Array<{ source: string; version: string; fitness: ListFitness }>;
 }
 
 export interface ComplianceBlockOptions {
@@ -345,6 +352,10 @@ export function buildComplianceBlock(
             list_version: evidence.listVersion,
             decision: evidence.decision,
             names_screened: { sender: evidence.namesScreened.sender, recipient: evidence.namesScreened.recipient },
+            // Fix pack 5 T29: lists mode only.
+            ...(evidence.lists
+              ? { lists: evidence.lists.map(({ source, version, fitness }) => ({ source, version, fitness })) }
+              : {}),
           }
         : {}),
     },

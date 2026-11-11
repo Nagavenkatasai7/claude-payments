@@ -128,6 +128,25 @@ describe('compliance block schema, version 2 (fix pack 5 T5, P10)', { retry: 0 }
     expect(whole).not.toContain(SENDER_NAME);
   });
 
+  it('lists case (fix pack 5 T29): screening keys [status, reasons, screened_at, list_source, list_version, decision, names_screened, lists]; each item exactly { source, version, fitness }', () => {
+    const ref: ComplianceScreeningRef = {
+      ...refFromEvidence(),
+      listSource: 'lists:ofac-sdn+ofac-cons', listVersion: 'v1+v2',
+      lists: [
+        { source: 'ofac-sdn', version: 'v1', fitness: 'live' },
+        { source: 'ofac-cons', version: 'v2', fitness: 'live' },
+      ],
+    };
+    const block = buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true, screening: ref });
+    expect(Object.keys(block)).toEqual(TOP_UNROUTED);
+    expect(Object.keys(block.screening)).toEqual([
+      'status', 'reasons', 'screened_at', 'list_source', 'list_version', 'decision', 'names_screened', 'lists',
+    ]);
+    const lists = (block.screening as { lists: Array<Record<string, unknown>> }).lists;
+    for (const item of lists) expect(Object.keys(item)).toEqual(['source', 'version', 'fitness']);
+    expect(lists).toEqual(ref.lists);
+  });
+
   it('version is 2 on every rail-independent input (business sender, no customer)', () => {
     const business = buildComplianceBlock(
       transfer({ transferType: 'b2b', senderEntityType: 'business', senderBusinessName: 'Globex Payer LLC' }),

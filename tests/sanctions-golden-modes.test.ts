@@ -1,17 +1,21 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { screenTransfer } from '@/lib/compliance';
-import { buildComplianceBlock } from '@/lib/providers/http-payment-provider';
-import { inputHash } from '@/lib/sanctions/evidence';
-import type { Customer, Transfer } from '@/lib/types';
-import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { loadComplianceBlock } from '@/lib/instruction-compliance';
+import { inputHash, sanctionsAuditEvent } from '@/lib/sanctions/evidence';
+import { auditEvents } from '@/db/schema';
+import type { Db } from '@/db/client';
+import type { Transfer } from '@/lib/types';
+import { freshDb, seedPartner } from './helpers-db';
+import { listSetList, primeListSet, primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 
 // Fix pack 5 T28 (R08, P25): a CHARACTERISATION test. The opt-in
 // SANCTIONS_LIST=lists mode must leave every other value byte-identical: for
 // unset, 'mock', 'ofac-sdn' and an unknown value the screening evidence of a
 // fixed pair of names deep-equals the literal below (written from the shape
 // before the multi-list screener existed, and seen green on that code first),
-// with NO `lists` key, and the compliance block's screening keys are the same
-// in every mode. Pure: no DB (screenTransfer and buildComplianceBlock need none).
+// with NO `lists` key. Fix pack 5 T29: the compliance block is built through the
+// real path (stored evidence -> loadComplianceBlock, PGlite) and its screening
+// object is pinned with values, exact version 2 keys and no lists key.
 
 const SCREENED_AT = '<screenedAt>';
 const CHECKED_AT = '<listCheckedAt>';
@@ -78,35 +82,41 @@ const ofacExpected = (senderName: string, blocked: boolean) => ({
   },
 });
 
-function transfer(): Transfer {
+function transfer(id: string, r: { status: string; reasons: string[] }): Transfer {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   return {
-    id: 'gold_t1', phone: '15550000001', amountUsd: 50, feeUsd: 5, totalChargeUsd: 55,
+    id, phone: '15550000001', amountUsd: 50, feeUsd: 5, totalChargeUsd: 55,
     fxRate: 83, amountInr: 4150, recipientName: 'Golden Payee', recipientPhone: '919800000001',
     payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', fundingMethod: 'bank_transfer',
-    status: 'paid', complianceStatus: 'cleared', complianceReasons: [],
+    status: 'paid', complianceStatus: r.status, complianceReasons: r.reasons,
     createdAt: at, paidAt: at, partnerId: 'acme',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 50, feeSource: 5, totalChargeSource: 55,
   } as Transfer;
 }
 
-function customer(): Customer {
-  const at = new Date(Date.now() - 30 * 86_400_000).toISOString();
-  return {
-    senderPhone: '15550000001', firstSeenAt: at, kycStatus: 'verified', kycVerifiedAt: at,
-    fullName: 'Golden Sender', senderCountry: 'US', partnerId: 'acme', createdAt: at, updatedAt: at,
-  } as Customer;
-}
+/** The version 2 screening keys (fix pack 5 T5), in order; 'lists' is added only under SANCTIONS_LIST=lists (T29). */
+const V2_SCREENING_KEYS = ['status', 'reasons', 'screened_at', 'list_source', 'list_version', 'decision', 'names_screened'];
 
-async function screeningKeys(): Promise<string[]> {
-  const r = await screenTransfer({ amountUsd: 50, recipientName: CLEAN_RECIPIENT, senderName: CLEAN_SENDER, transfersToday: 0 });
-  const e = r.evidence!;
-  const block = buildComplianceBlock(transfer(), customer(), new Date(), {
-    kycGateActive: true,
-    screening: { listSource: e.listSource, listVersion: e.listVersion, decision: e.decision, screenedAt: e.screenedAt },
-  } as Parameters<typeof buildComplianceBlock>[3]);
-  return Object.keys((block as unknown as { screening: Record<string, unknown> }).screening).sort();
+let seq = 0;
+/**
+ * Fix pack 5 T29 (L1 amendment): the REAL path. screenTransfer's evidence is
+ * stored as the mint stores it (sanctionsAuditEvent, owner tenant), then the
+ * worker's loadComplianceBlock reads it back (listScreenEvidence -> parseEvidence
+ * -> screeningRef) and builds the block.
+ */
+async function blockScreening(db: Db, senderName: string) {
+  const r = await screenTransfer({
+    amountUsd: 50, recipientName: CLEAN_RECIPIENT, senderName, transfersToday: 0, destinationCountry: 'IN',
+  });
+  const t = transfer(`gold_t${++seq}`, r);
+  const row = sanctionsAuditEvent(t.partnerId, t.id, r.evidence!);
+  await db.insert(auditEvents).values({
+    partnerId: row.partnerId ?? null, actor: row.actor, actorType: row.actorType, action: row.action,
+    subjectId: row.subjectId ?? null, meta: row.meta ?? null,
+  });
+  const block = await loadComplianceBlock(db, t, new Date());
+  return { evidence: r.evidence!, screening: block.screening as Record<string, unknown> };
 }
 
 describe('SANCTIONS_LIST unset / mock / ofac-sdn / unknown stay byte-identical (pack 5 T28)', () => {
@@ -140,21 +150,60 @@ describe('SANCTIONS_LIST unset / mock / ofac-sdn / unknown stay byte-identical (
     expect('lists' in clean.evidence).toBe(false);
   });
 
-  it('the compliance block screening keys are the same in every mode, with no lists key', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const sets: string[][] = [];
-    for (const value of [undefined, 'mock', 'bogus']) {
-      if (value === undefined) delete process.env.SANCTIONS_LIST;
-      else process.env.SANCTIONS_LIST = value;
-      sets.push(await screeningKeys());
+  // Fix pack 5 T29 (L1 amendment, LE2/LE3): the block through the real path, with
+  // values, for each old mode: the exact version 2 screening keys and NO lists key.
+  describe('the compliance block screening through the real path (pack 5 T29)', () => {
+    let db: Db;
+    beforeEach(async () => {
+      db = await freshDb();
+      await seedPartner(db, 'acme');
+    });
+
+    const screeningFor = (e: { screenedAt: string }, over: Record<string, unknown>) => ({
+      status: 'cleared', reasons: [], screened_at: e.screenedAt, decision: 'clear',
+      names_screened: { sender: 1, recipient: 1 }, ...over,
+    });
+
+    for (const [label, value] of MOCK_MODES) {
+      it(`${label}: the whole screening object equals the expected values; exact version 2 keys, no lists key`, async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        if (value === undefined) delete process.env.SANCTIONS_LIST;
+        else process.env.SANCTIONS_LIST = value;
+        const clean = await blockScreening(db, CLEAN_SENDER);
+        expect(clean.screening).toEqual(screeningFor(clean.evidence, { list_source: 'mock-watchlist', list_version: 'static' }));
+        expect(Object.keys(clean.screening)).toEqual(V2_SCREENING_KEYS);
+        const listed = await blockScreening(db, LISTED_SENDER);
+        expect(listed.screening).toEqual(screeningFor(listed.evidence, {
+          status: 'blocked', reasons: ['Sender is on the compliance watchlist.'], decision: 'match',
+          list_source: 'mock-watchlist', list_version: 'static',
+        }));
+        expect(Object.keys(listed.screening)).toEqual(V2_SCREENING_KEYS);
+      });
     }
-    primeOfacSource({ checkedAgoMs: 3_600_000 });
-    sets.push(await screeningKeys());
-    for (const s of sets) {
-      expect(s).toEqual(sets[0]);
-      expect(s).not.toContain('lists');
-      // The keys every block version carries (pack 4 C20); T5's version 2 adds names_screened.
-      expect(s).toEqual(expect.arrayContaining(['decision', 'list_source', 'list_version', 'reasons', 'screened_at', 'status']));
-    }
+
+    it('ofac-sdn: the whole screening object equals the expected values; exact version 2 keys, no lists key', async () => {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const clean = await blockScreening(db, CLEAN_SENDER);
+      expect(clean.screening).toEqual(screeningFor(clean.evidence, { list_source: 'ofac-sdn', list_version: '2026-09-18' }));
+      expect(Object.keys(clean.screening)).toEqual(V2_SCREENING_KEYS);
+      const listed = await blockScreening(db, LISTED_SENDER);
+      expect(listed.screening).toEqual(screeningFor(listed.evidence, {
+        status: 'blocked', reasons: ['Sender is on the compliance watchlist.'], decision: 'match',
+        list_source: 'ofac-sdn', list_version: '2026-09-18',
+      }));
+      expect(Object.keys(listed.screening)).toEqual(V2_SCREENING_KEYS);
+    });
+
+    it('lists: the same version 2 keys plus lists, one { source, version, fitness } per floor list of the destination', async () => {
+      primeListSet({});
+      const clean = await blockScreening(db, CLEAN_SENDER);
+      const sources = ['ofac-sdn', 'ofac-cons', 'un-sc', 'in-mha-uapa'] as const;
+      const versions = sources.map((src) => listSetList(src).version);
+      expect(clean.screening).toEqual(screeningFor(clean.evidence, {
+        list_source: `lists:${sources.join('+')}`, list_version: versions.join('+'),
+        lists: sources.map((source, i) => ({ source, version: versions[i], fitness: 'live' })),
+      }));
+      expect(Object.keys(clean.screening)).toEqual([...V2_SCREENING_KEYS, 'lists']);
+    });
   });
 });

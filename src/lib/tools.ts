@@ -2034,6 +2034,8 @@ async function registerSellerTool(
       recipientName: businessName,
       transfersToday: 0,
       sourceCountry: country,
+      // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+      destinationCountry: null,
     });
     cleared = screen.status === 'cleared';
     blocked = screen.status === 'blocked';
@@ -4099,6 +4101,8 @@ export async function prepareSendDraft(
       // B2B: screen the PAYER business legal name (defense-in-depth — the mint
       // re-screens it too). A consumer send screens the individual sender name.
       senderName: (b2b ? b2b.senderBusinessName : undefined) ?? customer.fullName,
+      // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+      destinationCountry,
     });
     if (screen.status === 'blocked') {
       // Fix pack 2 T5 (R04): the block notices ride the blocked row's transaction.

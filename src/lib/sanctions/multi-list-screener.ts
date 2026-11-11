@@ -64,6 +64,21 @@ export function fromPartialSet(hit: SanctionsHit): boolean {
   return PARTIAL_HITS.has(hit);
 }
 
+/**
+ * Fix pack 5 T29 (P26): the members that did NOT answer one screen (their load
+ * rejected, their screen threw, or they reported no loaded list), recorded on
+ * the partial-set hit or on the SanctionsListUnavailableError that screen
+ * returned or threw. screenTransfer reads it so the evidence's lists[] never
+ * claims a list was checked when it was not.
+ */
+const UNANSWERED = new WeakMap<object, readonly SanctionsSourceId[]>();
+
+/** The members that did not answer the screen that produced this hit or error; [] when none is recorded. */
+export function unansweredMembers(hitOrError: unknown): readonly SanctionsSourceId[] {
+  if (!hitOrError || typeof hitOrError !== 'object') return [];
+  return UNANSWERED.get(hitOrError) ?? [];
+}
+
 export class MultiListSanctionsScreener implements SanctionsScreener {
   private readonly members: ReadonlyArray<ListMember>;
   private readonly compositeSource: string;
@@ -81,18 +96,29 @@ export class MultiListSanctionsScreener implements SanctionsScreener {
     // cheap. allSettled: a member's failure never drops another member's hit.
     const settled = await Promise.allSettled(this.members.map((m) => m.screener.screen(input)));
     const source = this.compositeSource;
-    const partial =
-      settled.some((r) => r.status === 'rejected') || !this.members.every((m) => loaded(m.screener.listInfo()));
+    const missing = Object.freeze(
+      this.members
+        .filter((m, i) => settled[i].status === 'rejected' || !loaded(m.screener.listInfo()))
+        .map((m) => m.source),
+    );
+    const partial = missing.length > 0;
     // An exact match on any member blocks, whatever the other members did.
     for (const r of settled) {
       if (r.status === 'fulfilled' && r.value.matched) {
         const hit: SanctionsHit = { ...r.value, listSource: source };
-        if (partial) PARTIAL_HITS.add(hit);
+        if (partial) {
+          PARTIAL_HITS.add(hit);
+          UNANSWERED.set(hit, missing);
+        }
         return hit;
       }
     }
     // Anything else on a partial set fails closed: no partial result.
-    if (partial) throw new SanctionsListUnavailableError();
+    if (partial) {
+      const err = new SanctionsListUnavailableError();
+      UNANSWERED.set(err, missing);
+      throw err;
+    }
     const hits = settled.map((r) => (r as PromiseFulfilledResult<SanctionsHit>).value);
     const possible = hits.find((h) => Boolean(h.possibleMatch));
     if (possible) return { ...possible, listSource: source };

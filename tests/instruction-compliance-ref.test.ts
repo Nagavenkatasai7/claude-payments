@@ -193,4 +193,58 @@ describe('loadComplianceBlock: the screening reference is the newest screen (pac
     expect(err).toBeInstanceOf(InstructPermanentError);
     expect((err as InstructPermanentError).code).toBe('compliance_block');
   });
+
+  // Fix pack 5 T29 (P26, P10): lists[] is copied onto the wire as { source, version, fitness }
+  // (no hash, no checkedAt); evidence without lists gives no lists key.
+  const rawScreen = async (t: Transfer, meta: Record<string, unknown>) =>
+    db.insert(auditEvents).values({
+      partnerId: 'default', actor: 'system:sanctions', actorType: 'system', action: SANCTIONS_AUDIT_ACTION, subjectId: t.id, meta,
+    });
+
+  it('evidence with lists[] -> block.screening.lists = [{ source, version, fitness }] (no hash, no checkedAt)', async () => {
+    const t = transferAt(new Date(Date.now() - HOUR), 'icr_lists');
+    const checkedAt = new Date(Date.now() - HOUR).toISOString();
+    await rawScreen(t, {
+      listSource: 'lists:ofac-sdn+ofac-cons', listVersion: 'v1+v2', listHash: 'f'.repeat(64), screenedAt: new Date().toISOString(),
+      decision: 'clear', parties: [{ role: 'recipient', inputHash: 'c'.repeat(64), matched: false, matchScore: 0 }], listFitness: 'live',
+      lists: [
+        { source: 'ofac-sdn', version: 'v1', hash: 'a'.repeat(64), fitness: 'live', checkedAt },
+        { source: 'ofac-cons', version: 'v2', hash: 'b'.repeat(64), fitness: 'live', checkedAt },
+      ],
+    });
+    const block = await loadComplianceBlock(db, t, new Date());
+    expect((block.screening as { lists?: unknown }).lists).toEqual([
+      { source: 'ofac-sdn', version: 'v1', fitness: 'live' },
+      { source: 'ofac-cons', version: 'v2', fitness: 'live' },
+    ]);
+    const raw = JSON.stringify(block);
+    expect(raw).not.toContain('a'.repeat(64));
+    expect(raw).not.toContain(checkedAt);
+  });
+
+  it('evidence without lists -> no lists key on the block screening', async () => {
+    const t = transferAt(new Date(Date.now() - HOUR), 'icr_nolists');
+    await seedLiveEvidence(db, t, { at: new Date(Date.now() - HOUR) });
+    const block = await loadComplianceBlock(db, t, new Date());
+    expect('lists' in block.screening).toBe(false);
+  });
+
+  it('an evidence row stored before this pack (no listFitness, no lists, no unscreened) still parses and gives a valid version 2 block', async () => {
+    const t = transferAt(new Date(Date.now() - HOUR), 'icr_old');
+    const screenedAt = new Date(Date.now() - HOUR).toISOString();
+    await rawScreen(t, {
+      listSource: 'mock-watchlist', listVersion: 'static', listHash: 'd'.repeat(64), screenedAt, decision: 'clear',
+      parties: [
+        { role: 'recipient', inputHash: null, matched: false, matchScore: 0 },
+        { role: 'sender', inputHash: 'e'.repeat(64), matched: false, matchScore: 0 },
+      ],
+    });
+    const block = await loadComplianceBlock(db, t, new Date());
+    expect(block.version).toBe(2);
+    expect(block.screening).toEqual({
+      status: 'cleared', reasons: [], screened_at: screenedAt,
+      list_source: 'mock-watchlist', list_version: 'static', decision: 'clear',
+      names_screened: { sender: 1, recipient: 1 },
+    });
+  });
 });

@@ -51,8 +51,11 @@ describe('screenTransfer under SANCTIONS_LIST=lists with in-mha-uapa unloaded (L
     expect(r.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
     expect(r.evidence!.parties).toEqual([
       { role: 'recipient', inputHash: inputHash(SDN_NAME), matched: true, matchScore: 1, matchedEntryId: 'sdn:1003' },
-      { role: 'sender', inputHash: inputHash('Plain Invented Sender'), matched: false, matchScore: 0 },
+      // Fix pack 5 T29: the sender's screen failed closed on the partial set, so it is marked unscreened.
+      { role: 'sender', inputHash: inputHash('Plain Invented Sender'), matched: false, matchScore: 0, unscreened: true },
     ]);
+    // Fix pack 5 T29: lists[] shows which lists answered; MHA did not and is not claimed as checked.
+    expect(r.evidence!.lists!.find((l) => l.source === 'in-mha-uapa')).toEqual({ source: 'in-mha-uapa', version: 'unavailable', hash: '', fitness: 'not_live' });
   });
 
   it('an exact sender with a clear recipient -> blocked with the sender watchlist reason', async () => {
@@ -146,8 +149,15 @@ describe('screenTransfer: a member that recovers mid-screen (LF1-D1)', () => {
     expect(m.listInfo().hash).toMatch(/^[0-9a-f]{64}$/);
     notChecked(r.evidence);
     expect(r.evidence!.parties).toEqual([
-      { role: 'recipient', inputHash: inputHash('Plain Payee'), matched: false, matchScore: 0 },
+      // Fix pack 5 T29: the recipient was NOT screened (failed closed), told apart from a clear.
+      { role: 'recipient', inputHash: inputHash('Plain Payee'), matched: false, matchScore: 0, unscreened: true },
       { role: 'sender', inputHash: inputHash('Zorvan Quillet'), matched: true, matchScore: 1, matchedEntryId: 'sdn:1' },
+    ]);
+    // Fix pack 5 T29: the member that failed during this call is recorded as not checked,
+    // although it has loaded again by the time the evidence is written.
+    expect(r.evidence!.lists).toEqual([
+      expect.objectContaining({ source: 'ofac-sdn', version: 'v1', fitness: 'live' }),
+      { source: 'ofac-cons', version: 'unavailable', hash: '', fitness: 'not_live' },
     ]);
   });
 

@@ -235,6 +235,23 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
     });
   });
 
+  it('screening.lists copies the ref items in order (fix pack 5 T29, SANCTIONS_LIST=lists only)', () => {
+    const lists = [
+      { source: 'ofac-sdn', version: '2026-09-01', fitness: 'live' as const },
+      { source: 'un-sc', version: '2026-09-02', fitness: 'stale' as const },
+      { source: 'in-mha-uapa', version: 'unavailable', fitness: 'not_live' as const },
+    ];
+    const block = buildComplianceBlock(transfer(), customer(), NOW, {
+      kycGateActive: true,
+      screening: {
+        listSource: 'lists:ofac-sdn+un-sc+in-mha-uapa', listVersion: 'unavailable', decision: 'match', screenedAt: daysAgo(1),
+        namesScreened: { sender: 1, recipient: 1 }, lists,
+      },
+    });
+    expect((block.screening as { lists?: unknown }).lists).toEqual(lists);
+    expect((block.screening as { lists?: unknown[] }).lists![0]).not.toBe(lists[0]);
+  });
+
   it('screening: no evidence ⇒ list fields are OMITTED (never a guessed list name)', () => {
     const block = buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true });
     expect(Object.keys(block.screening).sort()).toEqual(['reasons', 'screened_at', 'status']);

@@ -115,6 +115,8 @@ export async function screenHeldOnFile(
     requireLiveList: needLive,
     now,
     ...(names.alsoRecipientNames.length > 0 ? { alsoRecipientNames: names.alsoRecipientNames } : {}),
+    // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+    destinationCountry: t.destinationCountry ?? null,
   });
   return { result, uncovered };
 }

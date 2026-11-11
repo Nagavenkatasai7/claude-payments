@@ -28,7 +28,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
-import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { LIST_SET_NAMES, NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeListSet, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { SendBusyError } from '@/lib/send-limits';
@@ -1520,6 +1520,27 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
         payout_destination: 'newly@upi',
       }, ctx);
       expect(r.blocked).toBe(true);
+    } finally {
+      restoreOfacSource(original);
+    }
+  });
+
+  // Fix pack 5 T29 (R08): the quote-time screen passes the send's destination (IN -> four lists).
+  it('fix pack 5 T29: under SANCTIONS_LIST=lists the quote-time screen of a send to IN covers four lists', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildClearedCtx();
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+      primeListSet({});
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 200, funding_method: 'bank_transfer', recipient_name: LIST_SET_NAMES['un-sc'],
+        recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'unsc@upi',
+      }, ctx);
+      expect(r.blocked).toBe(true);
+      const ev = (await db.execute(
+        sql`SELECT meta FROM audit_events WHERE action = 'sanctions.screen' ORDER BY id DESC LIMIT 1`,
+      )) as unknown as { rows: Array<{ meta: Record<string, unknown> }> };
+      expect((ev.rows[0].meta.lists as unknown[]).length).toBe(4);
     } finally {
       restoreOfacSource(original);
     }
@@ -4038,6 +4059,21 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
       const r = await executeTool('register_seller', { business_name: NEWLY_LISTED_BUSINESS }, ctx);
       expect(r.registered).toBe(false);
       expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+    } finally {
+      restoreOfacSource(original);
+    }
+  });
+
+  // Fix pack 5 T29 (R08): a seller has no destination: under lists every list is screened.
+  it('fix pack 5 T29: under SANCTIONS_LIST=lists register_seller screens all four lists', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildCtx(fakeRedis());
+      primeListSet({});
+      await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+      const rows = await sellerScreenRows();
+      expect(rows).toHaveLength(1);
+      expect((rows[0].meta.lists as unknown[]).length).toBe(4);
     } finally {
       restoreOfacSource(original);
     }

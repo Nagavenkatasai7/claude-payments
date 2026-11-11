@@ -56,6 +56,8 @@ async function screeningRef(db: DbOrTx, transfer: Transfer, now: Date): Promise<
       sender: newest.parties.filter((p) => p.role === 'sender').length,
       recipient: newest.parties.filter((p) => p.role === 'recipient').length,
     },
+    // Fix pack 5 T29 (P26): lists mode only; never the hashes or check times.
+    ...(newest.lists ? { lists: newest.lists.map(({ source, version, fitness }) => ({ source, version, fitness })) } : {}),
   };
 }
 

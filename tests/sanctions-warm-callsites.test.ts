@@ -1,4 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
+import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { freshDb, seedLedgerSpend } from './helpers-db';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { rescreenBeforePay } from '@/lib/pay-rescreen';
@@ -59,4 +61,26 @@ describe('rescreenBeforePay warms every list under "lists"', () => {
     const out = await rescreenBeforePay(db, t, { senderName: 'Clean Sender', recipientName: NEWLY_LISTED_PERSON }, GLOBAL_DEFAULTS);
     expect(out.kind).toBe('blocked');
   });
+});
+
+// Fix pack 5 T29 (R08): the pay re-screen passes the row's destination, which
+// picks the list floor under SANCTIONS_LIST=lists.
+describe('rescreenBeforePay screens the destination floor under "lists" (pack 5 T29)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(original));
+
+  for (const [dest, n] of [['IN', 4], ['DE', 2]] as const) {
+    it(`a ${dest} row is screened against ${n} lists (evidence lists.length)`, async () => {
+      const db = await freshDb();
+      const id = await seedLedgerSpend(db, { partnerId: 'default', phone: '15550190003', amountUsd: 50, status: 'awaiting_payment' });
+      await db.execute(sql`UPDATE transfers SET destination_country = ${dest} WHERE id = ${id}`);
+      const t = (await createTransferRepo(db).getTransfer(id))!;
+      expect(t.destinationCountry).toBe(dest);
+      primeListSet({});
+      await rescreenBeforePay(db, t, { senderName: 'Clean Sender', recipientName: 'Clean Payee' }, GLOBAL_DEFAULTS);
+      const r = await db.execute(sql`SELECT meta FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`);
+      const metas = (r.rows as Array<{ meta: ScreeningEvidence }>).map((x) => x.meta);
+      expect(metas.at(-1)!.lists).toHaveLength(n);
+    });
+  }
 });

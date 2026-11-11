@@ -791,6 +791,8 @@ async function mintLocked(
     alsoRecipientNames: input.recipientLegalName?.trim() ? [input.recipientLegalName.trim()] : undefined,
     requireLiveList: p.realMoney,      // Fix pack 2 (R02): real money clears only on a live list
     now,
+    // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+    destinationCountry: p.destinationCountry,
   });
 
   // EDD merge: a watchlist BLOCK always wins; EDD only ever ADDS a flag.

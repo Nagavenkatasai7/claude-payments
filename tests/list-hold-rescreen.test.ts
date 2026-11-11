@@ -653,6 +653,25 @@ describe('the list-hold sweep and the paid heal under lists (fix pack 5 T30)', {
     expect(await healPaidRowScreen(db, paid, new Date(), { prechecked: true })).toBe('skipped');
     expect(fitnessReads.n).toBe(2);
     expect(await auditRows()).toEqual(au);
-    // (A release under lists needs the set fitness inside screenTransfer: T29.)
+    // (A release under lists needs the set fitness inside screenTransfer: T29, below.)
+  });
+
+  // Fix pack 5 T29 (L1 amendment): with the set fitness in screenTransfer, a
+  // real-money hold is RELEASED under lists once every floor list is live, and
+  // screenHeldOnFile screens the row's own destination floor.
+  it('fix pack 5 T29: under lists with every list live the sweep releases an IN and a DE hold; the re-screens cover 4 and 2 lists', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_in29' });
+    await heldRow({ id: 'lh_de29', destinationCountry: 'DE', destinationCurrency: 'EUR' } as Partial<Transfer> & { id: string });
+    primeListSet({});
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 2, stillHeld: 0, blocked: 0 });
+    for (const [id, n] of [['lh_in29', 4], ['lh_de29', 2]] as const) {
+      expect((await store.getTransfer(id))?.status).toBe('paid');
+      const screens = (await auditRows(id)).filter((a) => a.action === 'sanctions.screen');
+      expect(screens).toHaveLength(2);
+      expect(screens[1].meta).toMatchObject({ decision: 'clear', listFitness: 'live' });
+      expect((screens[1].meta.lists as unknown[]).length).toBe(n);
+    }
+    expect((await keys()).filter((x) => x?.startsWith('instruct:')).sort()).toEqual(['instruct:lh_de29', 'instruct:lh_in29']);
   });
 });
