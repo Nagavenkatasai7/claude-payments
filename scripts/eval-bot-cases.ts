@@ -86,6 +86,11 @@ export interface EvalCase {
   gateActive?: boolean;
   /** The purpose.detect switch (agent.ts purposeRequired): prompt section + required schema arg. Default false. */
   purposeRequired?: boolean;
+  /**
+   * Fix pack 6 (P12): the routed partner is live-certified (agent.ts
+   * isLiveCertified): the ENGLISH TRANSACTION STEPS section is on. Default off.
+   */
+  englishSteps?: true;
   /** Server-injected system notes, verbatim from agent.ts. */
   notes?: string[];
   /** The conversation so far (user, assistant, tool), newest last. */
@@ -1437,13 +1442,72 @@ export const EVAL_CASES: EvalCase[] = [
       fail: say('Your account was flagged by our sanctions screening and is under compliance review.'),
     },
   },
+  // ── Fix pack 6 (P12, R46): a live-certified partner's bot keeps the money
+  // steps in English, after ONE short lead-in line in the customer's language.
+  // Small talk stays localised (cases 16-18 keep the section off). ──────────
+  {
+    id: 60,
+    title: 'English steps on, Spanish customer: one Spanish lead-in line, then the status text verbatim in English',
+    category: 'flow',
+    lang: 'es',
+    englishSteps: true,
+    history: [user('Hola, ¿dónde está mi dinero? Es la transferencia abc12345'), ...heldStatus()],
+    check: (r) => {
+      const fixed = fixedReply('hold', { help: true });
+      const text = textOf(r);
+      const rest = text.split(fixed).join('\n').split('\n').filter((l) => l.trim() !== '');
+      return fail(
+        !text.includes(fixed) && 'did not relay the status text verbatim in English',
+        rest.length > 1 && 'wrote more than one line besides the status text',
+        textAvoids(r, HOLD_REASON_EN, 'named a reason or a review'),
+        textAvoids(r, HOLD_REASON_ES, 'named a reason or a review (in Spanish)'),
+      );
+    },
+    recorded: {
+      pass: say(`Le dejo la respuesta en inglés:\n${fixedReply('hold', { help: true })}`),
+      fail: say('Su transferencia se está procesando. Le escribiremos en cuanto haya novedades. No necesita hacer nada por ahora. Responda HELP para hablar con una persona.'),
+    },
+  },
+  {
+    id: 61,
+    title: 'English steps on, Hinglish customer: at most one Hinglish lead-in line, the quote line and question in English',
+    category: 'flow',
+    lang: 'hinglish',
+    englishSteps: true,
+    history: [
+      user('mummy ko India mein $200 bhejne hai, kitna lagega?'),
+      ...toolTurn('check_send_limit', { amount_usd: 200 }, { within_cap: true, tier: 'T1', edd_required: false }),
+      ...toolTurn('get_quote', { amount_source: 200, destination_country: 'IN' }, {
+        source_currency: 'USD', amount_source: 200, fee_source: 1.99, total_charge_source: 201.99, fee_usd: 1.99, fx_rate: 83,
+        amount_dest: 16600, destination_currency: 'INR', destination_country: 'IN', delivery_estimate: 'within 1 business day',
+        amount_source_display: '$200.00 USD',
+      }),
+    ],
+    check: (r) => {
+      const lines = textOf(r).split('\n').filter((l) => l.trim() !== '');
+      const question = [...lines].reverse().find((l) => l.trim().endsWith('?'));
+      return fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, /1\.99|\b83(?:\.0+)?\b|16,?600|business day|201\.99/i, 'restated the quote figures the code adds'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        lines.filter((l) => ROMAN_HINDI.test(l)).length > 1 && 'wrote more than one Hinglish line',
+        !question && 'did not ask the confirmation question',
+        question !== undefined && ROMAN_HINDI.test(question) && 'asked the confirmation question in Hinglish',
+        question !== undefined && !/\b(shall|should|go ahead|confirm|proceed)\b/i.test(question) && 'the confirmation question is not in English',
+      );
+    },
+    recorded: {
+      pass: say('Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote. Shall I go ahead?'),
+      fail: say('Yeh raha aapka quote. Kya main aage badhun?'),
+    },
+  },
 ];
 
 /**
  * The 20-case subset a pull request runs (Q10): every risk category and every
  * language, never a pending case. The nightly run covers every case.
  */
-export const PR_SUBSET_IDS: readonly number[] = [5, 6, 8, 9, 16, 25, 28, 29, 30, 32, 33, 35, 36, 38, 39, 42, 47, 51, 52, 57];
+export const PR_SUBSET_IDS: readonly number[] = [5, 6, 8, 16, 25, 28, 29, 30, 32, 33, 35, 36, 38, 39, 42, 47, 51, 52, 57, 60];
 
 export type EvalSubset = 'full' | 'pr';
 
@@ -1457,7 +1521,16 @@ export function casesFor(subset: EvalSubset): EvalCase[] {
 /** The messages the agent would send the model for this case (agent.ts order). */
 export function buildEvalMessages(c: EvalCase): ChatMessage[] {
   return [
-    { role: 'system', content: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: c.gateActive ?? true, purposeRequired: c.purposeRequired ?? false }) },
+    {
+      role: 'system',
+      content: buildSystemPrompt({
+        brand: 'SmartRemit',
+        kycGateActive: c.gateActive ?? true,
+        purposeRequired: c.purposeRequired ?? false,
+        // Fix pack 6 (P12): only an englishSteps case adds the key, so every other case's messages stay byte-identical.
+        ...(c.englishSteps ? { englishTransactionSteps: true } : {}),
+      }),
+    },
     ...(c.notes ?? []).map((content): ChatMessage => ({ role: 'system', content })),
     ...c.history,
   ];

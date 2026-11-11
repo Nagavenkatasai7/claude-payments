@@ -40,6 +40,7 @@ import { modelVisibleResult } from './model-visible-result';
 import { composeReply } from './compose-reply';
 import { MIN_USD } from './fx';
 import { providerLineFor } from './legal/provider-line';
+import { isLiveCertified } from './live-gate';
 import {
   addPolicyFacts,
   addTextFacts,
@@ -284,6 +285,9 @@ export function createAgent(deps: AgentDeps) {
     // new read). None for the default tenant, demo or an unapproved block, so the
     // prompt and the tool context stay byte-identical there.
     const providerLine = providerLineFor(resolvePartnerDisclosure(notePartner)) ?? undefined;
+    // Fix pack 6 (P12, Q-R46.2): a live-certified routed partner's bot keeps the
+    // money steps in English. Decided on the partner row already read; no rail read.
+    const englishTransactionSteps = isLiveCertified(notePartner);
     // Scheduled-send name nudge (2026-10-02): an active schedule that cannot run
     // for want of the owner's legal name. Fail-soft: a read error injects nothing.
     let scheduleNeedsName = false;
@@ -397,7 +401,7 @@ export function createAgent(deps: AgentDeps) {
     // the front of `history`, which moves where this turn starts.
     let historyAtTurnStart = history.length;
     const prefix: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired, providerLine }) },
+      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired, providerLine, ...(englishTransactionSteps ? { englishTransactionSteps: true } : {}) }) },
     ];
     // Web channel: in the prefix, so the model still knows the channel's limits
     // after tool results arrive. Never persisted.

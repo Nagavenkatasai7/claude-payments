@@ -6,6 +6,7 @@ import {
   EVAL_CASES,
   PR_SUBSET_IDS,
   casesFor,
+  buildEvalMessages,
   runEval,
   replyExcerpt,
   EVAL_EXCERPT_MAX,
@@ -15,6 +16,7 @@ import {
 import { main, makeEvalChat, EVAL_DEFAULT_MODEL, parseEvalConfig, requiredPasses, reportBaseName } from '../../scripts/eval-bot';
 import { AGENT_MODEL_CHOICES, HAIKU, SONNET } from '@/lib/llm-models';
 import type { ChatMessage } from '@/lib/types';
+import { ENGLISH_STEPS_SECTION, buildSystemPrompt } from '@/lib/prompt';
 
 // Program-Fix 49B (prompt-11) and R31. No real model is ever called here:
 // every chat function is a stub, and fetch is a spy that answers like the
@@ -313,6 +315,16 @@ describe('runEval', () => {
     expect(replyExcerpt({ role: 'assistant', content: '', tool_calls: [{ id: 'c', type: 'function', function: { name: 'get_quote', arguments: '{"amount_source":5}' } }] })).toBe(
       '[tool get_quote {"amount_source":5}]',
     );
+  });
+});
+
+describe('buildEvalMessages and the English steps section (pack 6 P12)', () => {
+  it('buildEvalMessages passes englishTransactionSteps only for an englishSteps case', () => {
+    const byId = (id: number) => EVAL_CASES.find((c) => c.id === id)!;
+    expect(String(buildEvalMessages(byId(60))[0].content)).toContain(ENGLISH_STEPS_SECTION);
+    expect(String(buildEvalMessages(byId(61))[0].content)).toContain(ENGLISH_STEPS_SECTION);
+    expect(String(buildEvalMessages(byId(18))[0].content)).not.toContain(ENGLISH_STEPS_SECTION);
+    expect(buildEvalMessages(byId(18))[0].content).toBe(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true, purposeRequired: false }));
   });
 });
 
