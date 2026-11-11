@@ -3,7 +3,7 @@ import { FX_MAX_AGE_MS, FX_PROVIDER_ID, RateUnavailableError, getDestinationRate
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { warmSanctionsList } from './providers/sanctions-provider';
-import { railPartnerOf, realMoneyRail } from './live-gate';
+import { capabilityOpen, isLiveCertified, liveMoneyRefusal, railPartnerOf, realMoneyRail } from './live-gate';
 import { resolveCorridorRules, senderScreeningHoldActive, SENDER_SCREENING_REASON, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -24,6 +24,8 @@ import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rul
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { RewardMintFacts, SenderLedgerOps, Store } from './store';
 import type { PartnerStore } from './partner-store';
+import type { FixedReplyKind } from './hold-replies';
+import type { LiveCapability } from './live-controls';
 import type {
   CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
@@ -33,7 +35,7 @@ import type {
   TransferEnvironment,                                                       // Program-Fix 44 P2
   FxRateOrigin,                                                              // Step 0 FX-7
 } from './types';
-import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
+import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 
 export interface CreateTransferInput {
@@ -325,6 +327,28 @@ export class TransferIdConflictError extends Error {
   }
 }
 
+/**
+ * Fix pack 3 (contract 4): ONLY pack 3's live refusals use this class (the
+ * classes above are untouched). Thrown before any write: a real-money mint
+ * owned by the default tenant (default_on_live_rail), a real-money mint on a
+ * rail partner not certified for live money (live_not_certified), or a closed
+ * capability on a certified owner (capability_off, with `capability`).
+ * Callers answer the customer with fixedReply(copyKey). Thrown by
+ * createTransferWithOutcome (T4: the live gate; T12: the capability gate).
+ */
+export type MintRefusalCode = 'live_not_certified' | 'capability_off' | 'default_on_live_rail';
+
+export class MintRefusedError extends Error {
+  constructor(
+    readonly code: MintRefusalCode,
+    readonly copyKey: FixedReplyKind = 'cannot_complete',
+    readonly capability?: LiveCapability,
+  ) {
+    super(`mint_refused:${code}`);
+    this.name = 'MintRefusedError';
+  }
+}
+
 export async function createTransfer(
   store: Store,
   partnerStore: PartnerStore,
@@ -339,6 +363,14 @@ export async function createTransfer(
  * claim-first same-id re-mint) instead of inserting. Same arguments, same
  * behaviour; the partner API uses it so a concurrent loser that replays the
  * winner never repeats a mint-only side effect (the deprecation warning).
+ *
+ * Order before the lock: KYC backstop, pulled-on-b2c refusal, sends.paused,
+ * root-handle reads (owner, subject), quote, route, real-money rail read,
+ * then the fix pack 3 live gate (MintRefusedError: default_on_live_rail or
+ * live_not_certified, nothing written), then the fix pack 3 capability gate
+ * (MintRefusedError capability_off: a certified owner, env not 'test', a
+ * closed b2b / usdc / schedules opt-in; nothing written), then the reward
+ * plan and the lock.
  */
 export async function createTransferWithOutcome(
   store: Store,
@@ -377,10 +409,14 @@ export async function createTransferWithOutcome(
   // caller's key stays bound-but-unminted and the same request mints once the
   // switch is off. A sandbox (test-key) mint moves no money and is never
   // paused, so the pre-release synthetic transfer still runs during a pause.
+  // Fix pack 3 (R26): a partner-set (`tenant:`) pause applies to the OWNER's
+  // sends only; a routed rail partner's own sends pause never stops this mint
+  // (a platform 'partner' row of the rail still does).
   if (
     input.environment !== 'test' &&
     (await store.isFlagOn('sends.paused', {
       partnerId: [input.partnerId, input.settlementPartnerId],
+      tenants: [input.partnerId],
       corridor: destinationCountry,
     }))
   ) {
@@ -460,6 +496,48 @@ export async function createTransferWithOutcome(
       ? null
       : await store.railProviderType(railPartnerOf({ partnerId: input.partnerId, settlementPartnerId }));
   const realMoney = realMoneyRail({ environment: input.environment ?? 'live', railProviderType });
+
+  // ── Fix pack 3 (R15; contract 4 (a)(b)): the live gate ───────────────────
+  // A real-money mint refuses BEFORE any write unless its RAIL partner is
+  // certified for live money; the default tenant refuses any real-money mint,
+  // owned or routed. The rail row: none for the default owner (refused
+  // without a read), the owner row already in hand when not routed, else the
+  // routed partner on the ROOT partner store (never `ops`, see above), read
+  // only on real money. A failed read counts as not certified.
+  if (realMoney) {
+    const railId = railPartnerOf({ partnerId: input.partnerId, settlementPartnerId });
+    const rail =
+      input.partnerId === DEFAULT_PARTNER_ID
+        ? null
+        : railId === input.partnerId
+          ? partner
+          : await partnerStore.getPartner(railId).catch(() => null);
+    const code = liveMoneyRefusal({ realMoney, ownerId: input.partnerId, rail });
+    if (code) {
+      logWarn('transfer-create.live-refused', 'live mint refused', { partnerId: input.partnerId, code });
+      throw new MintRefusedError(code);
+    }
+  }
+
+  // ── Fix pack 3 (R13; contract 4 (c)): the capability gate ────────────────
+  // A CERTIFIED owner mints B2B (a b2b transfer or a partner-pulled funding
+  // method), USDC payouts and scheduled runs only with that capability's
+  // opt-in (counsel ref + partner approval). Keyed on the owner's
+  // certification, not on the rail being real money; a sandbox ('test') mint
+  // skips it. No extra read: the owner row is in hand. Checked in the order
+  // b2b, usdc, schedules; the first closed one is refused, before any write
+  // (so before the locked scheduleMintCheck too).
+  if (input.environment !== 'test' && isLiveCertified(partner)) {
+    const needed: LiveCapability[] = [];
+    if ((input.transferType ?? 'b2c') === 'b2b' || isPartnerPulled(input.fundingMethod)) needed.push('b2b');
+    if (input.payoutMethod === 'usdc') needed.push('usdc');
+    if (input.scheduleId) needed.push('schedules');
+    const closed = needed.find((c) => !capabilityOpen(partner, c));
+    if (closed) {
+      logWarn('transfer-create.live-refused', 'live mint refused', { partnerId: input.partnerId, code: 'capability_off' });
+      throw new MintRefusedError('capability_off', 'cannot_complete', closed);
+    }
+  }
 
   // ── ONE locked mint per (partner, phone) ──────────────────────────────────
   // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all

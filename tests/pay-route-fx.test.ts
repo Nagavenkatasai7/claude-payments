@@ -5,6 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { fixedReply } from '@/lib/hold-replies';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -60,5 +61,16 @@ describe('POST /api/pay/[transferId] — fx_unavailable (Task 9)', () => {
     const res = await post();
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe('That amount exceeds your current limit.');
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint ⇒ the neutral 409
+// PAY_NOT_AVAILABLE, never the generic 400 "link no longer active".
+describe('POST /api/pay/[transferId] — not_available (pack 3)', () => {
+  it('not_available ⇒ 409 { ok: false, error: fixedReply("cannot_complete"), reason: "not_available" }', async () => {
+    finalizeDraftPayment.mockResolvedValueOnce({ ok: false, error: 'not_available' });
+    const res = await post();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
   });
 });

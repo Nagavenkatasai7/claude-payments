@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -115,6 +116,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   outbox = createOutboxRepo(db);
   await seedPartner(db, 'acme');
+  await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   sendText.mockReset();
   sendTemplate.mockReset();
   fetchFn.mockReset();
@@ -512,6 +514,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
 
   it('ROUTED: the rail partner gets originator null + routed true, the kyc status still read under the OWNER, and no sender name or phone anywhere in the body', async () => {
     await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
       kyc: {},
@@ -543,6 +546,7 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
   beforeEach(async () => {
     // Owner 'acme' has its OWN rail config — which must NOT be used when routed.
     await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
     const repo = createIntegrationsRepo(db, provider);
     await repo.saveIntegrations('acme', {

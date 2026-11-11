@@ -54,6 +54,11 @@ import { getPartnerSite } from '@/db/repos/partner-site-repo';
 import { SendLimitsCard } from '../../send-limits-card';
 import { enablePartnerPortalAction, recordPortalAuthTemplateAction } from '../portal-actions';
 import { GoLiveCard, goLiveFlash, type GoLiveChecklistView } from '../go-live-card';
+import { LiveCertificationCard } from '../live-certification-card';
+import { certifyLiveAction, recordContractAction, recordCounselAction, revokeLiveAction } from '../go-live-actions';
+import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
+import { liveReadiness, type LiveReadiness } from '@/lib/live-certification';
+import { EMPTY_LIVE_CONTROLS, postureSigned } from '@/lib/live-controls';
 import { getGoLive, latestTemplateAttestation, type GoLiveRecord } from '@/db/repos/partner-go-live-repo';
 import { loadOnboardingFacts } from '@/db/repos/partner-onboarding-facts';
 import { getPortalSettings, type PortalSettings } from '@/db/repos/portal-settings-repo';
@@ -241,6 +246,18 @@ export default async function PartnerDetailPage({
             return 'error' as const;
           })
       : null;
+  // Fix pack 3 T10 (R15): the live readiness lines for the LiveCertificationCard (platform admins,
+  // never 'default'). Facts on the ROOT handle, outside any transaction (contract 8); a read failure
+  // renders "could not be read", never a broken page (the certify action re-derives it anyway).
+  const liveReadinessView: LiveReadiness | 'error' | null =
+    isPlatformAdmin && partner.id !== 'default'
+      ? await loadLiveReadinessFacts(getDb(), partner.id, new Date())
+          .then((facts) => liveReadiness(partner, facts))
+          .catch((err: unknown) => {
+            logWarn('admin.live_readiness', err instanceof Error ? err.name : 'error', { partnerId: partner.id });
+            return 'error' as const;
+          })
+      : null;
   const [channelHealth, channelTest, signature] = await Promise.all([
     partner.id === 'default'
       ? Promise.resolve(null)
@@ -347,6 +364,17 @@ export default async function PartnerDetailPage({
                 goLive={goLive}
                 flash={goLiveFlashText}
                 checklist={goLiveChecklist ?? 'error'}
+              />
+            )}
+            {isPlatformAdmin && partner.id !== 'default' && (
+              <LiveCertificationCard
+                partnerId={partner.id}
+                liveControls={partner.liveControls ?? EMPTY_LIVE_CONTROLS}
+                readiness={liveReadinessView ?? 'error'}
+                certifyAction={certifyLiveAction.bind(null, partner.id)}
+                revokeAction={revokeLiveAction.bind(null, partner.id)}
+                contractAction={recordContractAction.bind(null, partner.id)}
+                counselAction={recordCounselAction.bind(null, partner.id)}
               />
             )}
             {health && (
@@ -520,10 +548,20 @@ export default async function PartnerDetailPage({
                             <option value="delegated">Partner runs KYC (delegated)</option>
                           </select>
                         </div>
-                        <label className="mt-3 flex items-center gap-1.5 text-sm">
-                          <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
-                          Require identity verification before sending (off ⇒ customers send immediately)
-                        </label>
+                        {/* Fix pack 3 (contract 14): a signed posture forces verify-before-send, so the
+                            box is locked ON; a disabled box posts nothing and updatePartnerAction then
+                            keeps the stored column. */}
+                        {postureSigned(partner.liveControls) ? (
+                          <label className="mt-3 flex items-center gap-1.5 text-sm">
+                            <input type="checkbox" name="requireKycBeforeSend" disabled defaultChecked />{' '}
+                            Require identity verification before sending: ON (locked by the partner&apos;s signed posture)
+                          </label>
+                        ) : (
+                          <label className="mt-3 flex items-center gap-1.5 text-sm">
+                            <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
+                            Require identity verification before sending (off ⇒ customers send immediately)
+                          </label>
+                        )}
                         <p className="mt-2 text-xs text-muted-foreground">
                           Off by default. Sanctions screening always runs, in both modes, regardless of this setting.
                         </p>

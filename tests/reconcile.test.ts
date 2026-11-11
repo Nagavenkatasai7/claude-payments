@@ -14,6 +14,7 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
@@ -34,8 +35,10 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
-// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one per
-// stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one readFlag
+// per stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+// (flags.ts's own isFlagOn -> readFlag call does not go through this mock, so a
+// row is never counted twice.)
 const flagHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
 vi.mock('@/lib/flags', async (orig) => {
   const real = await orig<typeof import('@/lib/flags')>();
@@ -44,6 +47,10 @@ vi.mock('@/lib/flags', async (orig) => {
     isFlagOn: async (...a: Parameters<typeof real.isFlagOn>) => {
       flagHook.before?.();
       return real.isFlagOn(...a);
+    },
+    readFlag: async (...a: Parameters<typeof real.readFlag>) => {
+      flagHook.before?.();
+      return real.readFlag(...a);
     },
   };
 });
@@ -390,6 +397,61 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
     const r = await reconcileSweep(db);
     expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'recon:rc_t1' }]);
+  });
+});
+
+// Pack 3 review Q2 (I1): a stuck paid row the live gate refuses is skipped (no
+// re-instruct, no recon:). While an instruct row for it is still live the worker
+// owns it (it raises livegate:<id>); once that instruct has finished, nothing
+// would ever alert, so the sweep raises ONE livegate:stuck:<id> alert.
+describe('reconcileSweep — stuck paid refused by the live gate (pack 3 review I1)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(fixture({ id: 'lg_r1', paidAt: new Date(Date.now() - 30 * 60_000).toISOString() }));
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '30 minutes' WHERE id = 'lg_r1'`);
+  });
+
+  it("the only settlement.instruct row is 'done': one livegate:stuck:<id> alert (ids and code only), no recon:, no reinstruct; a second sweep adds nothing", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    const first = await reconcileSweep(db);
+    expect(first.reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([
+      { kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' },
+      { kind: 'ops.alert', dedupe_key: 'livegate:stuck:lg_r1' },
+    ]);
+    const msg = String(((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = 'livegate:stuck:lg_r1'`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m);
+    expect(msg).toContain('lg_r1');
+    expect(msg).toContain('live_not_certified');
+    for (const pii of ['15551230000', 'Anita', '919876543210', '123456789012', '200']) expect(msg).not.toContain(pii);
+    await reconcileSweep(db);
+    expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it("a 'pending' settlement.instruct row (the worker owns it): no alert from the sweep", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
+  });
+
+  // Pack 3 final check J1: a paid row that sanctions screening BLOCKED is owned
+  // by its paidmatch:/paidmatchinstructed: alert and the sanctions procedure. It
+  // gets no livegate:stuck: alert (whose "re-instruct / cancel and refund" would
+  // be wrong for it), and is still skipped: no recon:, no re-instruct.
+  it("a sanctions-BLOCKED twin whose only instruct is 'done': no livegate:stuck: alert, no recon:, no reinstruct (J1)", async () => {
+    await db.execute(sql`UPDATE transfers SET compliance_status = 'blocked' WHERE id = 'lg_r1'`);
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
   });
 });
 
@@ -850,6 +912,8 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
         : { providerType: 'mock' },
       whatsapp: {},
     });
+    // Pack 3 T6: the stuck-paid loop skips an uncertified real-money row (K3 feeds it 'acme' http rows).
+    if (providerType === 'http') await certifyPartnerForTest(db, 'acme');
   }
   const message = async (key: string) =>
     ((await db.execute(sql`SELECT payload->>'message' AS message FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {

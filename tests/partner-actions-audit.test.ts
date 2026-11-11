@@ -224,6 +224,15 @@ describe('issueApiKeyAction / revokeApiKeyAction audit api_key.issue / api_key.r
     expect((await auditRows()).filter((x) => x.action === 'api_key.revoke')).toHaveLength(1);
   });
 
+  // Pack 3 T13: every live key needs an approved go-live, platform admins included.
+  it('issue live on an unapproved partner writes no audit row and no key', async () => {
+    await seedPartner(db, 'gamma');
+    await expect(issueApiKeyAction('gamma', 'live')).rejects.toThrow(/after SmartRemit approves go-live/);
+    expect(await auditRows()).toEqual([]);
+    const keys = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = 'gamma'`);
+    expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
+  });
+
   it('an unknown key ⇒ "Key not found." and no row', async () => {
     await expect(revokeApiKeyAction('acme', form({ keyId: 'pk_live_ghost' }))).rejects.toThrow('Key not found.');
     expect(await auditRows()).toEqual([]);
@@ -278,6 +287,17 @@ describe('wizardCreatePartnerAction audits the WhatsApp creds and the first key'
     expect(rows[2].subject_id).toBe(rows[2].meta!.keyId);
     const raw = JSON.stringify(rows);
     for (const v of [PN, w.token, w.appSecret, w.verifyToken, r.apiKey]) expect(raw).not.toContain(v);
+  });
+
+  it('the http wizard audits partner.whatsapp_config and api_key.issue {mode test} only (no go-live approve row)', async () => {
+    currentStaff = { username: 'admin', role: 'admin' };
+    const r = await wizardCreatePartnerAction({
+      name: 'Http Co', countries: ['US'], payment: { providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' },
+    });
+    const rows = (await auditRows()).filter((x) => x.partner_id === r.id);
+    expect(rows.map((x) => x.action)).toEqual(['partner.whatsapp_config', 'api_key.issue']);
+    expect(rows[1].meta).toEqual({ keyId: rows[1].subject_id, mode: 'test', last4: r.apiKeyLast4 });
+    expect(JSON.stringify(rows)).not.toContain(r.apiKey);
   });
 
   it('a wizard with no WhatsApp still records the (all-false) creds row and the first key', async () => {

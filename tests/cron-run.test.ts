@@ -7,8 +7,10 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
-import { freshDb, seedLedgerSpend } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { SendBusyError } from '@/lib/send-limits';
+import { MintRefusedError } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
 import type { CustomerStore } from '@/lib/customer-store';
@@ -874,5 +876,62 @@ describe('runDueSchedules — the schedule purpose rides every run (required pur
     });
     expect(result.fired).toBe(1);
     expect((await store.listTransfers())[0].purpose).toBeUndefined();
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint. Nothing throws it in
+// production yet (T4/T12 do), so the throw is stubbed at the sender lock. It is
+// never retried in-process (only a busy lock is), counts as failed, leaves
+// lastRunAt alone and raises the one deduped refusal alert naming the code.
+describe('runDueSchedules: MintRefusedError (pack 3)', () => {
+  it.each(['live_not_certified', 'capability_off'] as const)(
+    'a MintRefusedError (%s) ⇒ failed++, lastRunAt NOT advanced, one schedule-refused alert whose text carries the code',
+    async (code) => {
+      const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+      await seedVerified(customerStore);
+      await scheduleStore.saveSchedule(sched('due', 21));
+      const spy = vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(code));
+      const result = await runDueSchedules({
+        db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+        sendScheduledLink: async () => { throw new Error('must not send'); },
+      });
+      expect(result).toEqual({ fired: 0, failed: 1 });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await store.listTransfers()).toHaveLength(0);
+      expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+      const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`);
+      const alerts = (r as unknown as { rows: { dedupe_key: string; payload: { message: string } }[] }).rows;
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].dedupe_key).toMatch(/^schedule-refused:due:/);
+      expect(alerts[0].payload.message).toContain(`(${code})`);
+    },
+  );
+
+  // Fix pack 3 T12 (R13): the real capability gate, not a stub.
+  it('a certified owner with schedules closed -> no transfer, failed++, one alert naming (capability_off)', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedPartner(db, 'acme');
+    await certifyPartnerForTest(db, 'acme', { optIns: ['b2b', 'usdc', 'mcp', 'telegram'] });
+    await customerStore.saveCustomer({
+      senderPhone: '15551234567', firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified', senderCountry: 'US', partnerId: 'acme', fullName: OWNER_FULL_NAME,
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await scheduleStore.saveSchedule({ ...sched('due', 21), partnerId: 'acme' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const lock = vi.spyOn(store, 'mintUnderSenderLock');
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => { throw new Error('must not send'); },
+    });
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(lock).not.toHaveBeenCalled();
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`);
+    const alerts = (r as unknown as { rows: { dedupe_key: string; payload: { message: string } }[] }).rows;
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupe_key).toMatch(/^schedule-refused:due:/);
+    expect(alerts[0].payload.message).toContain('(capability_off)');
   });
 });

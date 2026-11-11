@@ -57,7 +57,12 @@ export type StepUpTarget =
   | 'disclosure.save'
   | 'refund.approve' | 'refund.retry' | 'refund.issue'
   | 'transfer.reject'
-  | 'customer.mfa.recovery.approve';
+  | 'customer.mfa.recovery.approve'
+  // Fix pack 3 (contract 12): the live-controls actions.
+  | 'live.certify' | 'live.revoke' | 'live.contract' | 'optin.counsel' | 'optin.approve' | 'posture.sign'
+  | 'compliance_user.set' | 'switch.resume'
+  // Reserved for PR5/PR6/PR8 (no caller yet): added in the same single union edit.
+  | 'licence.save' | 'corridor.save' | 'funding.save' | 'aml_rule.save' | 'risk_signal.save';
 
 export interface StaffStepUpDeps {
   redis: RedisLike;

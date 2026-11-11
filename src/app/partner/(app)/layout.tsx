@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { CircleAlert, LogOut, TriangleAlert } from 'lucide-react';
+import { CircleAlert, LogOut, OctagonPause, TriangleAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
 import { PARTNER_ANY, type PartnerRole } from '@/lib/partner-access';
 import { getStore } from '@/lib/store';
@@ -11,10 +11,13 @@ import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { buildPartnerCommands, openCommandScope } from '@/lib/partner-commands';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
+import { getDb } from '@/db/client';
+import { activeKillSwitches } from '@/lib/flags';
+import { partnerKillSwitchBannerLines } from '@/lib/flag-switch';
 import { buttonVariants } from '@/components/ds';
 import BrandLogo from '@/app/landing/BrandLogo';
 import { logout } from '@/app/login/actions';
-import { PARTNER_ROUTES, partnerNav } from '../routes';
+import { PARTNER_ROUTES, partnerNav, routeAllows } from '../routes';
 import { PartnerSidebar } from './partner-sidebar';
 import { PartnerPalette } from './partner-palette';
 import { PartnerLiveRefresh } from './live-refresh';
@@ -86,9 +89,46 @@ function ChannelStrip({ banner }: { banner: ShellChannelBanner }) {
   );
 }
 
+/**
+ * Fix pack 3 T11 (R26, contract 18): the pause strip, on every partner page while a kill switch
+ * touches this tenant (its own `tenant:` rows, the platform's row for it, a global or corridor
+ * row). The fixed English lines of partnerKillSwitchBannerLines: who set it, never a reason or a
+ * username. activeKillSwitches is cached (15 s) and never throws ([] on a read failure, so no
+ * strip). Admins get a link to Controls; no data-testid starting 'partner-' (the smoke counts them).
+ */
+async function pauseLines(partnerId: string): Promise<string[]> {
+  try {
+    return partnerKillSwitchBannerLines(await activeKillSwitches(getDb()), partnerId);
+  } catch (err) {
+    logWarn('partner.shell', err instanceof Error ? err.name : 'error', { source: 'kill_switches', partnerId });
+    return [];
+  }
+}
+
+function KillSwitchStrip({ lines, link }: { lines: string[]; link: boolean }) {
+  return (
+    <div role="status" data-shell-banner="pause" className="mx-auto mt-4 w-full max-w-[1180px] px-4 text-ds-danger-ink sm:px-5">
+      <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded-ds-inner border border-ds-danger-border bg-ds-danger-bg px-4 py-2 text-[14px]">
+        <OctagonPause aria-hidden="true" className="size-4 shrink-0" />
+        <span className="font-semibold">{t('partner.shell.paused')}</span>
+        <ul className="w-full sm:w-auto sm:flex-1">
+          {lines.map((l, i) => (
+            <li key={i}>{l}</li>
+          ))}
+        </ul>
+        {link ? (
+          <Link href={PARTNER_ROUTES.controls.href} className="ml-auto inline-flex min-h-11 items-center font-semibold underline underline-offset-4">
+            {t('partner.shell.pausedOpen')}
+          </Link>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export default async function PartnerAppLayout({ children }: { children: ReactNode }) {
   const ctx = await requirePartnerStaff(PARTNER_ANY, { skipMfa: true });
-  const banner = await channelBanner(ctx.partnerId, ctx.role);
+  const [banner, pauses] = await Promise.all([channelBanner(ctx.partnerId, ctx.role), pauseLines(ctx.partnerId)]);
   const items = partnerNav(ctx.role).map((r) => ({ href: r.href, label: t(r.labelKey) }));
 
   return (
@@ -121,6 +161,7 @@ export default async function PartnerAppLayout({ children }: { children: ReactNo
           </form>
         </div>
       </header>
+      {pauses.length > 0 ? <KillSwitchStrip lines={pauses} link={routeAllows('controls', ctx.role)} /> : null}
       {banner !== null ? <ChannelStrip banner={banner} /> : null}
       <div className="mx-auto grid w-full max-w-[1180px] gap-4 px-4 py-4 sm:px-5 lg:grid-cols-[15rem_minmax(0,1fr)] lg:gap-8 lg:py-8">
         <PartnerSidebar label={t('partner.nav.label')} menuLabel={t('partner.nav.menu')} items={items} />

@@ -225,6 +225,13 @@ describe('prepareResultCopy — sender_unavailable (fix pack 2 T6)', () => {
   });
 });
 
+// Fix pack 3 T4 (contract 5): the draft-time live refusal reads neutral too.
+describe('prepareResultCopy — not_available (fix pack 3 T4)', () => {
+  it('not_available -> portal.send.cannot_complete', () => {
+    expect(prepareResultCopy({ kind: 'not_available' }, 'Acme')).toEqual({ error: 'portal.send.cannot_complete' });
+  });
+});
+
 describe('toPrepareSendInput — consumer only', () => {
   it('sets exactly the consumer fields; the name is clamped', () => {
     const r = toPrepareSendInput({

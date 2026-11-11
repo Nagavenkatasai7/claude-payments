@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createWebChat } from '@/lib/web-chat';
+import { createWebChat, runWebChatTurn } from '@/lib/web-chat';
+import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { invalidateFlagCache, tenantScopeId } from '@/lib/flags';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -35,6 +37,17 @@ vi.mock('@/lib/outbox', async (orig) => ({
   ...(await orig<typeof import('@/lib/outbox')>()),
   pokeWorker: () => {
     events.list.push('poke');
+  },
+}));
+
+// Fix pack 3 T7: runWebChatTurn (the production entry) builds its deps from the
+// singletons; bind Redis to a fake and count the production model calls.
+const prod = vi.hoisted(() => ({ redis: null as unknown, chatCalls: 0 }));
+vi.mock('@/lib/redis', async (orig) => ({ ...(await orig<typeof import('@/lib/redis')>()), getRedis: () => prod.redis }));
+vi.mock('@/lib/llm', () => ({
+  chat: async () => {
+    prod.chatCalls += 1;
+    return { role: 'assistant' as const, content: 'Hello from production!' };
   },
 }));
 
@@ -154,6 +167,23 @@ describe('R56 and the R26 slot on the web chat', () => {
     const { chatBot } = webChat({ agentPaused: async () => true });
     expect(await chatBot.runTurn(customer(), 'send $100 to Mom')).toBe(`${NOTICE_WEB}\n\n${pausedReply('en')}`);
     expect(chat).not.toHaveBeenCalled();
+  });
+
+  // Fix pack 3 T7 (R26): the production entry wires the slot to agent.paused.
+  it("runWebChatTurn reads agent.paused for the customer's tenant", async () => {
+    prod.redis = fakeRedis();
+    prod.chatCalls = 0;
+    invalidateFlagCache(db);
+    await createFeatureFlagRepo(db).upsert({
+      key: 'agent.paused', scopeType: 'partner', scopeId: tenantScopeId('default'), enabled: true, reason: 'model incident', updatedBy: 'admin',
+    });
+    invalidateFlagCache(db);
+    try {
+      expect(await runWebChatTurn(customer(), 'send $100 to Mom')).toBe(`${NOTICE_WEB}\n\n${pausedReply('en')}`);
+      expect(prod.chatCalls).toBe(0);
+    } finally {
+      invalidateFlagCache(db);
+    }
   });
 });
 

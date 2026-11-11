@@ -51,6 +51,8 @@ export const partners = pgTable('partners', {
   // Program fix 16 (0018): PartnerSendLimits — tighten-only in fix 16, audited raises in 16b.
   sendLimits: jsonb('send_limits'),
   supportConfig: jsonb('support_config'), // PartnerSupportConfig (absent ⇒ defaults)
+  // Fix pack 3 (0037): read in rowToPartner only, never in partnerToRow; ONE writer updateLiveControlsKey.
+  liveControls: jsonb('live_controls').notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

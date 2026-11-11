@@ -16,7 +16,8 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
-import { realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
@@ -36,7 +37,7 @@ import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
 import { isQueryError, stripQueryParams } from '@/lib/db-error';
-import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
+import { readFlag, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { replyGuardAlertFor, type ReplyGuardReport } from '@/lib/reply-guard';
@@ -159,8 +160,10 @@ export interface WorkerDeps {
   /**
    * R26's slot in the agent.turn router (turn-router.ts): whether this tenant's
    * AI agent is paused. A paused tenant's customers get the fixed, non-AI menu
-   * (HELP still opens a case). Absent ⇒ never paused; R26 (PR3) wires it to the
-   * agent.paused kill switch. A throw fails the row, which retries.
+   * (HELP still opens a case). Absent ⇒ never paused. The worker route wires it
+   * to the agent.paused kill switch (fix pack 3 R26) through isFlagOn, which
+   * never throws and fails open (an unreadable switch ⇒ not paused). A throw
+   * would fail the row, which retries.
    */
   agentPaused?: (partnerId: PartnerId) => Promise<boolean>;
 }
@@ -278,6 +281,26 @@ export class SettlementPausedError extends Error {
   constructor(readonly delaySec: number = SETTLEMENT_PAUSED_DEFER_SEC) {
     super('settlement_paused');
     this.name = 'SettlementPausedError';
+  }
+}
+
+/** How long a paid row held by the live-certification gate waits before it is looked at again (contract 7). */
+export const INSTRUCT_NOT_CERTIFIED_DEFER_SEC = 900;
+
+/**
+ * Fix pack 3 T6 (R15, contract 7 step 11): thrown by the settlement.instruct
+ * handler when the row is real money (realMoneyRail) and its RAIL partner is
+ * not certified for live money, or its owner is the default tenant. Nothing
+ * was POSTed. A deliberate stop, not a rail failure: drainOnce defers the row
+ * UNCHARGED (like SettlementPausedError), so it never spends the 56-attempt
+ * budget, never dead-letters and never raises railfail. The handler raised
+ * one deduped `livegate:<transferId>` ops alert. The row runs once the rail
+ * partner is certified, or staff cancel and refund it.
+ */
+export class InstructNotCertifiedError extends Error {
+  constructor(readonly delaySec: number = INSTRUCT_NOT_CERTIFIED_DEFER_SEC) {
+    super('instruct_not_certified');
+    this.name = 'InstructNotCertifiedError';
   }
 }
 
@@ -837,16 +860,42 @@ async function handle(
       // Release safety part A: the settlement.paused kill switch. Checked after
       // every "not payable" guard above (those rows finish as before) and
       // BEFORE the instruction is built or sent. The row waits, uncharged.
-      if (
-        await isFlagOn(deps.db, 'settlement.paused', {
-          partnerId: [transfer.partnerId, railPartnerId],
-          corridor: transfer.destinationCountry,
-        })
-      ) {
+      // Fix pack 3 (R26): partner-set (`tenant:`) rows of the owner or the
+      // rail tenant match too.
+      const pause = await readFlag(deps.db, 'settlement.paused', {
+        partnerId: [transfer.partnerId, railPartnerId],
+        tenants: [transfer.partnerId, railPartnerId],
+        corridor: transfer.destinationCountry,
+      });
+      if (pause === 'on') {
         logWarn('outbox.instruct-paused', 'settlement.paused is on; instruction deferred', { transferId });
         throw new SettlementPausedError();
       }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
+      const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
+      // Fix pack 3 T7 (owner answer Q5, contract 7 step 10): the switch table
+      // could not be read. On a real-money rail the row WAITS, uncharged, as if
+      // paused (readFlag raised the flagread alert); anywhere else the read
+      // fails open and the instruction continues.
+      if (pause === 'unknown' && realMoney) {
+        logWarn('outbox.instruct-paused', 'settlement.paused unreadable on a real-money rail; instruction deferred', { transferId });
+        throw new SettlementPausedError();
+      }
+      // Fix pack 3 T6 (R15, contract 7 step 11): on real money the RAIL partner
+      // must be certified for live money, and the default tenant never owns a
+      // real-money row. Before the URL check, so an uncertified rail with no URL
+      // waits here (never a charged RailInstructError). The rail partner is read
+      // from the DB on the integrations in hand (no second rail-type read); a
+      // failed read counts as not certified (fail closed). Ids only.
+      if (realMoney && (await liveRefusalForRail(deps.db, transfer, integrations.payment.providerType ?? null)) !== null) {
+        logWarn('outbox.instruct-livegate', 'rail partner not certified for live money; instruction deferred', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          { message: instructLivegateMessage(transferId, railPartnerId) },
+          { dedupeKey: `livegate:${transferId}` },
+        );
+        throw new InstructNotCertifiedError();
+      }
       // Pack 2 T10 (R02): only an 'http' rail reaches the stored URL; a simulator
       // (or any other) rail POSTs to the hosted reference rail, whatever is stored.
       const settlementUrl = settlementTargetUrl(integrations.payment);
@@ -869,7 +918,7 @@ async function handle(
       // gate only ever stops a POST; it never moves money. InstructNotLiveError,
       // not a rail failure (review F1/C1): retried under the instruct policy, no
       // railfail alert; the reconcile stuck-paid heal re-screens the row.
-      if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
+      if (realMoney) {
         const gateNow = new Date();
         const newest = (await listScreenEvidence(deps.db, transfer, gateNow)).at(-1);
         if (newest && instructGateRefuses(newest, gateNow)) {
@@ -1843,7 +1892,13 @@ export async function drainOnce(
       // spend the attempt budget or dead-letter a customer's message.
       // M3-16: a report that cannot fit this invocation is deferred the same way (never charged).
       // Release safety part A: a paused settlement instruction waits the same way.
-      if (err instanceof TurnBusyError || err instanceof ReportDeferredError || err instanceof SettlementPausedError) {
+      // Pack 3 T6: so does an instruction held by the live-certification gate.
+      if (
+        err instanceof TurnBusyError ||
+        err instanceof ReportDeferredError ||
+        err instanceof SettlementPausedError ||
+        err instanceof InstructNotCertifiedError
+      ) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;
         } else {

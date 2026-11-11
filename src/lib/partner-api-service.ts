@@ -10,7 +10,7 @@ import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { assertLegsUsable, quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
-import { createTransferWithOutcome, TransferIdConflictError } from './transfer-create';
+import { createTransferWithOutcome, MintRefusedError, TransferIdConflictError } from './transfer-create';
 import { SendsPausedError, SENDS_PAUSED_RETRY_AFTER_SEC } from './flags';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isValidPhone, normalizePhone } from './phone';
@@ -45,7 +45,7 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
-import { railPartnerOf, realMoneyFor } from './live-gate';
+import { liveRefusalForRail, railPartnerOf, realMoneyFor } from './live-gate';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { rescreenOnFile } from './pay-rescreen';
 import { parseClientReference } from './order-references';
@@ -630,6 +630,17 @@ export async function createTransaction(
         retryAfterSec: SENDS_PAUSED_RETRY_AFTER_SEC,
       });
     }
+    // Pack 3 (contract 5): a live control refused the mint. Nothing was minted;
+    // the key stays bound-but-unminted, so the SAME Idempotency-Key mints once
+    // the partner is certified / the capability is on. A fixed code and message
+    // only: never the reason, a contract or a counsel reference.
+    // (Two plain `return err(` statements: the OpenAPI route inventory reads them.)
+    if (e instanceof MintRefusedError) {
+      if (e.code === 'capability_off') {
+        return err(403, 'This feature is not enabled for live transfers on this partner.', { code: 'capability_off' });
+      }
+      return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
+    }
     throw e;
   }
 
@@ -794,6 +805,21 @@ export async function confirmTransaction(
     return ok(200, await transferViewWithName(deps, t));
   }
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
+  // Pack 3 (contract 6): ONE live-certification gate before the re-screen and
+  // both settleOrHold calls (and the deps.initiatePayment seam): an uncertified
+  // real-money rail, or the default tenant on one, is refused with nothing
+  // written. Review P1 A1: the gate judges on the rail partner's integrations,
+  // read ONCE here and reused by both settleOrHold calls below (as pay-process
+  // and the b2b route do). A failed read throws (a retryable 5xx through the
+  // route's error path), never a 403: owner Q15, the pay-time gates do not
+  // refuse on a failed read.
+  const railId = railPartnerOf(t);
+  const railIntegrations = await deps.integrationsStore.getIntegrations(railId);
+  const integrationsFor = (tr: Transfer) =>
+    railPartnerOf(tr) === railId ? Promise.resolve(railIntegrations) : deps.integrationsStore.getIntegrations(railPartnerOf(tr));
+  if (await liveRefusalForRail(deps.db, t, railIntegrations.payment.providerType ?? null)) {
+    return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
+  }
 
   // Fix pack 2 T3 (R02): on a real-money rail (the RAIL partner is http, env
   // not 'test'), settle only on a LIVE, fresh screen. When the newest evidence
@@ -831,7 +857,7 @@ export async function confirmTransaction(
     // other entry point (LIST_UNAVAILABLE when the newest screen is not live
     // and fresh, SENDER_SCREENING when the sender's hold is active). Not real
     // money: the same beginHold as before. Still never deps.initiatePayment.
-    const hold = await settleOrHold(deps.db as Db, current, await deps.integrationsStore.getIntegrations(railPartnerOf(current)));
+    const hold = await settleOrHold(deps.db as Db, current, await integrationsFor(current));
     if (hold.kind === 'held') {
       pokeWorker(); // the held "payment received / under review" message is READY now
       // Audit ONLY a real transition (mirrors the settle path below): on the
@@ -849,8 +875,9 @@ export async function confirmTransaction(
     // the customer message names the OWNING partner (creds resolve at drain —
     // fix 11). settleOrHold re-checks the LEDGER: if the row was re-screened
     // to flagged since the read above, it is held instead of instructed.
-    // Fix pack 2 T3: the RAIL partner's integrations (routed, else owner).
-    const integrations = await deps.integrationsStore.getIntegrations(railPartnerOf(tr));
+    // Fix pack 2 T3: the RAIL partner's integrations (routed, else owner);
+    // the gate's read above when the rail partner is the same (review P1 A1).
+    const integrations = await integrationsFor(tr);
     const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its

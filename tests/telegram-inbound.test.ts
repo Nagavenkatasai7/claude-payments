@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
@@ -110,6 +111,19 @@ describe('tenant rule and link life', () => {
     expect(await outboxRows()).toEqual([]);
   });
 
+  // Fix pack 3 T12 (R13, contract 15): the telegram capability needs no new gate. Telegram
+  // already serves the default tenant only, so a CERTIFIED partner's customer never reaches it.
+  it('a phone that is a customer of a CERTIFIED partner with telegram closed is refused NOT_AVAILABLE and queues nothing', async () => {
+    await seedPartner(db, 'acme');
+    await certifyPartnerForTest(db, 'acme', { optIns: ['b2b', 'usdc', 'mcp', 'schedules'] });
+    await db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country) VALUES (${PHONE}, 'acme', now(), 'US')`);
+    expect(await handleTelegramUpdate(contact(1, CHAT))).toMatchObject({ text: NOT_AVAILABLE_REPLY });
+    expect(redis.dump.has(`tg:chat:${CHAT}`)).toBe(false);
+    redis.dump.set(`tg:chat:${CHAT}`, PHONE);
+    expect(await handleTelegramUpdate(msg(2, { text: 'hi' }))).toMatchObject({ text: NOT_AVAILABLE_REPLY });
+    expect(await outboxRows()).toEqual([]);
+  });
+
   it('messages never extend the chat link (fixed life)', async () => {
     await linkPhone();
     const expire = vi.spyOn(redis, 'expire');
@@ -121,7 +135,8 @@ describe('tenant rule and link life', () => {
 });
 
 describe('a linked chat runs the WhatsApp pipeline', () => {
-  it('a text becomes ONE agent.turn (channel tg) and Telegram becomes the reply channel', async () => {
+  // Fix pack 3 T12: this case also pins that a linked chat's turn is always the default tenant (routedPartnerId null).
+  it('a text becomes ONE agent.turn (channel tg) and Telegram becomes the reply channel; a linked chat\'s turn is always the default tenant (routedPartnerId null)', async () => {
     await linkPhone();
     expect(await handleTelegramUpdate(msg(5, { text: 'send 100 to mom' }))).toBeNull();
     expect(await outboxRows()).toEqual([

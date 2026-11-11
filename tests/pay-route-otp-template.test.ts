@@ -14,6 +14,7 @@ import { partners, partnerPortalSettings } from '@/db/schema';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Transfer, Customer } from '@/lib/types';
+import { certifiedLiveControls } from './helpers-live';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -41,9 +42,17 @@ vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import
 const draftsById = vi.hoisted(() => new Map<string, { senderPhone: string; partnerId?: string }>());
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async (id: string) => draftsById.get(id) ?? null }) }));
 const brandByPartner = vi.hoisted(() => new Map<string, string>([['pa', 'Acme A'], ['pb', 'Bravo B']]));
+// Pack 3 (contract 17): partners certified for live money (an active Partner fake with certification).
+const certifiedPartners = vi.hoisted(() => new Set<string>());
 vi.mock('@/lib/partner-store', () => ({
   getPartnerStore: () => ({
-    getPartner: async (pid: string) => (brandByPartner.has(pid) ? { id: pid, name: pid, displayName: brandByPartner.get(pid) } : null),
+    getPartner: async (pid: string) =>
+      brandByPartner.has(pid)
+        ? {
+            id: pid, name: pid, displayName: brandByPartner.get(pid),
+            ...(certifiedPartners.has(pid) ? { status: 'active', liveControls: certifiedLiveControls() } : {}),
+          }
+        : null,
     ensureDefaultPartner: async () => null,
   }),
 }));
@@ -118,6 +127,7 @@ beforeEach(async () => {
   }
   integrationsByPartner.clear();
   integrationsFail.clear();
+  certifiedPartners.clear();
   recordChannelHealth.mockClear();
   draftsById.clear();
   getPortalSettingsSpy.fail = false;
@@ -302,5 +312,29 @@ describe('POST /api/pay/[transferId] request_otp — fail closed off the partner
     expect(res.status).toBe(502);
     expect(recordChannelHealth).toHaveBeenCalledWith('pa', 'auth_template_failed', { code: 132001 });
     expect(lastInbound).toHaveBeenCalledWith('pa', PHONE);
+  });
+});
+
+// Pack 3 (contract 17): the route resolves its channel through resolveDirectOtpChannel (no inline
+// twin), so a partner CERTIFIED for live money never gets a code on SmartRemit's shared number.
+describe('POST /api/pay/[transferId] request_otp — own-number rule for certified partners (pack 3)', { retry: 0 }, () => {
+  it('a certified partner without its own number → 502 otp_send_failed, nothing sent, no code minted', async () => {
+    certifiedPartners.add('pb');
+    const issue = vi.spyOn(txOtp, 'issue');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await requestOtp('t_pb');
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(issue).not.toHaveBeenCalled();
+  });
+
+  it('a certified partner WITH its own number → the code goes on its number', async () => {
+    certifiedPartners.add('pa');
+    integrationsByPartner.set('pa', CREDS_A);
+    const res = await requestOtp('t_pa');
+    expect(res.status).toBe(200);
+    expect(sendTransactionOtp).toHaveBeenCalledOnce();
+    expect(sendTransactionOtp.mock.calls[0][2]).toEqual(CREDS_A);
   });
 });

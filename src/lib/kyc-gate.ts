@@ -6,10 +6,12 @@ import type { PartnerIntegrations } from './partner-integrations';
 export const SEND_GATE_REASON = 'kyc_required' as const;
 
 /**
- * WL1 white-label gate: whether SmartRemit's OWN verify-before-send gate is
- * active for this partner. true ⇒ enforce isSendVerified (the default / 'ours'
- * partner — unchanged). false ⇒ the partner is the licensed entity running KYC
- * on their side ('delegated'), so we short-circuit our gate.
+ * WL1 white-label gate: whether the verify-before-send gate is active for this
+ * partner (resolveKycMode(partner).requireKyc). true ⇒ enforce isSendVerified.
+ * It is on when the platform set requireKycBeforeSend, in EITHER kycMode, or
+ * (fix pack 3, R27) the partner signed its compliance posture, which always
+ * forces it. Otherwise it is off, in either mode: the default partner has no
+ * gate, and 'delegated' only says the partner runs the verification itself.
  *
  * ⚠️ This governs ONLY identity verification. Sanctions/OFAC screening
  * (screenTransfer) is NEVER governed here and runs in BOTH modes — it has no

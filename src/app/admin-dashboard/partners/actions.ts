@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
 import { partnerRequests, partners } from '@/db/schema';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
+import { createPendingGoLive, isLiveApproved, upsertApprovedGoLive } from '@/db/repos/partner-go-live-repo';
 import { isPartnerRequestId } from '@/lib/partner-application-decision';
 import { partnerIdForRequest } from '@/lib/partner-from-request';
 import { createAuditRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
@@ -25,6 +25,7 @@ import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
+import { postureSigned } from '@/lib/live-controls';
 import { removeTenantStaff } from '@/lib/partner-staff-ops';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
@@ -51,7 +52,9 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
-import { settlementTargetUrl } from '@/lib/live-gate';
+import { hasStandingCertification, settlementTargetUrl } from '@/lib/live-gate';
+import { lockPartner } from '@/lib/live-controls-write';
+import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
   assertPhoneNumberIdFree,
@@ -120,19 +123,16 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const submittedCountries = formData.getAll('countries').map(String).filter(isSupportedDestination);
   // WL: KYC posture. 'delegated' = the partner runs KYC on their side, so our
   // verify-gate steps aside (sanctions still always run). Absent/anything-else ⇒
-  // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend only matters when
-  // delegated (resolveKycMode forces it true under 'ours' regardless).
+  // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend is the opt-in
+  // verify-before-send gate in EITHER mode; a partner's signed compliance
+  // posture forces it on in resolveKycMode (fix pack 3) without rewriting it.
   // PLATFORM-GOVERNED (owner decision 2026-09-16): kycMode decides whether a
   // partner-scoped admin may release a compliance hold (canReleaseHeld), so a
   // partner admin must not be able to flip it (or the send gate) for their own
   // tenant — their submitted values are ignored and the stored posture kept.
   const isPlatform = scopeOf(staff).kind === 'platform';
-  const kycMode: KycMode = isPlatform
-    ? (formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours')
-    : (existing.kycMode ?? 'ours');
-  const requireKycBeforeSend = isPlatform
-    ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
-    : existing.requireKycBeforeSend;
+  const submittedKycMode: KycMode = formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours';
+  const submittedRequireKyc = formData.get('requireKycBeforeSend') === 'on'; // OPT-IN gate, either mode
   // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
   // partner-scoped admin can set it for their own tenant — strip control
   // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
@@ -152,17 +152,44 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
-    kycMode,
-    requireKycBeforeSend,
     updatedAt: new Date().toISOString(),
   };
   // Program-Fix 38: a persona change is audited in the SAME transaction as the
   // save (tx-bound repos only inside it), so a saved change always has its row.
   const personaChanged = (existing.botPersona ?? '') !== (botPersona ?? '');
   await getDb().transaction(async (tx) => {
-    await createPartnerStore(tx).savePartner(updated);
+    // Pack 3 review C3 + Q1 (F1, F2/H4): kycMode names the KYC decider a signed posture was
+    // signed against, and a live certification rests on that posture. The KYC fields are decided
+    // on the partner row read UNDER the row lock (FOR NO KEY UPDATE, taken first, like
+    // certifyLiveAction), so a certify cannot commit between this check and the save. While a
+    // certification stands (not revoked; WHATEVER the status, so suspend -> flip -> reactivate
+    // cannot slip past), a kycMode change is refused by a throw here: the transaction rolls back
+    // and nothing is saved. Revoke the certification first. Every accepted change is audited.
+    if (!(await lockPartner(tx, id))) throw new Error('Partner not found.');
+    const locked = await createPartnerStore(tx).getPartner(id);
+    if (!locked) throw new Error('Partner not found.');
+    const previousKycMode: KycMode = locked.kycMode ?? 'ours';
+    const kycMode: KycMode = isPlatform ? submittedKycMode : previousKycMode;
+    const kycModeChanged = kycMode !== previousKycMode;
+    if (kycModeChanged && hasStandingCertification(locked.liveControls)) throw new Error(t('partner.live.kycModeLocked'));
+    // Fix pack 3 (contract 14): while the partner's compliance posture is signed the admin
+    // checkbox is rendered disabled (a disabled box posts nothing), so the stored column is
+    // kept as is; the posture forces the gate on in resolveKycMode regardless.
+    const signed = postureSigned(locked.liveControls);
+    const requireKycBeforeSend = isPlatform && !signed ? submittedRequireKyc : locked.requireKycBeforeSend;
+    await createPartnerStore(tx).savePartner({ ...updated, kycMode, requireKycBeforeSend });
     if (personaChanged) {
       await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, existing.botPersona, botPersona));
+    }
+    if (kycModeChanged) {
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.kyc_mode.change',
+        subjectId: id,
+        meta: { from: previousKycMode, to: kycMode, postureSigned: signed },
+      });
     }
   });
   revalidatePath('/admin-dashboard/partners');
@@ -691,14 +718,13 @@ export async function issueApiKeyAction(
   const staff = await gatePartnerConfig(partnerId);
   const m: unknown = mode ?? 'live';
   if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
-  // UI redesign M3-21 (#427 review follow-up): a PARTNER-scoped admin gets a live key only once
-  // SmartRemit approved its go-live, checked in the same transaction as the insert (a thrown read
-  // fails closed). Platform admins are the approvers and are unchanged.
-  const partnerScoped = scopeOf(staff).kind === 'partner';
+  // Pack 3 T13 (D14): EVERY live key needs an approved go-live, platform admins included, checked in
+  // the same transaction as the insert (a thrown read fails closed). Platform admins approve go-live
+  // on the partner page; the setup wizard issues its own first key (it never calls this action).
   // R3a (M4): the key and its audit row commit together. Meta: keyId, mode,
   // last4 — never the plaintext.
   const issued = await getDb().transaction(async (tx) => {
-    if (m === 'live' && partnerScoped && !(await isLiveApproved(tx, partnerId))) {
+    if (m === 'live' && !(await isLiveApproved(tx, partnerId))) {
       throw new Error('Live keys are available after SmartRemit approves go-live. Issue a sandbox key for now.');
     }
     const k = await createPartnerApiKeyStore(tx).issue(partnerId, m);
@@ -781,6 +807,8 @@ export interface PartnerWizardResult {
   id: string;
   apiKey: string; // shown once by the wizard, then discarded
   apiKeyLast4: string;
+  /** Pack 3 T13: 'test' (a sandbox key) for an http rail, which starts with a pending go-live. */
+  apiKeyMode: ApiKeyMode;
   whatsappCallbackUrl: string;
   statusCallbackUrl: string;
   apiBaseUrl: string;
@@ -888,6 +916,9 @@ export async function wizardCreatePartnerAction(
     appSecret: clean(wa.appSecret),
   };
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
+  // Pack 3 T13 (R15, owner Q3): a partner-operated (http) rail moves real money, so it starts with a
+  // pending go-live and a sandbox first key; simulator, mock and no rail keep auto-approval + live.
+  const firstKeyMode: ApiKeyMode = providerType === 'http' ? 'test' : 'live';
   // The partner row and its integrations commit in ONE transaction (fix 1
   // review): if the pnid unique index loses a race (23505), the partner insert
   // rolls back too — never an orphan ACTIVE partner with no integrations/key.
@@ -907,16 +938,22 @@ export async function wizardCreatePartnerAction(
       }
       await createPartnerStore(tx).savePartner(partner);
       // UI redesign M3-21: a platform-wizard partner is approved for go-live at creation (it gets a
-      // live key below), committed with the partner itself.
-      await upsertApprovedGoLive(tx, id, staff.username);
-      await createAuditRepo(tx).record({
-        partnerId: id,
-        actor: staff.username,
-        actorType: 'staff',
-        action: 'partner.go_live.approve',
-        subjectId: id,
-        meta: { reason: 'platform setup wizard', actorScope: 'platform' },
-      });
+      // live key below), committed with the partner itself. Pack 3 R15: except on a partner-operated
+      // (http) rail, which moves real money: it goes live only through the request and approval path
+      // (and, for live money, certification), so it starts with a pending row and no approve audit.
+      if (providerType === 'http') {
+        await createPendingGoLive(tx, id);
+      } else {
+        await upsertApprovedGoLive(tx, id, staff.username);
+        await createAuditRepo(tx).record({
+          partnerId: id,
+          actor: staff.username,
+          actorType: 'staff',
+          action: 'partner.go_live.approve',
+          subjectId: id,
+          meta: { reason: 'platform setup wizard', actorScope: 'platform' },
+        });
+      }
       if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},
@@ -945,8 +982,8 @@ export async function wizardCreatePartnerAction(
   // commit (as before R3a), so a key-insert error is never reported as a pnid
   // conflict by rethrowPnidConflict above.
   const issued = await getDb().transaction(async (tx) => {
-    const k = await createPartnerApiKeyStore(tx).issue(id);
-    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(id, staff.username, k.keyId, 'live', k.last4));
+    const k = await createPartnerApiKeyStore(tx).issue(id, firstKeyMode);
+    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(id, staff.username, k.keyId, firstKeyMode, k.last4));
     return k;
   });
 
@@ -955,6 +992,7 @@ export async function wizardCreatePartnerAction(
     id,
     apiKey: issued.plaintext,
     apiKeyLast4: issued.last4,
+    apiKeyMode: firstKeyMode,
     whatsappCallbackUrl: `${env.appBaseUrl}/api/whatsapp/${id}`,
     statusCallbackUrl: `${env.appBaseUrl}/api/payment-webhook/${providerType === 'simulator' ? 'simulator' : 'http'}`,
     apiBaseUrl: `${env.appBaseUrl}/api/partner/v1`,

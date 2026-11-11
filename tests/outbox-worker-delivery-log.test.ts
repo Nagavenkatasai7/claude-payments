@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { partnerWebhookDeliveries } from '@/db/schema';
@@ -88,6 +89,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   outbox = createOutboxRepo(db);
   await seedPartner(db, 'acme');
+  await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   fetchFn.mockReset();
   await store.saveTransfer(transferFixture());
   await createIntegrationsRepo(db, provider).saveIntegrations('acme', rail('https://rail.example/settle', 'sgn'));
@@ -112,6 +114,7 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
 
   it('a ROUTED transfer records the row for the SETTLEMENT partner (the rail whose endpoint was called), not the owner', async () => {
     await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle', 'rsgn'));
     fetchFn.mockResolvedValue(new Response('{}', { status: 200 }));
@@ -152,6 +155,7 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
       store = createStore(fakeRedis(), db);
       outbox = createOutboxRepo(db);
       await seedPartner(db, 'acme');
+      await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
       await store.saveTransfer(transferFixture());
       await createIntegrationsRepo(db, provider).saveIntegrations('acme', rail('https://rail.example/settle', 'sgn'));
       fetchFn.mockReset();

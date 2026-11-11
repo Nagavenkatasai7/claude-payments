@@ -1,4 +1,4 @@
-import { createTransfer } from './transfer-create';
+import { createTransfer, MintRefusedError } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
 import { SendsPausedError } from './flags';
 import { isB2bSendVerified, sendGateActive } from './kyc-gate';
@@ -69,7 +69,10 @@ export type CrossBorderFinalizeResult =
         | 'busy'
         // Release safety part A: the sends.paused kill switch refused the mint
         // (route ⇒ 503). Nothing was minted; the bound id replays once it is off.
-        | 'sends_paused';
+        | 'sends_paused'
+        // Pack 3 (contract 5): a live control refused the mint (MintRefusedError;
+        // route ⇒ 409 PAY_NOT_AVAILABLE). Nothing was minted.
+        | 'not_available';
       transferId?: string;
     };
 
@@ -262,6 +265,7 @@ export async function finalizeCrossBorderBillPayment(
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
+    if (err instanceof MintRefusedError) return { ok: false, error: 'not_available' };
     throw err;
   }
 

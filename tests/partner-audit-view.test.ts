@@ -213,6 +213,56 @@ describe('lost-features audit labels (BL-4)', () => {
     expect(projectAuditRow(row({ action: 'customer.mfa.recovery.approve', meta: { checks: ['id_document', 'recent_transfer'], ticketId: 'tk_1' } }), tenant).detail).toBe('checks=id_document recent_transfer');
     expect(projectAuditRow(row({ action: 'customer.mfa.recovery.decline', meta: { reason: 'not_verified', ticketId: 'tk_1' } }), tenant).detail).toBe('reason=not_verified');
   });
+  it('partner.live.posture.sign and partner.live.compliance_user.set are labelled and show only their safe keys (fix pack 3 T9)', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.posture.sign');
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.compliance_user.set');
+    expect(t(actionLabelKey('partner.live.posture.sign'))).toBe('Compliance posture signed');
+    expect(t(actionLabelKey('partner.live.compliance_user.set'))).toBe('Compliance users changed');
+    const sign = projectAuditRow(
+      row({ action: 'partner.live.posture.sign', subjectId: 'pa', meta: { version: 1, kycDecider: 'partner', holdDecider: 'smartremit_delegated', fourEyesNonSanctions: true, actorScope: 'partner', reason: 'SECRET_REASON' } }),
+      tenant,
+    );
+    expect(sign.detail).toBe('kycDecider=partner, holdDecider=smartremit_delegated, fourEyesNonSanctions=true');
+    const set = projectAuditRow(row({ action: 'partner.live.compliance_user.set', subjectId: 'pa', meta: { target: 'pa-ops', on: false, actorScope: 'partner', ref: 'SECRET_REF' } }), tenant);
+    expect(set.detail).toBe('target=pa-ops, on=false');
+    for (const p of [sign, set]) for (const v of ['SECRET_REASON', 'SECRET_REF', 'actorScope']) expect(JSON.stringify(p)).not.toContain(v);
+  });
+});
+
+describe('fix pack 3 T11: switch changes and capability approvals in the tenant feed', () => {
+  it('flag.change shows key, enabled, corridor only (never reason, scopeId, previous); optin.approve shows capability, on; optin.counsel not in TENANT_AUDIT_ACTIONS', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('flag.change');
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.live.optin.approve');
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('partner.live.optin.counsel');
+    expect(t(actionLabelKey('flag.change'))).toBe('Switch changed');
+    expect(t(actionLabelKey('partner.live.optin.approve'))).toBe('Live feature approval changed');
+    const flag = projectAuditRow(
+      row({
+        action: 'flag.change',
+        subjectId: 'sends.paused:partner:tenant:pa:IN',
+        meta: { key: 'sends.paused', scopeType: 'partner', scopeId: 'tenant:pa:IN', corridor: 'IN', enabled: true, previous: false, reason: 'SECRET_REASON pausing', actorScope: 'partner' },
+      }),
+      tenant,
+    );
+    expect(flag.actor).toBe('pa-admin');
+    expect(flag.detail).toBe('key=sends.paused, enabled=true, corridor=IN');
+    const approve = projectAuditRow(row({ action: 'partner.live.optin.approve', subjectId: 'pa', meta: { capability: 'b2b', on: true, actorScope: 'partner', counselRef: 'SECRET_REF' } }), tenant);
+    expect(approve.detail).toBe('capability=b2b, on=true');
+    for (const p of [flag, approve]) for (const v of ['SECRET_REASON', 'SECRET_REF', 'previous', 'scopeType', 'actorScope']) expect(JSON.stringify(p)).not.toContain(v);
+  });
+  it("a PLATFORM-written flag.change row for this tenant (applyFlagChange: partnerId = the tenant id, a platform actor, no actorScope) shows actor 'SmartRemit' and key/enabled only", () => {
+    const platformRow = row({
+      action: 'flag.change',
+      actor: 'owner-admin',
+      subjectId: 'settlement.paused:partner:pa',
+      meta: { key: 'settlement.paused', scopeType: 'partner', scopeId: 'pa', enabled: true, previous: false, reason: 'PLATFORM_SECRET_REASON' },
+    });
+    for (const p of [projectAuditRow(platformRow, tenant), projectAuditRow(platformRow, tenant, platform)]) {
+      expect(p.actor).toBe(t('partner.audit.smartremit'));
+      expect(p.detail).toBe('key=settlement.paused, enabled=true');
+      for (const v of ['owner-admin', 'PLATFORM_SECRET_REASON', 'previous']) expect(JSON.stringify(p)).not.toContain(v);
+    }
+  });
 });
 
 describe('parseAuditFilters', () => {
@@ -272,5 +322,19 @@ describe('the keyset cursor', () => {
       expect(parseAuditCursor(v as string | string[] | undefined), String(v)).toBeUndefined();
     }
     expect(parseAuditCursor(['1726000000000.5', 'junk'])).toEqual({ at: new Date(1726000000000), id: 5 });
+  });
+});
+
+describe('partner.kyc_mode.change (pack 3 review C3)', () => {
+  it('is in the tenant feed with its own label, as SmartRemit, and never shows its meta', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('partner.kyc_mode.change');
+    expect(t(actionLabelKey('partner.kyc_mode.change'))).toBe('KYC handling changed');
+    const p = projectAuditRow(
+      row({ action: 'partner.kyc_mode.change', actor: 'owner-admin', subjectId: 'pa', meta: { from: 'ours', to: 'delegated', postureSigned: true } }),
+      tenant,
+      platform,
+    );
+    expect(p.actor).toBe(t('partner.audit.smartremit'));
+    expect(p.detail).toBeNull();
   });
 });

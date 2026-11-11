@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { and, eq } from 'drizzle-orm';
 import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { scopeOf } from '@/lib/staff-scope';
 import { getDb, type DbOrTx } from '@/db/client';
 import { auditEvents, partners } from '@/db/schema';
@@ -13,6 +14,11 @@ import { requestGoLive } from '@/db/repos/partner-go-live-repo';
 import { loadOnboardingFacts } from '@/db/repos/partner-onboarding-facts';
 import { ATTESTED_TEMPLATES, mayRequestGoLive } from '@/lib/partner-onboarding';
 import { pokeWorker } from '@/lib/outbox';
+import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
+import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
+import { writePosture, type LiveWriteResult } from '@/lib/live-controls-write';
+import type { KycDecider, PostureRecord } from '@/lib/live-controls';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import { PARTNER_ROUTES } from '../../routes';
@@ -34,6 +40,12 @@ import type { ActionResult } from '../../action-result';
 // ops.alert outbox row deduped per tenant per UTC day. An already requested or approved partner
 // gets { ok: true } with nothing written. A partner can NEVER approve: approval is the platform's
 // (approveGoLive, M3-21); nothing here un-approves either (PR 427 review LOW: add a lock if that ever changes).
+//
+// signPostureAction (fix pack 3 T9, R27, contract 12): the partner admin signs the compliance
+// posture (a card after the steps list, NOT an eighth step). Order: site host, admin gate, the
+// actor's own staff MFA (before the step-up: factorFor would fall back to the password), the parse,
+// the 'posture.sign' step-up, then ONE transaction: writePosture (key write under the partner row
+// lock + audit + ops alert + partner email). A signed posture forces verify-before-send.
 
 const PAGE = PARTNER_ROUTES.onboarding.href;
 
@@ -115,6 +127,46 @@ export async function requestGoLiveAction(_formData: FormData): Promise<ActionRe
     return refused('partner.onboarding.failed');
   }
   if (requested) pokeWorker(); // post-response (after()); the per-minute cron drains it regardless
+  revalidatePath(PAGE);
+  return { ok: true };
+}
+
+const KYC_DECIDERS: readonly KycDecider[] = ['partner', 'smartremit_procedures'];
+const HOLD_DECIDERS: readonly PostureRecord['holdDecider'][] = ['partner', 'smartremit_delegated'];
+const POSTURE_REFUSAL: Record<Exclude<LiveWriteResult, { ok: true }>['code'], MessageKey> = {
+  kyc_decider_mismatch: 'partner.live.posture.mismatch',
+  bad_input: 'partner.live.posture.invalid',
+  not_found: 'partner.onboarding.failed',
+  not_ready: 'partner.onboarding.failed',
+  not_certified: 'partner.onboarding.failed',
+};
+
+export async function signPostureAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(PARTNER_ROUTES.onboarding.policy);
+  // Pack 3 review Q1 (H1): SmartRemit's own default tenant never signs a posture (it would force
+  // verify-before-send on all default traffic); refused before the MFA check and the step-up.
+  if (ctx.partnerId === DEFAULT_PARTNER_ID) return refused('partner.onboarding.failed');
+  if (!(await staffMfaEnrolled(ctx.username))) return refused('partner.live.posture.needMfa');
+  const kyc = formData.get('kycDecider');
+  const hold = formData.get('holdDecider');
+  const kycDecider = KYC_DECIDERS.find((d) => d === kyc);
+  const holdDecider = HOLD_DECIDERS.find((d) => d === hold);
+  if (!kycDecider || !holdDecider) return refused('partner.live.posture.invalid');
+  const fourEyesNonSanctions = formData.get('fourEyesNonSanctions') === 'on';
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'posture.sign');
+  if (stepUp) return stepUp;
+  let r: LiveWriteResult;
+  try {
+    r = await getDb().transaction((tx) =>
+      writePosture(tx, ctx.partnerId, { username: ctx.username, scope: 'partner' }, { kycDecider, holdDecider, fourEyesNonSanctions }),
+    );
+  } catch (err) {
+    logWarn('partner.onboarding.posture', errName(err), { partnerId: ctx.partnerId });
+    return refused('partner.onboarding.failed');
+  }
+  if (!r.ok) return refused(POSTURE_REFUSAL[r.code]);
+  pokeWorker(); // post-response (after()): the ops alert and the partner email
   revalidatePath(PAGE);
   return { ok: true };
 }

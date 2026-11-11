@@ -172,6 +172,32 @@ describe('selectSettlementRoute (PGlite)', () => {
     expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
   });
 
+  // Fix pack 3 T4 (contract 15): only the default tenant routes, and it may not
+  // settle on a real-money rail, so an http contender is never a route.
+  it('an http contender with a public https URL is never a route', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 88, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db, stubIntegrations({ p1: { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme.com/x', signingSecret: 's' } } }), 'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+  });
+
+  it('an http best rate is skipped, the next simulator contender wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db,
+      stubIntegrations({
+        p1: ROUTABLE,
+        p2: { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme.com/x', signingSecret: 's' } },
+      }),
+      'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
   it('a rate merely EQUAL to mid never wins (strictly better required)', async () => {
     const repo = createPartnerRateRepo(db);
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: MID, expiresAt: inHours(1) });

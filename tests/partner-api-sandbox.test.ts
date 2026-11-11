@@ -14,6 +14,7 @@ import {
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
 import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Partner } from '@/lib/types';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
@@ -73,6 +74,8 @@ beforeEach(async () => {
     },
     whatsapp: {},
   });
+  // Fix pack 3 T4: the live mints here are on an http rail, so the rail partner is certified.
+  await certifyPartnerForTest(db, 'acme');
 });
 afterEach(() => vi.restoreAllMocks());
 

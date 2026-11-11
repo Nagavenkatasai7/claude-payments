@@ -98,6 +98,18 @@ const ACTION_LABELS = Object.freeze({
   'customer.mfa.recovery.request': 'partner.audit.action.mfaRecoveryRequest',
   'customer.mfa.recovery.approve': 'partner.audit.action.mfaRecoveryApprove',
   'customer.mfa.recovery.decline': 'partner.audit.action.mfaRecoveryDecline',
+  // Fix pack 3 T9 (R27): the partner's own live-controls writes (subject = the partner id).
+  'partner.live.posture.sign': 'partner.audit.action.postureSign',
+  'partner.live.compliance_user.set': 'partner.audit.action.complianceUserSet',
+  // Fix pack 3 T11 (R26, R13): switch changes for this tenant (the partner's own `tenant:` rows,
+  // and the platform's partner-scope rows, which applyFlagChange writes with partnerId = the tenant
+  // and no actorScope: those read as "SmartRemit", see projectActor) and the partner's capability
+  // approvals. partner.live.optin.counsel (SmartRemit's counsel record) stays OUT of the feed.
+  'flag.change': 'partner.audit.action.flagChange',
+  'partner.live.optin.approve': 'partner.audit.action.optinApprove',
+  // Pack 3 review C3: SmartRemit changed who runs KYC (subject = the partner id). Meta
+  // { from, to, postureSigned } stays out of DETAIL_KEYS; the row reads as "SmartRemit".
+  'partner.kyc_mode.change': 'partner.audit.action.kycModeChange',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -140,7 +152,21 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   // Closed enums only (the recovery module's RECOVERY_CHECKS and decline reasons).
   'customer.mfa.recovery.approve': ['checks'],
   'customer.mfa.recovery.decline': ['reason'],
+  // Fix pack 3 T9: closed enums and booleans, plus the listed member's username (never a reason or ref).
+  'partner.live.posture.sign': ['kycDecider', 'holdDecider', 'fourEyesNonSanctions'],
+  'partner.live.compliance_user.set': ['target', 'on'],
+  // Fix pack 3 T11: the switch key, on/off and the corridor (never reason, scopeId or previous);
+  // the capability and on/off (never a counsel reference).
+  'flag.change': ['key', 'enabled', 'corridor'],
+  'partner.live.optin.approve': ['capability', 'on'],
 });
+
+/**
+ * Actions whose only tenant-scoped writer marks its rows actorScope 'partner'; an unmarked row is
+ * the platform's (applyFlagChange writes no marker), so it reads "SmartRemit" even when the
+ * platform account was since deleted (never "Former staff", never the platform username).
+ */
+const PARTNER_MARKED_ACTIONS: ReadonlySet<string> = new Set(['flag.change']);
 
 const MASK = '••••'; // ••••
 const PHONE_SHAPE = /^\+?[\d\s().-]{8,24}$/;
@@ -200,6 +226,7 @@ function projectActor(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>,
   // "SmartRemit": the log must not blame the platform for an ex-employee's reveal.
   const scope = row.meta && typeof row.meta === 'object' ? (row.meta as { actorScope?: unknown }).actorScope : undefined;
   if (scope === 'platform') return t('partner.audit.smartremit');
+  if (scope !== 'partner' && PARTNER_MARKED_ACTIONS.has(row.action)) return t('partner.audit.smartremit');
   if (scope === 'partner' || tenantUsernames.has(row.actor)) return safeText(row.actor); // a legacy email-shaped name is masked
   if (platformUsernames.has(row.actor)) return t('partner.audit.smartremit');
   return t('partner.audit.formerStaff');

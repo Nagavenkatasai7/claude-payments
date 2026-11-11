@@ -17,7 +17,7 @@
 export const STATIC_PAGE_SEGMENTS: ReadonlySet<string> = new Set([
   '.well-known', 'about', 'account', 'admin-dashboard', 'ai-apps', 'analytics', 'api-keys', 'apply',
   'audit', 'authorize', 'b2b',
-  'branding', 'chat', 'compliance', 'contact', 'continue', 'conversation', 'corridors',
+  'branding', 'chat', 'compliance', 'contact', 'continue', 'controls', 'conversation', 'corridors',
   'customers', 'delete', 'devices', 'docs', 'documents', 'download', 'edit',
   'employee-questions', 'export', 'help', 'history', 'integrations', 'invite', 'invoices', 'kyc',
   'l', 'landing', 'legal', 'live', 'login', 'mfa', 'my-queue', 'new', 'notifications', 'oauth',

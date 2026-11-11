@@ -55,6 +55,7 @@ import { createStaffInviteStore } from '@/lib/staff-invite-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import StaffPage from '@/app/partner/(app)/staff/page';
 import { t } from '@/lib/i18n';
+import { writeComplianceUser } from '@/lib/live-controls-write';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 const mkStaff = (o: Partial<Staff>): Staff => ({
@@ -170,6 +171,30 @@ describe('/partner/staff: content', () => {
     expect(html).not.toMatch(/name="(canCancel|canResend|canAssign|canRevealPii|permissions)"/);
   });
 
+  it('admin sees the compliance column with add / remove (fix pack 3 T9)', async () => {
+    for (const u of ['pa-agent', 'pa-left']) {
+      await box.db!.transaction((tx) => writeComplianceUser(tx, 'pa', { username: 'pa-admin', scope: 'partner' }, { username: u, on: true }));
+    }
+    const html = await render();
+    const row = (u: string) => html.slice(html.indexOf(`>${u}<`), html.indexOf('</tr>', html.indexOf(`>${u}<`)));
+    expect(html).toContain(t('partner.staff.complianceUser.col'));
+    expect(row('pa-agent')).toContain(t('partner.staff.complianceUser.on'));
+    expect(row('pa-agent')).toContain(t('partner.staff.complianceUser.removeName', { name: 'pa-agent' }));
+    expect(row('pa-admin')).toContain(t('partner.staff.complianceUser.addName', { name: 'pa-admin' }));
+    expect(row('pa-fin')).not.toContain(t('partner.staff.complianceUser.addName', { name: 'pa-fin' }));
+    expect(row('pa-fin')).not.toContain(t('partner.staff.complianceUser.on'));
+    // A listed name no longer on the roster: a remove-only line under the table.
+    expect(html).toContain(t('partner.staff.complianceUser.formerTitle'));
+    expect(html).toContain(t('partner.staff.complianceUser.removeName', { name: 'pa-left' }));
+    expect(html).not.toContain(t('partner.staff.complianceUser.addName', { name: 'pa-left' }));
+  });
+
+  it('nobody listed -> no former-members line', async () => {
+    const html = await render();
+    expect(html).not.toContain(t('partner.staff.complianceUser.formerTitle'));
+    expect(html).not.toContain(t('partner.staff.complianceUser.on'));
+  });
+
   it('no Remove control on your own row', async () => {
     const html = await render();
     expect(html).not.toContain(t('partner.staff.removeName', { name: 'Alice Admin' }));
@@ -204,5 +229,6 @@ describe('/partner/staff: the agent view', () => {
     expect(html).not.toContain(t('partner.staff.statusActive'));
     expect(html).not.toContain(t('partner.staff.colPermissions'));
     expect(html).not.toContain(t('partner.staff.perm.all'));
+    expect(html).not.toContain(t('partner.staff.complianceUser.col'));
   });
 });

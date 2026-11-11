@@ -78,7 +78,16 @@ export type ScheduleRefusalCode =
   | 'sender_name'
   | 'amount'
   | 'no_payout'
-  | 'purpose';
+  | 'purpose'
+  // Fix pack 3 (R13, contract 15): the account may not set up repeat payments.
+  // 'capability_off': a tenant certified for live money without its schedules
+  // opt-in (or its partner row could not be read: fail closed). 'licence' and
+  // 'corridor_closed': no producer until PR8 (licence matrix, corridor
+  // register). All three answer the same neutral text on every surface
+  // (FIXED_REPLIES.schedule_unavailable / 'portal.schedules.unavailable').
+  | 'capability_off'
+  | 'licence'
+  | 'corridor_closed';
 
 export type ScheduleValidateResult =
   | { ok: true; schedule: Omit<Schedule, 'id' | 'createdAt'> }

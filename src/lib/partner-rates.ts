@@ -20,10 +20,12 @@ import { logWarn } from './log';
 //   • not the 'default' partner (it IS the platform baseline)
 //   • a FRESH pushed rate (effectiveRate with expiresAt in the future), else a
 //     standing marginBps off mid (signed; positive ⇒ better for the customer)
-//   • a routable rail: payment.providerType 'http' | 'simulator' AND a
-//     passing target URL (settlementTargetUrl: an http rail's stored URL, a
-//     simulator's hosted rail) — anything else dead-letters money
-//     in `paid` (the settlement.instruct handler throws on a missing URL).
+//   • a routable rail: payment.providerType 'simulator' AND a passing target
+//     URL (settlementTargetUrl: a simulator's hosted rail) — anything else
+//     dead-letters money in `paid` (the settlement.instruct handler throws on
+//     a missing URL). Fix pack 3 (contract 15): an 'http' rail is never a
+//     route. Only the default tenant routes, and it may not settle on a
+//     real-money rail (the mint refuses it: default_on_live_rail).
 //   • a PLAUSIBLE rate: at most MAX_ROUTE_PREMIUM above mid (smart-routing R0
 //     fix A). A pushed typo (850 for 85.0) or a fat-fingered margin would
 //     otherwise win every route at a rate the partner never meant to pay.
@@ -33,7 +35,7 @@ import { logWarn } from './log';
 // Callers gate on the tenant BEFORE calling (white-label customers are pinned
 // to their partner — transmitter of record): only default-tenant quotes route.
 
-const ROUTABLE_PROVIDER_TYPES = new Set(['http', 'simulator']);
+const ROUTABLE_PROVIDER_TYPES = new Set(['simulator']);
 
 /** The most a partner rate may beat mid by and still compete (5%). Above it the rate is treated as a typo. */
 export const MAX_ROUTE_PREMIUM = 0.05;
@@ -124,6 +126,8 @@ export async function selectSettlementRoute(
     try {
       const integrations = await integrationsStore.getIntegrations(c.partnerId);
       const providerType = integrations.payment.providerType ?? '';
+      // Pack 3: only the default tenant routes and it may not settle on a real-money rail.
+      if (providerType === 'http') continue;
       // Fix pack 2 T10: the URL the worker POSTs to (a simulator's is the hosted rail).
       const settlementUrl = settlementTargetUrl(integrations.payment);
       // Fix 22: routable only when the endpoint passes the same sync URL rule

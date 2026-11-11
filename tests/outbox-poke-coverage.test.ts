@@ -53,7 +53,13 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/delivery-receipt.ts': ['deliverTransfer'],
   // Release safety part A: the switch ops alert; its one caller, the
   // /admin-dashboard/switches action, pokes.
-  'src/lib/flag-switch.ts': ['applyFlagChange'],
+  'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
+  // Fix pack 3 T9 (contract 9): the typed live-controls writers run in the caller's
+  // transaction; their callers (the partner / platform live-controls actions) poke.
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn'],
+  // Pack 3 review I1: the livegate:stuck: alert — called only from the two
+  // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
+  'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };

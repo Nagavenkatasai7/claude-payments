@@ -25,3 +25,19 @@ Work through this list with your test key and a reference-rail test run arranged
 ### Compliance
 
 - [ ] Your KYC mode is agreed, and you send `sender.kyc_status` and `sender.name` on every transaction. See <GuideLink slug="kyc-delegation">KYC delegation</GuideLink>.
+
+### Live money on your own rail
+
+Going live with your own settlement rail needs a second SmartRemit approval after go-live. SmartRemit approves your workspace for live money on your rail when:
+
+- your compliance setup is signed on the Onboarding page of your workspace (signing it turns on verify before send for your customers);
+- two of your team are named as compliance users, each with two-step verification;
+- your own WhatsApp Business number is connected;
+- your agreement with SmartRemit is on file;
+- the further checks SmartRemit adds are met (your Controls page lists every check and its state).
+
+Until then, live transactions on your rail are refused with `403` and `code` `partner_not_live`. Sandbox transactions are not affected. After the approval, a live Partner API transaction with a USDC payout is refused with `403` and `code` `capability_off` until that feature is approved. Business payments, repeat payments and AI apps stay closed in the chat, the portal, the pay pages and AI apps until they are approved, and customers see a neutral message there. SmartRemit reviews each feature first; your admin then approves it on the Controls page. See <GuideLink slug="errors">Errors</GuideLink>.
+
+### Your switches
+
+Your admins can pause your own workspace on the Controls page: new sends and settlement (for every corridor or for one), the AI agent and AI agent tools. A pause takes effect within about 15 seconds and stays until your team resumes it. Resuming asks the admin to confirm their identity again. SmartRemit sees each change, and your workspace shows a notice while a pause is on.

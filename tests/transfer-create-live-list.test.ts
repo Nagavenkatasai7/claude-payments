@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, MintRefusedError } from '@/lib/transfer-create';
 import { createStore, type SenderLedgerOps } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -13,6 +13,7 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
 import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 
@@ -104,6 +105,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('http partner, live, mock list, UNROUTED: flagged LIST_UNAVAILABLE, awaiting_payment; settleOrHold -> in_review; one ops.alert; a second mint the same day -> still one alert', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
     expect(t.complianceStatus).toBe('flagged');
     expect(t.complianceReasons[0]).toBe(LIST_UNAVAILABLE_REASON);
@@ -131,6 +133,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('fresh ofac -> cleared, evidence listFitness live', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     primeOfacSource({ checkedAgoMs: HOUR });
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
     expect(t.complianceStatus).toBe('cleared');
@@ -144,6 +147,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('checked 37 h ago -> held, stale', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     primeOfacSource({ checkedAgoMs: 37 * HOUR });
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
     expect(t.complianceStatus).toBe('flagged');
@@ -153,15 +157,21 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
     expect(await listAlerts(db)).toHaveLength(1);
   });
 
-  it('default owner + approved quote routed to an http partner -> held', async () => {
+  it('default owner + approved quote routed to an http partner -> refused default_on_live_rail, nothing written (fix pack 3 T4)', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
     await seedPartner(db, 'railco');
     await setRail(db, 'railco', 'http');
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', quote, settlementPartnerId: 'railco' });
-    expect(t.settlementPartnerId).toBe('railco');
-    expect(t.complianceStatus).toBe('flagged');
-    expect(t.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const before = await outboxCount(db);
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default', quote, settlementPartnerId: 'railco' })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('default_on_live_rail');
+    expect(await outboxCount(db)).toBe(before);
+    const n = await db.execute(sql`SELECT count(*)::int AS n FROM transfers`);
+    expect(Number((n.rows[0] as { n: number }).n)).toBe(0);
+    expect(await listAlerts(db)).toEqual([]);
   });
 
   it('same without a quote (route dropped) -> cleared', async () => {
@@ -178,6 +188,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('http owner routed to a simulator partner -> cleared', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     await seedPartner(db, 'simco');
     await setRail(db, 'simco', 'simulator');
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'simco' });
@@ -188,6 +199,8 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('rail read fails -> held on the mock list, cleared on a fresh one', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'simco', 'simulator');
+    // Fix pack 3 T4: a failed rail read is real money, so the owner must be certified to mint.
+    await certifyPartnerForTest(db, 'simco');
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
     try {
@@ -205,6 +218,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('\'test blocked\' on http -> blocked, no list alert', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', recipientName: 'test blocked' });
     expect(t.complianceStatus).toBe('blocked');
     expect(t.complianceReasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
@@ -216,6 +230,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
     // partner email commit with the blocked row, or not at all.
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
     primeOfacSource({ checkedAgoMs: HOUR });
     const notices = async () => (await db.execute(sql`
@@ -260,6 +275,7 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
   it('a same-id replay -> no second evidence row, no alert', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     const real = store.mintUnderSenderLock.bind(store);
     let alertCalls = 0;
     vi.spyOn(store, 'mintUnderSenderLock').mockImplementation(((p: string, ph: string, fn: (ops: SenderLedgerOps) => Promise<unknown>) =>
@@ -293,6 +309,7 @@ describe('mint live-list gate — demo paths unchanged (fix pack 2 R02)', { retr
   it('a live http mint makes exactly ONE pre-lock rail read', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme'); // fix pack 3 T4: live http mints need a certified rail
     primeOfacSource({ checkedAgoMs: HOUR });
     const stop = captureQueries();
     await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });

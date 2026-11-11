@@ -8,7 +8,6 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isB2bSendVerified, isSendVerified, sendGateActive } from '@/lib/kyc-gate';
-import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -21,11 +20,11 @@ import { retryOnceOnInfra } from '@/lib/infra-retry';
 import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
 import { resolvePartnerBranding, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
-import { resolveWaChannel } from '@/lib/whatsapp-creds';
+import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { recordChannelHealth } from '@/lib/channel-health';
 import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
-import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
+import { sendTransactionOtp } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
@@ -38,6 +37,7 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { payNotAvailable } from '@/lib/pay-not-available';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
 import { QuoteError } from '@/lib/fx';
@@ -351,25 +351,14 @@ export async function POST(
         logWarn('pay.otp-channel', 'tenant unresolved; confirmation code not sent (fail closed)', {});
         return otpSendFailed();
       }
-      // WL2: the code arrives from the number the customer is mid-payment with.
-      let otpCreds: WaCreds | undefined;
-      try {
-        const channel = resolveWaChannel(otpPartnerId, await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
-        if (channel.kind === 'incomplete') {
-          // B2 (pay-process move): the alert email this may enqueue gets its poke here, as
-          // direct-otp-channel.ts does (outbox-poke-coverage).
-          if (await recordChannelHealth(otpPartnerId, 'incomplete_config')) pokeWorker();
-          logWarn('pay.otp-channel', 'partner channel incomplete; confirmation code not sent (fail closed)', { partnerId: otpPartnerId });
-          return otpSendFailed();
-        }
-        otpCreds = channel.kind === 'own' ? channel.creds : undefined;
-      } catch {
-        if (otpPartnerId !== DEFAULT_PARTNER_ID) {
-          logWarn('pay.otp-channel', 'partner channel read failed; confirmation code not sent (fail closed)', { partnerId: otpPartnerId });
-          return otpSendFailed();
-        }
-        // The default tenant's number IS the shared env number.
-      }
+      // WL2: the code arrives from the number the customer is mid-payment with. Pack 3
+      // (contract 17): the ONE channel rule (direct-otp-channel.ts) — own number → its creds;
+      // shared → the env number, except a partner certified for live money (refused); a
+      // half-configured channel (incomplete_config recorded + poke) or a non-default partner's
+      // failed read → refused; the default tenant keeps the shared number on a read failure.
+      const channel = await resolveDirectOtpChannel(otpPartnerId, 'pay.otp-channel');
+      if (!channel.ok) return otpSendFailed();
+      const otpCreds = channel.creds;
       // Program-Fix 49A: the partner's name on the free-form text, on the partner's
       // OWN number only (the shared number keeps its wording). Best-effort: a read
       // error keeps the neutral default wording.
@@ -733,6 +722,11 @@ export async function POST(
           { ok: false, error: 'Please try again.', reason: 'busy' },
           { status: 503 },
         );
+      }
+      if (result.error === 'not_available') {
+        // Pack 3 (contract 5): a live control refused the mint. Nothing was
+        // minted, charged or consumed; the neutral 409 never names the reason.
+        return payNotAvailable();
       }
       const msg =
         result.error === 'cap'
