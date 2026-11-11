@@ -81,6 +81,15 @@ describe('recordInstructDelivery', () => {
     expect((logWarnSpy.mock.calls[0] as unknown[])[1]).toBe('DeliveryLogTimeout');
   });
 
+  it('recordInstructDelivery stores the body_sha256 it is given; NULL when none', async () => {
+    const sha = 'a'.repeat(64);
+    await recordInstructDelivery(db, { ...meta, bodySha256: sha, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    await recordInstructDelivery(db, { ...meta, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    await recordInstructDelivery(db, { ...meta, bodySha256: null, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    const r = await db.select().from(partnerWebhookDeliveries).orderBy(partnerWebhookDeliveries.id);
+    expect(r.map((x) => x.bodySha256)).toEqual([sha, null, null]);
+  });
+
   it('the default cap is small next to the row deadline and the rail timeout', async () => {
     const { ROW_DEADLINE_MS } = await import('@/lib/outbox-worker');
     const { RAIL_TIMEOUT_MS } = await import('@/lib/providers/http-payment-provider');
@@ -104,6 +113,16 @@ describe('withInstructDeliveryLog', () => {
     expect(out.res).toBe(res);
     await out.logged;
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['http_error', 503]]);
+  });
+
+  it('passes the body_sha256 on for ok, http_error and network', async () => {
+    const sha = 'b'.repeat(64);
+    const m = { ...meta, bodySha256: sha };
+    await (await withInstructDeliveryLog(db, m, async () => new Response('{}', { status: 200 }))).logged;
+    await (await withInstructDeliveryLog(db, m, async () => new Response(null, { status: 500 }))).logged;
+    await expect(withInstructDeliveryLog(db, m, async () => Promise.reject(new Error('net')))).rejects.toThrow('net');
+    const r = await db.select().from(partnerWebhookDeliveries).orderBy(partnerWebhookDeliveries.id);
+    expect(r.map((x) => [x.outcome, x.bodySha256])).toEqual([['ok', sha], ['http_error', sha], ['network', sha]]);
   });
 
   it('records network and rethrows the SAME error when the POST throws', async () => {

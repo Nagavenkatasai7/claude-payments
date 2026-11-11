@@ -15,6 +15,7 @@ import { invalidateFlagCache, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { resetFlagReadAlertMemoForTests } from '@/lib/flag-read-alert';
 import { INSTRUCT_GATE_ORDER } from '@/lib/instruct-gates';
 import { EnvKeyProvider } from '@/lib/field-crypto';
+import { railMessages } from '@/db/schema';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
@@ -343,5 +344,28 @@ describe('adjacent pairs: a row that fails both steps gets the earlier outcome',
   it.todo('funding_mode + build (T14)');
   it.todo('build + travel_rule (T23)');
   it.todo('travel_rule + record (T23)');
-  it.todo('record + send (T9)');
+  it('record + send: the record append fails AND the rail would 500 -> the record outcome (no fetch, RailRecordError, no railfail:)', async () => {
+    await saveRail('simulator');
+    await store.saveTransfer(transferFixture());
+    fetchFn.mockResolvedValue(new Response('down', { status: 500 }));
+    await enqueueInstruct();
+    await db.execute(sql`UPDATE outbox SET attempts = 2 WHERE dedupe_key = ${`instruct:${ID}`}`); // attempt 3: where railfail: would fire
+    const recordDown = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) => {
+            if (table === railMessages) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
+            return target.insert(table as never);
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    expect((await drainOnce({ ...deps(), db: recordDown }, 'w1')).failed).toBe(1);
+    expect(await rowState()).toMatchObject({ status: 'failed', attempts: 3, last_error: `rail_record_failed:${ID}` });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await hasPrefix('railfail:')).toBe(false);
+    expect(await hasPrefix('railrecord:')).toBe(true);
+  });
 });

@@ -15,6 +15,7 @@ import {
 } from '@/lib/providers/http-payment-provider';
 import { signRailHeaders, UnsignedRailError } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
+import { createRailMessageRepo, RAIL_OUT } from '@/db/repos/rail-message-repo';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import {
   ComplianceBlockUnavailableError,
@@ -1064,22 +1065,43 @@ async function handle(
       }
       const compliance = await loadComplianceBlock(deps.db, transfer);
       // gate: travel_rule (G16) - slot, T23
-      // gate: record (G17) - slot, T9 (it records the body built here before the POST)
+      // gate: record (G17)
+      // Fix pack 5 T9 (P4, P8 G17): the body and the signed headers are computed
+      // ONCE; the sealed rail_messages row (direction 1, kind 'settle') is
+      // appended and AWAITED outside any transaction; only then does the POST
+      // below send those same constants. A failed append is a RailRecordError
+      // (not a RailInstructError: no railfail, no rail-health effect); drainOnce
+      // raises railrecord:<hour>. No time cap: a hung insert ends in the row
+      // deadline, which is retryable (nothing was sent).
       const rawBody = JSON.stringify({
         ...instruction,
         partner_id: railPartnerId,
         compliance,
       });
+      let signed: Record<string, string>;
+      try {
+        // fix 29: legacy x-signature (byte-identical) + x-smartremit-signature.
+        signed = signRailHeaders(rawBody, signingSecrets, Date.now());
+      } catch (e) {
+        throw new RailInstructError(railPartnerId, e); // P5: a sign-time throw is a rail configuration failure
+      }
+      const headers = { 'Content-Type': 'application/json', ...signed };
+      const recorded = await recordRailOut(deps.db, {
+        partnerId: transfer.partnerId,
+        railPartnerId,
+        transferId,
+        kind: 'settle',
+        body: rawBody,
+        signatureHeader: signed['x-smartremit-signature'] ?? null,
+      });
       // gate: send (G18)
-      // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body);
+      // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body;
+      // fix pack 5 T9: the body's hash, the same as its rail record's);
       // the response and any thrown error pass through unchanged (webhook-delivery-log.ts).
-      const { res, logged } = await withInstructDeliveryLog(deps.db, { partnerId: railPartnerId, transferId, outboxId: row.id, attempt: row.attempts }, () => deps.fetchFn(settlementUrl, {
+      const deliveryMeta = { partnerId: railPartnerId, transferId, outboxId: row.id, attempt: row.attempts, bodySha256: recorded.bodySha256 };
+      const { res, logged } = await withInstructDeliveryLog(deps.db, deliveryMeta, () => deps.fetchFn(settlementUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // fix 29: legacy x-signature (byte-identical) + x-smartremit-signature.
-          ...signRailHeaders(rawBody, signingSecrets, Date.now()),
-        },
+        headers,
         body: rawBody,
         signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
       })).catch((e: unknown) => {
@@ -1176,12 +1198,23 @@ async function handle(
         // Fix pack 5 T1 (P5): never an unsigned reverse (default policy: dead at 8 + dead:<id>; refund stays pending).
         if (signingSecrets.length === 0) throw new UnsignedRailError();
         const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
+        // Fix pack 5 T9 (P4, P15 step 4): signed once, recorded (kind 'reverse')
+        // and awaited BEFORE the POST of the same bytes and headers. A failed
+        // record is a RailRecordError (default policy; railrecord:<hour>); the
+        // refund stays pending.
+        const signed = signRailHeaders(rawBody, signingSecrets, Date.now()); // fix 29: both headers
+        const headers = { 'Content-Type': 'application/json', ...signed };
+        await recordRailOut(deps.db, {
+          partnerId: full.partnerId,
+          railPartnerId,
+          transferId,
+          kind: 'reverse',
+          body: rawBody,
+          signatureHeader: signed['x-smartremit-signature'] ?? null,
+        });
         const res = await deps.fetchFn(settlementUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...signRailHeaders(rawBody, signingSecrets, Date.now()), // fix 29: both headers
-          },
+          headers,
           body: rawBody,
           signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
         });
@@ -1855,6 +1888,25 @@ async function alertInstructBlock(outbox: OutboxRepo, row: OutboxRow, err: Compl
     );
   } catch (e) {
     logWarn('worker.instructblock', 'instruct-block alert not enqueued', { id: row.id, error: e instanceof Error ? e.name : 'error' });
+  }
+}
+
+/**
+ * Fix pack 5 T9 (P4, P8 G17): append the sealed outbound rail_messages row for
+ * a body about to be POSTed, awaited, through the worker's db (outside any
+ * transaction). Any failure becomes RailRecordError, logged by the error NAME
+ * with ids only: never the error object, the body or the header.
+ */
+async function recordRailOut(
+  db: DbOrTx,
+  i: { partnerId: PartnerId; railPartnerId: PartnerId; transferId: string; kind: 'settle' | 'reverse'; body: string; signatureHeader: string | null },
+): Promise<{ id: string; bodySha256: string }> {
+  try {
+    const { id, bodySha256 } = await createRailMessageRepo(db).append({ ...i, direction: RAIL_OUT });
+    return { id, bodySha256 };
+  } catch (err) {
+    logWarn('outbox.rail-record', err instanceof Error ? err.name : 'error', { transferId: i.transferId, kind: i.kind });
+    throw new RailRecordError(i.transferId);
   }
 }
 
