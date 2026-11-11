@@ -106,14 +106,17 @@ export async function POST(
   }
 
   // fix 29: replay guard for the timestamped scheme — CHECK here, MARK only
-  // after the handling below returned. A throw propagates (the rail retries)
+  // after the handling below returned a 2xx. A throw propagates (the rail retries)
   // and leaves no mark. Redis down ⇒ 'unavailable' ⇒ proceed (fail-open; the
   // ±5 min window still holds and every downstream effect is idempotent).
   if (verified.scheme === 'v2' && (await railNonceSeen(verified.nonce)) === 'seen') {
     return NextResponse.json({ ok: true, duplicate: true });
   }
   const response = await handleVerified(provider, body, railPartnerId, railIntegrations, refTransfer);
-  if (verified.scheme === 'v2') await markRailNonce(verified.nonce);
+  // Fix pack 5 T3 (P6): mark only after a HANDLED 2xx. A 422 (amount_required,
+  // reference_unresolved) leaves the nonce unmarked, so a corrected retry of
+  // the same message is processed, not taken for a duplicate.
+  if (verified.scheme === 'v2' && response.ok) await markRailNonce(verified.nonce);
   return response;
 }
 
@@ -170,13 +173,18 @@ async function handleVerified(
     return NextResponse.json({ ok: true });
   }
 
-  // fix 29 (money-09): a delivery is checked before it may land.
+  // fix 29 (money-09) + fix pack 5 T3 (P6): a delivery is checked before it may land.
   //  • a row already HELD for an amount mismatch (`railamount:<id>`) is never
   //    delivered by a later callback — staff resolve it by cancel/refund;
+  //  • the callback must name the transfer it is about: no resolvable
+  //    reference, or one that differs from the parsed transfer ⇒ 422
+  //    reference_unresolved (ids-only log, no alert, nothing applied);
   //  • the callback's `amount` must equal the locked instruction amount. A
   //    mismatch (or a partial/unparseable block) never settles: one deduped
   //    ops alert (transfer id only) and 200 held, so the rail stops retrying.
-  //    No amount at all is accepted for now, with a deprecation log.
+  //    No amount block at all ⇒ 422 amount_required (nothing saved) plus one
+  //    `railnoamount:<rail|unresolved>:<hour>` alert; the rail retries until
+  //    it reports the amount (a 4xx leaves the nonce unmarked).
   if (result.status === 'delivered') {
     if (await outbox.hasDedupeKey(`railamount:${result.transferId}`)) {
       logWarn('payment-webhook.held', 'delivery refused: transfer is held for an amount mismatch', {
@@ -184,23 +192,44 @@ async function handleVerified(
       });
       return NextResponse.json({ ok: true, held: true });
     }
-    if (refTransfer && refTransfer.id === result.transferId) {
-      const amountCheck = checkCallbackAmount(refTransfer, body);
-      if (amountCheck === 'mismatch') {
-        await holdForAmountMismatch(outbox, result.transferId, refTransfer.complianceStatus === 'blocked');
-        logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
-          transferId: result.transferId,
-          partnerId: railPartnerId,
-        });
-        return NextResponse.json({ ok: true, held: true });
-      }
-      if (amountCheck === 'absent') {
-        logWarn('payment-webhook.amount_absent', 'paid_out callback without an amount block (deprecated)', {
-          transferId: result.transferId,
-          partnerId: railPartnerId,
-          provider,
-        });
-      }
+    if (!refTransfer || refTransfer.id !== result.transferId) {
+      logWarn('payment-webhook.reference_unresolved', 'delivered callback refused: the reference does not resolve to this transfer', {
+        transferId: result.transferId,
+        refTransferId: refTransfer?.id ?? null,
+        partnerId: railPartnerId,
+        provider,
+      });
+      return NextResponse.json({ ok: false, error: 'reference_unresolved' }, { status: 422 });
+    }
+    const amountCheck = checkCallbackAmount(refTransfer, body);
+    if (amountCheck === 'mismatch') {
+      await holdForAmountMismatch(outbox, result.transferId, refTransfer.complianceStatus === 'blocked');
+      logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
+        transferId: result.transferId,
+        partnerId: railPartnerId,
+      });
+      return NextResponse.json({ ok: true, held: true });
+    }
+    if (amountCheck === 'missing') {
+      // The pokeWorker() above already ran, so this alert row is picked up.
+      const rail = railPartnerId ?? 'unresolved';
+      await outbox.enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: a paid_out callback from rail partner ${rail} for transfer ${result.transferId} was refused (422 amount_required): ` +
+            'it carried no amount block, so the transfer was not marked delivered. Ask the rail partner to report amount.destination and ' +
+            'amount.destination_currency (see the webhooks docs); the rail keeps retrying until it does. ' +
+            'Further refusals for this rail this hour are coalesced into this alert.',
+        },
+        { dedupeKey: `railnoamount:${rail}:${Math.floor(Date.now() / 3_600_000)}` },
+      );
+      logWarn('payment-webhook.amount_missing', 'paid_out callback refused: no amount block', {
+        transferId: result.transferId,
+        partnerId: railPartnerId,
+        provider,
+      });
+      return NextResponse.json({ ok: false, error: 'amount_required' }, { status: 422 });
     }
   }
 

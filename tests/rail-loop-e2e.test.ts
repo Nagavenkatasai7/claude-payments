@@ -155,6 +155,23 @@ describe('rail loop end to end (fix 29)', () => {
     expect(sendText).toHaveBeenCalled(); // the stage-2 "delivered" message
   });
 
+  // Fix pack 5 T3 (P6): a paid_out needs its amount; the simulator always echoes it.
+  it("the simulator's callback carries amount.destination 16600 INR and the v2 header, and delivers", async () => {
+    await drainOnce(deps(), 'w1');
+    await releaseDelayedCallback();
+    await drainOnce(deps(), 'w2');
+    const cb = calls.find((c) => c.url === HOOK_URL)!;
+    expect(cb.status).toBe(200);
+    expect(cb.headers['x-smartremit-signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
+    const sent = JSON.parse(cb.body) as { reference?: string; status?: string; amount?: { destination?: unknown; destination_currency?: unknown } };
+    expect(sent.reference).toBe('e2e_t1');
+    expect(sent.status).toBe('paid_out');
+    expect(Number(sent.amount?.destination)).toBe(16600);
+    expect(sent.amount?.destination_currency).toBe('INR');
+    expect((await createStore(redis, db).getTransfer('e2e_t1'))!.status).toBe('delivered');
+    expect((await keys()).some((k) => k.startsWith('railnoamount:'))).toBe(false);
+  });
+
   it('Batch B1: the instruction carries client_reference; the simulator reports SIMPAY-<ref>, saved once on delivery', async () => {
     await drainOnce(deps(), 'w1');
     expect((JSON.parse(calls[0].body) as { client_reference?: string }).client_reference).toBe('PO-E2E-1');

@@ -34,10 +34,11 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
 
-// In-memory store double + a controllable handleWebhook. The default fixture
-// state (no transfers, no integrations) keeps the legacy contract these tests
-// pin: getTransfer → null so the WL3 partner-secret resolution falls through to
-// the env per-provider secret. Routed tests set fixtures per test.
+// In-memory store double + a controllable handleWebhook. The base fixture is
+// ONE paid wh_1 (16600 INR, no partnerId) and no integrations (fix pack 5 T3:
+// a paid_out must name a transfer and report its amount): with no rail partner
+// resolved, verification still falls through to the env per-provider secret.
+// Routed tests set fixtures per test.
 const fixtures = vi.hoisted(() => ({
   transfersById: {} as Record<string, unknown>,
   integrationsByPartner: {} as Record<string, unknown>,
@@ -140,7 +141,9 @@ const deliveredGbp = {
   recipientName: 'Liam', recipientPhone: '447911000000', payoutMethod: 'bank', status: 'delivered',
 };
 const SECRET = 'uniteller-secret';
-const body = JSON.stringify({ reference: 'wh_1', status: 'paid_out' });
+// Fix pack 5 T3: a paid_out carries the instructed amount (wh_1: 16600 INR).
+const body = JSON.stringify({ reference: 'wh_1', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+const baseWh1 = { ...deliveredTransfer, status: 'paid', amountInr: 16600, destinationCurrency: 'INR' };
 /**
  * Fix pack 5 T2: since a legacy-only callback is refused, `sig()` returns the
  * v2 header VALUE (`t=..,v1=..`, straight from the documented recipe) and
@@ -172,7 +175,7 @@ beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
   updateTransferFromWebhook.mockReset(); handleWebhook.mockReset();
   handleRailFailure.mockClear(); alertRefusedDelivery.mockClear(); alertCallbackOnHold.mockClear();
-  fixtures.transfersById = {};
+  fixtures.transfersById = { wh_1: baseWh1 };
   fixtures.integrationsByPartner = {};
   fixtures.getPaymentProviderCalls.length = 0;
   afterPending.length = 0; // never leak an unflushed after() into the next test
@@ -224,9 +227,11 @@ describe('POST /api/payment-webhook/[provider]', () => {
   });
 
   it('delivered message uses the DESTINATION currency (GBP shows £, never ₹)', async () => {
+    fixtures.transfersById.wh_2 = { ...deliveredGbp, status: 'paid' };
+    const gbpBody = JSON.stringify({ reference: 'wh_2', status: 'paid_out', amount: { destination: 745, destination_currency: 'GBP' } });
     handleWebhook.mockResolvedValue({ transferId: 'wh_2', status: 'delivered' });
     updateTransferFromWebhook.mockResolvedValue(deliveredGbp);
-    const res = await post('uniteller', body, sig(body));
+    const res = await post('uniteller', gbpBody, sig(gbpBody));
     expect(res.status).toBe(200);
     await flushAfter();
     expect(sendText).toHaveBeenCalledTimes(1);
@@ -624,7 +629,8 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
   });
 
   it('rotation (env): PAYMENT_WEBHOOK_SECRET_<P>_PREVIOUS also verifies when no partner secret applies', async () => {
-    delete fixtures.transfersById['wh_1'];
+    // No rail partner on the row (fix pack 5 T3: the reference must still resolve) ⇒ env secrets.
+    fixtures.transfersById['wh_1'] = baseWh1;
     process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS = 'uni_old';
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
     updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
@@ -639,10 +645,101 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
     expect(outboxFake.enqueued).toEqual([]);
   });
 
-  it('absent amount → delivered with a deprecation log', async () => {
-    expect((await post('simulator', body, undefined, v2(body, 'owner_whk'))).status).toBe(200);
-    expect(updateTransferFromWebhook).toHaveBeenCalledTimes(1);
-    expect(logWarnSpy.mock.calls.some((c) => c[0] === 'payment-webhook.amount_absent')).toBe(true);
+  // Fix pack 5 T3 (P6, P30): a paid_out must report the instructed amount and
+  // name the transfer it is about; otherwise 422 and nothing applies.
+  const noAmount = JSON.stringify({ reference: 'wh_1', status: 'paid_out' });
+  const noAmountAlerts = () => outboxFake.enqueued.filter((e) => e.kind === 'ops.alert' && e.dedupeKey?.startsWith('railnoamount:'));
+
+  it('paid_out with NO amount → 422 amount_required; not delivered, no payout reference saved, ONE ops.alert railnoamount:owner:<hour> (ids only), nonce NOT marked', async () => {
+    const raw = JSON.stringify({ reference: 'wh_1', status: 'paid_out', payout_reference: 'UTR-NOAMT-1' });
+    const res = await post('simulator', raw, undefined, v2(raw, 'owner_whk'));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ ok: false, error: 'amount_required' });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(setPayoutReference).not.toHaveBeenCalled();
+    const alerts = noAmountAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupeKey).toBe(`railnoamount:owner:${hour()}`);
+    expect(Object.keys(alerts[0].payload as object)).toEqual(['message']);
+    expect((alerts[0].payload as { message: string }).message).toBe(
+      '⚠️ SmartRemit ops: a paid_out callback from rail partner owner for transfer wh_1 was refused (422 amount_required): it carried no amount block, so the transfer was not marked delivered. Ask the rail partner to report amount.destination and amount.destination_currency (see the webhooks docs); the rail keeps retrying until it does. Further refusals for this rail this hour are coalesced into this alert.',
+    );
+    expect(replay.markCalls).toBe(0);
+    expect(logWarnSpy.mock.calls.some((c) => c[0] === 'payment-webhook.amount_missing')).toBe(true);
+    const logged = JSON.stringify(logWarnSpy.mock.calls);
+    for (const pii of ['15551230000', '919876543210', 'Mom', 'UTR-NOAMT-1']) expect(logged).not.toContain(pii);
+    await flushAfter();
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('the same amount-less message retried after a 422 is handled again (not taken for a duplicate)', async () => {
+    const h = v2(noAmount, 'owner_whk');
+    expect((await post('simulator', noAmount, undefined, h)).status).toBe(422);
+    expect((await post('simulator', noAmount, undefined, h)).status).toBe(422);
+    expect(handleWebhook).toHaveBeenCalledTimes(2);
+  });
+
+  it('a second amount-less paid_out in the hour → 422 again, still one alert', async () => {
+    expect((await post('simulator', noAmount, undefined, v2(noAmount, 'owner_whk'))).status).toBe(422);
+    expect((await post('simulator', noAmount, sig(noAmount, 'owner_whk'))).status).toBe(422);
+    expect(noAmountAlerts()).toHaveLength(1);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+  });
+
+  it('paid_out whose result.transferId differs from the referenced transfer → 422 reference_unresolved, ids-only log, no alert, nothing applied', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_9', status: 'delivered' });
+    const a = withAmount(16600);
+    const res = await post('simulator', a, undefined, v2(a, 'owner_whk'));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ ok: false, error: 'reference_unresolved' });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(setPayoutReference).not.toHaveBeenCalled();
+    expect(outboxFake.enqueued).toEqual([]);
+    expect(replay.markCalls).toBe(0);
+    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'payment-webhook.reference_unresolved');
+    expect(call?.[2]).toEqual({ transferId: 'wh_9', refTransferId: 'wh_1', partnerId: 'owner', provider: 'simulator' });
+  });
+
+  it('paid_out with no resolvable transfer (env-secret path) → 422 reference_unresolved', async () => {
+    const ghost = JSON.stringify({ reference: 'tr_unknown', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+    handleWebhook.mockResolvedValue({ transferId: 'tr_unknown', status: 'delivered' });
+    const res = await post('uniteller', ghost, sig(ghost, SECRET));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ ok: false, error: 'reference_unresolved' });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(outboxFake.enqueued).toEqual([]);
+    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'payment-webhook.reference_unresolved');
+    expect(call?.[2]).toEqual({ transferId: 'tr_unknown', refTransferId: null, partnerId: null, provider: 'uniteller' });
+  });
+
+  it('the railamount: hold still answers 200 held first (marker + no amount → 200 held, no railnoamount alert)', async () => {
+    outboxFake.keys.add('railamount:wh_1');
+    const res = await post('simulator', noAmount, undefined, v2(noAmount, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    expect(noAmountAlerts()).toHaveLength(0);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+  });
+
+  it('a failed callback without an amount is still acted on (handleRailFailure, 200)', async () => {
+    const failedBody = JSON.stringify({ reference: 'wh_1', status: 'failed' });
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
+    const res = await post('simulator', failedBody, undefined, v2(failedBody, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(1);
+    expect(noAmountAlerts()).toHaveLength(0);
+  });
+
+  it('a paid (funded) callback without an amount is unchanged', async () => {
+    const funded = JSON.stringify({ reference: 'wh_1', status: 'funded' });
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    updateTransferFromWebhook.mockResolvedValue({ ...paidOwner });
+    const res = await post('simulator', funded, undefined, v2(funded, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'paid');
+    expect(noAmountAlerts()).toHaveLength(0);
+    expect(replay.markCalls).toBe(1);
   });
 
   it('MISMATCH → never delivered: 200 held, ONE railamount:<id> ops alert (id only), nonce marked', async () => {
@@ -834,7 +931,9 @@ describe('POST /api/payment-webhook/[provider] — sandbox (Program-Fix 44 P2)',
 });
 
 describe('POST /api/payment-webhook — payout reference (Batch B1)', { retry: 0 }, () => {
-  const withRef = (ref: unknown, status = 'paid_out') => JSON.stringify({ reference: 'wh_1', status, payout_reference: ref });
+  // Fix pack 5 T3: a paid_out carries its amount (a missing one is refused before the save).
+  const withRef = (ref: unknown, status = 'paid_out') =>
+    JSON.stringify({ reference: 'wh_1', status, payout_reference: ref, amount: { destination: 16600, destination_currency: 'INR' } });
 
   it('a SIGNED paid_out with a payout_reference saves it once, before the status update', async () => {
     const order: string[] = [];
@@ -918,7 +1017,7 @@ describe('rail callback on an uncertified real-money rail (pack 3)', { retry: 0 
     liveControls: certified ? certifiedLiveControls() : { optIns: {}, complianceUsers: [] },
   });
   const funded = JSON.stringify({ reference: 'wh_1', status: 'funded' });
-  const paidOut = JSON.stringify({ reference: 'wh_1', status: 'paid_out', payout_reference: 'UTR-LIVE-1' });
+  const paidOut = JSON.stringify({ reference: 'wh_1', status: 'paid_out', payout_reference: 'UTR-LIVE-1', amount: { destination: 16600, destination_currency: 'INR' } });
   const liveAlerts = () => outboxFake.enqueued.filter((e) => e.dedupeKey === 'livegate:wh_1');
 
   it('signed funded on an uncertified http rail\'s awaiting_payment row -> 200 { ok: true, held: true }, updateTransferFromWebhook never called, one ops.alert livegate:<id> naming only ids', async () => {

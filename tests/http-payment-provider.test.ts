@@ -366,9 +366,9 @@ describe('checkCallbackAmount (pure)', () => {
   const t = fixture(); // amountInr 16600, INR
   const cb = (amount: unknown) => ({ reference: 'rail_t1', status: 'paid_out', ...(amount === undefined ? {} : { amount }) });
 
-  it('no amount block → absent', () => {
-    expect(checkCallbackAmount(t, cb(undefined))).toBe('absent');
-    expect(checkCallbackAmount(t, null)).toBe('absent');
+  it('no amount block → missing', () => {
+    expect(checkCallbackAmount(t, cb(undefined))).toBe('missing');
+    expect(checkCallbackAmount(t, null)).toBe('missing');
   });
 
   it('exact destination + currency → match (number or numeric string)', () => {

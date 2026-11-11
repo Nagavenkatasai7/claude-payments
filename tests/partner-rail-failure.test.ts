@@ -240,9 +240,31 @@ describe('partner-rail — rail signature v2 (fix 29)', () => {
     expect(await railCallbacks()).toHaveLength(1);
   });
 
-  it('an instruction with no or a malformed amount block is still accepted; the callback simply carries no amount', async () => {
+  // Fix pack 5 T3 (P6): a callback without an amount would 422 at our webhook
+  // and dead-letter rail.callback, so the reference rail refuses such a settle.
+  it('a settle with no or a malformed amount block → 400 { ok: false, error: amount_required }, no rail.callback row', async () => {
     const { amount: _a, ...noAmount } = settle('v2_t6', 'HDFC0001234 123456789012');
-    expect((await postWith(noAmount, { 'x-smartremit-signature': '$RAW_V2' })).status).toBe(200);
-    expect((await railCallbacks())[0].payload).toEqual({ reference: 'v2_t6', partner_id: 'default' });
+    const cases: unknown[] = [
+      noAmount,
+      { ...noAmount, reference: 'v2_t6b', amount: { destination: null } },
+      { ...noAmount, reference: 'v2_t6c', amount: 'x' },
+    ];
+    for (const b of cases) {
+      const res = await postWith(b, { 'x-smartremit-signature': '$RAW_V2' });
+      expect(res.status, JSON.stringify(b)).toBe(400);
+      expect(await res.json()).toEqual({ ok: false, error: 'amount_required' });
+    }
+    expect(await railCallbacks()).toHaveLength(0);
+    expect(pokes.delayed).toEqual([]);
+  });
+
+  it('a reverse without an amount still acks (200, no callback)', async () => {
+    const res = await postWith(
+      { reference: 'reverse-v2_t7', partner_id: 'default', action: 'reverse', payout: { rail: 'bank', destination: 'x' } },
+      { 'x-smartremit-signature': '$RAW_V2' },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, action: 'reverse' });
+    expect(await railCallbacks()).toHaveLength(0);
   });
 });

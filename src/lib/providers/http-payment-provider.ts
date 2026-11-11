@@ -321,7 +321,7 @@ export function buildReverseInstruction(transfer: Transfer) {
   };
 }
 
-export type CallbackAmountCheck = 'match' | 'absent' | 'mismatch';
+export type CallbackAmountCheck = 'match' | 'missing' | 'mismatch';
 
 const DECIMAL = /^\d+(\.\d+)?$/;
 
@@ -339,11 +339,12 @@ function parseAmount(v: unknown): number | null {
  * Program-Fix 29 (money-09): compare a `paid_out` callback's `amount` block to
  * the LOCKED instruction amount (buildSettlementInstruction's
  * amount.destination / destination_currency, the currency defaulting to INR
- * exactly as there), in minor units. No `amount` key at all ⇒ 'absent' (older
- * integrations); a partial, unparseable or different block ⇒ 'mismatch'.
+ * exactly as there), in minor units. No `amount` key at all ⇒ 'missing'
+ * (refused since fix pack 5: 422 amount_required); a partial, unparseable or
+ * different block ⇒ 'mismatch'.
  */
 export function checkCallbackAmount(transfer: Transfer, body: unknown): CallbackAmountCheck {
-  if (!body || typeof body !== 'object' || !('amount' in body)) return 'absent';
+  if (!body || typeof body !== 'object' || !('amount' in body)) return 'missing';
   const a = (body as Record<string, unknown>).amount;
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'mismatch';
   const block = a as Record<string, unknown>;
