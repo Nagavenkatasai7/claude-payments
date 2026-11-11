@@ -515,10 +515,12 @@ describe('pack 5 documents say what the code does', () => {
   it('funding.mdx Refunds: no reverse for a transfer never sent to the rail, and a partner_psp card payment is refunded in the partner\'s own Stripe dashboard (final check F9, U2)', () => {
     const refunds = section(FUNDING, '## Refunds');
     expect(refunds).toContain('For a transfer that was never sent to your rail, that was settled before you went live, or that another partner pays out, no reverse is sent and SmartRemit staff arrange the return with you.');
-    // Final check R3 (F9-D1): SmartRemit records no Stripe-dashboard refund, so only a transfer with an open
-    // refund request is held; any other unpaid-out transfer can still be paid out.
-    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. SmartRemit does not record that refund: a transfer with an open refund request stays paid and is not paid out, but any other transfer that has not been paid out yet can still be paid out, so ask SmartRemit staff before you refund it.');
+    // Final check R3 (F9-D1) and R4 (R3-D1): SmartRemit records no Stripe-dashboard refund. The page says
+    // only what SmartRemit controls: with an open refund request it sends no NEW instruction, but an
+    // instruction a rail already holds, and any other transfer not yet paid out, can still be paid out.
+    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. SmartRemit does not record that refund. While a transfer has an open refund request, SmartRemit sends no new payout instruction for it, but an instruction already sent to a rail can still be paid out, and any other transfer that has not been paid out yet can still be paid out. Ask SmartRemit staff before you refund a transfer that has not been delivered.');
     expect(refunds).not.toContain('The transfer then stays paid and held in SmartRemit');
+    expect(refunds).not.toContain('stays paid and is not paid out');
     expect(FUNDING).not.toContain('is refunded through Stripe');
   });
 

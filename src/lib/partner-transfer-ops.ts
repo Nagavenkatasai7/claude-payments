@@ -116,8 +116,9 @@ export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus'
  *  - sandbox: a test transfer moved no money.
  * The core's money rules are mirrored here so the page hides the button too.
  * Fix pack 5 T15 (P15, M3): `collectedOnRealMoney` (the caller computes
- * `!t.fundingRef && await collectedOnRealMoneyView(db, t)`: not routed, and the settle went to
- * the rail after go-live, review round 1 RC2 and RF1) lets a
+ * `!t.fundingRef && await collectedOnRealMoneyView(db, t)`: not routed, and either the settle went
+ * to the rail after go-live (review round 1 RC2 and RF1) or the row was held before its first
+ * instruction and is not demo era (final check F8, X1: heldBeforeFirstSettle)) lets a
  * real-money partner-collected row with no fundingRef through, as the core does.
  */
 export function issueRefundEligibility(
