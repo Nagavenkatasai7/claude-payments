@@ -28,6 +28,14 @@
 // no </sdnList> end, an entry without a uid or a primary name, zero entries or
 // no Publish_Date fails the WHOLE parse, so a different structure never loads
 // a partial list (the last good version stays active, runListLoad alerts).
+// Fix pack 5 L1-LF2 (parseStrict in ofac-sdn-loader.ts) adds: any <sdnEntry>
+// opening or end tag outside a plain <sdnEntry>…</sdnEntry> block (no end
+// tag, an attribute, a namespace prefix) -> 'unrecognised entry element'; a
+// malformed element the parser reads (uid, firstName, lastName, sdnType,
+// category, program, aka, akaList, programList) -> 'entry <n> has a
+// malformed <X> element'; a repeated uid -> 'entry <n> repeats an id'.
+// Entities are decoded in one pass, before the trim. Empty and self-closing
+// optional elements stay accepted.
 //
 // Not opened from the build machine (the OFAC host answers 403 through its
 // proxy): the XSD file (XML.xsd) and the live CONSOLIDATED.XML.

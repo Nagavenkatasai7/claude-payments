@@ -45,7 +45,16 @@
 // unrecognised shape, an entry without a reference number or a name, or zero
 // entries fails the WHOLE parse with 'UN SC: ...' (positions only, never a
 // name), so a changed structure never loads a partial list (runListLoad keeps
-// the last good version and alerts).
+// the last good version and alerts). Fix pack 5 L1-LF2 adds: an entry block
+// holding another entry opening of either kind, or an entry end tag of
+// another shape ('unrecognised entry element'); a malformed element the
+// parser reads (no end tag, an attribute or namespace prefix, a tag inside a
+// text element, an alias opened again before its end tag, a name part given
+// twice: 'entry <n> has a malformed <X> element'); a repeated
+// REFERENCE_NUMBER ('entry <n> repeats an id'). Empty and self-closing
+// optional elements (<ALIAS_NAME/>, <THIRD_NAME></THIRD_NAME>) are accepted.
+// Entities are decoded in ONE pass and BEFORE the trim (decodeEntitiesOnce /
+// strictTag in ofac-sdn-loader.ts), so a name of only '&#32;' is empty.
 //
 // Owner step: the first live load on a preview deployment, with a count check
 // against the UN page, comes before SANCTIONS_LIST=lists is ever set (the
@@ -56,7 +65,7 @@
 // the cron (only with SANCTIONS_LOADER_ENABLED and SANCTIONS_LIST=lists).
 
 import type { SanctionsList, SanctionsListEntry } from './list-source';
-import { hashEntries } from './ofac-sdn-loader';
+import { entryElementsMatch, hashEntries, malformedElement, strictTag as tag } from './ofac-sdn-loader';
 
 export const UN_SC_XML_URL = 'https://scsanctions.un.org/resources/xml/en/consolidated.xml';
 const USER_AGENT = 'SmartRemit-sanctions-loader/1.0 (+https://smartremit.ai)';
@@ -73,22 +82,20 @@ export const UN_SC_MAX_BYTES = 20 * 1024 * 1024;
 /** A hung download must not eat the cron's 300 s budget. */
 export const UN_SC_FETCH_TIMEOUT_MS = 60_000;
 
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(parseInt(d, 10)))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
-}
-
-/** The text of the first <name>…</name> (a self-closing <name/> is absent). */
-function tag(block: string, name: string): string | undefined {
-  const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(block);
-  return m ? decodeEntities(m[1].trim()) : undefined;
-}
+const ENTRY_KINDS = ['INDIVIDUAL', 'ENTITY'] as const;
+/** The text elements the parser reads (L1-LF2, LB2). */
+const UN_LEAVES = [
+  'REFERENCE_NUMBER',
+  'FIRST_NAME',
+  'SECOND_NAME',
+  'THIRD_NAME',
+  'FOURTH_NAME',
+  'UN_LIST_TYPE',
+  'ALIAS_NAME',
+  'QUALITY',
+] as const;
+/** Read once from the entry's own fields: a second one would be dropped. */
+const UN_OWN_ONCE = ['REFERENCE_NUMBER', 'FIRST_NAME', 'SECOND_NAME', 'THIRD_NAME', 'FOURTH_NAME', 'UN_LIST_TYPE'] as const;
 
 /** A name part or alias that carries a name: not empty, not the XSD default "na". */
 function present(v: string | undefined): v is string {
@@ -123,17 +130,26 @@ function parseUnchecked(xml: string): SanctionsList {
   if (!day) throw new Error(`${ERR} unrecognised dateGenerated`);
 
   const entries: SanctionsListEntry[] = [];
+  const ids = new Set<string>();
   let position = 0;
   for (const kind of ['INDIVIDUAL', 'ENTITY'] as const) {
-    const blocks = [...xml.matchAll(new RegExp(`<${kind}>([\\s\\S]*?)</${kind}>`, 'g'))];
-    // Every <INDIVIDUAL…>/<ENTITY…> opening must be a plain one we read: an
-    // attribute or a self-closing form is a structure we do not know.
-    const opened = xml.match(new RegExp(`<${kind}[\\s>/]`, 'g'))?.length ?? 0;
-    if (opened !== blocks.length) throw new Error(`${ERR} unrecognised entry element (${kind.toLowerCase()})`);
-    for (const m of blocks) {
+    const blocks = [...xml.matchAll(new RegExp(`<${kind}>([\\s\\S]*?)</${kind}>`, 'g'))].map((m) => m[1]);
+    // Every <INDIVIDUAL…>/<ENTITY…> opening and end tag must belong to a plain
+    // block we read (an attribute, a namespace prefix, a self-closing form or
+    // a spaced end tag is a structure we do not know), and no block may hold
+    // another entry opening of either kind (L1-LF2, LB1).
+    if (!entryElementsMatch(xml, kind, blocks, ENTRY_KINDS)) {
+      throw new Error(`${ERR} unrecognised entry element (${kind.toLowerCase()})`);
+    }
+    for (const block of blocks) {
       position += 1;
-      const block = m[1];
+      // L1-LF2 (LB2): a malformed element we read fails the parse (position only).
+      const malformed = (name: string | null) => {
+        if (name !== null) throw new Error(`${ERR} entry ${position} has a malformed <${name}> element`);
+      };
+      malformed(malformedElement(block, UN_LEAVES, [`${kind}_ALIAS`]));
       const own = ownFields(block);
+      malformed(malformedElement(own, UN_LEAVES, [], UN_OWN_ONCE));
       const ref = tag(own, 'REFERENCE_NUMBER');
       if (!ref) throw new Error(`${ERR} entry ${position} has no reference number`);
       const parts =
@@ -141,9 +157,14 @@ function parseUnchecked(xml: string): SanctionsList {
           ? ['FIRST_NAME', 'SECOND_NAME', 'THIRD_NAME', 'FOURTH_NAME'].map((n) => tag(own, n)).filter(present)
           : [tag(own, 'FIRST_NAME')].filter(present);
       if (parts.length === 0) throw new Error(`${ERR} entry ${position} has no name`);
+      // L1-LF2 (LB3): storeList keeps the first of two equal ids and drops the
+      // second entry's names, so a repeated reference number fails the parse.
+      if (ids.has(ref)) throw new Error(`${ERR} entry ${position} repeats an id`);
+      ids.add(ref);
       const strong: string[] = [];
       const weak: string[] = [];
       for (const a of block.matchAll(new RegExp(`<${kind}_ALIAS>([\\s\\S]*?)</${kind}_ALIAS>`, 'g'))) {
+        malformed(malformedElement(a[1], UN_LEAVES, [], ['ALIAS_NAME', 'QUALITY']));
         const name = tag(a[1], 'ALIAS_NAME');
         if (!present(name)) continue;
         // Low quality: "probably insufficient alone" (UN page) -> review only.

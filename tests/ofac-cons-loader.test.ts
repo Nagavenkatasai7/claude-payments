@@ -89,6 +89,128 @@ describe('parseOfacConsolidatedXml (fixture: 4 invented consolidated entries)', 
       }
     });
 
+    // L1-LF2 (LB1, LE1): an entry element of any other shape fails the WHOLE parse.
+    it('an <sdnEntry> with no end tag (it would merge with the next) -> unrecognised entry element', () => {
+      const first = FIXTURE.indexOf('</sdnEntry>');
+      const merged = FIXTURE.slice(0, first) + FIXTURE.slice(first + '</sdnEntry>'.length);
+      expect(() => parseOfacConsolidatedXml(merged)).toThrow(/^OFAC CONS: unrecognised entry element$/);
+      // The last entry with no end tag is not a block at all.
+      const last = FIXTURE.lastIndexOf('</sdnEntry>');
+      const lastOpen = FIXTURE.slice(0, last) + FIXTURE.slice(last + '</sdnEntry>'.length);
+      expect(() => parseOfacConsolidatedXml(lastOpen)).toThrow(/^OFAC CONS: unrecognised entry element$/);
+    });
+
+    it('an <sdnEntry> with an attribute, a namespace prefix or a spaced end tag -> unrecognised entry element', () => {
+      const nth = (xml: string, n: number, from: string, to: string) => {
+        let at = -1;
+        for (let i = 0; i <= n; i++) at = xml.indexOf(from, at + 1);
+        return xml.slice(0, at) + to + xml.slice(at + from.length);
+      };
+      expect(() => parseOfacConsolidatedXml(nth(FIXTURE, 1, '<sdnEntry>', '<sdnEntry foo="x">'))).toThrow(/^OFAC CONS: unrecognised entry element$/);
+      expect(() => parseOfacConsolidatedXml(nth(FIXTURE, 1, '<sdnEntry>', '<sdnEntry xmlns="urn:x">'))).toThrow(/^OFAC CONS: unrecognised entry element$/);
+      const prefixed = nth(nth(FIXTURE, 2, '<sdnEntry>', '<o:sdnEntry>'), 2, '</sdnEntry>', '</o:sdnEntry>');
+      expect(() => parseOfacConsolidatedXml(prefixed)).toThrow(/^OFAC CONS: unrecognised entry element$/);
+      expect(() => parseOfacConsolidatedXml(nth(FIXTURE, 0, '</sdnEntry>', '</sdnEntry >'))).toThrow(/^OFAC CONS: unrecognised entry element$/);
+      expect(() => parseOfacConsolidatedXml(nth(FIXTURE, 3, '<sdnEntry>', '<sdnEntry/><sdnEntry>'))).toThrow(/^OFAC CONS: unrecognised entry element$/);
+    });
+
+    // L1-LF2 (LB2): a malformed element the parser reads fails the WHOLE parse.
+    it('a malformed read element inside an entry (no end tag, attribute, nested) -> the WHOLE parse throws', () => {
+      const cases: Array<[string, string, number]> = [
+        // An aka with no end tag before the next aka (the second alias would be lost).
+        ['<lastName>EXAMPLE PETRO</lastName>\n      </aka>', '<lastName>EXAMPLE PETRO</lastName>\n', 1],
+        ['<aka>\n        <uid>8104</uid>', '<aka q="1">\n        <uid>8104</uid>', 3],
+        ['<firstName>Placido</firstName>', '<firstName>Placido', 3],
+        ['<firstName>Placido</firstName>', '<firstName x="1">Placido</firstName>', 3],
+        ['<lastName>INVENTATI</lastName>', '<lastName>INVENTATI', 3],
+        ['<lastName>MOCK &amp; DUMMY CAPITAL BANK</lastName>', '<o:lastName>MOCK &amp; DUMMY CAPITAL BANK</o:lastName>', 4],
+        ['<uid>7102</uid>', '<uid id="1">7102</uid>', 2],
+        ['<sdnType>Entity</sdnType>\n    <programList>\n      <program>SAMPLE-CMIC</program>', '<sdnType>Entity\n    <programList>\n      <program>SAMPLE-CMIC</program>', 2],
+        ['<program>SAMPLE-MBS</program>', '<program>SAMPLE-MBS', 4],
+        ['<category>weak</category>', '<category kind="x">weak</category>', 1],
+        ['<programList>\n      <program>SAMPLE-PLC</program>', '<programList a="1">\n      <program>SAMPLE-PLC</program>', 3],
+        ['<akaList>\n      <aka>\n        <uid>8104</uid>', '<akaList x="1">\n      <aka>\n        <uid>8104</uid>', 3],
+        // A second akaList (its aliases would be lost) and a name read twice.
+        ['</akaList>\n    <dateOfBirthList>', '</akaList>\n    <akaList><aka><lastName>X</lastName></aka></akaList>\n    <dateOfBirthList>', 3],
+        ['<lastName>FICTIONAL MILITARY INDUSTRIES GROUP</lastName>', '<lastName>FICTIONAL MILITARY INDUSTRIES GROUP</lastName><lastName>X</lastName>', 2],
+        ['<lastName>INVENTATI</lastName>', '<lastName>INVENTATI<b>X</b></lastName>', 3],
+      ];
+      for (const [from, to, entry] of cases) {
+        expect(FIXTURE.includes(from)).toBe(true);
+        expect(() => parseOfacConsolidatedXml(FIXTURE.replace(from, to)), to).toThrow(new RegExp(`^OFAC CONS: entry ${entry} has a malformed <`));
+      }
+    });
+
+    it('a primary name that is only an encoded space is decoded BEFORE the trim -> no primary name', () => {
+      expect(() => parseOfacConsolidatedXml(FIXTURE.replace('FICTIONAL MILITARY INDUSTRIES GROUP', '&#32;'))).toThrow(/^OFAC CONS: entry 2 has no primary name$/);
+      expect(() => parseOfacConsolidatedXml(FIXTURE.replace('FICTIONAL MILITARY INDUSTRIES GROUP', ' &#x20;&#9; '))).toThrow(/^OFAC CONS: entry 2 has no primary name$/);
+      // An alias that is only an encoded space is dropped like an empty one.
+      const e = parseOfacConsolidatedXml(FIXTURE.replace('<lastName>EXAMPLE PETRO</lastName>', '<lastName>&#32;</lastName>')).entries[0];
+      expect(e.names).toEqual(['EXAMPLE PETRO TRADING COMPANY']);
+    });
+
+    it('EMPTY and SELF-CLOSING optional elements stay accepted exactly as before (fixture entry 2)', () => {
+      const e = parseOfacConsolidatedXml(FIXTURE).entries.find((x) => x.id === 'cons:7102')!;
+      // The fixture gives entry 7102 a self-closing <firstName/>, and an aka with
+      // a self-closing <lastName/> and an empty <firstName></firstName>.
+      expect(FIXTURE).toMatch(/<uid>7102<\/uid>\s*<firstName\/>/);
+      expect(FIXTURE).toMatch(/<lastName\/>\s*<firstName><\/firstName>/);
+      expect(e.names).toEqual(['FICTIONAL MILITARY INDUSTRIES GROUP']);
+      expect(e.weakNames).toBeUndefined();
+      // Self-closing lists are accepted too.
+      const selfClosing = FIXTURE.replace(/<programList>\s*<program>SAMPLE-CMIC<\/program>\s*<\/programList>/, '<programList/>');
+      expect(parseOfacConsolidatedXml(selfClosing).entries[1].programs).toEqual([]);
+    });
+
+    // L1-LF2 (LB3): a repeated uid would drop the second entry in storeList.
+    it('a repeated entry uid -> the WHOLE parse throws (position only)', () => {
+      expect(() => parseOfacConsolidatedXml(FIXTURE.replace('<uid>7103</uid>', '<uid>7101</uid>'))).toThrow(/^OFAC CONS: entry 3 repeats an id$/);
+    });
+
+    // L1-LF2 (LB5): one decoding pass, so an encoded '&' followed by 'lt;' stays '&lt;'.
+    it("decodes entities in ONE pass: '&#38;lt;' reads '&lt;', never '<'", () => {
+      const e = parseOfacConsolidatedXml(FIXTURE.replace('MOCK &amp; DUMMY', 'MOCK &#38;lt; &#x26;amp; &amp;gt; DUMMY')).entries[3];
+      expect(e.names).toEqual(['MOCK &lt; &amp; &gt; DUMMY CAPITAL BANK']);
+      expect(parseOfacConsolidatedXml(FIXTURE.replace('MOCK &amp; DUMMY', 'MOCK &quot;&apos;&lt;&gt;&#65;&#x42; DUMMY')).entries[3].names).toEqual([
+        'MOCK "\'<>AB DUMMY CAPITAL BANK',
+      ]);
+    });
+
+    it('a malformed or repeated-id fault never puts a list name in the message', () => {
+      for (const v of [
+        FIXTURE.replace('<firstName>Placido</firstName>', '<firstName>Placido'),
+        FIXTURE.replace('<uid>7103</uid>', '<uid>7101</uid>'),
+        FIXTURE.replace('<sdnEntry>', '<sdnEntry foo="x">'),
+      ]) {
+        try {
+          parseOfacConsolidatedXml(v);
+          expect.unreachable();
+        } catch (err) {
+          expect((err as Error).message).toMatch(/^OFAC CONS: /);
+          expect((err as Error).message).not.toMatch(/INVENTAT|Placid|EXAMPLE|FICTIONAL|MOCK/);
+        }
+      }
+    });
+
+    it('linear: a ~5 MB strict document parses well inside a generous bound', () => {
+      const one = FIXTURE.slice(FIXTURE.indexOf('<sdnEntry>'), FIXTURE.lastIndexOf('</sdnEntry>') + '</sdnEntry>'.length);
+      const parts: string[] = [];
+      let uid = 100000;
+      let size = 0;
+      while (size < 5 * 1024 * 1024) {
+        const chunk = one.replace(/<uid>710(\d)<\/uid>/g, () => `<uid>${uid++}</uid>`);
+        parts.push(chunk);
+        size += chunk.length;
+      }
+      const head = FIXTURE.slice(0, FIXTURE.indexOf('<sdnEntry>'));
+      const big = `${head}${parts.join('\n')}\n</sdnList>\n`;
+      const t0 = performance.now();
+      const list = parseOfacConsolidatedXml(big);
+      const ms = performance.now() - t0;
+      expect(list.entries.length).toBe(parts.length * 4);
+      expect(ms).toBeLessThan(15_000);
+    });
+
     it('the SDN parse is NOT strict: the same faults stay a silent skip there (behaviour unchanged)', () => {
       const noUid = parseOfacSdnXml(SDN_FIXTURE.replace('<uid>1004</uid>', ''));
       expect(noUid.entries.map((e) => e.id)).toEqual(['sdn:1001', 'sdn:1002', 'sdn:1003', 'sdn:1005']);

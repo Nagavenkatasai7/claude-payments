@@ -138,6 +138,96 @@ describe('parseUnScXml (fixture: 2 invented individuals + 2 invented entities)',
       expect(thrown(() => parseUnScXml(FIXTURE.replace('<ENTITY>', '<ENTITY id="1">')))).toMatch(/^UN SC: unrecognised entry element/);
     });
 
+    // L1-LF2 (LB1): an entry block may not hold another entry opening of either kind.
+    it('an ENTITY nested inside an INDIVIDUAL, a prefixed or a spaced-end entry -> unrecognised entry element', () => {
+      const ents = /<ENTITY>[\s\S]*?<\/ENTITY>/.exec(FIXTURE)![0];
+      const nested = FIXTURE.replace(ents, '').replace('<SORT_KEY_LAST_MOD/>\n    </INDIVIDUAL>\n  </INDIVIDUALS>', `<SORT_KEY_LAST_MOD/>\n${ents}\n    </INDIVIDUAL>\n  </INDIVIDUALS>`);
+      expect(nested).not.toBe(FIXTURE);
+      expect(thrown(() => parseUnScXml(nested))).toMatch(/^UN SC: unrecognised entry element/);
+      const prefixed = FIXTURE.replace(ents, ents.replace('<ENTITY>', '<u:ENTITY>').replace('</ENTITY>', '</u:ENTITY>'));
+      expect(thrown(() => parseUnScXml(prefixed))).toMatch(/^UN SC: unrecognised entry element \(entity\)$/);
+      expect(thrown(() => parseUnScXml(FIXTURE.replace('</INDIVIDUAL>', '</INDIVIDUAL >')))).toMatch(/^UN SC: unrecognised entry element \(individual\)$/);
+    });
+
+    // L1-LF2 (LB2): a malformed element the parser reads fails the WHOLE parse.
+    it('a malformed read element inside an entry (no end tag, attribute, prefix, nested) -> the WHOLE parse throws', () => {
+      const cases: Array<[string, string, number]> = [
+        // An alias with no end tag before the next alias (the second name would be lost).
+        ['<ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>\n      </INDIVIDUAL_ALIAS>', '<ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>\n', 1],
+        ['<INDIVIDUAL_ALIAS>\n        <QUALITY>Low</QUALITY>\n        <ALIAS_NAME>Odo', '<INDIVIDUAL_ALIAS q="1">\n        <QUALITY>Low</QUALITY>\n        <ALIAS_NAME>Odo', 2],
+        ['<ENTITY_ALIAS>\n        <QUALITY>f.k.a.</QUALITY>', '<ENTITY_ALIAS q="1">\n        <QUALITY>f.k.a.</QUALITY>', 3],
+        ['<FIRST_NAME>ZEPHYRIN</FIRST_NAME>', '<FIRST_NAME>ZEPHYRIN', 1],
+        ['<FIRST_NAME>ZEPHYRIN</FIRST_NAME>', '<FIRST_NAME lang="x">ZEPHYRIN</FIRST_NAME>', 1],
+        ['<SECOND_NAME>PLACEHOLD</SECOND_NAME>', '<SECOND_NAME>PLACEHOLD', 2],
+        ['<THIRD_NAME>FICTAVIO</THIRD_NAME>', '<u:THIRD_NAME>FICTAVIO</u:THIRD_NAME>', 2],
+        ['<FOURTH_NAME>TESTARIS</FOURTH_NAME>', '<FOURTH_NAME>TESTARIS<x/></FOURTH_NAME>', 2],
+        ['<REFERENCE_NUMBER>XXe.001</REFERENCE_NUMBER>', '<REFERENCE_NUMBER id="1">XXe.001</REFERENCE_NUMBER>', 3],
+        ['<ALIAS_NAME>FHS GROUP</ALIAS_NAME>', '<ALIAS_NAME>FHS GROUP', 3],
+        ['<ALIAS_NAME>Zephy</ALIAS_NAME>', '<ALIAS_NAME x="1">Zephy</ALIAS_NAME>', 1],
+        ['<QUALITY>Good</QUALITY>\n        <ALIAS_NAME>Zeph', '<QUALITY>Good\n        <ALIAS_NAME>Zeph', 1],
+        ['<UN_LIST_TYPE>Exemplaria</UN_LIST_TYPE>\n      <REFERENCE_NUMBER>YYe.002', '<UN_LIST_TYPE a="b">Exemplaria</UN_LIST_TYPE>\n      <REFERENCE_NUMBER>YYe.002', 4],
+        // A name part read twice, or two names in one alias.
+        ['<FIRST_NAME>ODALRIC</FIRST_NAME>', '<FIRST_NAME>ODALRIC</FIRST_NAME><FIRST_NAME>X</FIRST_NAME>', 2],
+        ['<ALIAS_NAME>OLD FICTIVE DOCKS</ALIAS_NAME>', '<ALIAS_NAME>OLD FICTIVE DOCKS</ALIAS_NAME><ALIAS_NAME>X</ALIAS_NAME>', 3],
+      ];
+      for (const [from, to, entry] of cases) {
+        expect(FIXTURE.includes(from), from).toBe(true);
+        const msg = thrown(() => parseUnScXml(FIXTURE.replace(from, to)));
+        expect(msg, to).toMatch(new RegExp(`^UN SC: entry ${entry} has a malformed <`));
+        expect(msg).not.toMatch(FIXTURE_NAMES);
+      }
+    });
+
+    it('a name that is only an encoded space is decoded BEFORE the trim -> no name', () => {
+      expect(thrown(() => parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE TRADING', '&#32;')))).toBe('UN SC: entry 4 has no name');
+      expect(thrown(() => parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE TRADING', ' &#x20;&#9; ')))).toBe('UN SC: entry 4 has no name');
+      // An alias that is only an encoded space is dropped like an empty one.
+      const e = parseUnScXml(FIXTURE.replace('<ALIAS_NAME>FHS GROUP</ALIAS_NAME>', '<ALIAS_NAME>&#32;</ALIAS_NAME>')).entries[2];
+      expect(e.names).toEqual(['FICTIVE HARBOUR SYNDICATE', 'OLD FICTIVE DOCKS']);
+    });
+
+    it('EMPTY and SELF-CLOSING optional elements stay accepted exactly as before', () => {
+      // The fixture holds a self-closing alias (<QUALITY/>, <ALIAS_NAME/>), a
+      // self-closing <THIRD_NAME/>, and an empty alias and name part in entry 2.
+      expect(FIXTURE).toMatch(/<QUALITY\/>\s*<ALIAS_NAME\/>/);
+      expect(FIXTURE).toMatch(/<QUALITY><\/QUALITY>\s*<ALIAS_NAME><\/ALIAS_NAME>/);
+      expect(FIXTURE).toMatch(/<INDIVIDUAL_ALIAS\/>/);
+      expect(parseUnScXml(FIXTURE).entries.find((e) => e.id === 'unsc:YYi.002')!.names).toEqual(['ODALRIC PLACEHOLD FICTAVIO TESTARIS']);
+      const emptyPart = FIXTURE.replace('<THIRD_NAME/>', '<THIRD_NAME></THIRD_NAME>');
+      expect(parseUnScXml(emptyPart).entries[0].names[0]).toBe('ZEPHYRIN MOCKOVANI');
+    });
+
+    // L1-LF2 (LB3): a repeated reference number would drop the second entry in storeList.
+    it('a repeated REFERENCE_NUMBER -> the WHOLE parse throws (position only)', () => {
+      expect(thrown(() => parseUnScXml(FIXTURE.replace('<REFERENCE_NUMBER>YYe.002<', '<REFERENCE_NUMBER>XXi.001<')))).toBe('UN SC: entry 4 repeats an id');
+    });
+
+    // L1-LF2 (LB5): one decoding pass, so an encoded '&' followed by 'lt;' stays '&lt;'.
+    it("decodes entities in ONE pass: '&#38;lt;' reads '&lt;', never '<'", () => {
+      const e = parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE', 'MOCK &#38;lt; &#x26;amp; &amp;gt; SAMPLE')).entries[3];
+      expect(e.names).toEqual(['MOCK &lt; &amp; &gt; SAMPLE TRADING']);
+      const all = parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE', 'MOCK &quot;&apos;&lt;&gt;&#65;&#x42; SAMPLE')).entries[3];
+      expect(all.names).toEqual(['MOCK "\'<>AB SAMPLE TRADING']);
+    });
+
+    it('linear: a ~5 MB document parses well inside a generous bound', () => {
+      const inds = /<INDIVIDUALS>([\s\S]*)<\/INDIVIDUALS>/.exec(FIXTURE)![1];
+      const parts: string[] = [];
+      let ref = 0;
+      let size = 0;
+      while (size < 5 * 1024 * 1024) {
+        const chunk = inds.replace(/<REFERENCE_NUMBER>[^<]*<\/REFERENCE_NUMBER>/g, () => `<REFERENCE_NUMBER>ZZi.${ref++}</REFERENCE_NUMBER>`);
+        parts.push(chunk);
+        size += chunk.length;
+      }
+      const big = FIXTURE.replace(inds, parts.join(''));
+      const t0 = performance.now();
+      const list = parseUnScXml(big);
+      const ms = performance.now() - t0;
+      expect(list.entries.length).toBe(parts.length * 2 + 2);
+      expect(ms).toBeLessThan(15_000);
+    });
+
     it('a malformed character reference -> unparseable document (<ErrorName>)', () => {
       expect(thrown(() => parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE', 'MOCK &#x110000; SAMPLE')))).toBe('UN SC: unparseable document (RangeError)');
     });

@@ -110,10 +110,140 @@ export interface SdnXmlParseOptions {
 
 const SDN_PARSE: SdnXmlParseOptions = { source: 'ofac-sdn', idPrefix: 'sdn', errorPrefix: 'OFAC SDN:' };
 
+// ---------------------------------------------------------------------------
+// Fix pack 5 L1-LF2 (LB1, LB2, LB3, LB5): helpers for the STRICT parses only
+// (OFAC consolidated through parseOfacSdnXml with strict: true, and the UN SC
+// parser). The SDN (non-strict) path never calls them: its decodeEntities,
+// tag(), output and golden hash stay exactly as they were.
+// ---------------------------------------------------------------------------
+
+/**
+ * Single-pass XML entity decoder (strict parses): each reference is decoded
+ * once, so an encoded '&' followed by 'lt;' ('&#38;lt;') reads '&lt;', never
+ * '<'. A code point out of range throws a RangeError (reported by the
+ * caller as 'unparseable document (RangeError)').
+ */
+export function decodeEntitiesOnce(s: string): string {
+  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|quot|apos|lt|gt|amp);/g, (_, ref: string) => {
+    switch (ref) {
+      case 'quot':
+        return '"';
+      case 'apos':
+        return "'";
+      case 'lt':
+        return '<';
+      case 'gt':
+        return '>';
+      case 'amp':
+        return '&';
+      default:
+        return ref[1] === 'x'
+          ? String.fromCodePoint(parseInt(ref.slice(2), 16))
+          : String.fromCodePoint(parseInt(ref.slice(1), 10));
+    }
+  });
+}
+
+/**
+ * Strict tag(): the text of the first plain <name>…</name>, DECODED BEFORE
+ * the trim (so a part that is only '&#32;' reads ''). A self-closing <name/>
+ * is absent, as in tag().
+ */
+export function strictTag(block: string, name: string): string | undefined {
+  const m = new RegExp(`<${name}>([^<]*)</${name}>`).exec(block);
+  return m ? decodeEntitiesOnce(m[1]).trim() : undefined;
+}
+
+/**
+ * One linear pass over the tags of `block` (strict parses only). For every
+ * name in `leaves` (text elements the parser reads) and `containers`
+ * (elements whose children it reads), each occurrence must be exactly <X>,
+ * <X/> (or <X />) or </X>: an attribute, a namespace prefix or a spaced end
+ * tag is refused. Openings and end tags must alternate (no element of a
+ * checked name opened again before its end tag, none left open, no stray end
+ * tag), and a leaf may hold text only (no other tag before its end tag).
+ * `atMostOnce` names may occur at most once in `block` (a second one would
+ * be dropped by the reader). Returns the first offending name, or null.
+ * Linear: one /g regex over the block whose only quantifiers are single
+ * negated character classes ([^>]*, [^\s/>]*), no nesting.
+ */
+export function malformedElement(
+  block: string,
+  leaves: readonly string[],
+  containers: readonly string[] = [],
+  atMostOnce: readonly string[] = [],
+): string | null {
+  const leafSet = new Set(leaves);
+  const checked = new Set([...leaves, ...containers]);
+  const open = new Map<string, boolean>();
+  const seen = new Map<string, number>();
+  const once = new Set(atMostOnce);
+  let leafOpen: string | null = null;
+  for (const m of block.matchAll(/<(\/?)([A-Za-z_][^\s/>]*)([^>]*)>/g)) {
+    const [, slash, qname, rest] = m;
+    const colon = qname.lastIndexOf(':');
+    const local = colon >= 0 ? qname.slice(colon + 1) : qname;
+    if (leafOpen !== null) {
+      // Inside a leaf only its own plain end tag may follow.
+      if (!(slash === '/' && qname === leafOpen && rest === '')) return leafOpen;
+      leafOpen = null;
+      open.set(local, false);
+      continue;
+    }
+    if (!checked.has(local)) continue;
+    if (colon >= 0) return local;
+    if (slash === '/') {
+      if (rest !== '' || !open.get(local)) return local;
+      open.set(local, false);
+      continue;
+    }
+    const selfClosing = /^\s*\/$/.test(rest);
+    if (rest !== '' && !selfClosing) return local;
+    if (open.get(local)) return local;
+    if (once.has(local)) {
+      const n = (seen.get(local) ?? 0) + 1;
+      if (n > 1) return local;
+      seen.set(local, n);
+    }
+    if (selfClosing) continue;
+    open.set(local, true);
+    if (leafSet.has(local)) leafOpen = local;
+  }
+  if (leafOpen !== null) return leafOpen;
+  for (const [name, isOpen] of open) if (isOpen) return name;
+  return null;
+}
+
+/**
+ * Strict entry-element check over the WHOLE document: every opening of
+ * `name` (any shape: plain, attribute, namespace prefix, self-closing) and
+ * every end tag (any shape) must belong to one of the plain blocks matched,
+ * and no matched block may hold another entry opening of any of `entryNames`.
+ * Linear: two /g regexes over the document plus one per block.
+ */
+export function entryElementsMatch(
+  xml: string,
+  name: string,
+  blocks: readonly string[],
+  entryNames: readonly string[],
+): boolean {
+  const opened = xml.match(new RegExp(`<(?:[A-Za-z_][^\\s/>:]*:)?${name}[\\s>/]`, 'g'))?.length ?? 0;
+  const ended = xml.match(new RegExp(`</(?:[A-Za-z_][^\\s/>:]*:)?${name}[\\s>]`, 'g'))?.length ?? 0;
+  if (opened !== blocks.length || ended !== blocks.length) return false;
+  const inner = new RegExp(`<(?:[A-Za-z_][^\\s/>:]*:)?(?:${entryNames.join('|')})[\\s>/]`);
+  return !blocks.some((b) => inner.test(b));
+}
+
+/** The text elements and containers the OFAC strict parse reads. */
+const OFAC_LEAVES = ['uid', 'firstName', 'lastName', 'sdnType', 'category', 'program'] as const;
+const OFAC_CONTAINERS = ['aka', 'akaList', 'programList'] as const;
+
 /** Pure parser. Throws ('OFAC SDN: …') on a truncated document, or one without a publish date or entries. */
 export function parseOfacSdnXml(xml: string, opts: SdnXmlParseOptions = SDN_PARSE): SanctionsList {
   try {
-    return parseUnchecked(xml, opts);
+    // L1-LF2: the strict parse (ofac-cons) has its own function; the SDN
+    // (non-strict) parse below is unchanged.
+    return opts.strict ? parseStrict(xml, opts) : parseUnchecked(xml, opts);
   } catch (err) {
     // Every parse failure (incl. a RangeError from a malformed entity) is
     // reported as a parse error, prefixed 'OFAC SDN:' (or opts.errorPrefix).
@@ -124,8 +254,6 @@ export function parseOfacSdnXml(xml: string, opts: SdnXmlParseOptions = SDN_PARS
 
 function parseUnchecked(xml: string, opts: SdnXmlParseOptions): SanctionsList {
   const p = opts.errorPrefix;
-  // Strict: the root element OFAC published for both files is <sdnList ...>.
-  if (opts.strict && !/<sdnList[\s>]/.test(xml)) throw new Error(`${p} unexpected document (no <sdnList> root element)`);
   // A body cut off after N whole entries would otherwise parse cleanly.
   if (!/<\/sdnList>\s*$/.test(xml)) throw new Error(`${p} truncated document (no closing </sdnList>)`);
   const publishDate = tag(xml, 'Publish_Date');
@@ -140,11 +268,6 @@ function parseUnchecked(xml: string, opts: SdnXmlParseOptions): SanctionsList {
     const own = stripNestedLists(block);
     const uid = tag(own, 'uid');
     const primary = personName(own);
-    if (opts.strict) {
-      // The position only: never a name from the list in an error text.
-      if (!uid) throw new Error(`${p} entry ${position} has no uid`);
-      if (!primary) throw new Error(`${p} entry ${position} has no primary name`);
-    }
     if (!uid || !primary) continue;
     const akas: string[] = [];
     const weak: string[] = [];
@@ -162,6 +285,80 @@ function parseUnchecked(xml: string, opts: SdnXmlParseOptions): SanctionsList {
       names: [primary, ...akas],
       type: tag(own, 'sdnType') ?? 'Unknown',
       programs: tags(programList, 'program'),
+    };
+    if (weak.length > 0) entry.weakNames = weak;
+    entries.push(entry);
+  }
+  if (entries.length === 0) throw new Error(`${p} no entries parsed`);
+  return { source: opts.source, version, hash: hashEntries(entries), entries };
+}
+
+/** Strict personName: decoded before the trim; empty parts are absent. */
+function strictPersonName(block: string): string | undefined {
+  const parts = [strictTag(block, 'firstName'), strictTag(block, 'lastName')].filter((v): v is string => !!v);
+  return parts.length > 0 ? parts.join(' ') : undefined;
+}
+
+/**
+ * The STRICT parse (ofac-cons, orchestrator decision D11, L1-LF2). The WHOLE
+ * parse throws (positions only, never a name) on: no <sdnList ...> root or no
+ * </sdnList> end; no or a malformed Publish_Date; any <sdnEntry> opening or
+ * end tag that is not part of a plain <sdnEntry>…</sdnEntry> block, or a
+ * block holding another entry opening ('unrecognised entry element'); a
+ * malformed element the parser reads ('entry <n> has a malformed <X>
+ * element'); an entry with no uid or no primary name; a repeated uid
+ * ('entry <n> repeats an id'); zero entries. Entities are decoded in one pass,
+ * before the trim. Empty and self-closing optional elements are accepted.
+ */
+function parseStrict(xml: string, opts: SdnXmlParseOptions): SanctionsList {
+  const p = opts.errorPrefix;
+  // The root element OFAC published for both files is <sdnList ...>.
+  if (!/<sdnList[\s>]/.test(xml)) throw new Error(`${p} unexpected document (no <sdnList> root element)`);
+  // A body cut off after N whole entries would otherwise parse cleanly.
+  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error(`${p} truncated document (no closing </sdnList>)`);
+  const publishDate = strictTag(xml, 'Publish_Date');
+  if (!publishDate) throw new Error(`${p} missing Publish_Date`);
+  const version = toIsoDate(publishDate, p);
+
+  const blocks = [...xml.matchAll(/<sdnEntry>([\s\S]*?)<\/sdnEntry>/g)].map((m) => m[1]);
+  if (!entryElementsMatch(xml, 'sdnEntry', blocks, ['sdnEntry'])) throw new Error(`${p} unrecognised entry element`);
+
+  const entries: SanctionsListEntry[] = [];
+  const ids = new Set<string>();
+  let position = 0;
+  for (const block of blocks) {
+    position += 1;
+    // The position only: never a name from the list in an error text.
+    const malformed = (name: string | null) => {
+      if (name !== null) throw new Error(`${p} entry ${position} has a malformed <${name}> element`);
+    };
+    malformed(malformedElement(block, OFAC_LEAVES, OFAC_CONTAINERS, ['akaList', 'programList']));
+    const own = stripNestedLists(block);
+    malformed(malformedElement(own, OFAC_LEAVES, [], ['uid', 'firstName', 'lastName', 'sdnType']));
+    const uid = strictTag(own, 'uid');
+    if (!uid) throw new Error(`${p} entry ${position} has no uid`);
+    const primary = strictPersonName(own);
+    if (!primary) throw new Error(`${p} entry ${position} has no primary name`);
+    if (ids.has(uid)) throw new Error(`${p} entry ${position} repeats an id`);
+    ids.add(uid);
+    const akas: string[] = [];
+    const weak: string[] = [];
+    const akaList = /<akaList>([\s\S]*?)<\/akaList>/.exec(block)?.[1] ?? '';
+    for (const a of akaList.matchAll(/<aka>([\s\S]*?)<\/aka>/g)) {
+      malformed(malformedElement(a[1], OFAC_LEAVES, [], ['firstName', 'lastName', 'category']));
+      const n = strictPersonName(a[1]);
+      if (!n) continue;
+      // A weak a.k.a. is kept apart — review, never an automatic block.
+      if ((strictTag(a[1], 'category') ?? '').toLowerCase() === 'weak') weak.push(n);
+      else akas.push(n);
+    }
+    const programList = /<programList>([\s\S]*?)<\/programList>/.exec(block)?.[1] ?? '';
+    const programs = [...programList.matchAll(/<program>([^<]*)<\/program>/g)].map((m) => decodeEntitiesOnce(m[1]).trim());
+    const entry: SanctionsListEntry = {
+      id: `${opts.idPrefix}:${uid}`,
+      names: [primary, ...akas],
+      type: strictTag(own, 'sdnType') ?? 'Unknown',
+      programs,
     };
     if (weak.length > 0) entry.weakNames = weak;
     entries.push(entry);

@@ -42,11 +42,21 @@
   </sdnEntry>
   <sdnEntry>
     <uid>7102</uid>
+    <firstName/>
     <lastName>FICTIONAL MILITARY INDUSTRIES GROUP</lastName>
     <sdnType>Entity</sdnType>
     <programList>
       <program>SAMPLE-CMIC</program>
     </programList>
+    <akaList>
+      <aka>
+        <uid>8106</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName/>
+        <firstName></firstName>
+      </aka>
+    </akaList>
   </sdnEntry>
   <sdnEntry>
     <uid>7103</uid>
