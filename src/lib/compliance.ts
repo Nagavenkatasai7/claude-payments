@@ -16,6 +16,7 @@ import {
 } from './providers/sanctions-provider';
 import { inputHash, type ScreeningEvidence, type ScreeningEvidenceParty, type SanctionsDecision } from './sanctions/evidence';
 import { SanctionsListUnavailableError } from './sanctions/list-screener';
+import { isMultiListScreener } from './sanctions/multi-list-screener';
 import { listFitness, type ListFitness } from './sanctions/list-policy';
 import { normalizeName } from './sanctions/normalize';
 import type { SanctionsListInfo } from './providers/sanctions-provider';
@@ -138,11 +139,36 @@ export async function screenTransfer(input: {
   let senderHit: SanctionsHit;
   const extraHits: SanctionsHit[] = [];
   try {
-    recipientHit = await screener.screen({ name: recipientName, sourceCountry });
-    senderHit = input.senderName
-      ? await screener.screen({ name: senderName, sourceCountry })   // NEW (KYC)
-      : { matched: false };
-    for (const name of extraNames) extraHits.push(await screener.screen({ name, sourceCountry }));
+    if (isMultiListScreener(screener)) {
+      // Fix pack 5 LA1 (SANCTIONS_LIST=lists only): an exact match on any
+      // party blocks, even when another party's screen failed closed on a
+      // partial list set; that party is recorded unscreened (matched false,
+      // score 0). With no exact match anywhere, the hold below runs as before.
+      const settle = async (name: string): Promise<SanctionsHit | null> => {
+        try {
+          return await screener.screen({ name, sourceCountry });
+        } catch (err) {
+          if (err instanceof SanctionsListUnavailableError) return null;
+          throw err;
+        }
+      };
+      const r = await settle(recipientName);
+      const s = input.senderName ? await settle(senderName) : { matched: false };
+      const ex: Array<SanctionsHit | null> = [];
+      for (const name of extraNames) ex.push(await settle(name));
+      const all = [r, s, ...ex];
+      if (all.some((h) => h === null) && !all.some((h) => h?.matched)) throw new SanctionsListUnavailableError();
+      const unscreenedHit: SanctionsHit = { matched: false, matchScore: 0 };
+      recipientHit = r ?? unscreenedHit;
+      senderHit = s ?? unscreenedHit;
+      for (const h of ex) extraHits.push(h ?? unscreenedHit);
+    } else {
+      recipientHit = await screener.screen({ name: recipientName, sourceCountry });
+      senderHit = input.senderName
+        ? await screener.screen({ name: senderName, sourceCountry })   // NEW (KYC)
+        : { matched: false };
+      for (const name of extraNames) extraHits.push(await screener.screen({ name, sourceCountry }));
+    }
   } catch (err) {
     // Program-Fix 14 (B2): a list that cannot load FAILS CLOSED to a human
     // review — never cleared, never the mock, and never a throw that would

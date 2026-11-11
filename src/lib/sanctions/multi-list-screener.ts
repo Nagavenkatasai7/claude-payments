@@ -2,12 +2,19 @@
 // list of a set (the floor for the transfer's destination, list-sets.ts
 // floorLists), used only under the opt-in SANCTIONS_LIST=lists.
 //
-//   • any member's exact match blocks (the first member in order wins);
-//   • else any member's possible match flags for review (the first one);
-//   • ANY member that cannot answer (its load rejects, its list is empty, its
-//     screen throws, or it reports no loaded list) fails the WHOLE screen
-//     closed with SanctionsListUnavailableError: never a partial result, so
-//     screenTransfer holds the row as pack 2 does (LIST_UNAVAILABLE).
+// THE RULE (LA1): an exact match on any member blocks, whatever the other
+// members did; every other outcome on a partial set (a possible match, a
+// clear) fails closed.
+//
+//   • every member is settled; an exact match on any member that answered is
+//     returned (the first one in member order), even when another member's
+//     load rejects, its list is empty, its screen throws, or it reports no
+//     loaded list: a confirmed listed hit is never turned into a hold;
+//   • else, when ANY member cannot answer (as above), the WHOLE screen fails
+//     closed with SanctionsListUnavailableError: never a partial possible match
+//     or clear, so screenTransfer holds the row as pack 2 does
+//     (LIST_UNAVAILABLE);
+//   • else any member's possible match flags for review (the first one).
 //
 // A stale member does not throw: the set fitness (list-policy.ts
 // listSetFitness over memberInfos()) is what holds real money (T29).
@@ -52,20 +59,20 @@ export class MultiListSanctionsScreener implements SanctionsScreener {
   }
 
   async screen(input: { name: string; sourceCountry: CountryCode }): Promise<SanctionsHit> {
-    let hits: SanctionsHit[];
-    try {
-      // Each source caches its list, so screening every member in parallel is cheap.
-      hits = await Promise.all(this.members.map((m) => m.screener.screen(input)));
-    } catch {
-      // A list error or any other member failure: no partial result.
-      throw new SanctionsListUnavailableError();
+    // Each source caches its list, so screening every member in parallel is
+    // cheap. allSettled: a member's failure never drops another member's hit.
+    const settled = await Promise.allSettled(this.members.map((m) => m.screener.screen(input)));
+    const source = this.compositeSource;
+    // An exact match on any member blocks, whatever the other members did.
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value.matched) return { ...r.value, listSource: source };
     }
+    // Anything else on a partial set fails closed: no partial result.
+    if (settled.some((r) => r.status === 'rejected')) throw new SanctionsListUnavailableError();
     if (!this.members.every((m) => loaded(m.screener.listInfo()))) {
       throw new SanctionsListUnavailableError();
     }
-    const source = this.compositeSource;
-    const exact = hits.find((h) => h.matched);
-    if (exact) return { ...exact, listSource: source };
+    const hits = settled.map((r) => (r as PromiseFulfilledResult<SanctionsHit>).value);
     const possible = hits.find((h) => Boolean(h.possibleMatch));
     if (possible) return { ...possible, listSource: source };
     return { matched: false };

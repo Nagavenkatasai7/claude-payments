@@ -82,25 +82,89 @@ describe('MultiListSanctionsScreener (pack 5 T28)', () => {
     expect((await second.screener.screen({ name: 'Partner Extra Villain', sourceCountry: 'US' })).matched).toBe(false);
   });
 
-  it('fail closed: a member whose load rejects, whose list is empty, or whose screen throws -> SanctionsListUnavailableError', async () => {
+  it('fail closed: a clear on a partial set (a member whose load rejects, whose list is empty, or whose screen throws) -> SanctionsListUnavailableError', async () => {
+    // 'Nobody Listed' is on no member: without the failing member there is no answer.
     const rejecting = new MultiListSanctionsScreener([
       member('ofac-sdn', src(SDN)),
       member('ofac-cons', src(async () => { throw new Error('no active ofac-cons list'); })),
     ]);
-    await expect(rejecting.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    await expect(rejecting.screen({ name: 'Nobody Listed', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
     const empty = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN)), member('ofac-cons', src({ ...CONS, entries: [] }))]);
-    await expect(empty.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    await expect(empty.screen({ name: 'Nobody Listed', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
     const throwing = new MultiListSanctionsScreener([
       member('ofac-sdn', src(SDN)),
       { source: 'ofac-cons', screener: { screen: async () => { throw new TypeError('boom'); }, listInfo: () => ({ source: 'ofac-cons', version: 'v', hash: 'h' }) } },
     ]);
-    await expect(throwing.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    await expect(throwing.screen({ name: 'Nobody Listed', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
     // A member that answers but reports no loaded list also fails closed.
     const unloaded = new MultiListSanctionsScreener([
       member('ofac-sdn', src(SDN)),
       { source: 'ofac-cons', screener: { screen: async () => ({ matched: false }), listInfo: () => ({ source: 'ofac-cons', version: 'unloaded', hash: '' }) } },
     ]);
-    await expect(unloaded.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    await expect(unloaded.screen({ name: 'Nobody Listed', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+  });
+
+  // LA1 (list review round 1): an exact match on any member blocks, whatever
+  // the other members did; every other outcome on a partial set fails closed.
+  describe('partial set (LA1): an exact match survives another member\'s failure', () => {
+    const rejectingCons = () => member('ofac-cons', src(async () => { throw new Error('no active ofac-cons list'); }));
+    const unloadedCons = () => ({
+      source: 'ofac-cons' as const,
+      screener: { screen: async () => ({ matched: false }), listInfo: () => ({ source: 'ofac-cons', version: 'unloaded', hash: '' }) },
+    });
+
+    it('(a) member 1 exact match + member 2 rejects -> matched with the member 1 entry id and the composite listSource', async () => {
+      const m = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN)), rejectingCons()]);
+      expect(await m.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).toEqual({
+        matched: true, matchScore: 1, entryId: 'sdn:1', listSource: 'lists:ofac-sdn+ofac-cons',
+      });
+      // The composite identity still says the set is not loaded.
+      expect(m.listInfo()).toEqual({ source: 'lists:ofac-sdn+ofac-cons', version: 'unavailable', hash: '' });
+    });
+
+    it('(b) member 1 exact match + member 2 unloaded but not throwing -> the same', async () => {
+      const m = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN)), unloadedCons()]);
+      expect(await m.screen({ name: 'Zorvan Quillet', sourceCountry: 'US' })).toMatchObject({
+        matched: true, entryId: 'sdn:1', listSource: 'lists:ofac-sdn+ofac-cons',
+      });
+    });
+
+    it('(c) member 1 possible match + member 2 rejects -> SanctionsListUnavailableError', async () => {
+      const fuzzy = list('ofac-sdn', [{ names: ['Fuzzy Nearmissnamx'] }]);
+      const m = new MultiListSanctionsScreener([member('ofac-sdn', src(fuzzy)), rejectingCons()]);
+      const alone = await new ListSanctionsScreener(src(fuzzy), { sourceName: 'ofac-sdn' }).screen({ name: 'Fuzzy Nearmissname', sourceCountry: 'US' });
+      expect(alone).toMatchObject({ matched: false, possibleMatch: true });
+      await expect(m.screen({ name: 'Fuzzy Nearmissname', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    });
+
+    it('(d) member 1 clear + member 2 unloaded -> SanctionsListUnavailableError', async () => {
+      const m = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN)), unloadedCons()]);
+      await expect(m.screen({ name: 'Nobody Listed', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    });
+
+    it('(e) exact match on member 2 while member 1 rejects -> matched with the member 2 entry id', async () => {
+      const m = new MultiListSanctionsScreener([
+        member('ofac-sdn', src(async () => { throw new Error('no active ofac-sdn list'); })),
+        member('ofac-cons', src(CONS)),
+      ]);
+      expect(await m.screen({ name: 'Marlowe Tessaract', sourceCountry: 'US' })).toMatchObject({
+        matched: true, entryId: 'cons:1', listSource: 'lists:ofac-sdn+ofac-cons',
+      });
+    });
+
+    it('an exact extras hit on the ofac-sdn member survives another member\'s failure', async () => {
+      const m = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN), ['Partner Extra Villain']), rejectingCons()]);
+      expect(await m.screen({ name: 'Partner Extra Villain', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'extra:0' });
+    });
+
+    it('two exact matches with a third member failing -> the first in member order', async () => {
+      const m = new MultiListSanctionsScreener([
+        member('ofac-sdn', src(SDN)),
+        member('ofac-cons', src(CONS)),
+        member('un-sc', src(async () => { throw new Error('no active un-sc list'); })),
+      ]);
+      expect(await m.screen({ name: 'Shared Exact Person', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'sdn:2' });
+    });
   });
 
   it('the constructor refuses an empty member list', () => {
@@ -108,11 +172,13 @@ describe('MultiListSanctionsScreener (pack 5 T28)', () => {
   });
 
   it('listInfo() before any screen is unloaded with an empty hash; after a screen it is the composite', async () => {
-    const sdnAgo = 2 * HOUR;
-    const consAgo = 5 * HOUR;
-    const m = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN, sdnAgo)), member('ofac-cons', src(CONS, consAgo))]);
+    // LE5: fixed checkedAt values (no wall-clock window): sdn 2 h ago, cons 5 h ago.
+    const now = Date.now();
+    const sdnAt = new Date(now - 2 * HOUR);
+    const consAt = new Date(now - 5 * HOUR);
+    const fixed = (l: SanctionsList, at: Date): SanctionsListSource => ({ load: async () => l, checkedAt: () => at });
+    const m = new MultiListSanctionsScreener([member('ofac-sdn', fixed(SDN, sdnAt)), member('ofac-cons', fixed(CONS, consAt))]);
     expect(m.listInfo()).toEqual({ source: 'lists:ofac-sdn+ofac-cons', version: 'unloaded', hash: '' });
-    const before = Date.now();
     await m.screen({ name: 'Nobody Listed', sourceCountry: 'US' });
     const info = m.listInfo();
     const members = m.memberInfos();
@@ -120,10 +186,11 @@ describe('MultiListSanctionsScreener (pack 5 T28)', () => {
     expect(info.version).toBe(`${SDN.version}+${CONS.version}`);
     expect(info.hash).toBe(sha(members.map((x) => x.hash).join('|')));
     expect(info.hash).toMatch(/^[0-9a-f]{64}$/);
-    // checkedAt = the OLDEST member checkedAt (cons, 5 h ago).
-    const checked = Date.parse(info.checkedAt!);
-    expect(checked).toBeLessThanOrEqual(before - consAgo + 50);
-    expect(checked).toBeGreaterThan(before - consAgo - 5_000);
+    // checkedAt = the OLDEST member checkedAt (cons, 5 h ago), exactly; also when the oldest is first.
+    expect(info.checkedAt).toBe(consAt.toISOString());
+    const m1 = new MultiListSanctionsScreener([member('ofac-cons', fixed(CONS, consAt)), member('ofac-sdn', fixed(SDN, sdnAt))]);
+    await m1.screen({ name: 'Nobody Listed', sourceCountry: 'US' });
+    expect(m1.listInfo().checkedAt).toBe(consAt.toISOString());
     // Absent when any member's checkedAt is absent.
     const m2 = new MultiListSanctionsScreener([member('ofac-sdn', src(SDN)), member('ofac-cons', src(CONS, null))]);
     await m2.screen({ name: 'Nobody Listed', sourceCountry: 'US' });
