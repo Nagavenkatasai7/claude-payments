@@ -342,7 +342,10 @@ describe('pay route, existing transfer, real money: the originator rule before t
     await store.saveTransfer(makeTransfer({ id: 'or-throw' }));
     seam.writeThrows = true;
     const before = consoleLines.length;
+    // Review round 2 GF1: the hour is read before and after the action; the key is one of them.
+    const hourBefore = new Date().toISOString().slice(0, 13);
     const res = await post('or-throw', realMoneyPayBody({ senderAddress: ADDRESS }));
+    const hourAfter = new Date().toISOString().slice(0, 13);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
     expect(otp.verify).toHaveBeenCalledOnce();
@@ -351,7 +354,8 @@ describe('pay route, existing transfer, real money: the originator rule before t
     expect(t?.fundingRef).toBeFalsy();
     expect(seam.order).toEqual(['writeOriginatorInfo']); // never re-screened or charged
     const rows = await outboxRows();
-    expect(rows.map((r) => [r.kind, r.dedupe_key])).toEqual([['ops.alert', `payevidence:${new Date().toISOString().slice(0, 13)}`]]);
+    expect(rows.map((r) => r.kind)).toEqual(['ops.alert']);
+    expect([`payevidence:${hourBefore}`, `payevidence:${hourAfter}`]).toContain(rows[0].dedupe_key);
     const lines = consoleLines.slice(before);
     expect(lines.filter((l) => l.includes('pay.originator_write'))).toHaveLength(1);
     expect(lines.find((l) => l.includes('pay.originator_write'))).toContain('TypeError');

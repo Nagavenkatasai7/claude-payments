@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -268,6 +268,14 @@ describe('uploadMhaListAction: strict UTF-8 (pack 5 review LD1)', () => {
 });
 
 describe('uploadMhaListAction: step-up and store', () => {
+  // Review round 2 GF1: the expected versions (dayOffset) are read after each
+  // upload; Date frozen (after the top-level freshDb()) so a run that crosses
+  // UTC midnight reads the same day throughout.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   it("step-up ALWAYS ('sanctions_list.upload', { always: true }); a StepUpRequired result is returned and nothing stored", async () => {
     await platformAdmin();
     gate.bypass = false;

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { createHmac } from 'node:crypto';
 
@@ -485,6 +485,13 @@ describe('POST /api/payment-webhook — rail failure (fix 8)', () => {
 
 // Program-Fix 29: timestamped signature, replay guard, rotation, amount check.
 describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
+  // Review round 2 GF1: Date frozen so the route's hour-keyed dedupe key and
+  // the expected hour() read the same instant (no PGlite in this file).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   const paidOwner = { ...deliveredTransfer, status: 'paid', partnerId: 'owner', amountInr: 16600, destinationCurrency: 'INR' };
   const ownerInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'owner_whk' }, whatsapp: {} };
   const withAmount = (destination: unknown, cur = 'INR') =>
@@ -1154,6 +1161,13 @@ describe('rail callback on an uncertified real-money rail (pack 3)', { retry: 0 
 // Fix pack 5 T10 (P4, P6, D6): the sealed record of every verified callback is
 // written after the signature and nonce checks and before anything acts on it.
 describe('pack 5 (T10): every verified callback is recorded before it is handled', { retry: 0 }, () => {
+  // Review round 2 GF1: Date frozen so the route's hour-keyed dedupe key and
+  // the expected hour() read the same instant (no PGlite in this file).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   const hour = () => Math.floor(Date.now() / 3_600_000);
   const ownerInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'owner_whk' }, whatsapp: {} };
   const railInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'rail_whk' }, whatsapp: {} };

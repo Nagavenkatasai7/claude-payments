@@ -151,6 +151,13 @@ beforeEach(async () => {
 afterEach(() => invalidateFlagCache(db));
 
 describe('settlement.instruct records the settle message before the POST (G17, G18)', { retry: 0 }, () => {
+  // Review round 2 GF1: Date frozen (after the top-level freshDb()) so the
+  // worker's railrecord:<hour> and the expected key read the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   it('the settle row exists BEFORE the POST with the exact bytes, hash and header that were POSTed', async () => {
     await enqueueInstruct();
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
@@ -288,7 +295,37 @@ describe('settlement.instruct records the settle message before the POST (G17, G
   });
 });
 
+// Review round 2 GF1: the railrecord:<hour> key is read from the clock by the
+// worker; a test that reads it AGAIN after the drain goes red when the run
+// crosses an hour boundary. This case pins the clock to the last millisecond of
+// an hour (in the past, so the row is due against Postgres now()), drains, and
+// moves into the next hour before it asserts.
+describe('railrecord:<hour> across an hour boundary (review round 2 GF1)', { retry: 0 }, () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('the alert carries the key of the hour the drain ran in, read once from the pinned clock', async () => {
+    const H = 3_600_000;
+    const hourStart = Math.floor(Date.now() / H) * H;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hourStart - 1); // HH:59:59.999 of the previous hour
+    const expected = railRecordAlertKey(); // read ONCE, before the action
+    recordDown = true;
+    await enqueueInstruct();
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    vi.setSystemTime(hourStart); // the next hour
+    expect((await alerts()).map((x) => x.k)).toEqual([expected]);
+    expect(expected).toBe(railRecordAlertKey(hourStart - 1));
+  });
+});
+
 describe('funding.refund partner-pulled reverse records before its POST', { retry: 0 }, () => {
+  // Review round 2 GF1: Date frozen (after the top-level freshDb()) so the
+  // worker's railrecord:<hour> and the expected key read the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   it("a partner-pulled reverse is recorded (kind 'reverse') before its POST with the exact bytes and header", async () => {
     await store.saveTransfer(pulledFixture());
     fetchFn.mockImplementation(async () => {

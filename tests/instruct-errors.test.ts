@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import {
   ComplianceBlockUnavailableError,
@@ -132,7 +132,15 @@ describe('railRecordAlertKey (P30)', () => {
     expect(railRecordAlertKey(base)).toBe(`railrecord:${base / H}`);
     expect(railRecordAlertKey(base + H - 1)).toBe(railRecordAlertKey(base + 1));
     expect(railRecordAlertKey(base + H)).not.toBe(railRecordAlertKey(base));
-    expect(railRecordAlertKey()).toBe(`railrecord:${Math.floor(Date.now() / H)}`);
+    // Review round 2 GF1: the default reads the clock; the clock is pinned mid-hour
+    // so the key and the expected value read the same instant.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(base + H / 2);
+      expect(railRecordAlertKey()).toBe(`railrecord:${base / H}`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

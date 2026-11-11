@@ -14,6 +14,8 @@ import { railRecordAlertKey } from '@/lib/instruct-errors';
 import { ARCHIVE_LAG_ALERT_DAYS } from '@/lib/sanctions/list-archive';
 import { MAX_REDIRECT_HOPS } from '@/lib/sanctions/pinned-fetch';
 import type { Customer, Transfer } from '@/lib/types';
+import { drizzle as drizzleProxy } from 'drizzle-orm/pg-proxy';
+import { partnerWebhookDeliveries } from '@/db/schema';
 
 const ROOT = join(__dirname, '..');
 const read = (p: string): string => readFileSync(join(ROOT, p), 'utf8');
@@ -252,11 +254,27 @@ describe('pack 5 documents say what the code does', () => {
       '`railrecord:<hour>`',
       '`MIGRATE_ON_BUILD_SKIP=1`',
       'answers 500 to every verified callback until it is applied',
+      // Review round 2 GD1: what else a build serving without 0039 breaks.
+      'sends no reverse (a refund stays pending and dead-letters at 8)',
+      "fails the partner webhooks page's delivery log",
+      "reports a \"Send test event\" ping that reached the partner's endpoint as failed (no delivery row, no `webhook.test` audit row)",
     ]) {
       expect(durability, s).toContain(s);
     }
     expect(railRecordAlertKey(3_600_000 * 7)).toBe('railrecord:7');
     expect(read('src/lib/instruct-errors.ts')).toContain('export class RailRecordError');
+  });
+
+  it('the coupling the "without 0039" text relies on: a ping insert that leaves body_sha256 out still names the column (review round 2 GD1)', () => {
+    // drizzle names every insertable column and fills a missing one with `default`
+    // (node_modules/drizzle-orm/pg-core/dialect.js buildInsertQuery), so the
+    // unchanged sendTestPing insert fails on a database without 0039.
+    const db = drizzleProxy(async () => ({ rows: [] }));
+    const q = db
+      .insert(partnerWebhookDeliveries)
+      .values({ partnerId: 'acme', kind: 'ping', attempt: 1, outcome: 'ok', httpStatus: 200, latencyMs: 1 })
+      .toSQL();
+    expect(q.sql).toContain('"body_sha256"');
   });
 
   it('CLAUDE.md Sanctions bullet names SANCTIONS_LIST=lists as opt-in, the floor file and fail closed', () => {
@@ -309,6 +327,10 @@ describe('pack 5 documents say what the code does', () => {
       'Set `SANCTIONS_LIST` back to `ofac-sdn` (or unset) BEFORE rolling back past PR5: an older build treats `lists` as unknown and screens with the mock',
       // Review round 2 GE1: Issue refund refuses a real-money card payment.
       "Issue refund refuses a card payment through the partner's Stripe key",
+      // Review round 2 GD1: what else a build serving without 0039 breaks.
+      'it also sends no reverse instruction, so a queued refund of a partner-pulled or partner-collected row stays pending and dead-letters after 8 attempts (`dead:<id>`)',
+      'the delivery log section of the partner webhooks page fails to load',
+      "a \"Send test event\" ping still reaches the partner's endpoint but is reported as failed, with no delivery row and no `webhook.test` audit row",
     ]) {
       expect(p, s).toContain(s);
     }
