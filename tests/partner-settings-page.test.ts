@@ -73,7 +73,8 @@ import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import SettingsPage from '@/app/partner/(app)/settings/page';
 import { t } from '@/lib/i18n';
-import { approvedDisclosureConfig } from './helpers-live';
+import { approvedDisclosureConfig, certifyPartnerForTest } from './helpers-live';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -272,6 +273,56 @@ describe('disclosure approval state (pack 4)', () => {
     expect(html).toContain(t('partner.settings.disclosure.enrolToApprove'));
     expect(html).toContain('data-testid="settings-disclosure-form"');
     expect(logged).not.toContain('mfa store down');
+  });
+});
+
+describe('a save by a viewer without two-step sign-in clears the approval (pack 4 R2 I1)', () => {
+  beforeEach(async () => {
+    await signInAs({});
+  });
+  const setBlock = async (disclosure: unknown) =>
+    box.db!.update(partners).set({ supportConfig: { disclosure: disclosure as never } }).where(eq(partners.id, PA));
+  const warning = (html: string) => html.match(/<p[^>]*data-testid="settings-disclosure-clear-warning"[^>]*>([^<]*)<\/p>/)?.[1];
+
+  it('an approved block and a viewer not enrolled: the page warns that a save clears the approval', async () => {
+    await setBlock(approvedDisclosureConfig());
+    const w = warning(decode(await render()));
+    expect(w).toBe(t('partner.settings.disclosure.clearWarning'));
+    expect(w).toBe('Saving clears the current approval. Payments that need it stop until an admin with two-step sign-in saves this block again.');
+  });
+
+  it('a live-certified partner gets the stronger sentence', async () => {
+    await setBlock(approvedDisclosureConfig());
+    await certifyPartnerForTest(box.db!, PA);
+    const w = warning(decode(await render()));
+    expect(w).toBe(t('partner.settings.disclosure.clearWarningLive'));
+    expect(w).toContain('certified for live money');
+  });
+
+  it('no warning when the viewer is enrolled or the block is not approved', async () => {
+    await setBlock(approvedDisclosureConfig());
+    staffMfa.enrolled.add('pa-admin');
+    expect(await render()).not.toContain('settings-disclosure-clear-warning');
+    staffMfa.enrolled.clear();
+    const { approval: _a, ...block } = approvedDisclosureConfig();
+    void _a;
+    await setBlock(block);
+    expect(await render()).not.toContain('settings-disclosure-clear-warning');
+  });
+});
+
+describe('the default tenant is never approved (pack 4 R2 I3)', () => {
+  it('a saved block on the default tenant shows neither the approval line nor the enrol hint', async () => {
+    await box.db!
+      .update(partners)
+      .set({ supportConfig: { disclosure: approvedDisclosureConfig() as never } })
+      .where(eq(partners.id, DEFAULT_PARTNER_ID));
+    await signInAs({ username: 'def-admin', partnerId: DEFAULT_PARTNER_ID });
+    const html = await render();
+    expect(html).toContain('data-testid="settings-disclosure-form"');
+    expect(html).not.toContain('data-testid="settings-disclosure-approval"');
+    expect(html).not.toContain('data-testid="settings-disclosure-enrol"');
+    expect(html).not.toContain('settings-disclosure-clear-warning');
   });
 });
 

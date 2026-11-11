@@ -50,6 +50,8 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { encodeTransferCursor } from '@/lib/partner-transfers';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { t } from '@/lib/i18n';
 
 const PHONE = '14155550101';
 const list = async (sp: Record<string, string> = {}) => renderToStaticMarkup(await ListPage({ searchParams: Promise.resolve(sp) }));
@@ -331,6 +333,22 @@ describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is 
     await db.execute(sql`UPDATE partners SET kyc_mode = 'ours' WHERE id = 'pa'`);
     await seedHold('tr_A_edd', ['Large transfer amount.']);
     expect(await detail('tr_A_edd')).not.toContain(RELEASE);
+  });
+});
+
+describe('/partner/transfers/[id]: a recipient-identity hold (pack 4 review R2 I5)', () => {
+  it('says it cannot be released without the account holder name and can only be rejected or refunded', async () => {
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'pa'`);
+    await createCustomerRepo(db, async () => null).ensureCustomer('pa', PHONE);
+    await seedPartnerTransfer(db, { id: 'tr_A_noname', partnerId: 'pa', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [RECIPIENT_IDENTITY_MISSING_REASON] });
+    for (const as of [asAdmin, asAgent]) {
+      await as();
+      const html = (await detail('tr_A_noname')).replace(/&#x27;/g, "'");
+      expect(html).toContain(t('partner.transfers.holdIdentity'));
+      expect(t('partner.transfers.holdIdentity')).toBe('This transfer cannot be released without the account holder name. It can only be rejected or refunded.');
+      expect(html).not.toContain(t('partner.transfers.holdRelease'));
+      expect(html).not.toContain('data-testid="partner-release"');
+    }
   });
 });
 

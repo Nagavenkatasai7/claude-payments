@@ -74,6 +74,7 @@ import { createPortalSessionStore, PORTAL_SESSION_COOKIE } from '@/lib/portal-se
 import { newRequestKey } from '@/lib/portal-request-key';
 import { recipientRid } from '@/lib/portal-recipients';
 import { maskAccount } from '@/lib/tools';
+import { t } from '@/lib/i18n';
 
 const PHONE = TWO_PARTNER_PHONE;
 const OTHER_SENDER = '14155550303';
@@ -386,7 +387,9 @@ describe('the account-holder name (fix pack 4)', () => {
     const html = renderToStaticMarkup(await EditRecipientPage({ params: Promise.resolve({ rid: recipientRid('pa', PHONE, A_RP) }) }));
     expect(html).toContain('name="legalName"');
     expect(html).toContain('Account holder name');
-    expect(html).toContain('Leave blank to keep the saved name.');
+    // Pack 4 review R2 (I4/L1): blank keeps the name ONLY while the bank details stay the same.
+    expect(html).toContain('Leave blank to keep the saved name. If you change the bank details, enter the name again.');
+    expect(t('portal.recipients.legalNameEditHint')).toBe('Leave blank to keep the saved name. If you change the bank details, enter the name again.');
     expect(html).not.toContain(LEGAL);
   });
 });

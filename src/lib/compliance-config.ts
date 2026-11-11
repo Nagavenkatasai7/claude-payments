@@ -138,6 +138,15 @@ export function isRescreenOnlyHold(t: { complianceReasons?: readonly string[] | 
 }
 
 /**
+ * Pack 4 review R2 (I5): the hold carries the recipient-identity reason. Such a row is never
+ * released (C19, owner Q19: only rejected or refunded until a later pack), so the staff pages say
+ * that instead of offering or promising a release. Pure, null-safe.
+ */
+export function isRecipientIdentityHold(t: { complianceReasons?: readonly string[] | null }): boolean {
+  return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON);
+}
+
+/**
  * SPEC §3.3 + D7: a partner admin may release ONLY a delegated partner's
  * KYC-class hold. Fails CLOSED: an unknown KYC mode, a missing partner, a
  * status other than in_review, a sanctions-blocked row, an empty or malformed

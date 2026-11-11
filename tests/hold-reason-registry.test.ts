@@ -17,6 +17,7 @@ import {
   AML_HOLD_REASON,
   CUSTOMER_SCREENING_FLAGS,
   holdReleasableBy,
+  isRecipientIdentityHold,
   isRescreenOnlyHold,
   isScreeningHold,
   senderScreeningHoldActive,
@@ -99,6 +100,16 @@ describe('HOLD_REASONS registry', () => {
     expect(holdReasonKeys([r])).toEqual(['partner.transfers.reason.recipientIdentity']);
     expect(HOLD_REASON_CODES[r]).toBe('recipient_identity_missing');
     expect(t('partner.transfers.reason.recipientIdentity')).toBe('Recipient identity missing');
+  });
+
+  // Pack 4 review R2 (I5): the staff pages say a recipient-identity hold is never released.
+  it('isRecipientIdentityHold: true when the reasons carry the identity reason, else false (null-safe)', () => {
+    expect(isRecipientIdentityHold({ complianceReasons: [RECIPIENT_IDENTITY_MISSING_REASON] })).toBe(true);
+    expect(isRecipientIdentityHold({ complianceReasons: [LARGE_AMOUNT_REASON, RECIPIENT_IDENTITY_MISSING_REASON] })).toBe(true);
+    expect(isRecipientIdentityHold({ complianceReasons: [LARGE_AMOUNT_REASON] })).toBe(false);
+    expect(isRecipientIdentityHold({ complianceReasons: [] })).toBe(false);
+    expect(isRecipientIdentityHold({ complianceReasons: null })).toBe(false);
+    expect(isRecipientIdentityHold({})).toBe(false);
   });
 
   it('compliance.ts re-exports the new registry names', () => {

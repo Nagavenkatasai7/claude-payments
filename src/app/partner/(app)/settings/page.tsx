@@ -8,6 +8,7 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { setupView, type SetupView } from '@/lib/partner-setup-view';
 import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
+import { isLiveCertified } from '@/lib/live-gate';
 import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import type { PartnerDisclosureConfig } from '@/lib/types';
@@ -30,6 +31,9 @@ export const metadata: Metadata = { title: t('partner.settings.title'), robots: 
 // on <date>' or 'Not approved') and, when the VIEWER has no two-step sign-in, how to approve it (a
 // partner admin's save approves only with TOTP enrolled). A failed enrolment read counts as not
 // enrolled (logged by error name only).
+// Pack 4 review R2 (I1, I3): a viewer without two-step sign-in who looks at an APPROVED block is
+// warned that a save clears the approval (a stronger line when the partner is live-certified). The
+// default tenant is never stamped (setDisclosure), so it shows no approval line, hint or warning.
 
 const H2 = 'text-[18px] font-extrabold text-ds-ink';
 const day = (iso: string | undefined): string => (iso ? iso.slice(0, 10) : '');
@@ -158,15 +162,20 @@ export default async function PartnerSettingsPage() {
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.settings.disclosure.title')}</h2>
           <p className={INTRO}>{t('partner.settings.disclosure.intro')}</p>
-          {sc.disclosure ? (
+          {sc.disclosure && !shown.demo ? (
             <p data-testid="settings-disclosure-approval" data-approved={shown.partnerApproved ? 'true' : 'false'} className="mb-2 text-[14px] font-semibold text-ds-ink">
               {shown.partnerApproved
                 ? t('partner.settings.disclosure.approved', { who: sc.disclosure.approval?.by ?? '', date: day(sc.disclosure.approval?.at) })
                 : t('partner.settings.disclosure.notApproved')}
             </p>
           ) : null}
-          {!enrolled ? (
+          {!enrolled && !shown.demo ? (
             <p data-testid="settings-disclosure-enrol" className="mb-4 text-[13px] text-ds-ink-muted">{t('partner.settings.disclosure.enrolToApprove')}</p>
+          ) : null}
+          {!enrolled && !shown.demo && shown.partnerApproved ? (
+            <p data-testid="settings-disclosure-clear-warning" className="mb-4 text-[13px] font-semibold text-ds-warning-ink">
+              {t(isLiveCertified(partner) ? 'partner.settings.disclosure.clearWarningLive' : 'partner.settings.disclosure.clearWarning')}
+            </p>
           ) : null}
           <DisclosureForm current={disclosureValues(sc.disclosure)} maxDays={MAX_DELIVERY_BUSINESS_DAYS} />
         </Card>
