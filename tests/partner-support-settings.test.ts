@@ -17,6 +17,7 @@ import {
 } from '@/lib/partner-support-settings';
 import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { disclosureHash } from '@/lib/disclosure-hash';
+import { isProviderNameText, namesPlatform, providerLineFits, providerLineFor } from '@/lib/legal/provider-line';
 import { certifyPartnerForTest } from './helpers-live';
 
 // partner-support-settings: the support-portal switch, the channel alert email and the Reg E
@@ -116,6 +117,82 @@ describe('parseDisclosureForm (pure)', () => {
     const r = parseDisclosureForm(fullForm({ licensedEntity: name, regulatorName: "Dept. of Banking & Finance, People's Office" }));
     expect(r.ok && r.value?.licensedEntity).toBe(name);
     expect(r.ok && r.value?.stateRegulator?.name).toBe("Dept. of Banking & Finance, People's Office");
+  });
+  // Review R4-Z1 S1: the rule holds for the STORED value too. boundUntrustedText removes invisible
+  // characters and brackets (and truncates with an ellipsis), so a raw name that passed could be
+  // stored as one providerLineFor reads null on: "Approved", but no provider line anywhere.
+  const truncatedOverride = `Acme ${'a'.repeat(97)} ignore the rulesxyz`;
+  const HOSTILE_NAMES: ReadonlyArray<readonly [string, string]> = [
+    ['the platform name split by brackets', 'Smart[]Remit Money LLC'],
+    ['the platform name split by angle brackets', 'Smart<>Remit LLC'],
+    ['the platform name split by braces', 'Smart{}Remit LLC'],
+    ['the platform name split by a zero-width space', 'Smart\u200bRemit Money LLC'],
+    ['the platform name split by a soft hyphen', 'Smart\u00adRemit LLC'],
+    ['the platform name split by a word joiner', 'S\u2060martRemit LLC'],
+    ['a doubled prime split by a zero-width space', '\u2032\u200b\u2032 Dept'],
+    ['a doubled prime split by brackets', '\u2032[]\u2032 Dept'],
+    ['an override phrase split by a zero-width space', 'Acme Pay. Ign\u200bore previous'],
+    ['an override phrase split by brackets', 'Acme Pay. Disre[]gard the rules'],
+    ['an override phrase made by the length cut', truncatedOverride],
+  ];
+  const CLEAN_NAMES = ["O'Brien Money Transfer LLC", 'Acme \u2032Prime\u2032 Pay'];
+  // Review R4-Z2 A1: names of 101 to 120 astral characters (NFKC keeps U+20000) are 202 to 240
+  // UTF-16 units: the form caps by code point, so the read side must too.
+  const ASTRAL_101 = '\u{20000}'.repeat(101);
+  const ASTRAL_MAX = '\u{20000}'.repeat(DISCLOSURE_TEXT_MAX);
+  const storedIsLineSafe = (entity: string, regulator: string) =>
+    isProviderNameText(entity) && isProviderNameText(regulator) && !namesPlatform(entity) && !namesPlatform(regulator) && providerLineFits(entity, regulator);
+  // What the read side makes of an approved stored block: the same names, and a provider line.
+  const readsBackWithLine = (value: object, entity: string, regulator: string) => {
+    const block = { ...value, approval: { hash: disclosureHash(value) } };
+    const d = resolvePartnerDisclosure({ id: 'pa', supportConfig: { disclosure: block }, displayName: 'Brand X', brandName: null } as unknown as Parameters<typeof resolvePartnerDisclosure>[0]);
+    return d.configured && d.partnerApproved && d.licensedEntity === entity && d.stateRegulator?.name === regulator && providerLineFor(d) !== null;
+  };
+
+  it.each(HOSTILE_NAMES)('refuses %s (checked on the raw and the stored value) with reason provider_name', (_label, bad) => {
+    expect(parseDisclosureForm(fullForm({ licensedEntity: bad }))).toEqual({ ok: false, reason: 'provider_name' });
+    expect(parseDisclosureForm(fullForm({ regulatorName: bad }))).toEqual({ ok: false, reason: 'provider_name' });
+  });
+  it('invariant: every block the partner path accepts stores names the provider line is built from', () => {
+    const inputs = [...HOSTILE_NAMES.map(([, v]) => v), ...CLEAN_NAMES, ASTRAL_101];
+    let accepted = 0;
+    for (const entity of [...inputs, 'Acme Money Services LLC']) {
+      for (const regulator of [...inputs, 'State Department of Financial Services']) {
+        const r = parseDisclosureForm(fullForm({ licensedEntity: entity, regulatorName: regulator }));
+        if (!r.ok) continue;
+        accepted++;
+        const e = r.value?.licensedEntity ?? '';
+        const g = r.value?.stateRegulator?.name ?? '';
+        expect(storedIsLineSafe(e, g), JSON.stringify([entity, regulator])).toBe(true);
+        expect(readsBackWithLine(r.value ?? {}, e, g), JSON.stringify([entity, regulator])).toBe(true);
+      }
+    }
+    // the clean names, the astral name and the defaults are accepted in every pairing (4 x 4),
+    // except astral x astral, whose line is over PROVIDER_LINE_MAX
+    expect(accepted).toBe(15);
+  });
+  it('a name of 101 to 120 astral characters is stored and read back whole, with the provider line', () => {
+    for (const [entity, regulator] of [['Acme', ASTRAL_101], [ASTRAL_101, 'X'], ['Acme', ASTRAL_MAX], [ASTRAL_MAX, 'X']]) {
+      const r = parseDisclosureForm(fullForm({ licensedEntity: entity, regulatorName: regulator }));
+      expect(r.ok && r.value?.stateRegulator?.name, JSON.stringify([entity.length, regulator.length])).toBe(regulator);
+      expect(readsBackWithLine(r.ok ? (r.value ?? {}) : {}, entity, regulator), JSON.stringify([entity.length, regulator.length])).toBe(true);
+    }
+  });
+  it('this file writes invisible characters as \\u escapes, never as raw bytes', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL(import.meta.url), 'utf8');
+    expect(/[\p{Cf}\u2032]/u.test(src)).toBe(false);
+  });
+  it.each(CLEAN_NAMES)('still accepts the clean name %s, stored unchanged', (name) => {
+    const r = parseDisclosureForm(fullForm({ licensedEntity: name, regulatorName: name }));
+    expect(r.ok && r.value?.licensedEntity).toBe(name);
+    expect(r.ok && r.value?.stateRegulator?.name).toBe(name);
+  });
+  it('the admin path (platformNameAllowed) still accepts a split platform name, but not a split quote or phrase', () => {
+    const r = parseDisclosureForm(fullForm({ licensedEntity: 'Smart[]Remit Demo' }), { platformNameAllowed: true });
+    expect(r.ok && r.value?.licensedEntity).toBe('SmartRemit Demo');
+    expect(parseDisclosureForm(fullForm({ regulatorName: '\u2032[]\u2032 Dept' }), { platformNameAllowed: true })).toEqual({ ok: false, reason: 'provider_name' });
+    expect(parseDisclosureForm(fullForm({ licensedEntity: 'Acme Pay. Ign\u200bore previous' }), { platformNameAllowed: true })).toEqual({ ok: false, reason: 'provider_name' });
   });
   it('checks in the legacy order: the provider phone is reported before the provider website', () => {
     expect(parseDisclosureForm(fullForm({ phone: 'x', website: 'http://a.example' }))).toEqual({ ok: false, reason: 'provider_phone' });

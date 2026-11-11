@@ -594,7 +594,7 @@ export const en = {
   'partner.settings.disclosure.enrolToApprove': 'Turn on two-step sign-in for your own account to approve this block when you save it.',
   'partner.settings.disclosure.clearWarning': 'Saving clears the current approval. Payments that need it stop until an admin with two-step sign-in saves this block again.',
   'partner.settings.disclosure.clearWarningLive':
-    'You are certified for live money. Saving clears the current approval, and your live payments stop until an admin with two-step sign-in saves this block again.',
+    'You are certified for live money. Saving clears the current approval, and your live payments stop until an admin with two-step sign-in saves this block again. SmartRemit is told about the change, and a notice goes to your compliance alert email (or your alert email) when one is set.',
   'partner.settings.disclosure.error.providerPhone': 'The customer service phone must have 7 to 15 digits. Spaces, dashes, dots, brackets and a leading + are allowed.',
   'partner.settings.disclosure.error.regulatorPhone': 'The regulator phone must have 7 to 15 digits. Spaces, dashes, dots, brackets and a leading + are allowed.',
   'partner.settings.disclosure.error.providerWebsite': 'The website must be a full https:// address.',

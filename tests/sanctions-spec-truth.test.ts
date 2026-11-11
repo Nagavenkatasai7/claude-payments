@@ -239,6 +239,22 @@ describe('sanctions screening spec says what the code does', () => {
     expect(gap).not.toContain('The alerts tell them not to before');
   });
 
+  // Fix pack 4 decision D5 (finding T1): the replaced account-holder name is a known gap, stated next
+  // to the Partner-API sender gap, and the coverage rule it names is the one the code holds
+  // (POSSIBLE_MATCH for a recipient; pinned in tests/pay-route-rescreen.test.ts).
+  it('D5: section 9 lists the replaced account-holder name, right after the Partner-API sender gap, as going to a person with POSSIBLE_MATCH', () => {
+    const gaps = section('## 9.').split('\n').filter((l) => l.startsWith('- **'));
+    const at = gaps.findIndex((l) => l.startsWith('- **A replaced account-holder name** (fix pack 4, the pay page): '));
+    expect(at, 'the D5 bullet').toBeGreaterThan(0);
+    expect(gaps[at - 1]).toMatch(/^- \*\*Partner-API sender names\*\*/);
+    const line = gaps[at];
+    expect(line).toContain('new bank details with a different account-holder name on a real-money rail');
+    expect(line).toContain('the coverage rule (section 4, rule 4) sends the transfer to a person with `POSSIBLE_MATCH`, never a silent clear');
+    expect(line).toContain('the new name and the chat name are screened on the live list first');
+    expect(section('## 4.')).toMatch(/`SENDER_IDENTITY_MISSING` \(sender\) or `POSSIBLE_MATCH` \(recipient\)/);
+    expect(complianceConfig.POSSIBLE_MATCH_REASON).toEqual(expect.any(String));
+  });
+
   // Review S6 (Y1, Y2, Y3).
   it('S6: section 10 has one S6 line after the S5 line', () => {
     const s10 = section('## 10.');

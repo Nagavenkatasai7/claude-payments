@@ -78,10 +78,18 @@ function optionalBusinessDays(formData: FormData): Field<number> {
  * Review R1-P5 (C1): a name the provider line is built from, checked on the RAW form text.
  * Review R3-Y1 O2 (D4): a name with the platform brand is refused too (namesPlatform, the rule
  * providerLineFor reads null on), unless the save is the platform's own for the default tenant.
+ * Review R4-Z1 S1: the rule holds for the value that is STORED too (optionalText's clamp removes
+ * invisible characters and brackets, so 'Smart[]Remit' or a split doubled prime would only appear
+ * there). The raw check stays: the clamp turns a line break into a space.
  */
+const failsProviderNameRule = (v: string, platformNameAllowed: boolean): boolean =>
+  !isProviderNameText(v) || (!platformNameAllowed && namesPlatform(v));
+
 const badProviderName = (formData: FormData, key: string, platformNameAllowed: boolean): boolean => {
   const v = raw(formData.get(key));
-  return v !== '' && (!isProviderNameText(v) || (!platformNameAllowed && namesPlatform(v)));
+  if (v === '') return false;
+  const stored = boundUntrustedText(formData.get(key), DISCLOSURE_TEXT_MAX);
+  return failsProviderNameRule(v, platformNameAllowed) || (stored !== '' && failsProviderNameRule(stored, platformNameAllowed));
 };
 
 export interface DisclosureParseOptions {
