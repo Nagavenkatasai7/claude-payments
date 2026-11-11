@@ -1,8 +1,8 @@
 import { sql } from 'drizzle-orm';
-import { LIVE_CAPABILITIES, type LiveCapability, type LiveControls, type OptInRecord } from '@/lib/live-controls';
+import { LIVE_CAPABILITIES, type FundingMode, type LiveCapability, type LiveControls, type OptInRecord } from '@/lib/live-controls';
 import type { Db } from '@/db/client';
 import { disclosureHash } from '@/lib/disclosure-hash';
-import type { PartnerDisclosureConfig, PartnerId } from '@/lib/types';
+import type { CountryCode, FundingMethod, PartnerDisclosureConfig, PartnerId, Transfer } from '@/lib/types';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 
 // helpers-live — Fix pack 3 (contract 16): a certified partner for money-path
@@ -21,6 +21,13 @@ export interface CertifyOptions {
   complianceUsers?: string[];
   /** Fix pack 4 T6 (C24): certifyPartnerForTest also writes approvedDisclosureConfig() (approveDisclosureForTest). */
   approvedDisclosure?: boolean;
+  /**
+   * Fix pack 5 T14 (P32): the owner's live_controls.fundingMode record, which the
+   * worker's G14 gate reads. Default 'partner_collected' (so a certified http-rail
+   * fixture draining a bank_transfer row with no fundingRef passes G14); null
+   * writes no record.
+   */
+  fundingMode?: FundingMode | null;
 }
 
 export function certifiedLiveControls(o: CertifyOptions = {}): LiveControls {
@@ -47,6 +54,8 @@ export function certifiedLiveControls(o: CertifyOptions = {}): LiveControls {
     optIns,
     complianceUsers: [...(o.complianceUsers ?? [])],
   };
+  const mode = o.fundingMode === undefined ? 'partner_collected' : o.fundingMode;
+  if (mode !== null) lc.fundingMode = { mode, setBy: 'test-admin', setAt: at(-200_000) };
   if (o.posture) {
     lc.posture = {
       version: 1,
@@ -127,4 +136,72 @@ export async function seedRealMoneyRail(
       webhookSecret: o.webhookSecret ?? 'test-webhook',
     },
   });
+}
+
+// Fix pack 5 T14 (P32): a paid, cleared, live b2c row for a real-money instruct
+// fixture: paid 20 minutes ago (past reconcile's 15-minute window), a legal
+// name on the recipient, the sender saved as a customer (a full name, and an
+// invented placeholder address / date of birth when `originator` asks), and a
+// fresh live screening evidence row (G12 passes). `fundingProvider` is written
+// by a raw UPDATE (the insert-only column). The caller still seeds the partner,
+// the rail (seedRealMoneyRail) and the certification. Ids and times relative.
+export async function paidRealMoneyTransfer(
+  db: Db,
+  o: {
+    id?: string;
+    partnerId?: PartnerId;
+    routedVia?: PartnerId;
+    fundingProvider?: 'mock' | 'stripe' | null;
+    fundingRef?: string;
+    fundingMethod?: FundingMethod;
+    amountUsd?: number;
+    destinationCountry?: CountryCode;
+    originator?: { address?: boolean; dob?: boolean };
+  } = {},
+): Promise<Transfer> {
+  // Loaded here, not at the top: every money-path test imports this file, and a
+  // static import would pull the store and the sanctions modules into files that
+  // vi.mock them.
+  const { createStore } = await import('@/lib/store');
+  const { createCustomerStore } = await import('@/lib/customer-store');
+  const { fakeRedis } = await import('./helpers');
+  const { seedLiveEvidence } = await import('./helpers-sanctions');
+  const now = Date.now();
+  const id = o.id ?? `prm_${now.toString(36)}`;
+  const partnerId = o.partnerId ?? 'acme';
+  const amountUsd = o.amountUsd ?? 200;
+  const phone = '15551239876';
+  const senderName = 'Test Sender Placeholder';
+  const t = {
+    id, phone, amountUsd, feeUsd: 5, totalChargeUsd: amountUsd + 5,
+    fxRate: 83, amountInr: amountUsd * 83, recipientName: 'Test Recipient', recipientLegalName: 'Test Recipient Legal',
+    recipientPhone: '919800000999',
+    payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', fundingMethod: o.fundingMethod ?? 'bank_transfer',
+    status: 'paid', complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: new Date(now - 30 * 60_000).toISOString(), paidAt: new Date(now - 20 * 60_000).toISOString(),
+    partnerId, transferType: 'b2c', environment: 'live',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: o.destinationCountry ?? 'IN', destinationCurrency: 'INR',
+    amountSource: amountUsd, feeSource: 5, totalChargeSource: amountUsd + 5,
+    ...(o.routedVia ? { settlementPartnerId: o.routedVia } : {}),
+    ...(o.fundingRef ? { fundingRef: o.fundingRef } : {}),
+  } as Transfer;
+  const store = createStore(fakeRedis(), db);
+  await store.saveTransfer(t);
+  if (o.fundingProvider) {
+    await db.execute(sql`UPDATE transfers SET funding_provider = ${o.fundingProvider} WHERE id = ${id}`);
+  }
+  await createCustomerStore(db, store).saveCustomer({
+    senderPhone: phone,
+    partnerId,
+    senderCountry: 'US',
+    kycStatus: 'verified',
+    firstSeenAt: new Date(now - 10 * 86_400_000).toISOString(),
+    createdAt: new Date(now - 10 * 86_400_000).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    fullName: senderName,
+    ...(o.originator?.address ? { residentialAddress: '1 Placeholder Street, Testville 00000' } : {}),
+    ...(o.originator?.dob ? { dateOfBirth: new Date(now - 40 * 365.25 * 86_400_000).toISOString().slice(0, 10) } : {}),
+  });
+  await seedLiveEvidence(db, { id, partnerId, recipientName: t.recipientName, senderName });
+  return (await store.getTransfer(id)) ?? t;
 }

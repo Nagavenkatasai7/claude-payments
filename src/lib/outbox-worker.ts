@@ -26,6 +26,8 @@ import {
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { fundingGateRefusal } from '@/lib/instruct-gates';
+import { fundingClassOf } from '@/lib/funding-class';
 import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
@@ -1045,7 +1047,47 @@ async function handle(
           throw new InstructNotLiveError(senderWhy);
         }
       }
-      // gate: funding_mode (G14) - slot, filled by fix pack 5 T14
+      // gate: funding_mode (G14)
+      // Fix pack 5 T14 (P8 G14, P17): on real money the sender's money must
+      // really have been collected, the way the OWNER partner recorded it
+      // collects. (a) A mock-class row (the demo funding provider collected
+      // nothing) is never sent and a retry cannot heal it: done + ONE
+      // mockfund:<id> alert (its exit is Issue refund, which completes it as
+      // nofunds-<id>). (b) A class that does not match the owner's
+      // live_controls.fundingMode waits UNCHARGED 900 s + ONE fundmode:<id>.
+      // A failed owner read throws (charged retry). Ids, a class and a mode only.
+      if (realMoney) {
+        const f = await fundingGateRefusal(deps.db, transfer);
+        if (f?.reason === 'mockfund') {
+          logWarn('outbox.instruct-mockfund', 'mock-funded row on a real-money rail; instruction not sent', { transferId });
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message:
+                `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID but was not instructed: ` +
+                'it was funded by the demo (mock) funding provider on a real-money rail, so no real money was collected here. It will never be sent. ' +
+                `Close it with Issue refund in the dashboard: it completes as nofunds-${transferId} without moving money. Check with the partner how the sender paid.`,
+            },
+            { dedupeKey: `mockfund:${transferId}` },
+          );
+          return;
+        }
+        if (f?.reason === 'fundmode') {
+          logWarn('outbox.instruct-fundmode', 'funding does not match the funding mode; instruction deferred', { transferId });
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message:
+                `transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is paid but was not instructed: ` +
+                `its funding (${fundingClassOf(transfer)}) does not match the partner's recorded funding mode (${f.recorded ?? 'none'}). ` +
+                "It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, " +
+                "or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).",
+            },
+            { dedupeKey: `fundmode:${transferId}` },
+          );
+          throw new InstructFundingModeError();
+        }
+      }
       // gate: build (G15)
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it (fix 31 + fix pack 5). It fails

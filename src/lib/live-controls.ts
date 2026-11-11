@@ -52,19 +52,30 @@ export interface OptInRecord {
   partnerApprovedAt?: string;
 }
 
+/** Fix pack 5 T14 (P17): how the owner partner collects the sender's money on real money. */
+export type FundingMode = 'partner_collected' | 'partner_psp';
+
+export interface FundingModeRecord {
+  mode: FundingMode;
+  setBy: string;
+  setAt: string;
+}
+
 export interface LiveControls {
   posture?: PostureRecord;
   certification?: CertificationRecord;
   contract?: ContractRecord;
   optIns: Partial<Record<LiveCapability, OptInRecord>>;
   complianceUsers: string[];
-  // Reserved for later packs (PR5, PR8): copied as stored, never read, no writer.
-  fundingMode?: unknown;
+  // Fix pack 5 (P17): parsed like contract (a bad value reads as absent);
+  // written only by writeFundingMode (T17). Read by the worker's G14 gate.
+  fundingMode?: FundingModeRecord;
+  // Reserved for a later pack (PR8): copied as stored, never read, no writer.
   licence?: unknown;
   retentionYears?: unknown;
 }
 
-export const LIVE_CONTROLS_KEYS = ['posture', 'certification', 'contract', 'optIns', 'complianceUsers'] as const;
+export const LIVE_CONTROLS_KEYS = ['posture', 'certification', 'contract', 'optIns', 'complianceUsers', 'fundingMode'] as const;
 export type LiveControlsKey = (typeof LIVE_CONTROLS_KEYS)[number];
 
 export const EMPTY_LIVE_CONTROLS: LiveControls = Object.freeze({
@@ -72,7 +83,7 @@ export const EMPTY_LIVE_CONTROLS: LiveControls = Object.freeze({
   complianceUsers: Object.freeze([]) as unknown as string[],
 });
 
-const RESERVED_KEYS = ['fundingMode', 'licence', 'retentionYears'] as const;
+const RESERVED_KEYS = ['licence', 'retentionYears'] as const;
 const MAX_STRING = 200;
 const MAX_COMPLIANCE_USERS = 20;
 
@@ -119,6 +130,12 @@ const optInSchema = z.object({
   partnerApprovedAt: timestamp.optional(),
 });
 
+const fundingModeSchema = z.object({
+  mode: z.enum(['partner_collected', 'partner_psp']),
+  setBy: text,
+  setAt: timestamp,
+});
+
 const complianceUsersSchema = z.array(z.string().regex(/^[a-z0-9._-]{1,64}$/));
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -147,6 +164,20 @@ function parseComplianceUsers(raw: unknown): string[] {
   return deduped.length > MAX_COMPLIANCE_USERS ? [] : deduped;
 }
 
+/**
+ * Fix pack 5 (P17): THE fundingMode rule (the parser and T17's writer share
+ * it). A bad mode, a missing field, an unparseable setAt or a non-object reads
+ * as absent. Never throws.
+ */
+export function parseFundingModeRecord(raw: unknown): FundingModeRecord | undefined {
+  try {
+    const r = fundingModeSchema.safeParse(raw);
+    return r.success ? r.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Never throws. A non-object root, or any unexpected failure, reads as EMPTY (a fresh copy). */
 export function parseLiveControls(raw: unknown): LiveControls {
   try {
@@ -161,6 +192,8 @@ export function parseLiveControls(raw: unknown): LiveControls {
     if (certification.success) out.certification = certification.data;
     const contract = contractSchema.safeParse(raw.contract);
     if (contract.success) out.contract = contract.data;
+    const fundingMode = parseFundingModeRecord(raw.fundingMode);
+    if (fundingMode) out.fundingMode = fundingMode;
     for (const k of RESERVED_KEYS) {
       if (Object.prototype.hasOwnProperty.call(raw, k)) out[k] = raw[k];
     }

@@ -18,7 +18,8 @@
 // rail_config   G11  RailInstructError (no URL / URL refused / no signing secret), charged
 // live_list     G12  InstructNotLiveError + instructnotlive:<id>, charged
 // sender_hold   G13  InstructNotLiveError + instructsenderhold:<id>, charged
-// funding_mode  G14  slot (T14): mockfund done / InstructFundingModeError deferred
+// funding_mode  G14  real money: a mock-funded row -> done + mockfund:<id>; a class that does not
+//                    match the OWNER's fundingMode -> InstructFundingModeError deferred 900 s + fundmode:<id>
 // build         G15  builder + compliance block, fail closed (P10)
 // travel_rule   G16  slot (T23): InstructTravelRuleError deferred
 // record        G17  slot (T9): the rail_messages record before the POST
@@ -32,6 +33,9 @@
 
 import type { DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { fundingClassOf, fundingModeMatches } from './funding-class';
+import type { FundingMode } from './live-controls';
 import { realMoneyFor } from './live-gate';
 import { logWarn } from './log';
 import type { Transfer } from './types';
@@ -63,6 +67,25 @@ export type InstructGateId = (typeof INSTRUCT_GATE_ORDER)[number];
 /** Why a later instruct gate holds a paid row on purpose (G14 a/b, G16). */
 export type InstructHeldReason = 'mockfund' | 'fundmode' | 'travelrule';
 
+/** Fix pack 5 T14 (P17, P8 G14): why the funding_mode gate holds a real-money row. */
+export type FundingGateRefusal = { reason: 'mockfund' } | { reason: 'fundmode'; recorded: FundingMode | null };
+
+/**
+ * Fix pack 5 T14 (P8 G14, P17): the funding_mode gate's predicate. The caller
+ * has decided the row is on real money. A mock-class row (the demo funding
+ * provider collected nothing) -> 'mockfund'; a partner-pulled row passes with
+ * no read; any other class must match the OWNER partner's recorded
+ * live_controls.fundingMode (absent = mismatch) or -> 'fundmode' with the
+ * recorded mode. A failed owner read THROWS (the worker retries, charged).
+ */
+export async function fundingGateRefusal(db: DbOrTx, t: Transfer): Promise<FundingGateRefusal | null> {
+  const cls = fundingClassOf(t);
+  if (cls === 'mock') return { reason: 'mockfund' };
+  if (cls === 'partner_pull') return null;
+  const rec = (await createPartnerRepo(db).getPartner(t.partnerId))?.liveControls?.fundingMode;
+  return fundingModeMatches(cls, rec) ? null : { reason: 'fundmode', recorded: rec?.mode ?? null };
+}
+
 /**
  * P9: the reason a stuck paid row is held ON PURPOSE by a later instruct gate,
  * or null. Not real money -> null with no further read (a 'test' row makes no
@@ -72,7 +95,9 @@ export type InstructHeldReason = 'mockfund' | 'fundmode' | 'travelrule';
 export async function instructHeldOnPurpose(db: DbOrTx, t: Transfer): Promise<InstructHeldReason | null> {
   try {
     if (!(await realMoneyFor(db, t))) return null;
-    // slot: funding_mode (G14; T14, P12/P17)
+    // funding_mode (G14; T14, P12/P17): the same predicate as the worker.
+    const f = await fundingGateRefusal(db, t);
+    if (f) return f.reason;
     // slot: travel_rule (G16; T23, P22)
     return null;
   } catch (err) {

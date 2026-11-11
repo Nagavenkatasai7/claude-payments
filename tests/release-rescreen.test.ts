@@ -83,6 +83,17 @@ async function rail(partnerId: string, providerType: string) {
   });
 }
 
+/**
+ * Fix pack 5 T14 (P8 G14): a row with a 'pi_' fundingRef stands for a Stripe
+ * charge. Stamp funding_provider 'stripe' (a NULL provider with a ref reads as
+ * a mock charge, which G14 and the sweeps never instruct) and record the
+ * owner's funding mode 'partner_psp' so the class matches.
+ */
+async function stripeFunded(id: string) {
+  await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe' WHERE id = ${id}`);
+  await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
+}
+
 function base(o: Partial<Transfer> & { id: string }): Transfer {
   return {
     phone: SENDER_PHONE, amountUsd: 1500, feeUsd: 5, totalChargeUsd: 1505,
@@ -584,6 +595,8 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
       paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
     });
     await store.saveTransfer(t);
+    // Fix pack 5 T14 (G14): a 'pi_' ref is a Stripe charge; a NULL provider with a ref reads as mock.
+    await stripeFunded(t.id);
     await seedLiveEvidence(
       db,
       { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
@@ -674,6 +687,7 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
       paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
     });
     await store.saveTransfer(t);
+    await stripeFunded(t.id); // fix pack 5 T14 (G14): a 'pi_' ref is a Stripe charge
     await seedLiveEvidence(
       db,
       { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },

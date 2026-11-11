@@ -80,6 +80,20 @@ describe('updateLiveControlsKey', () => {
     expect(row.licence).toBe('"L-1"');
   });
 
+  // Fix pack 5 T14 (P17): fundingMode is a LIVE_CONTROLS_KEYS entry now.
+  it('updateLiveControlsKey writes fundingMode (jsonb_set of that key only)', async () => {
+    await setRaw(db, 'acme', '{"zeta": 1, "complianceUsers": ["a"]}');
+    const rec = { mode: 'partner_psp', setBy: 'ops-admin', setAt: new Date().toISOString() };
+    const stop = captureQueries();
+    const r = await updateLiveControlsKey(pid('acme'), 'fundingMode', rec, db);
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    expect(r).toEqual({ found: true, previousRaw: undefined });
+    expect(qs.some((q) => q.startsWith('update') && q.includes('jsonb_set'))).toBe(true);
+    const raw = JSON.parse((await rawColumn(db, 'acme')).raw) as Record<string, unknown>;
+    expect(raw).toEqual({ zeta: 1, complianceUsers: ['a'], fundingMode: rec });
+    expect((await createPartnerRepo(db).getPartner(pid('acme')))?.liveControls?.fundingMode).toEqual(rec);
+  });
+
   it('the function form receives the RAW sub-value', async () => {
     await setRaw(db, 'acme', '{"complianceUsers": ["Not Valid", "a"]}');
     const seen: unknown[] = [];
@@ -117,7 +131,7 @@ describe('updateLiveControlsKey', () => {
     await expect(updateLiveControlsKey(pid('acme'), 'complianceUsers', undefined, db)).rejects.toBeInstanceOf(TypeError);
     await expect(updateLiveControlsKey(pid('acme'), 'complianceUsers', () => undefined, db)).rejects.toBeInstanceOf(TypeError);
     await expect(
-      updateLiveControlsKey(pid('acme'), 'fundingMode' as LiveControlsKey, { mode: 'x' }, db),
+      updateLiveControlsKey(pid('acme'), 'licence' as LiveControlsKey, { mode: 'x' }, db),
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
       updateLiveControlsKey(pid('acme'), "posture'}, '{}') --" as LiveControlsKey, {}, db),

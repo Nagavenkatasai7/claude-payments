@@ -3,6 +3,7 @@ import {
   EMPTY_LIVE_CONTROLS,
   LIVE_CAPABILITIES,
   LIVE_CONTROLS_KEYS,
+  parseFundingModeRecord,
   parseLiveControls,
   postureSigned,
   type LiveControls,
@@ -177,12 +178,40 @@ describe('parseLiveControls: keys', () => {
     expect(parseLiveControls({ complianceUsers: ['ok.user_1-x'] }).complianceUsers).toEqual(['ok.user_1-x']);
   });
 
-  it('reserved keys fundingMode, licence, retentionYears are copied, never validated', () => {
-    const lc = parseLiveControls({ fundingMode: { anything: [1, 2] }, licence: 'x'.repeat(500), retentionYears: -3 });
-    expect(lc.fundingMode).toEqual({ anything: [1, 2] });
+  it('reserved keys licence, retentionYears are copied, never validated', () => {
+    const lc = parseLiveControls({ licence: 'x'.repeat(500), retentionYears: -3 });
     expect(lc.licence).toBe('x'.repeat(500));
     expect(lc.retentionYears).toBe(-3);
+    expect('licence' in parseLiveControls({})).toBe(false);
     expect('fundingMode' in parseLiveControls({})).toBe(false);
+  });
+
+  // Fix pack 5 T14 (P17): fundingMode is a parsed key (no longer copied as stored).
+  it('fundingMode parses { mode, setBy, setAt }; a bad mode, a missing field, an unparseable setAt or a non-object reads as absent; the other keys survive', () => {
+    const good = { mode: 'partner_collected', setBy: 'ops', setAt: iso() };
+    expect(parseLiveControls({ fundingMode: good }).fundingMode).toEqual(good);
+    const psp = { mode: 'partner_psp', setBy: 'ops', setAt: iso() };
+    expect(parseLiveControls({ fundingMode: psp }).fundingMode).toEqual(psp);
+    expect(parseFundingModeRecord(good)).toEqual(good);
+    for (const bad of [
+      { ...good, mode: 'mock' },
+      { ...good, mode: 'partner_pull' },
+      { mode: 'partner_collected', setBy: 'ops' },
+      { mode: 'partner_collected', setAt: iso() },
+      { ...good, setBy: '' },
+      { ...good, setAt: 'not a date' },
+      'partner_collected',
+      ['partner_collected'],
+      null,
+      42,
+      { anything: [1, 2] },
+    ]) {
+      const lc = parseLiveControls({ fundingMode: bad, complianceUsers: ['a'], contract: fullRecord().contract });
+      expect('fundingMode' in lc).toBe(false);
+      expect(lc.complianceUsers).toEqual(['a']);
+      expect(lc.contract).toBeDefined();
+      expect(parseFundingModeRecord(bad)).toBeUndefined();
+    }
   });
 
   it('unknown top-level keys are not copied', () => {
@@ -200,7 +229,7 @@ describe('postureSigned and the pinned lists', () => {
 
   it('LIVE_CAPABILITIES and LIVE_CONTROLS_KEYS pinned', () => {
     expect(LIVE_CAPABILITIES).toEqual(['b2b', 'usdc', 'telegram', 'mcp', 'schedules']);
-    expect(LIVE_CONTROLS_KEYS).toEqual(['posture', 'certification', 'contract', 'optIns', 'complianceUsers']);
+    expect(LIVE_CONTROLS_KEYS).toEqual(['posture', 'certification', 'contract', 'optIns', 'complianceUsers', 'fundingMode']);
   });
 });
 
@@ -224,6 +253,7 @@ describe('parseLiveControls never throws', () => {
     const lc = parseLiveControls(cyclic);
     expect(lc.posture).toBeUndefined();
     expect(lc.complianceUsers).toEqual(['a']);
+    expect(lc.fundingMode).toBeUndefined();
 
     const throwingOpt = { optIns: {} };
     Object.defineProperty(throwingOpt.optIns, 'b2b', {

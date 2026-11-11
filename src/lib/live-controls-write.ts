@@ -66,6 +66,7 @@ const LABELS: Record<LiveNoticeKey, string> = {
   contract: 'Your live contract record',
   certification: 'Your live certification',
   optIns: 'A live feature approval',
+  fundingMode: 'Your funding mode',
   providerBlock: 'Your provider disclosure',
 };
 

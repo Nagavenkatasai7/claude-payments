@@ -340,8 +340,36 @@ describe('adjacent pairs: a row that fails both steps gets the earlier outcome',
     expect(await hasPrefix('railfail:')).toBe(false);
   });
 
-  it.todo('sender_hold + funding_mode (T14)');
-  it.todo('funding_mode + build (T14)');
+  it('sender_hold + funding_mode: an active sender hold and a mock-class row -> instructsenderhold:<id> only, InstructNotLiveError', async () => {
+    await saveRail('http');
+    await certifyPartnerForTest(db, 'acme');
+    const t = transferFixture({ fundingRef: `mockfund-${ID}` });
+    await store.saveTransfer(t);
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'mock' WHERE id = ${ID}`);
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await seedSender(db, { partnerId: 'acme', phone: '15551230000' });
+    await db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await enqueueInstruct();
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(await rowState()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'Sender under an active screening hold.' });
+    expect(await alertKeys()).toEqual([`instructsenderhold:${ID}`]);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('funding_mode + build: a mock-class row with a destination the builder rejects -> done + mockfund:<id>, not dead', async () => {
+    await saveRail('http');
+    await certifyPartnerForTest(db, 'acme');
+    const t = transferFixture({ payoutDestination: '****9012', fundingRef: `mockfund-${ID}` });
+    await store.saveTransfer(t);
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'mock' WHERE id = ${ID}`);
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await enqueueInstruct();
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, dead: 0, failed: 0 });
+    expect(await rowState()).toMatchObject({ status: 'done', last_error: null });
+    expect(await alertKeys()).toEqual([`mockfund:${ID}`]);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
   it.todo('build + travel_rule (T23)');
   it.todo('travel_rule + record (T23)');
   it('record + send: the record append fails AND the rail would 500 -> the record outcome (no fetch, RailRecordError, no railfail:)', async () => {

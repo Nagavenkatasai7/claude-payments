@@ -400,5 +400,9 @@ describe('sanctions screening spec says what pack 5 does', () => {
     expect([...list.matchAll(/`([a-z_]+)`/g)].map((m) => m[1])).toEqual([...INSTRUCT_GATE_ORDER]);
     expect(r.indexOf('In order (fix pack 3)')).toBeLessThan(at);
     expect(rest).toContain("A row that fails two steps gets the earlier step's outcome.");
+    // Fix pack 5 T14 (P8 G14, P9): the funding_mode step, its alerts and its exit.
+    for (const k of ['`mockfund:<id>`', '`fundmode:<id>`', '`mockfund:stuck:<id>`', '`fundmode:stuck:<id>`', '`nofunds-<id>`', 'Issue refund']) {
+      expect(rest, k).toContain(k);
+    }
   });
 });

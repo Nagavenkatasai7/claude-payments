@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { seedRealMoneyRail } from './helpers-live';
+import { certifyPartnerForTest, seedRealMoneyRail } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
@@ -26,6 +26,24 @@ vi.mock('@/lib/live-gate', async (orig) => {
       liveGateSeam.calls += 1;
       if (liveGateSeam.throws) throw new TypeError('rail read exploded');
       return real.realMoneyFor(...a);
+    },
+  };
+});
+// Fix pack 5 T14: a switch that makes the OWNER partner read throw (the G14 read).
+const partnerSeam = vi.hoisted(() => ({ throws: false }));
+vi.mock('@/db/repos/partner-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/partner-repo')>();
+  return {
+    ...real,
+    createPartnerRepo: (dbx: Parameters<typeof real.createPartnerRepo>[0]) => {
+      const r = real.createPartnerRepo(dbx);
+      return {
+        ...r,
+        getPartner: async (id: string) => {
+          if (partnerSeam.throws) throw new RangeError('partner read exploded');
+          return r.getPartner(id);
+        },
+      };
     },
   };
 });
@@ -81,12 +99,13 @@ const instructRow = async (id: string, status: string) => {
 beforeEach(async () => {
   liveGateSeam.throws = false;
   liveGateSeam.calls = 0;
+  partnerSeam.throws = false;
   logSpy.warn.mockReset();
   db = await freshDb();
   await seedPartner(db, 'acme');
 });
 
-describe('instructHeldOnPurpose (P9, slots empty)', () => {
+describe('instructHeldOnPurpose (P9; funding_mode slot filled by T14)', () => {
   it("a 'test' row -> null, with no rail read", async () => {
     await seedRealMoneyRail(db, 'acme');
     const stop = captureQueries();
@@ -96,10 +115,47 @@ describe('instructHeldOnPurpose (P9, slots empty)', () => {
     expect(q.filter((x) => /partner_integrations|from "partners"/i.test(x.sql))).toEqual([]);
   });
 
-  it('a real-money (http) row -> null (the funding_mode and travel_rule slots are empty)', async () => {
+  it('a real-money (http) partner_collected row whose owner records partner_collected -> null (a match)', async () => {
     await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
     expect(await instructHeldOnPurpose(db, fixture())).toBeNull();
     expect(liveGateSeam.calls).toBe(1);
+  });
+
+  // Fix pack 5 T14 (P9 slot, G14 predicates).
+  it("a real-money mock row (funding_provider 'mock', or NULL with a fundingRef) -> 'mockfund'", async () => {
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    expect(await instructHeldOnPurpose(db, fixture({ fundingProvider: 'mock', fundingRef: `mockfund-${ID}` }))).toBe('mockfund');
+    expect(await instructHeldOnPurpose(db, fixture({ fundingRef: `mockfund-${ID}` }))).toBe('mockfund');
+  });
+
+  it("a real-money mismatch -> 'fundmode' (no record; a Stripe row on a partner_collected owner)", async () => {
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme', { fundingMode: null });
+    expect(await instructHeldOnPurpose(db, fixture())).toBe('fundmode');
+    await certifyPartnerForTest(db, 'acme');
+    expect(await instructHeldOnPurpose(db, fixture({ fundingProvider: 'stripe', fundingRef: 'pi_1' }))).toBe('fundmode');
+    await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
+    expect(await instructHeldOnPurpose(db, fixture({ fundingProvider: 'stripe', fundingRef: 'pi_1' }))).toBeNull();
+  });
+
+  it('any simulator row (mock-funded or mismatched) -> null', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    expect(await instructHeldOnPurpose(db, fixture({ fundingProvider: 'mock', fundingRef: `mockfund-${ID}` }))).toBeNull();
+    expect(await instructHeldOnPurpose(db, fixture())).toBeNull();
+  });
+
+  it('the owner read throws -> null, logged by the error NAME only', async () => {
+    await seedRealMoneyRail(db, 'acme');
+    partnerSeam.throws = true;
+    await expect(instructHeldOnPurpose(db, fixture())).resolves.toBeNull();
+    expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'RangeError', { transferId: ID });
+    expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('exploded');
   });
 
   it('a simulator row -> null', async () => {

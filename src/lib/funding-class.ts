@@ -1,5 +1,6 @@
 import { isPartnerPulled } from './funding-method';
 import { selectFundingProvider } from './providers/funding-provider';
+import type { FundingModeRecord } from './live-controls';
 import type { PartnerFundingConfig } from './partner-integrations';
 import type { Transfer } from './types';
 
@@ -34,6 +35,20 @@ export function fundingClassOf(
   if (t.fundingProvider === 'mock') return 'mock';
   if (t.fundingRef) return 'mock';
   return 'partner_collected';
+}
+
+/**
+ * Fix pack 5 T14 (P17 match rule, G14b): does this funding class match the
+ * OWNER's recorded funding mode? partner_pull always matches (the partner's
+ * rail pulls on the instruction); stripe needs 'partner_psp';
+ * partner_collected needs 'partner_collected'; no record mismatches every
+ * other class. sandbox and mock never reach it (G2 / G14a decide them first).
+ */
+export function fundingModeMatches(cls: FundingClass, rec: FundingModeRecord | undefined): boolean {
+  if (cls === 'partner_pull') return true;
+  if (cls === 'stripe') return rec?.mode === 'partner_psp';
+  if (cls === 'partner_collected') return rec?.mode === 'partner_collected';
+  return false;
 }
 
 /**

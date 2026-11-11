@@ -115,3 +115,41 @@ describe('approvedDisclosureConfig / approveDisclosureForTest (pack 4)', () => {
     expect(p?.supportConfig).toBeUndefined();
   });
 });
+
+// Fix pack 5 T14 (P32): the owner's funding-mode record and a paid real-money row.
+describe('certifyPartnerForTest fundingMode / paidRealMoneyTransfer (pack 5)', () => {
+  it("writes fundingMode partner_collected by default; fundingMode: 'partner_psp' writes that; fundingMode: null writes none", async () => {
+    await certifyPartnerForTest(db, pid('acme'));
+    const a = (await createPartnerRepo(db).getPartner(pid('acme')))?.liveControls?.fundingMode;
+    expect(a).toMatchObject({ mode: 'partner_collected', setBy: 'test-admin' });
+    expect(Date.parse(a?.setAt ?? '')).toBeLessThan(Date.now());
+    await certifyPartnerForTest(db, pid('acme'), { fundingMode: 'partner_psp' });
+    expect((await createPartnerRepo(db).getPartner(pid('acme')))?.liveControls?.fundingMode?.mode).toBe('partner_psp');
+    await certifyPartnerForTest(db, pid('acme'), { fundingMode: null });
+    const p = await createPartnerRepo(db).getPartner(pid('acme'));
+    expect(p?.liveControls?.fundingMode).toBeUndefined();
+    expect(isLiveCertified(p)).toBe(true);
+  });
+
+  it('paidRealMoneyTransfer: a paid cleared live b2c row, its sender and fresh live evidence; fundingProvider by raw UPDATE', async () => {
+    const { paidRealMoneyTransfer } = await import('./helpers-live');
+    const { createStore } = await import('@/lib/store');
+    const { fakeRedis } = await import('./helpers');
+    const { createCustomerStore } = await import('@/lib/customer-store');
+    const { listScreenEvidence } = await import('@/lib/sanctions/evidence-read');
+    const t = await paidRealMoneyTransfer(db, { id: 'prm_1', fundingProvider: 'mock', fundingRef: 'mockfund-prm_1', originator: { address: true, dob: true } });
+    const store = createStore(fakeRedis(), db);
+    const row = await store.getTransfer('prm_1');
+    expect(row).toMatchObject({ status: 'paid', complianceStatus: 'cleared', partnerId: 'acme', fundingProvider: 'mock', fundingRef: 'mockfund-prm_1' });
+    expect(row?.environment ?? 'live').toBe('live');
+    expect(Date.now() - Date.parse(row?.paidAt ?? '')).toBeGreaterThan(15 * 60_000);
+    const c = await createCustomerStore(db, store).getCustomer(t.partnerId, t.phone);
+    expect(c?.fullName).toBeTruthy();
+    expect(c?.residentialAddress).toBeTruthy();
+    expect(c?.dateOfBirth).toBeTruthy();
+    const ev = await listScreenEvidence(db, row!, new Date());
+    expect(ev.at(-1)).toMatchObject({ listFitness: 'live', decision: 'clear' });
+    const plain = await paidRealMoneyTransfer(db, { id: 'prm_2' });
+    expect((await store.getTransfer(plain.id))?.fundingProvider).toBeUndefined();
+  });
+});

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { fundingClassOf } from '@/lib/funding-class';
+import { fundingClassOf, fundingModeMatches } from '@/lib/funding-class';
+import type { FundingModeRecord } from '@/lib/live-controls';
 import type { Transfer } from '@/lib/types';
 
 // Fix pack 5 T12 (P12): how the sender's money was collected, read from
@@ -59,5 +60,26 @@ describe('fundingClassOf (fix pack 5 T12, P12)', { retry: 0 }, () => {
   it('partner_collected: no provider, no ref, no intent (a Partner API confirm)', () => {
     expect(fundingClassOf(transfer())).toBe('partner_collected');
     expect(fundingClassOf(transfer({ environment: 'live', fundingMethod: 'debit_card' }))).toBe('partner_collected');
+  });
+});
+
+// Fix pack 5 T14 (P17 match rule, G14b): the OWNER's recorded funding mode.
+describe('fundingModeMatches (T14)', () => {
+  const rec = (mode: FundingModeRecord['mode']): FundingModeRecord => ({ mode, setBy: 'ops', setAt: daysAgo(1) });
+  it('partner_pull matches any record and none', () => {
+    expect(fundingModeMatches('partner_pull', undefined)).toBe(true);
+    expect(fundingModeMatches('partner_pull', rec('partner_collected'))).toBe(true);
+    expect(fundingModeMatches('partner_pull', rec('partner_psp'))).toBe(true);
+  });
+  it('stripe needs partner_psp', () => {
+    expect(fundingModeMatches('stripe', rec('partner_psp'))).toBe(true);
+    expect(fundingModeMatches('stripe', rec('partner_collected'))).toBe(false);
+  });
+  it('partner_collected needs partner_collected', () => {
+    expect(fundingModeMatches('partner_collected', rec('partner_collected'))).toBe(true);
+    expect(fundingModeMatches('partner_collected', rec('partner_psp'))).toBe(false);
+  });
+  it('a missing record mismatches every non-pull class', () => {
+    for (const c of ['stripe', 'partner_collected', 'mock', 'sandbox'] as const) expect(fundingModeMatches(c, undefined)).toBe(false);
   });
 });
