@@ -3,10 +3,10 @@
 // loadLiveReadinessFacts (src/db/repos/live-certification-facts.ts), which a
 // caller loads on the ROOT handle before any transaction.
 //
-// Twelve lines in a fixed order. Seven are built (six in pack 3, provider_block
-// in pack 4 T6); the other five are 'not_built' and always fail until their
-// pack ships (NOT_BUILT_LINES: PR5, PR8, PR9), so `ok` is false for EVERY
-// partner until PR9 (pinned in tests/live-certification.test.ts).
+// Twelve lines in a fixed order. Eight are built (six in pack 3, provider_block
+// in pack 4 T6, funding in pack 5 T17); the other four are 'not_built' and
+// always fail until their pack ships (NOT_BUILT_LINES: PR8, PR9), so `ok` is
+// false for EVERY partner until PR9 (pinned in tests/live-certification.test.ts).
 
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { EMPTY_LIVE_CONTROLS, postureSigned, type KycDecider } from './live-controls';
@@ -18,7 +18,7 @@ export const LIVE_READINESS_LINE_IDS = ['go_live', 'sanctions_list', 'posture', 
   'provider_block', 'funding', 'licence_matrix', 'corridor_register', 'staff_mfa', 'dual_control'] as const;
 export type LiveReadinessLineId = (typeof LIVE_READINESS_LINE_IDS)[number];
 
-export const NOT_BUILT_LINES = { funding: 'PR5', licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9' } as const;
+export const NOT_BUILT_LINES = { licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9' } as const;
 
 export interface LiveReadinessFacts {
   goLiveApproved: boolean;
@@ -73,6 +73,8 @@ export function liveReadiness(
     own_whatsapp: f.ownWhatsapp,
     contract: lc.contract !== undefined,
     provider_block: providerBlockReady(p),
+    // Fix pack 5 T17 (P17): a valid fundingMode record (the parser already dropped a malformed one).
+    funding: lc.fundingMode !== undefined,
   };
 
   const lines: LiveReadinessLine[] = LIVE_READINESS_LINE_IDS.map((id) => {

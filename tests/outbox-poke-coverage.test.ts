@@ -58,7 +58,7 @@ const HELPERS: Record<string, string[]> = {
   // transaction; their callers (the partner / platform live-controls actions) poke.
   // Fix pack 4 T5 (C11): notifyLiveChange (the alert + email half, no audit row) is also called by
   // partner-support-settings.ts setDisclosure, listed below.
-  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange'],
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange', 'writeFundingMode'],
   // Fix pack 4 T5 (C11): no .enqueue( of its own; setDisclosure calls notifyLiveChange
   // (live-controls-write.ts) when a platform save clears a certified partner's provider
   // approval. Its two callers (the partner settings and the admin partner disclosure actions) poke.

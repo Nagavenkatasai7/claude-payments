@@ -27,7 +27,7 @@ import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { liveReadiness, type LiveReadinessFacts } from '@/lib/live-certification';
 import { LIVE_CAPABILITIES, type LiveCapability } from '@/lib/live-controls';
-import { isCalendarDate, writeCertification, writeContract, writeOptIn, type LiveWriteResult } from '@/lib/live-controls-write';
+import { isCalendarDate, writeCertification, writeContract, writeFundingMode, writeOptIn, type LiveWriteResult } from '@/lib/live-controls-write';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { gateStaffStepUp } from '@/lib/partner-step-up-gate';
@@ -126,9 +126,9 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
 // (contract 8). Inside the transaction the partner row is locked, re-read, and readiness is
 // recomputed on the LOCKED row, so drift since the facts were read (posture, contract, status,
 // kycMode, a compliance user taken off the list) refuses. Nothing in the transaction touches
-// getDb(), getAuthStore(), Redis or the OFAC source. Five readiness lines are not built until
-// PR5/PR8/PR9 (pack 4 built provider_block), so certify always answers "not ready" (pinned in
-// tests/admin-live-actions.test.ts).
+// getDb(), getAuthStore(), Redis or the OFAC source. Four readiness lines are not built until
+// PR8/PR9 (pack 4 built provider_block, pack 5 funding), so certify always answers "not ready"
+// (pinned in tests/admin-live-actions.test.ts).
 
 export type LiveActionResult = { ok: true } | { ok: false; error: string };
 
@@ -142,6 +142,7 @@ const CODE_COPY: Record<Exclude<LiveWriteResult, { ok: true }>['code'], string> 
   not_certified: 'This partner is not certified.',
   bad_input: 'Check the fields and try again.',
   kyc_decider_mismatch: 'Check the fields and try again.',
+  psp_unavailable: 'Partner-run card payments need Stripe funding switched on and a restricted Stripe key stored first.',
 };
 const refused = (error: string): LiveActionResult => ({ ok: false, error });
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
@@ -245,6 +246,23 @@ export async function recordContractAction(partnerId: string, formData: FormData
   if (stepUp) return stepUp;
 
   return commit(id, 'admin.live.contract', (tx) => writeContract(tx, id, { username: staff.username, scope: 'platform' }, { ref, signedOn }));
+}
+
+// Fix pack 5 T17 (P17): how the partner collects its senders' money. Platform only, and a step-up
+// on EVERY save (the reserved target 'funding.save', always: true). The writer refuses partner_psp
+// unless Stripe funding is on and a restricted key is stored (psp_unavailable).
+export async function setFundingModeAction(partnerId: string, formData: FormData): Promise<LiveActionResult | StepUpRequired> {
+  await refuseOnSiteHost();
+  const g = await gateLive(partnerId);
+  if ('ok' in g) return g;
+  const { staff, id } = g;
+  const mode = formData.get('mode');
+  if (mode !== 'partner_collected' && mode !== 'partner_psp') return refused('Choose a funding mode.');
+
+  const stepUp = await gateStaffStepUp(staff, formData, 'funding.save', { always: true });
+  if (stepUp) return stepUp;
+
+  return commit(id, 'admin.live.funding_mode', (tx) => writeFundingMode(tx, id, { username: staff.username, scope: 'platform' }, { mode }));
 }
 
 export async function recordCounselAction(partnerId: string, formData: FormData): Promise<LiveActionResult | StepUpRequired> {

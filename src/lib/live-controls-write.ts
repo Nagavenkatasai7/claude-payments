@@ -4,19 +4,25 @@ import type { DbOrTx } from '@/db/client';
 import { partners } from '@/db/schema';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo, updateLiveControlsKey } from '@/db/repos/partner-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
+import { env } from './env';
 import type { LiveReadiness } from './live-certification';
 import {
   LIVE_CAPABILITIES,
+  parseFundingModeRecord,
   type CertificationRecord,
   type ContractRecord,
+  type FundingMode,
+  type FundingModeRecord,
   type KycDecider,
   type LiveCapability,
   type LiveControlsKey,
   type PostureRecord,
 } from './live-controls';
 import { hasStandingCertification, isLiveCertified } from './live-gate';
+import { isRestrictedStripeKey } from './providers/funding-provider';
 import { sanctionsNoticeAddress } from './sanctions/notices';
 import type { PartnerId, PartnerSupportConfig } from './types';
 
@@ -51,7 +57,7 @@ export interface LiveActor {
 
 export type LiveWriteResult =
   | { ok: true }
-  | { ok: false; code: 'not_found' | 'kyc_decider_mismatch' | 'not_ready' | 'not_certified' | 'bad_input' };
+  | { ok: false; code: 'not_found' | 'kyc_decider_mismatch' | 'not_ready' | 'not_certified' | 'bad_input' | 'psp_unavailable' };
 
 /**
  * Fix pack 4 T5 (C11): the keys a live-change notice can name: the live_controls keys plus
@@ -415,5 +421,43 @@ export async function writeOptIn(
           word: c.on ? 'approved' : 'approval withdrawn',
         },
   );
+  return { ok: true };
+}
+
+const FUNDING_MODES: ReadonlySet<unknown> = new Set<FundingMode>(['partner_collected', 'partner_psp']);
+
+/**
+ * Fix pack 5 T17 (P17, P29): record how the partner collects its senders' money on real money.
+ * Platform only (the one caller is setFundingModeAction; partners never write it); partner_psp
+ * needs the flag and a restricted key: Stripe funding switched on (env.stripeFundingEnabled) AND
+ * the partner's stored funding config holds an rk_ key (isRestrictedStripeKey), else
+ * psp_unavailable with nothing written. A funding-config decrypt failure throws (the action's
+ * commit logs its name). Audit meta { mode, previous, actorScope }: previous is the STORED mode
+ * (null when absent or malformed), never the record. The default tenant is refused (not_found).
+ */
+export async function writeFundingMode(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  actor: LiveActor,
+  i: { mode: unknown },
+): Promise<LiveWriteResult> {
+  if (typeof i.mode !== 'string' || !FUNDING_MODES.has(i.mode)) return { ok: false, code: 'bad_input' };
+  const mode = i.mode as FundingMode;
+  if (partnerId === DEFAULT_PARTNER_ID) return { ok: false, code: 'not_found' };
+  if (mode === 'partner_psp') {
+    if (!env.stripeFundingEnabled) return { ok: false, code: 'psp_unavailable' };
+    const cfg = await createIntegrationsRepo(tx).getFundingConfig(partnerId);
+    if (!(cfg?.providerType === 'stripe' && isRestrictedStripeKey(cfg.secretKey ?? ''))) return { ok: false, code: 'psp_unavailable' };
+  }
+  const record: FundingModeRecord = { mode, setBy: actor.username, setAt: new Date().toISOString() };
+  const w = await updateLiveControlsKey(partnerId, 'fundingMode', record, tx);
+  if (!w.found) return { ok: false, code: 'not_found' };
+  const previous = parseFundingModeRecord(w.previousRaw)?.mode ?? null;
+  await recordLiveChange(tx, partnerId, actor, {
+    key: 'fundingMode',
+    action: 'partner.live.funding_mode.set',
+    meta: { mode, previous },
+    word: `set to ${mode}`,
+  });
   return { ok: true };
 }

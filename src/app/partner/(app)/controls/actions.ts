@@ -92,6 +92,7 @@ const OPTIN_REFUSAL: Record<Exclude<LiveWriteResult, { ok: true }>['code'], Mess
   bad_input: 'partner.controls.invalid',
   not_found: 'partner.controls.failed',
   kyc_decider_mismatch: 'partner.controls.failed',
+  psp_unavailable: 'partner.controls.failed', // fix pack 5 T17: writeFundingMode only (platform), never from here
 };
 
 export async function approveCapabilityAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {

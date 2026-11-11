@@ -1,8 +1,8 @@
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { LIVE_CAPABILITIES, type LiveCapability, type LiveControls } from '@/lib/live-controls';
+import { LIVE_CAPABILITIES, type FundingMode, type LiveCapability, type LiveControls } from '@/lib/live-controls';
 import type { LiveReadiness, LiveReadinessLineId } from '@/lib/live-certification';
-import { CertifyForm, ContractForm, CounselForm, RevokeForm, type LiveAction } from './live-certification-forms';
+import { CertifyForm, ContractForm, CounselForm, FundingModeForm, RevokeForm, type LiveAction } from './live-certification-forms';
 
 // Fix pack 3 T10 (R15, R13; contract 12): the platform live-money certification card, under the
 // GoLiveCard on the admin partner page (platform admins only, never the 'default' tenant). The
@@ -36,6 +36,11 @@ const CAPABILITY_LABELS: Record<LiveCapability, string> = {
   schedules: 'Repeat payments',
 };
 
+const FUNDING_MODE_LABELS: Record<FundingMode, string> = {
+  partner_collected: 'Partner collects',
+  partner_psp: "Partner's own Stripe account",
+};
+
 const when = (iso: string | undefined): string => {
   const t = iso === undefined ? Number.NaN : Date.parse(iso);
   return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
@@ -63,6 +68,7 @@ export function LiveCertificationCard({
   revokeAction,
   contractAction,
   counselAction,
+  fundingModeAction,
 }: {
   partnerId: string;
   liveControls: LiveControls;
@@ -71,10 +77,12 @@ export function LiveCertificationCard({
   revokeAction: LiveAction;
   contractAction: LiveAction;
   counselAction: LiveAction;
+  fundingModeAction: LiveAction;
 }) {
   const state = liveCertState(liveControls);
   const c = liveControls.certification;
   const contract = liveControls.contract;
+  const funding = liveControls.fundingMode;
   const badgeClass =
     state === 'Certified' ? 'border-success/50 text-success' : state === 'Revoked' ? 'border-destructive/50 text-destructive' : 'text-muted-foreground';
 
@@ -135,6 +143,15 @@ export function LiveCertificationCard({
         </div>
 
         <div className="flex flex-col gap-1">
+          <div className="font-medium">Funding</div>
+          <p data-testid="live-funding-mode" className={funding ? undefined : 'text-muted-foreground'}>
+            {funding
+              ? `Funding mode: ${FUNDING_MODE_LABELS[funding.mode]}; set by ${funding.setBy} on ${when(funding.setAt)}.`
+              : 'Funding mode: none'}
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1">
           <div className="font-medium">Live features</div>
           <table className="text-left">
             <thead>
@@ -165,6 +182,7 @@ export function LiveCertificationCard({
           <CertifyForm partnerId={partnerId} action={certifyAction} />
         )}
         <ContractForm partnerId={partnerId} action={contractAction} />
+        <FundingModeForm partnerId={partnerId} action={fundingModeAction} />
         <CounselForm partnerId={partnerId} action={counselAction} />
       </CardContent>
     </Card>

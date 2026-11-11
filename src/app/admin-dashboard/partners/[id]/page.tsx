@@ -57,7 +57,7 @@ import { GoLiveCard, goLiveFlash, type GoLiveChecklistView } from '../go-live-ca
 import { LiveCertificationCard } from '../live-certification-card';
 import { DisclosureApprovalState } from '../disclosure-approval-state';
 import { isLiveCertified } from '@/lib/live-gate';
-import { certifyLiveAction, recordContractAction, recordCounselAction, revokeLiveAction } from '../go-live-actions';
+import { certifyLiveAction, recordContractAction, recordCounselAction, revokeLiveAction, setFundingModeAction } from '../go-live-actions';
 import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { liveReadiness, type LiveReadiness } from '@/lib/live-certification';
 import { EMPTY_LIVE_CONTROLS, postureSigned } from '@/lib/live-controls';
@@ -377,6 +377,7 @@ export default async function PartnerDetailPage({
                 revokeAction={revokeLiveAction.bind(null, partner.id)}
                 contractAction={recordContractAction.bind(null, partner.id)}
                 counselAction={recordCounselAction.bind(null, partner.id)}
+                fundingModeAction={setFundingModeAction.bind(null, partner.id)}
               />
             )}
             {health && (
