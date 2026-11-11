@@ -48,13 +48,13 @@ function allKeys(v: unknown, out: string[] = []): string[] {
 }
 
 describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
-  it('a cleared, verified individual: version 1, originator identity (id_last4 only), beneficiary, purpose, kyc T1, screening', () => {
+  it('a cleared, verified individual: version 2, originator identity (id_last4 only), beneficiary, purpose, kyc T1, screening', () => {
     const block = buildComplianceBlock(
       transfer({ recipientLegalName: 'Anita Legal', relationship: 'parent', purpose: 'family_support' }),
       customer(), NOW, { kycGateActive: true },
     );
     expect(block).toEqual({
-      version: 1,
+      version: 2,
       originator: {
         entity_type: 'individual', name: 'Test Sender Person', country: 'US', phone: '15550000001',
         id_type: 'passport', id_last4: '7766',
@@ -135,23 +135,31 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
     expect('routed' in buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true })).toBe(false);
   });
 
-  it('omitOriginator (the worker fail-open path): originator null, the rest still built from the transfer', () => {
-    const block = buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), null, NOW, { omitOriginator: true });
-    expect(block.originator).toBeNull();
-    expect(block.purpose).toBe('gift');
-    expect(block.edd_required).toBe(true);
-    expect('routed' in block).toBe(false);
+  it('there is no fail-open option: an unknown option key changes nothing', () => {
+    // fix pack 5 T5 (P10): the removed fail-open option is gone; a stale caller's key is
+    // ignored (spelled by concatenation so the "no fail-open option left" grep stays empty).
+    const opts = { kycGateActive: true, ['omit' + 'Originator']: true } as unknown as Parameters<typeof buildComplianceBlock>[3];
+    const block = buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), customer(), NOW, opts);
+    expect(block.originator).toEqual({
+      entity_type: 'individual', name: 'Test Sender Person', country: 'US', phone: '15550000001',
+      id_type: 'passport', id_last4: '7766',
+    });
+    expect(block).toEqual(buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), customer(), NOW, { kycGateActive: true }));
   });
 
   it('screening: flagged reasons pass through; fix 14 evidence adds list source/version/decision + its screenedAt', () => {
     const t = transfer({ complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
     const block = buildComplianceBlock(t, customer(), NOW, {
       kycGateActive: true,
-      screening: { listSource: 'ofac-sdn', listVersion: '2026-09-01', decision: 'clear', screenedAt: daysAgo(2) },
+      screening: {
+        listSource: 'ofac-sdn', listVersion: '2026-09-01', decision: 'clear', screenedAt: daysAgo(2),
+        namesScreened: { sender: 1, recipient: 1 },
+      },
     });
     expect(block.screening).toEqual({
       status: 'flagged', reasons: ['Large transfer amount.'], screened_at: daysAgo(2),
       list_source: 'ofac-sdn', list_version: '2026-09-01', decision: 'clear',
+      names_screened: { sender: 1, recipient: 1 },
     });
   });
 

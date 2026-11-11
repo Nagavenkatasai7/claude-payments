@@ -142,7 +142,7 @@ describe('rail loop end to end (fix 29)', () => {
     expect(calls[0].headers['x-signature']).toMatch(/^[0-9a-f]{64}$/);
     expect((await createStore(redis, db).getTransfer('e2e_t1'))!.paymentProviderRef).toBe('simrail-e2e_t1');
     // fix 31: the simulator accepted the instruction WITH the additive compliance block.
-    expect((JSON.parse(calls[0].body) as { compliance?: { version?: number } }).compliance?.version).toBe(1);
+    expect((JSON.parse(calls[0].body) as { compliance?: { version?: number } }).compliance?.version).toBe(2);
 
     await releaseDelayedCallback();
     await drainOnce(deps(), 'w2');

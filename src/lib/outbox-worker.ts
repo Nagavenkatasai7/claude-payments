@@ -1032,8 +1032,10 @@ async function handle(
         }
       }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
-      // key, so the signature below covers it. Built after the fail-closed URL
-      // check; loadComplianceBlock never throws (fail open, originator null).
+      // key, so the signature below covers it (fix 31 + fix pack 5). It fails
+      // closed (P10): loadComplianceBlock throws ComplianceBlockUnavailableError
+      // (transient) or InstructPermanentError('compliance_block'); both reach
+      // drainOnce as they are, so nothing is sent without the block.
       // Fix pack 5 T4 (P7 G15, builder half): the builder's throws are
       // ids-only codes (settlement_destination_invalid:<id>,
       // settlement_funding_invalid:<id>, http-payment-provider.ts) and a retry
@@ -1049,7 +1051,7 @@ async function handle(
       const rawBody = JSON.stringify({
         ...instruction,
         partner_id: railPartnerId,
-        ...(compliance ? { compliance } : {}),
+        compliance,
       });
       // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body);
       // the response and any thrown error pass through unchanged (webhook-delivery-log.ts).

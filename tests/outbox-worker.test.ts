@@ -52,9 +52,10 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
 });
 
 // Program-Fix 31 PR B: a pass-through customer repo whose getCustomer can be
-// made to throw, proving the compliance block fails OPEN (the instruction
-// still goes out, originator null) and never dead-letters settlement.instruct.
-const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false }));
+// made to throw. Fix pack 5 T5 (P10): the block now fails CLOSED: a
+// non-transient throw dead-letters the instruct at once, a driver-shaped
+// (transient) one is a charged retry; nothing is POSTed without the block.
+const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false, transient: false }));
 vi.mock('@/db/repos/customer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/customer-repo')>();
   return {
@@ -64,6 +65,7 @@ vi.mock('@/db/repos/customer-repo', async (orig) => {
       return {
         ...repo,
         getCustomer: async (...a: Parameters<typeof repo.getCustomer>) => {
+          if (customerRepoFault.transient) throw Object.assign(new Error('connection reset'), { code: '08006', severity: 'ERROR' });
           if (customerRepoFault.throwOnGet) throw new Error('decrypt failed for 15551230000');
           return repo.getCustomer(...a);
         },
@@ -401,6 +403,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   const SENDER_NAME = 'Test Sender Person';
   beforeEach(async () => {
     customerRepoFault.throwOnGet = false;
+    customerRepoFault.transient = false;
     await store.saveTransfer({ ...transferFixture(), recipientLegalName: 'Anita Legal', purpose: 'family_support' });
     const { createCustomerRepo } = await import('@/db/repos/customer-repo');
     // Seeded under the OWNER ('acme') with the default key provider — the
@@ -424,9 +427,10 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   });
   afterEach(() => {
     customerRepoFault.throwOnGet = false;
+    customerRepoFault.transient = false;
   });
 
-  it('the POSTed body = every legacy key unchanged + compliance v1 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
+  it('the POSTed body = every legacy key unchanged + compliance v2 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c1' }) });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
@@ -439,7 +443,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     const { compliance, ...legacy } = body;
     expect(legacy).toEqual(JSON.parse(JSON.stringify({ ...buildSettlementInstruction(decrypted!), partner_id: 'acme' })));
     expect(Object.keys(body).at(-1)).toBe('compliance');
-    expect(compliance.version).toBe(1);
+    expect(compliance.version).toBe(2);
     expect(compliance.originator).toEqual({
       entity_type: 'individual', name: SENDER_NAME, country: 'US', phone: '15551230000',
       id_type: 'passport', id_last4: '7766',
@@ -471,6 +475,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     expect(screening).toMatchObject({
       status: 'cleared', list_source: 'mock-watchlist', list_version: 'v-test', decision: 'clear',
       screened_at: '2026-06-09T00:00:00.000Z',
+      names_screened: { sender: 0, recipient: 1 },
     });
     expect(raw).not.toContain('f'.repeat(64));
     expect(raw).not.toContain('h'.repeat(64));
@@ -484,29 +489,56 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     expect(Object.keys(body.compliance.screening).sort()).toEqual(['reasons', 'screened_at', 'status']);
   });
 
-  it('FAIL-OPEN: getCustomer throws ⇒ the instruction is STILL POSTed (originator null), the row is done, a warn names the transfer id only', async () => {
+  const instructRow = async () =>
+    ((await db.execute(sql`SELECT id, status, attempts, last_error FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+      rows: Array<{ id: number; status: string; attempts: number; last_error: string | null }>;
+    }).rows[0];
+  const opsAlerts = async () =>
+    ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: { message?: string } }>;
+    }).rows;
+
+  it('FAIL CLOSED: getCustomer throws a non-transient error => NOTHING is POSTed, the row is dead at once with one dead:<id> alert that says terminal (compliance_block); the warn names the transfer id only, never the phone or the error text', async () => {
     customerRepoFault.throwOnGet = true;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c4' }) });
       await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
       const r = await drainOnce(deps(), 'w1');
-      expect(r.processed).toBe(1);
-      expect(r.failed).toBe(0);
-      expect(fetchFn).toHaveBeenCalledTimes(1);
-      const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
-      const body = JSON.parse(raw) as { reference: string; compliance: Record<string, unknown> };
-      expect(body.reference).toBe('wk_t1');
-      expect(body.compliance.version).toBe(1);
-      expect(body.compliance.originator).toBeNull();
-      expect(raw).not.toContain(SENDER_NAME);
-      const rows = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
-      expect(rows.rows[0].status).toBe('done');
-      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('instruct.compliance_block'));
+      expect(r).toMatchObject({ processed: 0, dead: 1 });
+      expect(fetchFn).not.toHaveBeenCalled();
+      // DEVIATIONS T4: markFailed keeps the attempts actually spent (1), status dead.
+      const row = await instructRow();
+      expect(row).toMatchObject({ status: 'dead', attempts: 1, last_error: 'instruct_permanent:compliance_block:wk_t1' });
+      const alerts = await opsAlerts();
+      expect(alerts.map((a) => a.dedupe_key)).toEqual([`dead:${row.id}`]);
+      const text = JSON.stringify(alerts[0].payload);
+      expect(text).toContain('terminal');
+      expect(text).toContain('compliance_block');
+      expect(text).not.toContain('15551230000');
+      expect(text).not.toContain('decrypt failed');
+      expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('instruct.compliance_block'));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('wk_t1');
       expect(lines[0]).not.toContain('15551230000');
       expect(lines[0]).not.toContain('decrypt failed');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a transient customer read error => no POST, charged retry (failed, attempts 1), no dead alert', async () => {
+    customerRepoFault.transient = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c6' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      const r = await drainOnce(deps(), 'w1');
+      expect(r).toMatchObject({ failed: 1, dead: 0 });
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(await instructRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'compliance_block_unavailable:wk_t1' });
+      expect((await opsAlerts()).some((a) => a.dedupe_key.startsWith('dead:'))).toBe(false);
     } finally {
       warn.mockRestore();
     }

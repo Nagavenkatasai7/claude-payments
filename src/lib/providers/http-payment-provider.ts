@@ -198,6 +198,8 @@ export interface ComplianceScreeningRef {
   listVersion: string;
   decision: string;
   screenedAt: string;
+  /** Fix pack 5 T5 (P10): counts of the newest screen's parties by role; never names or hashes. */
+  namesScreened: { sender: number; recipient: number };
 }
 
 export interface ComplianceBlockOptions {
@@ -205,8 +207,6 @@ export interface ComplianceBlockOptions {
   kycGateActive?: boolean;
   /** Fix 14 evidence when found; absent ⇒ the list fields are omitted, never guessed. */
   screening?: ComplianceScreeningRef | null;
-  /** Worker fail-open path: the originator could not be loaded ⇒ originator null. */
-  omitOriginator?: boolean;
 }
 
 /**
@@ -223,6 +223,10 @@ export interface ComplianceBlockOptions {
  *   • a ROUTED row (settlementPartnerId set) goes to another tenant's rail, so
  *     the sender identity is omitted: originator null, routed true (C3);
  *   • the screening list fields come only from fix 14 evidence, never guessed.
+ * Version 2 since fix pack 5 (one bump for the pack's new fields);
+ * `names_screened` are counts by role of the parties the newest screen
+ * covered, never names or hashes. There is no fail-open option: a block that
+ * cannot be loaded stops the instruction (loadComplianceBlock, P10).
  * Pure: no DB, no clock (`now` is passed in).
  */
 export function buildComplianceBlock(
@@ -235,7 +239,7 @@ export function buildComplianceBlock(
   const senderIsBusiness = transfer.senderEntityType === 'business';
   const recipientIsBusiness = transfer.recipientEntityType === 'business';
   const originator =
-    routed || opts.omitOriginator
+    routed
       ? null
       : {
           entity_type: senderIsBusiness ? ('business' as const) : ('individual' as const),
@@ -248,7 +252,7 @@ export function buildComplianceBlock(
         };
   const evidence = opts.screening;
   return {
-    version: 1 as const,
+    version: 2 as const,
     ...(routed ? { routed: true as const } : {}),
     originator,
     beneficiary: {
@@ -274,7 +278,12 @@ export function buildComplianceBlock(
       reasons: [...(transfer.complianceReasons ?? [])],
       screened_at: evidence?.screenedAt ?? transfer.createdAt,
       ...(evidence
-        ? { list_source: evidence.listSource, list_version: evidence.listVersion, decision: evidence.decision }
+        ? {
+            list_source: evidence.listSource,
+            list_version: evidence.listVersion,
+            decision: evidence.decision,
+            names_screened: { sender: evidence.namesScreened.sender, recipient: evidence.namesScreened.recipient },
+          }
         : {}),
     },
     edd_required: transfer.eddRequired ?? false,
