@@ -1,4 +1,6 @@
 import { isPartnerPulled } from './funding-method';
+import { selectFundingProvider } from './providers/funding-provider';
+import type { PartnerFundingConfig } from './partner-integrations';
 import type { Transfer } from './types';
 
 // funding-class (fix pack 5 T12, P12): THE answer to "how was this sender's
@@ -32,4 +34,24 @@ export function fundingClassOf(
   if (t.fundingProvider === 'mock') return 'mock';
   if (t.fundingRef) return 'mock';
   return 'partner_collected';
+}
+
+/**
+ * Fix pack 5 T13a (P12, P13 step 7): a mock charge never backs a real payout.
+ * True = refuse this payment (PAY_NOT_AVAILABLE) before any write or capture:
+ * the rail moves real money, the row is not a B2B partner pull, it is not
+ * already bound to a Stripe intent (fundTransfer decides those), and the
+ * funding selection would not be Stripe (the mock, or a refused selection).
+ * Pure: the caller reads the flag and the funding config (only on real money
+ * with the flag on; a read that throws is passed as `config: null`). A draft
+ * passes its own fields with fundingProvider / fundingIntentRef undefined.
+ */
+export function payFundingRefusal(
+  t: Pick<Transfer, 'transferType' | 'fundingMethod' | 'fundingProvider' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId' | 'environment'>,
+  o: { realMoney: boolean; stripeEnabled: boolean; config: PartnerFundingConfig | null },
+): boolean {
+  if (!o.realMoney) return false;
+  if (t.transferType === 'b2b' && isPartnerPulled(t.fundingMethod)) return false;
+  if (t.fundingProvider === 'stripe' || !!t.fundingIntentRef) return false;
+  return selectFundingProvider(t, { enabled: o.stripeEnabled, config: o.config }).kind !== 'stripe';
 }

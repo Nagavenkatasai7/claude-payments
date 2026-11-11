@@ -18,6 +18,8 @@ import { DEFAULT_PARTNER_ID } from './defaults';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
 import { disclosureGateRefusal, disclosureMandatory, type DisclosureGateRefusal } from './pay-disclosure-gate';
 import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult, type PaymentEvidence } from './payment-evidence';
+import { payFundingRefusal } from './funding-class';
+import type { PartnerFundingConfig } from './partner-integrations';
 import type { Store } from './store';
 import type { Partner, Transfer } from './types';
 
@@ -141,6 +143,10 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  *      rail, or the default tenant on one, is refused before any charge
  *      (409 not_available; the row stays awaiting_payment). It reads the
  *      rail type from the integrations already in hand (no second read).
+ *   3b. funding (fix pack 5 T13a, P13 step 7): a real-money payment whose
+ *      funding would be the mock (not Stripe, not a B2B partner pull, not
+ *      already Stripe-bound) is refused (409 not_available) before R18, the
+ *      evidence commit and any capture (payFundingRefusal, funding-class.ts)
  *   4. R18 provider disclosure (fix pack 4, C9/C10; b2c rows only): when the
  *      payment is MANDATORY (the owner is live-certified, or the rail is real
  *      money), the owner's provider block must be approved (else 409
@@ -266,6 +272,31 @@ export async function processTransferPayment(
     return payNotAvailable();
   }
 
+  // Fix pack 5 (gate #7, P13): no mock funding on real money. A real-money
+  // payment whose funding would be the mock (not Stripe, not a B2B partner
+  // pull, not already bound to a Stripe intent) is refused with the neutral
+  // 409 before R18 and the evidence commit: nothing is written or captured.
+  // The funding config is read only here, on real money with the flag on; a
+  // read that throws counts as no config (refuse), logged by the error name.
+  const realMoneyPay = realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null });
+  if (realMoneyPay) {
+    let fundingConfig: PartnerFundingConfig | null = null;
+    if (env.stripeFundingEnabled) {
+      try {
+        fundingConfig = await getPartnerIntegrationsStore().getFundingConfig(transfer.partnerId);
+      } catch (err) {
+        logWarn('pay.funding-config', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+      }
+    }
+    if (payFundingRefusal(transfer, { realMoney: true, stripeEnabled: env.stripeFundingEnabled, config: fundingConfig })) {
+      logWarn('pay.funding-refused', 'mock funding refused on a real-money rail', {
+        transferId: transfer.id,
+        code: 'mock_on_real_money',
+      });
+      return payNotAvailable();
+    }
+  }
+
   // Fix pack 4 (gate #4, C9/C10): R18. A b2b row makes no owner read here
   // (never mandatory; the commit writes the auth row only). The default tenant
   // makes NO read either: its block is the demo block (never null, never
@@ -290,7 +321,7 @@ export async function processTransferPayment(
     }
     mandatory = disclosureMandatory({
       ownerCertified: isLiveCertified(owner),
-      realMoney: realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null }),
+      realMoney: realMoneyPay,
       transferType: 'b2c',
     });
     const refusal = disclosureGateRefusal({

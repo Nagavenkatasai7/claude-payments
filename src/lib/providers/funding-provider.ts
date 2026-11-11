@@ -95,8 +95,13 @@ export class MockFundingProvider implements FundingProvider {
     const transferId = typeof b.transfer_id === 'string' ? b.transfer_id : '';
     const event = typeof b.event === 'string' ? b.event : '';
     if (!transferId) return null;
-    if (event === 'captured' || event === 'refunded') {
+    if (event === 'captured') {
       const ref = typeof b.ref === 'string' && b.ref ? b.ref : `mockfund-${transferId}`;
+      return { transferId, event, ref };
+    }
+    if (event === 'refunded') {
+      // Fix pack 5 T13a (P13): a refund is never labelled as a charge.
+      const ref = typeof b.ref === 'string' && b.ref ? b.ref : `refund-webhook-${transferId}`;
       return { transferId, event, ref };
     }
     if (event === 'refund_failed') {
@@ -137,7 +142,9 @@ export type FundingSelection =
  *  5. Stripe config without a secret key ⇒ refused (fail closed).
  */
 export function selectFundingProvider(
-  transfer: Transfer,
+  // Fix pack 5 T13a: only the fields the rules read, so payFundingRefusal can
+  // judge a draft (no row yet) the same way. Every Transfer still fits.
+  transfer: Pick<Transfer, 'fundingProvider' | 'fundingIntentRef' | 'environment' | 'transferType' | 'partnerId' | 'settlementPartnerId'>,
   opts: { enabled: boolean; config: PartnerFundingConfig | null; fetchImpl?: typeof fetch },
 ): FundingSelection {
   const bound = transfer.fundingProvider === 'stripe' || !!transfer.fundingIntentRef;

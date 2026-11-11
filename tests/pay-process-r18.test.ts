@@ -20,6 +20,9 @@ import { fixedReply } from '@/lib/hold-replies';
 import type { Transfer } from '@/lib/types';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
+// Fix pack 5 T13a: this file tests the R18 gate and the evidence commit, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: () => {} };

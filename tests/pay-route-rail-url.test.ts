@@ -23,6 +23,9 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 
+// Fix pack 5 T13a: this file tests the settlement URL and live certification gates, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: () => {} };
