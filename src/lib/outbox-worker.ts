@@ -782,6 +782,7 @@ async function handle(
     case 'settlement.instruct': {
       const transferId = str(p.transferId);
       const transferRepo = createTransferRepo(deps.db);
+      // gate: read (G1)
       // Program-Fix 15 PR C: a SHORT locking read (FOR UPDATE, committed before
       // the POST below), so a concurrent sender cancel (sender-cancel.ts) is
       // either fully committed — seen here as cancelled — or not yet started.
@@ -800,6 +801,7 @@ async function handle(
         throw new InstructPermanentError(transferId, 'decrypt', { cause: err });
       }
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
+      // gate: sandbox (G2)
       // Program-Fix 44 P2 — DEFENCE IN DEPTH behind the settlement chokepoint:
       // a sandbox (test-key) transfer is NEVER instructed to a real rail, however
       // this row came to exist (a hand-inserted row, a dead-letter Retry, an old
@@ -817,6 +819,7 @@ async function handle(
         );
         return;
       }
+      // gate: not_payable (G3)
       // DEFENCE IN DEPTH: instruct only money the LEDGER still says is payable.
       //  • definitively NOT going out (cancelled / delivered, or a refund that
       //    is pending / completed) ⇒ skip: mark DONE with a log — retrying
@@ -844,11 +847,13 @@ async function handle(
         });
         return;
       }
+      // gate: not_paid (G4)
       if (transfer.status !== 'paid' || refund !== 'none') {
         throw new Error(
           `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
         );
       }
+      // gate: funding_state (G5)
       // Program-Fix 7 (review M-1b): the sender's ASYNC debit must still be
       // good. RETURNED ⇒ never payable: done + ONE deduped ops alert (retrying
       // can never help). pending / failed on a paid row (should not exist — the
@@ -870,6 +875,7 @@ async function handle(
       if (transfer.fundingState === 'pending' || transfer.fundingState === 'failed') {
         throw new Error(`Settlement instruction held: sender debit is ${transfer.fundingState} — retrying`);
       }
+      // gate: railamount (G6)
       // fix 29 (money-09): the rail reported a DIFFERENT amount for this row
       // (`railamount:<id>` marker). It is held for staff — never instructed
       // again, whether this is a reconcile `reinstruct:` row or a dead-letter
@@ -878,6 +884,7 @@ async function handle(
         logWarn('outbox.instruct-held', 'rail reported a different amount; instruction not sent', { transferId });
         return;
       }
+      // gate: paused (G7)
       // Best-rate routing: the RAIL is the settlement partner's when routed
       // (settlementPartnerId set) — their endpoint, their signing secret, and
       // their id in the instruction (the rail verifies with the partner_id it
@@ -897,8 +904,10 @@ async function handle(
         logWarn('outbox.instruct-paused', 'settlement.paused is on; instruction deferred', { transferId });
         throw new SettlementPausedError();
       }
+      // gate: integrations (G8)
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
+      // gate: pause_unknown (G9)
       // Fix pack 3 T7 (owner answer Q5, contract 7 step 10): the switch table
       // could not be read. On a real-money rail the row WAITS, uncharged, as if
       // paused (readFlag raised the flagread alert); anywhere else the read
@@ -907,6 +916,7 @@ async function handle(
         logWarn('outbox.instruct-paused', 'settlement.paused unreadable on a real-money rail; instruction deferred', { transferId });
         throw new SettlementPausedError();
       }
+      // gate: live_cert (G10)
       // Fix pack 3 T6 (R15, contract 7 step 11): on real money the RAIL partner
       // must be certified for live money, and the default tenant never owns a
       // real-money row. Before the URL check, so an uncertified rail with no URL
@@ -922,6 +932,7 @@ async function handle(
         );
         throw new InstructNotCertifiedError();
       }
+      // gate: rail_config (G11)
       // Pack 2 T10 (R02): only an 'http' rail reaches the stored URL; a simulator
       // (or any other) rail POSTs to the hosted reference rail, whatever is stored.
       const settlementUrl = settlementTargetUrl(integrations.payment);
@@ -936,6 +947,7 @@ async function handle(
       // signing secret is a rail configuration failure like a missing URL
       // (checked after it): RailInstructError, charged retry, railfail alert.
       if (signingSecrets.length === 0) throw new RailInstructError(railPartnerId, 'Signing secret not configured.');
+      // gate: live_list (G12)
       // Pack 2 T10 (R02): the live-list gate at the instruct chokepoint. A row
       // paid while the rail was a demo rail (screened on the mock list), then
       // retried, re-instructed or dead-letter-retried after the rail went 'http',
@@ -976,6 +988,7 @@ async function handle(
           );
           throw new InstructNotLiveError(why);
         }
+        // gate: sender_hold (G13)
         // Pack 2 review R1 (G1): the SENDER's screening hold (R06), which
         // settleOrHold checks at pay, re-checked here because a row can become
         // paid without it (a signed rail 'funded' callback) and reach this POST
@@ -1031,6 +1044,8 @@ async function handle(
           throw new InstructNotLiveError(senderWhy);
         }
       }
+      // gate: funding_mode (G14) - slot, filled by fix pack 5 T14
+      // gate: build (G15)
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it (fix 31 + fix pack 5). It fails
       // closed (P10): loadComplianceBlock throws ComplianceBlockUnavailableError
@@ -1048,11 +1063,14 @@ async function handle(
         throw new InstructPermanentError(transferId, 'build', { cause: err });
       }
       const compliance = await loadComplianceBlock(deps.db, transfer);
+      // gate: travel_rule (G16) - slot, T23
+      // gate: record (G17) - slot, T9 (it records the body built here before the POST)
       const rawBody = JSON.stringify({
         ...instruction,
         partner_id: railPartnerId,
         compliance,
       });
+      // gate: send (G18)
       // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body);
       // the response and any thrown error pass through unchanged (webhook-delivery-log.ts).
       const { res, logged } = await withInstructDeliveryLog(deps.db, { partnerId: railPartnerId, transferId, outboxId: row.id, attempt: row.attempts }, () => deps.fetchFn(settlementUrl, {
@@ -1071,6 +1089,7 @@ async function handle(
         await logged; // never rejects; capped
         throw new RailInstructError(railPartnerId, `Settlement instruction rejected (${res.status})`);
       }
+      // gate: provider_ref (G19)
       let providerRef = `rail-${transferId}`;
       try {
         const parsed = (await res.json()) as { providerRef?: unknown };

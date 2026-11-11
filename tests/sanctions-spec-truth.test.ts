@@ -384,3 +384,21 @@ describe('sanctions screening spec says what pack 3 does', () => {
     }
   });
 });
+
+// Fix pack 5 T6 (P8): section 4 rule 3 also states the full instruct gate
+// order, the same list as INSTRUCT_GATE_ORDER (pinned against the handler's
+// markers by tests/instruct-gate-order.test.ts).
+describe('sanctions screening spec says what pack 5 does', () => {
+  it('pack 5: section 4 rule 3 states the full instruct order, the same as INSTRUCT_GATE_ORDER', async () => {
+    const { INSTRUCT_GATE_ORDER } = await import('@/lib/instruct-gates');
+    const r = /^3\. \*\*Instruct gate\*\*(.*)$/m.exec(section('## 4.'))?.[1] ?? '';
+    const lead = 'The full order (fix pack 5, `INSTRUCT_GATE_ORDER` in `src/lib/instruct-gates.ts`):';
+    const at = r.indexOf(lead);
+    expect(at, lead).toBeGreaterThanOrEqual(0);
+    const rest = r.slice(at + lead.length);
+    const list = rest.slice(0, rest.indexOf('.'));
+    expect([...list.matchAll(/`([a-z_]+)`/g)].map((m) => m[1])).toEqual([...INSTRUCT_GATE_ORDER]);
+    expect(r.indexOf('In order (fix pack 3)')).toBeLessThan(at);
+    expect(rest).toContain("A row that fails two steps gets the earlier step's outcome.");
+  });
+});

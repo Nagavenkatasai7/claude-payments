@@ -12,6 +12,7 @@ import { readFlag } from '@/lib/flags';
 import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { liveRefusalFor, realMoneyFor, realMoneyRail } from '@/lib/live-gate';
 import { alertStuckLivegate } from '@/lib/livegate-alerts';
+import { alertStuckHeld, instructHeldOnPurpose } from '@/lib/instruct-gates';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
@@ -186,6 +187,16 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     const refusal = await liveRefusalFor(db, t);
     if (refusal !== null) {
       await alertStuckLivegate(db, t, refusal);
+      continue;
+    }
+    // Fix pack 5 (P9): a row a later instruct gate holds on purpose. While its
+    // instruct row is live the worker's own alert (mockfund:/fundmode:/
+    // travelrule:) owns it; with none (a mockfund row's instruct is done) one
+    // <reason>:stuck:<id> alert is the escalation (pack 3 I1 rule). No
+    // reinstruct, no recon alert, no rung, no audit row.
+    const heldOnPurpose = await instructHeldOnPurpose(db, t);
+    if (heldOnPurpose !== null) {
+      await alertStuckHeld(db, t, heldOnPurpose);
       continue;
     }
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT

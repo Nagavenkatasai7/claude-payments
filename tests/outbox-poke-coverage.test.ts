@@ -66,6 +66,9 @@ const HELPERS: Record<string, string[]> = {
   // Pack 3 review I1: the livegate:stuck: alert — called only from the two
   // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
   'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
+  // Fix pack 5 T6 (P9): the <reason>:stuck:<id> alert, the same rule, called
+  // only from the same two stuck-paid sweeps.
+  'src/lib/instruct-gates.ts': ['alertStuckHeld'],
   // Fix pack 4 T8 (C8, critic M9): the payevidence:<hour> alert when a pay-page
   // payment's evidence could not be written; its callers (pay-process.ts, the
   // B2B pay route and, from review R1-P1 A2, the transfer pay route) poke.
