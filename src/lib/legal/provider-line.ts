@@ -1,15 +1,18 @@
 // Fix pack 4 (C16, R16): the one approved provider line,
 // "Payments by <licensed entity>, licensed by <state regulator>".
 //
-// PURE (imports: the ResolvedDisclosure type and the persona's rule-override check). Shown only for the OWNER's approved provider block
+// PURE (imports: the ResolvedDisclosure and DisclosureSnapshotV1 types and the persona's rule-override check). Shown only for the OWNER's approved provider block
 // (partner admin's stamp matches the block's hash): null for demo, the default
 // tenant, a pending or unapproved block, or a block without a regulator. Never a
 // licence id, phone or URL. A value naming the platform brand reads null too
 // (critic P10: the claims register bans that wording; landing-claims scans
 // source files, not this runtime value). Surfaces call it only through
-// `providerLineFor(resolvePartnerDisclosure(owner))` (C22).
+// `providerLineFor(resolvePartnerDisclosure(owner))` (C22), or, on the paid pay page,
+// `providerLineFromSnapshot` (pack 6 P11: the block the customer acknowledged). Both share one
+// rule (lineFromNames).
 
 import type { ResolvedDisclosure } from '../partner-config';
+import type { DisclosureSnapshotV1 } from '../remittance-disclosure';
 import { hasOverridePhrase } from '../untrusted-text';
 
 export const PROVIDER_LINE_TEMPLATE = 'Payments by {entity}, licensed by {regulator}';
@@ -61,14 +64,29 @@ export function providerLineFits(entity: string, regulator: string): boolean {
   return [...buildLine(flatten(entity), flatten(regulator)).normalize('NFKC')].length <= PROVIDER_LINE_MAX;
 }
 
-export function providerLineFor(d: ResolvedDisclosure | null | undefined): string | null {
-  if (!d || d.demo || !d.configured || !d.partnerApproved) return null;
-  const entity = flatten(d.licensedEntity);
-  const regulator = flatten(d.stateRegulator?.name);
+// Fix pack 6 (P11): the name checks of the one line, after the caller's approval gate.
+function lineFromNames(entityRaw: string | null | undefined, regulatorRaw: string | null | undefined): string | null {
+  const entity = flatten(entityRaw);
+  const regulator = flatten(regulatorRaw);
   if (entity === '' || regulator === '') return null;
   if (namesPlatform(entity) || namesPlatform(regulator)) return null;
   // Checked on the flattened values: a legacy line break is already a space (as before).
   if (!isProviderNameText(entity) || !isProviderNameText(regulator)) return null;
   if (!providerLineFits(entity, regulator)) return null;
   return buildLine(entity, regulator);
+}
+
+export function providerLineFor(d: ResolvedDisclosure | null | undefined): string | null {
+  if (!d || d.demo || !d.configured || !d.partnerApproved) return null;
+  return lineFromNames(d.licensedEntity, d.stateRegulator?.name);
+}
+
+/**
+ * Fix pack 6 (P11): the provider line of the block stored in a disclosure snapshot: only a
+ * `configured` block that was `approved` when acknowledged, and only when every providerLineFor
+ * check passes on its names. Pure.
+ */
+export function providerLineFromSnapshot(s: Pick<DisclosureSnapshotV1, 'provider'> | null | undefined): string | null {
+  if (!s || s.provider.kind !== 'configured' || s.provider.approved !== true) return null;
+  return lineFromNames(s.provider.licensedEntity, s.provider.regulator);
 }
