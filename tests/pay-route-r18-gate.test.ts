@@ -243,6 +243,20 @@ describe('pay, before the code is checked (C12 step 3)', { retry: 0 }, () => {
     expect(await statusOf(TID)).toBe('paid');
   });
 
+  it('R2-Q1 B4: a consume that throws a bare TypeError(fetch failed) (no cause code) -> 503 temporary, not the wrong code; nothing charged, no evidence', async () => {
+    const consume = { ...redis, async getdel(): Promise<string | null> { throw new TypeError('fetch failed'); } };
+    txOtp = createTransactionOtpStore(redis, { randomInt: () => 654321, consume });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    onTestFinished(() => err.mockRestore());
+    const res = await post(TID, realMoneyPayBody());
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable',
+    });
+    expect(await statusOf(TID)).toBe('awaiting_payment');
+    expect(await evidenceRows()).toEqual([]);
+  });
+
   it('a wrong code on a mandatory payment with a good body -> 403, no rows', async () => {
     const res = await post(TID, realMoneyPayBody({ otp: '000000' }));
     expect(res.status).toBe(403);

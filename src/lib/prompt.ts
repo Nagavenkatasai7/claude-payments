@@ -5,6 +5,7 @@ import { PURPOSE_CHOICES_TEXT, PURPOSE_HINTS, TRANSFER_PURPOSES } from './purpos
 import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, hasHumanIdentityClaim, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 import { EDD_ASK, FIXED_REPLIES } from './hold-replies';
+import { PROVIDER_LINE_MAX } from './legal/provider-line';
 import { REDACTION_LABELS } from './inbound-redact';
 
 /**
@@ -390,7 +391,8 @@ ENHANCED VERIFICATION
   const withPurpose = b.purposeRequired ? `${base}\n\n${purposeSection()}` : base;
   // Fix pack 4 (C22 d): the approved provider line, flattened and bounded; no
   // line ⇒ no section, so the prompt stays byte-identical.
-  const providerLine = boundUntrustedText(b.providerLine, 200).replace(/\s+/g, ' ').trim();
+  // Review R2-Q1 K1: a backstop; an approved line always fits PROVIDER_LINE_MAX (provider-line.ts).
+  const providerLine = boundUntrustedText(b.providerLine, PROVIDER_LINE_MAX).replace(/\s+/g, ' ').trim();
   // Review R1-P5 (C1): the line is partner-written, so it goes in as a JSON
   // string literal (its quotes escaped) and the fixed PROVIDER_TRAILER follows
   // it, so a platform sentence closes the section even with no persona.

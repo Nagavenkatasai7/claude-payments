@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { fakeRedis } from './helpers';
+import { isOtpConsumeFailure } from '@/lib/otp-consume-failure';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 
 const cdKeyFor = (txId: string) => `txotp:cd:${createHash('sha256').update(txId).digest('hex')}`;
@@ -551,6 +552,23 @@ describe('transaction-otp - review R1-P4 (B1 channel note per code, B2 no-retry 
     await s.issue(TX, PHONE);
     await expect(s.verify(TX, PHONE, '123456')).rejects.toThrow('fetch failed');
     expect(consumeCalls).toEqual([recKey(TX)]);
+  });
+
+  it('R2-Q1 B4: the consume throw is marked (isOtpConsumeFailure), the error itself unchanged; a string throw becomes a marked Error', async () => {
+    const bare = new TypeError('fetch failed');
+    const s = createTransactionOtpStore(redis, { now: () => nowMs, randomInt: () => 123456, consume: { ...redis, async getdel(): Promise<string | null> { throw bare; } } });
+    await s.issue(TX, PHONE);
+    const caught = await s.verify(TX, PHONE, '123456').catch((e: unknown) => e);
+    expect(caught).toBe(bare);
+    expect(isOtpConsumeFailure(caught)).toBe(true);
+    expect(isOtpConsumeFailure(new TypeError('fetch failed'))).toBe(false);
+    const r2 = fakeRedis();
+    const s2 = createTransactionOtpStore(r2, { now: () => nowMs, randomInt: () => 123456, consume: { ...r2, async getdel(): Promise<string | null> { throw 'boom'; } } });
+    await s2.issue(TX, PHONE);
+    const caught2 = await s2.verify(TX, PHONE, '123456').catch((e: unknown) => e);
+    expect(caught2).toBeInstanceOf(Error);
+    expect(isOtpConsumeFailure(caught2)).toBe(true);
+    expect(String((caught2 as Error).message)).not.toContain('123456');
   });
 
   it('B2: a consume client that throws before the server ran the command leaves the code valid for the retry', async () => {

@@ -19,6 +19,7 @@ import {
   type SupportWriteResult,
 } from '@/lib/partner-support-settings';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { PROVIDER_LINE_MAX } from '@/lib/legal/provider-line';
 import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { pokeWorker } from '@/lib/outbox';
@@ -59,6 +60,7 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, MessageKey> = {
   regulator_name_required: 'partner.settings.disclosure.error.regulatorNameRequired',
   entity_required: 'partner.settings.disclosure.error.entityRequired',
   provider_name: 'partner.settings.disclosure.error.providerName',
+  provider_line_too_long: 'partner.settings.disclosure.error.providerLineTooLong',
 };
 
 async function tenantExists(ctx: PartnerCtx): Promise<boolean> {
@@ -116,7 +118,7 @@ export async function saveDisclosureAction(_prev: ActionResult | null, formData:
   await refuseOnSiteHost();
   const ctx = await requirePartnerStaff(POLICY);
   const parsed = parseDisclosureForm(formData); // validated BEFORE the step-up and any write
-  if (!parsed.ok) return refused(DISCLOSURE_ERROR[parsed.reason], { max: MAX_DELIVERY_BUSINESS_DAYS });
+  if (!parsed.ok) return refused(DISCLOSURE_ERROR[parsed.reason], { max: MAX_DELIVERY_BUSINESS_DAYS, limit: PROVIDER_LINE_MAX });
   // Fix pack 4 T5 (C11): a TOTP-enrolled admin's save stamps the partner approval, so the step-up is
   // forced for THIS save (critic M7: a still-fresh step-up taken with a password before enrolment
   // never stamps). Fail closed: a read error counts as not enrolled (saved unapproved, as today).

@@ -1,4 +1,5 @@
 import { boundUntrustedText } from './untrusted-text';
+import { PROVIDER_LINE_MAX } from './legal/provider-line';
 
 /**
  * hold-replies — the ONLY source of the fixed text a customer is shown when a
@@ -80,7 +81,6 @@ export const HELP_SUFFIX = 'Reply HELP to reach a person.';
 
 const RECEIPT_LABEL = 'Receipt:';
 const RECEIPT_MAX = 300;
-const PROVIDER_LINE_MAX = 200;
 
 export interface FixedReplyOptions {
   /** Append HELP_SUFFIX (a way out on every dead end). */
@@ -102,6 +102,7 @@ export function fixedReply(kind: FixedReplyKind, opts: FixedReplyOptions = {}): 
   if (opts.help) text = `${text} ${HELP_SUFFIX}`;
   const receipt = boundUntrustedText(opts.receiptUrl, RECEIPT_MAX).trim();
   if (receipt) text = `${text}\n${RECEIPT_LABEL} ${receipt}`;
+  // Review R2-Q1 K1: a backstop; an approved line always fits PROVIDER_LINE_MAX (provider-line.ts).
   const provider = boundUntrustedText(opts.providerLine, PROVIDER_LINE_MAX).trim();
   if (provider) text = `${text}\n${provider}`;
   return text;

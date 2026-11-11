@@ -12,7 +12,7 @@ import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
-import { providerLineFor } from './legal/provider-line';
+import { PROVIDER_LINE_MAX, providerLineFor } from './legal/provider-line';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_DESTINATIONS } from './destination-country';
@@ -62,6 +62,7 @@ import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './send
 import { HELP_REASONS, openHelpCaseAndPoke, type HelpCaseChannel, type HelpReason } from './help-case';
 import { OFF_TOPIC_REPLY } from './scope-guard';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
+import { validateAccountHolder } from './pay-body';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 import { BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC, isBillExpired } from './b2b-bill-expiry';
 import { customerHistoryUrl } from './customer-portal-url';
@@ -444,7 +445,8 @@ export function buildApproveSummary(
   providerLine?: string,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
-  const line = boundUntrustedText(providerLine, 200).replace(/\s+/g, ' ').trim();
+  // Review R2-Q1 K1: a backstop; an approved line always fits PROVIDER_LINE_MAX (provider-line.ts).
+  const line = boundUntrustedText(providerLine, PROVIDER_LINE_MAX).replace(/\s+/g, ' ').trim();
   return [
     // fix 5: the name may be a pre-fix outsider-written value, and on the web
     // channel this summary is returned to the model — clamp it (a clean name
@@ -551,6 +553,12 @@ const OCCUPATIONS = ['salaried','self_employed','business_owner','student','home
 const RELATIONSHIPS = ['self','spouse','parent','child','sibling','other_family','friend','business','other'] as const;
 function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | undefined {
   return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
+}
+/** Review R2-Q1 J1: a model-written recipient legal name, trimmed, or undefined unless validateAccountHolder accepts it. */
+function modelRecipientLegalName(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const r = validateAccountHolder(v);
+  return r.ok ? r.name : undefined;
 }
 
 // ── funding_method and the B2B shape are closed (fix 6) ─────────────────────
@@ -4181,7 +4189,9 @@ export async function prepareSendDraft(
       destinationCurrency,
       fundingMethod,
       // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
-      recipientLegalName: typeof input.recipientLegalName === 'string' ? input.recipientLegalName : undefined,
+      // Review R2-Q1 J1: the model's name is kept only when it passes the pay page's typed-name
+      // rule (validateAccountHolder); anything else is dropped silently, so the pay page asks.
+      recipientLegalName: modelRecipientLegalName(input.recipientLegalName),
       relationship: asEnum(RELATIONSHIPS, input.relationship),
       purpose: b2b ? BUSINESS_PURPOSE : parsePurpose(input.purpose),
       // Batch B follow-up A3: the reason rides the draft to the mint (plaintext in

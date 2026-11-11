@@ -140,3 +140,17 @@ describe('disclosureAckBody', () => {
     }
   });
 });
+
+// Review R2-Q1 I2: a 409 not_available on the pay POST (the R18 gates, the live controls) shows
+// the fixed cannot_complete line on the pay, link and bill forms, never the generic retry text.
+describe('payErrorMessage — not_available (R2-Q1 I2)', () => {
+  it('maps to PAY_NOT_AVAILABLE_COPY, pinned equal to the server body and fixedReply(cannot_complete)', async () => {
+    const { PAY_NOT_AVAILABLE } = await import('@/lib/pay-not-available');
+    const { fixedReply } = await import('@/lib/hold-replies');
+    const { PAY_NOT_AVAILABLE_COPY } = await import('@/lib/pay-outcome');
+    expect(PAY_NOT_AVAILABLE_COPY).toBe(fixedReply('cannot_complete'));
+    expect(PAY_NOT_AVAILABLE_COPY).toBe(PAY_NOT_AVAILABLE.body.error);
+    expect(payErrorMessage({ ...PAY_NOT_AVAILABLE.body })).toBe(PAY_NOT_AVAILABLE_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'not_available', error: 'anything the server said' })).toBe(PAY_NOT_AVAILABLE_COPY);
+  });
+});

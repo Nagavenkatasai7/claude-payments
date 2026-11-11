@@ -1,4 +1,5 @@
 import { getConsumeRedis, getRedis } from './redis';
+import { markOtpConsumeFailure } from './otp-consume-failure';
 import { createHash, randomInt as cryptoRandomInt, timingSafeEqual } from 'node:crypto';
 import type { RedisLike } from './store';
 import { raiseLimiterDownAlert } from './limiter-alert';
@@ -321,7 +322,14 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
         // retryable 503) instead of a resent GETDEL answering null ("wrong
         // code"). Nothing is restored after a throw: whether the server ran it
         // is unknown, and another request may already have accepted the code.
-        const taken = await consume.getdel(key(txId));
+        // Review R2-Q1 B4: the throw is marked (otp-consume-failure.ts), so every caller answers
+        // its retryable error whatever the network error's shape.
+        let taken: string | null;
+        try {
+          taken = await consume.getdel(key(txId));
+        } catch (err) {
+          throw markOtpConsumeFailure(err);
+        }
         if (taken === null) return { ok: false, reason: 'no_code' }; // another request consumed it
         if (taken !== raw) {
           // A Resend re-issued between the GET and the GETDEL: put the newer

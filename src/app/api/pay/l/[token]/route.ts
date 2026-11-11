@@ -9,6 +9,7 @@ import { getPortalSettings, portalAuthTemplate } from '@/db/repos/portal-setting
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
 import { isInfraError } from '@/lib/infra-error';
+import { isOtpConsumeFailure } from '@/lib/otp-consume-failure';
 import { isDisclosureAckVersion } from '@/lib/remittance-disclosure';
 import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { recordChannelHealth } from '@/lib/channel-health';
@@ -262,7 +263,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     // The error NAME only: a query error's message carries its params (the link
     // token, names), and the scrubber masks digits and emails, not those.
     logError('paylink.route', err instanceof Error ? err.name : 'error', {});
-    if (isInfraError(err)) {
+    // Review R2-Q1 B4: a failed single-use code consume is retryable whatever its shape.
+    if (isInfraError(err) || isOtpConsumeFailure(err)) {
       return NextResponse.json(
         { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
         { status: 503 },

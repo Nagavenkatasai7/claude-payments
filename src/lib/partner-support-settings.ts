@@ -16,7 +16,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { normalizeAlertEmail } from '@/lib/channel-health';
 import { isDisclosurePhone, isHttpsUrl, MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
 import { boundUntrustedText } from '@/lib/untrusted-text';
-import { isProviderNameText } from '@/lib/legal/provider-line';
+import { isProviderNameText, providerLineFits } from '@/lib/legal/provider-line';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { disclosureHash } from './disclosure-hash';
 import { isLiveCertified } from './live-gate';
@@ -34,7 +34,8 @@ export type DisclosureParseReason =
   | 'delivery_days'
   | 'regulator_name_required'
   | 'entity_required'
-  | 'provider_name';
+  | 'provider_name'
+  | 'provider_line_too_long';
 export type DisclosureParse = { ok: true; value: PartnerDisclosureConfig | undefined } | { ok: false; reason: DisclosureParseReason };
 export type AlertEmailParse = { ok: true; value: string | null } | { ok: false; reason: 'invalid_email' };
 
@@ -106,6 +107,10 @@ export function parseDisclosureForm(formData: FormData): DisclosureParse {
   const days = optionalBusinessDays(formData);
   if (!days.ok) return { ok: false, reason: 'delivery_days' };
   if ((regulatorPhone.value || regulatorWebsite.value) && !regulatorName) return { ok: false, reason: 'regulator_name_required' };
+  // Review R2-Q1 K1: the two names build the provider line, which may not exceed PROVIDER_LINE_MAX.
+  if (licensedEntity && regulatorName && !providerLineFits(licensedEntity, regulatorName)) {
+    return { ok: false, reason: 'provider_line_too_long' };
+  }
   const anyDetail = licenseIds.length > 0 || phone.value || website.value || regulatorName || days.value !== undefined;
   if (!licensedEntity) return anyDetail ? { ok: false, reason: 'entity_required' } : { ok: true, value: undefined };
 

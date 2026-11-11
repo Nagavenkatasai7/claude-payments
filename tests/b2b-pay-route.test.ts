@@ -5,6 +5,7 @@
  * code send nor reach the claim-first mint.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { fakeRedis } from './helpers';
 import { NextRequest } from 'next/server';
 import { PAY_NOT_AVAILABLE } from '@/lib/pay-not-available';
 import { fixedReply } from '@/lib/hold-replies';
@@ -316,5 +317,27 @@ describe('POST /api/pay/b2b/[invoiceId] — payment evidence (fix pack 4)', { re
     const res = await pay();
     expect(res.status).toBe(PAY_NOT_AVAILABLE.status);
     expect(await evidenceRowsIn(db)).toEqual([]);
+  });
+});
+
+// Review R2-Q1 B4: the single-use code consume throws (a no-retry client, a bare
+// TypeError('fetch failed') with no cause code): a retryable 503 with the temporary copy, never
+// the generic 400; nothing is minted. The real verify runs on a fake Redis.
+describe('POST /api/pay/b2b/[invoiceId] — the code consume fails (R2-Q1 B4)', { retry: 0 }, () => {
+  it('a bare TypeError(fetch failed) from the consume -> 503 temporarily_unavailable; no mint', async () => {
+    createdAt = new Date(Date.now() - 1 * DAY).toISOString();
+    const actual = await vi.importActual<typeof import('@/lib/transaction-otp')>('@/lib/transaction-otp');
+    const redis = fakeRedis();
+    const consume = { ...redis, async getdel(): Promise<string | null> { throw new TypeError('fetch failed'); } };
+    const real = actual.createTransactionOtpStore(redis, { randomInt: () => 123456, consume });
+    await real.issue('inv_1', '15550001111');
+    verify.mockImplementation((id: string, phone: string, code: string) => real.verify(id, phone, code));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    onTestFinished(() => err.mockRestore());
+    const res = await pay();
+    expect(verify).toHaveBeenCalledOnce();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' });
+    expect(finalizeCrossBorderBillPayment).not.toHaveBeenCalled();
   });
 });

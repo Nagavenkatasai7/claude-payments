@@ -32,6 +32,21 @@ export function isProviderNameText(v: unknown): boolean {
 
 const flatten = (v: string | null | undefined): string => (v ?? '').replace(/\s+/g, ' ').trim();
 
+// Review R2-Q1 K1: the one bound for the line. A longer line is never shown (providerLineFor reads
+// null) and the partner form refuses a block that would build one (parseDisclosureForm), so the
+// chat surfaces' own bounding call (hold-replies, the Approve card, the prompt) never cuts it.
+// Measured in NFKC code points, as boundUntrustedText measures.
+export const PROVIDER_LINE_MAX = 200;
+
+const buildLine = (entity: string, regulator: string): string =>
+  // One pass, so a value that contains a placeholder is never substituted again.
+  PROVIDER_LINE_TEMPLATE.replace(/\{(entity|regulator)\}/g, (_m, k: string) => (k === 'entity' ? entity : regulator));
+
+/** Whether the line built from these two names (flattened) fits PROVIDER_LINE_MAX. Pure. */
+export function providerLineFits(entity: string, regulator: string): boolean {
+  return [...buildLine(flatten(entity), flatten(regulator)).normalize('NFKC')].length <= PROVIDER_LINE_MAX;
+}
+
 export function providerLineFor(d: ResolvedDisclosure | null | undefined): string | null {
   if (!d || d.demo || !d.configured || !d.partnerApproved) return null;
   const entity = flatten(d.licensedEntity);
@@ -40,6 +55,6 @@ export function providerLineFor(d: ResolvedDisclosure | null | undefined): strin
   if (PLATFORM_NAME.test(entity) || PLATFORM_NAME.test(regulator)) return null;
   // Checked on the flattened values: a legacy line break is already a space (as before).
   if (!isProviderNameText(entity) || !isProviderNameText(regulator)) return null;
-  // One pass, so a value that contains a placeholder is never substituted again.
-  return PROVIDER_LINE_TEMPLATE.replace(/\{(entity|regulator)\}/g, (_m, k: string) => (k === 'entity' ? entity : regulator));
+  if (!providerLineFits(entity, regulator)) return null;
+  return buildLine(entity, regulator);
 }

@@ -16,6 +16,7 @@ import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
 import { isInfraError } from '@/lib/infra-error';
+import { isOtpConsumeFailure } from '@/lib/otp-consume-failure';
 import { retryOnceOnInfra } from '@/lib/infra-retry';
 import { isDisclosureAckVersion } from '@/lib/remittance-disclosure';
 import { resolvePartnerBranding } from '@/lib/partner-config';
@@ -915,7 +916,8 @@ export async function POST(
     // Fix D: an infrastructure error (Redis / Neon) is retryable, not a refusal.
     // The copy never says nothing was charged: this catch also wraps post-capture
     // code, and a re-POST converges (claim-first replay / refuseUnlessAwaiting).
-    if (isInfraError(err)) {
+    // Review R2-Q1 B4: a failed single-use code consume is retryable whatever its shape.
+    if (isInfraError(err) || isOtpConsumeFailure(err)) {
       return NextResponse.json(
         { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
         { status: 503 },

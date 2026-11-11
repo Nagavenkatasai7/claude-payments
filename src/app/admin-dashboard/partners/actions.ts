@@ -68,6 +68,7 @@ import {
   whatsappAuditMeta,
 } from '@/lib/partner-whatsapp-config';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { PROVIDER_LINE_MAX } from '@/lib/legal/provider-line';
 import type {
   Partner,
   PartnerStatus,
@@ -693,6 +694,7 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, string> = {
   entity_required: 'Enter the licensed entity name before its other details.',
   provider_name:
     'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks or instructions.',
+  provider_line_too_long: `The licensed entity name and the state regulator name are too long together for the provider line, which can have at most ${PROVIDER_LINE_MAX} characters. Shorten one of the names.`,
 };
 
 export async function saveDisclosureConfigAction(formData: FormData): Promise<void> {

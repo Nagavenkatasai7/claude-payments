@@ -62,6 +62,10 @@ export const PAY_RELOAD_REQUIRED_FUNDED_COPY =
   'This page is out of date. Reload the page, check the details, then try again.';
 export const PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY =
   "We couldn't record your approval. Tap Resend for a new code, then try again.";
+// Review R2-Q1 I2: 409 not_available (PAY_NOT_AVAILABLE, pay-not-available.ts) on the pay POST.
+// Duplicates fixedReply('cannot_complete') (hold-replies.ts) so this module stays import-light;
+// a test pins them equal.
+export const PAY_NOT_AVAILABLE_COPY = "This transfer can't be completed right now.";
 export const PAY_ACCOUNT_HOLDER_COPY = "Enter the account holder's name as it appears at the recipient's bank.";
 
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
@@ -77,6 +81,7 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.reason === 'temporarily_unavailable') return PAY_TEMPORARY_COPY;
   if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
   if (b.reason === 'reload_required') return b.funded === true ? PAY_RELOAD_REQUIRED_FUNDED_COPY : PAY_RELOAD_REQUIRED_COPY;
+  if (b.reason === 'not_available') return PAY_NOT_AVAILABLE_COPY;
   if (b.reason === 'approval_not_recorded') {
     return b.funded === true ? PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY : PAY_APPROVAL_NOT_RECORDED_COPY;
   }

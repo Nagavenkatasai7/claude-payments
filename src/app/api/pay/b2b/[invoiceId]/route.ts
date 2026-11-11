@@ -27,6 +27,7 @@ import { payApprovalNotRecorded, payNotAvailable } from '@/lib/pay-not-available
 import { parsePayBody } from '@/lib/pay-body';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult } from '@/lib/payment-evidence';
+import { isOtpConsumeFailure } from '@/lib/otp-consume-failure';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
 
 // Cross-border B2B bill checkout (Plan 4) — the country-aware sibling of
@@ -359,6 +360,14 @@ export async function POST(
     }
   } catch (err) {
     logError('pay.b2b.route', err, { invoiceId });
+    // Review R2-Q1 B4: a failed single-use code consume (thrown out of verify, before any mint) is
+    // retryable: the transfer and link routes' 503 with the same temporary copy, never "Payment failed".
+    if (isOtpConsumeFailure(err)) {
+      return NextResponse.json(
+        { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
 }

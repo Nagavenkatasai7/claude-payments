@@ -6,7 +6,8 @@
  * sent, nothing charged), or it would skip the link checks (paylinks.enabled,
  * payee approved, link expiry and status).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { NextRequest } from 'next/server';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -45,6 +46,7 @@ let customerStore: ReturnType<typeof createCustomerStore>;
 let partnerStore: ReturnType<typeof createPartnerStore>;
 let txOtp: ReturnType<typeof createTransactionOtpStore>;
 let quotes: ReturnType<typeof createLinkQuoteStore>;
+let redis: ReturnType<typeof fakeRedis>;
 vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
 vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/store')>()), getStore: () => store }));
 vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import('@/lib/customer-store')>()), getCustomerStore: () => customerStore }));
@@ -97,6 +99,7 @@ async function mintUnpaid(): Promise<string> {
 beforeEach(async () => {
   vi.stubEnv('DEMO_PHONES', '*');
   const r = fakeRedis();
+  redis = r;
   db = await freshDb();
   invalidateFlagCache(db);
   store = createStore(r, db);
@@ -171,5 +174,25 @@ describe('a payment-link transfer on the hosted pay route', () => {
     const body = await res.json();
     expect(body.transferId).toBe(id);
     expect((await store.getTransfer(id))?.status).toBe('paid');
+  });
+});
+
+// Review R2-Q1 B4: the single-use code consume runs on a no-retry client, so a network error
+// throws out of verify. A bare TypeError('fetch failed') with no cause code is not an
+// isInfraError shape: the route still answers its retryable 503, never the wrong-code 403.
+describe('link route: the code consume fails (R2-Q1 B4)', () => {
+  it('a bare TypeError(fetch failed) -> 503 temporary; no transfer, no evidence; the code is not reported as wrong', async () => {
+    expect((await viaLink({ action: 'request_otp' })).status).toBe(200);
+    const consume = { ...redis, async getdel(): Promise<string | null> { throw new TypeError('fetch failed'); } };
+    txOtp = createTransactionOtpStore(redis, { randomInt: () => 654321, consume });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    onTestFinished(() => err.mockRestore());
+    const lockedAt = (await quotes.get(LINK_ID))!.lockedAt;
+    const res = await viaLink({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' });
+    const n = async (q: ReturnType<typeof sql>) => ((await db.execute(q)) as unknown as { rows: { n: number }[] }).rows[0].n;
+    expect(await n(sql`SELECT count(*)::int AS n FROM transfers`)).toBe(0);
+    expect(await n(sql`SELECT count(*)::int AS n FROM audit_events WHERE action IN ('otp.verified', 'remittance.disclosure_ack')`)).toBe(0);
   });
 });
