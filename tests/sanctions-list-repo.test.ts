@@ -309,6 +309,42 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(await versions(db)).toHaveLength(2);
   });
 
+  it('pack 5 LD2: without the upload option, older content under a newer date re-activates the old row (behaviour pinned)', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1));
+    await repo.storeList(variant(2));
+    const res = await repo.storeList({ ...variant(1), version: '2026-09-25' });
+    expect(res).toMatchObject({ status: 'activated', version: '2026-09-25', hash: variant(1).hash });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(1).version, hash: variant(1).hash });
+  });
+
+  it('pack 5 LD2: with refuseOlderContent, content equal to an OLDER stored version is stale; the active one stays', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1));
+    await repo.storeList(variant(2));
+    const before = await versions(db);
+    const err = await repo
+      .storeList({ ...variant(1), version: '2026-09-25' }, { refuseOlderContent: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SanctionsListStaleError);
+    expect(err).toMatchObject({ active: variant(2).version, next: variant(1).version });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(2).version, hash: variant(2).hash });
+    expect(await versions(db)).toEqual(before);
+  });
+
+  it('pack 5 LD2: with refuseOlderContent, a re-activated row reports its STORED version; new and same content as today', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList({ ...variant(1), version: variant(2).version });
+    await repo.storeList(variant(2));
+    const res = await repo.storeList({ ...variant(1), version: '2026-09-25' }, { refuseOlderContent: true });
+    expect(res).toMatchObject({ status: 'activated', version: variant(2).version, hash: variant(1).hash });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(2).version, hash: variant(1).hash });
+    const same = await repo.storeList({ ...variant(1), version: '2026-09-26' }, { refuseOlderContent: true });
+    expect(same).toMatchObject({ status: 'unchanged', version: variant(2).version, hash: variant(1).hash });
+    const fresh = await repo.storeList(variant(3), { refuseOlderContent: true });
+    expect(fresh).toMatchObject({ status: 'activated', version: variant(3).version, hash: variant(3).hash });
+  });
+
   it('freshDb applies 0036: the five columns exist and are nullable', async () => {
     const raw = await db.execute(sql.raw(
       `SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns

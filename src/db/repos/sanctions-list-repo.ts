@@ -172,8 +172,15 @@ export function createSanctionsListRepo(db: Db) {
      * version row; a re-activated version whose entries were pruned after
      * its archive gets them re-inserted (same content, same hash).
      * pruneArchivedEntries is the only entry delete.
+     *
+     * Pack 5 review LD2: `refuseOlderContent` is passed ONLY by the curated
+     * upload (India MHA, whose version is a typed date, not read from the
+     * file). With it, content equal to a stored version OLDER than the active
+     * one is refused (SanctionsListStaleError: the active version never moves
+     * backwards), and a re-activated row reports its STORED version. Without
+     * it (every list loader) the statements and the result are unchanged.
      */
-    async storeList(list: SanctionsList, opts: { minEntries?: number } = {}): Promise<StoreListResult> {
+    async storeList(list: SanctionsList, opts: { minEntries?: number; refuseOlderContent?: boolean } = {}): Promise<StoreListResult> {
       // Duplicate ids: first wins (never fail a whole load over one repeat).
       const seen = new Set<string>();
       const entries = list.entries.filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
@@ -243,8 +250,20 @@ export function createSanctionsListRepo(db: Db) {
           .limit(1);
 
         let versionId: number;
+        let storedVersion: string | undefined;
         if (existing[0]) {
           versionId = existing[0].id;
+          if (opts.refuseOlderContent) {
+            const stored = await tx
+              .select({ version: sanctionsListVersions.version })
+              .from(sanctionsListVersions)
+              .where(eq(sanctionsListVersions.id, versionId))
+              .limit(1);
+            storedVersion = stored[0]?.version ?? list.version;
+            if (active && storedVersion < active.version) {
+              throw new SanctionsListStaleError(active.version, storedVersion);
+            }
+          }
           // Fix pack 2 (R07): its entries may have been pruned after the
           // archive. Re-insert the incoming entries (same hash = same
           // content) so loadList's count check passes.
@@ -290,7 +309,7 @@ export function createSanctionsListRepo(db: Db) {
         return {
           status: 'activated' as const,
           versionId,
-          version: list.version,
+          version: storedVersion ?? list.version,
           hash: list.hash,
           entryCount: entries.length,
           nameCount,

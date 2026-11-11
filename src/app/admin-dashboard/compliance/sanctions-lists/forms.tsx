@@ -22,19 +22,31 @@ const OUTCOME_KEY = {
   confirmed: 'admin.compliance.sanctionsLists.outcome.confirmed',
 } as const;
 
+/** Pack 5 review LD2: the version and hash ACTIVE after a store, as the action read them back. */
+function ActiveAfter({ state }: { state: { activeVersion?: string; activeHash?: string } }) {
+  if (!state.activeVersion || !state.activeHash) return null;
+  return (
+    <p className="text-sm text-muted-foreground" data-testid="mha-active-after">
+      {t('admin.compliance.sanctionsLists.activeAfter', { version: state.activeVersion, hash: state.activeHash.slice(0, 12) })}
+    </p>
+  );
+}
+
 function Outcome({ state }: { state: Result }) {
   if (!state) return null;
   if (state.ok) {
     return (
-      <p role="status" className="text-sm font-semibold text-foreground">
-        {t(OUTCOME_KEY[state.outcome])}
-      </p>
+      <div role="status" className="flex flex-col gap-1.5">
+        <p className="text-sm font-semibold text-foreground">{t(OUTCOME_KEY[state.outcome])}</p>
+        <ActiveAfter state={state} />
+      </div>
     );
   }
   const rows = 'rows' in state ? state.rows : undefined;
   return (
     <div role="alert" className="flex flex-col gap-1.5 text-sm">
       <p className="font-semibold text-destructive">{state.error}</p>
+      {'activeVersion' in state && <ActiveAfter state={state} />}
       {rows && rows.length > 0 && (
         <ul className="list-disc pl-5 text-muted-foreground" data-testid="mha-row-errors">
           {rows.map((r, i) => (

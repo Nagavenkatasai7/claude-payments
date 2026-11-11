@@ -41,9 +41,17 @@ import type { Staff } from '@/lib/types';
 import { mhaCodeCopy } from './copy';
 
 export type MhaUploadOutcome = 'activated' | 'unchanged';
+/**
+ * Pack 5 review LD2: after a store (activated, unchanged, shrink or stale) the result carries the
+ * version and hash that are ACTIVE after it, never the typed date.
+ */
+interface ActiveAfter {
+  activeVersion?: string;
+  activeHash?: string;
+}
 export type MhaListActionResult =
-  | { ok: true; outcome: MhaUploadOutcome | 'confirmed' }
-  | { ok: false; error: string; rows?: Array<{ row: number; code: string }> }
+  | ({ ok: true; outcome: MhaUploadOutcome | 'confirmed' } & ActiveAfter)
+  | ({ ok: false; error: string; rows?: Array<{ row: number; code: string }> } & ActiveAfter)
   | StepUpRequired;
 
 const PAGE = '/admin-dashboard/compliance/sanctions-lists';
@@ -86,7 +94,7 @@ export async function uploadMhaListAction(formData: FormData): Promise<MhaListAc
   if ('ok' in g) return g;
   const staff = g;
 
-  // Bounds, before reading the body: the size is checked BEFORE text().
+  // Bounds, before reading the body: the size is checked BEFORE the decode.
   const file = formData.get('file');
   if (!(file instanceof File) || file.size === 0) {
     return refuseAudited(staff, t('admin.compliance.sanctionsLists.refused.noFile'), ['no_file']);
@@ -101,12 +109,21 @@ export async function uploadMhaListAction(formData: FormData): Promise<MhaListAc
   if (!isCalendarDate(version) || version > todayUtc) {
     return refuseAudited(staff, t('admin.compliance.sanctionsLists.refused.badVersion'), ['bad_version']);
   }
-  let text: string;
+  let bytes: ArrayBuffer;
   try {
-    text = await file.text();
+    bytes = await file.arrayBuffer();
   } catch (err) {
     logWarn('admin.sanctions-list.read', errName(err), { source: MHA_SOURCE });
     return refuseAudited(staff, t('admin.compliance.sanctionsLists.refused.noFile'), ['no_file']);
+  }
+  // Pack 5 review LD1: a strict UTF-8 decode. file.text() turns a byte that is not UTF-8 (a
+  // Windows-1252 or UTF-16 file) into U+FFFD and never fails, so a garbled name would be stored
+  // that can never match a payee. A leading UTF-8 BOM is still accepted (the decoder drops it).
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return refuseAudited(staff, mhaCodeCopy('bad_encoding'), ['bad_encoding']);
   }
   const parsed = parseInMhaCsv(text);
   if (!parsed.ok) {
@@ -125,27 +142,58 @@ export async function uploadMhaListAction(formData: FormData): Promise<MhaListAc
   if (stepUp) return stepUp;
 
   const nameCount = list.entries.reduce((n, e) => n + e.names.length + (e.weakNames?.length ?? 0), 0);
-  const metaOf = (outcome: string) => ({ source: MHA_SOURCE, version, hash: list.hash, entryCount: list.entries.length, nameCount, outcome });
+  // Pack 5 review LD2: version and hash are the ones ACTIVE after the store (null when none is);
+  // the typed date and the uploaded hash follow as requestedVersion / requestedHash when they differ.
+  const metaOf = (outcome: string, active: { version: string; hash: string } | null) => ({
+    source: MHA_SOURCE,
+    version: active?.version ?? null,
+    hash: active?.hash ?? null,
+    entryCount: list.entries.length,
+    nameCount,
+    outcome,
+    ...(active?.version === version ? {} : { requestedVersion: version }),
+    ...(active?.hash === list.hash ? {} : { requestedHash: list.hash }),
+  });
+  const repo = createSanctionsListRepo(getDb());
   let outcome: MhaUploadOutcome | 'shrink' | 'stale';
+  let active: { version: string; hash: string } | null = null;
+  /** The stale refusal is about the CONTENT (an older stored version), not the typed date. */
+  let olderContent = false;
   try {
-    outcome = (await createSanctionsListRepo(getDb()).storeList(list, { minEntries: MHA_MIN_ENTRIES })).status;
+    // refuseOlderContent: content equal to a stored version older than the active one is stale,
+    // so the active version never moves backwards; a re-activated row reports its stored version.
+    const stored = await repo.storeList(list, { minEntries: MHA_MIN_ENTRIES, refuseOlderContent: true });
+    outcome = stored.status;
+    active = { version: stored.version, hash: stored.hash };
   } catch (err) {
     if (err instanceof SanctionsListShrinkError) outcome = 'shrink';
-    else if (err instanceof SanctionsListStaleError) outcome = 'stale';
-    else {
+    else if (err instanceof SanctionsListStaleError) {
+      outcome = 'stale';
+      olderContent = err.next !== version;
+    } else {
       logWarn('admin.sanctions-list.store', errName(err), { source: MHA_SOURCE });
       return refused(t('admin.compliance.sanctionsLists.refused.failed'));
     }
+    try {
+      const a = await repo.activeVersion(MHA_SOURCE);
+      active = a ? { version: a.version, hash: a.hash } : null;
+    } catch (readErr) {
+      logWarn('admin.sanctions-list.read', errName(readErr), { source: MHA_SOURCE });
+    }
   }
   try {
-    await audit(staff, 'sanctions.list.upload', metaOf(outcome));
+    await audit(staff, 'sanctions.list.upload', metaOf(outcome, active));
   } catch (err) {
     logWarn('admin.sanctions-list.audit', errName(err), { source: MHA_SOURCE });
   }
   revalidatePath(PAGE);
-  if (outcome === 'shrink') return refused(t('admin.compliance.sanctionsLists.refused.shrink'));
-  if (outcome === 'stale') return refused(t('admin.compliance.sanctionsLists.refused.stale'));
-  return { ok: true, outcome };
+  const after: ActiveAfter = active ? { activeVersion: active.version, activeHash: active.hash } : {};
+  if (outcome === 'shrink') return { ok: false, error: t('admin.compliance.sanctionsLists.refused.shrink'), ...after };
+  if (outcome === 'stale') {
+    const key = olderContent ? 'admin.compliance.sanctionsLists.refused.staleContent' : 'admin.compliance.sanctionsLists.refused.stale';
+    return { ok: false, error: t(key), ...after };
+  }
+  return { ok: true, outcome, ...after };
 }
 
 export async function confirmMhaListCurrentAction(formData: FormData): Promise<MhaListActionResult> {

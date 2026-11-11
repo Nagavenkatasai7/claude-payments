@@ -219,6 +219,53 @@ describe('uploadMhaListAction: bounds before the step-up', () => {
   });
 });
 
+describe('uploadMhaListAction: strict UTF-8 (pack 5 review LD1)', () => {
+  // A Blob encodes a string part as UTF-8; a Uint8Array part goes in as raw bytes.
+  const bytesFile = (parts: Array<string | Uint8Array<ArrayBuffer>>) => new File(parts, 'mha.csv', { type: 'text/csv' });
+  const utf16le = (text: string) => {
+    const out = new Uint8Array(2 + text.length * 2);
+    out.set([0xff, 0xfe]);
+    for (let i = 0; i < text.length; i++) {
+      out[2 + i * 2] = text.charCodeAt(i) & 0xff;
+      out[3 + i * 2] = text.charCodeAt(i) >> 8;
+    }
+    return new File([out], 'mha.csv', { type: 'text/csv' });
+  };
+  const cases: Array<[string, () => File]> = [
+    [
+      'a Windows-1252 byte (0xFC) in a name cell',
+      () => {
+        const lines = csvOf(25).split('\n');
+        const [head, rest] = [lines.slice(0, 4).join('\n') + '\nm99,Entity,M', ',,,UAPA First Schedule,SO 99\n' + lines.slice(4).join('\n')];
+        return bytesFile([head, new Uint8Array([0xfc]), 'ller Zorvandel', rest]);
+      },
+    ],
+    ['a UTF-16LE file with a BOM', () => utf16le(csvOf(25))],
+  ];
+  for (const [label, file] of cases) {
+    it(`${label} -> refused 'bad_encoding', no step-up, nothing stored, one 'refused' audit row without a name`, async () => {
+      await platformAdmin();
+      const r = await uploadMhaListAction(uploadForm({ file: file() }));
+      expect(r).toEqual({ ok: false, error: expect.stringMatching(/UTF-8/) });
+      expect(gate.calls).toEqual([]);
+      expect(await versions()).toEqual([]);
+      const a = await audits();
+      expect(a.map((x) => x.meta)).toEqual([{ source: 'in-mha-uapa', errorCount: 1, codes: ['bad_encoding'], outcome: 'refused' }]);
+      expect(JSON.stringify([a, r])).not.toMatch(/Zorvandel|Invented|ller/);
+    });
+  }
+
+  it('a valid UTF-8 file with a BOM and diacritics still activates', async () => {
+    await platformAdmin();
+    const lines = csvOf(25).split('\n');
+    lines[2] = 'm1,Individual,Zoë Müller-Ñandú,Invented Ålias Øre,,UAPA First Schedule,SO 1';
+    const r = await uploadMhaListAction(uploadForm({ file: bytesFile(['\uFEFF' + lines.join('\n')]) }));
+    expect(r).toMatchObject({ ok: true, outcome: 'activated' });
+    const stored = await rows<{ names: string[] }>(sql`SELECT names FROM sanctions_list_entries WHERE entry_id = 'inmha:m1'`);
+    expect(stored[0].names).toEqual(['Zoë Müller-Ñandú', 'Invented Ålias Øre']);
+  });
+});
+
 describe('uploadMhaListAction: step-up and store', () => {
   it("step-up ALWAYS ('sanctions_list.upload', { always: true }); a StepUpRequired result is returned and nothing stored", async () => {
     await platformAdmin();
@@ -234,9 +281,14 @@ describe('uploadMhaListAction: step-up and store', () => {
     await platformAdmin();
     const version = dayOffset(-3);
     const csv = csvOf(25);
-    expect(await uploadMhaListAction(uploadForm({ csv, version }))).toEqual({ ok: true, outcome: 'activated' });
     const parsed = parseInMhaCsv(csv);
     if (!parsed.ok) throw new Error('fixture');
+    expect(await uploadMhaListAction(uploadForm({ csv, version }))).toEqual({
+      ok: true,
+      outcome: 'activated',
+      activeVersion: version,
+      activeHash: parsed.list.hash,
+    });
     const active = await createSanctionsListRepo(db).activeVersion('in-mha-uapa');
     expect(active).toMatchObject({ version, hash: hashEntries(parsed.list.entries), entryCount: 25 });
     expect(await audits()).toEqual([
@@ -256,7 +308,7 @@ describe('uploadMhaListAction: step-up and store', () => {
     await platformAdmin();
     await uploadMhaListAction(uploadForm());
     await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = now() - interval '6 days'`);
-    expect(await uploadMhaListAction(uploadForm())).toEqual({ ok: true, outcome: 'unchanged' });
+    expect(await uploadMhaListAction(uploadForm())).toMatchObject({ ok: true, outcome: 'unchanged', activeVersion: dayOffset(-1) });
     const v = await versions();
     expect(v).toHaveLength(1);
     expect(Date.now() - new Date(v[0].checked_at).getTime()).toBeLessThan(60_000);
@@ -270,9 +322,23 @@ describe('uploadMhaListAction: step-up and store', () => {
     expect(r).toMatchObject({ ok: false });
     expect((r as { error: string }).error).toMatch(/80%/);
     expect(await createSanctionsListRepo(db).activeVersion('in-mha-uapa')).toMatchObject({ version: dayOffset(-5), entryCount: 30 });
+    const active = (await createSanctionsListRepo(db).activeVersion('in-mha-uapa'))!;
+    expect(r).toMatchObject({ activeVersion: dayOffset(-5), activeHash: active.hash });
     const last = (await audits()).at(-1)!;
-    expect(last.meta).toMatchObject({ source: 'in-mha-uapa', version: dayOffset(-1), entryCount: 22, nameCount: 44, outcome: 'shrink' });
-    expect(Object.keys(last.meta).sort()).toEqual(['entryCount', 'hash', 'nameCount', 'outcome', 'source', 'version']);
+    // Pack 5 review LD2: version and hash are the ACTIVE ones after the store; the typed date and
+    // the uploaded hash follow as requestedVersion / requestedHash when they differ.
+    const shrunk = parseInMhaCsv(csvOf(22, 100));
+    if (!shrunk.ok) throw new Error('fixture');
+    expect(last.meta).toEqual({
+      source: 'in-mha-uapa',
+      version: dayOffset(-5),
+      hash: active.hash,
+      entryCount: 22,
+      nameCount: 44,
+      outcome: 'shrink',
+      requestedVersion: dayOffset(-1),
+      requestedHash: shrunk.list.hash,
+    });
   });
 
   it("an older version date -> refused (stale), outcome 'stale'", async () => {
@@ -283,6 +349,54 @@ describe('uploadMhaListAction: step-up and store', () => {
     expect((r as { error: string }).error).toMatch(/older/);
     expect(await createSanctionsListRepo(db).activeVersion('in-mha-uapa')).toMatchObject({ version: dayOffset(-1), entryCount: 25 });
     expect((await audits()).at(-1)!.meta.outcome).toBe('stale');
+  });
+
+  it("pack 5 LD2: the same content under another date -> 'unchanged'; page and audit carry the STORED active version", async () => {
+    await platformAdmin();
+    const csv = csvOf(25);
+    const parsed = parseInMhaCsv(csv);
+    if (!parsed.ok) throw new Error('fixture');
+    await uploadMhaListAction(uploadForm({ csv, version: dayOffset(-3) }));
+    expect(await uploadMhaListAction(uploadForm({ csv, version: dayOffset(-1) }))).toEqual({
+      ok: true,
+      outcome: 'unchanged',
+      activeVersion: dayOffset(-3),
+      activeHash: parsed.list.hash,
+    });
+    expect((await audits()).at(-1)!.meta).toEqual({
+      source: 'in-mha-uapa',
+      version: dayOffset(-3),
+      hash: parsed.list.hash,
+      entryCount: 25,
+      nameCount: 50,
+      outcome: 'unchanged',
+      requestedVersion: dayOffset(-1),
+    });
+  });
+
+  it("pack 5 LD2: content equal to an OLDER stored version under a newer date -> 'stale'; the active version never moves back", async () => {
+    await platformAdmin();
+    const a = csvOf(25);
+    const b = csvOf(26);
+    const pa = parseInMhaCsv(a);
+    const pb = parseInMhaCsv(b);
+    if (!pa.ok || !pb.ok) throw new Error('fixture');
+    await uploadMhaListAction(uploadForm({ csv: a, version: dayOffset(-5) }));
+    await uploadMhaListAction(uploadForm({ csv: b, version: dayOffset(-3) }));
+    const r = await uploadMhaListAction(uploadForm({ csv: a, version: dayOffset(-1) }));
+    expect(r).toMatchObject({ ok: false, activeVersion: dayOffset(-3), activeHash: pb.list.hash });
+    expect((r as { error: string }).error).toMatch(/older version/);
+    expect(await createSanctionsListRepo(db).activeVersion('in-mha-uapa')).toMatchObject({ version: dayOffset(-3), hash: pb.list.hash, entryCount: 26 });
+    expect((await audits()).at(-1)!.meta).toEqual({
+      source: 'in-mha-uapa',
+      version: dayOffset(-3),
+      hash: pb.list.hash,
+      entryCount: 25,
+      nameCount: 50,
+      outcome: 'stale',
+      requestedVersion: dayOffset(-1),
+      requestedHash: pa.list.hash,
+    });
   });
 
   it('audit meta never holds a name (JSON scan over every outcome)', async () => {

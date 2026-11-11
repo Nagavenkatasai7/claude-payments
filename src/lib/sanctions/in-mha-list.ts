@@ -173,7 +173,9 @@ export function parseInMhaCsv(text: string): ParseInMhaResult {
       errors.push({ row: rec.row, code: 'bad_columns' });
       continue;
     }
-    if (rec.cells.some((c) => !isBoundedPrintable(c, CELL_MAX))) {
+    // Pack 5 review LD1: U+FFFD is what a lossy decode leaves for a byte that is not UTF-8 (a
+    // Windows-1252 or UTF-16 file); a name holding it can never match a payee.
+    if (rec.cells.some((c) => !isBoundedPrintable(c, CELL_MAX) || c.includes('�'))) {
       errors.push({ row: rec.row, code: 'bad_text' });
       continue;
     }

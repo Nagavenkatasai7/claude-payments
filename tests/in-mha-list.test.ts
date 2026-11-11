@@ -116,6 +116,10 @@ describe('parseInMhaCsv: row errors carry row numbers and codes only', () => {
     [row('a1', { name: 'Invented\u0007Org' }), 'bad_text'],
     ['a1,Entity,"Invented\nOrg",,,UAPA-1,ref', 'bad_text'],
     [row('a1', { ref: 'SO​1' }), 'bad_text'],
+    // Pack 5 review LD1: U+FFFD is what a lossy decode leaves for a byte that is not UTF-8.
+    [row('a1', { name: 'M�ller Invented' }), 'bad_text'],
+    [row('a1', { aliases: 'Invented �lias' }), 'bad_text'],
+    [row('a1', { ref: 'SO �1' }), 'bad_text'],
   ];
   for (const [r, code] of cases) {
     it(`${code}: ${JSON.stringify(r).slice(0, 40)}`, () => {
