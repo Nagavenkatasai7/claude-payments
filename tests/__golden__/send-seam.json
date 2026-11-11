@@ -302,6 +302,11 @@
         "action": "sanctions.screen",
         "partner_id": "default",
         "subject_id": "ID_1"
+      },
+      {
+        "action": "sanctions.block",
+        "partner_id": "default",
+        "subject_id": "ID_1"
       }
     ],
     "kycInquiries": [],

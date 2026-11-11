@@ -5,7 +5,9 @@ import type { CurrencyCode, PartnerRate, SettlementRoute } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
+import { settlementTargetUrl } from './live-gate';
 import { recentlyFailingRails } from './rail-health';
+import { logWarn } from './log';
 
 // partner-rates — best-rate selection (internal). The platform mid-market rate
 // is ALWAYS the baseline competitor; an eligible partner wins a corridor only
@@ -18,9 +20,12 @@ import { recentlyFailingRails } from './rail-health';
 //   • not the 'default' partner (it IS the platform baseline)
 //   • a FRESH pushed rate (effectiveRate with expiresAt in the future), else a
 //     standing marginBps off mid (signed; positive ⇒ better for the customer)
-//   • a routable rail: payment.providerType 'http' | 'simulator' AND a
-//     non-empty credentials.settlementUrl — anything else dead-letters money
-//     in `paid` (the settlement.instruct handler throws on a missing URL).
+//   • a routable rail: payment.providerType 'simulator' AND a passing target
+//     URL (settlementTargetUrl: a simulator's hosted rail) — anything else
+//     dead-letters money in `paid` (the settlement.instruct handler throws on
+//     a missing URL). Fix pack 3 (contract 15): an 'http' rail is never a
+//     route. Only the default tenant routes, and it may not settle on a
+//     real-money rail (the mint refuses it: default_on_live_rail).
 //   • a PLAUSIBLE rate: at most MAX_ROUTE_PREMIUM above mid (smart-routing R0
 //     fix A). A pushed typo (850 for 85.0) or a fat-fingered margin would
 //     otherwise win every route at a rate the partner never meant to pay.
@@ -30,7 +35,7 @@ import { recentlyFailingRails } from './rail-health';
 // Callers gate on the tenant BEFORE calling (white-label customers are pinned
 // to their partner — transmitter of record): only default-tenant quotes route.
 
-const ROUTABLE_PROVIDER_TYPES = new Set(['http', 'simulator']);
+const ROUTABLE_PROVIDER_TYPES = new Set(['simulator']);
 
 /** The most a partner rate may beat mid by and still compete (5%). Above it the rate is treated as a typo. */
 export const MAX_ROUTE_PREMIUM = 0.05;
@@ -96,7 +101,7 @@ export async function selectSettlementRoute(
   } catch (err) {
     // Selection is an optimization, never a blocker — a rates outage must not
     // take quoting down. Fall back to the platform rate.
-    console.warn('selectSettlementRoute: candidate query failed:', err instanceof Error ? err.message : err);
+    logWarn('routing.candidates', err, { sourceCurrency, destinationCurrency });
     return platform;
   }
 
@@ -121,7 +126,10 @@ export async function selectSettlementRoute(
     try {
       const integrations = await integrationsStore.getIntegrations(c.partnerId);
       const providerType = integrations.payment.providerType ?? '';
-      const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+      // Pack 3: only the default tenant routes and it may not settle on a real-money rail.
+      if (providerType === 'http') continue;
+      // Fix pack 2 T10: the URL the worker POSTs to (a simulator's is the hosted rail).
+      const settlementUrl = settlementTargetUrl(integrations.payment);
       // Fix 22: routable only when the endpoint passes the same sync URL rule
       // the worker applies before any fetch — never route money into a rail
       // whose instruct could only be refused.
@@ -138,10 +146,7 @@ export async function selectSettlementRoute(
         };
       }
     } catch (err) {
-      console.warn(
-        `selectSettlementRoute: integrations read failed for ${c.partnerId}:`,
-        err instanceof Error ? err.message : err,
-      );
+      logWarn('routing.integrations', err, { partnerId: c.partnerId });
     }
     // Not routable — fall through to the next-best contender.
   }

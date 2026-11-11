@@ -10,6 +10,7 @@ import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
+import { MintRefusedError, type MintRefusalCode } from '@/lib/transfer-create';
 import { FX_UNAVAILABLE_MESSAGE, resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
@@ -17,7 +18,10 @@ import {
   resetSenderNameDeprecationLogForTests,
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
-import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Partner } from '@/lib/types';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
@@ -620,6 +624,319 @@ describe('partner-api-service: confirmTransaction enforces the compliance hold (
   });
 });
 
+// Fix pack 2 T3 (R02): confirm on a real-money rail re-screens unless the
+// newest evidence is a LIVE, fresh screen — an evidence test, not a mint-age
+// test, so a rail switched from simulator to http after the mint is caught.
+describe('partner-api-service: confirmTransaction re-screens on a real-money rail (fix pack 2 T3)', { retry: 0 }, () => {
+  const originalList = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(originalList));
+  type View = { id: string; status: string; compliance_status: string };
+  const screens = async (db: Awaited<ReturnType<typeof harness>>['db'], id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+  async function mint(h: Awaited<ReturnType<typeof harness>>, idem: string, over: Record<string, unknown> = {}) {
+    // Fix pack 3 T4: a live mint (and, from T5, a live confirm) on an http
+    // rail needs a certified rail partner; a sandbox mint stays as it was.
+    if (h.deps.keyMode !== 'test') await certifyPartnerForTest(h.db, 'acme');
+    const r = await createTransaction(h.deps, DELEGATED, 'pk_1', idem, txBody(over));
+    if (!r.ok) throw new Error('unexpected: ' + r.error);
+    return (r.data as View).id;
+  }
+
+  it('minted on a simulator rail, rail switched to http, confirmed 1 h later on a list that is not live → re-screened and held', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-1');
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    await setRailProviderType(h.db, 'acme', 'http');
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const later = new Date(Date.now() + 3_600_000);
+    h.deps.now = () => later.toISOString();
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect(r.data as View).toMatchObject({ status: 'in_review', compliance_status: 'flagged' });
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    expect(await screens(h.db, id)).toBe(2);
+  });
+
+  it('live, fresh evidence → no re-screen; settles', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-2');
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    const before = await screens(h.db, id);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(await screens(h.db, id)).toBe(before);
+  });
+
+  it('a body sender name (never stored) cannot be re-screened → held SENDER_IDENTITY_MISSING, never settled', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-3');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 }); // a live list: only the coverage rule holds it
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
+  });
+
+  it('re-screened to blocked → 422, nothing settled', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    // Not on the mock list at mint; on the OFAC fixture at confirm.
+    const id = await mint(h, 'idem-lv-4', {
+      beneficiary: { name: 'Testa Fixturelli', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    });
+    expect((await h.store.getTransfer(id))?.complianceStatus).toBe('cleared');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    expect(initiatePayment).not.toHaveBeenCalled();
+    const t = await h.store.getTransfer(id);
+    expect(t?.complianceStatus).toBe('blocked');
+    const kinds = ((await h.db.execute(sql`SELECT kind FROM outbox`)) as unknown as { rows: Array<{ kind: string }> }).rows.map((x) => x.kind);
+    expect(kinds).not.toContain('settlement.instruct');
+  });
+
+  // Pack 2 review round 4 (S4: N1, P1): the confirm call is the partner's
+  // attestation that it collected the funds, so a confirm-stage block never
+  // says nothing was charged, and tells nobody to refund.
+  it('re-screened to blocked at confirm → the block alert says the partner collected the funds', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mint(h, 'idem-lv-4b', {
+      beneficiary: { name: 'Testa Fixturelli', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    });
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    const t = await h.store.getTransfer(id);
+    expect(t?.fundingRef ?? null).toBeNull();
+    const msgs = ((await h.db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = ${'sanctionsblock:' + id}`)) as unknown as {
+      rows: Array<{ payload: { message: string } }>;
+    }).rows.map((x) => x.payload.message);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain("The recipient was not paid, but the partner confirmed that it collected the sender's funds.");
+    expect(msgs[0]).not.toMatch(/nothing was charged|nothing paid out|refund procedure|refund it|before any refund/i);
+  });
+
+  // Pack 2 review R1 (G2): the flagged branch adds the same real-money hold
+  // reasons settleOrHold adds (the platform reviewer sees them).
+  it('flagged LARGE, fresh live evidence, sender stamped after the mint → held with LARGE + SENDER_SCREENING', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2');
+    const cur = await h.store.getTransferDecrypted(id);
+    expect(cur?.complianceStatus).toBe('cleared');
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.', SENDER_SCREENING_REASON]);
+  });
+
+  it('flagged LARGE on a simulator rail, sender stamped → held with LARGE only (not real money, unchanged)', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mint(h, 'idem-lv-g2s');
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    await h.db.execute(sql`UPDATE customers SET screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    const t = await h.store.getTransfer(id);
+    expect(t?.status).toBe('in_review');
+    expect(t?.complianceReasons).toEqual(['Large transfer amount.']);
+  });
+
+  it('a sandbox transfer is never real money: no re-screen, settles as before', async () => {
+    const h = await harness();
+    h.deps.keyMode = 'test';
+    await setRailProviderType(h.db, 'acme', 'http');
+    const id = await mint(h, 'idem-lv-5');
+    const before = await screens(h.db, id);
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 }); // review R2 (J6): a failed confirm must not pass
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(await screens(h.db, id)).toBe(before);
+  });
+});
+
+// Pack 3 (contract 6): confirm on an uncertified real-money rail is refused BEFORE the re-screen
+// and the settle: 403 partner_not_live, the row stays awaiting_payment, no screen row is written
+// and deps.initiatePayment is never called (confirm judges on the rail integrations it reads: liveRefusalForRail).
+describe('partner-api-service: confirmTransaction live certification (pack 3)', { retry: 0 }, () => {
+  const originalList = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(originalList));
+  type View = { id: string; status: string };
+  const screens = async (db: Awaited<ReturnType<typeof harness>>['db'], id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+  async function mintOn(h: Awaited<ReturnType<typeof harness>>, idem: string) {
+    const r = await createTransaction(h.deps, DELEGATED, 'pk_1', idem, txBody());
+    if (!r.ok) throw new Error('unexpected: ' + r.error);
+    return (r.data as View).id;
+  }
+
+  it('confirm on an uncertified http rail (DB row; confirm uses liveRefusalForRail) -> 403 { code: partner_not_live }, still awaiting_payment, no re-screen row, deps.initiatePayment never called', async () => {
+    const h = await harness();
+    // Minted on a simulator rail (not real money, no certification needed), then switched to http.
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-1');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const before = await screens(h.db, id);
+    const initiatePayment = vi.fn(h.deps.initiatePayment!);
+    h.deps.initiatePayment = initiatePayment;
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({
+      ok: false, status: 403,
+      error: 'This partner is not certified for live transfers on its settlement rail.',
+      code: 'partner_not_live',
+    });
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+    expect(await screens(h.db, id)).toBe(before);
+    expect(initiatePayment).not.toHaveBeenCalled();
+  });
+
+  it('certified -> settles', async () => {
+    const h = await harness();
+    await certifyPartnerForTest(h.db, 'acme');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    await seedNamedCustomer(h.customerStore, '15551230000', 'Sender');
+    const id = await mintOn(h, 'idem-live-2');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+  });
+
+  it("a 'test' transfer confirms as before", async () => {
+    const h = await harness();
+    h.deps.keyMode = 'test';
+    await setRailProviderType(h.db, 'acme', 'http');
+    const id = await mintOn(h, 'idem-live-3');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+  });
+
+  // Review P1 A1: a failed rail read is never a 403 partner_not_live (owner Q15: the pay-time gates do
+  // not refuse on a failed read). The confirm judges on the integrations it reads, and a failed read
+  // throws (a retryable 5xx through the route's error path) with nothing written.
+  const writes = async (db: Awaited<ReturnType<typeof harness>>['db']) =>
+    ((await db.execute(sql`SELECT (SELECT count(*)::int FROM outbox) AS o, (SELECT count(*)::int FROM audit_events) AS a`)) as unknown as {
+      rows: Array<{ o: number; a: number }>;
+    }).rows[0];
+  // The rail's partner_integrations row cannot be read: every read of the table fails, as on a dropped connection.
+  const breakRailRead = (db: Awaited<ReturnType<typeof harness>>['db']) =>
+    db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_unreadable`);
+
+  for (const [label, who] of [
+    ['a simulator-rail partner', 'acme'],
+    ['the default tenant on the mock rail', 'default'],
+  ] as const) {
+    it(`${label}: a failed rail read rejects (retryable), never 403 partner_not_live, and writes nothing`, async () => {
+      const h = await harness();
+      const p = who === 'acme' ? DELEGATED : partner({ id: 'default', kycMode: 'delegated', requireKycBeforeSend: false });
+      if (who === 'acme') await setRailProviderType(h.db, 'acme', 'simulator');
+      const r0 = await createTransaction(h.deps, p, 'pk_1', `idem-fail-${who}`, txBody());
+      if (!r0.ok) throw new Error('unexpected: ' + r0.error);
+      const id = (r0.data as View).id;
+      const initiatePayment = vi.fn(h.deps.initiatePayment!);
+      h.deps.initiatePayment = initiatePayment;
+      const before = await writes(h.db);
+      await breakRailRead(h.db);
+      let outcome: unknown;
+      try {
+        outcome = await confirmTransaction(h.deps, p, 'pk_1', id);
+      } catch (e) {
+        outcome = e;
+      } finally {
+        // The PGlite instance is shared across tests: put the table back.
+        await h.db.execute(sql`ALTER TABLE partner_integrations_unreadable RENAME TO partner_integrations`);
+      }
+      expect(outcome).not.toMatchObject({ status: 403 });
+      expect(outcome).not.toMatchObject({ code: 'partner_not_live' });
+      expect(outcome).toBeInstanceOf(Error);
+      expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+      expect(await writes(h.db)).toEqual(before);
+      expect(initiatePayment).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a rail integrations read that rejects once (store error) rejects the confirm, never 403, and writes nothing', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-fail-once');
+    const before = await writes(h.db);
+    vi.spyOn(h.deps.integrationsStore, 'getIntegrations').mockRejectedValueOnce(new Error('connection dropped'));
+    await expect(confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).rejects.toThrow('connection dropped');
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+    expect(await writes(h.db)).toEqual(before);
+  });
+
+  it('an uncertified http partner is refused 403 partner_not_live from the integrations it read; no sanctions.screen row', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-4');
+    await setRailProviderType(h.db, 'acme', 'http');
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    const before = await screens(h.db, id);
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: false, status: 403, code: 'partner_not_live' });
+    expect(await screens(h.db, id)).toBe(before);
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(reads).toHaveBeenCalledWith('acme');
+  });
+
+  it('a normal confirm (real settleOrHold, simulator rail) reads the rail integrations once', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-5');
+    h.deps.initiatePayment = undefined;
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('paid');
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+
+  it('a held confirm (flagged, real settleOrHold) reads the rail integrations once', async () => {
+    const h = await harness();
+    await setRailProviderType(h.db, 'acme', 'simulator');
+    const id = await mintOn(h, 'idem-live-6');
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    const reads = vi.spyOn(h.deps.integrationsStore, 'getIntegrations');
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as View).status).toBe('in_review');
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('partner-api-service: FX unavailable is a 503 (retryable), never a 400 (Task 9)', () => {
   it('createQuote → 503 with the customer-safe message when Frankfurter is down and nothing is cached', async () => {
     const { deps } = await harness();
@@ -1211,5 +1528,49 @@ describe('createQuote fee parity with the mint', () => {
     vi.spyOn(deps.store, 'getTransferCount').mockRejectedValueOnce(new Error('db down'));
     const q = feeOf(await createQuote(deps, DELEGATED, { amount_source: 200, sender: { phone: NEW_PHONE } }, MINT_KEY));
     expect([q.fee_source, q.first_transfer_free]).toEqual([1.99, false]);
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint ⇒ 403 with a fixed
+// code and the contract message (never a reason, counsel or contract text).
+// Nothing throws it in production yet (T4/T12 do): the throw is stubbed at the
+// sender lock. The key stays bound-but-unminted, so the SAME key mints after.
+describe('createTransaction: MintRefusedError (pack 3)', () => {
+  const NOT_LIVE = 'This partner is not certified for live transfers on its settlement rail.';
+  const CAP_OFF = 'This feature is not enabled for live transfers on this partner.';
+  const PHONE = '15557771099';
+  it.each<[MintRefusalCode, string, string]>([
+    ['live_not_certified', 'partner_not_live', NOT_LIVE],
+    ['default_on_live_rail', 'partner_not_live', NOT_LIVE],
+    ['capability_off', 'capability_off', CAP_OFF],
+  ])('%s ⇒ 403 { code: %s } with the contract message, nothing minted; the same Idempotency-Key mints after', async (refusal, code, message) => {
+    const { deps, db, store } = await harness();
+    vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError(refusal));
+    const body = txBody({ sender: { phone: PHONE, kyc_status: 'not_started' } });
+    const key = `idem-live-${refusal}`;
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', key, body);
+    expect(r).toEqual({ ok: false, status: 403, error: message, code });
+    const bound = await createIdempotencyRepo(db).find('acme', key);
+    expect(bound).not.toBeNull();
+    expect(await store.getTransfer(bound!)).toBeNull();
+    expect(await store.getTransferCount('acme', PHONE)).toBe(0);
+    const r2 = await createTransaction(deps, DELEGATED, 'pk_1', key, body);
+    expect(r2).toMatchObject({ ok: true, status: 201 });
+    if (!r2.ok) throw new Error('unexpected');
+    expect((r2.data as { id: string }).id).toBe(bound);
+  });
+
+  // Fix pack 3 T4: the real throw (no stub) from the mint's live gate.
+  it("an uncertified http partner's live mint -> 403 partner_not_live, nothing minted", async () => {
+    const { deps, db, store } = await harness();
+    await setRailProviderType(db, 'acme', 'http');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const lock = vi.spyOn(store, 'mintUnderSenderLock');
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-live-real', txBody({ sender: { phone: PHONE, kyc_status: 'not_started' } }));
+    expect(r).toEqual({ ok: false, status: 403, error: NOT_LIVE, code: 'partner_not_live' });
+    expect(lock).not.toHaveBeenCalled();
+    expect(await store.getTransferCount('acme', PHONE)).toBe(0);
+    const n = await db.execute(sql`SELECT count(*)::int AS n FROM transfers`);
+    expect(Number((n.rows[0] as { n: number }).n)).toBe(0);
   });
 });

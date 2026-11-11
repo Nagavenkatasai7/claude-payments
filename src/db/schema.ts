@@ -51,6 +51,8 @@ export const partners = pgTable('partners', {
   // Program fix 16 (0018): PartnerSendLimits — tighten-only in fix 16, audited raises in 16b.
   sendLimits: jsonb('send_limits'),
   supportConfig: jsonb('support_config'), // PartnerSupportConfig (absent ⇒ defaults)
+  // Fix pack 3 (0037): read in rowToPartner only, never in partnerToRow; ONE writer updateLiveControlsKey.
+  liveControls: jsonb('live_controls').notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -291,6 +293,12 @@ export const customers = pgTable(
     pepDeclared: boolean('pep_declared'),
     watchlistHit: boolean('watchlist_hit'),
     pepHit: boolean('pep_hit'),
+    // Fix pack 2 (0036, R06): the sender screening hold. flaggedAt is stamped
+    // when a screening hit is seen; clearedAt by the audited platform clear. A
+    // hold is active while a hit (or flaggedAt) exists and is not cleared after
+    // it (compliance-config.ts senderScreeningHoldActive).
+    screeningFlaggedAt: timestamp('screening_flagged_at', { withTimezone: true }),
+    screeningClearedAt: timestamp('screening_cleared_at', { withTimezone: true }),
     sourceOfFunds: text('source_of_funds'),
     occupation: text('occupation'),
     eddCapturedAt: timestamp('edd_captured_at', { withTimezone: true }),
@@ -734,6 +742,11 @@ export const sanctionsListVersions = pgTable(
     loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
     activatedAt: timestamp('activated_at', { withTimezone: true }),
     checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+    // Fix pack 2 (0036, R07): the verified Blob archive of this version's
+    // source file, written before the version may be pruned.
+    archivePath: text('archive_path'),
+    archiveSha256: text('archive_sha256'),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
   (t) => [
     uniqueIndex('sanctions_list_versions_source_hash').on(t.source, t.hash),

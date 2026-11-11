@@ -3,12 +3,14 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep } from '@/lib/reconcile';
-import { invalidateFlagCache, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
+import { invalidateFlagCache, SETTLEMENT_PAUSED_DEFER_SEC, tenantScopeId } from '@/lib/flags';
+import { resetFlagReadAlertMemoForTests } from '@/lib/flag-read-alert';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
@@ -19,6 +21,26 @@ import type { Transfer } from '@/lib/types';
 // transfer as stuck.
 
 const provider = new EnvKeyProvider(Buffer.alloc(32, 7));
+
+// Fix pack 3 T7 (Q5): a switch-table read that fails. Only listEnabled throws;
+// the writer (upsert) and everything else stay real.
+const flagRead = vi.hoisted(() => ({ throws: false }));
+vi.mock('@/db/repos/feature-flag-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/feature-flag-repo')>();
+  return {
+    ...real,
+    createFeatureFlagRepo: (d: Parameters<typeof real.createFeatureFlagRepo>[0]) => {
+      const repo = real.createFeatureFlagRepo(d);
+      return {
+        ...repo,
+        listEnabled: async () => {
+          if (flagRead.throws) throw new Error('neon down');
+          return repo.listEnabled();
+        },
+      };
+    },
+  };
+});
 
 function transferFixture(over: Partial<Transfer> = {}): Transfer {
   return {
@@ -80,11 +102,14 @@ async function opsAlerts(): Promise<string[]> {
 }
 
 beforeEach(async () => {
+  flagRead.throws = false;
+  resetFlagReadAlertMemoForTests();
   db = await freshDb();
   invalidateFlagCache(db);
   store = createStore(fakeRedis(), db);
   outbox = createOutboxRepo(db);
   await seedPartner(db, 'acme');
+  await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   fetchFn.mockReset();
   fetchFn.mockResolvedValue(new Response(JSON.stringify({ providerRef: 'rail-1' }), { status: 200 }));
   await store.saveTransfer(transferFixture());
@@ -120,6 +145,7 @@ describe('settlement.instruct under settlement.paused', { retry: 0 }, () => {
 
   it('a pause on the ROUTED rail partner defers the row; a pause on another partner does not', async () => {
     await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle'));
     await pause('partner', 'globex');
@@ -174,5 +200,144 @@ describe('reconcileSweep under settlement.paused', { retry: 0 }, () => {
     const r = await reconcileSweep(db);
     expect(r.reinstructed).toBe(1);
     expect(await opsAlerts()).toContain('recon:sp_t1');
+  });
+});
+
+// Fix pack 3 T7 (owner answer Q5, contract 7 step 10): an unreadable
+// settlement.paused WAITS on a real-money rail (deferred uncharged, like a
+// pause) and fails open everywhere else. Reconcile skips the same rows.
+describe('settlement.paused unreadable (Q5)', { retry: 0 }, () => {
+  async function saveRail(partnerId: string, providerType: 'http' | 'simulator') {
+    const r = rail('https://rail.example/settle');
+    await createIntegrationsRepo(db, provider).saveIntegrations(partnerId, {
+      ...r,
+      payment: { ...r.payment, providerType } as typeof r.payment,
+    });
+  }
+
+  it('http live row -> SettlementPausedError deferral (300 s), no POST, flagread alert', async () => {
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    flagRead.throws = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ processed: 0, failed: 0, released: 1 });
+    const st = await rowState();
+    expect(st).toMatchObject({ status: 'pending', attempts: 0, last_error: null });
+    expect(st.backoff_s).toBeGreaterThanOrEqual(SETTLEMENT_PAUSED_DEFER_SEC - 5);
+    expect(st.backoff_s).toBeLessThanOrEqual(SETTLEMENT_PAUSED_DEFER_SEC + 5);
+    const keys = await opsAlerts();
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^flagread:settlement\.paused:\d{4}-\d{2}-\d{2}T\d{2}$/);
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it('simulator rail -> POSTed (fail open)', async () => {
+    await saveRail('acme', 'simulator');
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    flagRead.throws = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(r.released).toBe(0);
+    expect((await rowState()).status).toBe('done');
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it('sandbox row -> sandboxinstruct as before', async () => {
+    await db.execute(sql`DELETE FROM transfers WHERE id = 'sp_t1'`);
+    await store.saveTransfer(transferFixture({ environment: 'test' } as Partial<Transfer>));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    flagRead.throws = true;
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r.released).toBe(0);
+    expect(await opsAlerts()).toEqual(['sandboxinstruct:sp_t1']);
+  });
+
+  it('reconcile: unknown + http -> skipped (no reinstruct, no recon)', async () => {
+    flagRead.throws = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(0);
+    const keys = await opsAlerts();
+    expect(keys.filter((k) => k.startsWith('recon:'))).toEqual([]);
+    expect(keys.filter((k) => k.startsWith('flagread:settlement.paused:'))).toHaveLength(1);
+    const instr = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'settlement.instruct'`)) as unknown as {
+      rows: Array<{ n: number }>;
+    };
+    expect(Number(instr.rows[0].n)).toBe(0);
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it('reconcile: unknown + simulator -> re-instructed once', async () => {
+    await saveRail('acme', 'simulator');
+    flagRead.throws = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(1);
+    expect(await opsAlerts()).toContain('recon:sp_t1');
+    vi.mocked(console.warn).mockRestore();
+  });
+});
+
+// Fix pack 3 T7 (R26, contract 10): partner-set (`tenant:`) settlement pauses
+// at the instruct match the owner OR the rail tenant, and a corridor row only
+// that destination.
+describe('tenant rows at instruct', { retry: 0 }, () => {
+  it('tenant:railp pauses a routed instruct', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await db.execute(sql`DELETE FROM transfers WHERE id = 'sp_t1'`);
+    await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle'));
+    await pause('partner', tenantScopeId('railp'));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r.released).toBe(1);
+  });
+
+  it('tenant:acme:MX does not pause an IN row; tenant:acme:IN does (PH is not a supported corridor, so MX)', async () => {
+    await pause('partner', tenantScopeId('acme', 'MX'));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    await pause('partner', tenantScopeId('acme', 'IN'));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'reinstruct:sp_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(r.released).toBe(1);
+  });
+});
+
+// Pack 3 review Q2 (G4): the owner side of a partner-set (`tenant:`) settlement
+// pause, pinned apart from the rail side: at the reconcile sweep, and on a
+// ROUTED instruct (where owner and rail are different ids).
+describe('owner tenant pause (pack 3 review G4)', { retry: 0 }, () => {
+  it('reconcileSweep: tenant:acme on settlement.paused -> nothing re-instructed, no recon: alert', async () => {
+    await pause('partner', tenantScopeId('acme'));
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(0);
+    expect((await opsAlerts()).filter((k) => k.startsWith('recon:'))).toEqual([]);
+    const instr = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'settlement.instruct'`)) as unknown as {
+      rows: Array<{ n: number }>;
+    };
+    expect(Number(instr.rows[0].n)).toBe(0);
+  });
+
+  it('a row routed to railp with ONLY the owner tenant:acme paused: deferred uncharged, no POST', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await db.execute(sql`DELETE FROM transfers WHERE id = 'sp_t1'`);
+    await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle'));
+    await pause('partner', tenantScopeId('acme'));
+    await outbox.enqueue('settlement.instruct', { transferId: 'sp_t1' }, { dedupeKey: 'instruct:sp_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ processed: 0, failed: 0, released: 1 });
+    expect(await rowState()).toMatchObject({ status: 'pending', attempts: 0, last_error: null });
   });
 });

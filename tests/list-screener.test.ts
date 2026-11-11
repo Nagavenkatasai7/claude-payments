@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
+import { createHash } from 'node:crypto';
+import { parseOfacSdnXml, canonicalLines, hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
 import {
   ListSanctionsScreener,
   SanctionsListUnavailableError,
@@ -72,6 +73,30 @@ describe('ListSanctionsScreener', () => {
     expect(extra.listInfo().hash).not.toBe(plain.listInfo().hash);
   });
 
+  // Fix pack 2 T2 (R02): the list age is read from the source on EVERY call,
+  // not bound when the list was indexed.
+  it('listInfo carries the source checkedAt live (not bound at load); hash and version unchanged', async () => {
+    let checked: Date | null = new Date('2026-01-01T00:00:00.000Z');
+    const src: SanctionsListSource = { load: vi.fn(async () => LIST), checkedAt: () => checked };
+    const s = new ListSanctionsScreener(src, { extraNames: ['john doe'] });
+    await s.screen({ name: 'x', sourceCountry: 'US' });
+    const first = s.listInfo();
+    expect(first.checkedAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(first.baseHash).toBe(LIST.hash);
+    checked = new Date('2026-01-02T00:00:00.000Z');
+    const second = s.listInfo();
+    expect(second.checkedAt).toBe('2026-01-02T00:00:00.000Z');
+    expect(second.hash).toBe(first.hash);
+    expect(second.version).toBe(first.version);
+    expect(second.hash).not.toBe(LIST.hash); // the screened hash still covers the extras
+    checked = null;
+    expect(s.listInfo().checkedAt).toBeUndefined();
+    // A source without checkedAt (the fixture): no age at all.
+    const plain = new ListSanctionsScreener(fixtureSource());
+    await plain.screen({ name: 'x', sourceCountry: 'US' });
+    expect(plain.listInfo().checkedAt).toBeUndefined();
+  });
+
   // PR C: the SOURCE owns caching (the Postgres source serves its cached
   // active version), so the screener asks it on every screen and re-indexes
   // only when it hands back a different list (a newly activated version).
@@ -131,5 +156,17 @@ describe('ListSanctionsScreener', () => {
     await expect(s.screen({ name: 'Mom', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
     expect(s.listInfo()).toMatchObject({ source: 'ofac-sdn', version: 'unavailable' });
     await expect(s.screen({ name: 'Testa Fixturelli', sourceCountry: 'US' })).resolves.toMatchObject({ matched: true });
+  });
+});
+
+// Fix pack 2 T7 (R07): the archive stores canonicalLines; its sha256 IS the version hash.
+describe('canonicalLines', () => {
+  it('canonicalLines of the sample XML hashes to the parsed list hash (pin)', () => {
+    const lines = canonicalLines(LIST.entries);
+    expect(lines.split('\n')).toHaveLength(LIST.entries.length);
+    expect(createHash('sha256').update(lines, 'utf8').digest('hex')).toBe(LIST.hash);
+    expect(hashEntries(LIST.entries)).toBe(LIST.hash);
+    // order-insensitive: a reversed entry list gives the same lines
+    expect(canonicalLines([...LIST.entries].reverse())).toBe(lines);
   });
 });

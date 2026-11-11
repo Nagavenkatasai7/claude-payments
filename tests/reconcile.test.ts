@@ -14,6 +14,84 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
+import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
+
+// Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
+const rescreenThrows = vi.hoisted(() => ({ value: false }));
+// Pack 2 review F3 (C2): a hook run before each resume re-screen (advances a test clock).
+const rescreenHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-rescreen')>();
+  return {
+    ...real,
+    rescreenOnFile: async (...a: Parameters<typeof real.rescreenOnFile>) => {
+      if (rescreenThrows.value) throw new Error('screening unavailable');
+      rescreenHook.before?.();
+      return real.rescreenOnFile(...a);
+    },
+  };
+});
+
+// Pack 2 review R2 (E4): a hook run on every settlement.paused read (one readFlag
+// per stuck-paid row): advances a test clock to model the stuck-paid bookkeeping.
+// (flags.ts's own isFlagOn -> readFlag call does not go through this mock, so a
+// row is never counted twice.)
+const flagHook = vi.hoisted(() => ({ before: null as null | (() => void) }));
+vi.mock('@/lib/flags', async (orig) => {
+  const real = await orig<typeof import('@/lib/flags')>();
+  return {
+    ...real,
+    isFlagOn: async (...a: Parameters<typeof real.isFlagOn>) => {
+      flagHook.before?.();
+      return real.isFlagOn(...a);
+    },
+    readFlag: async (...a: Parameters<typeof real.readFlag>) => {
+      flagHook.before?.();
+      return real.readFlag(...a);
+    },
+  };
+});
+// Pack 2 review round 3 (K3): a hook run on every sanctions evidence read
+// (advances a test clock to model a slow Neon read), and a count of the reads.
+const evidenceHook = vi.hoisted(() => ({ before: null as null | (() => void), calls: [] as string[] }));
+vi.mock('@/lib/sanctions/evidence-read', async (orig) => {
+  const real = await orig<typeof import('@/lib/sanctions/evidence-read')>();
+  return {
+    ...real,
+    listScreenEvidence: async (...a: Parameters<typeof real.listScreenEvidence>) => {
+      evidenceHook.calls.push(a[1].id);
+      evidenceHook.before?.();
+      return real.listScreenEvidence(...a);
+    },
+  };
+});
+const logSpy = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('@/lib/log', async (orig) => {
+  const real = await orig<typeof import('@/lib/log')>();
+  return {
+    ...real,
+    logWarn: (...a: Parameters<typeof real.logWarn>) => {
+      logSpy.warn(...a);
+      return real.logWarn(...a);
+    },
+  };
+});
+
+// Fix pack 2 T4: a switch that makes the list-hold sweep throw (off by default).
+const listSweepThrows = vi.hoisted(() => ({ value: false }));
+vi.mock('@/lib/list-hold-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/list-hold-rescreen')>();
+  return {
+    ...real,
+    sweepListUnavailableHolds: async (...a: Parameters<typeof real.sweepListUnavailableHolds>) => {
+      if (listSweepThrows.value) throw new Error('list sweep down');
+      return real.sweepListUnavailableHolds(...a);
+    },
+  };
+});
 
 // Program-Fix 15 PR C: a switch that makes findStuckPaid return a STALE
 // snapshot (read before a concurrent sender cancel committed). Off (null) by
@@ -64,6 +142,12 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
   stuckSnapshot.rows = null;
+  rescreenThrows.value = false;
+  rescreenHook.before = null;
+  flagHook.before = null;
+  evidenceHook.before = null;
+  logSpy.warn.mockClear();
+  listSweepThrows.value = false;
 });
 
 describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
@@ -83,7 +167,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     await store.saveTransfer(fixture());
 
     const first = await reconcileSweep(db);
-    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -155,10 +239,32 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     expect(msg).not.toContain('Re-instructed');
   });
 
+  // Inventory (S5): a held row that is also sanctions-BLOCKED (the heal matched
+  // a possibly instructed row; the rail then paid out a different amount)
+  // never gets "cancel/refund it"; any other held row keeps it.
+  it('S5: a HELD (railamount) row that is sanctions-BLOCKED: the recon alert has the no-refund rule; an unblocked held row keeps "cancel/refund it."', async () => {
+    await store.saveTransfer(fixture({ complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    await store.saveTransfer(fixture({ id: 'rc_t2' }));
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'amount mismatch' }, { dedupeKey: 'railamount:rc_t1' });
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'amount mismatch' }, { dedupeKey: 'railamount:rc_t2' });
+    await reconcileSweep(db);
+    const recon = async (id: string) =>
+      ((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = ${`recon:${id}`}`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m;
+    expect(await recon('rc_t1')).toBe(
+      "⚠️ SmartRemit ops: transfer rc_t1 (partner acme) has been 'paid' for >15min with no delivery confirmation." +
+        ' The rail reported a different amount — held, not re-instructed. It is blocked by sanctions screening: investigate with the rail, and ' +
+        `${SANCTIONS_FUNDS_RULE}.`,
+    );
+    expect(await recon('rc_t2')).toBe(
+      "⚠️ SmartRemit ops: transfer rc_t2 (partner acme) has been 'paid' for >15min with no delivery confirmation." +
+        ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.',
+    );
+  });
+
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
     await store.saveTransfer(fixture({ paidAt: new Date().toISOString() }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toHaveLength(0);
   });
 });
@@ -289,8 +395,63 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   it('alerts but NEVER re-instructs (there is no rail to instruct)', async () => {
     await store.saveTransfer(fixture()); // 'acme' has no integrations row ⇒ mock
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'recon:rc_t1' }]);
+  });
+});
+
+// Pack 3 review Q2 (I1): a stuck paid row the live gate refuses is skipped (no
+// re-instruct, no recon:). While an instruct row for it is still live the worker
+// owns it (it raises livegate:<id>); once that instruct has finished, nothing
+// would ever alert, so the sweep raises ONE livegate:stuck:<id> alert.
+describe('reconcileSweep — stuck paid refused by the live gate (pack 3 review I1)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(fixture({ id: 'lg_r1', paidAt: new Date(Date.now() - 30 * 60_000).toISOString() }));
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '30 minutes' WHERE id = 'lg_r1'`);
+  });
+
+  it("the only settlement.instruct row is 'done': one livegate:stuck:<id> alert (ids and code only), no recon:, no reinstruct; a second sweep adds nothing", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    const first = await reconcileSweep(db);
+    expect(first.reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([
+      { kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' },
+      { kind: 'ops.alert', dedupe_key: 'livegate:stuck:lg_r1' },
+    ]);
+    const msg = String(((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = 'livegate:stuck:lg_r1'`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m);
+    expect(msg).toContain('lg_r1');
+    expect(msg).toContain('live_not_certified');
+    for (const pii of ['15551230000', 'Anita', '919876543210', '123456789012', '200']) expect(msg).not.toContain(pii);
+    await reconcileSweep(db);
+    expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it("a 'pending' settlement.instruct row (the worker owns it): no alert from the sweep", async () => {
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
+  });
+
+  // Pack 3 final check J1: a paid row that sanctions screening BLOCKED is owned
+  // by its paidmatch:/paidmatchinstructed: alert and the sanctions procedure. It
+  // gets no livegate:stuck: alert (whose "re-instruct / cancel and refund" would
+  // be wrong for it), and is still skipped: no recon:, no re-instruct.
+  it("a sanctions-BLOCKED twin whose only instruct is 'done': no livegate:stuck: alert, no recon:, no reinstruct (J1)", async () => {
+    await db.execute(sql`UPDATE transfers SET compliance_status = 'blocked' WHERE id = 'lg_r1'`);
+    await createOutboxRepo(db).enqueue('settlement.instruct', { transferId: 'lg_r1' }, { dedupeKey: 'instruct:lg_r1' });
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'instruct:lg_r1'`);
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'settlement.instruct', dedupe_key: 'instruct:lg_r1' }]);
   });
 });
 
@@ -311,7 +472,7 @@ describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () =>
     await store.saveTransfer(fixture({ settlementPartnerId: 'railp' }));
 
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -330,7 +491,7 @@ describe('reconcileSweep — stale compliance reviews', () => {
   it('alerts exactly once for an in_review transfer older than 24h', async () => {
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'review:rc_rev1' }]);
     await reconcileSweep(db);
     expect(await outboxRows()).toHaveLength(1);
@@ -516,6 +677,35 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     expect((await outboxRows()).map((x) => x.dedupe_key).filter((k) => k?.startsWith('cancelcharged:'))).toEqual(['cancelcharged:rc_fund1']);
     expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('refundstuck:rc_fund2'); // fresh effect row ⇒ not stuck either
   });
+
+  // Review S6 (Y3): the text of the cancelcharged:<id> alert, by compliance.
+  const cancelChargedText = async (id: string) =>
+    ((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = ${`cancelcharged:${id}`}`)) as unknown as {
+      rows: Array<{ m: string }>;
+    }).rows[0]?.m;
+
+  it('S6: a cancelled, charged row that is NOT blocked keeps the "refund it by hand" text', async () => {
+    await store.saveTransfer(victim({ status: 'cancelled', refundStatus: 'none' }));
+    await reconcileSweep(db);
+    expect(await cancelChargedText('rc_fund1')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED but was CHARGED (mockfund-rc_fund1) and has no refund in flight — refund it by hand.',
+    );
+  });
+
+  it('S6: a cancelled, charged row BLOCKED by sanctions screening: same cancelcharged:<id> key, the no-refund rule, never "refund it by hand"', async () => {
+    await store.saveTransfer(victim({
+      status: 'cancelled', refundStatus: 'none',
+      complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'],
+    }));
+    await reconcileSweep(db);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['cancelcharged:rc_fund1']);
+    const text = await cancelChargedText('rc_fund1');
+    expect(text).toBe(
+      `⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED, was CHARGED (mockfund-rc_fund1) and is blocked by sanctions screening; ${SANCTIONS_FUNDS_RULE}.`,
+    );
+    expect(text).not.toMatch(/refund it by hand/);
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('cancelled');
+  });
 });
 
 describe('reconcileSweep — stuck refunds', () => {
@@ -677,7 +867,7 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
     await overdueTicket('tk_b3', 30, 'normal');
     const today = new Date();
     const r = await reconcileSweep(db, today);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
     await reconcileSweep(db, today);
     await reconcileSweep(db, new Date(today.getTime() + 60_000));
     const rows = await digestRows();
@@ -704,5 +894,273 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
     await overdueTicket('tk_fresh', 1);
     await reconcileSweep(db);
     expect(await digestRows()).toHaveLength(0);
+  });
+});
+
+// Fix pack 2 T3 (R02): the non-Stripe crash-resume of a real-money (http rail)
+// row re-screens when its newest evidence is not a live, fresh screen; a hold
+// waiting on the list says so in the ops copy.
+describe('reconcileSweep — real-money resume needs a live, fresh screen (fix pack 2 T3)', { retry: 0 }, () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  const victim = (over: Partial<Transfer> = {}) =>
+    fixture({ id: 'rc_lv1', status: 'awaiting_payment', fundingRef: 'mockfund-rc_lv1', createdAt: minutesAgo(20), paidAt: undefined, ...over });
+  async function rail(providerType: 'http' | 'mock') {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: providerType === 'http'
+        ? { providerType: 'http', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' }
+        : { providerType: 'mock' },
+      whatsapp: {},
+    });
+    // Pack 3 T6: the stuck-paid loop skips an uncertified real-money row (K3 feeds it 'acme' http rows).
+    if (providerType === 'http') await certifyPartnerForTest(db, 'acme');
+  }
+  const message = async (key: string) =>
+    ((await db.execute(sql`SELECT payload->>'message' AS message FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {
+      rows: Array<{ message: string }>;
+    }).rows[0]?.message;
+  const screens = async (id: string) =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${id}`)) as unknown as {
+      rows: Array<{ n: number }>;
+    }).rows[0].n;
+
+  it('a charged http row whose evidence is stale is re-screened and HELD (LIST_UNAVAILABLE), with the list copy in the fundhold alert', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    const after = await store.getTransfer('rc_lv1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    const keys = (await outboxRows()).map((x) => x.dedupe_key);
+    expect(keys).not.toContain('instruct:rc_lv1');
+    expect(keys).toContain('fundhold:rc_lv1');
+    const m = await message('fundhold:rc_lv1');
+    expect(m).toContain('fresh sanctions list');
+    expect(m).toContain('released automatically');
+    expect(m).toContain('list loader');
+    expect(await screens('rc_lv1')).toBe(2);
+  });
+
+  // Review round 3 (M2): the resumed row is charged by definition, so its
+  // block notices say the sender was charged (ops alert and partner email).
+  it('M2: a charged http row whose resume re-screen matches: the block alert and the partner email say the sender was charged', async () => {
+    const originalList = process.env.SANCTIONS_LIST;
+    try {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      await rail('http');
+      await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+      await store.saveTransfer(victim({ recipientName: 'Testa Fixturelli' }));
+      await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Testa Fixturelli' }, { screenedAgoMs: 40 * 3_600_000 });
+      await reconcileSweep(db);
+      expect((await store.getTransfer('rc_lv1'))?.complianceStatus).toBe('blocked');
+      const block = await message('sanctionsblock:rc_lv1');
+      expect(block).toContain('the sender was charged');
+      expect(block).not.toContain('Nothing paid out');
+      const mail = ((await db.execute(sql`SELECT payload->>'text' AS t FROM outbox WHERE dedupe_key = 'sanctionsblockmail:rc_lv1:acme'`)) as unknown as {
+        rows: Array<{ t: string }>;
+      }).rows[0]?.t;
+      expect(mail).toContain('after the sender was charged');
+      for (const m of [block, mail]) expect(m.toLowerCase()).not.toMatch(/testa|fixturelli/);
+    } finally {
+      restoreOfacSource(originalList);
+    }
+  });
+
+  it('a mock rail resumes as before: no re-screen, paid', async () => {
+    await rail('mock');
+    await store.saveTransfer(victim());
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('paid');
+    expect(await screens('rc_lv1')).toBe(0);
+  });
+
+  it('a re-screen that throws leaves the row untouched (the next sweep retries)', async () => {
+    await rail('http');
+    rescreenThrows.value = true;
+    await store.saveTransfer(victim());
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(0);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toEqual([]);
+  });
+
+  // Pack 2 review F3 (C2): the resume re-screens run before the worker drain,
+  // so they share a time budget: once it is spent no further re-screen starts
+  // (that row is left untouched for the next sweep).
+  it('time budget: a re-screen that spends the budget -> the next victim is not re-screened this sweep', async () => {
+    await rail('http');
+    for (const id of ['rc_lvb1', 'rc_lvb2']) {
+      await store.saveTransfer(victim({ id, fundingRef: `mockfund-${id}` }));
+      await seedLiveEvidence(db, { id, partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    }
+    const clock = { t: 5_000_000 };
+    rescreenHook.before = () => { clock.t += 10_000; };
+    const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+    expect(r.fundingResumed).toBe(1);
+    const statuses = [(await store.getTransfer('rc_lvb1'))?.status, (await store.getTransfer('rc_lvb2'))?.status].sort();
+    expect(statuses).toEqual(['awaiting_payment', 'in_review']);
+    expect((await screens('rc_lvb1')) + (await screens('rc_lvb2'))).toBe(3);
+    // The next sweep (a fresh budget) takes the row left behind.
+    rescreenHook.before = null;
+    expect((await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t })).fundingResumed).toBe(1);
+  });
+
+  // Pack 2 review R2 (E4): the budget is charged only for time spent INSIDE a
+  // re-screen, so a long stuck-paid backlog (bookkeeping, no re-screen) never
+  // starves the crash-resume re-screen.
+  it('E4: 200 stuck-paid rows of bookkeeping (~50 ms each) do not spend the budget: the charged victim is still re-screened', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    // 200 long-stuck rows on another tenant's mock rail (alert only, no re-screen).
+    stuckSnapshot.rows = Array.from({ length: 200 }, (_, i) => fixture({ id: `rc_bk${i}`, partnerId: 'bulk' }));
+    const clock = { t: 5_000_000 };
+    flagHook.before = () => { clock.t += 50; };
+    const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+    expect(clock.t - 5_000_000).toBeGreaterThanOrEqual(200 * 50); // the bookkeeping took 10 s of the test clock
+    expect(r.stuckPaid).toBe(200);
+    expect(await screens('rc_lv1')).toBe(2);
+    expect(r.fundingResumed).toBe(1);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('in_review');
+    expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+  });
+
+  // Pack 2 review round 3 (K3): a skipped heal costs nothing against the
+  // budget. A paid+blocked real-money row is skipped before the heal with no
+  // read; the heal's cheap "needs a heal?" reads of any other stuck row run
+  // outside the budget. The re-instruct and the recon alert run for every row.
+  it('K3: 120 paid+blocked http rows (50 ms per evidence read) do not spend the budget, and are not read at all', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    stuckSnapshot.rows = Array.from({ length: 120 }, (_, i) =>
+      fixture({ id: `rc_blk${i}`, complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    const clock = { t: 5_000_000 };
+    evidenceHook.calls = [];
+    evidenceHook.before = () => { clock.t += 50; };
+    try {
+      const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+      expect(evidenceHook.calls.filter((id) => id.startsWith('rc_blk'))).toEqual([]);
+      expect(r.stuckPaid).toBe(120);
+      expect(r.fundingResumed).toBe(1);
+      expect(await screens('rc_lv1')).toBe(2);
+      expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+      // Every stuck row still gets its recon alert.
+      expect((await outboxRows()).filter((x) => x.dedupe_key?.startsWith('recon:rc_blk'))).toHaveLength(120);
+    } finally {
+      evidenceHook.before = null;
+    }
+  });
+
+  it('K3: 120 stuck http rows whose screen needs no heal (50 ms per evidence read) do not spend the budget', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    // No evidence on file: the instruct gate passes them, so the heal is skipped after one read.
+    stuckSnapshot.rows = Array.from({ length: 120 }, (_, i) => fixture({ id: `rc_ok${i}` }));
+    const clock = { t: 5_000_000 };
+    evidenceHook.calls = [];
+    evidenceHook.before = () => { clock.t += 50; };
+    try {
+      const r = await reconcileSweep(db, new Date(), { rescreenBudgetMs: 5_000, clock: () => clock.t });
+      expect(evidenceHook.calls.filter((id) => id.startsWith('rc_ok'))).toHaveLength(120);
+      expect(r.fundingResumed).toBe(1);
+      expect(await screens('rc_lv1')).toBe(2);
+      expect(logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred')).toEqual([]);
+      expect((await outboxRows()).filter((x) => x.dedupe_key?.startsWith('recon:rc_ok'))).toHaveLength(120);
+    } finally {
+      evidenceHook.before = null;
+    }
+  });
+
+  it('E4: a victim deferred for lack of budget is logged with counts only (no id, no name)', async () => {
+    await rail('http');
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' }, { screenedAgoMs: 40 * 3_600_000 });
+    await reconcileSweep(db, new Date(), { rescreenBudgetMs: 0 });
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    const calls = logSpy.warn.mock.calls.filter((c) => c[0] === 'reconcile.rescreen-deferred');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][2]).toEqual({ resumeDeferred: 1, healDeferred: 0 });
+    expect(JSON.stringify(calls[0])).not.toMatch(/rc_lv1|Anita|1555/);
+  });
+
+  it('a stale review waiting on the list says so; any other stale review keeps the usual copy', async () => {
+    await store.saveTransfer(fixture({ id: 'rc_lvrev', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON] }));
+    await store.saveTransfer(fixture({ id: 'rc_rev2', status: 'in_review', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] }));
+    await reconcileSweep(db);
+    const listCopy = await message('review:rc_lvrev');
+    expect(listCopy).toContain('fresh sanctions list');
+    expect(listCopy).toContain('released automatically');
+    expect(listCopy).toContain('list loader');
+    const usual = await message('review:rc_rev2');
+    expect(usual).toContain('release or refund it');
+    expect(usual).not.toContain('sanctions list');
+  });
+
+  // Review S5 (W2b): a stale review of a row BLOCKED by sanctions screening
+  // (the list-hold sweep or the release re-screen matched it; it stays in
+  // review) can never be released, and its funds must not be returned before
+  // the compliance officer decides: no "release or refund it".
+  it('S5 W2b: a stale review of a sanctions-BLOCKED row says so and the no-refund rule; a flagged one keeps "release or refund it."', async () => {
+    await store.saveTransfer(fixture({
+      id: 'rc_blkrev', status: 'in_review', complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'],
+    }));
+    await store.saveTransfer(fixture({ id: 'rc_rev3', status: 'in_review', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] }));
+    await reconcileSweep(db);
+    expect(await message('review:rc_blkrev')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_blkrev (partner acme) has been in compliance review for >24h — ' +
+        `it is blocked by sanctions screening, so it can never be released. ${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    );
+    expect(await message('review:rc_rev3')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_rev3 (partner acme) has been in compliance review for >24h — release or refund it.',
+    );
+  });
+
+  // Inventory (S5): the crash-resume of a charged row that is BLOCKED (its
+  // resume re-screen matched, or it was already compliance-blocked) never says
+  // to refund it at the funding provider.
+  it('S5: a charged victim already compliance-BLOCKED (settleOrHold refused): fundblocked has the no-refund rule, never "refund at the funding provider"', async () => {
+    await rail('mock');
+    await store.saveTransfer(victim({ complianceStatus: 'blocked', complianceReasons: ['Recipient matches a sanctions watchlist.'] }));
+    await reconcileSweep(db);
+    expect((await store.getTransfer('rc_lv1'))?.status).toBe('awaiting_payment');
+    expect(await message('fundblocked:rc_lv1')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_lv1 (partner acme) was charged (mockfund-rc_lv1) but never settled — ' +
+        `it is BLOCKED by sanctions screening and was CHARGED. NOT settled. ${SANCTIONS_NO_PAYOUT_SENTENCE}. ` +
+        'No dashboard action applies: once the compliance officer has decided, record the outcome with a direct ledger edit under a change ticket.',
+    );
+  });
+});
+
+// Fix pack 2 T4 (R02): every full sweep re-screens the LIST_UNAVAILABLE holds
+// (list-hold-rescreen.ts) in its own try/catch.
+describe('reconcileSweep — list-outage holds (fix pack 2 T4)', { retry: 0 }, () => {
+  const held = (id: string) =>
+    fixture({
+      id, status: 'in_review', complianceStatus: 'flagged', complianceReasons: [LIST_UNAVAILABLE_REASON],
+      createdAt: new Date(Date.now() - 3_600_000).toISOString(), paidAt: new Date(Date.now() - 1_800_000).toISOString(),
+    });
+
+  it('runs the list-hold sweep; a sweep throw does not fail the others; listHoldsReleased reported', async () => {
+    // A mock-rail hold on the (mock) demo list: released by the re-screen.
+    await store.saveTransfer(held('rc_lh1'));
+    const r = await reconcileSweep(db);
+    expect(r.listHoldsReleased).toBe(1);
+    expect((await store.getTransfer('rc_lh1'))?.status).toBe('paid');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('mocksettle:rc_lh1');
+
+    // A throwing sweep costs only itself: the stuck-paid sweep still alerts.
+    listSweepThrows.value = true;
+    await store.saveTransfer(held('rc_lh2'));
+    await store.saveTransfer(fixture({ id: 'rc_stuck', paidAt: new Date(Date.now() - 20 * 60_000).toISOString() }));
+    const r2 = await reconcileSweep(db);
+    expect(r2.listHoldsReleased).toBe(0);
+    expect(r2.stuckPaid).toBeGreaterThanOrEqual(1);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('recon:rc_stuck');
+    expect((await store.getTransfer('rc_lh2'))?.status).toBe('in_review');
   });
 });

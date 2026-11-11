@@ -3,6 +3,8 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
+import { liveRefusalFor } from './live-gate';
+import { alertStuckLivegate } from './livegate-alerts';
 
 // stale-money — Program-Fix 32. Two sweeps over money that has stopped moving:
 //
@@ -71,6 +73,20 @@ export async function escalateStuckPaid(db: Db, now: Date = new Date()): Promise
     if (!t.paidAt) continue;
     const rung = stuckRung(now.getTime() - Date.parse(t.paidAt));
     if (!rung) continue;
+    // Fix pack 3 T6 (R15, contract 7): a real-money row whose rail partner is
+    // not certified for live money (or whose owner is the default tenant) is
+    // owned by the worker: it defers the instruct uncharged and raised
+    // `livegate:<id>`. A 'Chase the rail partner.' rung would give the wrong
+    // remedy, every day. liveRefusalFor makes no read for a 'test' row and
+    // never throws (a failed rail read is real money).
+    // Pack 3 review I1: with no live instruct row the worker never alerts again,
+    // so one `livegate:stuck:<id>` alert (shared with reconcileSweep) is raised;
+    // still no rung and no audit row.
+    const refusal = await liveRefusalFor(db, t);
+    if (refusal !== null) {
+      await db.transaction((tx) => alertStuckLivegate(tx, t, refusal));
+      continue;
+    }
     const fresh = await db.transaction(async (tx) => {
       const enqueued = await createOutboxRepo(tx).enqueue(
         'ops.alert',

@@ -27,6 +27,8 @@ import {
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 import { sendTextThenTemplate } from '@/lib/whatsapp-business-initiated';
 import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
+import { liveRefusalForRail } from '@/lib/live-gate';
 
 // WL3: the settlement status callback. A partner's rail (or our hosted reference
 // rail) POSTs lifecycle events here; we verify the HMAC with THAT partner's
@@ -154,7 +156,7 @@ async function handleVerified(
     if (refTransfer && refTransfer.id === result.transferId) {
       const amountCheck = checkCallbackAmount(refTransfer, body);
       if (amountCheck === 'mismatch') {
-        await holdForAmountMismatch(outbox, result.transferId);
+        await holdForAmountMismatch(outbox, result.transferId, refTransfer.complianceStatus === 'blocked');
         logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
           transferId: result.transferId,
           partnerId: railPartnerId,
@@ -168,6 +170,38 @@ async function handleVerified(
           provider,
         });
       }
+    }
+  }
+
+  // Pack 3 (contract 6, critic M1): a signed funded / paid_out may not flip an
+  // awaiting_payment row to paid or delivered when its rail is real money and
+  // not certified for live money (or its owner is the default tenant): rows
+  // minted before deploy, or whose rail was switched to http after the mint.
+  // Real money is judged on the integrations already read above (no second
+  // read). Not applied: one deduped ops alert (ids only) and 200 held, so the
+  // rail stops retrying (the poke above already ran). A paid row's paid_out is
+  // NOT gated (it may be a payout instructed before deploy).
+  if (
+    (result.status === 'paid' || result.status === 'delivered') &&
+    refTransfer?.id === result.transferId &&
+    refTransfer.status === 'awaiting_payment'
+  ) {
+    const live = await liveRefusalForRail(getDb(), refTransfer, railIntegrations?.payment.providerType ?? null);
+    if (live) {
+      // refTransfer.id (=== result.transferId here): the payload names ids only, and its
+      // dataflow stays clear of the integrations (tests/outbox-payload-secrets.test.ts).
+      await outbox.enqueue(
+        'ops.alert',
+        {
+          message: `transfer ${refTransfer.id} (rail ${railPartnerId}) got a signed rail callback that was not applied: the rail partner is not certified for live money. Check with the rail partner before cancelling or refunding it.`,
+        },
+        { dedupeKey: `livegate:${refTransfer.id}` },
+      );
+      logWarn('payment-webhook.live-refused', 'rail callback not applied: rail partner not certified', {
+        transferId: refTransfer.id,
+        partnerId: railPartnerId,
+      });
+      return NextResponse.json({ ok: true, held: true });
     }
   }
 
@@ -312,14 +346,19 @@ async function alertNotifyFailed(transferId: string, code: number | undefined): 
  * this route read (outboxRepo.hasDedupeKey) to never deliver or re-instruct the
  * row. Transfer id only — no amounts, no PII.
  */
-async function holdForAmountMismatch(outbox: OutboxRepo, transferId: string): Promise<void> {
+async function holdForAmountMismatch(outbox: OutboxRepo, transferId: string, sanctionsBlocked: boolean): Promise<void> {
   await outbox.enqueue(
     'ops.alert',
     {
-      message:
-        `⚠️ SmartRemit ops: transfer ${transferId} — the rail's paid_out reported a different ` +
-        `amount than the settlement instruction. NOT delivered; held (stays paid, never re-instructed). ` +
-        `Investigate with the rail, then cancel/refund it.`,
+      // Review S5 (inventory): a sanctions-blocked row is never told to be
+      // cancelled or refunded: the compliance officer decides first.
+      message: sanctionsBlocked
+        ? `⚠️ SmartRemit ops: transfer ${transferId} — the rail's paid_out reported a different ` +
+          `amount than the settlement instruction. NOT delivered; held (stays paid, never re-instructed). ` +
+          `It is blocked by sanctions screening: investigate with the rail, and ${SANCTIONS_FUNDS_RULE}.`
+        : `⚠️ SmartRemit ops: transfer ${transferId} — the rail's paid_out reported a different ` +
+          `amount than the settlement instruction. NOT delivered; held (stays paid, never re-instructed). ` +
+          `Investigate with the rail, then cancel/refund it.`,
     },
     { dedupeKey: `railamount:${transferId}` },
   );

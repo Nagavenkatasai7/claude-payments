@@ -3,7 +3,7 @@
  * one 404 and no code sent; the code gates the payment; a paid link becomes
  * ONE paid transfer (same capture + settle path as the hosted pay page).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
@@ -22,6 +22,9 @@ import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Customer } from '@/lib/types';
+import { MintRefusedError } from '@/lib/transfer-create';
+import { fixedReply } from '@/lib/hold-replies';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -51,9 +54,32 @@ vi.mock('@/lib/monthly-volume-store', async (orig) => ({ ...(await orig<typeof i
 vi.mock('@/lib/daily-volume-store', async (orig) => ({ ...(await orig<typeof import('@/lib/daily-volume-store')>()), getDailyVolumeStore: () => createDailyVolumeStore(store) }));
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
 vi.mock('@/lib/payment-link-quote', async (orig) => ({ ...(await orig<typeof import('@/lib/payment-link-quote')>()), getLinkQuoteStore: () => quotes }));
+// Pack 3: the rail config per partner (empty ⇒ the mock rail, as before); a test may switch it.
+const linkRails = vi.hoisted(() => ({ byPartner: {} as Record<string, unknown> }));
 vi.mock('@/lib/partner-integrations-store', () => ({
-  getPartnerIntegrationsStore: () => ({ getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }) }),
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async (id: string) => ({ kyc: {}, payment: linkRails.byPartner[id] ?? {}, whatsapp: {} }),
+  }),
 }));
+// Pack 3: the real mock funding provider, with a switch to decline the capture (a minted,
+// unpaid transfer the customer resumes later) and a count of capture calls.
+const funding = vi.hoisted(() => ({ decline: false, captures: 0 }));
+vi.mock('@/lib/providers/funding-provider', async (orig) => {
+  const real = await orig<typeof import('@/lib/providers/funding-provider')>();
+  return {
+    ...real,
+    getFundingProvider: () => {
+      const p = real.getFundingProvider();
+      const capture = p.capture.bind(p);
+      p.capture = async (t) => {
+        funding.captures++;
+        if (funding.decline) throw new Error('card declined');
+        return capture(t);
+      };
+      return p;
+    },
+  };
+});
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 
 import { POST } from '@/app/api/pay/l/[token]/route';
@@ -106,6 +132,9 @@ beforeEach(async () => {
   }]);
   lockedAt = (await quotes.lock(linkId, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' })).lockedAt;
   sendTransactionOtp.mockClear();
+  linkRails.byPartner = {};
+  funding.decline = false;
+  funding.captures = 0;
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -243,5 +272,78 @@ describe('POST /api/pay/l/[token]', () => {
     expect(lines[0]).not.toContain('Asha');
     err.mockRestore();
     vi.restoreAllMocks();
+  });
+});
+
+// Pack 3 T3 (contract 5): a live control refused the mint AFTER the claim.
+// The common live refusal never reaches this arm (T4 adds a pre-claim check
+// that keeps the link OPEN); this arm stays for capability_off (T12) and races.
+describe('POST /api/pay/l/[token] — MintRefusedError at the mint (pack 3)', () => {
+  it('a MintRefusedError at the mint (stubbed AFTER the claim) ⇒ 409 not_available with the cannot_complete text; no transfer row; the link is left claimed and a retry re-mints that same id', async () => {
+    const spy = vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new MintRefusedError('live_not_certified'));
+    await call({ action: 'request_otp' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+    // Left claimed exactly like a sends.paused refusal under the claim: 'used',
+    // bound to the unminted id, one paylink.claim audit row.
+    const row = ((await db.execute(sql.raw(`SELECT status, transfer_id FROM payment_links WHERE id = '${linkId}'`))) as unknown as {
+      rows: Array<{ status: string; transfer_id: string | null }>;
+    }).rows[0];
+    expect(row.status).toBe('used');
+    expect(row.transfer_id).toMatch(/\S/);
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'paylink.claim'`)).toBe(1);
+    spy.mockRestore();
+
+    // The retry (the refusal is gone) re-mints that same id: one transfer.
+    // (A fresh OTP store: the first code was spent and the issue cooldown
+    // would refuse a second code this soon.)
+    txOtp = createTransactionOtpStore(fakeRedis(), { randomInt: () => 654321 });
+    await call({ action: 'request_otp' });
+    const retry = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()).transferId).toBe(row.transfer_id);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'paylink.claim'`)).toBe(1);
+  });
+});
+
+// Pack 3 (contract 6): a link transfer minted while its rail was demo, resumed after the owner's
+// rail turned http (real money) without certification — here the default tenant, which may never
+// own real money — is refused at pay time BEFORE the capture: 409 not_available, never charged.
+describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { retry: 0 }, () => {
+  it('a minted link transfer whose owner rail turned http and is uncertified -> 409 not_available on resume, never charged', async () => {
+    // 1. Minted on the mock rail, but the capture is declined: a minted, unpaid transfer.
+    funding.decline = true;
+    await call({ action: 'request_otp' });
+    const first = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(first.status).toBe(402);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+    const tid = ((await db.execute(sql.raw('SELECT id FROM transfers'))) as unknown as { rows: Array<{ id: string }> }).rows[0].id;
+    expect((await store.getTransfer(tid))?.status).toBe('awaiting_payment');
+
+    // 2. The owner's rail turns http (stored type too: live-gate.ts reads it there).
+    linkRails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    await setRailProviderType(db, 'default', 'http');
+    // Real money screens (payee, sender, recipient) only on a live list (fix pack 2).
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
+    funding.decline = false;
+    funding.captures = 0;
+
+    // 3. The resume is refused before any capture. (A fresh OTP store: the issue cooldown.)
+    txOtp = createTransactionOtpStore(fakeRedis(), { randomInt: () => 654321 });
+    await call({ action: 'request_otp' });
+    const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(funding.captures).toBe(0);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+    const t = await store.getTransfer(tid);
+    expect(t?.status).toBe('awaiting_payment');
+    expect(t?.fundingRef).toBeFalsy();
   });
 });

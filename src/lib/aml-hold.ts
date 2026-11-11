@@ -16,12 +16,13 @@
 // blocked row stays the sanctions path's), and the reason never names the rule
 // (no tipping off — complianceReasons can reach the customer's status view).
 
+import { AML_HOLD_REASON } from './compliance-config';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { firstTransfer, structuring, type AmlHit, type AmlRuleConfig, type SenderAmlStats } from './aml-rules';
 import type { ComplianceStatus, PartnerId } from './types';
 
-/** The only reason a hold adds. Deliberately generic (no rule name). */
-export const AML_HOLD_REASON = 'Additional review required.';
+/** The only reason a hold adds. Deliberately generic (no rule name). Lives in the registry (compliance-config.ts). */
+export { AML_HOLD_REASON };
 
 /**
  * The pre-read gate. False ⇒ mintLocked runs ZERO extra statements (no

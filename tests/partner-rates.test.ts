@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
+import { captureConsole, expectSafeLog, fakeQueryError } from './helpers-db-error-log';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { effectiveOfferFor, effectiveRateFor, selectSettlementRoute, MAX_ROUTE_PREMIUM } from '@/lib/partner-rates';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -148,6 +149,49 @@ describe('selectSettlementRoute (PGlite)', () => {
       stubIntegrations({
         p1: ROUTABLE,
         p2: { providerType: 'http', credentials: { settlementUrl: 'https://10.1.1.1/x', signingSecret: 's' } },
+      }),
+      'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  it('a simulator contender is routable on the hosted URL', async () => {
+    // Fix pack 2 T10: a simulator instruct always goes to the hosted rail, so
+    // routability checks that URL, never the stored one (empty or off-origin).
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db,
+      stubIntegrations({
+        p1: { providerType: 'simulator', credentials: { signingSecret: 's' } },
+        p2: { providerType: 'simulator', credentials: { settlementUrl: 'https://10.1.1.1/x', signingSecret: 's' } },
+      }),
+      'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: 87, source: 'partner', settlementPartnerId: 'p2', kind: 'partner_push', expiresAt: inHours(1) });
+  });
+
+  // Fix pack 3 T4 (contract 15): only the default tenant routes, and it may not
+  // settle on a real-money rail, so an http contender is never a route.
+  it('an http contender with a public https URL is never a route', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 88, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db, stubIntegrations({ p1: { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme.com/x', signingSecret: 's' } } }), 'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+  });
+
+  it('an http best rate is skipped, the next simulator contender wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db,
+      stubIntegrations({
+        p1: ROUTABLE,
+        p2: { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme.com/x', signingSecret: 's' } },
       }),
       'USD', 'INR', MID,
     );
@@ -314,5 +358,46 @@ describe('rail health: skip a partner whose rail is failing (R0 fix B)', () => {
   it('a health lookup error fails open (empty set, quoting continues)', async () => {
     const broken = { select: () => { throw new Error('db down'); } } as unknown as Db;
     expect((await recentlyFailingRails(broken, ['p1'], NOW)).size).toBe(0);
+  });
+});
+
+// 2026-11-10 (C6): the three fail-open branches of route selection printed
+// err.message with console.warn (a query error's message carries its params).
+// They now log through logWarn; the fallback is unchanged.
+describe('route selection failure logs', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  /** A handle whose every query fails like a dropped connection. */
+  const brokenDb = () => ({ select: () => { throw fakeQueryError(); } }) as unknown as Db;
+
+  it('a failed candidate query falls back to the platform rate and logs routing.candidates', async () => {
+    const c = captureConsole();
+    const route = await selectSettlementRoute(brokenDb(), stubIntegrations({}), 'USD', 'INR', MID);
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+    const line = expectSafeLog(c, 'routing.candidates');
+    expect(line).toMatchObject({ sourceCurrency: 'USD', destinationCurrency: 'INR' });
+    expect(String(line.msg)).toContain('[57P01]');
+  });
+
+  it('a failed rail-health lookup fails open and logs routing.rail-health', async () => {
+    const c = captureConsole();
+    const failing = await recentlyFailingRails(brokenDb(), ['p1'], NOW);
+    expect(failing.size).toBe(0);
+    expectSafeLog(c, 'routing.rail-health');
+  });
+
+  it('a failed integrations read skips the contender and logs routing.integrations', async () => {
+    await seedPartner(db, 'p1', 'P1');
+    await createPartnerRateRepo(db).upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    const store = { getIntegrations: async () => { throw fakeQueryError(); } } as unknown as PartnerIntegrationsStore;
+    const c = captureConsole();
+    const route = await selectSettlementRoute(db, store, 'USD', 'INR', MID);
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+    const line = expectSafeLog(c, 'routing.integrations');
+    expect(line.partnerId).toBe('p1');
   });
 });

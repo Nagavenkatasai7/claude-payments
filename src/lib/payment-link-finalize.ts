@@ -1,4 +1,4 @@
-import { assertQuoteOverrideFresh, createTransfer } from './transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, MintRefusedError } from './transfer-create';
 import { RateUnavailableError } from './rate';
 import { QuoteError } from './fx';
 import { isFlagOn, SendsPausedError } from './flags';
@@ -8,10 +8,14 @@ import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-
 import { evaluateCap } from './tier-rules';
 import { resolveCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
+import { enqueueSanctionsBlockNotices } from './sanctions/notices';
+import { pokeWorker } from './outbox';
+import { logWarn } from './log';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
 import { rescreenBeforePay } from './pay-rescreen';
+import { liveMoneyRefusal, readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
 import type { LockedLinkRate } from './payment-link-quote';
 import { createIdempotencyRepo, createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo, type PaymentLink } from '@/db/repos/payment-link-repo';
@@ -34,6 +38,8 @@ import type { Partner, Transfer } from './types';
 //   → payee sanctions screen (both names; a sanctions.screen evidence row)
 //   → a retry on an already-minted transfer: KYC gate + sender/recipient
 //     re-screen (resumeMinted), then the pay route resumes THAT transfer
+//   → fix pack 3: a real-money link on an uncertified owner (or the default
+//     tenant) is refused with the link still open (nothing written)
 //   → ensureCustomer (NO WhatsApp opt-in) → KYC gate → cap pre-check
 //   → CLAIM, one transaction: the `paylink:<linkId>` idempotency key is bound to
 //     a pre-generated transfer id AND the link moves open → used. A second tab, a
@@ -107,7 +113,10 @@ export type LinkFinalizeError =
   | 'kyc_required'
   | 'cap'
   | 'busy'
-  | 'blocked';
+  | 'blocked'
+  // Pack 3 (contract 5): a live control refused the mint (MintRefusedError).
+  // Nothing was minted; the route answers 409 PAY_NOT_AVAILABLE.
+  | 'not_available';
 
 export type LinkFinalizeResult =
   | { ok: true; transferId: string }
@@ -140,13 +149,34 @@ export async function finalizeLinkPayment(
   if (!bank || bank.partnerId !== partnerId || bank.payoutDestination.trim() === '') {
     return { ok: false, error: 'payee_unavailable' };
   }
+  // Fix pack 2 T3 (R02): the payee is paid through its partner's rail; an
+  // http rail (real money) needs the LIVE list. A list outage refuses this
+  // payment but says nothing about the payee: its screening is not touched.
+  const payeeRealMoney = realMoneyRail({ environment: 'live', railProviderType: await readRailProviderType(db, partnerId) });
   const screen = await screenPayee(
     { legalName: payee.legalName, accountHolder: bank.accountHolder },
     resolveCorridorRules(partner, 'US'),
+    { realMoney: payeeRealMoney },
   );
-  if (screen.evidence) await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  if (screen.verdict === 'match') {
+    // Fix pack 2 T5 (R04): the evidence and the block notices in ONE transaction.
+    await db.transaction(async (tx) => {
+      if (screen.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+      await enqueueSanctionsBlockNotices(tx, {
+        partnerId,
+        subjectId: payee.id,
+        stage: 'payee',
+        environment: 'live',
+        realMoney: payeeRealMoney,
+        evidence: screen.evidence,
+      });
+    });
+    pokeWorker(); // partner-demo R4: after the notices commit
+  } else if (screen.evidence) {
+    await createAuditRepo(db).record(sanctionsAuditEvent(partnerId, payee.id, screen.evidence));
+  }
   if (screen.verdict !== 'clear') {
-    if (screen.verdict === 'review') await createPayeeRepo(db).setScreening(payee.id, 'review');
+    if (screen.verdict === 'review' && !screen.listUnavailable) await createPayeeRepo(db).setScreening(payee.id, 'review');
     return { ok: false, error: screen.verdict === 'match' ? 'blocked' : 'payee_unavailable' };
   }
 
@@ -160,6 +190,16 @@ export async function finalizeLinkPayment(
   // claim; that refusal is the resumable bound-but-unminted shape).
   if (await store.isFlagOn('sends.paused', { partnerId: [partnerId], corridor: 'IN' })) {
     return { ok: false, error: 'sends_paused' };
+  }
+
+  // Fix pack 3 (contract 5): a real-money link whose rail partner (the owner:
+  // a link mint is never routed) is not certified for live money, or the
+  // default tenant on a real-money rail, is refused before anything is
+  // written, so the link stays open. The catch arm below still maps a refusal
+  // raised inside the mint (capability_off, T12, or a race).
+  if (liveMoneyRefusal({ realMoney: payeeRealMoney, ownerId: partnerId, rail: partner })) {
+    logWarn('paylink.live-refused', 'live link refused before the claim', { partnerId });
+    return { ok: false, error: 'not_available' };
   }
 
   // The figures the customer saw: the LOCKED rate, the link's exact rupees. No
@@ -261,6 +301,7 @@ export async function finalizeLinkPayment(
     if (err instanceof SendCapError) return { ok: false, error: 'cap' };
     if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
+    if (err instanceof MintRefusedError) return { ok: false, error: 'not_available' };
     if (err instanceof Error && err.message === 'kyc_required') return { ok: false, error: 'kyc_required' };
     throw err;
   }
@@ -285,11 +326,15 @@ async function resumeMinted(
 ): Promise<LinkFinalizeResult> {
   const customer = await stores.customerStore.ensureCustomer(link.partnerId, link.customerPhone);
   if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // Fix pack 2 T3 (R02): the transfer's RAIL partner (routed, else owner) and
+  // its own environment decide real money; rescreenBeforePay then needs a live
+  // list and also screens the stored recipient name (the payee's legal name).
   const rescreen = await rescreenBeforePay(
     stores.db,
     transfer,
     { senderName: (customer.fullName ?? '').trim() || link.customerName, recipientName: accountHolder },
     resolveCorridorRules(partner, transfer.sourceCountry ?? 'US'),
+    { realMoney: await realMoneyFor(stores.db, transfer), stage: 'pay' },
   );
   switch (rescreen.kind) {
     case 'blocked':

@@ -13,6 +13,8 @@ import {
 } from '@/lib/partner-api-service';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
+import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Partner } from '@/lib/types';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
@@ -72,6 +74,8 @@ beforeEach(async () => {
     },
     whatsapp: {},
   });
+  // Fix pack 3 T4: the live mints here are on an http rail, so the rail partner is certified.
+  await certifyPartnerForTest(db, 'acme');
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -151,7 +155,12 @@ describe('idempotency — the claim is namespaced by environment', { retry: 0 },
 });
 
 describe('reads and confirm are confined to the key environment (404, never 403)', { retry: 0 }, () => {
+  // Fix pack 2 T2 (R02): acme is an http rail, so the LIVE sbx0 mint needs a
+  // live sanctions list to clear (else it is held and queues the list alert).
+  const originalList = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(originalList));
   beforeEach(async () => {
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
     await createTransaction(deps('live'), ACME, 'pk_1', 'kl', txBody()); // sbx0 live
     await createTransaction(deps('test'), ACME, 'pk_test_1', 'kt', txBody()); // sbx1 test
   });

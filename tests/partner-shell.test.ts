@@ -86,6 +86,9 @@ import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
 import { PartnerSidebar } from '@/app/partner/(app)/partner-sidebar';
 import { t } from '@/lib/i18n';
+import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { invalidateFlagCache } from '@/lib/flags';
+import { partnerKillSwitchBannerLines } from '@/lib/flag-switch';
 
 // A distinctive tenant id, so "no tenant in any href" cannot false-match "/partner".
 const TENANT = 'ptn-zq9x';
@@ -119,6 +122,7 @@ beforeEach(async () => {
   const db = await freshDb();
   homeDb = db;
   pgPartnerStore = createPartnerStore(db);
+  invalidateFlagCache(db); // freshDb hands back the same handle: never a previous test's switch snapshot
   await seedPartner(db, TENANT, 'Acme Remit Test');
   await seedPartner(db, OTHER, 'Other Brand Co');
 });
@@ -303,6 +307,51 @@ describe('/partner layout: WhatsApp health strip (p3 B12)', () => {
       redis.get = get;
       warn.mockRestore();
     }
+  });
+});
+
+describe('/partner layout: the pause strip (fix pack 3 T11, R26)', () => {
+  const pause = (scopeId: string, key = 'sends.paused') =>
+    createFeatureFlagRepo(homeDb).upsert({ key, scopeType: 'partner', scopeId, enabled: true, reason: 'SECRET_REASON pausing', updatedBy: 'tenant-admin' });
+  it('a tenant pause shows the strip (partnerKillSwitchBannerLines text) and main.sh-main stays; admins get the Controls link', async () => {
+    await pause(`tenant:${TENANT}`);
+    await pause(`tenant:${TENANT}:IN`, 'settlement.paused');
+    const rows = await createFeatureFlagRepo(homeDb).listEnabled();
+    const lines = partnerKillSwitchBannerLines(rows, TENANT);
+    expect(lines).toHaveLength(2);
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    const html = await shell();
+    expect(html).toContain('data-shell-banner="pause"');
+    for (const l of lines) expect(html).toContain(l);
+    expect(html).toContain('<main id="main" class="sh-main min-w-0 bg-transparent p-0"><p>child</p></main>');
+    const at = html.indexOf('data-shell-banner="pause"');
+    const strip = html.slice(at, html.indexOf('</div></div>', at));
+    expect(strip).toContain('href="/partner/controls"');
+    expect(html).not.toContain('SECRET_REASON');
+    expect(html).not.toContain('tenant-admin');
+    expect(html).not.toMatch(/data-testid="partner-[^"]*"[^>]*data-shell-banner|data-shell-banner="pause"[^>]*data-testid/);
+  });
+  it('other roles see the strip without a Controls link (Controls is admin only)', async () => {
+    await pause(`tenant:${TENANT}`);
+    await signInAs({ username: 'ag', partnerId: TENANT, role: 'agent' });
+    const html = await shell();
+    expect(html).toContain('data-shell-banner="pause"');
+    expect(hrefs(html)).not.toContain('/partner/controls');
+  });
+  it("another tenant's pause or no row -> no strip", async () => {
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    expect(await shell()).not.toContain('data-shell-banner');
+    await pause(`tenant:${OTHER}`);
+    await pause(OTHER, 'settlement.paused');
+    invalidateFlagCache(homeDb);
+    expect(await shell()).not.toContain('data-shell-banner');
+  });
+  it('a platform row for this tenant shows the strip as set by SmartRemit', async () => {
+    await pause(TENANT, 'settlement.paused');
+    await signInAs({ partnerId: TENANT, role: 'admin' });
+    const html = await shell();
+    expect(html).toContain('data-shell-banner="pause"');
+    expect(html).toContain('for your workspace (set by SmartRemit).');
   });
 });
 

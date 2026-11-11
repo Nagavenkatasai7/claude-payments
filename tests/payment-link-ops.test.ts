@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, onTestFinished } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -19,6 +19,7 @@ import {
   type PartnerActor, type PlatformActor,
 } from '@/lib/payment-link-ops';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
+import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 
 const ACME: PartnerActor = { partnerId: 'acme', username: 'acme-admin', role: 'admin' };
 const OTHER: PartnerActor = { partnerId: 'other', username: 'other-admin', role: 'admin' };
@@ -75,9 +76,43 @@ describe('payees', () => {
     expect(await rows(`SELECT 1 FROM audit_events WHERE action = 'payee.refused'`)).toHaveLength(1);
   });
 
+  it('payee match -> evidence + sanctions.block + notices in one tx (add, on an http rail)', async () => {
+    // Fix pack 2 T5 (R04): the refusal, its evidence and the block notices commit together.
+    await setRailProviderType(db, 'acme', 'http');
+    await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    expect(await code(addPayee(db, ACME, { ...PAYEE, legalName: 'Testa Fixturelli' }))).toBe('refused');
+    const audits = await rows<{ action: string; subject_id: string; meta: Record<string, unknown> }>(`SELECT action, subject_id, meta FROM audit_events ORDER BY id`);
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen', 'payee.refused', 'sanctions.block']);
+    const id = audits[0].subject_id;
+    expect(audits[2].meta).toMatchObject({ stage: 'payee', realMoney: true, quiet: false, partnerNotified: true });
+    const ob = await rows<{ kind: string; dedupe_key: string }>(`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
+    expect(ob).toEqual([
+      { kind: 'ops.alert', dedupe_key: `sanctionsblock:${id}` },
+      { kind: 'email.send', dedupe_key: `sanctionsblockmail:${id}:acme` },
+    ]);
+    expect(JSON.stringify(ob)).not.toMatch(/testa|fixturelli/i);
+  });
+
+  it('payee match on approve -> evidence + sanctions.block + notices together (committed before the rejection)', async () => {
+    const p = await addPayee(db, ACME, PAYEE);
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    const real = screenPayee.fn!.getMockImplementation()!;
+    screenPayee.fn!.mockImplementationOnce((_n, rules, opts) => real({ legalName: 'Testa Fixturelli', accountHolder: 'Sunrise School Trust' }, rules, opts));
+    expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('refused');
+    const audits = await rows<{ action: string; meta: Record<string, unknown> }>(`SELECT action, meta FROM audit_events WHERE subject_id = '${p.id}' ORDER BY id`);
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen', 'payee.create', 'sanctions.screen', 'sanctions.block', 'payee.decide']);
+    expect(audits[3].meta).toMatchObject({ stage: 'payee', environment: 'live', realMoney: false, quiet: false });
+    expect(await rows(`SELECT 1 FROM outbox WHERE kind = 'ops.alert' AND dedupe_key = 'sanctionsblock:${p.id}'`)).toHaveLength(1);
+  });
+
   it('approve re-screens: clear approves; a possible match refuses the approval; suspend and re-approve; reject is final', async () => {
     const p = await addPayee(db, ACME, PAYEE);
-    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'review' });
+    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'review', listUnavailable: false });
     expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('review');
     const [r1] = await rows<{ status: string; screening: string }>(`SELECT status, screening FROM payees WHERE id = '${p.id}'`);
     expect(r1).toEqual({ status: 'pending', screening: 'review' });
@@ -92,9 +127,43 @@ describe('payees', () => {
 
   it('an approve that now matches the watchlist rejects the payee', async () => {
     const p = await addPayee(db, ACME, PAYEE);
-    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'match' });
+    screenPayee.fn!.mockResolvedValueOnce({ verdict: 'match', listUnavailable: false });
     expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('refused');
     expect((await rows<{ status: string }>(`SELECT status FROM payees WHERE id = '${p.id}'`))[0].status).toBe('rejected');
+  });
+
+  // Fix pack 2 T3 (R02): a payee of an http-rail (real-money) partner needs the
+  // LIVE list; an outage says nothing about the payee, so nothing is persisted.
+  it('add on an http rail with a stale list → list_unavailable, no payee row, evidence recorded', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    const original = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
+    onTestFinished(() => restoreOfacSource(original));
+    expect(await code(addPayee(db, ACME, PAYEE))).toBe('list_unavailable');
+    expect(await rows(`SELECT id FROM payees`)).toEqual([]);
+    const audits = await rows<{ action: string; meta: { decision: string; listFitness: string } }>(
+      `SELECT action, meta FROM audit_events ORDER BY id`,
+    );
+    expect(audits.map((a) => a.action)).toEqual(['sanctions.screen']);
+    expect(audits[0].meta).toMatchObject({ decision: 'list_unavailable', listFitness: 'stale' });
+    expect(JSON.stringify(audits[0].meta)).not.toContain('Sunrise');
+  });
+
+  it('add on a mock rail is unchanged (the mock list clears)', async () => {
+    await setRailProviderType(db, 'acme', 'mock');
+    expect((await addPayee(db, ACME, PAYEE)).screening).toBe('clear');
+  });
+
+  it('approve on an http rail with a list that is not live → review, screening and status unchanged', async () => {
+    const p = await addPayee(db, ACME, PAYEE); // mock rail: clear
+    await setRailProviderType(db, 'acme', 'http'); // the mock list is never live
+    expect(await code(decidePayee(db, ADMIN, p.id, 'approve'))).toBe('review');
+    const [r] = await rows<{ status: string; screening: string }>(`SELECT status, screening FROM payees WHERE id = '${p.id}'`);
+    expect(r).toEqual({ status: 'pending', screening: 'clear' });
+    const screens = await rows<{ meta: { decision: string } }>(
+      `SELECT meta FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = '${p.id}' ORDER BY id`,
+    );
+    expect(screens.map((x) => x.meta.decision)).toEqual(['clear', 'list_unavailable']);
   });
 
   it('only a platform admin decides or reveals; a partner-scoped admin is forbidden', async () => {

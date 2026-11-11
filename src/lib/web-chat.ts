@@ -26,6 +26,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { replyGuardAlertFor, type ReplyGuardReport } from './reply-guard';
 import { redactSensitive, redactionNotice } from './inbound-redact';
 import { composeReply } from './compose-reply';
+import { isFlagOn } from './flags';
 
 // web-chat (B5) — the WhatsApp agent brain re-channeled into the customer web
 // dashboard. The web thread is keyed `conv:<partnerId>:web:<phone>` — deliberately SEPARATE
@@ -206,6 +207,9 @@ export async function runWebChatTurn(customer: Customer, text: string, opts?: We
     kycProvider: getKycProvider(customerStore, env.appBaseUrl),
     partnerStore: getPartnerStore(),
     conversationLog: createConversationLogRepo(getDb()),
+    // Fix pack 3 (R26): the agent.paused kill switch for the customer's tenant.
+    // isFlagOn never throws and fails open (unreadable ⇒ not paused).
+    agentPaused: (partnerId) => isFlagOn(getDb(), 'agent.paused', { partnerId }),
   });
   return webChat.runTurn(customer, text, opts);
 }

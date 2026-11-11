@@ -25,6 +25,7 @@ import {
   parseAmount,
   parsePrefill,
   portalToolContext,
+  prepareResultCopy,
   quoteForPortal,
   saveSendReview,
   sendLimitsForPortal,
@@ -213,6 +214,21 @@ describe('R30: the portal cap copy is the fixed text, with no figure', () => {
   it('limitsCopy over the daily cap carries no vars', () => {
     const copy = limitsCopy({ kind: 'limits', withinCap: false, tier: 'T0', reason: 'over_daily_cap', dailyCapUsd: 500, perTransferCapUsd: 500, eddRequired: false }, 'Acme');
     expect(copy).toEqual({ error: 'portal.send.cap_daily' });
+  });
+});
+
+// Fix pack 2 T6 (R06): the sender screening hold arm reads like a block: neutral.
+describe('prepareResultCopy — sender_unavailable (fix pack 2 T6)', () => {
+  it('sender_unavailable -> portal.send.cannot_complete', () => {
+    expect(prepareResultCopy({ kind: 'sender_unavailable' }, 'Acme')).toEqual({ error: 'portal.send.cannot_complete' });
+    expect(prepareResultCopy({ kind: 'blocked' }, 'Acme')).toEqual({ error: 'portal.send.cannot_complete' });
+  });
+});
+
+// Fix pack 3 T4 (contract 5): the draft-time live refusal reads neutral too.
+describe('prepareResultCopy — not_available (fix pack 3 T4)', () => {
+  it('not_available -> portal.send.cannot_complete', () => {
+    expect(prepareResultCopy({ kind: 'not_available' }, 'Acme')).toEqual({ error: 'portal.send.cannot_complete' });
   });
 });
 

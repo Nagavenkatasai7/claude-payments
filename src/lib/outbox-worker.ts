@@ -16,9 +16,15 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
+import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
+import { instructLivegateMessage } from '@/lib/livegate-alerts';
+import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
+import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import { railSecrets } from '@/lib/partner-integrations';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
-import { isPartnerPulled } from '@/lib/funding-method';
+import { isPartnerPulled, senderChargeState } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
 import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
@@ -30,7 +36,8 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { railFailAlertKey } from '@/lib/rail-health';
 import { logWarn, scrub } from '@/lib/log';
-import { isFlagOn, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
+import { isQueryError, stripQueryParams } from '@/lib/db-error';
+import { readFlag, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { replyGuardAlertFor, type ReplyGuardReport } from '@/lib/reply-guard';
@@ -153,8 +160,10 @@ export interface WorkerDeps {
   /**
    * R26's slot in the agent.turn router (turn-router.ts): whether this tenant's
    * AI agent is paused. A paused tenant's customers get the fixed, non-AI menu
-   * (HELP still opens a case). Absent ⇒ never paused; R26 (PR3) wires it to the
-   * agent.paused kill switch. A throw fails the row, which retries.
+   * (HELP still opens a case). Absent ⇒ never paused. The worker route wires it
+   * to the agent.paused kill switch (fix pack 3 R26) through isFlagOn, which
+   * never throws and fails open (an unreadable switch ⇒ not paused). A throw
+   * would fail the row, which retries.
    */
   agentPaused?: (partnerId: PartnerId) => Promise<boolean>;
 }
@@ -275,6 +284,26 @@ export class SettlementPausedError extends Error {
   }
 }
 
+/** How long a paid row held by the live-certification gate waits before it is looked at again (contract 7). */
+export const INSTRUCT_NOT_CERTIFIED_DEFER_SEC = 900;
+
+/**
+ * Fix pack 3 T6 (R15, contract 7 step 11): thrown by the settlement.instruct
+ * handler when the row is real money (realMoneyRail) and its RAIL partner is
+ * not certified for live money, or its owner is the default tenant. Nothing
+ * was POSTed. A deliberate stop, not a rail failure: drainOnce defers the row
+ * UNCHARGED (like SettlementPausedError), so it never spends the 56-attempt
+ * budget, never dead-letters and never raises railfail. The handler raised
+ * one deduped `livegate:<transferId>` ops alert. The row runs once the rail
+ * partner is certified, or staff cancel and refund it.
+ */
+export class InstructNotCertifiedError extends Error {
+  constructor(readonly delaySec: number = INSTRUCT_NOT_CERTIFIED_DEFER_SEC) {
+    super('instruct_not_certified');
+    this.name = 'InstructNotCertifiedError';
+  }
+}
+
 /** How long a row of a kind this build does not know waits before it is looked at again. */
 export const UNKNOWN_KIND_DEFER_SEC = 300;
 
@@ -299,6 +328,23 @@ export class UnknownOutboxKindError extends Error {
 /** A row's kind as it may appear in an alert or a dedupe key: bounded, one line, a safe alphabet. */
 function safeKindLabel(kind: string): string {
   return kind.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 64) || '_';
+}
+
+/**
+ * Pack 2 review F1 (C1): the instruct live-list gate refused a real-money
+ * instruction because the newest screen is not on a live list, is older than
+ * SANCTIONS_LIST_MAX_AGE_MS, or was a match; or (review R1 / G1) the sender's
+ * screening hold is active or could not be read. A COMPLIANCE refusal, never a rail
+ * failure: deliberately NOT a RailInstructError, so it never raises
+ * railfail:<partner> and never touches rail health or best-rate routing.
+ * Retryable under the settlement.instruct policy: the reconcile stuck-paid
+ * heal (healPaidRowScreen) re-screens the row on a live list.
+ */
+export class InstructNotLiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InstructNotLiveError';
+  }
 }
 
 /**
@@ -704,7 +750,9 @@ async function handle(
             waCreds,
           );
         } catch (err) {
-          console.warn('mock.settle: recipient template failed; falling back to text:', err);
+          // The error can carry Meta's response body; log it through the
+          // scrubbing logger, never the object (2026-11-10).
+          logWarn('mock.settle.recipient_template', err, { id: row.id, transferId, note: 'recipient template failed; falling back to text' });
           await deps.sendText(
             recipientPhone,
             recipientDeliveredFallbackText(stage2.transfer, brand),
@@ -751,16 +799,21 @@ async function handle(
       //    other unexpected status ⇒ THROW (retryable): the row backs off and,
       //    if it dies, the dead-row ops alert fires. Never silently done — a
       //    request staff later dismiss must still be paid out.
+      //  • pack 2 review R1 (E2): a SANCTIONS-BLOCKED row (a paid row whose
+      //    re-screen matched: list-hold-rescreen healPaidRowScreen) is never
+      //    paid out, on any rail ⇒ skip; its paidmatch:<id> alert owns it.
       const refund = transfer.refundStatus ?? 'none';
       if (
         transfer.status === 'cancelled' ||
         transfer.status === 'delivered' ||
+        transfer.complianceStatus === 'blocked' ||
         refund === 'pending' ||
         refund === 'completed'
       ) {
         logWarn('outbox.instruct-skipped', 'transfer not payable; instruction not sent', {
           transferId,
           status: transfer.status,
+          complianceStatus: transfer.complianceStatus,
           refundStatus: refund,
         });
         return;
@@ -807,23 +860,146 @@ async function handle(
       // Release safety part A: the settlement.paused kill switch. Checked after
       // every "not payable" guard above (those rows finish as before) and
       // BEFORE the instruction is built or sent. The row waits, uncharged.
-      if (
-        await isFlagOn(deps.db, 'settlement.paused', {
-          partnerId: [transfer.partnerId, railPartnerId],
-          corridor: transfer.destinationCountry,
-        })
-      ) {
+      // Fix pack 3 (R26): partner-set (`tenant:`) rows of the owner or the
+      // rail tenant match too.
+      const pause = await readFlag(deps.db, 'settlement.paused', {
+        partnerId: [transfer.partnerId, railPartnerId],
+        tenants: [transfer.partnerId, railPartnerId],
+        corridor: transfer.destinationCountry,
+      });
+      if (pause === 'on') {
         logWarn('outbox.instruct-paused', 'settlement.paused is on; instruction deferred', { transferId });
         throw new SettlementPausedError();
       }
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-      const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+      const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
+      // Fix pack 3 T7 (owner answer Q5, contract 7 step 10): the switch table
+      // could not be read. On a real-money rail the row WAITS, uncharged, as if
+      // paused (readFlag raised the flagread alert); anywhere else the read
+      // fails open and the instruction continues.
+      if (pause === 'unknown' && realMoney) {
+        logWarn('outbox.instruct-paused', 'settlement.paused unreadable on a real-money rail; instruction deferred', { transferId });
+        throw new SettlementPausedError();
+      }
+      // Fix pack 3 T6 (R15, contract 7 step 11): on real money the RAIL partner
+      // must be certified for live money, and the default tenant never owns a
+      // real-money row. Before the URL check, so an uncertified rail with no URL
+      // waits here (never a charged RailInstructError). The rail partner is read
+      // from the DB on the integrations in hand (no second rail-type read); a
+      // failed read counts as not certified (fail closed). Ids only.
+      if (realMoney && (await liveRefusalForRail(deps.db, transfer, integrations.payment.providerType ?? null)) !== null) {
+        logWarn('outbox.instruct-livegate', 'rail partner not certified for live money; instruction deferred', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          { message: instructLivegateMessage(transferId, railPartnerId) },
+          { dedupeKey: `livegate:${transferId}` },
+        );
+        throw new InstructNotCertifiedError();
+      }
+      // Pack 2 T10 (R02): only an 'http' rail reaches the stored URL; a simulator
+      // (or any other) rail POSTs to the hosted reference rail, whatever is stored.
+      const settlementUrl = settlementTargetUrl(integrations.payment);
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new RailInstructError(railPartnerId, 'Settlement endpoint not configured.');
       try {
         assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       } catch (e) {
         throw new RailInstructError(railPartnerId, e);
+      }
+      // Pack 2 T10 (R02): the live-list gate at the instruct chokepoint. A row
+      // paid while the rail was a demo rail (screened on the mock list), then
+      // retried, re-instructed or dead-letter-retried after the rail went 'http',
+      // is NOT sent: its newest screen must have been on a live list. Evidence
+      // with no listFitness (written before pack 2), or no evidence at all,
+      // passes (in-flight rows keep today's behaviour). Evidence that carries a
+      // listFitness must be liveFresh: a live list AND screened within
+      // SANCTIONS_LIST_MAX_AGE_MS (review F1/A1: a release or a dead-letter
+      // Retry days later never POSTs on an old screen), and not a match. The
+      // gate only ever stops a POST; it never moves money. InstructNotLiveError,
+      // not a rail failure (review F1/C1): retried under the instruct policy, no
+      // railfail alert; the reconcile stuck-paid heal re-screens the row.
+      if (realMoney) {
+        const gateNow = new Date();
+        const newest = (await listScreenEvidence(deps.db, transfer, gateNow)).at(-1);
+        if (newest && instructGateRefuses(newest, gateNow)) {
+          const why =
+            newest.decision === 'match'
+              ? 'Last screen was a sanctions match.'
+              : newest.listFitness !== 'live'
+                ? 'Last screen not on a live list.'
+                : 'Last screen older than the list age limit.';
+          logWarn('outbox.instruct-not-live', 'last sanctions screen not live, too old or a match; instruction not sent', { transferId });
+          // Review S5 (W2a): after a sanctions MATCH the heal does not
+          // re-screen the row, and its funds can have to be blocked (frozen):
+          // no "otherwise refund it", the compliance officer decides first.
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message:
+                newest.decision === 'match'
+                  ? `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: Last screen was a sanctions match. No automatic re-screen follows. ` +
+                    `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+                  : `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: ${why} ` +
+                    'The reconcile sweep re-screens it once a live list is served; otherwise refund it.',
+            },
+            { dedupeKey: `instructnotlive:${transferId}` },
+          );
+          throw new InstructNotLiveError(why);
+        }
+        // Pack 2 review R1 (G1): the SENDER's screening hold (R06), which
+        // settleOrHold checks at pay, re-checked here because a row can become
+        // paid without it (a signed rail 'funded' callback) and reach this POST
+        // through the instruct, the reconcile reinstruct or a dead-letter Retry.
+        // Owning tenant's row; a read error refuses (fail closed). The ledger
+        // keeps 'paid' (the sender was charged); the row stays retryable, so a
+        // platform clear lets the next attempt send it.
+        let senderWhy: string | null = null;
+        try {
+          if (senderScreeningHoldActive(await readSenderScreeningFlags(deps.db, transfer.partnerId, transfer.phone))) {
+            senderWhy = 'Sender under an active screening hold.';
+          }
+        } catch (err) {
+          // The error NAME only: a failed query's message carries its bound params (the phone).
+          logWarn('outbox.instruct-sender-hold', err instanceof Error ? err.name : 'error', { transferId });
+          senderWhy = 'Sender screening hold could not be checked.';
+        }
+        if (senderWhy) {
+          logWarn('outbox.instruct-sender-hold', 'sender screening hold; instruction not sent', { transferId });
+          // Review S5 (X1): the money by senderChargeState (a Partner-API row
+          // has no charge reference; a partner-pulled row was charged by
+          // nobody here), and no "or refund the transfer": a sender who stays
+          // held may be a sanctions match, whose funds the compliance officer
+          // decides about first.
+          // Review S6 (Y2): a partner-pulled row (ach_pull / bank_pull) is never
+          // "nothing was charged": the partner's rail pulls on an instruction,
+          // and an earlier one (before a reconcile reinstruct or a dead-letter
+          // Retry) may have reached the rail. The claim already counted THIS
+          // row's attempt, so hasStartedInstruction cannot tell; the text
+          // says "may" and sends ops to the rail. The clause speaks about THIS
+          // instruction only.
+          const charge = senderChargeState(transfer);
+          const money =
+            charge === 'charged'
+              ? 'the sender was charged'
+              : charge === 'partner_collected'
+                ? "the partner confirmed that it collected the sender's funds"
+                : 'nothing was charged';
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            {
+              message: isPartnerPulled(transfer.fundingMethod)
+                ? `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `The partner's rail pulls the sender's funds only on an instruction; if an earlier instruction reached the rail, the rail may have pulled the sender's funds: check with the rail. ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`
+                : `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) is PAID (${money}) ` +
+                  `but this instruction was not sent to the rail: ${senderWhy} ` +
+                  `A platform person must review the sender screening hold. If the review clears the sender, clear the hold; if not, ${SANCTIONS_NO_PAYOUT_RULE}.`,
+            },
+            { dedupeKey: `instructsenderhold:${transferId}` },
+          );
+          throw new InstructNotLiveError(senderWhy);
+        }
       }
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it. Built after the fail-closed URL
@@ -928,7 +1104,8 @@ async function handle(
         if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
         const railPartnerId = full.settlementPartnerId ?? full.partnerId;
         const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-        const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+        // Pack 2 T10: same target rule as settlement.instruct. No list gate on a reverse (it returns money).
+        const settlementUrl = settlementTargetUrl(integrations.payment);
         const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
         assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
@@ -1042,7 +1219,14 @@ async function handle(
       // phone check, so it still goes out when OPS_ALERT_PHONE is empty, and
       // before sendText, so a WhatsApp outage cannot stop it. Its dedupe keys
       // (opsmail:/opshook:<row.id>) make a WhatsApp retry re-enqueue nothing.
-      await enqueueAlertMirror(deps, row, str(p.message));
+      // 2026-11-10: rows queued by an older build can carry a raw query-error
+      // text, so its params are cut again here. Not the full scrub(): its
+      // 7-digit mask would turn `outbox #1234567` and an all-digit short SHA
+      // into `…4567` on the ops phone. New alerts are built from text that is
+      // already scrubbed (see drainOnce); the email and webhook mirror scrub
+      // their own copy.
+      const alertText = stripQueryParams(str(p.message));
+      await enqueueAlertMirror(deps, row, alertText);
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
       // Program-Fix 25: unset ⇒ free-form exactly as before. alertDead skips
@@ -1051,7 +1235,7 @@ async function handle(
       // 2026-10-03: the ops alert comes from the same bot number customers chat
       // with, so a free-form alert is labelled as staff-only. A tester's phone
       // that is also the ops phone can never mistake it for a customer message.
-      const staffText = `${OPS_ALERT_TEXT_PREFIX}${str(p.message)}`;
+      const staffText = `${OPS_ALERT_TEXT_PREFIX}${alertText}`;
       if (!opsTemplate) {
         await deps.sendText(to, staffText);
         return;
@@ -1059,7 +1243,7 @@ async function handle(
       const out = await sendBusinessInitiated(
         to,
         {
-          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(str(p.message))] },
+          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(alertText)] },
           fallbackText: staffText,
         },
         undefined, // the platform number, as the free-form path
@@ -1708,7 +1892,13 @@ export async function drainOnce(
       // spend the attempt budget or dead-letter a customer's message.
       // M3-16: a report that cannot fit this invocation is deferred the same way (never charged).
       // Release safety part A: a paused settlement instruction waits the same way.
-      if (err instanceof TurnBusyError || err instanceof ReportDeferredError || err instanceof SettlementPausedError) {
+      // Pack 3 T6: so does an instruction held by the live-certification gate.
+      if (
+        err instanceof TurnBusyError ||
+        err instanceof ReportDeferredError ||
+        err instanceof SettlementPausedError ||
+        err instanceof InstructNotCertifiedError
+      ) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;
         } else {
@@ -1736,7 +1926,12 @@ export async function drainOnce(
         }
         continue;
       }
-      const message = err instanceof Error ? err.message : 'unknown error';
+      // 2026-11-10: this text goes to outbox.last_error (kept until a retry),
+      // the dead-letter alert and the ops copilot. A query error becomes its
+      // fixed description (no params, no Postgres detail); any other message is
+      // scrubbed (phones, emails, URL credentials). 6-digit Graph codes stay
+      // readable for permanentCodeInError.
+      const message = scrub(isQueryError(err) ? err : err instanceof Error ? err.message : 'unknown error');
       // TERMINAL deadline: an abandoned non-idempotent handler (agent.turn) must
       // never be retried beside its own ghost — force the dead ceiling so the
       // ordinary dead-letter path (one deduped dead:<id> alert) handles it.

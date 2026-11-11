@@ -1,6 +1,7 @@
 import type { Customer, KycReviewState, PartnerId } from './types';
 import type { KycProvider } from './providers/kyc-provider';
 import type { CustomerStore } from './customer-store';
+import { logError } from './log';
 
 /**
  * verify-link — deterministic delivery of the KYC verification link.
@@ -77,10 +78,7 @@ export async function issueVerifyLink(deps: IssueVerifyLinkDeps): Promise<string
       }
       return start.url;
     } catch (err) {
-      console.error(
-        `issueVerifyLink (${existingInquiryId ? 'reuse' : 'new'}) failed:`,
-        err,
-      );
+      logError('kyc.verify-link', err, { attempt: existingInquiryId ? 'reuse' : 'new', partnerId: deps.partnerId });
     }
   }
   return null;

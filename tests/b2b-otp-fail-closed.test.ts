@@ -28,7 +28,8 @@ vi.mock('@/lib/store', () => ({
 }));
 vi.mock('@/lib/b2b-quote-store', () => ({ getB2bQuoteStore: () => ({}) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
-vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({}) }));
+// Pack 3 (contract 17): the shared-number branch reads the partner (is it certified?); none here.
+vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null }) }));
 vi.mock('@/lib/monthly-volume-store', () => ({ getMonthlyVolumeStore: () => ({}) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 const issue = vi.hoisted(() => vi.fn());

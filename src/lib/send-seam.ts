@@ -125,7 +125,19 @@ export type PrepareSendResult =
   | { kind: 'bill_refused'; message: string; payUrl?: string }
   | { kind: 'cap'; evaluation: CapEvaluation }
   /** A sanctions hit. Reasonless by design: the screening detail never leaves the server. */
-  | { kind: 'blocked' };
+  | { kind: 'blocked' }
+  /**
+   * Fix pack 2 T6 (R06): the sender's screening hold is active on a real-money
+   * rail. Reasonless like `blocked`: the customer sees neutral fixed text.
+   */
+  | { kind: 'sender_unavailable' }
+  /**
+   * Fix pack 3 T4 (contract 5): the card's rail (read as 'http') is not
+   * certified for live money, or the default tenant is on a real-money rail.
+   * Reasonless: the customer sees neutral fixed text; the mint stays the
+   * authoritative gate.
+   */
+  | { kind: 'not_available' };
 
 /** The inputs get_quote reads. */
 export interface QuoteTypedInput {

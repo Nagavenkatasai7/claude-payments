@@ -5,7 +5,7 @@ import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPho
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { recordBlockedAttempt } from './transfer-create';
+import { recordBlockedAttempt, type BlockedAttemptInput } from './transfer-create';
 import { resolveQuoteReward } from './rewards/resolver';
 import { rewardFeeLine } from './rewards/engine';
 import { isFundedRewardKind, type QuotedReward } from './rewards/types';
@@ -35,6 +35,8 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
+import { capabilityOpen, liveMoneyRefusal, realMoneyRail } from './live-gate';
+import { sanctionsBlockUnrecordedKey } from './sanctions/notices';
 import { getDb, type Db } from '@/db/client';
 import { openRecallTicketLocked } from './receipt-cores';
 import { refundDisposition } from './refund-policy';
@@ -47,6 +49,7 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { senderScreeningHoldActive } from './compliance-config';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
@@ -130,6 +133,18 @@ export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
  * mint directly, and a stale call to it is an unknown tool that runs nothing.
  */
 export const WHATSAPP_HIDDEN_TOOLS: ReadonlySet<string> = new Set(['generate_payment_link']);
+
+/**
+ * Fix pack 3 (R13, contract 15): the bot's B2B tools. On a tenant certified
+ * for live money they run only while its `b2b` capability is open (counsel
+ * ref + partner approval); executeTool refuses them otherwise with
+ * fixedReply('cannot_complete'). The partner is read only for these names and
+ * never for the default tenant; a read failure fails CLOSED. check_bill_status
+ * only reads and is never gated.
+ */
+export const B2B_CAPABILITY_TOOLS: ReadonlySet<string> = new Set([
+  'present_bill', 'register_seller', 'create_invoice', 'cancel_bill', 'dispute_bill',
+]);
 
 /**
  * Required purpose (owner decision 2026-10-08): the tools whose schema lists
@@ -1439,7 +1454,7 @@ async function selectRouteForQuote(
       return route;
     }
   } catch (err) {
-    console.warn('routeSelector failed — quoting at mid:', err);
+    logWarn('quote.route-select-failed', err, { partnerId: ctx.partnerId });
   }
   return null;
 }
@@ -1515,6 +1530,25 @@ export async function executeTool(
   if (ctx.turn?.inputModality === 'voice' && VOICE_TYPED_ONLY_TOOLS.has(name)) {
     logWarn('voice.tool-blocked', `typed-only tool refused in a voice turn: ${name}`, { phone: ctx.phone });
     return { error: 'This needs a typed confirmation. Read back the details and ask the customer to type yes.' };
+  }
+  // Fix pack 3 (R13): B2B on a certified tenant needs its b2b opt-in (see
+  // B2B_CAPABILITY_TOOLS). Logs the tool name (and a read failure's error
+  // name) only.
+  if (B2B_CAPABILITY_TOOLS.has(name) && ctx.partnerId !== DEFAULT_PARTNER_ID) {
+    let open: boolean;
+    try {
+      open = capabilityOpen(await ctx.partnerStore.getPartner(ctx.partnerId), 'b2b');
+    } catch (err) {
+      logWarn('capability.tool-blocked', 'partner read failed; b2b tool refused', {
+        tool: name,
+        error: err instanceof Error ? err.name : 'error',
+      });
+      return { error: fixedReply('cannot_complete') };
+    }
+    if (!open) {
+      logWarn('capability.tool-blocked', 'b2b capability closed; tool refused', { tool: name });
+      return { error: fixedReply('cannot_complete') };
+    }
   }
   switch (name) {
     case 'get_quote':
@@ -1827,7 +1861,7 @@ async function presentBillTool(
     const partnerId = ctx.partnerId;
     invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
-    console.warn('present_bill getUnpaidInvoiceByBuyer failed:', err);
+    logWarn('present_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     return { has_bill: false };
   }
   if (!invoice) return { has_bill: false };
@@ -1971,6 +2005,7 @@ async function registerSellerTool(
   // never flag), and closed for the list screener. The screen's evidence (or
   // decision 'error' when the screener threw) is recorded on the seller id below.
   let cleared: boolean;
+  let blocked = false;
   let screenEvidence: ScreeningEvidence;
   // Program-Fix 14 PR C: refresh the OFAC list before the screen (a no-op
   // unless SANCTIONS_LIST=ofac-sdn; never throws; no transaction is open here).
@@ -1983,9 +2018,11 @@ async function registerSellerTool(
       sourceCountry: country,
     });
     cleared = screen.status === 'cleared';
+    blocked = screen.status === 'blocked';
     screenEvidence = screen.evidence ?? errorEvidence();
   } catch (err) {
-    console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
+    // The name only: a screener error can echo the screened business name.
+    logWarn('register_seller.screen-failed', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
     cleared = false;
     screenEvidence = errorEvidence();
   }
@@ -2003,7 +2040,7 @@ async function registerSellerTool(
       kycReviewState: cleared ? 'none' : 'needs_review',
     });
   } catch (err) {
-    console.warn('register_seller createSeller failed:', err);
+    logWarn('register_seller.create-failed', err, { partnerId: ctx.partnerId });
     return {
       registered: false,
       reply_to_customer:
@@ -2014,8 +2051,24 @@ async function registerSellerTool(
   // Program-Fix 14 step 6: the screen's evidence on the new seller id. Best-
   // effort (the seller row and its fail-closed review state are already
   // committed); a lost row is logged without the business name.
+  //
+  // Fix pack 2 T5 (R04): a BLOCKED screen writes its evidence and the block
+  // notices in one transaction (the seller's rail is the owner; environment
+  // 'live', a seller is never sandbox).
   try {
-    await ctx.store.recordAudit(sanctionsAuditEvent(partnerId, sellerId, screenEvidence));
+    if (blocked) {
+      const realMoney = realMoneyRail({ environment: 'live', railProviderType: await ctx.store.railProviderType(partnerId) });
+      await ctx.store.recordScreenEvidenceWithBlock(sanctionsAuditEvent(partnerId, sellerId, screenEvidence), {
+        partnerId,
+        subjectId: sellerId,
+        stage: 'seller',
+        environment: 'live',
+        realMoney,
+        evidence: screenEvidence,
+      });
+    } else {
+      await ctx.store.recordAudit(sanctionsAuditEvent(partnerId, sellerId, screenEvidence));
+    }
   } catch (err) {
     logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId });
   }
@@ -2294,7 +2347,7 @@ async function createInvoiceTool(
     // Release the claim so the at-least-once retry can actually create the bill
     // (the insert never happened). PII-scrubbed log per the money-path convention.
     await ctx.store.clearBillInvoiceClaim(billKey).catch(() => {});
-    logWarn('create_invoice.save-failed', `saveB2bInvoice failed: ${err instanceof Error ? err.message : 'error'}`, { phone: ctx.phone });
+    logWarn('create_invoice.save-failed', err instanceof Error ? err : 'saveB2bInvoice failed', { phone: ctx.phone });
     return {
       created: false,
       reply_to_customer:
@@ -2464,7 +2517,7 @@ async function listRecentTransfersTool(
   try {
     rows = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, RECENT_SCAN); // newest-first, indexed
   } catch (err) {
-    console.warn('list_recent_transfers listTransfersByPhone failed:', err);
+    logWarn('list_recent_transfers.lookup-failed', err, { partnerId: ctx.partnerId });
     return { transfers: [], count: 0, history_url: historyUrl };
   }
 
@@ -3086,7 +3139,7 @@ async function checkBillStatusTool(
   try {
     transfer = (await listOwnB2bTransfers(ctx))[0];
   } catch (err) {
-    console.warn('check_bill_status listTransfersByPhone failed:', err);
+    logWarn('check_bill_status.lookup-failed', err, { partnerId: ctx.partnerId });
     return { found: false };
   }
   if (!transfer) return { found: false };
@@ -3109,7 +3162,7 @@ async function checkBillStatusTool(
         result.invoice_paid = invoice.status === 'paid';
       }
     } catch (err) {
-      console.warn('check_bill_status getB2bInvoiceScoped failed:', err);
+      logWarn('check_bill_status.invoice-lookup-failed', err, { partnerId: ctx.partnerId });
     }
   }
   return result;
@@ -3141,7 +3194,7 @@ async function cancelBillTool(
   try {
     b2bTransfers = await listOwnB2bTransfers(ctx);
   } catch (err) {
-    console.warn('cancel_bill listTransfersByPhone failed:', err);
+    logWarn('cancel_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     b2bTransfers = [];
   }
 
@@ -3264,7 +3317,7 @@ async function disputeBillTool(
   try {
     invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
-    console.warn('dispute_bill getUnpaidInvoiceByBuyer failed:', err);
+    logWarn('dispute_bill.lookup-failed', err, { partnerId: ctx.partnerId });
     return { error_code: 'no_open_bill', reply_hint: "I don't see an open bill to dispute." };
   }
   if (!invoice) {
@@ -3370,6 +3423,22 @@ export async function validateScheduleInput(
   input: ScheduleInput,
   opts: ScheduleValidateOptions = {},
 ): Promise<ScheduleValidateResult> {
+  // Fix pack 3 (R13, contract 15): a tenant certified for live money sets up
+  // repeat payments only with its schedules opt-in. FIRST, so a refusal writes
+  // nothing; a partner read failure fails CLOSED. The default tenant makes no
+  // read (the golden corpus stays byte-identical).
+  if (ctx.partnerId !== DEFAULT_PARTNER_ID) {
+    let open: boolean;
+    try {
+      open = capabilityOpen(await ctx.partnerStore.getPartner(ctx.partnerId), 'schedules');
+    } catch (err) {
+      logWarn('capability.schedule-blocked', 'partner read failed; schedule refused', {
+        error: err instanceof Error ? err.name : 'error',
+      });
+      open = false;
+    }
+    if (!open) return { ok: false, code: 'capability_off' };
+  }
   const recipientPhone = normalizePhone(input.recipientPhone);
   if (!isValidPhone(recipientPhone)) return { ok: false, code: 'invalid_phone' };
   // fix 6: a schedule is a consumer send — funding_method is a closed set.
@@ -3509,7 +3578,7 @@ async function createScheduleTool(
 }
 
 /** The bot's exact pre-M2-10 error record for each refusal (golden-pinned). */
-function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: false }>): ToolResult {
+export function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: false }>): ToolResult {
   switch (r.code) {
     case 'invalid_phone':
       return { error: 'A valid recipient WhatsApp number with country code is required.' };
@@ -3532,6 +3601,12 @@ function scheduleRefusalToolResult(r: Extract<ScheduleValidateResult, { ok: fals
       return { error: 'No saved bank details for this recipient.' };
     case 'purpose':
       return purposeRequiredResult();
+    // Fix pack 3 (R13): one neutral text, never the reason ('licence' and
+    // 'corridor_closed' have no producer until PR8).
+    case 'capability_off':
+    case 'licence':
+    case 'corridor_closed':
+      return { error: fixedReply('schedule_unavailable') };
   }
 }
 
@@ -3586,7 +3661,7 @@ async function auditBotSchedule(ctx: ToolContext, action: BotScheduleAuditAction
       botScheduleAuditEvent({ partnerId: ctx.partnerId, phone: ctx.phone, action, scheduleId, channel: ctx.channel ?? 'whatsapp' }),
     );
   } catch (err) {
-    logWarn('schedule.audit', err instanceof Error ? err.message : 'audit write failed', { scheduleId, action });
+    logWarn('schedule.audit', err instanceof Error ? err : 'audit write failed', { scheduleId, action });
   }
 }
 
@@ -3608,7 +3683,7 @@ async function listSavedRecipientsTool(
       })),
     };
   } catch (err) {
-    console.warn('listRecipients failed; returning []:', err);
+    logWarn('list_saved_recipients.lookup-failed', err, { partnerId: ctx.partnerId });
     return { recipients: [] };
   }
 }
@@ -3624,7 +3699,7 @@ async function resolveRecipientTool(
   try {
     all = await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25); // generous cap; own-phone only
   } catch (err) {
-    console.warn('resolve_recipient listRecipients failed:', err);
+    logWarn('resolve_recipient.lookup-failed', err, { partnerId: ctx.partnerId });
     return { match: 'none' };
   }
 
@@ -3950,6 +4025,44 @@ export async function prepareSendDraft(
     const routeExpiresAt = routeExpiryMs(route);
     const fxOrigin = rateOriginOf(route);
 
+    // Fix pack 2 (R04 / R06): is the card rail real money? The rail is the
+    // route's settlement partner, else the owner; the bot never mints sandbox,
+    // so the environment is 'live'. The rail type is read ONCE per card
+    // (memoised; fix pack 3 reads it for every card, below); a failed read
+    // (undefined) is real money for pack 2's checks (the stricter path).
+    let cardRailRead = false;
+    let cardRailType: string | null | undefined;
+    const cardRailProviderType = async (): Promise<string | null | undefined> => {
+      if (!cardRailRead) {
+        cardRailType = await ctx.store.railProviderType(settlementPartnerId ?? ctx.partnerId);
+        cardRailRead = true;
+      }
+      return cardRailType;
+    };
+    const realMoneyCard = async (): Promise<boolean> =>
+      realMoneyRail({ environment: 'live', railProviderType: await cardRailProviderType() });
+    // Fix pack 2 T6 (R06): a sender with an active screening hold (the
+    // customer the KYC gate read; no new read) is refused on a real-money
+    // rail with neutral fixed text: no draft, no card, no screen.
+    if (senderScreeningHoldActive(customer) && (await realMoneyCard())) {
+      return { kind: 'sender_unavailable' };
+    }
+    // Pack 3 (contract 5): only a rail type that was READ as 'http' refuses at draft
+    // time. A failed read (undefined) is left to the mint, the authoritative gate,
+    // so the default tenant's and simulator partners' cards do not change during a
+    // transient read failure (D17). The rail row: none for the default tenant
+    // (refused without a read), the routed partner when routed, else the owner
+    // row already in hand; a failed read counts as not certified.
+    if ((await cardRailProviderType()) === 'http') {
+      const rail =
+        ctx.partnerId === DEFAULT_PARTNER_ID
+          ? null
+          : settlementPartnerId
+            ? await ctx.partnerStore.getPartner(settlementPartnerId).catch(() => null)
+            : partner;
+      if (liveMoneyRefusal({ realMoney: true, ownerId: ctx.partnerId, rail })) return { kind: 'not_available' };
+    }
+
     // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
     // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).
     await warmSanctionsList();
@@ -3963,43 +4076,70 @@ export async function prepareSendDraft(
       senderName: (b2b ? b2b.senderBusinessName : undefined) ?? customer.fullName,
     });
     if (screen.status === 'blocked') {
+      // Fix pack 2 T5 (R04): the block notices ride the blocked row's transaction.
+      const realMoney = await realMoneyCard();
       // Record an auditable, never-charged blocked row (no velocity/volume bump).
-      try {
-        await recordBlockedAttempt(ctx.store, {
-          phone: ctx.phone,
-          partnerCountries: partner?.countries,
-          recipientName: input.recipientName,
-          recipientPhone,
-          payoutMethod,
-          // fix 6: the sender's stored destination for this number, or '' — never a
-          // model-supplied value (the screener matches on name, not the account).
-          payoutDestination,
-          fundingMethod,
-          amountUsd: q.amountUsd,
-          amountSource: q.amountSource,
-          sourceCurrency: q.sourceCurrency,
-          feeUsd: q.feeUsd,
-          feeSource: q.feeSource,
-          fxRate: q.fxRate,
-          amountInr: q.amountInr,
-          totalChargeUsd: q.totalChargeUsd,
-          totalChargeSource: q.totalChargeSource,
-          destinationCountry,
-          destinationCurrency,
-          partnerId: ctx.partnerId,
-          reasons: screen.reasons,
-          // Program-Fix 14: the blocked row and its sanctions.screen evidence
-          // commit together (recordBlockedWithEvidence, one transaction).
-          evidence: screen.evidence,
-          // Step 0 FX-7: the quote-time rate provenance.
-          fxOrigin, fxAsOf, fxFetchedAt, fxProvider,
-        });
-      } catch (err) {
-        // Still best-effort: the customer gets the blocked reply either way.
-        // Only the error NAME is logged — a driver error can echo the insert's
-        // parameters (recipient name) in its message (drizzle-orm
-        // DrizzleQueryError carries query + params, errors.d.ts:9-14).
-        logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+      const blockedInput: BlockedAttemptInput = {
+        phone: ctx.phone,
+        partnerCountries: partner?.countries,
+        recipientName: input.recipientName,
+        recipientPhone,
+        payoutMethod,
+        // fix 6: the sender's stored destination for this number, or '' — never a
+        // model-supplied value (the screener matches on name, not the account).
+        payoutDestination,
+        fundingMethod,
+        amountUsd: q.amountUsd,
+        amountSource: q.amountSource,
+        sourceCurrency: q.sourceCurrency,
+        feeUsd: q.feeUsd,
+        feeSource: q.feeSource,
+        fxRate: q.fxRate,
+        amountInr: q.amountInr,
+        totalChargeUsd: q.totalChargeUsd,
+        totalChargeSource: q.totalChargeSource,
+        destinationCountry,
+        destinationCurrency,
+        partnerId: ctx.partnerId,
+        reasons: screen.reasons,
+        // Program-Fix 14: the blocked row and its sanctions.screen evidence
+        // commit together (recordBlockedWithEvidence, one transaction).
+        evidence: screen.evidence,
+        // Step 0 FX-7: the quote-time rate provenance.
+        fxOrigin, fxAsOf, fxFetchedAt, fxProvider,
+        notice: { realMoney, railPartnerId: settlementPartnerId },
+      };
+      let recorded = false;
+      for (let attempt = 0; attempt < 2 && !recorded; attempt++) {
+        try {
+          await recordBlockedAttempt(ctx.store, blockedInput);
+          recorded = true;
+        } catch (err) {
+          // Retried once (each attempt is its own transaction, so a failed one
+          // left nothing). Still best-effort: the customer gets the blocked reply
+          // either way. Only the error NAME is logged — a driver error can echo
+          // the insert's parameters (recipient name) in its message (drizzle-orm
+          // DrizzleQueryError carries query + params, errors.d.ts:9-14).
+          if (attempt === 1) logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+        }
+      }
+      if (!recorded) {
+        // Fix pack 2 T5: the block left no row, evidence or notice. One root
+        // ops alert per partner per hour (ids only; inline literal payload).
+        try {
+          await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+            'ops.alert',
+            {
+              message:
+                `⚠️ SmartRemit ops: a sanctions block for partner ${ctx.partnerId} could not be recorded (no blocked row, evidence or notice). ` +
+                `The customer was refused; check the database and the logs.`,
+            },
+            { dedupeKey: sanctionsBlockUnrecordedKey(ctx.partnerId, Math.floor(Date.now() / 3_600_000)) },
+          );
+          pokeWorker();
+        } catch (err) {
+          logWarn('sanctions.block-unrecorded', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+        }
       }
       return { kind: 'blocked' };
     }
@@ -4133,6 +4273,16 @@ function prepareRefusalToTool(r: Exclude<PrepareSendResult, { kind: 'draft' }>):
     case 'blocked':
       // R30: the fixed block text (hold-replies.ts), never a reason.
       return { blocked: true, reply_to_customer: fixedReply('block', { help: true }) };
+    case 'sender_unavailable':
+      // Fix pack 2 T6 (R06): the neutral fixed text; never a screening or review word.
+      return {
+        error: 'Sending is not available for this account.',
+        unavailable: true,
+        reply_to_customer: fixedReply('cap_unavailable', { help: true }),
+      };
+    case 'not_available':
+      // Fix pack 3 T4 (contract 5): the rail is not certified for live money.
+      return { error: fixedReply('cannot_complete') };
   }
 }
 

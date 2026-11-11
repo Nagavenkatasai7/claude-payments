@@ -18,7 +18,7 @@ import { sendOtpCode } from '@/lib/whatsapp';
 import { partnerWaContext, type PartnerWaContext } from '@/lib/whatsapp-creds';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { PartnerId } from '@/lib/types';
-import { logWarn } from '@/lib/log';
+import { logError, logWarn, stackFrames } from '@/lib/log';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getDb } from '@/db/client';
 import { pokeWorker } from '@/lib/outbox';
@@ -252,7 +252,7 @@ export async function registerAction(
     if (err instanceof CustomerInputError) {
       return { step: 'register', error: err.message };
     }
-    console.error('registerAction: unexpected failure', err);
+    logError('account.register', err, { stack: stackFrames(err) });
     return { step: 'register', error: 'Could not create your account. Please try again.' };
   }
 
@@ -609,7 +609,7 @@ export async function resetAction(
     if (err instanceof CustomerInputError) {
       return { step: 'otp', phone, pendingToken, error: err.message };
     }
-    console.error('resetAction: unexpected failure', err);
+    logError('account.reset', err, { stack: stackFrames(err) });
     return { step: 'otp', phone, pendingToken, error: 'Could not reset your password. Please try again.' };
   }
   if (!updated) return { step: 'login', error: SESSION_EXPIRED };

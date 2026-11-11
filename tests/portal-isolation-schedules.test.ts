@@ -31,6 +31,8 @@ const h = vi.hoisted(() => {
     redis: null as unknown as Record<string, (...a: unknown[]) => unknown>,
     db: null as unknown,
     redisProxy: null as unknown,
+    // Fix pack 3 T12: forces createPortalSchedule's refusal code (null = the real helper).
+    forceCreateCode: null as null | string,
   };
   state.redisProxy = new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => state.redis[k](...a) });
   return state;
@@ -63,6 +65,14 @@ vi.mock('@/lib/store', async (orig) => {
   const real = await orig<typeof import('@/lib/store')>();
   return { ...real, getStore: () => real.createStore(h.redisProxy as never, h.db as never) };
 });
+vi.mock('@/lib/portal-schedules', async (orig) => {
+  const real = await orig<typeof import('@/lib/portal-schedules')>();
+  return {
+    ...real,
+    createPortalSchedule: (...a: Parameters<typeof real.createPortalSchedule>) =>
+      h.forceCreateCode ? Promise.resolve({ ok: false, code: h.forceCreateCode }) : real.createPortalSchedule(...a),
+  };
+});
 vi.mock('@/lib/customer-mfa', () => ({
   getCustomerMfaStore: () => ({ isEnrolled: async () => false, verifyCode: async () => false }),
 }));
@@ -77,6 +87,9 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 import { maskAccount } from '@/lib/tools';
+import { certifyPartnerForTest } from './helpers-live';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
+import { en } from '@/lib/i18n/catalogues/en';
 
 const PHONE = TWO_PARTNER_PHONE;
 const OTHER = '14155550303';
@@ -130,6 +143,7 @@ beforeEach(async () => {
   h.redis = redis as never;
   h.db = db;
   h.jar = new Map();
+  h.forceCreateCode = null;
   await nameOnFile('pa');
   await nameOnFile('pb');
   onHost('pa');
@@ -227,6 +241,25 @@ describe('create', () => {
     expect(created).toMatchObject({ recipientPhone: A_RP, amountSource: 120, dayOfMonth: 9, payoutDestination: `${A_FULL}|HDFC0001111`, status: 'active', purpose: 'savings' });
     const a = await audits();
     expect(a).toEqual([{ action: 'schedule.create', partner_id: 'pa', meta: { scheduleId: created.id } }]);
+  });
+
+  // Fix pack 3 T12 (R13): a tenant certified for live money without its schedules opt-in.
+  it('createScheduleAction: capability_off -> portal.schedules.unavailable, nothing written', async () => {
+    await certifyPartnerForTest(db, 'pa', { optIns: ['b2b', 'usdc', 'mcp', 'telegram'] });
+    await signIn('pa');
+    const s = await createScheduleAction(init(), createForm());
+    expect(s.error).toBe('portal.schedules.unavailable');
+    expect(await schedulesOf('pa')).toHaveLength(1);
+    expect(await audits()).toEqual([]);
+  });
+
+  it('capability_off, licence and corridor_closed all show portal.schedules.unavailable, the schedule_unavailable sentence', async () => {
+    await signIn('pa');
+    for (const code of ['capability_off', 'licence', 'corridor_closed']) {
+      h.forceCreateCode = code;
+      expect((await createScheduleAction(init(), createForm())).error).toBe('portal.schedules.unavailable');
+    }
+    expect(en['portal.schedules.unavailable']).toBe(FIXED_REPLIES.schedule_unavailable);
   });
 
   it('a double submit with the same key writes once', async () => {

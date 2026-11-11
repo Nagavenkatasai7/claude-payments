@@ -11,7 +11,7 @@ import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
 import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { notifyKycReviewDecision } from '@/lib/kyc-notify';
-import { canDecideCustomerKyc } from '@/lib/compliance-config';
+import { canDecideCustomerKyc, senderScreeningHoldActive } from '@/lib/compliance-config';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -365,6 +365,98 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
     if (!(err instanceof UnchangedPartnerEntry)) throw err;
     // Rolled back: nothing written, nothing audited. The page still re-renders the current state.
   }
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
+}
+
+/** Thrown INSIDE the transaction when the locked row has no active screening hold (nothing written). */
+class NoScreeningHold extends Error {
+  constructor() {
+    super('This customer has no active screening hold.');
+    this.name = 'NoScreeningHold';
+  }
+}
+
+/**
+ * Pack 2 review R3 (H1 a): thrown INSIDE the transaction when the locked row's
+ * screening_flagged_at is not the one the clearing admin's page showed (a newer
+ * match landed, or the form predates the field). The rollback writes nothing.
+ */
+class ScreeningChanged extends Error {
+  constructor() {
+    super('The screening for this customer changed since this page loaded. Reload the page and review it again.');
+    this.name = 'ScreeningChanged';
+  }
+}
+
+/** The posted reviewed flag time, normalised to an ISO string ('' for none); null ⇒ missing or unreadable. */
+function reviewedFlaggedAt(raw: FormDataEntryValue | null): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (v === '') return '';
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/**
+ * Fix pack 2 T6 (R06): clear a sender's screening hold (a Persona watchlist /
+ * PEP hit, or a stamped flaggedAt) — SmartRemit platform admins only, for a
+ * customer in any kycStatus and under either kycMode (sanctions are never
+ * delegated). Server-action checklist, in order:
+ *  1. refuseOnSiteHost + requirePlatformAdmin (partner, support and agent staff are redirected);
+ *  2. a typed reason (requireStaffReason), BEFORE any read;
+ *  3. the phone and the named tenant (targetPartnerId), then the row must exist and hold;
+ *  4. ONE transaction: clearScreeningHold (FOR UPDATE), the hold re-checked on
+ *     the LOCKED value, and the customer.screening_hold.clear audit row (subject
+ *     auditSubjectId, never the raw phone). A failed audit rolls the clear back.
+ *     Pack 2 review R3 (H1): the locked flag time must equal the one the page
+ *     showed (posted screeningFlaggedAt), else ScreeningChanged and nothing is
+ *     written; the clear time is taken after the lock (customer-repo).
+ * The Persona flags stay as evidence; the clear time lifts the hold until a
+ * later match stamps a new flag. It does NOT release any held transfer: staff
+ * release those afterwards (dashboard-ops.ts releaseTransfer).
+ */
+export async function clearSenderScreeningHoldAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  const reason = requireStaffReason(formData.get('reason'));
+  const phone = String(formData.get('phone') ?? '').trim();
+  if (!phone) throw new Error('Phone is required.');
+  const partnerId = targetPartnerId(staff, formData); // platform staff MUST name the tenant
+  const reviewed = reviewedFlaggedAt(formData.get('screeningFlaggedAt'));
+
+  const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
+  if (!customer) throw new Error('Customer not found.');
+  if (!senderScreeningHoldActive(customer)) throw new NoScreeningHold();
+
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (a root-handle call here would
+    // deadlock PGlite's single connection / hold a second Neon pool connection).
+    const { found, previous } = await createCustomerStore(tx, getStore()).clearScreeningHold(
+      customer.partnerId, customer.senderPhone,
+    );
+    if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
+    // Re-checked on the value read FOR UPDATE: a concurrent clear is never doubled.
+    if (!senderScreeningHoldActive(previous)) throw new NoScreeningHold();
+    // Pack 2 review R3 (H1 a): only the match the admin reviewed is cleared.
+    const locked = previous?.screeningFlaggedAt ? previous.screeningFlaggedAt.toISOString() : '';
+    if (reviewed === null || reviewed !== locked) throw new ScreeningChanged();
+    await createAuditRepo(tx).record({
+      partnerId: customer.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'customer.screening_hold.clear',
+      subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
+      meta: {
+        reason,
+        flaggedAt: previous?.screeningFlaggedAt ? previous.screeningFlaggedAt.toISOString() : null,
+        previousClearedAt: previous?.screeningClearedAt ? previous.screeningClearedAt.toISOString() : null,
+        pepHit: previous?.pepHit ?? null,
+        watchlistHit: previous?.watchlistHit ?? null,
+        kycStatus: customer.kycStatus,
+      },
+    });
+  });
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

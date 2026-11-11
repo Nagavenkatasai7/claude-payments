@@ -32,4 +32,10 @@ export interface SanctionsListSource {
   load(): Promise<SanctionsList>;
   /** PR C: refresh ahead of the hot path (outside any transaction). Never throws. */
   warm?(): Promise<void>;
+  /**
+   * Fix pack 2 (R02): when the list served now was last confirmed current
+   * (the loader's checked_at), or null when unknown. Read on every listInfo()
+   * call, so the list's age is live. Absent = unknown (the list is stale).
+   */
+  checkedAt?(): Date | null;
 }

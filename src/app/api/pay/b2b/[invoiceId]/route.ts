@@ -20,8 +20,10 @@ import { sendTransactionOtp } from '@/lib/whatsapp';
 import { resolveDirectOtpChannel } from '@/lib/direct-otp-channel';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
-import { logError } from '@/lib/log';
+import { logError, logWarn } from '@/lib/log';
+import { liveRefusalForRail } from '@/lib/live-gate';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
+import { payNotAvailable } from '@/lib/pay-not-available';
 import type { CountryCode, CurrencyCode } from '@/lib/types';
 
 // Cross-border B2B bill checkout (Plan 4) — the country-aware sibling of
@@ -264,6 +266,9 @@ export async function POST(
           { status: 503 },
         );
       }
+      // Pack 3 (contract 5): a live control refused the mint. Nothing was
+      // minted or charged; the neutral 409 never names the reason.
+      if (minted.error === 'not_available') return payNotAvailable();
       const msg =
         minted.error === 'blocked' || minted.error === 'buyer_unscreened'
           ? "We can't process this payment."
@@ -290,6 +295,16 @@ export async function POST(
     // message names the OWNING partner and its creds resolve at drain (fix 11).
     const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
     const railIntegrations = await getPartnerIntegrationsStore().getIntegrations(railPartnerId);
+
+    // Pack 3 (contract 6): an uncertified real-money rail, or the default tenant
+    // on one, is refused BEFORE settleOrHold (nothing held, instructed or
+    // written; the row stays awaiting_payment). Real money is judged on the
+    // integrations just read, so no second rail-type read can refuse a demo rail.
+    const live = await liveRefusalForRail(getDb(), transfer, railIntegrations.payment.providerType ?? null);
+    if (live) {
+      logWarn('pay.b2b.live-refused', 'live B2B payment refused before settlement', { transferId: transfer.id, code: live });
+      return payNotAvailable();
+    }
 
     const result = await settleOrHold(getDb(), transfer, railIntegrations);
     pokeWorker();

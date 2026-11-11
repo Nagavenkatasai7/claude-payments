@@ -970,7 +970,9 @@ describe('settlement URL is validated at save time (Program-Fix 22, acceptance t
     });
     currentStaff = staff({ role: 'admin' });
     await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: '' }))).rejects.toThrow(MSG);
-    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }))).rejects.toThrow(MSG);
+    // Fix pack 2 T10: simulator never keeps a stored URL; it always saves the hosted rail.
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }))).resolves.toBeUndefined();
+    expect((await integrations.getIntegrations('acme')).payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
     // mock does not require a URL: the blank field passes and the kept value is not the gate.
     await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'mock', settlementUrl: '' }))).resolves.toBeUndefined();
     // ...but a SUBMITTED bad value is still refused for mock.
@@ -987,6 +989,37 @@ describe('settlement URL is validated at save time (Program-Fix 22, acceptance t
     currentStaff = staff({ role: 'admin' });
     await savePaymentConfigAction(form({ id: 'beta', providerType: 'simulator', settlementUrl: '' }));
     const after = await integrations.getIntegrations('beta');
+    expect(after.payment.providerType).toBe('simulator');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+  });
+
+  // Fix pack 2 T10 (R02): a simulator rail only ever POSTs to the hosted rail,
+  // so its stored URL is always that one: a kept or submitted URL is ignored.
+  it('switching http -> simulator rewrites the URL to /api/partner-rail', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }));
+    const after = await integrations.getIntegrations('acme');
+    expect(after.payment.providerType).toBe('simulator');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+    expect(after.payment.credentials?.signingSecret).toBe('sgn'); // secrets are kept, not re-minted
+  });
+
+  it('simulator with a submitted external URL stores the hosted URL', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await savePaymentConfigAction(form({ id: 'beta', providerType: 'simulator', settlementUrl: 'https://rail.elsewhere-test.com/settle' }));
+    const after = await integrations.getIntegrations('beta');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+    expect(after.payment.credentials?.signingSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(after.payment.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('wizard simulator with an external URL stores the hosted URL', async () => {
+    currentStaff = staff({ role: 'admin' });
+    const r = await wizardCreatePartnerAction({
+      name: 'Sim Ext', countries: ['US'], payment: { providerType: 'simulator', settlementUrl: 'https://rail.elsewhere-test.com/settle' },
+    });
+    expect(r.settlementConfigured).toBe(true);
+    const after = await integrations.getIntegrations(r.id);
     expect(after.payment.providerType).toBe('simulator');
     expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
   });
@@ -1195,9 +1228,17 @@ describe('savePaymentConfigAction — rail secret rotation (Program-Fix 29)', ()
 describe('issueApiKeyAction — mode is live by default, test on request, nothing else', () => {
   it('no mode ⇒ an sr_live_ / pk_live_ key (every existing caller unchanged)', async () => {
     await seedPartner(db, 'acme');
+    await upsertApprovedGoLive(db, 'acme', 'root'); // pack 3 T13: every live key needs an approved go-live
     const r = await issueApiKeyAction('acme');
     expect(r.plaintext.startsWith('sr_live_')).toBe(true);
     expect(r.keyId.startsWith('pk_live_')).toBe(true);
+  });
+
+  it('no mode on an unapproved partner ⇒ refused (the default mode is live)', async () => {
+    await seedPartner(db, 'acme');
+    await expect(issueApiKeyAction('acme')).rejects.toThrow(/after SmartRemit approves go-live/);
+    const keys = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = 'acme'`);
+    expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 
   it("mode 'test' ⇒ an sr_test_ / pk_test_ sandbox key", async () => {
@@ -1217,9 +1258,12 @@ describe('issueApiKeyAction — mode is live by default, test on request, nothin
     expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 
-  it('the setup wizard\'s first key is live', async () => {
-    const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment: { providerType: 'simulator' } });
-    expect(r.apiKey.startsWith('sr_live_')).toBe(true);
+  it('the setup wizard\'s first key is live on a simulator, mock or no rail', async () => {
+    for (const payment of [{ providerType: 'simulator' }, { providerType: 'mock' }, undefined]) {
+      const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment });
+      expect(r.apiKey.startsWith('sr_live_')).toBe(true);
+      expect(r.apiKeyMode).toBe('live');
+    }
   });
 
   // UI redesign M3-21 (#427 review follow-up): the legacy per-partner page no longer lets a
@@ -1244,9 +1288,21 @@ describe('issueApiKeyAction — mode is live by default, test on request, nothin
     const audits = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'api_key.issue'`);
     expect((audits as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
-  it('a platform admin (the approver) may issue a live key before go-live', async () => {
+  // Pack 3 T13 (D14): the platform-admin exemption is gone. Every live key needs an approved go-live.
+  it('a platform admin cannot issue a live key before go-live: refused, no key, no audit row; a test key is issued; after approval the live key is issued', async () => {
     await seedPartner(db, 'acme');
     expect(await isLiveApproved(db, 'acme')).toBe(false);
+    for (const mode of [undefined, 'live'] as const) {
+      await expect(issueApiKeyAction('acme', mode)).rejects.toThrow(
+        'Live keys are available after SmartRemit approves go-live. Issue a sandbox key for now.',
+      );
+    }
+    expect(await allKeys('acme')).toEqual([]);
+    const audits = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'api_key.issue'`);
+    expect((audits as unknown as { rows: unknown[] }).rows).toEqual([]);
+    const t = await issueApiKeyAction('acme', 'test');
+    expect(t.keyId.startsWith('pk_test_')).toBe(true);
+    await upsertApprovedGoLive(db, 'acme', 'root');
     const r = await issueApiKeyAction('acme');
     expect(r.keyId.startsWith('pk_live_')).toBe(true);
     expect(await liveKeys('acme')).toHaveLength(1);
@@ -1261,10 +1317,56 @@ describe('wizardCreatePartnerAction — go-live', () => {
     expect(await isLiveApproved(db, r.id)).toBe(true);
     expect((await getGoLive(db, r.id))?.approvedBy).toBe('admin');
   });
+  it('a simulator, mock or no-rail wizard partner is approved at creation', async () => {
+    for (const payment of [{ providerType: 'simulator' }, { providerType: 'mock' }, undefined]) {
+      const r = await wizardCreatePartnerAction({ name: 'Approved Co', countries: ['US'], payment });
+      expect(await isLiveApproved(db, r.id)).toBe(true);
+      expect(r.apiKeyMode).toBe('live');
+    }
+  });
   it('a refused wizard commit writes no go-live row', async () => {
     await expect(wizardCreatePartnerAction({ name: 'X', countries: ['ZZ'] })).rejects.toThrow();
     const rows = await db.execute(sql`SELECT partner_id FROM partner_go_live`);
     expect((rows as unknown as { rows: unknown[] }).rows).toEqual([]);
+  });
+});
+
+// Pack 3 T13 (R15, owner Q3): a partner-operated (http) rail moves real money, so the wizard no
+// longer approves it at creation: a pending go-live row, a sandbox first key, a 'test' audit mode.
+describe('wizardCreatePartnerAction - http rail starts pending', () => {
+  const HTTP = { providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' };
+  const auditFor = async (pid: string) =>
+    (await db.execute(sql`SELECT action, meta FROM audit_events WHERE partner_id = ${pid} ORDER BY id`) as unknown as {
+      rows: Array<{ action: string; meta: Record<string, unknown> | null }>;
+    }).rows;
+
+  it('http: go-live row pending, first key sr_test_, apiKeyMode test, settlement configured', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    expect(await isLiveApproved(db, r.id)).toBe(false);
+    const row = await getGoLive(db, r.id);
+    expect(row).not.toBeNull();
+    expect(row?.approvedAt).toBeNull();
+    expect(r.apiKey.startsWith('sr_test_')).toBe(true);
+    expect(r.apiKeyMode).toBe('test');
+    expect(r.settlementConfigured).toBe(true);
+  });
+
+  it('http: no partner.go_live.approve audit row; api_key.issue meta mode test', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    const rows = await auditFor(r.id);
+    expect(rows.map((x) => x.action)).not.toContain('partner.go_live.approve');
+    const issue = rows.filter((x) => x.action === 'api_key.issue');
+    expect(issue).toHaveLength(1);
+    expect(issue[0].meta).toMatchObject({ mode: 'test', last4: r.apiKeyLast4 });
+  });
+
+  it('http then issueApiKeyAction: live refused, test issued', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Http Co', countries: ['US'], payment: HTTP });
+    await expect(issueApiKeyAction(r.id, 'live')).rejects.toThrow(/after SmartRemit approves go-live/);
+    const t = await issueApiKeyAction(r.id, 'test');
+    expect(t.keyId.startsWith('pk_test_')).toBe(true);
+    const live = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = ${r.id} AND id LIKE 'pk_live_%'`);
+    expect((live as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 });
 
@@ -1300,6 +1402,23 @@ describe('saveAlertEmailAction / testWhatsappConnectionAction (R2a)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'plat-admin', meta: { set: true, hadPrevious: false } });
     expect(JSON.stringify(rows)).not.toContain('ops@acme.example');
+  });
+
+  it('fix pack 2 T5: saveComplianceAlertEmailAction saves, clears and refuses like the alert email; audit has no address', async () => {
+    const { saveComplianceAlertEmailAction } = await import('@/app/admin-dashboard/partners/actions');
+    await saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: ' compliance@acme.example ' }));
+    expect((await ps.getPartner('acme'))!.supportConfig?.complianceAlertEmail).toBe('compliance@acme.example');
+    for (const bad of ['nope', 'a@b.example\r\nBcc: x@y.example']) {
+      await expect(saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: bad }))).rejects.toThrow(/valid email/i);
+    }
+    await saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: '' }));
+    expect((await ps.getPartner('acme'))!.supportConfig).not.toHaveProperty('complianceAlertEmail');
+    const rows = (await auditRows()).filter((r) => r.action === 'partner.compliance_email.update');
+    expect(rows.map((r) => r.meta)).toMatchObject([{ set: true, hadPrevious: false }, { set: false, hadPrevious: true }]);
+    expect(JSON.stringify(rows)).not.toContain('@');
+    currentStaff = { username: 'beta-admin', role: 'admin', partnerId: 'beta' };
+    await expect(saveComplianceAlertEmailAction(form({ id: 'acme', complianceAlertEmail: 'evil@x.example' }))).rejects.toThrow(/^NEXT_REDIRECT:\/partner$/);
+    expect((await ps.getPartner('acme'))!.supportConfig).not.toHaveProperty('complianceAlertEmail');
   });
 
   it('a blank address clears it', async () => {
@@ -1504,5 +1623,172 @@ describe('UI M5: legacy partner-config actions refuse partner staff (→ /partne
     await expect(run.savePricingAction()).resolves.toBeUndefined();
     expect((await ps.getPartner('acme'))!.supportConfig).toMatchObject({ enableSupportPortal: true, alertEmail: 'ops@x.example' });
     expect((await createPartnerRateRepo(db).getRate('acme', 'USD', 'INR'))?.marginBps).toBe(25);
+  });
+});
+
+describe('updatePartnerAction: KYC lock while a posture is signed (fix pack 3 T10, contract 14)', () => {
+  it('a platform save without the checkbox keeps requireKycBeforeSend while a posture is signed', async () => {
+    const { updateLiveControlsKey } = await import('@/db/repos/partner-repo');
+    for (const [id, stored] of [['p9', false], ['p10', true]] as const) {
+      await ps.savePartner({
+        id, name: 'Kay', countries: ['US'], status: 'active', kycMode: 'ours', requireKycBeforeSend: stored,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      });
+      await updateLiveControlsKey(id, 'posture', {
+        version: 1, signedBy: 'kay-admin', signedAt: new Date().toISOString(), kycDecider: 'smartremit_procedures',
+        holdDecider: 'partner', requireKycBeforeSend: true, fourEyesNonSanctions: false,
+      }, db);
+      const fd = new FormData();
+      fd.set('id', id);
+      fd.set('name', 'Kay');
+      fd.append('countries', 'US');
+      fd.set('kycMode', 'ours');
+      // requireKycBeforeSend omitted: the locked (disabled) box posts nothing
+      await updatePartnerAction(fd);
+      expect((await ps.getPartner(id))?.requireKycBeforeSend).toBe(stored);
+      // A forged 'on' does not rewrite it either.
+      fd.set('requireKycBeforeSend', 'on');
+      await updatePartnerAction(fd);
+      expect((await ps.getPartner(id))?.requireKycBeforeSend).toBe(stored);
+    }
+  });
+});
+
+describe('updatePartnerAction: kycMode under a signed posture or a live certification (pack 3 review C3)', () => {
+  const POSTURE = () => ({
+    version: 1, signedBy: 'kay-admin', signedAt: new Date().toISOString(), kycDecider: 'smartremit_procedures',
+    holdDecider: 'partner', requireKycBeforeSend: true, fourEyesNonSanctions: false,
+  });
+  const kycAudits = async () =>
+    (await db.execute(rawSql`SELECT partner_id, actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'partner.kyc_mode.change' ORDER BY id`)).rows as Array<{
+      partner_id: string; actor: string; actor_type: string; subject_id: string; meta: Record<string, unknown>;
+    }>;
+  const seedKay = async (id: string) => {
+    const now = new Date().toISOString();
+    await ps.savePartner({ id, name: 'Kay', countries: ['US'], status: 'active', kycMode: 'ours', createdAt: now, updatedAt: now });
+  };
+  const kycForm = (id: string, kycMode: 'ours' | 'delegated', name = 'Kay') => {
+    const fd = new FormData();
+    fd.set('id', id);
+    fd.set('name', name);
+    fd.append('countries', 'US');
+    fd.set('kycMode', kycMode);
+    return fd;
+  };
+
+  it('a certified partner: a kycMode flip is refused (revoke first), the row and the audit log are unchanged', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { isLiveCertified } = await import('@/lib/live-gate');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk1');
+    await certifyPartnerForTest(db, 'pk1', { posture: true });
+    expect(isLiveCertified((await ps.getPartner('pk1'))!)).toBe(true);
+    const before = await ps.getPartner('pk1');
+    await expect(updatePartnerAction(kycForm('pk1', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    const after = await ps.getPartner('pk1');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay'); // the whole submit is refused, nothing half-saved
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  it('an uncertified partner with a signed posture: the flip is saved with one audit row, and the readiness posture line fails', async () => {
+    const { updateLiveControlsKey } = await import('@/db/repos/partner-repo');
+    const { liveReadiness } = await import('@/lib/live-certification');
+    await seedKay('pk2');
+    await updateLiveControlsKey('pk2', 'posture', POSTURE(), db);
+    const facts = { goLiveApproved: true, listFitness: 'live' as const, ownWhatsapp: true, complianceStaff: [] };
+    expect(liveReadiness((await ps.getPartner('pk2'))!, facts).lines.find((l) => l.id === 'posture')?.ok).toBe(true);
+
+    await updatePartnerAction(kycForm('pk2', 'delegated'));
+    const got = (await ps.getPartner('pk2'))!;
+    expect(got.kycMode).toBe('delegated');
+    const a = await kycAudits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ partner_id: 'pk2', actor: 'admin', actor_type: 'staff', subject_id: 'pk2' });
+    expect(a[0].meta).toEqual({ from: 'ours', to: 'delegated', postureSigned: true });
+    expect(liveReadiness(got, facts).lines.find((l) => l.id === 'posture')?.ok).toBe(false);
+  });
+
+  it('an uncertified partner with no posture: the flip is audited with postureSigned false', async () => {
+    await seedKay('pk3');
+    await updatePartnerAction(kycForm('pk3', 'delegated'));
+    expect((await ps.getPartner('pk3'))?.kycMode).toBe('delegated');
+    expect((await kycAudits()).map((r) => r.meta)).toEqual([{ from: 'ours', to: 'delegated', postureSigned: false }]);
+  });
+
+  it('no kycMode change -> saved with no kyc audit row (also on a certified partner)', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    await seedKay('pk4');
+    await seedKay('pk5');
+    await certifyPartnerForTest(db, 'pk5', { posture: true });
+    for (const id of ['pk4', 'pk5']) {
+      await updatePartnerAction(kycForm(id, 'ours', 'Kay Renamed'));
+      expect((await ps.getPartner(id))?.name).toBe('Kay Renamed');
+    }
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  // Pack 3 review Q1 (F1): the lock is on the certification RECORD, whatever the status, so
+  // suspend -> flip -> reactivate cannot leave a standing certification on a different kycMode.
+  it('a SUSPENDED partner with a standing certification: a kycMode flip is refused, nothing written', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk6');
+    await certifyPartnerForTest(db, 'pk6', { posture: true });
+    await ps.savePartner({ ...(await ps.getPartner('pk6'))!, status: 'suspended' });
+    const before = await ps.getPartner('pk6');
+    await expect(updatePartnerAction(kycForm('pk6', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    const after = await ps.getPartner('pk6');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay');
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  // Pack 3 review Q1 (F2 = H4): the refusal is decided on the row read under the lock inside the
+  // save transaction, not on the first, unlocked read. Here the row is certified after that read.
+  it('certified between the first read and the save: the flip is refused on the locked row, nothing written', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { t } = await import('@/lib/i18n');
+    await seedKay('pk7');
+    const realGet = ps.getPartner.bind(ps);
+    const spy = vi.spyOn(ps, 'getPartner').mockImplementationOnce(async (pid) => {
+      const snap = await realGet(pid); // uncertified
+      await certifyPartnerForTest(db, 'pk7', { posture: true }); // a certify commits in between
+      return snap;
+    });
+    await expect(updatePartnerAction(kycForm('pk7', 'delegated', 'Kay Renamed'))).rejects.toThrow(t('partner.live.kycModeLocked'));
+    spy.mockRestore();
+    const after = await ps.getPartner('pk7');
+    expect(after?.kycMode).toBe('ours');
+    expect(after?.name).toBe('Kay');
+    expect(await kycAudits()).toEqual([]);
+  });
+
+  it('the save transaction locks the partners row FOR NO KEY UPDATE before the partners upsert', async () => {
+    const { captureQueries } = await import('./helpers-db');
+    await seedKay('pk8');
+    const stop = captureQueries();
+    await updatePartnerAction(kycForm('pk8', 'delegated', 'Kay Renamed'));
+    const qs = stop().map((q) => q.sql.toLowerCase());
+    const lock = qs.findIndex((q) => q.startsWith('select') && q.includes('from "partners"') && q.includes('for no key update'));
+    const upsert = qs.findIndex((q) => q.startsWith('insert into "partners"'));
+    expect(lock).toBeGreaterThan(-1);
+    expect(upsert).toBeGreaterThan(-1);
+    expect(lock).toBeLessThan(upsert);
+  });
+
+  it('a REVOKED certification does not lock: the flip is saved with one audit row (from the locked row)', async () => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    await seedKay('pk9');
+    await certifyPartnerForTest(db, 'pk9', { posture: true });
+    const revokedAt = new Date().toISOString();
+    await db.execute(rawSql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{certification}', (live_controls -> 'certification') || jsonb_build_object('revokedAt', ${revokedAt}::text, 'revokedBy', 'admin')) WHERE id = 'pk9'`);
+    await updatePartnerAction(kycForm('pk9', 'delegated'));
+    expect((await ps.getPartner('pk9'))?.kycMode).toBe('delegated');
+    const a = await kycAudits();
+    expect(a).toHaveLength(1);
+    expect(a[0].meta).toEqual({ from: 'ours', to: 'delegated', postureSigned: true });
   });
 });

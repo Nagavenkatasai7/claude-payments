@@ -25,6 +25,15 @@ const runOfacSdnLoad = vi.hoisted(() =>
   vi.fn(async () => ({ status: 'activated', version: '2026-09-18', hash: 'h', entryCount: 5, nameCount: 9 })),
 );
 vi.mock('@/lib/sanctions/list-loader', () => ({ runOfacSdnLoad }));
+// Fix pack 2 (R02): the list health check runs on every daily run.
+const checkSanctionsListHealth = vi.hoisted(() => vi.fn(async () => ({ alerted: false })));
+vi.mock('@/lib/sanctions/list-health', () => ({ checkSanctionsListHealth }));
+// Fix pack 2 T7 (R07): the verified Blob archive runs after a load.
+const archivePending = vi.hoisted(() => vi.fn(async () => ({ status: 'done', archived: 1, failed: 0, pruned: 0 })));
+vi.mock('@/lib/sanctions/list-archive', () => ({ archivePending, ARCHIVE_BUDGET_MS: 150_000 }));
+// Pack 2 review F3 (C3): the poke, observed (a hanging archive must not cost it).
+const pokeWorker = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/outbox', async (orig) => ({ ...(await orig<typeof import('@/lib/outbox')>()), pokeWorker }));
 
 import { GET } from '@/app/api/cron/route';
 
@@ -35,8 +44,12 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
   const original = process.env.SANCTIONS_LOADER_ENABLED;
   beforeEach(() => {
     runOfacSdnLoad.mockClear();
+    checkSanctionsListHealth.mockClear();
+    archivePending.mockClear();
+    pokeWorker.mockClear();
   });
   afterEach(() => {
+    vi.useRealTimers();
     if (original === undefined) delete process.env.SANCTIONS_LOADER_ENABLED;
     else process.env.SANCTIONS_LOADER_ENABLED = original;
   });
@@ -70,6 +83,88 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, fired: 2, sanctionsList: null });
     expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it('health check runs after the loader', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    await GET(req());
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+    const [db, now] = checkSanctionsListHealth.mock.calls[0] as unknown as [unknown, Date];
+    expect(db).toBe(fakeDb);
+    expect(now).toBeInstanceOf(Date);
+    expect(runOfacSdnLoad.mock.invocationCallOrder[0]).toBeLessThan(checkSanctionsListHealth.mock.invocationCallOrder[0]);
+  });
+
+  it('health check runs with the loader OFF', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    await GET(req());
+    expect(runOfacSdnLoad).not.toHaveBeenCalled();
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it('a health throw is logged; response unchanged', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    checkSanctionsListHealth.mockRejectedValueOnce(new Error('boom'));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-list-health'))).toBe(true);
+    err.mockRestore();
+  });
+
+  // Pack 2 review F3 (C3): loader, then the list health check, then the archive, then the poke.
+  it('ON: archivePending runs after the load AND after the health check, with the same db and a budget', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    await GET(req());
+    expect(archivePending).toHaveBeenCalledTimes(1);
+    const [db, opts] = archivePending.mock.calls[0] as unknown as [unknown, { budgetMs: number }];
+    expect(db).toBe(fakeDb);
+    expect(opts.budgetMs).toBeGreaterThan(0);
+    expect(opts.budgetMs).toBeLessThanOrEqual(150_000);
+    expect(runOfacSdnLoad.mock.invocationCallOrder[0]).toBeLessThan(checkSanctionsListHealth.mock.invocationCallOrder[0]);
+    expect(checkSanctionsListHealth.mock.invocationCallOrder[0]).toBeLessThan(archivePending.mock.invocationCallOrder[0]);
+    expect(archivePending.mock.invocationCallOrder[0]).toBeLessThan(pokeWorker.mock.invocationCallOrder[0]);
+  });
+
+  it('ON: an archive that never resolves still lets the health check and the poke run, and the cron answers', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    archivePending.mockImplementationOnce(() => new Promise(() => {}));
+    let settled = false;
+    const pending = GET(req()).then((r) => {
+      settled = true;
+      return r;
+    });
+    for (let i = 0; i < 40 && !settled; i++) await vi.advanceTimersByTimeAsync(10_000);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7, sanctionsList: 'activated' });
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-archive'))).toBe(true);
+    err.mockRestore();
+  });
+
+  it('OFF: never runs; response unchanged', async () => {
+    delete process.env.SANCTIONS_LOADER_ENABLED;
+    const res = await GET(req());
+    expect(archivePending).not.toHaveBeenCalled();
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
+  });
+
+  it('an archive throw fails soft; response unchanged', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    archivePending.mockRejectedValueOnce(new Error('boom'));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7, sanctionsList: 'activated' });
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-archive'))).toBe(true);
+    expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
     err.mockRestore();
   });
 });

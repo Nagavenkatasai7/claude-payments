@@ -30,6 +30,9 @@ import {
 import type { Schedule } from '@/lib/types';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { clearLegalName, freshDb, seedPartner, seedSender } from './helpers-db';
+import { certifyPartnerForTest } from './helpers-live';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
+import { CREATE_REFUSAL } from '@/lib/mcp/schedules';
 
 // Repeat payments over MCP (Oct 25): list / create / pause-resume-cancel the customer's OWN
 // schedules through the portal's helpers (createPortalSchedule, setPortalScheduleStatus), audited
@@ -192,6 +195,27 @@ describe('create_schedule', () => {
     const r = await createScheduleTool(principal(), monthly({ recipient_id: rid('pa', PHONE, '5215512345678') }), deps);
     expect(r).toMatchObject({ ok: false, message: expect.stringContaining('India only') });
     expect(await count()).toBe(0);
+  });
+
+  // Fix pack 3 T12 (R13): a tenant certified for live money without its schedules opt-in.
+  it('capability_off -> the schedule_unavailable text, nothing written', async () => {
+    await certifyPartnerForTest(db, 'pa', { optIns: ['b2b', 'usdc', 'mcp', 'telegram'] });
+    const r = await createScheduleTool(principal(), monthly(), deps);
+    expect(r).toEqual({ ok: false, message: FIXED_REPLIES.schedule_unavailable });
+    expect(await count()).toBe(0);
+    expect(await audits()).toEqual([]);
+  });
+
+  it('capability_off, licence and corridor_closed all read the schedule_unavailable text', () => {
+    for (const code of ['capability_off', 'licence', 'corridor_closed'] as const) {
+      expect(CREATE_REFUSAL[code]).toBe(FIXED_REPLIES.schedule_unavailable);
+    }
+  });
+
+  it('a certified tenant with schedules open sets up as today', async () => {
+    await certifyPartnerForTest(db, 'pa', { optIns: ['schedules'] });
+    expect(await createScheduleTool(principal(), monthly(), deps)).toMatchObject({ ok: true });
+    expect(await count()).toBe(1);
   });
 
   it('a retry with the same details returns the SAME schedule (one row, one audit)', async () => {

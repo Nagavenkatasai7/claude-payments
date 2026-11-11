@@ -11,12 +11,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Deterministic pre-settlement re-screen (never the Redis-backed default):
 // each test sets the behaviour it needs.
 const rescreenMode = vi.hoisted(() => ({ value: 'cleared' as 'cleared' | 'throw' }));
-vi.mock('@/lib/pay-rescreen', () => ({
-  rescreenBeforePay: async (_db: unknown, t: unknown) => {
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const stub = async (_db: unknown, t: unknown) => {
     if (rescreenMode.value === 'throw') throw new Error('screening unavailable');
     return { kind: 'cleared', transfer: t };
-  },
-}));
+  };
+  // Fix pack 2 T3: the funded settle's default re-screen is rescreenOnFile.
+  return { ...(await orig<typeof import('@/lib/pay-rescreen')>()), rescreenBeforePay: stub, rescreenOnFile: stub };
+});
 vi.mock('@/lib/store', () => ({ getStore: () => ({ getTransferDecrypted: async () => null }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({ getCustomer: async () => ({ fullName: 'Test Sender' }) }) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null, ensureDefaultPartner: async () => ({ id: 'default' }) }) }));

@@ -8,6 +8,7 @@ import {
   STEP_UP_SESSION_HOURLY_CAP,
   STEP_UP_USER_DAILY_CAP,
   type StaffStepUpDeps,
+  type StepUpTarget,
 } from '@/lib/staff-step-up';
 import { STEP_UP_FIELD, isStepUpRequired, withStepUpSecret, withoutStepUpSecret } from '@/lib/staff-step-up-result';
 import type { Staff } from '@/lib/types';
@@ -302,5 +303,17 @@ describe('the retry FormData helpers (client)', () => {
     expect(retry.get('mode')).toBe('test');
     expect(base.get(STEP_UP_FIELD)).toBeNull(); // the kept base never holds a secret
     expect(fd.get(STEP_UP_FIELD)).toBe('old-secret'); // the input is not mutated
+  });
+});
+
+describe('StepUpTarget (fix pack 3, contract 12)', () => {
+  it('StepUpTarget accepts the 13 pack 3 names', () => {
+    // tsc is the real proof: each literal must be a StepUpTarget for this file to compile.
+    const names: StepUpTarget[] = [
+      'live.certify', 'live.revoke', 'live.contract', 'optin.counsel', 'optin.approve', 'posture.sign',
+      'compliance_user.set', 'switch.resume',
+      'licence.save', 'corridor.save', 'funding.save', 'aml_rule.save', 'risk_signal.save',
+    ];
+    expect(new Set(names).size).toBe(13);
   });
 });

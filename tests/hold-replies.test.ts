@@ -236,3 +236,16 @@ describe('R30: the removed wording does not come back in the customer-facing mod
     for (const phrase of GONE) expect(src.includes(phrase), `${rel} still has "${phrase}"`).toBe(false);
   });
 });
+
+// Fix pack 3 T12 (R13, contract 15): the one neutral text for a repeat payment
+// the account may not set up (a closed capability, a licence, a closed corridor).
+describe('hold-replies: schedule_unavailable (fix pack 3 T12)', () => {
+  it('schedule_unavailable is pinned', () => {
+    expect(FIXED_REPLIES.schedule_unavailable).toBe("Repeat payments aren't available on this account right now.");
+  });
+
+  it("HOLD_REPLIES_VERSION changed from '2026-10-31.2 (draft, awaiting MLRO approval)'", () => {
+    expect(HOLD_REPLIES_VERSION).not.toBe('2026-10-31.2 (draft, awaiting MLRO approval)');
+    expect(HOLD_REPLIES_VERSION).toMatch(/awaiting MLRO approval/);
+  });
+});

@@ -17,6 +17,7 @@ import { decodeMasterKey } from '../field-crypto';
 import { env } from '../env';
 import { normalizeName } from './normalize';
 import type { AuditEvent } from '@/db/repos/aux-repos';
+import type { ListFitness } from './list-policy';
 
 /** The sanctions outcome recorded in evidence (distinct from the transfer's compliance status). */
 export type SanctionsDecision =
@@ -42,6 +43,16 @@ export interface ScreeningEvidence {
   screenedAt: string;
   decision: SanctionsDecision;
   parties: ScreeningEvidenceParty[];
+  /**
+   * Fix pack 2 (R02): the list's fitness at screen time (list-policy.ts
+   * listFitness); 'not_live' when the list could not load. Absent on evidence
+   * written before pack 2 and on errorEvidence.
+   */
+  listFitness?: ListFitness;
+  /** Fix pack 2 (R02): when the list was last confirmed current (ISO), when known. */
+  listCheckedAt?: string;
+  /** Fix pack 2 (R02): the base list's hash before corridor additions, when known. */
+  listBaseHash?: string;
 }
 
 /** The audit_events row shape every sanctions.screen write uses (actor is NOT NULL, schema.ts). */

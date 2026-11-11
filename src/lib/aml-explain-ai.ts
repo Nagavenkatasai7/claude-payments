@@ -7,6 +7,7 @@ import {
   POSSIBLE_MATCH_REASON,
   RECIPIENT_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
+  SENDER_SCREENING_REASON,
   SENDER_WATCHLIST_REASON,
   VELOCITY_REASON,
 } from '@/lib/compliance-config';
@@ -53,12 +54,13 @@ export type HoldReasonCode =
   | 'edd_required'
   | 'other';
 
-const HOLD_REASON_CODES: Readonly<Record<string, HoldReasonCode>> = Object.freeze({
+export const HOLD_REASON_CODES: Readonly<Record<string, HoldReasonCode>> = Object.freeze({
   [POSSIBLE_MATCH_REASON]: 'screening',
   [LIST_UNAVAILABLE_REASON]: 'screening',
   [RECIPIENT_WATCHLIST_REASON]: 'screening',
   [SENDER_WATCHLIST_REASON]: 'screening',
   [SENDER_IDENTITY_MISSING_REASON]: 'sender_identity_missing',
+  [SENDER_SCREENING_REASON]: 'screening',
   [LARGE_AMOUNT_REASON]: 'large_amount',
   [VELOCITY_REASON]: 'velocity',
   [AML_HOLD_REASON]: 'aml_hold',

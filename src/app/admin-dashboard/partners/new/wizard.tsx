@@ -8,6 +8,7 @@ import {
   type PartnerWizardResult,
 } from '../actions';
 import { CopyField } from '../copy-field';
+import { wizardDoneCopy } from './wizard-copy';
 import { LogoUpload } from '../logo-upload';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -113,10 +114,11 @@ export function PartnerSetupWizard({ fromRequest }: { fromRequest?: WizardSource
 
   // ── Done screen: show-once key + go-live checklist ──────────────────────
   if (result) {
+    const done = wizardDoneCopy(result.apiKeyMode);
     return (
       <Card>
         <CardHeader>
-          <CardTitle>🎉 {draft.name} is live</CardTitle>
+          <CardTitle>{done.title(draft.name)}</CardTitle>
           <CardDescription>
             Partner id <code>{result.id}</code>. Copy the API key NOW — it is shown exactly once
             and stored only as a hash.
@@ -124,7 +126,7 @@ export function PartnerSetupWizard({ fromRequest }: { fromRequest?: WizardSource
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="rounded-lg border border-warning/40 bg-accent/40 p-3">
-            <CopyField label="API key (shown once — store it in your secret manager)" value={result.apiKey} />
+            <CopyField label={done.keyLabel} value={result.apiKey} />
           </div>
           <CopyField label="API base URL" value={result.apiBaseUrl} />
           <CopyField label="WhatsApp callback URL (Meta → WhatsApp → Configuration)" value={result.whatsappCallbackUrl} />
@@ -150,7 +152,7 @@ export function PartnerSetupWizard({ fromRequest }: { fromRequest?: WizardSource
                     ? '— signed instructions will POST to your endpoint'
                     : '— configure later on the partner page'}
               </li>
-              <li>✅ API key issued (…{result.apiKeyLast4})</li>
+              <li>{done.keyLine(result.apiKeyLast4)}</li>
               <li>
                 ◻️ Test the loop: create + confirm a transaction via the API (or WhatsApp), and
                 watch it deliver on the partner page.

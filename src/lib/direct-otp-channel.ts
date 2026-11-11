@@ -1,8 +1,10 @@
 import type { WaCreds } from './whatsapp';
 import type { PartnerIntegrations } from './partner-integrations';
-import type { PartnerId } from './types';
+import type { Partner, PartnerId } from './types';
 import { resolveWaChannel } from './whatsapp-creds';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
+import { getPartnerStore } from './partner-store';
+import { isLiveCertified } from './live-gate';
 import { recordChannelHealth } from './channel-health';
 import { pokeWorker } from './outbox';
 import { logWarn } from './log';
@@ -22,7 +24,12 @@ import { DEFAULT_PARTNER_ID } from './defaults';
  *  - creds read throws                       → refused for a non-default partner; the default
  *    tenant keeps the shared number (it IS that tenant's number);
  *  - no tenant                               → refused, without a lookup.
- * The portal pay page applies the same rule (its twin landed separately; see PR #438).
+ * Pack 3 (contract 17): a partner CERTIFIED for live money never sends codes on the shared
+ * number: on 'shared' a non-default partner is read (getPartner), and a certified one is refused
+ * with `not_own_number`; a failed read is refused (`lookup_failed`). The default tenant is never
+ * read. Uncertified partners keep the shared number, as before.
+ * The portal pay page (api/pay/[transferId] request_otp), the payment-link page, B2B bill pay and
+ * seller onboarding all resolve their channel here (one rule, no inline twin).
  *
  * Logs carry the tenant id, a fixed reason and at most an error NAME: never a field value, a
  * token, or an error message (a driver or decrypt message can echo input).
@@ -30,15 +37,18 @@ import { DEFAULT_PARTNER_ID } from './defaults';
 
 export type DirectOtpChannel =
   | { ok: true; creds: WaCreds | undefined }
-  | { ok: false; why: 'tenant_unresolved' | 'lookup_failed' | 'incomplete' };
+  | { ok: false; why: 'tenant_unresolved' | 'lookup_failed' | 'incomplete' | 'not_own_number' };
 
 export interface DirectOtpChannelDeps {
   getIntegrations(partnerId: PartnerId): Promise<PartnerIntegrations | null | undefined>;
   recordIncomplete(partnerId: PartnerId): Promise<unknown>;
+  /** Pack 3: read only for a non-default partner on the shared number (is it certified?). */
+  getPartner(partnerId: PartnerId): Promise<Partner | null | undefined>;
 }
 
 const defaultDeps = (): DirectOtpChannelDeps => ({
   getIntegrations: (id) => getPartnerIntegrationsStore().getIntegrations(id),
+  getPartner: (id) => getPartnerStore().getPartner(id),
   // recordChannelHealth may enqueue the partner's alert email (an outbox row): poke the worker
   // when it did, so the email does not wait for the cron (outbox-poke-coverage).
   recordIncomplete: async (id) => {
@@ -73,7 +83,24 @@ export async function resolveDirectOtpChannel(
   }
   const channel = resolveWaChannel(partnerId, integrations);
   if (channel.kind === 'own') return { ok: true, creds: channel.creds };
-  if (channel.kind === 'shared') return { ok: true, creds: undefined };
+  if (channel.kind === 'shared') {
+    if (partnerId === DEFAULT_PARTNER_ID) return { ok: true, creds: undefined };
+    let partner: Partner | null | undefined;
+    try {
+      partner = await d.getPartner(partnerId);
+    } catch (err) {
+      logWarn(scope, 'partner read failed; confirmation code not sent (fail closed)', {
+        partnerId,
+        error: err instanceof Error ? err.name : 'error',
+      });
+      return { ok: false, why: 'lookup_failed' };
+    }
+    if (isLiveCertified(partner)) {
+      logWarn(scope, 'certified partner has no own number; confirmation code not sent (fail closed)', { partnerId });
+      return { ok: false, why: 'not_own_number' };
+    }
+    return { ok: true, creds: undefined };
+  }
   try {
     await d.recordIncomplete(partnerId);
   } catch {

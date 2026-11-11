@@ -227,6 +227,54 @@ describe('store ledger totals (Program fix 16: no Redis counters)', () => {
   });
 });
 
+// Fix pack 2 T2 (R02): the real-money rail read (root handle, above the lock)
+// and the in-transaction list-not-live alert.
+describe('fix pack 2 T2: railProviderType and enqueueListNotLiveAlert', () => {
+  it('railProviderType reads the root handle; read error -> undefined', async () => {
+    const { sql } = await import('drizzle-orm');
+    const { seedPartner } = await import('./helpers-db');
+    const store = createStore(fakeRedis(), db);
+    await seedPartner(db, 'acme');
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('acme', 'http')`);
+    const txSpy = vi.spyOn(db, 'transaction');
+    expect(await store.railProviderType('acme')).toBe('http');
+    expect(await store.railProviderType('nobody')).toBeNull();
+    expect(txSpy).not.toHaveBeenCalled();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
+    try {
+      expect(await store.railProviderType('acme')).toBeUndefined();
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    }
+  });
+
+  it('enqueueListNotLiveAlert: one ops.alert per Eastern day, in the mint transaction (a rollback drops it)', async () => {
+    const { sql } = await import('drizzle-orm');
+    const { listNotLiveDedupeKey } = await import('@/lib/sanctions/list-health');
+    const store = createStore(fakeRedis(), db);
+    const rows = async () =>
+      (await db.execute(sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'ops.alert'`)).rows as Array<{
+        payload: Record<string, unknown>; dedupe_key: string;
+      }>;
+    await expect(
+      store.mintUnderSenderLock('acme', 'p', async (ops) => {
+        await ops.enqueueListNotLiveAlert();
+        throw new Error('rolled-back');
+      }),
+    ).rejects.toThrow('rolled-back');
+    expect(await rows()).toEqual([]);
+    await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
+    await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
+    const r = await rows();
+    expect(r).toHaveLength(1);
+    expect(r[0].dedupe_key).toBe(listNotLiveDedupeKey(new Date()));
+    expect(Object.keys(r[0].payload)).toEqual(['message']);
+    expect(String(r[0].payload.message)).toContain('partner acme');
+    expect(String(r[0].payload.message)).not.toContain('p2');
+  });
+});
+
 describe('updateTransferFromWebhook (idempotent, forward-only)', () => {
   it('advances awaiting_payment → paid and sets paidAt', async () => {
     const store = createStore(fakeRedis(), db);

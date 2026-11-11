@@ -9,6 +9,8 @@ import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
 import { outbox } from '@/db/schema';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import type { PersonaEvent } from '@/lib/providers/persona-webhook-parse';
 
 // Customers live in Postgres now (PGlite per test); the audit hash + event
@@ -298,6 +300,18 @@ describe('kyc-case-store.review with a db (Program-Fix 28)', () => {
     expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
   });
 
+  // Pack 2 review F2 (A2, B1): a stamped, uncleared screening hold whose booleans a stale
+  // whole-row save nulled is still a screening hold on the LOCKED row.
+  it('refuses a stamp-only screening hold (booleans NULL, screening_flagged_at set, not cleared) unless allowScreeningHold', async () => {
+    await seed({ kycReviewState: 'needs_review' });
+    await db.execute(sql`UPDATE customers SET screening_flagged_at = ${new Date(Date.now() - 60_000)} WHERE partner_id = 'default' AND phone = ${PHONE}`);
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', { ...opts(), allowScreeningHold: false })).rejects.toThrow(/permission/i);
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('pending');
+    expect(await auditRows()).toEqual([]);
+    await store.review('default', PHONE, 'approve', 'plat', 'docs look good', { ...opts(), allowScreeningHold: true });
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
+  });
+
   it('an unknown customer ⇒ null, nothing written', async () => {
     expect(await store.review('default', '15550000009', 'approve', 'plat', 'docs look good', opts())).toBeNull();
     expect(await auditRows()).toEqual([]);
@@ -407,6 +421,62 @@ describe('kyc-case-store.applyPersonaEvent (Program-Fix 35)', () => {
     expect(r?.after.kycReviewState).toBe('needs_review');
     expect((await cs.getCustomer('default', PHONE))?.pepHit).toBe(true);
     expect(await alerts()).toHaveLength(1);
+  });
+
+  // Fix pack 2 T6 (R06): a watchlist / PEP match stamps the sender screening
+  // hold (screening_flagged_at) in the same transaction as the flag.
+  const flaggedAt = async () =>
+    ((await db.execute(sql`SELECT screening_flagged_at AS f FROM customers WHERE partner_id = 'default' AND phone = ${PHONE}`)).rows[0] as { f: Date | string | null }).f;
+
+  it('a match stamps flaggedAt, also on an approved customer', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    await store.applyPersonaEvent('default', PHONE, pep, opts());
+    const f = await flaggedAt();
+    expect(f).not.toBeNull();
+    // The store's own clock (the monotonic test clock above), like the apply's other times.
+    expect(new Date(f as string).getTime() - 1_700_000_000_000).toBeGreaterThanOrEqual(0);
+    expect(new Date(f as string).getTime() - 1_700_000_000_000).toBeLessThan(100);
+    expect((await cs.getCustomer('default', PHONE))?.screeningFlaggedAt).toBeDefined();
+
+    // An approved (verified) customer: a later watchlist match records its flag and the stamp.
+    db = await freshDb();
+    cs = createCustomerStore(db, createStore(fakeRedis(), db));
+    store = createKycCaseStore(redis, cs);
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    const watch = evt({ eventId: 'evt_w', name: 'report/watchlist.matched', referenceId: null, reportId: 'rep_3', matchKind: 'watchlist', status: 'ready' });
+    const r = await store.applyPersonaEvent('default', PHONE, watch, opts());
+    expect(r?.after.kycReviewState).toBe('approved');
+    expect(r?.after.watchlistHit).toBe(true);
+    expect(await flaggedAt()).not.toBeNull();
+  });
+
+  // Pack 2 review R3 (H1 b): the apply's clock was read before a platform
+  // clear committed (here the test clock is years behind it); the match still
+  // re-arms the hold, because the stamp's order comes from the locked row.
+  it('a match applied after a committed clear re-arms the hold, whatever the apply clock read', async () => {
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true, screening_flagged_at = ${new Date(Date.now() - 2 * 3_600_000).toISOString()}::timestamptz, screening_cleared_at = ${new Date().toISOString()}::timestamptz WHERE partner_id = 'default' AND phone = ${PHONE}`);
+    expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'default', PHONE))).toBe(false);
+    const watch = evt({ eventId: 'evt_rearm', name: 'report/watchlist.matched', referenceId: null, reportId: 'rep_9', matchKind: 'watchlist', status: 'ready' });
+    await store.applyPersonaEvent('default', PHONE, watch, opts());
+    expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'default', PHONE))).toBe(true);
+  });
+
+  it('no match -> no stamp', async () => {
+    await seed({ kycReviewState: 'inquiry_started', kycInquiryId: 'inq_1' });
+    await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_nm' }), opts());
+    expect(await flaggedAt()).toBeNull();
+    // Another match kind (adverse media) sets no screening flag, so no stamp either.
+    await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_am', name: 'report/adverse-media.matched', referenceId: null, reportId: 'rep_4', matchKind: 'other' }), opts());
+    expect(await flaggedAt()).toBeNull();
+  });
+
+  it('a failed alert rolls the stamp back', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    failEnqueue.once = true;
+    await expect(store.applyPersonaEvent('default', PHONE, pep, opts())).rejects.toThrow('ledger down');
+    expect(await flaggedAt()).toBeNull();
+    expect((await cs.getCustomer('default', PHONE))?.pepHit).toBeUndefined();
   });
 
   it('a missing row returns null and writes nothing', async () => {

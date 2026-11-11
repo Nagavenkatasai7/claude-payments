@@ -24,6 +24,10 @@ import { getStaffInviteStore, INVITE_ID_LEN, isInviteId, MAX_PENDING_INVITES } f
 import { parseInviteEmail, parseInviteName, parseInviteRole } from '@/lib/staff-invite-input';
 import { t, type MessageKey } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
+import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
+import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
+import { writeComplianceUser, type LiveWriteResult } from '@/lib/live-controls-write';
 import type { ActionResult } from '../../action-result';
 import { PARTNER_ROUTES } from '../../routes';
 
@@ -195,4 +199,48 @@ export async function removeStaffAction(formData: FormData): Promise<ActionResul
     default:
       return fail('partner.staff.notFound');
   }
+}
+
+/**
+ * Fix pack 3 T9 (R15, contract 12): add or remove one of THIS tenant's compliance users (the
+ * people named for live money). The actor's own staff MFA is checked before the step-up. Adding
+ * needs an ACTIVE admin or agent of the session tenant (anything else, including another tenant's
+ * member, is the same "not found"); removing needs no roster check, so a name that left the team
+ * can still be taken off. ONE transaction: writeComplianceUser (key write + audit + alert + email).
+ */
+export async function setComplianceUserAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(POLICY);
+  if (!(await staffMfaEnrolled(ctx.username))) return fail('partner.staff.complianceUser.needMfa');
+  const notFound = fail('partner.staff.notFound');
+  const username = String(formData.get('username') ?? '').trim();
+  const onRaw = formData.get('on');
+  // The live-controls username rule (live-controls.ts complianceUsers): anything else can never be listed.
+  if (!/^[a-z0-9._-]{1,64}$/.test(username) || (onRaw !== 'on' && onRaw !== 'off')) return notFound;
+  const on = onRaw === 'on';
+  if (on) {
+    let target: Awaited<ReturnType<ReturnType<typeof getAuthStore>['getStaff']>>;
+    try {
+      target = await getAuthStore().getStaff(username);
+    } catch (err) {
+      logWarn('partner.staff.compliance.lookup', errName(err), { partnerId: ctx.partnerId });
+      return fail('partner.common.failed');
+    }
+    if (!target || target.partnerId !== ctx.partnerId || target.status === 'suspended' || (target.role !== 'admin' && target.role !== 'agent')) {
+      return notFound;
+    }
+  }
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'compliance_user.set');
+  if (stepUp) return stepUp;
+  let r: LiveWriteResult;
+  try {
+    r = await getDb().transaction((tx) => writeComplianceUser(tx, ctx.partnerId, { username: ctx.username, scope: 'partner' }, { username, on }));
+  } catch (err) {
+    logWarn('partner.staff.compliance', errName(err), { partnerId: ctx.partnerId });
+    return fail('partner.common.failed');
+  }
+  if (!r.ok) return r.code === 'bad_input' && on ? fail('partner.staff.complianceUser.full') : notFound;
+  pokeWorker(); // post-response (after()): the ops alert and the partner email
+  revalidatePath(PAGE);
+  return { ok: true };
 }

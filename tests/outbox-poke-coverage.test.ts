@@ -33,9 +33,17 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
   // partner-demo R3a: the storage cap-watch — called only from the cron route.
   'src/lib/storage-watch.ts': ['checkStorageCap'],
+  // Fix pack 2 (R02): the list-not-live alert — called only from the cron route.
+  'src/lib/sanctions/list-health.ts': ['checkSanctionsListHealth'],
+  // Fix pack 2 T7 (R07): the archive-failed / unconfigured alerts — called only from the cron route.
+  'src/lib/sanctions/list-archive.ts': ['archivePending'],
+  // Fix pack 2 T5 (R04): the block notices — enqueued inside each block's own
+  // transaction; every caller pokes after it commits (store.ts recordSanctionsBlock,
+  // pay-rescreen, payment-link-*, tools) or is a listed helper (settlement.ts).
+  'src/lib/sanctions/notices.ts': ['enqueueSanctionsBlockNotices'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
-  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold'],
+  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold', 'releaseRescreenedHold', 'releaseHoldAfterRescreen'],
   // R2a: the partner alert email.send — called from drainOnce (the worker) and
   // the inbound webhook path (whatsapp-inbound.ts, which pokes).
   'src/lib/channel-health.ts': ['recordChannelHealth'],
@@ -45,7 +53,13 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/delivery-receipt.ts': ['deliverTransfer'],
   // Release safety part A: the switch ops alert; its one caller, the
   // /admin-dashboard/switches action, pokes.
-  'src/lib/flag-switch.ts': ['applyFlagChange'],
+  'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
+  // Fix pack 3 T9 (contract 9): the typed live-controls writers run in the caller's
+  // transaction; their callers (the partner / platform live-controls actions) poke.
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn'],
+  // Pack 3 review I1: the livegate:stuck: alert — called only from the two
+  // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
+  'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };

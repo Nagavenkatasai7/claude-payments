@@ -8,13 +8,66 @@ import { paylinkDedupeKey, resendEligibility } from './partner-transfer-ops';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { releaseHold, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+import { releaseHold, releaseHoldAfterRescreen, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
 export type { StaffAuditCtx } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold } from './compliance-config';
+import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
+import { realMoneyRail } from './live-gate';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
+import { warmSanctionsList } from './providers/sanctions-provider';
+import { screenHeldOnFile } from './list-hold-rescreen';
+
+/**
+ * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
+ * (LIST_UNAVAILABLE). Only the automatic re-screen (list-hold-rescreen.ts)
+ * releases it; Reject is unchanged.
+ */
+export const RESCREEN_ONLY_RELEASE_REFUSAL =
+  'Cannot release: this hold lifts only by an automatic re-screen against a fresh sanctions list.';
+
+/**
+ * Fix pack 2 T6 (R06): the platform release refusal while the sender's
+ * screening hold is active on a real-money rail (contracts section 8).
+ */
+export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sender screening hold first.';
+
+/**
+ * Pack 2 review F1 (A1): the refusal when a real-money release re-screened the
+ * hold (its newest screen was not live and fresh) and the re-screen did not
+ * clear it. Review R2 (J2): this is the PARTNER staff text, ONE for every
+ * outcome (a list outage, a possible match, an uncovered name, a match): no
+ * name, no match detail, so partner staff cannot tell them apart from it.
+ */
+export const RESCREEN_RELEASE_REFUSAL =
+  'Cannot release: the sanctions re-screen at release did not clear this transfer.';
+
+/**
+ * Review R2 (J2): the same refusal for PLATFORM staff, one text per outcome
+ * class, saying what to do next; none names a person or a list entry.
+ *   • listNotLive: the row now waits on LIST_UNAVAILABLE (a person's click is
+ *     refused). The automatic list re-screen screens it again once the list is
+ *     live, but the row keeps the reason it was held for (it reached a person's
+ *     release), so it returns to the review queue for a platform release
+ *     (review round 3, K2).
+ *   • review: a possible match or a name that could not be screened again
+ *     added a review reason. The row is never released automatically; a
+ *     second platform click (after reading the reasons) is the human review
+ *     and releases it on the ordinary claim.
+ *   • blocked: a match; the transfer is blocked and never released.
+ */
+export const PLATFORM_RESCREEN_REFUSALS = {
+  listNotLive:
+    'Cannot release: the sanctions list is not live, so the re-screen at release could not clear this transfer. ' +
+    'The system re-screens it automatically once the list is live again; it then returns to the review queue for a platform release.',
+  review:
+    'Cannot release yet: the sanctions re-screen at release added a review reason. ' +
+    'Read the reasons on the compliance page, and release again only after that review.',
+  blocked: 'Cannot release: the sanctions re-screen at release blocked this transfer.',
+} as const;
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -254,10 +307,15 @@ export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the
  * /partner rule, isPartnerReleasableHold — a delegated partner's in_review,
  * non-blocked hold whose EVERY reason is in PARTNER_RELEASABLE_REASONS (so the
  * AML hold and any unknown reason are refused), and whose SENDER customer row
- * (`sender`, read in the owning tenant) exists with no PEP / watchlist hit.
+ * (`sender`, read in the owning tenant) exists with no PEP / watchlist hit and
+ * (fix pack 2 review F2) no uncleared screening stamp.
  * PLATFORM staff are unchanged: `sender` is ignored for them.
  * Sanctions-blocked rows stay unreleasable for everyone regardless of this
  * (markPaidIfInReview carries compliance_status <> 'blocked').
+ * Fix pack 2 T4 (R02): a hold the registry marks 'rescreen' (LIST_UNAVAILABLE:
+ * screened while the sanctions list was not live) is released by NO person,
+ * platform staff included: only the automatic re-screen on a fresh list
+ * (list-hold-rescreen.ts) lifts it. That check comes first.
  * Pure: the server actions (authoritative gate) and the compliance page (which
  * hides the Release button) all call it, so the UI can never drift from it.
  */
@@ -265,8 +323,9 @@ export function canReleaseHeld(
   scope: Scope,
   owner: Pick<Partner, 'kycMode'> | null | undefined,
   transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
-  sender: { watchlistHit?: boolean | null; pepHit?: boolean | null } | null | undefined,
+  sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
+  if (isRescreenOnlyHold(transfer)) return false;
   if (scope.kind === 'platform') return true;
   return isPartnerReleasableHold(transfer, owner, sender);
 }
@@ -308,9 +367,81 @@ export async function releaseTransfer(
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
   }
+  // Review round 3 (M3): a blocked hold (a re-screen match) is never released;
+  // say so before any write instead of losing the claim as "moved
+  // concurrently". Partner staff get the one re-screen text, so a match looks
+  // the same as a list outage to them.
+  if (transfer.complianceStatus === 'blocked') {
+    throw new Error(partnerRelease ? RESCREEN_RELEASE_REFUSAL : PLATFORM_RESCREEN_REFUSALS.blocked);
+  }
+  // Fix pack 2 T4: a hold waiting on a fresh sanctions list is never released
+  // by a person (every caller, platform included), before any write. A row
+  // gains LIST_UNAVAILABLE only on its way INTO in_review (beginHold), so this
+  // read cannot be overtaken by a concurrent addition.
+  if (isRescreenOnlyHold(transfer)) {
+    throw new Error(RESCREEN_ONLY_RELEASE_REFUSAL);
+  }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
+  // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
+  // sender's screening hold first (the audited clearSenderScreeningHoldAction
+  // on the customer page), then release. The flags are the OWNING tenant's
+  // row; a read error throws (nothing released). This unlocked read is the
+  // fast refusal; review R1 (H2): the release transaction re-reads it locked
+  // right before the claim ('sender_hold' below), so a stamp in between refuses. The partner path is already
+  // refused in markPaidIfInReview (partnerRelease) for a flagged sender, a
+  // stamp-only hold included (pack 2 review F2: senderClearForPartnerRelease).
+  if (
+    !partnerRelease &&
+    realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
+    senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))
+  ) {
+    throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
+  }
+  // Pack 2 review F1 (A1): on a real-money rail a release never pays out on a
+  // screen that is not live and fresh (older than 36 h, not on a live list,
+  // no evidence, or evidence written before pack 2): it re-screens with the
+  // names on file FIRST (reads outside the transaction; a read error throws,
+  // nothing released), then releaseHoldAfterRescreen decides in ONE
+  // transaction: released only on a live, fresh, clear screen; otherwise held
+  // (LIST_UNAVAILABLE when the list is not live, so the automatic sweep owns
+  // the row) or blocked (with its notices). Partner staff get ONE fixed text;
+  // platform staff a text per outcome class (review R2, J2). Not real money: unchanged.
+  const now = new Date();
+  if (
+    realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
+    !liveFresh((await listScreenEvidence(db, transfer, now)).at(-1), now)
+  ) {
+    await warmSanctionsList();
+    const { result, uncovered } = await screenHeldOnFile(db, transfer, true, now);
+    const rr = await releaseHoldAfterRescreen(db, transfer.id, { result, uncovered, railIntegrations, audit, partnerRelease });
+    if (rr.kind === 'released') {
+      pokeWorker();
+      return;
+    }
+    // Review R1 (H2): a stamp that landed after the pre-read above (platform only).
+    if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
+    if (rr.kind === 'already') {
+      throw new Error(
+        partnerRelease
+          ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
+          : 'Cannot release: transfer is not in_review (it moved concurrently)',
+      );
+    }
+    if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
+    // Review R2 (J2): partner staff get one text for every outcome; platform
+    // staff get the text for the outcome class (what to do next).
+    if (partnerRelease) throw new Error(RESCREEN_RELEASE_REFUSAL);
+    throw new Error(
+      rr.kind === 'blocked'
+        ? PLATFORM_RESCREEN_REFUSALS.blocked
+        : rr.cause === 'list_not_live'
+          ? PLATFORM_RESCREEN_REFUSALS.listNotLive
+          : PLATFORM_RESCREEN_REFUSALS.review,
+    );
+  }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
+  if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'already') {
     throw new Error(
       partnerRelease

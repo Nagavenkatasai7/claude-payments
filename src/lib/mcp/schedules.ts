@@ -5,6 +5,7 @@ import type { Db } from '@/db/client';
 import { getDb } from '@/db/client';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { auditSubjectId } from '@/lib/customer-ref';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
 import { normalizePhone } from '@/lib/phone';
@@ -190,20 +191,24 @@ export const createScheduleInput = z.object({
 export type CreateScheduleArgs = z.infer<typeof createScheduleInput>;
 
 /** Each refusal of the portal's create, worded for an app (one fixed message per code). */
-const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusalCode, string> = {
+export const CREATE_REFUSAL: Record<'not_found' | 'recipient_changed' | ScheduleRefusalCode, string> = {
   not_found: RECIPIENT_NOT_FOUND,
   recipient_changed: "The recipient's saved account changed a moment ago. Check list_recipients and try again.",
   invalid_phone: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
   corridor: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
   unknown_destination: 'Repeat payments go to recipients in India only. This recipient cannot get one.',
   sender_name:
-    "SmartRemit needs the customer's full legal name first. They can add it in SmartRemit on WhatsApp or on the portal's Repeat payments page.",
+    "SmartRemit needs the customer's full legal name first. They can add it in SmartRemit on WhatsApp or on the portal's Schedules page.",
   amount: 'SmartRemit cannot schedule this amount. Try a different amount.',
   no_payout:
     'This recipient has no saved account. The customer can add one in SmartRemit on WhatsApp or the SmartRemit portal, then set up the repeat payment.',
   day_range: 'The day is not valid. Use day_of_month 1 to 28 for monthly, or day_of_week for weekly.',
   bad_funding: SCHEDULE_FAILED,
   purpose: 'A purpose is required. Ask the customer why they send the money.',
+  // Fix pack 3 (R13): one neutral text for all three, never the reason.
+  capability_off: FIXED_REPLIES.schedule_unavailable,
+  licence: FIXED_REPLIES.schedule_unavailable,
+  corridor_closed: FIXED_REPLIES.schedule_unavailable,
 };
 
 /** The retry key: one app connection, one set of details. 32 hex characters (runOnce's key shape). */

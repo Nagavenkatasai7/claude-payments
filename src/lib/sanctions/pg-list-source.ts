@@ -44,6 +44,13 @@ export class PostgresSanctionsListSource implements SanctionsListSource {
   private cached: { list: SanctionsList; hash: string; checkedAt: number } | null = null;
   private inflight: Promise<SanctionsList | null> | null = null;
   private warmMissAt: number | null = null;
+  /**
+   * Fix pack 2 (R02): the DB checked_at of the version served, refreshed on
+   * every successful pointer re-check (the unchanged-hash branch too). A
+   * refresh error keeps the old value, so the list ages and a real-money
+   * screen stops clearing (fail closed).
+   */
+  private dbCheckedAt: Date | null = null;
   private readonly source: string;
   private readonly ttlMs: number;
   private readonly now: () => number;
@@ -65,20 +72,28 @@ export class PostgresSanctionsListSource implements SanctionsListSource {
         const active = await repo.activeVersion(this.source);
         if (!active) {
           this.cached = null;
+          this.dbCheckedAt = null;
           return null;
         }
         if (this.cached && this.cached.hash === active.hash) {
           this.cached.checkedAt = this.now();
+          this.dbCheckedAt = active.checkedAt ?? null;
           return this.cached.list;
         }
         const list = await repo.loadList(active);
         this.cached = { list, hash: active.hash, checkedAt: this.now() };
+        this.dbCheckedAt = active.checkedAt ?? null;
         return list;
       })().finally(() => {
         this.inflight = null;
       });
     }
     return this.inflight;
+  }
+
+  /** Fix pack 2 (R02): the served version's DB checked_at, or null (nothing loaded / unknown). */
+  checkedAt(): Date | null {
+    return this.cached ? this.dbCheckedAt : null;
   }
 
   async load(): Promise<SanctionsList> {

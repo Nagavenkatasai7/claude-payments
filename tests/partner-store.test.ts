@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createPartnerStore } from '@/lib/partner-store';
 import { freshDb } from './helpers-db';
+import { EMPTY_LIVE_CONTROLS } from '@/lib/live-controls';
 import type { Db } from '@/db/client';
 
 // freshDb() truncates the shared PGlite and re-seeds the 'default' partner,
@@ -33,7 +34,8 @@ describe('partner store', () => {
   it('savePartner + getPartner round-trips', async () => {
     const p = buildPartner('acme', { name: 'Acme Remit', countries: ['CA'] });
     await ps.savePartner(p);
-    expect(await ps.getPartner('acme')).toEqual(p);
+    // Fix pack 3 (0037): a repo read always carries the parsed live_controls.
+    expect(await ps.getPartner('acme')).toEqual({ ...p, liveControls: EMPTY_LIVE_CONTROLS });
   });
 
   it('listPartners returns every saved partner (plus the seeded default)', async () => {

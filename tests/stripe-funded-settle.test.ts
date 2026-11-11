@@ -12,6 +12,10 @@ import { sql } from 'drizzle-orm';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { freshDb, seedPartner } from './helpers-db';
 import { settleFundedTransfer } from '@/lib/stripe-funded-settle';
+import { rescreenBeforePay } from '@/lib/pay-rescreen';
+import { GLOBAL_DEFAULTS, LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { setRailProviderType } from './helpers-sanctions';
+import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
@@ -34,6 +38,11 @@ async function funded(id: string, o: Partial<Transfer> = {}): Promise<Transfer> 
   await repo.bindFundingIntent(id, 'acme', 'stripe', `pi_${id}`);
   return (await repo.markFundingSucceeded(id, 'acme', `pi_${id}`))!;
 }
+
+const alertMessages = async () => {
+  const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+  return (r as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> }).rows.map((x) => [x.dedupe_key, x.payload.message]);
+};
 
 const kinds = async () => {
   const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
@@ -84,5 +93,91 @@ describe('settleFundedTransfer', () => {
     await expect(settleFundedTransfer(db, t, { rescreen: async () => { throw new Error('screen down'); } })).rejects.toThrow();
     expect((await repo.getTransfer('e1'))?.status).toBe('awaiting_payment');
     expect(await kinds()).toEqual([]);
+  });
+
+  // Fix pack 2 T3 (R02): the RAIL partner's config is read BEFORE the
+  // re-screen (a failed read moves nothing), and it decides real money.
+  it('the rail is read before the re-screen: an unreadable rail never re-screens', async () => {
+    const t = await funded('o1');
+    const calls: string[] = [];
+    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
+    try {
+      await expect(
+        settleFundedTransfer(db, t, { rescreen: async (x) => { calls.push('rescreen'); return { kind: 'cleared', transfer: x }; } }),
+      ).rejects.toThrow();
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('a rail read that throws moves nothing: no screen, no status change, no outbox row', async () => {
+    const t = await funded('o2');
+    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
+    try {
+      await expect(settleFundedTransfer(db, t)).rejects.toThrow();
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    }
+    expect((await repo.getTransfer('o2'))?.status).toBe('awaiting_payment');
+    expect(await kinds()).toEqual([]);
+    const screens = await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'sanctions.screen'`);
+    expect((screens as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(0);
+  });
+
+  const realRescreen = (seen: boolean[]) => async (x: Transfer, opts: { realMoney: boolean }) => {
+    seen.push(opts.realMoney);
+    return rescreenBeforePay(db, x, { senderName: 'Alex Sender', recipientName: 'Mom' }, GLOBAL_DEFAULTS, opts);
+  };
+
+  it('http rail with a list that is not live → re-screened as real money and held', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    const t = await funded('h1');
+    const seen: boolean[] = [];
+    expect(await settleFundedTransfer(db, t, { rescreen: realRescreen(seen) })).toBe('held');
+    expect(seen).toEqual([true]);
+    const after = await repo.getTransfer('h1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toContain(LIST_UNAVAILABLE_REASON);
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('mock rail → not real money, settles (started)', async () => {
+    await setRailProviderType(db, 'acme', 'mock');
+    const t = await funded('m1');
+    const seen: boolean[] = [];
+    expect(await settleFundedTransfer(db, t, { rescreen: realRescreen(seen) })).toBe('started');
+    expect(seen).toEqual([false]);
+  });
+
+  // Review S5 (W1): a sanctions block never tells anyone to refund: the funds
+  // can have to be blocked (frozen); the compliance officer decides first.
+  it('S5 W1: the re-screen BLOCKED it: fundblocked says charged, not settled, and the no-refund rule (ids only)', async () => {
+    const t = await funded('w1b');
+    const block = async (x: Transfer) => {
+      await repo.applyRescreenIfAwaiting(x.id, x.partnerId, 'blocked', ['sanctions_match']);
+      return { kind: 'blocked' as const };
+    };
+    expect(await settleFundedTransfer(db, t, { rescreen: block })).toBe('blocked');
+    expect(await alertMessages()).toEqual([[
+      'fundblocked:w1b',
+      `⚠️ SmartRemit ops: transfer w1b (partner acme) was CHARGED through Stripe (pi_w1b) but the pre-settlement sanctions re-screen BLOCKED it — NOT settled. ` +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
+    expect((await alertMessages())[0][1]).not.toMatch(/refund it/i);
+  });
+
+  it('S5 W1: a row BLOCKED by compliance (settleOrHold refused): fundblocked says charged, not settled, and the no-refund rule', async () => {
+    const t = await funded('w1r');
+    await repo.applyRescreenIfAwaiting('w1r', 'acme', 'blocked', ['sanctions_match']);
+    const blockedRow = (await repo.getTransfer('w1r'))!;
+    expect(blockedRow.complianceStatus).toBe('blocked');
+    expect(await settleFundedTransfer(db, t, { rescreen: async () => ({ kind: 'cleared', transfer: blockedRow }) })).toBe('refused');
+    expect((await repo.getTransfer('w1r'))?.status).toBe('awaiting_payment');
+    expect(await alertMessages()).toEqual([[
+      'fundblocked:w1r',
+      `⚠️ SmartRemit ops: transfer w1r (partner acme) was CHARGED through Stripe but is BLOCKED by sanctions screening — NOT settled. ` +
+        `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`,
+    ]]);
   });
 });

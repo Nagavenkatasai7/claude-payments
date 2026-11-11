@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { gateOffOnLiveRail, isSendVerified, SEND_GATE_REASON, sendGateActive } from '@/lib/kyc-gate';
 import type { Customer, Partner } from '@/lib/types';
+import { certifiedLiveControls } from './helpers-live';
 
 const now = '2026-06-08T00:00:00Z';
 const partner = (over: Partial<Partner>): Partner => ({
@@ -60,6 +61,13 @@ describe('sendGateActive (WL1 per-partner gate)', () => {
     expect(sendGateActive(partner({ kycMode: 'delegated' }))).toBe(false);
     expect(sendGateActive(partner({ kycMode: 'delegated', requireKycBeforeSend: true }))).toBe(true);
   });
+
+  it('sendGateActive is true with a signed posture (fix pack 3 T9)', () => {
+    const signed = certifiedLiveControls({ posture: true });
+    expect(sendGateActive(partner({ kycMode: 'ours', liveControls: signed }))).toBe(true);
+    expect(sendGateActive(partner({ kycMode: 'delegated', requireKycBeforeSend: false, liveControls: signed }))).toBe(true);
+    expect(sendGateActive(partner({ kycMode: 'ours', liveControls: certifiedLiveControls() }))).toBe(false);
+  });
 });
 
 describe('gateOffOnLiveRail (Program-Fix 35: partner page warning, read-only)', () => {
@@ -87,6 +95,10 @@ describe('gateOffOnLiveRail (Program-Fix 35: partner page warning, read-only)', 
   it('gate ON never warns, whatever the rail', () => {
     expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: true }), rail('http'))).toBe(false);
     expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: true }), rail('mock'))).toBe(false);
+  });
+
+  it('gateOffOnLiveRail is false with a signed posture (fix pack 3 T9)', () => {
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false, liveControls: certifiedLiveControls({ posture: true }) }), rail('http'))).toBe(false);
   });
 
   it('a missing partner is gate OFF (the resolver default)', () => {

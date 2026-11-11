@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, MintRefusedError } from '@/lib/transfer-create';
 import { createStore, inSavepoint, type SenderLedgerOps } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -12,6 +12,9 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import type { Db } from '@/db/client';
+import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
+import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { certifyPartnerForTest } from './helpers-live';
 
 // Program-Fix 43 PR B: the optional per-partner AML hold inside mintLocked.
 // Owner decision (binding): AML rules raise alerts only; a hard hold comes ONLY
@@ -22,11 +25,16 @@ import type { Db } from '@/db/client';
 
 const PHONE = '15550100043';
 
+// Fix pack 2 T2 (R02): a live http mint clears only on a live OFAC list, so
+// every test here screens against a fresh one (checked an hour ago).
+const ORIGINAL_LIST = process.env.SANCTIONS_LIST;
 beforeEach(() => {
   resetRateCacheForTests();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }));
+  primeOfacSource({ checkedAgoMs: 3_600_000 });
 });
 afterEach(() => {
+  restoreOfacSource(ORIGINAL_LIST);
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -53,11 +61,16 @@ async function setHolds(db: Db, partnerId: string, on: boolean) {
     UPDATE partners SET corridor_compliance = ${JSON.stringify({ US: { amlHolds: on } })}::jsonb WHERE id = ${partnerId}`);
 }
 
-/** A partner with the setting ON, a rail of `rail`, and a seasoned (T1) sender. */
+/**
+ * A partner with the setting ON, a rail of `rail`, and a seasoned (T1) sender.
+ * Fix pack 3 T4: an http partner is certified for live money (the mint's live
+ * gate refuses an uncertified real-money rail).
+ */
 async function partnerWith(db: Db, id: string, opts: { holds: boolean; rail?: string }) {
   await seedPartner(db, id);
   await setHolds(db, id, opts.holds);
   if (opts.rail) await setRail(db, id, opts.rail);
+  if (opts.rail === 'http') await certifyPartnerForTest(db, id);
   await seedSender(db, { partnerId: id, phone: PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
 }
 
@@ -73,8 +86,21 @@ const base = {
   senderKycStatus: 'verified' as const,
 };
 
+/** Split at the sender lock: statements before it ran on the root handle. */
+function atLock(log: Array<{ sql: string }>): { pre: string[]; locked: string[] } {
+  const sqls = log.map((q) => q.sql.toLowerCase());
+  const lock = sqls.findIndex((q) => q.includes('set local lock_timeout'));
+  return { pre: sqls.slice(0, lock), locked: sqls.slice(lock) };
+}
+
+/** The AML hold's statements: savepoints and rail reads INSIDE the lock. */
 function amlStatements(log: Array<{ sql: string }>): string[] {
-  return log.map((q) => q.sql.toLowerCase()).filter((s) => s.includes('partner_integrations') || s.includes('savepoint'));
+  return atLock(log).locked.filter((s) => s.includes('partner_integrations') || s.includes('savepoint'));
+}
+
+/** Fix pack 2 (R02): the one real-money rail read, on the root handle ABOVE the lock. */
+function preLockRailReads(log: Array<{ sql: string }>): string[] {
+  return atLock(log).pre.filter((s) => s.includes('partner_integrations'));
 }
 
 async function alerts(db: Db) {
@@ -92,31 +118,41 @@ describe('AML hold — setting OFF (the default)', { retry: 0 }, () => {
     expect(t.complianceStatus).toBe('cleared');
     expect(t.complianceReasons).toEqual([]);
     expect(amlStatements(log)).toEqual([]);
+    expect(preLockRailReads(log)).toHaveLength(1);
   });
 
   it('a partner with no corridor config at all is untouched', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedPartner(db, 'plain');
     await setRail(db, 'plain', 'http');
+    await certifyPartnerForTest(db, 'plain');
     await seedSender(db, { partnerId: 'plain', phone: PHONE, firstSeenDaysAgo: 10 });
     const stop = captureQueries();
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'plain' });
     expect(t.complianceStatus).toBe('cleared');
-    expect(amlStatements(stop())).toEqual([]);
+    const log = stop();
+    expect(amlStatements(log)).toEqual([]);
+    expect(preLockRailReads(log)).toHaveLength(1);
   });
 });
 
 describe('AML hold — demo is NEVER held (structural)', { retry: 0 }, () => {
-  it('the default tenant with the setting forced ON and an http rail: cleared, zero AML statements', async () => {
+  // Fix pack 3 T4: the default tenant may not mint real money at all.
+  it('the default tenant with the setting forced ON and an http rail: refused default_on_live_rail, zero AML statements', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await setHolds(db, 'default', true);
     await setRail(db, 'default', 'http');
     await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 10 });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const stop = captureQueries();
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default' });
-    expect(t.complianceStatus).toBe('cleared');
-    expect(t.status).toBe('awaiting_payment');
-    expect(amlStatements(stop())).toEqual([]);
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'default' }).then(() => null, (e: unknown) => e);
+    const log = stop();
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('default_on_live_rail');
+    expect(log.some((q) => q.sql.toLowerCase().includes('set local lock_timeout'))).toBe(false);
+    expect(log.filter((q) => q.sql.toLowerCase().includes('savepoint'))).toEqual([]);
+    // No lock was taken, so every statement is pre-lock: the one rail read.
+    expect(log.filter((q) => q.sql.toLowerCase().includes('partner_integrations'))).toHaveLength(1);
   });
 
   it('setting ON on a simulator rail: cleared', async () => {
@@ -202,6 +238,7 @@ describe('AML hold — routed settlement: the RAIL partner\'s provider decides',
     await partnerWith(db, 'acme', { holds: true, rail: 'simulator' });
     await seedPartner(db, 'railco');
     await setRail(db, 'railco', 'http');
+    await certifyPartnerForTest(db, 'railco');
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'railco' });
     expect(t.complianceStatus).toBe('flagged');
   });
@@ -215,12 +252,17 @@ describe('AML hold — routed settlement: the RAIL partner\'s provider decides',
     expect(t.complianceStatus).toBe('cleared');
   });
 
-  it('routed to the default tenant ⇒ never held', async () => {
+  // Fix pack 3 T4: the default tenant is never certified, so a real-money
+  // route to it is refused before the AML hold could run.
+  it('routed to the default tenant on an http rail ⇒ refused live_not_certified', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', { holds: true, rail: 'http' });
     await setRail(db, 'default', 'http');
-    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'default' });
-    expect(t.complianceStatus).toBe('cleared');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', quote, settlementPartnerId: 'default' })
+      .then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(MintRefusedError);
+    expect((err as MintRefusedError).code).toBe('live_not_certified');
   });
 });
 
@@ -244,6 +286,26 @@ describe('AML hold — the check never throws out of the mint', { retry: 0 }, ()
     expect(a[0].payload.message).toContain('AML hold check');
     expect(a[0].payload.message).not.toContain(PHONE);
     expect(Object.keys(a[0].payload)).toEqual(['message']);
+  });
+
+  // Fix pack 2 T2 (R02): the same rename also fails the pre-lock rail read,
+  // which counts as real money: held on a stale list, cleared on a fresh one.
+  it('the renamed table also fails the pre-lock rail read: held LIST_UNAVAILABLE on a stale list, cleared on a fresh one', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', { holds: true, rail: 'http' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
+    try {
+      primeOfacSource({ checkedAgoMs: 40 * 3_600_000 });
+      const stale = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+      expect(stale.complianceStatus).toBe('flagged');
+      expect(stale.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const fresh = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+      expect(fresh.complianceStatus).toBe('cleared');
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    }
   });
 
   it('an ops method that throws is absorbed: no hold, the transfer is minted', async () => {

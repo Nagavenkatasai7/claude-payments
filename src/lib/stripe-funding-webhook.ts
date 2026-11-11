@@ -5,6 +5,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { settleFundedTransfer, type FundedSettleDeps } from '@/lib/stripe-funded-settle';
+import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { toMinorUnits } from '@/lib/funding-amount';
 import { logError } from '@/lib/log';
 import type { StripeFundingEvent } from '@/lib/providers/stripe-funding-provider';
@@ -211,10 +212,17 @@ export async function processStripeFundingEvent(
     const funded = await repo.markFundingSucceeded(row.id, partnerId, event.intentId);
     if (!funded) return done({ outcome: 'noop', transferId: row.id });
     if (funded.status !== 'awaiting_payment' || funded.complianceStatus === 'blocked') {
+      // Review S5 (W1): a row blocked by sanctions screening (compliance
+      // 'blocked', which only a sanctions match sets) is never told to be
+      // refunded: the compliance officer decides first. Any other cause (a
+      // cancelled row) keeps the refund text.
       await alert(
         tx,
         `stripechargedmoved:${funded.id}`,
-        `transfer ${funded.id} (partner ${partnerId}) was CHARGED through Stripe (intent ${event.intentId}) but is '${funded.status}' / compliance '${funded.complianceStatus}' — it will NOT be settled. Refund it in the partner's Stripe dashboard and record the outcome.`,
+        funded.complianceStatus === 'blocked'
+          ? `transfer ${funded.id} (partner ${partnerId}) was CHARGED through Stripe (intent ${event.intentId}) but is BLOCKED by sanctions screening ('${funded.status}' / compliance 'blocked') — it will NOT be settled. ` +
+              `${SANCTIONS_NO_PAYOUT_SENTENCE}; evidence on the compliance page.`
+          : `transfer ${funded.id} (partner ${partnerId}) was CHARGED through Stripe (intent ${event.intentId}) but is '${funded.status}' / compliance '${funded.complianceStatus}' — it will NOT be settled. Refund it in the partner's Stripe dashboard and record the outcome.`,
       );
       return done({ outcome: 'funded_not_settled', transferId: funded.id });
     }

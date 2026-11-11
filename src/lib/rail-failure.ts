@@ -4,6 +4,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { scrub } from '@/lib/log';
 import { isPartnerPulled } from '@/lib/funding-method';
+import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 import { buildRailFailureMessage, type RailFailureNoticeVariant } from '@/lib/payment';
 import type { RailFailure } from '@/lib/providers/payment-provider';
 import type { RefundStatus, Transfer } from '@/lib/types';
@@ -97,10 +98,21 @@ export async function handleRailFailure(
     } else if (priorRefund === 'completed') {
       path = 'the refund already completed (nothing more to return)';
     } else if (priorRefund === 'failed') {
-      path = 'the prior refund FAILED — retry it from Refunds';
+      // Review S5 (inventory): a sanctions-blocked row is never told to retry
+      // its refund: the compliance officer decides about the funds first.
+      path =
+        updated.complianceStatus === 'blocked'
+          ? `the prior refund FAILED; the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}`
+          : 'the prior refund FAILED — retry it from Refunds';
     } else {
       // none / requested and NOT refundable: no charge was captured here.
-      path = 'funds were NOT captured by SmartRemit — partner-funded; the partner must return them to the sender';
+      // Review S6 (Y1): a sanctions-blocked row (healPaidRowScreen keeps it
+      // paid) is never told to return the funds: the compliance officer
+      // decides about them first.
+      path =
+        updated.complianceStatus === 'blocked'
+          ? `funds were NOT captured by SmartRemit (partner-funded); the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}`
+          : 'funds were NOT captured by SmartRemit — partner-funded; the partner must return them to the sender';
     }
 
     // 3. The customer notice, by the FINAL refund status. completed / failed:

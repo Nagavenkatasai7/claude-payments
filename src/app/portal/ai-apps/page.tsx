@@ -67,6 +67,7 @@ export default async function AgentAppsPage() {
                 );
               })}
             </ul>
+            <p className="text-[13px] text-ds-ink-muted">{t('portal.agentApps.repeatPayments')}</p>
             <p className="text-[13px] text-ds-ink-muted">{t('portal.agentApps.unverified')}</p>
           </>
         )}
