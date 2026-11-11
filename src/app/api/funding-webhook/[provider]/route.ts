@@ -130,7 +130,8 @@ async function alertFundRefundRefused(t: Transfer, event: 'refunded' | 'refund_f
     'its rail moves real money, and the generic funding webhook cannot confirm a real refund. The refund stays pending; ' +
     // Final check R3 (F9-D2): the worker also closes a refund with nothing
     // collected on the live rail as nofunds-<id> (mock class, demo era).
-    "A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>). Check the payment provider and the partner before acting.";
+    // Truth check R5 (F10-D1): refundunrecorded:<id> is the third no-reverse exit.
+    "A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id>, refundheld:<id> or refundunrecorded:<id>). Check the payment provider and the partner before acting.";
   try {
     await createOutboxRepo(getDb()).enqueue('ops.alert', { message }, { dedupeKey: `fundrefund:${t.id}` });
   } catch (err) {

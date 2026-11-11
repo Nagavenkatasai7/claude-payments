@@ -333,7 +333,8 @@ describe('pack 5 documents say what the code does', () => {
       // Final check F8 (X1, U1): a partner-collected row per class.
       // Truth check F10 (F2): what SmartRemit recorded, and the unrecorded case.
       'for a partner-collected row that is not routed, Issue refund sends nothing to the rail when SmartRemit has no record of an instruction for the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (or `refundunrecorded:<id>` when its delivery log or provider reference shows an instruction sent without a record; roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
-      'After the roll forward, a refund of a paid transfer that the older build instructed sends no reverse and raises `refundunrecorded:<id>` (the refund stays `pending`): ask the partner whether the rail still holds the instruction before anyone returns the money.',
+      // Truth check R5 (F10-D2): only the unrouted real-money partner-collected row with no record.
+      'After the roll forward, a refund of a real-money partner-collected transfer that is not routed, was paid at or after its rail went live, was instructed by the older build and was never recorded by this build sends no reverse and raises `refundunrecorded:<id>` (the refund stays `pending`): ask the partner whether the rail still holds the instruction before anyone returns the money. A partner-pulled transfer still gets its signed reverse.',
       'Issue refund is not available for a routed partner-collected row, so do not roll back while such a row is paid and held',
       // Review round 2 GD1: what else a build serving without 0039 breaks.
       // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
@@ -533,7 +534,7 @@ describe('pack 5 documents say what the code does', () => {
     // Truth check F11 (F2-docs): the reverse goes out only when SmartRemit HOLDS the settle record
     // (an instruction sent by a build that keeps no record gets none: refundunrecorded:<id>).
     expect(refunds).toContain('A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live: return the sender\'s money on your side.');
-    expect(refunds).toContain('For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange the return with you.');
+    expect(refunds).toContain('For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange the return with you.');
     expect(refunds).not.toContain('when its settlement instruction went to your rail after you went live');
     // Final check R3 (F9-D1) and R4 (R3-D1): SmartRemit records no Stripe-dashboard refund. The page says
     // only what SmartRemit controls: with an open refund request it sends no NEW instruction, but an
@@ -548,7 +549,9 @@ describe('pack 5 documents say what the code does', () => {
     const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `fundrefund:<id>`'));
     expect(row).toBeDefined();
     // Final check R3 (F9-D2): the worker also closes a refund with nothing collected as nofunds-<id>.
-    expect(row!).toContain("A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id> or refundheld:<id>).");
+    expect(row!).toContain("A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id>, refundheld:<id> or refundunrecorded:<id>).");
+    // Truth check R5 (F10-D1): the third outcome is named.
+    expect(row!).not.toContain('(refundrouted:<id> or refundheld:<id>)');
     expect(row!).not.toContain("A refund completes here only on the partner's signed reverse.");
     expect(row!).not.toContain('Only the partner\'s signed reverse completes it');
     expect(row!).not.toContain('the Stripe refund completes');
@@ -560,11 +563,13 @@ describe('pack 5 documents say what the code does', () => {
     expect(line).toBeDefined();
     // Truth check F11 (F2-docs): only a settle instruction SmartRemit holds the record of gets the reverse.
     expect(line!).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
-    expect(line!).toContain('Any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out) gets no reverse: SmartRemit staff arrange that return with you.');
+    expect(line!).toContain('Any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out) gets no reverse: SmartRemit staff arrange that return with you.');
     expect(FUNDING).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
     expect(WEBHOOKS).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
-    expect(WEBHOOKS).toContain('For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly.');
+    expect(WEBHOOKS).toContain('For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly.');
     for (const [name, text] of [['changelog', CHANGELOG], ['funding', FUNDING], ['webhooks', WEBHOOKS]] as const) {
+      // Truth check R5 (F11-D1): a recorded settle whose POST never reached the rail still gets the reverse.
+      expect(text, name).not.toContain('one that was never sent to your rail');
       expect(text, name).not.toContain('settlement instruction went to your rail after you went live');
       expect(text, name).not.toContain('whose settlement instruction we sent to your rail after you went live');
     }

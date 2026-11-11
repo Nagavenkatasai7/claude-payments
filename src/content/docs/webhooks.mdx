@@ -76,7 +76,7 @@ Instructions also carry a `compliance` object, after every other key. The value 
 
 A cancelled transfer whose funds your rail pulled gets a signed **reverse** instruction. It has `"action": "reverse"` and its own `reference` (`reverse-` plus our transfer ID), distinct from the original instruction's, so your rail can tell a reverse from a replay. A reverse for a debit that never happened must be a no-op on your side.
 
-A refund of a real-money transfer whose funds you collected yourself is a signed reverse too, with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live. For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly. An example:
+A refund of a real-money transfer whose funds you collected yourself is a signed reverse too, with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live. For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly. An example:
 
 ```json
 { "action": "reverse", "reference": "reverse-tr_abc123", "partner_id": "acme",
