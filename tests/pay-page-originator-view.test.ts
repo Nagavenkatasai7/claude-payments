@@ -17,6 +17,7 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { seedOriginatorForTest } from './helpers-live';
 import { setRailProviderType } from './helpers-sanctions';
+import { seedEsignConsentForTest } from './helpers-esign';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
 let store: ReturnType<typeof createStore>;
@@ -97,6 +98,8 @@ beforeEach(async () => {
   draftStore = createDraftStore(fakeRedis());
   await seedPartner(db, OWNER, 'Acme');
   await setRailProviderType(db, OWNER, 'http');
+  // consent on file (pack 6 P8): the E-SIGN tick is tested in pay-page-esign.test.ts
+  await seedEsignConsentForTest(db, OWNER, SENDER);
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }));
 });
 afterEach(() => {

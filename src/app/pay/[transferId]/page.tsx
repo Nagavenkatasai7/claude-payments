@@ -30,6 +30,8 @@ import { readLegalNameView } from '@/lib/recipient-legal-name';
 import { railPartnerOf } from '@/lib/live-gate';
 import { NO_ORIGINATOR_FIELDS, readOriginatorView, type OriginatorView } from '@/lib/originator-info';
 import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
+import { readEsignConsentNeeded } from '@/lib/esign';
+import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -205,6 +207,9 @@ async function renderPayPage(transferId: string) {
     // Fix pack 5 (P19, T21b): the sender's address / date-of-birth fields. Four
     // booleans only; a stored address or DOB never reaches the props or the markup.
     originator: OriginatorView;
+    // Fix pack 6 (R46, P8): the E-SIGN consent version to ask for; null = consent on
+    // file, an ACH-debit payment (exempt, P5) or not awaiting payment (page unchanged).
+    esignVersion: string | null;
   };
 
   // A row that is no longer payable, b2b or exempt: no field (and no read).
@@ -274,6 +279,15 @@ async function renderPayPage(transferId: string) {
             },
           })
         : NO_ORIGINATOR_FIELDS;
+    // Fix pack 6 (P5, P8): ask for E-SIGN consent while the row awaits payment and is not
+    // an ACH debit (a non-ACH b2b row is asked too). Owner + sender; never throws (a read
+    // error asks).
+    const esignVersion =
+      transfer.status === 'awaiting_payment' && transfer.fundingMethod !== 'ach_pull'
+        ? (await readEsignConsentNeeded(getDb(), transfer.partnerId, transfer.phone))
+          ? ESIGN_CONSENT_VERSION
+          : null
+        : null;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -305,6 +319,7 @@ async function renderPayPage(transferId: string) {
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
       originator,
+      esignVersion,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -345,6 +360,13 @@ async function renderPayPage(transferId: string) {
         routed: !!draft.settlementPartnerId,
       },
     });
+    // Fix pack 6 (P5, P8): the draft's owner and sender, unless it is an ACH debit (never throws).
+    const esignVersion =
+      draft.fundingMethod !== 'ach_pull'
+        ? (await readEsignConsentNeeded(getDb(), brandPartnerId, draft.senderPhone))
+          ? ESIGN_CONSENT_VERSION
+          : null
+        : null;
     view = {
       id: transferId,
       recipientName: draft.recipient.name,
@@ -375,6 +397,7 @@ async function renderPayPage(transferId: string) {
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
       originator,
+      esignVersion,
     };
   }
 
@@ -446,7 +469,9 @@ async function renderPayPage(transferId: string) {
             {view.rewardNote}
           </p>
         )}
-        {disclosure && <RemittanceDisclosure disclosure={disclosure} />}
+        {/* Fix pack 6 (P8): while E-SIGN consent is asked, the form renders the disclosure
+            below the consent block (same place on the page); otherwise unchanged. */}
+        {disclosure && !view.esignVersion && <RemittanceDisclosure disclosure={disclosure} />}
         {view.awaitingPayment ? (
           <PayForm
             disclosureVersion={disclosure?.version ?? null}
@@ -460,6 +485,12 @@ async function renderPayPage(transferId: string) {
             legalNameRequired={view.legalNameRequired}
             legalNameOnFile={view.legalNameOnFile}
             originator={view.originator}
+            {...(view.esignVersion
+              ? {
+                  esignVersion: view.esignVersion,
+                  disclosureSlot: disclosure ? <RemittanceDisclosure disclosure={disclosure} /> : null,
+                }
+              : {})}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
