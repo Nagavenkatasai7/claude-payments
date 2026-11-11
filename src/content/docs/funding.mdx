@@ -1,5 +1,23 @@
-## Coming soon
+## Who collects the sender's money
 
-Collecting sender funds through your own account is not enabled yet. This guide will describe it when it is available.
+SmartRemit never holds funds. For each partner, SmartRemit records how the sender's money is collected before live transfers start. A SmartRemit admin sets this funding mode on the partner's go-live record; it is one of two:
 
-Until then, you collect funds on your side and tell SmartRemit a transfer is paid by confirming it through the API with `POST /transactions/{id}/confirm`.
+- **You collect (`partner_collected`).** You collect the sender's money on your side, then tell SmartRemit the transfer is paid by confirming it through the API with `POST /transactions/{id}/confirm`. Your settlement instruction follows.
+- **Your payment provider (`partner_psp`).** The sender pays by card on the SmartRemit pay page, and the charge is made in your own Stripe account. SmartRemit stores only a restricted Stripe key (one that starts `rk_live_` or `rk_test_`) for your account, never a full secret key. Any other key is refused, and card payments stay off until a restricted key is stored.
+
+A transfer whose funding does not match your recorded mode is not instructed: it waits for our operations team, who resolve it with you.
+
+## What your rail sees
+
+Every settlement instruction carries `compliance.funding` (see <GuideLink slug="webhooks">Webhooks</GuideLink>):
+
+- `mode`: `partner_collected` or `partner_psp` (and `partner_pull` when your rail pulls the funds with the instruction).
+- `provider`: `partner` or `stripe`.
+- `reference`: the Stripe charge id for `partner_psp`, otherwise `null`. It is always `null` on a transfer routed to another partner's rail.
+- `status`, `amount` (the total charge, amount plus fee) and `currency`.
+
+It carries no card or bank digits and no personal data.
+
+## Refunds
+
+A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`: return the sender's money on your side. A `partner_psp` charge is refunded through Stripe.

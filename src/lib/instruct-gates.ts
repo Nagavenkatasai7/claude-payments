@@ -23,7 +23,7 @@
 // build         G15  builder + compliance block, fail closed (P10)
 // travel_rule   G16  real money: travel-rule data missing or routed (P22) -> InstructTravelRuleError
 //                    deferred 900 s + travelrule:<id>; then the defence check (non-exempt individuals)
-// record        G17  slot (T9): the rail_messages record before the POST
+// record        G17  the rail_messages record before the POST: RailRecordError + railrecord:<hour>, charged
 // send          G18  the signed POST through withInstructDeliveryLog: RailInstructError
 // provider_ref  G19  setProviderRef, write-once
 //

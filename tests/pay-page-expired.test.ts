@@ -37,6 +37,13 @@ vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) 
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 // Step 0 Q16: no draft:<id> claim behind an unknown id (tests/pay-page-draft-relink.test.ts covers it).
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
+// Fix pack 5 T32 (sweep): the fake db cannot answer the originator view (the transfer-repo mock
+// has no originatorExempt, so the real view fell into its read-error branch with a TypeError).
+// These cases are not about the travel rule: the page gets NO_ORIGINATOR_FIELDS.
+vi.mock('@/lib/originator-info', async (orig) => {
+  const real = await orig<typeof import('@/lib/originator-info')>();
+  return { ...real, readOriginatorView: async () => real.NO_ORIGINATOR_FIELDS };
+});
 vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer }),
 }));
