@@ -76,7 +76,7 @@ Instructions also carry a `compliance` object, after every other key. The value 
 
 A cancelled transfer whose funds your rail pulled gets a signed **reverse** instruction. It has `"action": "reverse"` and its own `reference` (`reverse-` plus our transfer ID), distinct from the original instruction's, so your rail can tell a reverse from a replay. A reverse for a debit that never happened must be a no-op on your side.
 
-A refund of a real-money transfer whose funds you collected yourself, and whose settlement instruction we sent to your rail after you went live, is a signed reverse too, with `"method": "partner_collected"`. A transfer settled before you went live, or settled on another partner's rail, gets no reverse: SmartRemit staff arrange that return with you directly. An example:
+A refund of a real-money transfer whose funds you collected yourself is a signed reverse too, with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live. For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly. An example:
 
 ```json
 { "action": "reverse", "reference": "reverse-tr_abc123", "partner_id": "acme",
@@ -120,8 +120,8 @@ Content-Type: application/json
 | `created` | Awaiting payment (no change). |
 | `funded` | Paid: the customer was charged on your side. |
 | `paid_out` | Delivered. Triggers the delivery notifications. |
-| `failed` | Cancelled. If SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
-| `returned` | Cancelled, as for `failed`: if SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
+| `failed` | Cancelled: a partner-pulled debit gets a signed `reverse`; SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>); SmartRemit refunds a demo payment, which moved no real money; for any other transfer you return the funds on your side. SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed. |
+| `returned` | Cancelled, as for `failed`: a partner-pulled debit gets a signed `reverse`; SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>); SmartRemit refunds a demo payment, which moved no real money; for any other transfer you return the funds on your side. SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed. |
 
 - The state machine only moves forward, so replays and out-of-order callbacks are safe.
 - A `failed` or `returned` may carry an optional `reason` string. It is stored on the transfer for your operations team and ours, cut to <Fact name="failureReasonMaxChars" /> characters.

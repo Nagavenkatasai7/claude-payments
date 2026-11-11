@@ -530,7 +530,11 @@ describe('pack 5 documents say what the code does', () => {
 
   it('funding.mdx Refunds: no reverse for a transfer never sent to the rail, and a partner_psp card payment is refunded in the partner\'s own Stripe dashboard (final check F9, U2)', () => {
     const refunds = section(FUNDING, '## Refunds');
-    expect(refunds).toContain('For a transfer that was never sent to your rail, that was settled before you went live, or that another partner pays out, no reverse is sent and SmartRemit staff arrange the return with you.');
+    // Truth check F11 (F2-docs): the reverse goes out only when SmartRemit HOLDS the settle record
+    // (an instruction sent by a build that keeps no record gets none: refundunrecorded:<id>).
+    expect(refunds).toContain('A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live: return the sender\'s money on your side.');
+    expect(refunds).toContain('For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange the return with you.');
+    expect(refunds).not.toContain('when its settlement instruction went to your rail after you went live');
     // Final check R3 (F9-D1) and R4 (R3-D1): SmartRemit records no Stripe-dashboard refund. The page says
     // only what SmartRemit controls: with an open refund request it sends no NEW instruction, but an
     // instruction a rail already holds, and any other transfer not yet paid out, can still be paid out.
@@ -554,10 +558,40 @@ describe('pack 5 documents say what the code does', () => {
   it('the changelog, funding.mdx and webhooks.mdx limit the partner_collected reverse to a settle sent to the rail after go-live (review round 1 R1, F2-D1)', () => {
     const line = section(CHANGELOG, '## 2026-11').split('\n').find((l) => l.includes('**Refunds of partner-collected funds.**'));
     expect(line).toBeDefined();
-    expect(line!).toContain('when its settlement instruction went to your rail after you went live');
-    expect(line!).toContain('A transfer settled before you went live, or on another partner\'s rail, gets no reverse');
-    expect(FUNDING).toContain('when its settlement instruction went to your rail after you went live');
-    expect(WEBHOOKS).toContain('whose settlement instruction we sent to your rail after you went live');
+    // Truth check F11 (F2-docs): only a settle instruction SmartRemit holds the record of gets the reverse.
+    expect(line!).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(line!).toContain('Any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out) gets no reverse: SmartRemit staff arrange that return with you.');
+    expect(FUNDING).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(WEBHOOKS).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(WEBHOOKS).toContain('For any other transfer you collected (for example one that was never sent to your rail, that was settled before you went live, or that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly.');
+    for (const [name, text] of [['changelog', CHANGELOG], ['funding', FUNDING], ['webhooks', WEBHOOKS]] as const) {
+      expect(text, name).not.toContain('settlement instruction went to your rail after you went live');
+      expect(text, name).not.toContain('whose settlement instruction we sent to your rail after you went live');
+    }
+  });
+
+  it('webhooks.mdx failed / returned rows: each funding mode gets its true return path, and no "captured the charge" claim (truth check F11, F3)', () => {
+    for (const status of ['failed', 'returned']) {
+      const row = WEBHOOKS.split('\n').find((l) => l.startsWith(`| \`${status}\` |`));
+      expect(row, `${status} row`).toBeDefined();
+      for (const s of [
+        'a partner-pulled debit gets a signed `reverse`',
+        'SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>)',
+        'SmartRemit refunds a demo payment, which moved no real money',
+        'for any other transfer you return the funds on your side',
+        'SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed.',
+      ]) {
+        expect(row!, `${status}: ${s}`).toContain(s);
+      }
+      expect(row!).not.toContain('If SmartRemit captured the charge it is refunded');
+      expect(row!).not.toMatch(/captured the charge/i);
+    }
+    // As built: a rail failure flips the refund to pending only for a captured charge or a partner pull,
+    // the Stripe provider's refund throws, and every customer notice opens with the undelivered head.
+    expect(read('src/db/repos/transfer-repo.ts')).toContain("AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))");
+    expect(read('src/lib/providers/stripe-funding-provider.ts')).toContain("throw new Error('stripe funding: automatic refund not supported yet");
+    expect(read('src/lib/payment.ts')).toContain("const head = `We couldn't deliver your transfer ${transfer.id} to ${recipientDisplayName(transfer)}.`;");
+    expect(read('src/lib/rail-failure.ts')).toContain("else if (finalRefund === 'none' || finalRefund === 'requested') variant = 'contact';");
   });
 
   it('spec: a key-configuration error at the build step retries like a transient read failure; the instructblock alert says so (review round 1 R1, F1-D1)', () => {

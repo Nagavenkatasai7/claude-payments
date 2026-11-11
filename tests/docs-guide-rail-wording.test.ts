@@ -14,13 +14,16 @@ describe('sandbox guide: reference-rail failure example', () => {
 });
 
 describe('webhooks guide: failed / returned refund wording (src/lib/rail-failure.ts)', () => {
-  it('names all three refund paths for both statuses: captured charge, partner-pulled reverse, partner returns funds', () => {
+  it('names the refund paths for both statuses: partner-pulled reverse, partner_psp in the Stripe dashboard, demo refund, partner returns funds', () => {
     for (const status of ['failed', 'returned']) {
       const row = WEBHOOKS.split('\n').find((l) => l.startsWith(`| \`${status}\` |`));
       expect(row, `${status} row`).toBeDefined();
-      expect(row).toMatch(/if SmartRemit captured the charge it is refunded/i);
+      // Truth check F11 (F3): a partner_psp card refund is never made by SmartRemit (the Stripe provider's refund throws).
+      expect(row).not.toMatch(/if SmartRemit captured the charge it is refunded/i);
       expect(row).toMatch(/a partner-pulled debit gets a signed `reverse`/);
-      expect(row).toMatch(/otherwise you return the funds/);
+      expect(row).toMatch(/SmartRemit cannot refund a card payment made through your own Stripe account \(`partner_psp`\) yet/);
+      expect(row).toMatch(/SmartRemit refunds a demo payment/);
+      expect(row).toMatch(/for any other transfer you return the funds on your side/);
     }
   });
 });
