@@ -22,6 +22,7 @@ import { TransferRows } from './transfers/transfer-rows';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { loadMyRewards, type MyRewards } from '@/lib/rewards/read';
 import { agentGateOpen, agentToolsOn } from '@/lib/agent-auth/gate';
+import { isFlagOn } from '@/lib/flags';
 import { telegramConfigured } from '@/lib/telegram';
 import { telegramSwitchOn } from '@/lib/telegram-link';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -108,7 +109,7 @@ export default async function PortalHomePage() {
   const ctx = await requirePortalCustomer();
   const owner = portalOwner(ctx);
   const sharedBot = site.partnerId === DEFAULT_PARTNER_ID;
-  const [recent, partner, scanned, todayUsedCents, book, rewards, aiAppsOn, aiSwitchOn, telegramOn] = await Promise.all([
+  const [recent, partner, scanned, todayUsedCents, book, rewards, aiAppsOn, aiSwitchOn, telegramOn, agentPaused] = await Promise.all([
     listPortalTransfers(owner, { limit: 5 }),
     getPartnerStore().getPartner(site.partnerId),
     getStore().listTransfersByPhone(owner.partnerId, owner.phone, STATS_SCAN),
@@ -122,9 +123,13 @@ export default async function PortalHomePage() {
     agentGateOpen(getDb(), owner.partnerId, owner.phone),
     agentToolsOn(getDb(), site.partnerId),
     sharedBot && telegramConfigured() ? telegramSwitchOn().catch(() => false) : false,
+    // The agent.paused kill switch (fix pack 3): the bot answers only the fixed reply, so the card
+    // hides WhatsApp and Telegram. isFlagOn never throws and fails open, exactly like the bot's read.
+    sharedBot ? isFlagOn(getDb(), 'agent.paused', { partnerId: site.partnerId }) : false,
   ]);
   const ways = waysToSend({
     sharedBot,
+    agentPaused,
     whatsappHref: waLink(WA_MESSAGES.generic),
     telegramOn,
     telegramHref: TELEGRAM_BOT_HREF,

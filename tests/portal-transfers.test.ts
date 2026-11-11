@@ -264,6 +264,24 @@ describe('Home: Ways to send', () => {
     for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).not.toContain(app);
   });
 
+  it('agent.paused on for the default tenant → the card hides WhatsApp (the bot answers only the fixed reply)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'partner', scopeId: DEFAULT_PARTNER_ID, enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+    expect(html).not.toContain('data-ways-to-send'); // agent.tools is off here, so nothing is left to list
+  });
+
+  it('agent.paused on for ANOTHER tenant leaves the default tenant\'s WhatsApp entry in place', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'partner', scopeId: 'pa', enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).toContain('data-way="whatsapp"');
+  });
+
   it('agent.tools on, gate shut → the names without a /portal/ai-apps link, by invitation', async () => {
     signIn(DEFAULT_PARTNER_ID, phone);
     await agentTools(true);

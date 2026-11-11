@@ -11,7 +11,7 @@ import { WaysToSendCard } from '@/app/portal/ways-to-send-card';
 
 const WA = 'https://api.whatsapp.com/send/?phone=1&text=hi&type=phone_number&app_absent=0';
 const TG = 'https://t.me/smartremit_bot';
-const base: WaysInput = { sharedBot: true, whatsappHref: WA, telegramOn: false, telegramHref: TG, aiSwitchOn: false, aiAppsOn: false };
+const base: WaysInput = { sharedBot: true, agentPaused: false, whatsappHref: WA, telegramOn: false, telegramHref: TG, aiSwitchOn: false, aiAppsOn: false };
 const ids = (i: Partial<WaysInput>) => waysToSend({ ...base, ...i }).map((w) => w.id);
 
 describe('waysToSend', () => {
@@ -34,6 +34,12 @@ describe('waysToSend', () => {
     expect(ids({ telegramOn: false })).not.toContain('telegram');
     const tg = waysToSend({ ...base, telegramOn: true }).find((w) => w.id === 'telegram');
     expect(tg).toMatchObject({ badge: 'byInvitation', href: TG, external: true });
+  });
+
+  it('agent.paused on (the bot answers only the fixed reply) → no WhatsApp and no Telegram; the AI apps follow their own switch', () => {
+    expect(ids({ agentPaused: true, telegramOn: true })).toEqual([]);
+    expect(ids({ agentPaused: true, telegramOn: true, aiSwitchOn: true, aiAppsOn: true })).toEqual(['claude', 'chatgpt', 'perplexity']);
+    expect(ids({ agentPaused: false, telegramOn: true })).toEqual(['whatsapp', 'telegram']);
   });
 
   it('agent.tools off → no AI entries, even when the customer could see /portal/ai-apps', () => {
