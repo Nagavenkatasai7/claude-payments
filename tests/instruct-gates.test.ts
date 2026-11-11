@@ -14,17 +14,18 @@ import type { Transfer } from '@/lib/types';
 // slots are filled (funding_mode T14, travel_rule T23); alertStuckHeld is the pack 3 I1 rule
 // (alertStuckLivegate) for the rows those slots will hold on purpose.
 
-// A switch that makes the real-money read throw (the helper must still return
-// null), and a count of its calls. The rest of live-gate stays real.
+// A switch that makes the rail-type read throw (the helper must still return
+// null), and a count of its calls. The rest of live-gate stays real. Review
+// round 1 (RA1): instructHeldOnPurpose reads readRailProviderType directly.
 const liveGateSeam = vi.hoisted(() => ({ throws: false, calls: 0 }));
 vi.mock('@/lib/live-gate', async (orig) => {
   const real = await orig<typeof import('@/lib/live-gate')>();
   return {
     ...real,
-    realMoneyFor: async (...a: Parameters<typeof real.realMoneyFor>) => {
+    readRailProviderType: async (...a: Parameters<typeof real.readRailProviderType>) => {
       liveGateSeam.calls += 1;
       if (liveGateSeam.throws) throw new TypeError('rail read exploded');
-      return real.realMoneyFor(...a);
+      return real.readRailProviderType(...a);
     },
   };
 });
@@ -59,6 +60,26 @@ vi.mock('@/db/repos/customer-repo', async (orig) => {
         originatorOnFile: async (...x: Parameters<typeof r.originatorOnFile>) => {
           if (customerSeam.throws) throw new SyntaxError('on-file read exploded');
           return r.originatorOnFile(...x);
+        },
+      };
+    },
+  };
+});
+// Fix pack 5 review round 1 (RA1): a switch that makes the rail-type column read
+// (integrations-repo paymentProviderType) throw. readRailProviderType swallows it
+// and returns undefined, which realMoneyRail reads as real money.
+const integrationsSeam = vi.hoisted(() => ({ throws: false }));
+vi.mock('@/db/repos/integrations-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/integrations-repo')>();
+  return {
+    ...real,
+    createIntegrationsRepo: (...a: Parameters<typeof real.createIntegrationsRepo>) => {
+      const r = real.createIntegrationsRepo(...a);
+      return {
+        ...r,
+        paymentProviderType: async (...x: Parameters<typeof r.paymentProviderType>) => {
+          if (integrationsSeam.throws) throw new Error('rail type read exploded for 15551230000');
+          return r.paymentProviderType(...x);
         },
       };
     },
@@ -119,6 +140,7 @@ const instructRow = async (id: string, status: string) => {
 beforeEach(async () => {
   liveGateSeam.throws = false;
   liveGateSeam.calls = 0;
+  integrationsSeam.throws = false;
   partnerSeam.throws = false;
   customerSeam.throws = false;
   logSpy.warn.mockReset();
@@ -195,6 +217,34 @@ describe('instructHeldOnPurpose (P9; funding_mode slot filled by T14)', () => {
     await expect(instructHeldOnPurpose(db, fixture())).resolves.toBeNull();
     expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'TypeError', { transferId: ID });
     expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('exploded');
+  });
+});
+
+describe('instructHeldOnPurpose: a failed rail-type read (review round 1, RA1)', () => {
+  it("a simulator demo row (environment 'live', funding provider 'mock') whose rail-type read fails -> null (as today), never 'mockfund'; the warn holds ids only", async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    integrationsSeam.throws = true;
+    const t = fixture({ environment: 'live', fundingProvider: 'mock', fundingRef: `mockfund-${ID}` } as Partial<Transfer>);
+    await expect(instructHeldOnPurpose(db, t)).resolves.toBeNull();
+    expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'rail_read_failed', { transferId: ID });
+    expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('15551230000');
+  });
+
+  it('the same row with the read succeeding -> null (simulator is not real money); an http rail -> mockfund as before', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    const t = fixture({ environment: 'live', fundingProvider: 'mock', fundingRef: `mockfund-${ID}` } as Partial<Transfer>);
+    expect(await instructHeldOnPurpose(db, t)).toBeNull();
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    expect(await instructHeldOnPurpose(db, t)).toBe('mockfund');
   });
 });
 

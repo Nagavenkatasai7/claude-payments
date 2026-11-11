@@ -12,7 +12,7 @@ import { sendGateActive } from '@/lib/kyc-gate';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
 import type { TravelRuleRequirement } from '@/lib/travel-rule';
-import { ComplianceBlockUnavailableError, InstructPermanentError, isTransientInstructError } from './instruct-errors';
+import { ComplianceBlockUnavailableError, InstructPermanentError, isKeyConfigError, isTransientInstructError } from './instruct-errors';
 import { railPartnerOf } from './live-gate';
 
 // Fix pack 5 T4 (P7): defined in instruct-errors.ts (no import cycle once T5
@@ -26,7 +26,8 @@ export { ComplianceBlockUnavailableError } from './instruct-errors';
 //
 // FAIL CLOSED (fix pack 5, P10): no instruction leaves without this block. A
 // transient read failure (P7 allow-list) throws ComplianceBlockUnavailableError
-// (retried, instructblock: alert from attempt 3); any other failure throws
+// (retried, instructblock: alert from attempt 3), and so does a key-ring
+// misconfiguration (isKeyConfigError, review round 1 RA2); any other failure throws
 // InstructPermanentError('compliance_block') (dead-lettered at once; ops Retry /
 // partner Replay after the fix). The routed rule (originator null, C3) is not a
 // failure. The warn carries the transfer id and the error NAME only.
@@ -83,7 +84,10 @@ export async function loadComplianceBlock(
   } catch (err) {
     // The error text is never logged: a decrypt or driver error can carry PII.
     logWarn('instruct.compliance_block', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
-    if (isTransientInstructError(err)) {
+    // Review round 1 (RA2, owner Q8): a key-ring misconfiguration (named in
+    // the error or its cause, isKeyConfigError) heals when the env is fixed,
+    // so it is transient here too, as at G1.
+    if (isTransientInstructError(err) || isKeyConfigError(err)) {
       throw new ComplianceBlockUnavailableError(transfer.id, railPartnerOf(transfer), { cause: err });
     }
     throw new InstructPermanentError(transfer.id, 'compliance_block', { cause: err });

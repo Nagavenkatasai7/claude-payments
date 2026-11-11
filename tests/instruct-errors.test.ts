@@ -8,6 +8,7 @@ import {
   InstructPermanentError,
   InstructTravelRuleError,
   RailRecordError,
+  isKeyConfigError,
   isTransientInstructError,
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
@@ -94,6 +95,33 @@ describe('isTransientInstructError (P7 allow-list)', () => {
     );
     expect(isTransientInstructError(hostile)).toBe(false);
     expect(isTransientInstructError(42)).toBe(false);
+  });
+});
+
+describe('isKeyConfigError (P7, review round 1 RA2)', () => {
+  it('names the key configuration in the error itself or in its direct cause (Error or string), one level deep', () => {
+    for (const m of [
+      'field-crypto: unknown key id',
+      'FIELD_ENCRYPTION_KEY missing or not 32 bytes',
+      'field-crypto: FIELD_ENCRYPTION_PREVIOUS_KEYS has a malformed entry',
+      'field-crypto: FIELD_ENCRYPTION_CURRENT_KID is not a valid key id',
+    ]) {
+      expect(isKeyConfigError(new Error(m))).toBe(true);
+      expect(isKeyConfigError(new Error('wrapper', { cause: new Error(m) }))).toBe(true);
+      expect(isKeyConfigError(new Error('wrapper', { cause: m }))).toBe(true);
+    }
+  });
+
+  it('anything else is false: another decrypt failure, two levels deep, a non-Error, a throwing getter', () => {
+    expect(isKeyConfigError(new Error('field-crypto: malformed blob'))).toBe(false);
+    expect(isKeyConfigError(new Error('Unsupported state or unable to authenticate data'))).toBe(false);
+    expect(isKeyConfigError(new Error('a', { cause: new Error('b', { cause: new Error('field-crypto: unknown key id') }) }))).toBe(false);
+    expect(isKeyConfigError('field-crypto: unknown key id')).toBe(false);
+    expect(isKeyConfigError(null)).toBe(false);
+    expect(isKeyConfigError(undefined)).toBe(false);
+    const evil = new Error('x');
+    Object.defineProperty(evil, 'cause', { get() { throw new Error('boom'); } });
+    expect(isKeyConfigError(evil)).toBe(false);
   });
 });
 

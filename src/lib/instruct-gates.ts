@@ -37,7 +37,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { fundingClassOf, fundingModeMatches } from './funding-class';
 import type { FundingMode } from './live-controls';
-import { realMoneyFor } from './live-gate';
+import { railPartnerOf, readRailProviderType, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
 import { originatorInfoMissing } from './originator-info';
 import { travelRuleRequirement, type TravelRuleRequirement } from './travel-rule';
@@ -137,10 +137,22 @@ export function travelRuleBlockIncomplete(
  * or null. Not real money -> null with no further read (a 'test' row makes no
  * read at all). Never throws: a read error -> null (logged by the error name),
  * so the sweep behaves as today.
+ *
+ * Review round 1 (RA1): the rail type is read here directly, NOT through
+ * realMoneyFor: readRailProviderType turns a failed read into undefined, which
+ * realMoneyRail (rightly, for the gates that hold or refuse) reads as real
+ * money. Here a failed read must mean "behave as today" (null), or a demo row
+ * would get a false permanent mockfund:stuck alert and miss a sweep pass.
  */
 export async function instructHeldOnPurpose(db: DbOrTx, t: Transfer): Promise<InstructHeldReason | null> {
   try {
-    if (!(await realMoneyFor(db, t))) return null;
+    if (t.environment === 'test') return null;
+    const railProviderType = await readRailProviderType(db, railPartnerOf(t));
+    if (railProviderType === undefined) {
+      logWarn('instruct-gates.held', 'rail_read_failed', { transferId: t.id });
+      return null;
+    }
+    if (!realMoneyRail({ environment: t.environment, railProviderType })) return null;
     // funding_mode (G14; T14, P12/P17): the same predicate as the worker.
     const f = await fundingGateRefusal(db, t);
     if (f) return f.reason;

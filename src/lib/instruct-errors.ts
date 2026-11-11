@@ -133,6 +133,32 @@ export function isTransientInstructError(err: unknown): boolean {
   }
 }
 
+/** P7: a message that names the field-crypto key configuration (field-crypto.ts key-ring errors). */
+const KEY_CONFIG_MESSAGE = /FIELD_ENCRYPTION_KEY|FIELD_ENCRYPTION_PREVIOUS_KEYS|FIELD_ENCRYPTION_CURRENT_KID|unknown key id/;
+
+function keyConfigSelf(v: unknown): boolean {
+  if (typeof v === 'string') return KEY_CONFIG_MESSAGE.test(v);
+  if (!(v instanceof Error)) return false;
+  const message = field(v, 'message');
+  return typeof message === 'string' && KEY_CONFIG_MESSAGE.test(message);
+}
+
+/**
+ * P7 (G1, and G15 since review round 1 RA2): true when the error, or its
+ * direct `cause` (an Error, or a string cause; one level), names the key
+ * configuration. A key-ring misconfiguration heals when the env is fixed, so
+ * both gates keep today's charged retry for it instead of dead-lettering. A
+ * top-level non-Error is false. Never throws.
+ */
+export function isKeyConfigError(err: unknown): boolean {
+  try {
+    if (!(err instanceof Error)) return false;
+    return keyConfigSelf(err) || keyConfigSelf(field(err, 'cause'));
+  } catch {
+    return false;
+  }
+}
+
 /** The ONE railrecord alert key (P30), shared by the worker (T4/T9) and the payment-webhook route (T10). */
 export function railRecordAlertKey(nowMs: number = Date.now()): string {
   return `railrecord:${Math.floor(nowMs / 3_600_000)}`;

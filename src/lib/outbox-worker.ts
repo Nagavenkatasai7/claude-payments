@@ -23,6 +23,7 @@ import {
   InstructPermanentError,
   InstructTravelRuleError,
   RailRecordError,
+  isKeyConfigError,
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
@@ -375,13 +376,6 @@ export class RailInstructError extends Error {
 }
 
 const hourBucket = (): number => Math.floor(Date.now() / 3_600_000);
-
-/** Fix pack 5 T4 (P7 G1): a decrypt cause that names the key configuration heals when the env is fixed: it retries. */
-const KEY_CONFIG_CAUSE = /FIELD_ENCRYPTION_KEY|FIELD_ENCRYPTION_PREVIOUS_KEYS|FIELD_ENCRYPTION_CURRENT_KID|unknown key id/;
-function causeMessage(err: Error): string {
-  const c = err.cause;
-  return c instanceof Error ? c.message : typeof c === 'string' ? c : '';
-}
 
 /**
  * Race `work` against the row deadline. The handler already holds `signal`
@@ -799,7 +793,7 @@ async function handle(
           createTransferRepo(tx).getTransferForUpdate(transferId, { decrypt: true }),
         );
       } catch (err) {
-        if (!(err instanceof TransferDecryptError) || KEY_CONFIG_CAUSE.test(causeMessage(err))) throw err;
+        if (!(err instanceof TransferDecryptError) || isKeyConfigError(err)) throw err;
         logWarn('outbox.instruct-read', err.name, { transferId });
         throw new InstructPermanentError(transferId, 'decrypt', { cause: err });
       }
