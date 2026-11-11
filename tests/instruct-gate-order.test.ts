@@ -14,6 +14,7 @@ import { drainOnce, INSTRUCT_NOT_CERTIFIED_DEFER_SEC, type WorkerDeps } from '@/
 import { invalidateFlagCache, SETTLEMENT_PAUSED_DEFER_SEC } from '@/lib/flags';
 import { resetFlagReadAlertMemoForTests } from '@/lib/flag-read-alert';
 import { INSTRUCT_GATE_ORDER } from '@/lib/instruct-gates';
+import { INSTRUCT_TRAVEL_RULE_DEFER_SEC } from '@/lib/instruct-errors';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { railMessages } from '@/db/schema';
 import type { Db } from '@/db/client';
@@ -372,8 +373,47 @@ describe('adjacent pairs: a row that fails both steps gets the earlier outcome',
     expect(await alertKeys()).toEqual([`mockfund:${ID}`]);
     expect(fetchFn).not.toHaveBeenCalled();
   });
-  it.todo('build + travel_rule (T23)');
-  it.todo('travel_rule + record (T23)');
+  it('build + travel_rule: a masked destination and no address on file -> dead at once (build), no travelrule:', async () => {
+    await saveRail('http');
+    await certifyPartnerForTest(db, 'acme');
+    const t = transferFixture({ payoutDestination: '****9012' });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await enqueueInstruct();
+    expect((await drainOnce(deps(), 'w1')).dead).toBe(1);
+    expect(await rowState()).toMatchObject({ status: 'dead', attempts: 1, last_error: `instruct_permanent:build:${ID}` });
+    expect(await hasPrefix('travelrule:')).toBe(false);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('travel_rule + record: no address on file and the record seam failing -> deferred 900 s, no rail_messages row, no railrecord:', async () => {
+    await saveRail('http');
+    await certifyPartnerForTest(db, 'acme');
+    const t = transferFixture();
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t, { listFitness: 'live' });
+    await db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await enqueueInstruct();
+    const recordDown = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) => {
+            if (table === railMessages) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
+            return target.insert(table as never);
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    await drainOnce({ ...deps(), db: recordDown }, 'w1');
+    expectDeferred(await rowState(), INSTRUCT_TRAVEL_RULE_DEFER_SEC);
+    const n = (await db.execute(sql`SELECT count(*)::int AS n FROM rail_messages`)) as unknown as { rows: Array<{ n: number }> };
+    expect(n.rows[0].n).toBe(0);
+    expect(await alertKeys()).toEqual([`travelrule:${ID}`]);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
   it('record + send: the record append fails AND the rail would 500 -> the record outcome (no fetch, RailRecordError, no railfail:)', async () => {
     await saveRail('simulator');
     await store.saveTransfer(transferFixture());

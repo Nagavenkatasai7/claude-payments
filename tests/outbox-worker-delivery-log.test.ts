@@ -6,6 +6,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { partnerWebhookDeliveries } from '@/db/schema';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { EnvKeyProvider } from '@/lib/field-crypto';
@@ -118,6 +119,9 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule; a Partner-API-minted (exempt) routed row is sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-dl_t1', 'dl_t1');
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle', 'rsgn'));
     fetchFn.mockResolvedValue(new Response('{}', { status: 200 }));
     await outbox.enqueue('settlement.instruct', { transferId: 'dl_t1' }, { dedupeKey: 'instruct:dl_t1' });

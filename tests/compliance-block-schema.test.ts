@@ -68,6 +68,18 @@ describe('compliance block schema, version 2 (fix pack 5 T5, P10)', { retry: 0 }
     expect(Object.keys(block.funding)).toEqual(FUNDING_KEYS);
   });
 
+  it('travel rule (fix pack 5 T23): originator keys [entity_type, name, country, phone, id_type, id_last4, address, date_of_birth]; top-level keys unchanged', () => {
+    const block = buildComplianceBlock(
+      transfer({ amountUsd: 3500 }),
+      customer({ residentialAddress: '1 Placeholder Road', dateOfBirth: '1980-01-02' }),
+      NOW,
+      { kycGateActive: true, travelRule: { band: 'address_dob', address: true, dateOfBirth: true } },
+    );
+    expect(block.version).toBe(2);
+    expect(Object.keys(block)).toEqual(TOP_UNROUTED);
+    expect(Object.keys(block.originator!)).toEqual(['entity_type', 'name', 'country', 'phone', 'id_type', 'id_last4', 'address', 'date_of_birth']);
+  });
+
   it('routed: keys [version, routed, originator, ...]; originator null', () => {
     const block = buildComplianceBlock(transfer({ settlementPartnerId: 'railp' }), customer(), NOW, { kycGateActive: true });
     expect(Object.keys(block)).toEqual(['version', 'routed', ...TOP_UNROUTED.slice(1)]);

@@ -11,6 +11,7 @@ import { listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
+import type { TravelRuleRequirement } from '@/lib/travel-rule';
 import { ComplianceBlockUnavailableError, InstructPermanentError, isTransientInstructError } from './instruct-errors';
 import { railPartnerOf } from './live-gate';
 
@@ -62,6 +63,7 @@ export async function loadComplianceBlock(
   db: DbOrTx,
   transfer: Transfer,
   now: Date = new Date(),
+  opts: { travelRule?: TravelRuleRequirement | null } = {},
 ): Promise<ComplianceBlock> {
   try {
     const transfers = createTransferRepo(db);
@@ -74,6 +76,7 @@ export async function loadComplianceBlock(
     return buildComplianceBlock(transfer, customer, now, {
       kycGateActive: sendGateActive(partner),
       screening,
+      travelRule: opts.travelRule ?? null,
     });
   } catch (err) {
     // The error text is never logged: a decrypt or driver error can carry PII.

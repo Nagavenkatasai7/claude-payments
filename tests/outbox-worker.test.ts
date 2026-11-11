@@ -9,7 +9,7 @@ import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from 
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createAuditRepo, createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { drainOnce, OPS_ALERT_TEXT_PREFIX, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
@@ -448,14 +448,18 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     expect(legacy).toEqual(JSON.parse(JSON.stringify({ ...buildSettlementInstruction(decrypted!), partner_id: 'acme' })));
     expect(Object.keys(body).at(-1)).toBe('compliance');
     expect(compliance.version).toBe(2);
+    // Fix pack 5 T23 (P10, P22): acme's http rail is real money and the row is
+    // under $1,000 to IN, so the travel rule sends the address (no DOB).
     expect(compliance.originator).toEqual({
       entity_type: 'individual', name: SENDER_NAME, country: 'US', phone: '15551230000',
-      id_type: 'passport', id_last4: '7766',
+      id_type: 'passport', id_last4: '7766', address: '1 Secret Lane',
     });
     expect(compliance.beneficiary).toMatchObject({ name: 'Anita Legal' });
     expect(compliance.kyc).toMatchObject({ status: 'verified', tier: 'T1' });
     expect(compliance.purpose_code).toBeNull();
-    for (const v of ['1980-01-02', 'Secret Lane', 'X99887766']) expect(raw).not.toContain(v);
+    for (const v of ['1980-01-02', 'X99887766']) expect(raw).not.toContain(v);
+    // 'Secret Lane' appears only as compliance.originator.address.
+    expect(raw.split('Secret Lane').length - 1).toBe(1);
     expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(raw).digest('hex'));
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-c1');
   });
@@ -548,10 +552,38 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     }
   });
 
+  it('ROUTED (non-exempt, real money): deferred by the travel rule (owner Q1, fix pack 5 T23), no POST, one travelrule:<id> with no sender data', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
+        webhookSecret: 'railp_whk',
+      },
+      whatsapp: {},
+    });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 0, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const a = (await opsAlerts()).filter((x) => x.dedupe_key.startsWith('travelrule:'));
+    expect(a.map((x) => x.dedupe_key)).toEqual(['travelrule:wk_t1']);
+    const st = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+      rows: Array<{ status: string; attempts: number }>;
+    };
+    expect(st.rows[0]).toEqual({ status: 'pending', attempts: 0 });
+  });
+
   it('ROUTED: the rail partner gets originator null + routed true, the kyc status still read under the OWNER, and no sender name or phone anywhere in the body', async () => {
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // (case above); a Partner-API-minted (exempt) routed row is still sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-wk_t1', 'wk_t1');
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
       kyc: {},
       payment: {
@@ -584,6 +616,10 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule; these routing cases use a Partner-API-minted
+    // (exempt) row, which is still sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-wk_t1', 'wk_t1');
     const repo = createIntegrationsRepo(db, provider);
     await repo.saveIntegrations('acme', {
       kyc: {},
@@ -2923,6 +2959,8 @@ describe('drainOnce — sandbox transfers never reach a rail or a real phone (Pr
 
   it('a LIVE transfer on the same rail is still instructed (unchanged)', async () => {
     await store.saveTransfer(transferFixture());
+    // Fix pack 5 T23 (P0 rule 9): the sender's travel-rule data on file (acme's http rail is real money).
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-9' }) });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
     await drainOnce(deps(), 'w1');

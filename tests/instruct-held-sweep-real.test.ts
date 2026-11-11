@@ -123,6 +123,43 @@ describe('stuck-paid sweeps and G14 (real helpers, pack 5 T14)', { retry: 0 }, (
     expect(await instructKeys()).toEqual([`instruct:${ID}`]);
   });
 
+  // Fix pack 5 T23 (P9 travelrule slot, P22), real helpers.
+  const clearOriginator = () =>
+    db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551239876'`);
+
+  it('a travelrule row whose instruct row is dead (no live instruction): one travelrule:stuck:<id> alert naming Issue refund, no re-instruct', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    await paidRealMoneyTransfer(db, { id: ID });
+    await clearOriginator();
+    await enqueueInstruct();
+    await db.execute(sql`UPDATE outbox SET status = 'dead' WHERE dedupe_key = ${`instruct:${ID}`}`);
+    await stuckTwoHours();
+
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    const a = await alerts();
+    expect(a).toEqual([{ k: `travelrule:stuck:${ID}`, m: stuckHeldMessage(ID, 'travelrule') }]);
+    expect(a[0].m).toContain('Issue refund');
+    expect(await escalateStuckPaid(db)).toBe(0);
+    expect(await alertKeys()).toEqual([`travelrule:stuck:${ID}`]);
+    expect(await instructKeys()).toEqual([`instruct:${ID}`]);
+  });
+
+  it('a travelrule row whose deferred instruct row is pending: no stuck alert, no re-instruct', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    await paidRealMoneyTransfer(db, { id: ID });
+    await clearOriginator();
+    await enqueueInstruct();
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rows<{ s: string }>(sql`SELECT status AS s FROM outbox WHERE dedupe_key = ${`instruct:${ID}`}`))[0].s).toBe('pending');
+    await stuckTwoHours();
+
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await escalateStuckPaid(db)).toBe(0);
+    expect(await alertKeys()).toEqual([`travelrule:${ID}`]);
+    expect(await instructKeys()).toEqual([`instruct:${ID}`]);
+  });
+
   it('a blocked row: no stuck alert', async () => {
     await certifyPartnerForTest(db, 'acme');
     await paidRealMoneyTransfer(db, { id: ID, fundingProvider: 'mock', fundingRef: `mockfund-${ID}` });

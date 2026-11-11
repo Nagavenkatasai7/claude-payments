@@ -84,8 +84,12 @@ export async function writeOriginatorInfo(
 export async function originatorInfoMissing(
   db: DbOrTx,
   t: Pick<Transfer, 'id' | 'partnerId' | 'phone' | 'settlementPartnerId' | 'destinationCountry' | 'amountUsd'>,
+  // Fix pack 5 T23: the worker read the exemption once in its build step
+  // (P22) and passes it, so the drain reads it once; absent -> read here.
+  known: { exempt?: boolean } = {},
 ): Promise<boolean> {
-  if (await createTransferRepo(db).originatorExempt(t.id, t.partnerId)) return false;
+  const exempt = known.exempt ?? (await createTransferRepo(db).originatorExempt(t.id, t.partnerId));
+  if (exempt) return false;
   if (t.settlementPartnerId) return true;
   return originatorDataMissing(
     travelRuleRequirement({ destinationCountry: t.destinationCountry, amountUsd: t.amountUsd }),

@@ -26,7 +26,7 @@ import {
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
-import { fundingGateRefusal } from '@/lib/instruct-gates';
+import { fundingGateRefusal, travelRuleBlockIncomplete, travelRuleBlocksInstruct, travelRuleFor } from '@/lib/instruct-gates';
 import { fundingClassOf } from '@/lib/funding-class';
 import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
@@ -1105,8 +1105,39 @@ async function handle(
         logWarn('outbox.instruct-build', err instanceof Error ? err.message : 'error', { transferId });
         throw new InstructPermanentError(transferId, 'build', { cause: err });
       }
-      const compliance = await loadComplianceBlock(deps.db, transfer);
-      // gate: travel_rule (G16) - slot, T23
+      // Fix pack 5 T23 (P22, P10): every real-money b2c row (exempt ones
+      // included) is built with its travel-rule requirement, so the originator
+      // carries the address / date of birth on file. The exemption is read
+      // ONCE here on real money (a read error throws: charged retry).
+      const travelRule = travelRuleFor(transfer, realMoney);
+      const exempt = realMoney ? await transferRepo.originatorExempt(transfer.id, transfer.partnerId) : true;
+      const compliance = await loadComplianceBlock(deps.db, transfer, new Date(), { travelRule });
+      // gate: travel_rule (G16)
+      // Fix pack 5 T23 (P8 G16, P22): on real money a row whose travel-rule
+      // data is not on file, or that is routed (the data cannot go to another
+      // tenant's rail, C3), is never sent: ONE travelrule:<id> alert, deferred
+      // UNCHARGED 900 s (never dead-lettered); the exit is Issue refund. Then
+      // the defence check (a race between that read and the build): a
+      // non-exempt individual sender whose built block lacks a field the band
+      // requires is held the same way. Ids only.
+      const blockLacksField =
+        !exempt &&
+        (transfer.senderEntityType ?? 'individual') !== 'business' &&
+        travelRuleBlockIncomplete(travelRule, compliance.originator);
+      if ((await travelRuleBlocksInstruct(deps.db, transfer, realMoney, { exempt })) || blockLacksField) {
+        logWarn('outbox.instruct-travel-rule', 'travel-rule data missing or not sendable; instruction deferred', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          {
+            message:
+              `transfer ${transferId} (rail ${railPartnerId}) is paid but was not instructed: the travel rule needs the sender's address or date of birth, ` +
+              'which is not on file or cannot go to a routed rail. It waits and is checked every 15 minutes. ' +
+              "Return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).",
+          },
+          { dedupeKey: `travelrule:${transferId}` },
+        );
+        throw new InstructTravelRuleError();
+      }
       // gate: record (G17)
       // Fix pack 5 T9 (P4, P8 G17): the body and the signed headers are computed
       // ONCE; the sealed rail_messages row (direction 1, kind 'settle') is

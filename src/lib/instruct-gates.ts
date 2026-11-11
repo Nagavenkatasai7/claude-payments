@@ -21,7 +21,8 @@
 // funding_mode  G14  real money: a mock-funded row -> done + mockfund:<id>; a class that does not
 //                    match the OWNER's fundingMode -> InstructFundingModeError deferred 900 s + fundmode:<id>
 // build         G15  builder + compliance block, fail closed (P10)
-// travel_rule   G16  slot (T23): InstructTravelRuleError deferred
+// travel_rule   G16  real money: travel-rule data missing or routed (P22) -> InstructTravelRuleError
+//                    deferred 900 s + travelrule:<id>; then the defence check (non-exempt individuals)
 // record        G17  slot (T9): the rail_messages record before the POST
 // send          G18  the signed POST through withInstructDeliveryLog: RailInstructError
 // provider_ref  G19  setProviderRef, write-once
@@ -38,6 +39,8 @@ import { fundingClassOf, fundingModeMatches } from './funding-class';
 import type { FundingMode } from './live-controls';
 import { realMoneyFor } from './live-gate';
 import { logWarn } from './log';
+import { originatorInfoMissing } from './originator-info';
+import { travelRuleRequirement, type TravelRuleRequirement } from './travel-rule';
 import type { Transfer } from './types';
 
 export const INSTRUCT_GATE_ORDER = Object.freeze([
@@ -87,6 +90,49 @@ export async function fundingGateRefusal(db: DbOrTx, t: Transfer): Promise<Fundi
 }
 
 /**
+ * Fix pack 5 T23 (P8 G16, P22): the travel_rule gate's predicate. Not real
+ * money -> false with no read. Otherwise originatorInfoMissing (not exempt AND
+ * routed or the band's data not on file). `known.exempt` is the exemption the
+ * worker already read in its build step (one read per drain). A read error
+ * THROWS (the worker retries, charged).
+ */
+export async function travelRuleBlocksInstruct(
+  db: DbOrTx,
+  t: Transfer,
+  realMoney: boolean,
+  known: { exempt?: boolean } = {},
+): Promise<boolean> {
+  if (!realMoney) return false;
+  return originatorInfoMissing(db, t, known);
+}
+
+/**
+ * Fix pack 5 T23 (P22, P10): the travel-rule requirement the compliance block
+ * is built with: real money AND b2c (exempt rows included, so an address the
+ * Partner API stored is sent), else null (no new key). Pure.
+ */
+export function travelRuleFor(t: Transfer, realMoney: boolean): TravelRuleRequirement | null {
+  return realMoney && (t.transferType ?? 'b2c') === 'b2c'
+    ? travelRuleRequirement({ destinationCountry: t.destinationCountry, amountUsd: t.amountUsd })
+    : null;
+}
+
+/**
+ * Fix pack 5 T23 (P22 defence check): true when a travel-rule requirement is
+ * set and the BUILT originator lacks a field it asks for (null originator, no
+ * `address`, or no `date_of_birth` in the DOB band). Pure; the caller decides
+ * who it applies to (non-exempt individual senders).
+ */
+export function travelRuleBlockIncomplete(
+  rule: TravelRuleRequirement | null,
+  originator: object | null | undefined,
+): boolean {
+  if (!rule) return false;
+  if (!originator) return true;
+  return !('address' in originator) || (rule.dateOfBirth && !('date_of_birth' in originator));
+}
+
+/**
  * P9: the reason a stuck paid row is held ON PURPOSE by a later instruct gate,
  * or null. Not real money -> null with no further read (a 'test' row makes no
  * read at all). Never throws: a read error -> null (logged by the error name),
@@ -98,7 +144,8 @@ export async function instructHeldOnPurpose(db: DbOrTx, t: Transfer): Promise<In
     // funding_mode (G14; T14, P12/P17): the same predicate as the worker.
     const f = await fundingGateRefusal(db, t);
     if (f) return f.reason;
-    // slot: travel_rule (G16; T23, P22)
+    // travel_rule (G16; T23, P22): the same predicate as the worker.
+    if (await travelRuleBlocksInstruct(db, t, true)) return 'travelrule';
     return null;
   } catch (err) {
     logWarn('instruct-gates.held', err instanceof Error ? err.name : 'error', { transferId: t.id });

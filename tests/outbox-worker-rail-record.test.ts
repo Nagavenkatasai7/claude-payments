@@ -6,6 +6,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { partnerWebhookDeliveries, railMessages } from '@/db/schema';
 import { railBodySha256 } from '@/db/repos/rail-message-repo';
@@ -171,6 +172,9 @@ describe('settlement.instruct records the settle message before the POST (G17, G
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp');
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule; a Partner-API-minted (exempt) routed row is sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-dl_t1', 'dl_t1');
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle', 'rsgn'));
     await enqueueInstruct();
     await drainOnce(deps(), 'w1');

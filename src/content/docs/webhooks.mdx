@@ -59,7 +59,8 @@ Instructions also carry an additive `compliance` object. Ignore unknown keys, an
 ```
 
 - `version` is `2` since fix pack 5. Accept any `version` of 1 or more and ignore keys you do not know. `originator` has `entity_type` (`individual` or `business`; for a business, `name` is the business), `name`, `country`, `phone`, `id_type` and `id_last4`.
-- Never sent: the full ID number, date of birth, email or residential address. The originator's address is not included yet.
+- On a real-money transfer the originator also carries `address` (one line) and, when the travel rule asks for it, `date_of_birth` (`YYYY-MM-DD`). They are never sent on a routed transfer, which waits instead.
+- Never sent: the full ID number or email.
 - `purpose` is our purpose value. `purpose_code` is always `null` for now.
 - `screening.list_source`, `list_version`, `decision` and `names_screened` appear only when a sanctions screening record exists for the transfer. `names_screened` counts the parties the screen covered, by role (no names).
 - A transfer settled on another partner's rail carries `"routed": true` and `originator: null`: the sender's identity is not shared with another partner. An instruction is never sent without its block; older instructions have no block.

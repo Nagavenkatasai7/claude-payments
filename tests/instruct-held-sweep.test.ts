@@ -104,6 +104,18 @@ describe('stuck-paid sweeps skip a row held on purpose (P9)', () => {
     expect(await auditCount('transfer.stuck_escalated')).toBe(0);
   });
 
+  // Fix pack 5 T23 (P9 travelrule slot): behaves like 'mockfund'.
+  it("held = 'travelrule', instruct row DONE: no reinstruct, no recon:, no rung, ONE travelrule:stuck:<id> shared by both sweeps", async () => {
+    held.value = 'travelrule';
+    await instructRow('done');
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+    expect(await escalateStuckPaid(db)).toBe(0);
+    expect(await instructKeys()).toEqual([`instruct:${ID}`]);
+    expect(await alertKeys()).toEqual([`travelrule:stuck:${ID}`]);
+    expect(await auditCount('sanctions.screen')).toBe(0);
+    expect(await auditCount('transfer.stuck_escalated')).toBe(0);
+  });
+
   it('held = null: reconcileSweep re-instructs once and alerts recon: (unchanged)', async () => {
     await instructRow('done');
     const r = await reconcileSweep(db);

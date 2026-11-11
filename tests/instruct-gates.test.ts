@@ -11,8 +11,7 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
 // Fix pack 5 T6 (P9): the sweep skip helper and its stuck alert. The predicate
-// slots (funding_mode T14, travel_rule T23) are empty, so instructHeldOnPurpose
-// returns null for every row today; alertStuckHeld is the pack 3 I1 rule
+// slots are filled (funding_mode T14, travel_rule T23); alertStuckHeld is the pack 3 I1 rule
 // (alertStuckLivegate) for the rows those slots will hold on purpose.
 
 // A switch that makes the real-money read throw (the helper must still return
@@ -47,6 +46,24 @@ vi.mock('@/db/repos/partner-repo', async (orig) => {
     },
   };
 });
+// Fix pack 5 T23: a switch that makes the travel-rule on-file read throw (the G16 read).
+const customerSeam = vi.hoisted(() => ({ throws: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  return {
+    ...real,
+    createCustomerRepo: (...a: Parameters<typeof real.createCustomerRepo>) => {
+      const r = real.createCustomerRepo(...a);
+      return {
+        ...r,
+        originatorOnFile: async (...x: Parameters<typeof r.originatorOnFile>) => {
+          if (customerSeam.throws) throw new SyntaxError('on-file read exploded');
+          return r.originatorOnFile(...x);
+        },
+      };
+    },
+  };
+});
 const logSpy = vi.hoisted(() => ({ warn: vi.fn() }));
 vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
@@ -63,6 +80,9 @@ import {
   heldStuckDedupeKey,
   instructHeldOnPurpose,
   stuckHeldMessage,
+  travelRuleBlockIncomplete,
+  travelRuleBlocksInstruct,
+  travelRuleFor,
   type InstructHeldReason,
 } from '@/lib/instruct-gates';
 
@@ -100,6 +120,7 @@ beforeEach(async () => {
   liveGateSeam.throws = false;
   liveGateSeam.calls = 0;
   partnerSeam.throws = false;
+  customerSeam.throws = false;
   logSpy.warn.mockReset();
   db = await freshDb();
   await seedPartner(db, 'acme');
@@ -174,6 +195,73 @@ describe('instructHeldOnPurpose (P9; funding_mode slot filled by T14)', () => {
     await expect(instructHeldOnPurpose(db, fixture())).resolves.toBeNull();
     expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'TypeError', { transferId: ID });
     expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('exploded');
+  });
+});
+
+describe('travel_rule slot (P9, P22; filled by T23)', () => {
+  const clearOriginator = () =>
+    db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
+
+  it("a real-money row missing its address -> 'travelrule'; null once the address is on file", async () => {
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    await clearOriginator();
+    expect(await instructHeldOnPurpose(db, fixture())).toBe('travelrule');
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true });
+    expect(await instructHeldOnPurpose(db, fixture())).toBeNull();
+  });
+
+  it("a 'test' row with no address -> null, with no read", async () => {
+    await seedRealMoneyRail(db, 'acme');
+    await clearOriginator();
+    const stop = captureQueries();
+    expect(await instructHeldOnPurpose(db, fixture({ environment: 'test' } as Partial<Transfer>))).toBeNull();
+    const q = stop();
+    expect(q.filter((x) => /customers|idempotency_keys/i.test(x.sql))).toEqual([]);
+  });
+
+  it('a read error -> null, logged by the error NAME only', async () => {
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    customerSeam.throws = true;
+    await expect(instructHeldOnPurpose(db, fixture())).resolves.toBeNull();
+    expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'SyntaxError', { transferId: ID });
+    expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('exploded');
+  });
+
+  it('travelRuleBlocksInstruct: not real money -> false with no read; real money -> the predicate; a read error throws', async () => {
+    await clearOriginator();
+    const stop = captureQueries();
+    expect(await travelRuleBlocksInstruct(db, fixture(), false)).toBe(false);
+    expect(stop()).toEqual([]);
+    expect(await travelRuleBlocksInstruct(db, fixture(), true)).toBe(true);
+    expect(await travelRuleBlocksInstruct(db, fixture(), true, { exempt: true })).toBe(false);
+    customerSeam.throws = true;
+    await expect(travelRuleBlocksInstruct(db, fixture(), true)).rejects.toThrow(SyntaxError);
+  });
+
+  it('travelRuleBlockIncomplete: no rule -> false; null originator or a missing required key -> true (pure)', () => {
+    const addr = { band: 'address' as const, address: true as const, dateOfBirth: false };
+    const dob = { band: 'address_dob' as const, address: true as const, dateOfBirth: true };
+    expect(travelRuleBlockIncomplete(null, null)).toBe(false);
+    expect(travelRuleBlockIncomplete(null, { name: 'x' })).toBe(false);
+    expect(travelRuleBlockIncomplete(addr, null)).toBe(true);
+    expect(travelRuleBlockIncomplete(addr, { name: 'x' })).toBe(true);
+    expect(travelRuleBlockIncomplete(addr, { address: 'a' })).toBe(false);
+    expect(travelRuleBlockIncomplete(dob, { address: 'a' })).toBe(true);
+    expect(travelRuleBlockIncomplete(dob, { address: 'a', date_of_birth: 'd' })).toBe(false);
+  });
+
+  it('travelRuleFor: real money b2c -> the band; not real money or b2b -> null (pure)', () => {
+    expect(travelRuleFor(fixture(), true)).toEqual({ band: 'address', address: true, dateOfBirth: false });
+    expect(travelRuleFor(fixture({ amountUsd: 1500, destinationCountry: 'DE' } as Partial<Transfer>), true)).toEqual({
+      band: 'address_dob',
+      address: true,
+      dateOfBirth: true,
+    });
+    expect(travelRuleFor(fixture({ transferType: undefined } as Partial<Transfer>), true)).not.toBeNull();
+    expect(travelRuleFor(fixture(), false)).toBeNull();
+    expect(travelRuleFor(fixture({ transferType: 'b2b' } as Partial<Transfer>), true)).toBeNull();
   });
 });
 

@@ -4,6 +4,7 @@ import { isMaskedDestination, usdcAddressFromDestination } from '../payout-forma
 import { isPartnerPulled } from '../funding-method';
 import { fundingClassOf } from '../funding-class';
 import type { Customer, Transfer, TransferStatus } from '../types';
+import type { TravelRuleRequirement } from '../travel-rule';
 import { deriveTier } from '../tier-rules';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
@@ -249,6 +250,13 @@ export interface ComplianceBlockOptions {
   kycGateActive?: boolean;
   /** Fix 14 evidence when found; absent ⇒ the list fields are omitted, never guessed. */
   screening?: ComplianceScreeningRef | null;
+  /**
+   * Fix pack 5 T23 (P10, P22): the travel-rule requirement of a real-money b2c
+   * row (travelRuleFor), else null/absent. Set: an individual originator
+   * carries `address` (and `date_of_birth` when it asks) when the owner
+   * customer holds it.
+   */
+  travelRule?: TravelRuleRequirement | null;
 }
 
 /**
@@ -258,9 +266,11 @@ export interface ComplianceBlockOptions {
  * it signs the final serialised body.
  *
  * Data minimisation (owner decisions C1–C3, docs §3):
- *   • the originator carries name, country, phone, id_type and id_last4 only —
- *     never the full ID number, date of birth, residential address or email.
- *     C1 (address at ≥ $3,000) is owner-pending, so no address is sent at all;
+ *   • the originator carries name, country, phone, id_type and id_last4 —
+ *     never the full ID number or email; address and date of birth only when
+ *     the travel rule requires them on a real-money row (fix pack 5, P22:
+ *     `opts.travelRule`, individual senders only); a routed row still sends
+ *     originator null (C3) and the worker holds it;
  *   • purpose_code is null until counsel/the partner bank supplies codes (C2);
  *   • a ROUTED row (settlementPartnerId set) goes to another tenant's rail, so
  *     the sender identity is omitted: originator null, routed true (C3);
@@ -294,6 +304,13 @@ export function buildComplianceBlock(
           // A business originator is the entity: no individual's ID is sent.
           id_type: senderIsBusiness ? null : (customer?.idDocType ?? customer?.govIdType ?? null),
           id_last4: senderIsBusiness ? null : (customer?.idLast4 ?? null),
+          // Fix pack 5 T23 (P10, P22): travel-rule fields, an individual only.
+          ...(!senderIsBusiness && opts.travelRule && customer?.residentialAddress
+            ? { address: customer.residentialAddress }
+            : {}),
+          ...(!senderIsBusiness && opts.travelRule?.dateOfBirth && customer?.dateOfBirth
+            ? { date_of_birth: customer.dateOfBirth }
+            : {}),
         };
   const evidence = opts.screening;
   return {

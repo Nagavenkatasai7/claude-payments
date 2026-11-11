@@ -8,6 +8,7 @@ import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { updateLiveControlsKey } from '@/db/repos/partner-repo';
 import {
   drainOnce,
@@ -205,6 +206,10 @@ describe('settlement.instruct and the live-certification gate (pack 3 T6)', { re
     await seedPartner(db, 'railp');
     await saveRail('railp', 'http', RAILP);
     await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule after this gate; a Partner-API-minted (exempt) routed
+    // row is still sent, so this case keeps proving the rail partner decides.
+    await createIdempotencyRepo(db).claim('acme', `order-${ID}`, ID);
     await enqueueInstruct();
     await expectDeferred(await drainOnce(deps(), 'w1'));
     expect(await opsAlerts()).toEqual([`livegate:${ID}`]);
