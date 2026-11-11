@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -127,6 +127,10 @@ beforeEach(async () => {
 });
 
 describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { retry: 0 }, () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   // Fix pack 2 T10: only an 'http' rail POSTs to its stored URL (a simulator
   // goes to the hosted rail), so the external-URL fixtures here are http rails.
   beforeEach(async () => {
@@ -1321,6 +1325,10 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
 // Program-Fix 8: no re-instruct after a rail failure, and the partner-pulled
 // reverse from a rail-failed row.
 describe('drainOnce — after a rail failure (fix 8)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   beforeEach(async () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
@@ -1437,6 +1445,10 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
 });
 
 describe('drainOnce — settlement URL fails CLOSED (Program-Fix 22, acceptance tests 7 and 9)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const lastError = async (kind: string) =>
     ((await db.execute(sql`SELECT status, attempts, last_error FROM outbox WHERE kind = ${kind}`)) as unknown as {
       rows: Array<{ status: string; attempts: number; last_error: string | null }>;
@@ -1724,6 +1736,10 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
 });
 
 describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const timeoutError = () =>
     Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
 
@@ -3180,6 +3196,10 @@ describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { r
 // to the hosted reference rail (never a stored URL), and a paid row on an http
 // rail is not instructed when its newest sanctions screen was not on a live list.
 describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const STORED = 'https://rail.partner.example/settle';
   const hosted = () => `${env.appBaseUrl}/api/partner-rail`;
   type Row = { dedupe_key: string; status: string; last_error: string | null; payload: unknown };

@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest, seedRealMoneyRail } from './helpers-live';
+import { certifyPartnerForTest, seedRealMoneyRail, seedOriginatorForTest } from './helpers-live';
 import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { railBodySha256 } from '@/db/repos/rail-message-repo';
@@ -128,6 +128,8 @@ beforeEach(async () => {
   await seedPartner(db, 'acme');
   await certifyPartnerForTest(db, 'acme');
   await seedRealMoneyRail(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
   fetchFn.mockReset();
   fetchFn.mockImplementation(async () => {
     rowsAtFetch.push(await countRecords());

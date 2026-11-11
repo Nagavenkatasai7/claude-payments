@@ -37,6 +37,13 @@ export const SENDER_SCREENING_REASON = 'Sender screening needs manual review.';
 // only; the release is refused while the name is missing (releaseHold), so
 // until PR7 such a row is rejected or refunded.
 export const RECIPIENT_IDENTITY_MISSING_REASON = 'Recipient identity missing.';
+// Fix pack 5 (R38, P22): the travel-rule originator data (the sender's home
+// address, and the date of birth by band) is not on file for a real-money b2c
+// transfer that is not exempt (Partner API, B2B). Screening-derived, platform
+// staff only; the release is refused while the data is missing (T20b). A
+// ROUTED real-money row always carries it (the data cannot go to a routed
+// rail) until the owner decides Q1.
+export const ORIGINATOR_INFO_MISSING_REASON = 'Originator information missing.';
 // The non-screening flag reasons screenTransfer (compliance.ts) and the EDD
 // check (tier-rules.ts evaluateEddForTransfer) write (UI redesign M3-10).
 export const LARGE_AMOUNT_REASON = 'Large transfer amount.';
@@ -77,6 +84,7 @@ export const HOLD_REASONS: Readonly<Record<string, HoldReasonEntry>> = Object.fr
   [SENDER_IDENTITY_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
   [SENDER_SCREENING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
   [RECIPIENT_IDENTITY_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+  [ORIGINATOR_INFO_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
   [LARGE_AMOUNT_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
   [VELOCITY_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
   [EDD_REQUIRED_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },

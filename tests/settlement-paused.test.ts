@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
@@ -114,6 +114,8 @@ beforeEach(async () => {
   fetchFn.mockResolvedValue(new Response(JSON.stringify({ providerRef: 'rail-1' }), { status: 200 }));
   await store.saveTransfer(transferFixture());
   await createIntegrationsRepo(db, provider).saveIntegrations('acme', rail('https://rail.example/settle'));
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
 });
 afterEach(() => invalidateFlagCache(db));
 

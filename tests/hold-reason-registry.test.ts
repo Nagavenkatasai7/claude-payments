@@ -11,6 +11,7 @@ import {
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
   RECIPIENT_IDENTITY_MISSING_REASON,
+  ORIGINATOR_INFO_MISSING_REASON,
   LARGE_AMOUNT_REASON,
   VELOCITY_REASON,
   EDD_REQUIRED_REASON,
@@ -43,6 +44,7 @@ describe('HOLD_REASONS registry', () => {
       'Sender identity missing.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
       'Sender screening needs manual review.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
       'Recipient identity missing.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+      'Originator information missing.': { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
       'Large transfer amount.': { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
       'High transfer velocity.': { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
       edd_required: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
@@ -110,6 +112,20 @@ describe('HOLD_REASONS registry', () => {
     expect(isRecipientIdentityHold({ complianceReasons: [] })).toBe(false);
     expect(isRecipientIdentityHold({ complianceReasons: null })).toBe(false);
     expect(isRecipientIdentityHold({})).toBe(false);
+  });
+
+  // Fix pack 5 T20a (R38, P22): travel-rule originator data missing on a real-money row.
+  it('the originator-info reason: its string, a platform-only screening entry with the hold copy, its staff labels', () => {
+    const r = ORIGINATOR_INFO_MISSING_REASON;
+    expect(r).toBe('Originator information missing.');
+    expect(HOLD_REASONS[r]).toEqual({ class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' });
+    expect(holdReleasableBy([LARGE_AMOUNT_REASON, r])).toBe('platform');
+    expect(PARTNER_RELEASABLE_REASONS).not.toContain(r);
+    expect(isScreeningHold({ complianceReasons: [r] })).toBe(true);
+    expect(holdReasonKeys([r])).toEqual(['partner.transfers.reason.originatorInfo']);
+    expect(HOLD_REASON_CODES[r]).toBe('originator_info_missing');
+    expect(t('partner.transfers.reason.originatorInfo')).toBe('Sender information missing');
+    expect(complianceReexports.ORIGINATOR_INFO_MISSING_REASON).toBe(r);
   });
 
   it('compliance.ts re-exports the new registry names', () => {

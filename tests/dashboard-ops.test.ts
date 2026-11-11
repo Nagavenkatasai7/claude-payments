@@ -22,7 +22,7 @@ import type { Transfer } from '@/lib/types';
 import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
-import { seedRealMoneyRail } from './helpers-live';
+import { seedOriginatorForTest, seedRealMoneyRail } from './helpers-live';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -1142,6 +1142,8 @@ describe('sender screening hold — platform release refusal (fix pack 2 T6)', (
     });
     await db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country, kyc_status, pep_hit, screening_flagged_at)
       VALUES (${PHONE}, 'rp', now() - interval '10 days', 'US', 'verified', true, now() - interval '1 hour')`);
+    // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b release check.
+    await seedOriginatorForTest(db, 'rp', PHONE, { address: true, dob: true });
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({
       id: 'rel_sender', partnerId: 'rp', environment, status: 'in_review', complianceStatus: 'flagged',

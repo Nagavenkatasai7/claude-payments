@@ -6,6 +6,7 @@ import {
   RECIPIENT_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   RECIPIENT_IDENTITY_MISSING_REASON,
+  ORIGINATOR_INFO_MISSING_REASON,
   SENDER_SCREENING_REASON,
   SENDER_WATCHLIST_REASON,
 } from '@/lib/compliance-config';
@@ -178,6 +179,7 @@ const REASON_KEYS: Record<string, MessageKey> = {
   [SENDER_WATCHLIST_REASON]: 'partner.transfers.reason.screening',
   [SENDER_IDENTITY_MISSING_REASON]: 'partner.transfers.reason.identity',
   [RECIPIENT_IDENTITY_MISSING_REASON]: 'partner.transfers.reason.recipientIdentity',
+  [ORIGINATOR_INFO_MISSING_REASON]: 'partner.transfers.reason.originatorInfo',
   [SENDER_SCREENING_REASON]: 'partner.transfers.reason.screening',
   'Large transfer amount.': 'partner.transfers.reason.large',
   'High transfer velocity.': 'partner.transfers.reason.velocity',

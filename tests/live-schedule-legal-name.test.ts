@@ -24,7 +24,7 @@ import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { processTransferPayment } from '@/lib/pay-process';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { okVerify, realMoneyPayBody, testEvidence } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { KycProvider } from '@/lib/providers/kyc-provider';
@@ -133,6 +133,8 @@ async function liveOwner() {
     senderPhone: SENDER, firstSeenAt: nowIso, kycStatus: 'verified', senderCountry: 'US',
     partnerId: OWNER, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso, fullName: 'Alex Sender',
   });
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b settle hold.
+  await seedOriginatorForTest(db, OWNER, SENDER, { address: true, dob: true });
 }
 
 async function saveBook(legalName?: string) {

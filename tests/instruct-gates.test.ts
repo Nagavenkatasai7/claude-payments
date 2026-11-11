@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest, seedRealMoneyRail } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest, seedRealMoneyRail } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
@@ -103,6 +103,8 @@ beforeEach(async () => {
   logSpy.warn.mockReset();
   db = await freshDb();
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T23 gate.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
 });
 
 describe('instructHeldOnPurpose (P9; funding_mode slot filled by T14)', () => {

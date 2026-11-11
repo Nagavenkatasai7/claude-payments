@@ -12,7 +12,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { testEvidence } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from '@/lib/pay-outcome';
@@ -128,6 +128,8 @@ const RELOAD = { ok: false, reason: 'reload_required', error: PAY_RELOAD_REQUIRE
 /** acme: certified unless `certify: false`; its block approved only with `approve: true`; a mock rail. */
 async function acme(o: { certify?: boolean; approve?: boolean } = {}): Promise<void> {
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b settle hold.
+  await seedOriginatorForTest(db, 'acme', SENDER, { address: true, dob: true });
   if (o.certify ?? true) await certifyPartnerForTest(db, 'acme');
   if (o.approve) await approveDisclosureForTest(db, 'acme');
   rails.byPartner.acme = { providerType: 'mock' };
@@ -296,6 +298,7 @@ describe('pay-process: the R18 gate (C10)', () => {
     expect(await pay(t1, testEvidence({ routeId: 'o1' }))).toEqual({ status: 400, body: { ok: false, error: 'Payment failed' } });
 
     await seedPartner(db, 'beta');
+    await seedOriginatorForTest(db, 'beta', SENDER, { address: true, dob: true }); // pack 5 T20a
     rails.byPartner.beta = { ...PUBLIC_RAIL, credentials: { ...PUBLIC_RAIL.credentials } };
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const t2 = makeTransfer({ id: 'o2', partnerId: 'beta' });

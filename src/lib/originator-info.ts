@@ -1,8 +1,10 @@
 import type { DbOrTx } from '@/db/client';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { auditSubjectId } from './customer-ref';
-import type { PartnerId } from './types';
+import { originatorDataMissing, travelRuleRequirement } from './travel-rule';
+import type { PartnerId, Transfer } from './types';
 
 /**
  * Fix pack 5 (P20, R38): the sender's travel-rule originator data, their home
@@ -65,4 +67,26 @@ export async function writeOriginatorInfo(
     }
     return fields;
   });
+}
+
+/**
+ * Fix pack 5 (P22, C3): THE one predicate: settleOrHold and the releases
+ * (T20b) and the worker's G16 (T23) import it; there is never a second copy.
+ * True when the row is NOT exempt (originatorExempt: B2B or Partner-API-minted)
+ * AND either it is routed (settlementPartnerId set: the originator data cannot
+ * go to a routed rail) or the travel-rule band's data is not on file on the
+ * OWNER's customer row (address always; date of birth by band, principal in
+ * USD). Reads booleans only (never decrypts). It does not decide real money:
+ * the caller does, and calls it only on a real-money row. A read error throws.
+ */
+export async function originatorInfoMissing(
+  db: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'phone' | 'settlementPartnerId' | 'destinationCountry' | 'amountUsd'>,
+): Promise<boolean> {
+  if (await createTransferRepo(db).originatorExempt(t.id, t.partnerId)) return false;
+  if (t.settlementPartnerId) return true;
+  return originatorDataMissing(
+    travelRuleRequirement({ destinationCountry: t.destinationCountry, amountUsd: t.amountUsd }),
+    await createCustomerRepo(db, async () => null).originatorOnFile(t.partnerId, t.phone),
+  );
 }

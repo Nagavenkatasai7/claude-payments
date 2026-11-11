@@ -101,6 +101,7 @@ Rules:
 | `SENDER_IDENTITY_MISSING_REASON` | screening | platform | hold |
 | `SENDER_SCREENING_REASON` | screening | platform | hold |
 | `RECIPIENT_IDENTITY_MISSING_REASON` | screening | platform | hold |
+| `ORIGINATOR_INFO_MISSING_REASON` | screening | platform | hold |
 | `LARGE_AMOUNT_REASON` | kyc | partner | hold |
 | `VELOCITY_REASON` | kyc | partner | hold |
 | `EDD_REQUIRED_REASON` | kyc | partner | hold |
@@ -109,6 +110,8 @@ Rules:
 The strictest reason wins (rescreen, then platform, then partner). An empty list or a reason outside the registry counts as platform-only. "Partner" means a delegated partner's admin, and platform staff too.
 
 `RECIPIENT_IDENTITY_MISSING` (pack 4, R03) holds a real-money consumer transfer that reaches settlement with no account-holder name on file; Partner-API and payment-link transfers are exempt (their payee name is attested elsewhere), and a release is refused while the name is missing.
+
+`ORIGINATOR_INFO_MISSING` (fix pack 5, R38) is for real-money consumer transfers only: the travel rule needs the sender's home address always, and the date of birth by band (from $1,000 to the date-of-birth destinations, from $3,000 everywhere; the amount is the principal in USD). A transfer whose required data is not on file is held, and a routed real-money transfer is held whatever is on file (the data cannot go to a routed rail). Partner-API and B2B transfers are exempt; payment-link, pay-page draft and recurring-schedule transfers are not. A release is refused while the data is missing.
 
 ## 5. Sender screening hold (R06)
 

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { asc, eq, sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { createStore } from '@/lib/store';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { outbox as outboxTable, partnerWebhookDeliveries } from '@/db/schema';
@@ -74,6 +74,8 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'pa', 'Partner A');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'pa', '15551230000', { address: true, dob: true });
   await certifyPartnerForTest(db, 'pa'); // pack 3 T6: a live row on this http rail is drained
   await createPartnerIntegrationsStore(db).saveIntegrations('pa', rail());
 });

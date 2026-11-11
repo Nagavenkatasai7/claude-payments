@@ -28,6 +28,7 @@ import {
   LIST_UNAVAILABLE_REASON,
   RECIPIENT_IDENTITY_MISSING_REASON,
 } from '@/lib/compliance-config';
+import { seedOriginatorForTest } from './helpers-live';
 
 // The identity read, with a fault toggle (the "read throws" case). Every other
 // method of the repo is the real one.
@@ -131,6 +132,8 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
   identityFault.throwOnRead = false;
 });
 

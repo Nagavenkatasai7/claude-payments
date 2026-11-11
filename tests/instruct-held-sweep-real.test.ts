@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail } from './helpers-live';
+import { certifyPartnerForTest, paidRealMoneyTransfer, seedOriginatorForTest, seedRealMoneyRail } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep } from '@/lib/reconcile';
@@ -56,6 +56,8 @@ beforeEach(async () => {
   outbox = createOutboxRepo(db);
   await seedPartner(db, 'acme');
   await seedRealMoneyRail(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T23 gate.
+  await seedOriginatorForTest(db, 'acme', '15551239876', { address: true, dob: true });
   fetchFn.mockReset();
   fetchFn.mockResolvedValue(new Response(JSON.stringify({ providerRef: 'rail-1' }), { status: 200 }));
 });

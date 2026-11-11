@@ -9,7 +9,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
@@ -84,6 +84,8 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
 });
 
 describe('stuckRung — the escalation ladder', () => {

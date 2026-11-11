@@ -18,7 +18,7 @@ import {
   transfersListHref,
   TIMELINE_AUDIT_ACTIONS,
 } from '@/lib/partner-transfers';
-import { POSSIBLE_MATCH_REASON, SENDER_WATCHLIST_REASON } from '@/lib/compliance-config';
+import { ORIGINATOR_INFO_MISSING_REASON, POSSIBLE_MATCH_REASON, SENDER_WATCHLIST_REASON } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { t } from '@/lib/i18n';
 import type { Transfer, TransferStatus } from '@/lib/types';
@@ -304,6 +304,11 @@ describe('holds', () => {
       'partner.transfers.reason.other',
     ]);
     expect(holdReasonKeys([SENDER_WATCHLIST_REASON])).toEqual(['partner.transfers.reason.screening']);
+  });
+  // Fix pack 5 T20a (P22, P31): the travel-rule originator hold renders its own label.
+  it('holdReasonKeys: the originator-info reason renders "Sender information missing"', () => {
+    expect(holdReasonKeys([ORIGINATOR_INFO_MISSING_REASON])).toEqual(['partner.transfers.reason.originatorInfo']);
+    expect(t('partner.transfers.reason.originatorInfo')).toBe('Sender information missing');
   });
 });
 

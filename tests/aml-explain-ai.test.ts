@@ -3,7 +3,7 @@ import type { ChatMessage, Transfer } from '@/lib/types';
 import { AML_DEFAULTS } from '@/lib/aml-rules';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { LARGE_AMOUNT_REASON } from '@/lib/compliance-config';
-import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 
 // A4 — the AML "Explain" copilot. Read-only, rung-1: it explains why a transfer
 // raised an AML alert or sits on hold; it never decides. Under test:
@@ -156,6 +156,19 @@ describe('buildAmlExplainBundle (pure)', () => {
     );
     expect(b.holdReasons).toEqual(['recipient_identity_missing']);
     expect(amlExplainFallback(b).summary).toContain('missing recipient identity');
+  });
+
+  // Fix pack 5 T20a (R38, P22): the originator-info hold has its own code and fallback text.
+  it('maps the originator-info hold reason to its own code and fallback text', () => {
+    const b = buildAmlExplainBundle(
+      makeTransfer({ complianceReasons: [ORIGINATOR_INFO_MISSING_REASON] }),
+      [],
+      CFG,
+      'platform',
+      NOW,
+    );
+    expect(b.holdReasons).toEqual(['originator_info_missing']);
+    expect(amlExplainFallback(b).summary).toContain('missing sender information');
   });
 
   it('a held row with no aml.alert yet uses the caller-recomputed hit, marked "recomputed"', () => {

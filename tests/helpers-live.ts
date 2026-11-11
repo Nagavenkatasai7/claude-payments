@@ -140,8 +140,8 @@ export async function seedRealMoneyRail(
 
 // Fix pack 5 T14 (P32): a paid, cleared, live b2c row for a real-money instruct
 // fixture: paid 20 minutes ago (past reconcile's 15-minute window), a legal
-// name on the recipient, the sender saved as a customer (a full name, and an
-// invented placeholder address / date of birth when `originator` asks), and a
+// name on the recipient, the sender saved as a customer (a full name, and the
+// originator data seedOriginatorForTest puts on file when `originator` asks), and a
 // fresh live screening evidence row (G12 passes). `fundingProvider` is written
 // by a raw UPDATE (the insert-only column). The caller still seeds the partner,
 // the rail (seedRealMoneyRail) and the certification. Ids and times relative.
@@ -199,9 +199,31 @@ export async function paidRealMoneyTransfer(
     createdAt: new Date(now - 10 * 86_400_000).toISOString(),
     updatedAt: new Date(now).toISOString(),
     fullName: senderName,
-    ...(o.originator?.address ? { residentialAddress: '1 Placeholder Street, Testville 00000' } : {}),
-    ...(o.originator?.dob ? { dateOfBirth: new Date(now - 40 * 365.25 * 86_400_000).toISOString().slice(0, 10) } : {}),
   });
+  if (o.originator) await seedOriginatorForTest(db, partnerId, phone, o.originator);
   await seedLiveEvidence(db, { id, partnerId, recipientName: t.recipientName, senderName });
   return (await store.getTransfer(id)) ?? t;
+}
+
+// Fix pack 5 T20a (P32): THE one originator fixture helper (no other name).
+// Puts the sender's travel-rule data on file for this tenant: ensureCustomer,
+// then the T18 set-if-unset setters with invented placeholder values (an
+// address '1 Test Street, Testville'; a date of birth 40 years before now,
+// YYYY-MM-DD in UTC). Default: the address only. A value already on file is
+// kept (the setters never replace). Customer repo loaded dynamically, like
+// paidRealMoneyTransfer's imports (some files vi.mock it).
+export async function seedOriginatorForTest(
+  db: Db,
+  partnerId: PartnerId,
+  phone: string,
+  o: { address?: boolean; dob?: boolean } = { address: true },
+): Promise<void> {
+  const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+  const repo = createCustomerRepo(db, async () => null);
+  await repo.ensureCustomer(partnerId, phone);
+  if (o.address) await repo.setResidentialAddressIfUnset(partnerId, phone, '1 Test Street, Testville');
+  if (o.dob) {
+    const dob = new Date(Date.now() - 40 * 365.25 * 86_400_000).toISOString().slice(0, 10);
+    await repo.setDateOfBirthIfUnset(partnerId, phone, dob);
+  }
 }

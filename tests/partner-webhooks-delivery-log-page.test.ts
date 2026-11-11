@@ -51,6 +51,7 @@ import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { t } from '@/lib/i18n';
 import WebhooksPage from '@/app/partner/(app)/integrations/webhooks/page';
+import { seedOriginatorForTest } from './helpers-live';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 async function signInAs(o: Partial<Staff>): Promise<void> {
@@ -92,6 +93,9 @@ beforeEach(async () => {
   await seedPartner(db, 'pb', 'Partner B');
   await createPartnerIntegrationsStore(db).saveIntegrations('pa', rail());
   await createPartnerIntegrationsStore(db).saveIntegrations('pb', rail());
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'pa', '15551230000', { address: true, dob: true });
+  await seedOriginatorForTest(db, 'pb', '15551230000', { address: true, dob: true });
 });
 
 describe('/partner/integrations/webhooks: the delivery log (M3-15b)', () => {

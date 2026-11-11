@@ -63,6 +63,7 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
 });
 
 import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { seedOriginatorForTest } from './helpers-live';
 
 const H = 3_600_000;
 const SENDER_PHONE = '15551230000';
@@ -136,6 +137,8 @@ beforeEach(async () => {
   customerStore = createCustomerStore(db, store);
   await seedPartner(db, 'acme');
   await seedSender('acme', SENDER);
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
   poke.calls = 0;
   fitnessReads.n = 0;
   names.throwFor = new Set();

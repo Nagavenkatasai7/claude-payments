@@ -20,7 +20,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { beginHold } from '@/lib/settlement';
@@ -170,6 +170,8 @@ beforeEach(async () => {
     senderPhone: SENDER_PHONE, firstSeenAt: nowIso, kycStatus: 'verified', fullName: SENDER,
     senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
   });
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
 });
 afterEach(() => restoreOfacSource(originalList));
 
