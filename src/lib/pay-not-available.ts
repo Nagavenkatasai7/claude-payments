@@ -6,6 +6,8 @@ import {
   PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
   PAY_RELOAD_REQUIRED_COPY,
   PAY_RELOAD_REQUIRED_FUNDED_COPY,
+  PAY_SENDER_ADDRESS_INVALID_COPY,
+  PAY_SENDER_DOB_INVALID_COPY,
 } from './pay-outcome';
 import type { Transfer } from './types';
 
@@ -86,4 +88,14 @@ export function payAccountHolderInvalid(): NextResponse {
     { ok: false, error: 'Please check the account holder name.', fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } },
     { status: 400 },
   );
+}
+
+/**
+ * Fix pack 5 (P21, R38): the sender's address or date of birth posted on a
+ * real-money payment is not a string, or fails the travel-rule check (P18).
+ * Answered before the code is checked: nothing was consumed or charged.
+ */
+export function payOriginatorInvalid(field: 'senderAddress' | 'senderDob'): NextResponse {
+  const copy = field === 'senderAddress' ? PAY_SENDER_ADDRESS_INVALID_COPY : PAY_SENDER_DOB_INVALID_COPY;
+  return NextResponse.json({ ok: false, error: 'originator_invalid', fieldErrors: { [field]: copy } }, { status: 400 });
 }
