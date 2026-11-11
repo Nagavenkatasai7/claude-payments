@@ -8,10 +8,11 @@ import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
-import { isMaskedDestination } from './payout-format';
+import { isMaskedDestination, isStoredAccount } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { hasSenderName } from './sender-identity';
-import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
+import { logWarn } from './log';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
@@ -111,6 +112,8 @@ export async function finalizeDraftPayment(
   stores: FinalizeStores,
   draftId: string,
   bankDetails?: BankDetails,
+  // Fix pack 4 (C18): the account-holder name typed on the pay page (b2c only).
+  opts: { recipientLegalName?: string } = {},
 ): Promise<FinalizeResult> {
   const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
 
@@ -299,6 +302,39 @@ export async function finalizeDraftPayment(
   // bound-but-UNMINTED and the draft is not consumed, so a retry of the same
   // link falls through the claim's replay branch and mints THAT id (the
   // existing crash-replay shape). Never the route's generic 400.
+  // Fix pack 4 (C18, C3): the recipient's legal name for the mint (screened there, C20). A
+  // consumer draft paid without new bank details takes its own name, else the one typed on the
+  // pay page, else the saved recipient's book name ONLY for the account actually minted (method +
+  // last4 of the final destination, after any bank details; review R1-P2 D1 below for a body
+  // with bank details). A book read error mints without a name (the identity
+  // hold at settle is the backstop) and logs the draft id only. B2B drafts take only their own.
+  const bookLegalName = async (): Promise<string | undefined> => {
+    try {
+      const name = await createRecipientRepo(db).getRecipientLegalName(partnerId, draft.senderPhone, draft.recipient.recipientPhone, {
+        payoutMethod,
+        payoutDestination,
+      });
+      return name?.trim() || undefined;
+    } catch (err) {
+      logWarn('pay.finalize_legal_name', err instanceof Error ? err.name : 'error', { draftId });
+      return undefined;
+    }
+  };
+  // Review R1-P2 D1: posted bank details carry their own account-holder name. With bank details
+  // in the body the TYPED name wins over the draft's own; when they REPLACE a destination the
+  // draft already stores and nothing was typed, the draft's own name (it describes the old
+  // account) is not used: only the book name for the FINAL account, else none. A first
+  // collection (no stored destination) and a body without bank details keep the old order.
+  const typedLegalName = opts.recipientLegalName?.trim() || undefined;
+  const draftOwnLegalName = draft.recipientLegalName?.trim() || undefined;
+  // Review R3-X1 N2: a masked stored destination is no account (the page shows a first collection).
+  const replacesStoredAccount = bodyDestination !== '' && isStoredAccount(draft.recipient.payoutDestination);
+  const recipientLegalName = isB2bDraft
+    ? draft.recipientLegalName
+    : bodyDestination !== ''
+      ? typedLegalName || (replacesStoredAccount ? undefined : draftOwnLegalName) || (await bookLegalName()) || undefined
+      : draftOwnLegalName || typedLegalName || (await bookLegalName()) || undefined;
+
   let transfer: Awaited<ReturnType<typeof createTransfer>>;
   try {
     transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
@@ -314,7 +350,7 @@ export async function finalizeDraftPayment(
       destinationCountry: draft.destinationCountry,
       destinationCurrency: draft.destinationCurrency,
       partnerId,
-      recipientLegalName: draft.recipientLegalName,
+      recipientLegalName,
       relationship: draft.relationship,
       purpose: draft.purpose,
       purposeDetail: draft.purposeDetail, // Batch B follow-up A3 (re-checked at the mint)

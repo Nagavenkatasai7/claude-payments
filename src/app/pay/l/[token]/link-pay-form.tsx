@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { payErrorMessage } from '@/lib/pay-outcome';
+import { disclosureAckBody, payErrorMessage } from '@/lib/pay-outcome';
+import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 
@@ -71,6 +72,8 @@ export function LinkPayForm({
   disclosureVersion,
   quoteLockedAt,
   receipt,
+  approvingName,
+  disclosureHash,
 }: {
   token: string;
   options: LinkPayOption[];
@@ -79,6 +82,10 @@ export function LinkPayForm({
   /** The rate lock these figures come from; null when a minted transfer's fixed figures are shown. */
   quoteLockedAt: string | null;
   receipt: Receipt;
+  /** Fix pack 4 (C15): the payee name the page shows, named whole in the 'Approving ...' line. */
+  approvingName: string;
+  /** Fix pack 4 (C10): the hash of the provider block the page was rendered with. */
+  disclosureHash: string | null;
 }) {
   const router = useRouter();
   const [method, setMethod] = useState<LinkPayMethod>(options[0]?.method ?? 'bank_transfer');
@@ -96,6 +103,13 @@ export function LinkPayForm({
   const disclosure = disclosures[method] ?? null;
   const ackMissing = disclosure !== null && disclosureVersion !== null && !acked;
   const endpoint = `/api/pay/l/${encodeURIComponent(token)}`;
+  // Fix pack 4 (C15): follows the chosen way to pay; never an account (critic P13: the payee in full).
+  const approvingText = chosen
+    ? approvingLine({ amountText: approvingAmountText(chosen.totalUsd), currency: 'USD', recipientName: approvingName, accountLast4: null, wholeName: true })
+    : null;
+  const approvingEl = approvingText ? (
+    <p data-testid="approving-line" className="mb-2 text-[13px] leading-normal text-[#e9edef]">{approvingText}</p>
+  ) : null;
 
   async function requestCode() {
     setRequesting(true);
@@ -132,7 +146,7 @@ export function LinkPayForm({
         body: JSON.stringify({
           otp: code,
           fundingMethod: chosen.method,
-          ...(disclosure !== null && disclosureVersion && acked ? { disclosureVersion } : {}),
+          ...disclosureAckBody(disclosure !== null ? disclosureVersion : null, disclosureHash, acked),
           ...(quoteLockedAt ? { quoteLockedAt } : {}),
         }),
       });
@@ -166,6 +180,8 @@ export function LinkPayForm({
       }
       if (data?.reason === 'otp') setOtpError('That code is incorrect or expired. Resend and try again.');
       else setErrorMessage(payErrorMessage(data));
+      // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
+      if (data?.reason === 'approval_not_recorded') setCode('');
       setStatus('error');
     } catch {
       setStatus('error');
@@ -232,6 +248,7 @@ export function LinkPayForm({
       {disclosure}
       {!sent ? (
         <div>
+          {approvingEl}
           <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
             {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
           </button>
@@ -239,6 +256,7 @@ export function LinkPayForm({
         </div>
       ) : (
         <div>
+          {approvingEl}
           <label className={labelClasses}>
             Confirmation code
             <input

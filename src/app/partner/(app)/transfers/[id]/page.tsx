@@ -9,7 +9,7 @@ import { loadPartnerTransferDetail } from '@/db/repos/partner-transfer-reads';
 import { getAuthStore } from '@/lib/auth-store';
 import { PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
 import { getPartnerStore } from '@/lib/partner-store';
-import { isPartnerReleasableHold } from '@/lib/compliance-config';
+import { isPartnerReleasableHold, isRecipientIdentityHold } from '@/lib/compliance-config';
 import { loadSenderScreening } from '@/lib/sender-screening';
 import {
   fundingEventView,
@@ -140,6 +140,11 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const releasable = isPartnerReleasableHold(transfer, owner, sender);
   const canRelease = releasable && PARTNER_ADMIN.roles.includes(ctx.role);
   const reasons = holdReasonKeys(transfer.complianceReasons);
+  // Pack 4 review R2 (I5): a recipient-identity hold is never released (C19, owner Q19): it can only
+  // be rejected or refunded, so the page says that instead of "SmartRemit releases this hold".
+  // R3-Y2 P1: it is class 'screening' (never partner-releasable), so this page shows no Reject or
+  // Refund control for it; the line names SmartRemit compliance as the party that rejects and refunds.
+  const identityHold = isRecipientIdentityHold(transfer);
   const funding = fundingView(transfer);
   const events = detail.fundingEvents.map(fundingEventView);
   const settlement = settlementView(transfer, detail.rail);
@@ -313,7 +318,7 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
               </div>
             ) : (
               <p className="mt-3 text-[13px] text-ds-ink-muted">
-                {t(releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
+                {t(identityHold ? 'partner.transfers.holdIdentityPage' : releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
               </p>
             )}
             {/* A4 (D5: admins only; the action re-gates): read-only AML explain. */}

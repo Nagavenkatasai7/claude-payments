@@ -15,6 +15,7 @@ import {
   buildApproveSummary,
   buildQuoteText,
   maskAccount,
+  prepareSendDraft,
 } from '@/lib/tools';
 import type { CurrencyCode, Quote, Transfer } from '@/lib/types';
 import { createStore } from '@/lib/store';
@@ -29,7 +30,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { SendBusyError } from '@/lib/send-limits';
 import {
   resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_PROVIDER_ID, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
@@ -7511,5 +7512,125 @@ describe('Purpose detail: the send tools and the "Other" reason', () => {
         purpose: 'other', purposeDetail: 'customs charge for a parcel',
       });
     });
+  });
+});
+
+describe('provider line in held replies and the Approve card (pack 4 C22 d, e)', () => {
+  const LINE = 'Payments by Acme Money Services LLC, licensed by State Department of Financial Services';
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+  const withLine = (ctx: Ctx) => ({ ...ctx, providerLine: LINE });
+
+  async function mint(ctx: Ctx): Promise<string> {
+    const created = await payPageMint({
+      amount_usd: 500, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    expect(created.error).toBeUndefined();
+    return created.transfer_id as string;
+  }
+  async function force(ctx: Ctx, id: string, status: 'in_review' | 'blocked') {
+    const t = (await ctx.store.getTransfer(id))!;
+    await ctx.store.saveTransfer({ ...t, status });
+  }
+
+  it('check_payment_status on an in_review transfer with ctx.providerLine -> the hold text with the line', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx);
+    await force(ctx, id, 'in_review');
+    const r = await executeTool('check_payment_status', { transfer_id: id }, withLine(ctx));
+    expect(r.reply_to_customer).toBe(fixedReply('hold', { help: true, providerLine: LINE }));
+    expect(String(r.reply_to_customer).endsWith(`\n${LINE}`)).toBe(true);
+  });
+
+  it('check_payment_status on a blocked transfer -> the block text, no line', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx);
+    await force(ctx, id, 'blocked');
+    const r = await executeTool('check_payment_status', { transfer_id: id }, withLine(ctx));
+    expect(r.reply_to_customer).toBe(fixedReply('block', { help: true }));
+    expect(String(r.reply_to_customer)).not.toContain(LINE);
+  });
+
+  it('check_payment_status without ctx.providerLine -> today\'s text', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx);
+    await force(ctx, id, 'in_review');
+    const r = await executeTool('check_payment_status', { transfer_id: id }, ctx);
+    expect(r.reply_to_customer).toBe(fixedReply('hold', { help: true }));
+  });
+
+  it('request_refund on a held transfer outside the window -> the message carries the line', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    expect((await beginHold(db, t)).kind).toBe('held');
+    await db.execute(sql`UPDATE outbox SET created_at = now() - interval '31 minutes' WHERE dedupe_key = ${`stage1:${id}`}`);
+    const r = await executeTool('request_refund', { transfer_id: id }, withLine(ctx));
+    expect(r.error_code).toBe('not_refundable_yet');
+    expect(r.message).toBe(fixedReply('refund_while_held', { help: true, providerLine: LINE }));
+    const plain = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(plain.message).toBe(fixedReply('refund_while_held', { help: true }));
+  });
+
+  it('cancel of an in_review payment -> reply_hint carries the line', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_provider_1', partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: ctx.phone, lineItems: [{ description: 'Widgets', qty: 40, unitAmountUsd: 10 }],
+      amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
+    const created = await payPageMint({
+      amount_source: 400, recipient_name: 'Globex Trading LLC', recipient_phone: '919876543210',
+      funding_method: 'ach_pull', entity_type: 'business', sender_business_name: 'Acme Imports Ltd',
+      recipient_business_name: 'Globex Trading LLC', invoice_id: 'inv_provider_1',
+    }, ctx);
+    expect(created.error).toBeUndefined();
+    await force(ctx, created.transfer_id as string, 'in_review');
+    const r = await executeTool('cancel_bill', {}, withLine(ctx));
+    expect(r.deferred).toBe(true);
+    expect(r.reply_hint).toBe(fixedReply('payment_held', { help: true, providerLine: LINE }));
+  });
+
+  it('buildApproveSummary with a providerLine -> the line is the last line, after the rate-lock line, flattened and bounded', () => {
+    const plain = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer');
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, undefined, undefined, LINE);
+    expect(s).toBe(`${plain}\n${LINE}`);
+    expect(plain.split('\n').at(-1)).toBe(rateLockLine(RATE_LOCK_MINUTES));
+    const messy = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, undefined, undefined, 'Payments by\nAcme,\t licensed by X');
+    expect(messy).toBe(`${plain}\nPayments by Acme, licensed by X`);
+    const long = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, undefined, undefined, 'B'.repeat(300));
+    expect([...long.split('\n').at(-1)!].length).toBe(200);
+  });
+
+  it('buildApproveSummary with undefined, empty or blank -> byte-identical to the call without it', () => {
+    const plain = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer');
+    for (const line of [undefined, '', '  \n ']) {
+      expect(buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@upi', 'bank_transfer', 'INR', RATE_LOCK_MINUTES, undefined, undefined, line)).toBe(plain);
+    }
+  });
+
+  const draftInput = {
+    recipientPhone: '919876543210', recipientName: 'Mom', amountSource: 200, fundingMethod: 'bank_transfer',
+  };
+
+  it('prepareSendDraft for an approved owner -> the card summary ends with the line', async () => {
+    await seedPartner(db, 'acme', 'Acme');
+    await approveDisclosureForTest(db, 'acme');
+    const ctx = await buildCtx(fakeRedis(), PHONE, 'acme');
+    const r = await prepareSendDraft(ctx, draftInput);
+    expect(r.kind).toBe('draft');
+    if (r.kind !== 'draft') return;
+    const lines = r.summary.split('\n');
+    expect(lines.at(-1)).toBe(LINE);
+    expect(lines.at(-2)).toMatch(/^Rate locked for /);
+  });
+
+  it('prepareSendDraft for the default tenant -> no provider line', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await prepareSendDraft(ctx, draftInput);
+    expect(r.kind).toBe('draft');
+    if (r.kind !== 'draft') return;
+    expect(r.summary.split('\n').at(-1)).toMatch(/^Rate locked for /);
+    expect(r.summary).not.toContain('Payments by');
   });
 });

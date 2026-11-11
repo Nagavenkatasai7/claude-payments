@@ -36,7 +36,15 @@ function ExternalLink({ href, children }: { href: string; children?: ReactNode }
   );
 }
 
-export function ReceiptDisclosureCard({ disclosure }: { disclosure: ReceiptDisclosure }) {
+// Fix pack 4 (C22 b, R16): `providerLine` is the owner's approved provider line
+// (providerLineFor of the LIVE config, from the receipt page); falsy renders nothing.
+export function ReceiptDisclosureCard({
+  disclosure,
+  providerLine,
+}: {
+  disclosure: ReceiptDisclosure;
+  providerLine?: string | null;
+}) {
   const p = disclosure.provider;
   // The receipt's Amount card already shows the amount, fee, total, rate and
   // total to recipient; this card adds only the date available from the lines.
@@ -48,6 +56,11 @@ export function ReceiptDisclosureCard({ disclosure }: { disclosure: ReceiptDiscl
         <CardDescription>{DISCLOSURE_DRAFT_BADGE}</CardDescription>
       </CardHeader>
       <CardContent>
+        {providerLine && (
+          <p data-testid="provider-line" className="mb-2 text-sm font-medium text-foreground">
+            {providerLine}
+          </p>
+        )}
         <dl>
           {dateAvailable && <Line label={dateAvailable.label} value={dateAvailable.value} strong />}
           <Separator className="my-1" />

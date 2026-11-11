@@ -8,6 +8,8 @@
 // a business is not a consumer "sender" (§1005.30).
 
 import type { ResolvedDisclosure } from './partner-config';
+import type { DisclosureSnapshotInput } from './payment-evidence';
+import type { Transfer } from './types';
 import { DEMO_NO_PARTNER_NOTE } from './legal/drafts';
 import {
   CFPB_CONTACT,
@@ -161,18 +163,21 @@ export interface ReceiptTransfer {
   fxRate: number;
   paidAt?: string;
   deliveredAt?: string;
+  /** Fix pack 4 (C21): the days stored on the row at mint; absent -> the partner's current value. */
+  deliveryBusinessDays?: number;
 }
 
 export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure, nowMs: number): ReceiptDisclosure | null {
   if (t.transferType === 'b2b') return null;
   const paidMs = t.paidAt ? Date.parse(t.paidAt) : NaN;
   const deliveredMs = t.deliveredAt ? Date.parse(t.deliveredAt) : NaN;
+  const days = deliveryDaysFor(t, d);
   const dateAvailable =
     t.status === 'delivered' && Number.isFinite(deliveredMs)
       ? `${DATE_AVAILABLE_DELIVERED_PREFIX} ${DATE_FMT.format(new Date(deliveredMs))}`
       : Number.isFinite(paidMs)
-        ? dateAvailableOnOrAbout(DATE_FMT.format(addBusinessDays(paidMs, d.deliveryBusinessDays)))
-        : dateAvailableEstimate(d.deliveryBusinessDays);
+        ? dateAvailableOnOrAbout(DATE_FMT.format(addBusinessDays(paidMs, days)))
+        : dateAvailableEstimate(days);
   // The window is keyed on paid_at, which markPaidIfInReview can move LATER
   // (customer-favourable). Shown only while a paid transfer is inside it.
   const deadlineMs = paidMs + CANCEL_WINDOW_MS;
@@ -218,4 +223,163 @@ export function isDisclosureAckVersion(v: unknown): v is string {
 /** The provider block's kind for a resolved partner (recorded in the ack meta). */
 export function disclosureProviderKind(d: ResolvedDisclosure): DisclosureProvider['kind'] {
   return providerBlock(d).kind;
+}
+
+// ── Fix pack 4 (C16): the disclosure snapshot stored on the transfer ────────────
+//
+// What the customer acknowledged at the pay step, written once by
+// commitPaymentEvidence (C8) into transfers.disclosure_snapshot and frozen once
+// the row is paid or in review. Figures and provider details only: no recipient
+// name, masked account, phone or static legal text. The type and its parser land
+// with the repo that is typed by them (T2); the builder is T7's.
+
+export interface DisclosureSnapshotV1 {
+  v: 1;
+  version: string;
+  configHash: string | null;
+  shownHash: string | null;
+  figures: {
+    amountSource: number;
+    feeSource: number;
+    totalChargeSource: number;
+    sourceCurrency: string;
+    amountDest: number;
+    destinationCurrency: string;
+    fxRate: number;
+  };
+  provider: {
+    kind: 'demo' | 'pending' | 'configured';
+    licensedEntity: string | null;
+    licenceIds: string[];
+    phone: string | null;
+    website: string | null;
+    regulator: string | null;
+    approved: boolean;
+  };
+  deliveryBusinessDays: number;
+  dateAvailable: string;
+  acknowledgedAt: string;
+  surface: 'transfer' | 'link';
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
+const PROVIDER_KINDS: ReadonlySet<unknown> = new Set(['demo', 'pending', 'configured']);
+const SNAPSHOT_SURFACES: ReadonlySet<unknown> = new Set(['transfer', 'link']);
+
+/**
+ * Parse a stored snapshot (jsonb, so untrusted shape). Returns a FRESH object
+ * with only the V1 keys, or null for anything that is not a complete V1
+ * snapshot. Pure; never throws.
+ */
+export function parseDisclosureSnapshot(raw: unknown): DisclosureSnapshotV1 | null {
+  try {
+    if (!isRecord(raw) || raw.v !== 1) return null;
+    const { version, configHash, shownHash, figures: f, provider: p } = raw;
+    if (typeof version !== 'string' || version === '') return null;
+    if (!isStringOrNull(configHash) || !isStringOrNull(shownHash)) return null;
+    if (!isRecord(f) || !isRecord(p)) return null;
+    const { amountSource, feeSource, totalChargeSource, amountDest, fxRate, sourceCurrency, destinationCurrency } = f;
+    if (![amountSource, feeSource, totalChargeSource, amountDest, fxRate].every(isFiniteNumber)) return null;
+    if (typeof sourceCurrency !== 'string' || typeof destinationCurrency !== 'string') return null;
+    const { kind, licensedEntity, licenceIds, phone, website, regulator, approved } = p;
+    if (!PROVIDER_KINDS.has(kind)) return null;
+    if (![licensedEntity, phone, website, regulator].every(isStringOrNull)) return null;
+    if (!Array.isArray(licenceIds) || !licenceIds.every((x) => typeof x === 'string')) return null;
+    if (typeof approved !== 'boolean') return null;
+    const { deliveryBusinessDays, dateAvailable, acknowledgedAt, surface } = raw;
+    if (!Number.isInteger(deliveryBusinessDays)) return null;
+    const days = deliveryBusinessDays as number;
+    if (days < 0 || days > 10) return null;
+    if (typeof dateAvailable !== 'string' || typeof acknowledgedAt !== 'string') return null;
+    if (!Number.isFinite(Date.parse(acknowledgedAt))) return null;
+    if (!SNAPSHOT_SURFACES.has(surface)) return null;
+    return {
+      v: 1,
+      version,
+      configHash,
+      shownHash,
+      figures: {
+        amountSource: amountSource as number,
+        feeSource: feeSource as number,
+        totalChargeSource: totalChargeSource as number,
+        sourceCurrency,
+        amountDest: amountDest as number,
+        destinationCurrency,
+        fxRate: fxRate as number,
+      },
+      provider: {
+        kind: kind as DisclosureSnapshotV1['provider']['kind'],
+        licensedEntity: licensedEntity as string | null,
+        licenceIds: [...(licenceIds as string[])],
+        phone: phone as string | null,
+        website: website as string | null,
+        regulator: regulator as string | null,
+        approved,
+      },
+      deliveryBusinessDays: days,
+      dateAvailable,
+      acknowledgedAt,
+      surface: surface as DisclosureSnapshotV1['surface'],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The business days a transfer's disclosure shows: the value stamped on the row
+ * at mint (C2) wins, else the owner's current value. No truthiness: 0 (same
+ * business day) is a stored value.
+ */
+export function deliveryDaysFor(t: Pick<Transfer, 'deliveryBusinessDays'>, d: ResolvedDisclosure): number {
+  return t.deliveryBusinessDays ?? d.deliveryBusinessDays;
+}
+
+/**
+ * The snapshot of what the customer acknowledged (C16), built from the LOCKED
+ * row and the owner's resolved block. Figures and provider details only; the
+ * provider kind follows providerBlock and the date available follows the
+ * pay-page wording (dateAvailableEstimate of the stored days). `acknowledgedAt`
+ * is the route's server time, falling back to `now` when not finite. Pure.
+ */
+export function buildDisclosureSnapshot(i: {
+  transfer: Transfer;
+  disclosure: ResolvedDisclosure;
+  input: DisclosureSnapshotInput;
+  now: number;
+}): DisclosureSnapshotV1 {
+  const { transfer: t, disclosure: d, input } = i;
+  const p = providerBlock(d);
+  const days = deliveryDaysFor(t, d);
+  return {
+    v: 1,
+    version: input.version,
+    configHash: d.hash,
+    shownHash: input.shownHash,
+    figures: {
+      amountSource: t.amountSource,
+      feeSource: t.feeSource,
+      totalChargeSource: t.totalChargeSource,
+      sourceCurrency: t.sourceCurrency,
+      amountDest: t.amountInr,
+      destinationCurrency: t.destinationCurrency ?? 'INR',
+      fxRate: t.fxRate,
+    },
+    provider: {
+      kind: p.kind,
+      licensedEntity: p.name,
+      licenceIds: [...p.licenseIds],
+      phone: p.phone,
+      website: p.website,
+      regulator: p.stateRegulator?.name ?? null,
+      approved: d.partnerApproved,
+    },
+    deliveryBusinessDays: days,
+    dateAvailable: dateAvailableEstimate(days),
+    acknowledgedAt: new Date(Number.isFinite(input.acknowledgedAt) ? input.acknowledgedAt : i.now).toISOString(),
+    surface: input.surface,
+  };
 }

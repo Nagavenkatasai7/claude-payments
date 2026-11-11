@@ -201,14 +201,16 @@ describe('pay route — existing-transfer payout writes (fix 6 / ctx-01)', () =>
     expect((await post('m3')).status).toBe(400);
   });
 
-  it('Edit bank details REPLACES a real stored destination on a consumer row — and the encrypted legal name survives (no whole-row re-save)', async () => {
-    await store.saveTransfer(makeTransfer({ id: 'e1', payoutDestination: '123456789 HDFC0001234', recipientLegalName: 'Mother Legal Name' }));
+  it('Edit bank details REPLACES a real stored destination on a consumer row — other columns survive (no whole-row re-save); the old account holder name is dropped (review R1-P2 D1)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e1', payoutDestination: '123456789 HDFC0001234', recipientLegalName: 'Mother Legal Name', relationship: 'parent' }));
     const res = await post('e1', EDIT);
     expect(res.status).toBe(200);
     expect(await status('e1')).toBe('paid');
     const full = await store.getTransferDecrypted('e1');
     expect(full?.payoutDestination).toContain('987654321098');
-    expect(full?.recipientLegalName).toBe('Mother Legal Name');
+    // The name described the OLD account; none was typed for the new one (not real money).
+    expect(full?.recipientLegalName).toBeUndefined();
+    expect(full?.relationship).toBe('parent');
     const audit = (await db.execute(sql`SELECT action, subject_id, meta FROM audit_events WHERE subject_id = 'e1'`)) as unknown as { rows: Array<{ action: string; meta: { last4: string } }> };
     expect(audit.rows.map((r) => r.action)).toContain('transfer.payout_edit');
     expect(JSON.stringify(audit.rows)).not.toContain('987654321098');

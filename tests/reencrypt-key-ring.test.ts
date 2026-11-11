@@ -5,6 +5,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { EnvKeyRing, defaultProvider } from '@/lib/field-crypto';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createRecipientRepo } from '@/db/repos/aux-repos';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
@@ -134,6 +135,19 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     // A second run has nothing left.
     const again = await reencryptKeyRing(db, { apply: true });
     expect(again.reduce((n, r) => n + r.stale, 0)).toBe(0);
+  });
+
+  it('fix pack 4: a k0 recipient legal name is resealed under k1 and still opens through getRecipientLegalName', async () => {
+    await seedPartner(db, 'acme');
+    await createRecipientRepo(db, new EnvKeyRing(KEY_0)).upsertRecipient('acme', '15551230000', {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '111122223333', lastUsedAt: now,
+    }, { legalName: 'Anita Sharma' });
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'recipients' });
+    expect(report.find((x) => x.column === 'legal_name_enc')).toMatchObject({ stale: 1, resealed: 1, failed: 0 });
+    const [row] = await raw(`SELECT legal_name_enc FROM recipients`);
+    expect(row.legal_name_enc?.startsWith('v2.k1.')).toBe(true);
+    expect(await createRecipientRepo(db, defaultProvider()).getRecipientLegalName('acme', '15551230000', '919876543210')).toBe('Anita Sharma');
   });
 
   it('pages numerically through bigint ids with batch=1 (ids past 10)', async () => {

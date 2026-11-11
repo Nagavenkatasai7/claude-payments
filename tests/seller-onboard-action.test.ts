@@ -120,6 +120,18 @@ describe('activateSellerAction', () => {
     expect(still?.payoutLast4).toBeUndefined();
   });
 
+  it('R2-Q1 B4: a code consume that throws a bare TypeError(fetch failed) -> the retryable answer, never the wrong-code one; not activated', async () => {
+    const id = await seedPendingSeller();
+    txOtp = createTransactionOtpStore(redis, { consume: { ...redis, async getdel(): Promise<string | null> { throw new TypeError('fetch failed'); } } });
+    const issued = await txOtp.issue(id, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await activateSellerAction({ id, fields: HK_FIELDS, otp: issued.code });
+    err.mockRestore();
+    expect(res).toEqual({ ok: false, error: 'Something went wrong — please try again.' });
+    expect((await store.getSeller(PHONE, 'default'))?.status).toBe('pending');
+  });
+
   it('rejects invalid payout fields with field errors (no activation)', async () => {
     const id = await seedPendingSeller();
     const issued = await txOtp.issue(id, PHONE);

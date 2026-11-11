@@ -517,11 +517,12 @@ export function splitWhatsAppText(text: string, max: number = WA_TEXT_CHUNK_MAX)
   return parts;
 }
 
-export async function sendText(to: string, text: string, creds?: WaCreds): Promise<void> {
+/** Fix pack 4 (C5): resolves the channel the text went out on ('tg' on the Telegram reroute). */
+export async function sendText(to: string, text: string, creds?: WaCreds): Promise<'wa' | 'tg'> {
   const tg = await telegramChat(to, creds);
   if (tg) {
     for (const part of splitWhatsAppText(text, TELEGRAM_TEXT_MAX)) await tgSendText(tg, part);
-    return;
+    return 'tg';
   }
   // One POST for every normal reply (byte-for-byte as before). An over-long body
   // goes out as ordered parts; if a later part fails, the outbox retry re-sends
@@ -539,6 +540,7 @@ export async function sendText(to: string, text: string, creds?: WaCreds): Promi
       'WhatsApp send failed',
     );
   }
+  return 'wa';
 }
 
 export async function sendTemplate(
@@ -989,6 +991,10 @@ export async function sendVerificationStatus(
 export interface TxOtpSendHooks {
   inWindow?: () => Promise<boolean>;
   onTemplateFailure?: (info: { status?: number; code?: number }) => void | Promise<void>;
+  /** Fix pack 4 (C5, C22): the approved provider line for the free-form code text; absent -> today's text. */
+  providerLine?: string;
+  /** Fix pack 4 (C5): 'payment' = a pay, link or bill code; Telegram then gets the transaction text. Absent (seller onboarding) = today's routing. */
+  purpose?: 'payment';
 }
 
 /** Only the HTTP status and Graph code of a send error: never its message or body. */
@@ -1010,7 +1016,14 @@ export async function sendTransactionOtp(
   brand?: string, // Program-Fix 49A: absent ⇒ "SmartRemit" (callers unchanged)
   partnerTemplate?: { name: string; lang: string }, // M2-6: absent ⇒ today's behaviour
   hooks: TxOtpSendHooks = {},
-): Promise<void> {
+): Promise<'wa' | 'tg'> {
+  // Fix pack 4 (C5, critic C11): a PAYMENT code on a Telegram chat never uses the
+  // 5-minute sign-in otpMessage of sendAuthTemplate's Telegram branch; it gets
+  // the 10-minute transaction text. Without `purpose` (seller onboarding) the
+  // routing below is unchanged on every channel.
+  if (hooks.purpose === 'payment' && (await telegramChat(phone, creds))) {
+    return sendText(phone, transactionOtpMessage(code, brand, hooks.providerLine), creds);
+  }
   if (creds && partnerTemplate) {
     try {
       await sendAuthTemplate(
@@ -1043,17 +1056,17 @@ export async function sendTransactionOtp(
         { to: maskPhone(phone) },
       );
       if (!fallback) throw err;
-      await sendText(phone, transactionOtpMessage(code, brand), creds);
+      return sendText(phone, transactionOtpMessage(code, brand, hooks.providerLine), creds);
     }
-    return;
+    return 'wa';
   }
   const authTemplate = env.whatsappAuthTemplate;
   if (!authTemplate || creds) {
-    await sendText(phone, transactionOtpMessage(code, brand), creds);
-    return;
+    return sendText(phone, transactionOtpMessage(code, brand, hooks.providerLine), creds);
   }
   try {
     await sendAuthTemplate(phone, authTemplate, OTP_TEMPLATE_LANG, authenticationTemplateParams(code));
+    return 'wa';
   } catch (err) {
     // The Graph error never echoes the params; the code is never passed to the logger.
     logWarn(
@@ -1061,6 +1074,6 @@ export async function sendTransactionOtp(
       `transaction OTP template send failed (${summaryText(err)}); falling back to free-form text`,
       { to: maskPhone(phone) },
     );
-    await sendText(phone, transactionOtpMessage(code, brand));
+    return sendText(phone, transactionOtpMessage(code, brand, hooks.providerLine));
   }
 }

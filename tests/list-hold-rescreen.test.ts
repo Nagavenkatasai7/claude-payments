@@ -83,6 +83,7 @@ function base(o: Partial<Transfer> & { id: string }): Transfer {
     createdAt: new Date(Date.now() - H).toISOString(), partnerId: 'acme', environment: 'live',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 200, feeSource: 5, totalChargeSource: 205,
+    recipientLegalName: 'Anita Legal', // pack 4 T14 (C19): a real-money release needs the name on file
     ...o,
   } as Transfer;
 }

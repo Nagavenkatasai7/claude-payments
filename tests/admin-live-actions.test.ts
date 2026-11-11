@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { signInAs } from './helpers-partner-app';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { LiveReadiness, LiveReadinessFacts } from '@/lib/live-certification';
 import type { Staff } from '@/lib/types';
@@ -149,7 +149,7 @@ const ALL = [
   ['counsel', recordCounselAction, counselForm],
 ] as const;
 
-/** Every built line ready on 'acme' (posture, contract, two listed users) and facts that pass. */
+/** Every built line ready on 'acme' (posture, contract, two listed users, an approved provider block) and facts that pass. */
 async function readyAcme(): Promise<void> {
   const now = new Date().toISOString();
   await updateLiveControlsKey(
@@ -160,6 +160,7 @@ async function readyAcme(): Promise<void> {
   );
   await updateLiveControlsKey('acme', 'contract', { ref: 'MSA-1', signedOn: today(), recordedBy: 'ops-admin', recordedAt: now }, db);
   await updateLiveControlsKey('acme', 'complianceUsers', USERS, db);
+  await approveDisclosureForTest(db, 'acme');
 }
 const passingFacts = (): LiveReadinessFacts => ({
   goLiveApproved: true,
@@ -281,7 +282,7 @@ describe('platform live actions: step-up', () => {
 });
 
 describe('certifyLiveAction', () => {
-  it('pack 3: not_ready (no record, no audit, no poke), even with every built line passing', async () => {
+  it('pack 4: not_ready (no record, no audit, no poke), even with every built line passing', async () => {
     await platformAdmin();
     await readyAcme();
     factsHook.override = async () => passingFacts();

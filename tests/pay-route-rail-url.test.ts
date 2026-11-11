@@ -14,11 +14,14 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -31,12 +34,27 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
+// Review R2-Q3 (H1): the verify is a spy, so a test can tell whether the code was checked (and
+// so consumed) before the refusal: the route's early R18 gate answers BEFORE it, pay-process's
+// live gate AFTER it.
+const otpVerify = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 vi.mock('@/lib/transaction-otp', () => ({
   getTransactionOtpStore: () => ({
     issue: async () => ({ ok: true, code: '000000' }),
-    verify: async () => ({ ok: true }),
+    verify: otpVerify,
   }),
 }));
+// Review R2-Q3 (H1): a test may make the route's early gate context read fail; the function then
+// answers its SAFE context (not mandatory), exactly as on an unexpected error.
+const gateCtx = vi.hoisted(() => ({ fail: false }));
+vi.mock('@/lib/pay-gate-context', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-gate-context')>();
+  return {
+    ...real,
+    readPayGateContext: (...a: Parameters<typeof real.readPayGateContext>) =>
+      gateCtx.fail ? Promise.resolve({ ...real.SAFE_PAY_GATE_CONTEXT }) : real.readPayGateContext(...a),
+  };
+});
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
 
 let db: Awaited<ReturnType<typeof freshDb>>;
@@ -73,7 +91,6 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-
 const capture = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/providers/funding-provider', async (orig) => {
   const real = await orig<typeof import('@/lib/providers/funding-provider')>();
@@ -98,9 +115,24 @@ function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
     amountSource: 200, feeSource: 0, totalChargeSource: 200, ...o,
   };
 }
-function post(id: string) {
-  const req = new NextRequest('http://localhost/api/pay/' + id, { method: 'POST' });
+// Fix pack 4 T9: a real-money (or certified) b2c payment posts the page's
+// acknowledgement (realMoneyPayBody); every other case stays bodyless.
+function post(id: string, body?: object) {
+  const req = new NextRequest('http://localhost/api/pay/' + id, {
+    method: 'POST',
+    ...(body ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } } : {}),
+  });
   return POST(req, { params: Promise.resolve({ transferId: id }) });
+}
+const evidenceCount = async () =>
+  ((await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action IN ('otp.verified', 'remittance.disclosure_ack')`)) as unknown as {
+    rows: Array<{ n: number }>;
+  }).rows[0].n;
+/** Spy on the structured warn lines (logWarn writes one JSON line per call to console.warn). */
+function warnLines(scope: string): () => string[] {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  onTestFinished(() => warn.mockRestore());
+  return () => warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes(scope));
 }
 const outboxCount = async () =>
   ((await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as { rows: Array<{ n: number }> }).rows[0].n;
@@ -117,6 +149,8 @@ beforeEach(async () => {
   await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
     VALUES ('railp', 'railp', 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
   rails.byPartner = {};
+  gateCtx.fail = false;
+  otpVerify.mockClear();
   capture.mockReset();
   capture.mockResolvedValue({ fundingRef: 'fund-abc' });
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
@@ -127,10 +161,13 @@ const PUBLIC_RAIL = { providerType: 'http', credentials: { settlementUrl: 'https
 /**
  * Pack 3: a non-default owner 'acme' on a public http rail (the rail type also stored, as
  * live-gate.ts reads it), with its own sender on file. Certified unless `certify: false`.
+ * Fix pack 4 T8: its provider block is approved (R18).
  */
 async function acmeOnHttp(o: { certify?: boolean } = {}): Promise<void> {
   await seedPartner(db, 'acme');
   if (o.certify ?? true) await certifyPartnerForTest(db, 'acme');
+  // Fix pack 4 T8: a real-money b2c payment needs the owner's approved provider block (R18).
+  await approveDisclosureForTest(db, 'acme');
   rails.byPartner.acme = { ...PUBLIC_RAIL, credentials: { ...PUBLIC_RAIL.credentials } };
   await setRailProviderType(db, 'acme', 'http');
   const nowIso = new Date().toISOString();
@@ -188,13 +225,13 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     // Pack 3: the owner is a certified non-default partner (the default tenant may never own a
     // real-money transfer, and an uncertified rail is refused at pay time).
     await acmeOnHttp();
-    await store.saveTransfer(makeTransfer({ id: 'g1', partnerId: 'acme' }));
+    await store.saveTransfer(makeTransfer({ id: 'g1', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
     // Fix pack 2 T9: an http rail settles only on a live, fresh screen; the
     // pay-time re-screen runs on a live OFAC list (checked an hour ago).
     const originalList = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
-    const res = await post('g1');
+    const res = await post('g1', realMoneyPayBody());
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('g1'))?.status).toBe('paid');
@@ -205,8 +242,8 @@ describe('pay route — settlement URL gate before capture (fix 22)', () => {
     const originalList = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 37 * 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
-    await store.saveTransfer(makeTransfer({ id: 's1', partnerId: 'acme' }));
-    const res = await post('s1');
+    await store.saveTransfer(makeTransfer({ id: 's1', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
+    const res = await post('s1', realMoneyPayBody());
     expect(res.status).toBe(200);
     const t = await store.getTransfer('s1');
     expect(t?.status).toBe('in_review');
@@ -243,7 +280,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await acmeOnHttp({ certify: false });
     liveList();
     await store.saveTransfer(makeTransfer({ id: 'lc1', partnerId: 'acme' }));
-    const res = await post('lc1');
+    const res = await post('lc1', realMoneyPayBody());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(NOT_AVAILABLE);
     expect(capture).not.toHaveBeenCalled();
@@ -254,23 +291,66 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
   it('the same owner certified -> charged and settles', async () => {
     await acmeOnHttp();
     liveList();
-    await store.saveTransfer(makeTransfer({ id: 'lc2', partnerId: 'acme' }));
-    const res = await post('lc2');
+    await store.saveTransfer(makeTransfer({ id: 'lc2', partnerId: 'acme', recipientLegalName: 'Anita Legal' })); // pack 4 T14: the name on file
+    const res = await post('lc2', realMoneyPayBody());
     expect(res.status).toBe(200);
     expect(capture).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer('lc2'))?.status).toBe('paid');
   });
 
-  it('a default-owner transfer on an http rail -> 409, never charged', async () => {
+  // Review R2-Q3 (H1): since fix pack 4 the route's early R18 gate answers this one (the default
+  // tenant's demo block is never approved, and a real-money rail makes it mandatory), BEFORE the
+  // code is checked; pay-process's live gate is never reached. lc3b/lc3c below prove the live gate.
+  it('a default-owner transfer on an http rail -> 409 from the route\'s early R18 gate (code not checked, no live-gate warn), never charged', async () => {
     rails.byPartner.default = { ...PUBLIC_RAIL, credentials: { ...PUBLIC_RAIL.credentials } };
     await setRailProviderType(db, 'default', 'http');
     liveList();
+    const liveWarns = warnLines('pay.live-refused');
     await store.saveTransfer(makeTransfer({ id: 'lc3' }));
-    const res = await post('lc3');
+    const res = await post('lc3', realMoneyPayBody());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(NOT_AVAILABLE);
+    expect(otpVerify).not.toHaveBeenCalled(); // the code was not consumed
+    expect(liveWarns()).toEqual([]);
     expect(capture).not.toHaveBeenCalled();
     expect((await store.getTransfer('lc3'))?.status).toBe('awaiting_payment');
+    expect(await outboxCount()).toBe(0);
+  });
+
+  // Review R2-Q3 (H1 b): the early R18 gate passes (approved block, complete request), so the
+  // refusal must come from pay-process's live gate (liveRefusalForRail).
+  it('uncertified non-default http owner, APPROVED block, complete request -> 409 from the pay-time LIVE gate: one pay.live-refused warn, no capture, no evidence rows', async () => {
+    await acmeOnHttp({ certify: false });
+    liveList();
+    const liveWarns = warnLines('pay.live-refused');
+    await store.saveTransfer(makeTransfer({ id: 'lc1b', partnerId: 'acme' }));
+    const hash = resolvePartnerDisclosure(await createPartnerRepo(db).getPartner('acme')).hash!;
+    const res = await post('lc1b', realMoneyPayBody({ disclosureHash: hash, accountHolder: 'Anita Legal' }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(NOT_AVAILABLE);
+    expect(otpVerify).toHaveBeenCalledTimes(1); // the early gate let it through to the code check
+    expect(liveWarns()).toHaveLength(1);
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceCount()).toBe(0);
+    expect((await store.getTransfer('lc1b'))?.status).toBe('awaiting_payment');
+    expect(await outboxCount()).toBe(0);
+  });
+
+  it('a default-owner transfer on an http rail whose EARLY gate context read fails (not mandatory) -> pay-process still refuses through the LIVE gate: 409, one pay.live-refused warn, never charged', async () => {
+    rails.byPartner.default = { ...PUBLIC_RAIL, credentials: { ...PUBLIC_RAIL.credentials } };
+    await setRailProviderType(db, 'default', 'http');
+    liveList();
+    gateCtx.fail = true;
+    const liveWarns = warnLines('pay.live-refused');
+    await store.saveTransfer(makeTransfer({ id: 'lc3c', recipientLegalName: 'Anita Legal' }));
+    const res = await post('lc3c', realMoneyPayBody());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(NOT_AVAILABLE);
+    expect(otpVerify).toHaveBeenCalledTimes(1);
+    expect(liveWarns()).toHaveLength(1);
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceCount()).toBe(0);
+    expect((await store.getTransfer('lc3c'))?.status).toBe('awaiting_payment');
     expect(await outboxCount()).toBe(0);
   });
 
@@ -307,7 +387,7 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     await acmeOnHttp({ certify: false });
     rails.byPartner.acme = { providerType: 'http', credentials: { settlementUrl: 'http://10.0.0.5/settle', signingSecret: 's' } };
     await store.saveTransfer(makeTransfer({ id: 'lc7', partnerId: 'acme' }));
-    const res = await post('lc7');
+    const res = await post('lc7', realMoneyPayBody());
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, error: 'Payment failed' });
     expect(capture).not.toHaveBeenCalled();

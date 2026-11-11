@@ -59,6 +59,7 @@ const finalizeCrossBorderBillPayment = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/b2b-pay-finalize', () => ({ finalizeCrossBorderBillPayment }));
 
 import { POST } from '@/app/api/pay/b2b/[invoiceId]/route';
+import { getTransactionOtpStore } from '@/lib/transaction-otp';
 
 const post = (fields: Record<string, string>) =>
   POST(
@@ -118,6 +119,8 @@ describe('POST /api/pay/b2b/[invoiceId] — request_otp at an issue cap (fix 45)
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, sent: true });
     expect(sendTransactionOtp).toHaveBeenCalledOnce();
+    // Fix pack 4 T10: this OTP store mock has no noteDelivery; the best-effort note never blocks the 200.
+    expect('noteDelivery' in getTransactionOtpStore()).toBe(false);
     // Its own per-phone budget: kind 'b2b', scoped to the invoice's partner.
     expect(issue).toHaveBeenCalledWith('inv_1', '15551112222', { kind: 'b2b', partnerId: 'default' });
   });

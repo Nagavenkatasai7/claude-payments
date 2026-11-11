@@ -970,3 +970,98 @@ describe('finalizeDraftPayment: MintRefusedError (pack 3)', { retry: 0 }, () => 
     },
   );
 });
+
+// Fix pack 4 T15 (C18 draft branch, C3, C20): the mint's recipient legal name is the draft's
+// own, else the name typed on the pay page (opts), else the saved recipient's book name for
+// the SAME account being minted (C3 match: method + last4 of the FINAL destination). The
+// name is screened at the mint (recipient, sender, recipient).
+describe('finalizeDraftPayment: the recipient legal name at the mint (pack 4 T15)', { retry: 0 }, () => {
+  // last4 of the repo = the last 4 DIGITS: the IFSC goes first so the account tail counts.
+  const ACCOUNT = 'HDFC0001234 123456789012';
+  const OTHER_ACCOUNT = 'HDFC0001234 123456785555';
+  const RP = '919876543210';
+
+  async function bookName(stores: Awaited<ReturnType<typeof buildStores>>, legalName: string, payoutDestination = ACCOUNT) {
+    const { createRecipientRepo } = await import('@/db/repos/aux-repos');
+    await createRecipientRepo(stores.db).upsertRecipient('default', PHONE, {
+      name: 'Mom', recipientPhone: RP, payoutMethod: 'bank', payoutDestination, lastUsedAt: new Date().toISOString(),
+    }, { legalName });
+  }
+  async function bankDraft(stores: Awaited<ReturnType<typeof buildStores>>, recipientLegalName?: string) {
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
+    return stores.draftStore.createDraft({
+      senderPhone: PHONE,
+      partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: ACCOUNT },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+      ...(recipientLegalName !== undefined ? { recipientLegalName } : {}),
+    });
+  }
+  async function mintedLegal(stores: Awaited<ReturnType<typeof buildStores>>, r: Awaited<ReturnType<typeof finalizeDraftPayment>>) {
+    if (!r.ok) throw new Error(`unexpected ${r.error}`);
+    return (await stores.store.getTransferDecrypted(r.transferId))?.recipientLegalName;
+  }
+
+  it('the draft legal name comes first (over a typed name and a book name)', async () => {
+    const stores = await buildStores();
+    await bookName(stores, 'Book Legal');
+    const draftId = await bankDraft(stores, 'Draft Legal');
+    expect(await mintedLegal(stores, await finalizeDraftPayment(stores, draftId, undefined, { recipientLegalName: 'Typed Legal' }))).toBe('Draft Legal');
+  });
+
+  it('then the typed name (opts.recipientLegalName), over a book name', async () => {
+    const stores = await buildStores();
+    await bookName(stores, 'Book Legal');
+    const draftId = await bankDraft(stores);
+    expect(await mintedLegal(stores, await finalizeDraftPayment(stores, draftId, undefined, { recipientLegalName: '  Typed Legal ' }))).toBe('Typed Legal');
+  });
+
+  it("then the saved recipient's name for the SAME account", async () => {
+    const stores = await buildStores();
+    await bookName(stores, 'Book Legal');
+    const draftId = await bankDraft(stores);
+    expect(await mintedLegal(stores, await finalizeDraftPayment(stores, draftId))).toBe('Book Legal');
+  });
+
+  it("a saved recipient's name for ANOTHER account (new bank details, other last4) is not taken", async () => {
+    const stores = await buildStores();
+    await bookName(stores, 'Book Legal');
+    const draftId = await bankDraft(stores);
+    const r = await finalizeDraftPayment(stores, draftId, { payoutMethod: 'bank', payoutDestination: OTHER_ACCOUNT });
+    expect(await mintedLegal(stores, r)).toBeUndefined();
+  });
+
+  it('a book read that throws -> minted without a name, one warn with the draft id only', async () => {
+    const stores = await buildStores();
+    await bookName(stores, 'Book Legal');
+    // A ciphertext sealed for another column fails its AAD check, so the decrypting read throws.
+    await stores.db.execute(sql`UPDATE recipients SET legal_name_enc = payout_destination_enc`);
+    const draftId = await bankDraft(stores);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await mintedLegal(stores, await finalizeDraftPayment(stores, draftId))).toBeUndefined();
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('pay.finalize_legal_name'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain(draftId);
+      expect(lines[0]).not.toMatch(/book legal|mom/i);
+      expect(lines[0]).not.toContain(PHONE);
+      expect(lines[0]).not.toContain(RP);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('the legal name is screened at mint (three parties)', async () => {
+    const stores = await buildStores();
+    const draftId = await bankDraft(stores);
+    const r = await finalizeDraftPayment(stores, draftId, undefined, { recipientLegalName: 'Typed Legal' });
+    if (!r.ok) throw new Error('unexpected');
+    const rows = (await stores.db.execute(
+      sql`SELECT meta FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${r.transferId} ORDER BY id`,
+    )) as unknown as { rows: Array<{ meta: { parties: Array<{ role: string }> } }> };
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].meta.parties.map((p) => p.role)).toEqual(['recipient', 'sender', 'recipient']);
+  });
+});

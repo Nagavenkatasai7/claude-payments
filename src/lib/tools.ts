@@ -12,6 +12,7 @@ import { isFundedRewardKind, type QuotedReward } from './rewards/types';
 import { quoteCeilingUsd, resolveEffectiveSendLimits } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { deliveryEstimatePhrase, resolvePartnerDisclosure } from './partner-config';
+import { PROVIDER_LINE_MAX, providerLineFor } from './legal/provider-line';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import { destinationListText, parseDestinationCountry, SUPPORTED_COUNTRY_COUNT, SUPPORTED_COUNTRY_NAMES, SUPPORTED_DESTINATIONS } from './destination-country';
@@ -61,6 +62,7 @@ import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './send
 import { HELP_REASONS, openHelpCaseAndPoke, type HelpCaseChannel, type HelpReason } from './help-case';
 import { OFF_TOPIC_REPLY } from './scope-guard';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
+import { validateAccountHolder } from './pay-body';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 import { BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC, isBillExpired } from './b2b-bill-expiry';
 import { customerHistoryUrl } from './customer-portal-url';
@@ -438,8 +440,13 @@ export function buildApproveSummary(
   // B3 rewards v1: a SmartRemit-funded reward on this quote (its fee is already
   // lowered). Absent, or first transfer free ⇒ the fee line is unchanged.
   reward?: QuotedReward,
+  // Fix pack 4 (C22 e): the owner's approved provider line, the card's LAST
+  // line (flattened, bounded). Absent or blank ⇒ the card is byte-identical.
+  providerLine?: string,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
+  // Review R2-Q1 K1: a backstop; an approved line always fits PROVIDER_LINE_MAX (provider-line.ts).
+  const line = boundUntrustedText(providerLine, PROVIDER_LINE_MAX).replace(/\s+/g, ' ').trim();
   return [
     // fix 5: the name may be a pre-fix outsider-written value, and on the web
     // channel this summary is returned to the model — clamp it (a clean name
@@ -448,6 +455,7 @@ export function buildApproveSummary(
     ...quoteFigureLines(q, fundingMethod, destinationCurrency, rateDate, reward),
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     rateLockLine(lockMinutes),
+    ...(line ? [line] : []),
   ].join('\n');
 }
 
@@ -545,6 +553,12 @@ const OCCUPATIONS = ['salaried','self_employed','business_owner','student','home
 const RELATIONSHIPS = ['self','spouse','parent','child','sibling','other_family','friend','business','other'] as const;
 function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | undefined {
   return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
+}
+/** Review R2-Q1 J1: a model-written recipient legal name, trimmed, or undefined unless validateAccountHolder accepts it. */
+function modelRecipientLegalName(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const r = validateAccountHolder(v);
+  return r.ok ? r.name : undefined;
 }
 
 // ── funding_method and the B2B shape are closed (fix 6) ─────────────────────
@@ -1254,6 +1268,10 @@ export interface ToolContext {
   // model to ask). The agent sets it from the purpose.detect switch; the portal
   // always sets it. Absent ⇒ purpose optional, exactly as before.
   purposeRequired?: boolean;
+  // Fix pack 4 (C22 d, R16): the owner's approved provider line, set by the
+  // agent from providerLineFor(resolvePartnerDisclosure(owner)). Held replies
+  // carry it. Absent on the portal and MCP contexts and without an approved line.
+  providerLine?: string;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
@@ -2477,7 +2495,12 @@ async function checkPaymentStatusTool(
       transfer_id: transfer.id,
       status: transferSummaryFields(transfer).status,
       // R43: every dead end says how to reach a person.
-      reply_to_customer: fixedReply(transfer.status === 'in_review' ? 'hold' : 'block', { help: true }),
+      // Fix pack 4 (C22 d): a HELD transfer's reply ends with the owner's
+      // approved provider line (none without one); a block never carries it.
+      reply_to_customer: fixedReply(
+        transfer.status === 'in_review' ? 'hold' : 'block',
+        transfer.status === 'in_review' ? { help: true, providerLine: ctx.providerLine } : { help: true },
+      ),
     };
   }
   return { transfer_id: transfer.id, status: transfer.status };
@@ -2728,7 +2751,8 @@ async function requestRefundTool(
       }
       return {
         error_code: 'not_refundable_yet',
-        message: fixedReply('refund_while_held', { help: true }), // R30: no review wording
+        // R30: no review wording; pack 4 (C22 d): the owner's approved provider line, when there is one.
+        message: fixedReply('refund_while_held', { help: true, providerLine: ctx.providerLine }),
       };
     }
     case 'cancellable': {
@@ -3238,7 +3262,8 @@ async function cancelBillTool(
           return {
             deferred: true,
             transfer_id: active.id,
-            reply_hint: fixedReply('payment_held', { help: true }), // R30: no review wording; R43: HELP
+            // R30: no review wording; R43: HELP; pack 4 (C22 d): the owner's approved provider line.
+            reply_hint: fixedReply('payment_held', { help: true, providerLine: ctx.providerLine }),
           };
         case 'paid': {
           // Reuse request_refund's guarded none→requested flag — a REQUEST only.
@@ -4164,7 +4189,9 @@ export async function prepareSendDraft(
       destinationCurrency,
       fundingMethod,
       // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
-      recipientLegalName: typeof input.recipientLegalName === 'string' ? input.recipientLegalName : undefined,
+      // Review R2-Q1 J1: the model's name is kept only when it passes the pay page's typed-name
+      // rule (validateAccountHolder); anything else is dropped silently, so the pay page asks.
+      recipientLegalName: modelRecipientLegalName(input.recipientLegalName),
       relationship: asEnum(RELATIONSHIPS, input.relationship),
       purpose: b2b ? BUSINESS_PURPOSE : parsePurpose(input.purpose),
       // Batch B follow-up A3: the reason rides the draft to the mint (plaintext in
@@ -4212,6 +4239,7 @@ export async function prepareSendDraft(
       rateLockMinutes(fxFetchedAt, Date.now(), routeExpiresAt),
       fxOrigin === 'platform' ? fxAsOf : undefined, // Step 0 §3.6
       offer?.reward, // B3: the reward fee line
+      providerLineFor(resolvePartnerDisclosure(partner)) ?? undefined, // pack 4 (C22 e): the owner's approved line
     );
     const payUrl = payUrlFor(draftId);
     return {

@@ -67,6 +67,20 @@ vi.mock('@/db/repos/customer-repo', async () => {
   };
 });
 
+// Pack 4 review R2 (I5): a switch that makes the release throw the recipient-identity refusal (the
+// real path needs an http rail and a fresh list; dashboard-ops.test.ts pins that it throws it).
+const releaseThrows: { err: Error | null } = { err: null };
+vi.mock('@/lib/dashboard-ops', async (orig) => {
+  const actual = await orig<typeof import('@/lib/dashboard-ops')>();
+  return {
+    ...actual,
+    releaseTransfer: async (...a: Parameters<typeof actual.releaseTransfer>) => {
+      if (releaseThrows.err) throw releaseThrows.err;
+      return actual.releaseTransfer(...a);
+    },
+  };
+});
+
 import { releaseHoldAction } from '@/app/partner/(app)/transfers/[id]/release-actions';
 import { auditEvents, outbox, transfers } from '@/db/schema';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -74,6 +88,7 @@ import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { EDD_REQUIRED_REASON as EDD, LARGE_AMOUNT_REASON as LARGE, SCREENING_REASONS } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { t } from '@/lib/i18n';
+import { RECIPIENT_IDENTITY_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
 
 const REASON = 'Source of funds verified with the sender.';
 const form = (id: string, reason = REASON) => {
@@ -108,6 +123,7 @@ beforeEach(async () => {
   revalidated.length = 0;
   screeningRead.fail = false;
   screeningRead.afterRead = null;
+  releaseThrows.err = null;
   host.value = 'smartremit.ai';
   db = await freshDb();
   store = createStore(redis, db);
@@ -316,6 +332,21 @@ describe('releaseHoldAction: success', () => {
     expect(await releaseHoldAction(form('tr_heldA1', 'a'.repeat(600)))).toEqual({ ok: true });
     const [row] = await releaseRows();
     expect((row.meta as { reason: string }).reason).toHaveLength(500);
+  });
+});
+
+describe('releaseHoldAction: the recipient-identity refusal (pack 4 review R2 I5)', () => {
+  it('maps RECIPIENT_IDENTITY_RELEASE_REFUSAL to the translated identity line, not the generic failure; nothing logged', async () => {
+    await asAdmin();
+    releaseThrows.err = new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await releaseHoldAction(form('tr_heldA1'));
+    const warned = warn.mock.calls.length;
+    warn.mockRestore();
+    expect(r).toEqual({ ok: false, error: t('partner.transfers.holdIdentity') });
+    expect(r).not.toEqual({ ok: false, error: t('partner.common.failed') });
+    expect(warned).toBe(0);
+    expect(revalidated).toEqual([]);
   });
 });
 

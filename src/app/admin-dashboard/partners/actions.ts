@@ -35,6 +35,7 @@ import {
   resolveStaffTenant,
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { sanitizeLogoValue } from '@/lib/logo';
 import { boundUntrustedText, BRAND_MAX } from '@/lib/untrusted-text';
 import { boundedDisplayName, boundedPersona, personaAuditEvent } from '@/lib/partner-brand-text';
@@ -54,6 +55,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { hasStandingCertification, settlementTargetUrl } from '@/lib/live-gate';
 import { lockPartner } from '@/lib/live-controls-write';
+import { pokeWorker } from '@/lib/outbox';
 import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
 import {
@@ -67,6 +69,7 @@ import {
   whatsappAuditMeta,
 } from '@/lib/partner-whatsapp-config';
 import { MAX_DELIVERY_BUSINESS_DAYS } from '@/lib/partner-config';
+import { PROVIDER_LINE_MAX } from '@/lib/legal/provider-line';
 import type {
   Partner,
   PartnerStatus,
@@ -690,16 +693,23 @@ const DISCLOSURE_ERROR: Record<DisclosureParseReason, string> = {
   delivery_days: `Delivery estimate must be a whole number of business days from 0 to ${MAX_DELIVERY_BUSINESS_DAYS}.`,
   regulator_name_required: 'Enter the state regulator name before its phone or website.',
   entity_required: 'Enter the licensed entity name before its other details.',
+  provider_name:
+    'The licensed entity and regulator names can hold letters, digits, spaces and common punctuation, on one line. Do not use quotation marks, backticks, instructions or the SmartRemit name.',
+  provider_line_too_long: `The licensed entity name and the state regulator name are too long together for the provider line, which can have at most ${PROVIDER_LINE_MAX} characters. Shorten one of the names.`,
 };
 
 export async function saveDisclosureConfigAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
-  const parsed = parseDisclosureForm(formData); // validate BEFORE any write
+  // Review R3-Y1 O2 (D4): only the default (demo) tenant's block may name SmartRemit; it is never shown.
+  const parsed = parseDisclosureForm(formData, { platformNameAllowed: id === DEFAULT_PARTNER_ID }); // validate BEFORE any write
   if (!parsed.ok) throw new Error(DISCLOSURE_ERROR[parsed.reason]);
+  // Fix pack 4 T5 (C11): a platform save never approves (it strips a partner approval; on a
+  // live-certified partner setDisclosure enqueues the live-change notice in its transaction).
   const r = await setDisclosure(getDb(), id, supportActor(staff), parsed.value);
   if (!r.ok) throw new Error('Partner not found.');
+  pokeWorker(); // post-response after(), so after the commit
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 

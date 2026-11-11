@@ -6,6 +6,7 @@ import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib
 import { last4, openOptional, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
+import { parseDisclosureSnapshot, type DisclosureSnapshotV1 } from '@/lib/remittance-disclosure';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
@@ -317,6 +318,13 @@ export function createTransferRepo(
      * encrypted columns at rest. When the incoming destination is the mask, the
      * conflict-update leaves payout_destination_enc/_last4 and
      * recipient_legal_name_enc untouched.
+     *
+     * Fix pack 4 (C4, critic P14): recipient_legal_name_enc is FILL-OR-KEEP on
+     * every read-modify-write: it is in the conflict set only when the incoming
+     * transfer carries a non-empty recipientLegalName. A masked read of an
+     * EMPTY-destination row is not '****'-prefixed, so without this it re-saved
+     * the column as NULL. disclosure_snapshot is not on Transfer and never in
+     * the set (setDisclosureSnapshotIfAwaiting is its only writer).
      */
     async saveTransfer(t: Transfer, opts: InsertOnlyColumns = {}): Promise<void> {
       const row = transferToRow(t, provider);
@@ -336,14 +344,15 @@ export function createTransferRepo(
       // payout reference is set only by setPayoutReference, from a signed callback).
       // Batch B follow-up A2: purpose_detail_enc is write-once as well (a masked read
       // never carries the reason, so re-saving one must not erase it).
+      // Fix pack 4 (C2): delivery_business_days is write-once too (stamped at mint).
       const {
         environment: _env, fxAsOf: _asOf, fxFetchedAt: _fxAt, fxSource: _fxSrc, fxProvider: _fxProv,
         fxExpiresAt: _fxExp, clientReference: _clientRef, payoutReference: _payoutRef,
-        purposeDetailEnc: _purposeDetail,
+        purposeDetailEnc: _purposeDetail, deliveryBusinessDays: _days,
         ...updatable
       } = row;
       void _env; void _asOf; void _fxAt; void _fxSrc; void _fxProv; void _fxExp; void _clientRef; void _payoutRef;
-      void _purposeDetail;
+      void _purposeDetail; void _days;
       let set: Partial<typeof row> = updatable;
       if (masked) {
         const {
@@ -358,6 +367,10 @@ export function createTransferRepo(
         } = updatable;
         void _enc; void _l4; void _legal;
         void _sbEnc; void _sbL4; void _rbEnc; void _rbL4;
+        set = rest;
+      } else if (!t.recipientLegalName?.trim()) {
+        const { recipientLegalNameEnc: _legal, ...rest } = updatable;
+        void _legal;
         set = rest;
       }
       // Program-Fix 14 PR C: `screening` is INSERT-ONLY — it goes into the
@@ -1177,12 +1190,22 @@ export function createTransferRepo(
      * not engage) it writes recipient_legal_name_enc = NULL, which the default
      * read omits. Returns the updated (masked) row, or null when any guard
      * failed — the caller reports current truth.
+     *
+     * Review R3-X1 N1/N2 (decision D3): the SAME guarded UPDATE also writes the
+     * account-holder name for the new account. `legalName` (trimmed, non-blank)
+     * seals it into recipient_legal_name_enc; with no name, `clearLegalName`
+     * sets it to NULL (the old name described the old account). The caller makes
+     * the clear decision under the row lock (lockEditablePayout), in the same
+     * transaction: a sealed destination cannot be tested in SQL, and a masked one
+     * is no account (isStoredAccount). Only the pay route passes either option.
      */
     async setPayoutIfEditable(
       id: string,
       partnerId: PartnerId,
       payout: { payoutMethod: PayoutMethod; payoutDestination: string },
+      opts: { legalName?: string; clearLegalName?: boolean } = {},
     ): Promise<Transfer | null> {
+      const name = (opts.legalName ?? '').trim();
       const rows = await db
         .update(transfers)
         .set({
@@ -1191,10 +1214,121 @@ export function createTransferRepo(
             ? encryptField(payout.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc')) // row id = the WHERE's id
             : '',
           payoutDestinationLast4: last4(payout.payoutDestination),
+          ...(name
+            ? { recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')) } // row id = the WHERE's id
+            : opts.clearLegalName
+              ? { recipientLegalNameEnc: null }
+              : {}),
         })
         .where(payoutEditable(id, partnerId))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Review R3-X1 N1 (decision D3): lock this tenant's editable row (the
+     * payoutEditable guard, FOR UPDATE) and return what the combined payout and
+     * name write decides on: the stored destination (decrypted, never logged)
+     * and whether a legal name is on the row. Null when the guard fails. Call it
+     * inside the transaction that then runs setPayoutIfEditable.
+     */
+    async lockEditablePayout(
+      id: string,
+      partnerId: PartnerId,
+    ): Promise<{ storedDestination: string; hasLegalName: boolean } | null> {
+      const rows = await db.select().from(transfers).where(payoutEditable(id, partnerId)).for('update');
+      if (!rows[0]) return null;
+      const t = toDomain(rows[0], true);
+      return { storedDestination: (t.payoutDestination ?? '').trim(), hasLegalName: rows[0].recipientLegalNameEnc !== null };
+    },
+
+    /**
+     * Fix pack 4 (C4): the pay step's account-holder name write. Sets
+     * recipient_legal_name_enc and NOTHING else, only while the payout is
+     * editable (payoutEditable: this tenant's awaiting_payment, unfunded b2c
+     * row, not partner-API, not a payment link) AND no name is stored yet
+     * (fill-only). False for a blank name (no query) or any failed guard.
+     */
+    async setRecipientLegalNameIfEditable(id: string, partnerId: PartnerId, legalName: string): Promise<boolean> {
+      const name = legalName.trim();
+      if (!name) return false;
+      const rows = await db
+        .update(transfers)
+        .set({
+          recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')), // row id = the WHERE's id
+        })
+        .where(and(payoutEditable(id, partnerId), isNull(transfers.recipientLegalNameEnc)))
+        .returning({ id: transfers.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Review R1-P2 D1: true when this tenant's row carries its own identity and
+     * is never asked for a name (b2b, Partner-API-minted, payment link: the rows
+     * recipientIdentityMissing exempts). False for a missing row or another tenant.
+     */
+    async recipientIdentityExempt(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.id, id),
+            eq(transfers.partnerId, partnerId),
+            sql`(${transfers.transferType} <> 'b2c' OR ${partnerApiMintedSql()} OR ${paymentLinkSql()})`,
+          ),
+        )
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 4 (C4): true when this tenant's b2c transfer has no recipient
+     * legal name and was minted neither through the partner API nor by a
+     * payment link (those rows carry their own identity). False for a missing
+     * row or another tenant. Never decrypts.
+     */
+    async recipientIdentityMissing(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.id, id),
+            eq(transfers.partnerId, partnerId),
+            eq(transfers.transferType, 'b2c'),
+            isNull(transfers.recipientLegalNameEnc),
+            sql`NOT ${partnerApiMintedSql()}`,
+            sql`NOT ${paymentLinkSql()}`,
+          ),
+        )
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 4 (C4): store the disclosure snapshot the customer acknowledged.
+     * Only commitPaymentEvidence (C8) calls this; once paid or in_review the
+     * snapshot is frozen. Writes only while this tenant's row is
+     * awaiting_payment, and overwrites a previous snapshot (a retried pay step).
+     */
+    async setDisclosureSnapshotIfAwaiting(id: string, partnerId: PartnerId, snap: DisclosureSnapshotV1): Promise<boolean> {
+      const rows = await db
+        .update(transfers)
+        .set({ disclosureSnapshot: snap })
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId), eq(transfers.status, 'awaiting_payment')))
+        .returning({ id: transfers.id });
+      return rows.length > 0;
+    },
+
+    /** Fix pack 4 (C4): the stored snapshot, parsed; null for another tenant (404-never-403), a missing row, NULL or a malformed value. */
+    async getDisclosureSnapshot(id: string, partnerId: PartnerId): Promise<DisclosureSnapshotV1 | null> {
+      const rows = await db
+        .select({ s: transfers.disclosureSnapshot })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId)))
+        .limit(1);
+      return rows[0] ? parseDisclosureSnapshot(rows[0].s) : null;
     },
 
     /**

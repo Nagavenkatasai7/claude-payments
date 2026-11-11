@@ -6,6 +6,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getDb } from '@/db/client';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
+import { providerLineFor } from '@/lib/legal/provider-line';
 import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
 import { isInfraError } from '@/lib/infra-error';
 import { logWarn } from '@/lib/log';
@@ -106,6 +107,10 @@ async function renderPage(token: string): Promise<React.ReactNode> {
   const { link, payee, transfer } = payable;
   const partner = await getPartnerStore().getPartner(link.partnerId);
   const disclosureConfig = resolvePartnerDisclosure(partner);
+  // Fix pack 4 (C22 a, R16): the link owner's approved provider line, only on
+  // the payable sheet below (Sheet itself is unchanged, so every dead-link and
+  // "can't be made online" sheet stays byte-identical). Null renders nothing.
+  const providerLine = providerLineFor(disclosureConfig);
 
   // The figures per way to pay. A claimed link whose transfer exists (a charge
   // failed before) shows THAT transfer's fixed figures and its one method.
@@ -168,6 +173,11 @@ async function renderPage(token: string): Promise<React.ReactNode> {
 
   return (
     <Sheet title="Secure payment">
+      {providerLine && (
+        <p data-testid="provider-line" className="-mt-3 mb-4 text-[13px] leading-normal text-[#8696a0]">
+          {providerLine}
+        </p>
+      )}
       <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
         <Row label="Pay to" value={payee.legalName} />
         <Row label="Reference" value={link.reference} />
@@ -182,6 +192,8 @@ async function renderPage(token: string): Promise<React.ReactNode> {
         disclosureVersion={disclosureVersion}
         quoteLockedAt={quoteLockedAt}
         receipt={{ payeeName: payee.legalName, reference: link.reference, amountInr: link.amountInr }}
+        approvingName={payee.legalName}
+        disclosureHash={disclosureConfig.hash}
       />
     </Sheet>
   );

@@ -30,6 +30,7 @@ import {
   ctx,
   type CustomerEncColumn,
   type IntegrationEncColumn,
+  type RecipientEncColumn,
   type ScheduleEncColumn,
   type TransferEncColumn,
   type WaitlistEncColumn,
@@ -77,8 +78,10 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
   {
     table: 'recipients',
     key: ['partner_id', 'sender_phone', 'recipient_phone'],
-    columns: ['payout_destination_enc'],
-    ctxFor: ([partnerId, senderPhone, recipientPhone]) => ctx.recipient(partnerId, senderPhone, recipientPhone),
+    // legal_name_enc: fix pack 4 (born v2; registered for key-ring rotation).
+    columns: ['payout_destination_enc', 'legal_name_enc'],
+    ctxFor: ([partnerId, senderPhone, recipientPhone], column) =>
+      ctx.recipient(partnerId, senderPhone, recipientPhone, column as RecipientEncColumn),
   },
   {
     table: 'beneficiaries',

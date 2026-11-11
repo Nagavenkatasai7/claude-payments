@@ -91,6 +91,7 @@ describe('/pay/[transferId] — an expired (cancelled) link (Program-Fix 32)', (
     expect(html).not.toContain('Acme Money Co');
     expect(html).not.toContain('Mom');
     expect(html).not.toContain('Total charge');
+    expect(html).not.toContain('Approving'); // fix pack 4 (C15): nothing on dead-link sheets
     // No decrypted payout read and no editability probe for a dead link.
     expect(getTransferDecrypted).not.toHaveBeenCalled();
     expect(isPayoutEditable).not.toHaveBeenCalled();

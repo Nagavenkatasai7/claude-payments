@@ -6,11 +6,11 @@ import { SendsPausedError } from './flags';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { hasSenderName } from './sender-identity';
 import { env } from './env';
-import { logError } from './log';
+import { logError, logWarn } from './log';
 import { RateUnavailableError } from './rate';
 import { newTransferId } from './id';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
@@ -174,6 +174,24 @@ export async function runDueSchedules(
           continue;
         }
       }
+      // Fix pack 4 (R03, C20): the saved recipient's legal name rides the mint (screened there as a
+      // further 'recipient' party and stored on the row), but only a name saved for THIS schedule's
+      // account (C3 match: payout method + last 4). Read once per run: the busy retry reuses it, and
+      // a name saved later reaches the next run. A failed read never stops the run; the warn names
+      // the schedule id and the error name only (never the name, a phone or the error object).
+      let recipientLegalName: string | undefined;
+      try {
+        recipientLegalName = (
+          await createRecipientRepo(deps.db).getRecipientLegalName(
+            schedule.partnerId,
+            schedule.phone,
+            schedule.recipientPhone,
+            { payoutMethod: schedule.payoutMethod, payoutDestination: schedule.payoutDestination ?? '' },
+          )
+        )?.trim() || undefined;
+      } catch (err) {
+        logWarn('cron.legal_name_read', err instanceof Error ? err.name : 'error', { scheduleId: schedule.id });
+      }
       const mint = () => createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
         id: reservedId,
         phone: schedule.phone,
@@ -182,6 +200,7 @@ export async function runDueSchedules(
         partnerId: schedule.partnerId,
         recipientName: schedule.recipientName,
         recipientPhone: schedule.recipientPhone,
+        recipientLegalName,
         payoutMethod: schedule.payoutMethod,
         payoutDestination: schedule.payoutDestination,
         fundingMethod: schedule.fundingMethod,

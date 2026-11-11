@@ -10,7 +10,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { isPartnerReleasableHold } from '@/lib/compliance-config';
 import { loadSenderScreening } from '@/lib/sender-screening';
-import { canReleaseHeld, releaseTransfer } from '@/lib/dashboard-ops';
+import { canReleaseHeld, RECIPIENT_IDENTITY_RELEASE_REFUSAL, releaseTransfer } from '@/lib/dashboard-ops';
 import { scopeOf } from '@/lib/staff-scope';
 import { requireStaffReason, STAFF_REASON_MIN } from '@/lib/send-limits';
 import { isReasonValid } from '@/lib/ui/confirm-reason';
@@ -86,6 +86,8 @@ export async function releaseHoldAction(formData: FormData): Promise<ActionResul
   } catch (err) {
     // Lost the guarded claim (a double submit or a concurrent release/reject): nothing moved.
     if (err instanceof Error && err.message.startsWith('Cannot release')) return notAllowed;
+    // Pack 4 review R2 (I5): a nameless real-money row is never released (C19); nothing was written.
+    if (err instanceof Error && err.message === RECIPIENT_IDENTITY_RELEASE_REFUSAL) return { ok: false, error: t('partner.transfers.holdIdentity') };
     // The error NAME only: a failed query's message carries its bound params.
     logWarn('partner.release', errName(err), { transferId: transfer.id });
     return { ok: false, error: t('partner.common.failed') };

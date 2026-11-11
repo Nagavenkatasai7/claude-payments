@@ -179,7 +179,7 @@ export const APPROVED_PUBLIC_PHRASINGS: readonly ApprovedPhrasing[] = [
   {
     topic: 'provider',
     say: 'A licensed money transmitter provides the transfer. SmartRemit provides the technology and never holds your money.',
-    evidence: 'src/lib/legal/drafts.ts LICENSING_DRAFT (provider of record); the pay page and receipt name the partner (resolvePartnerDisclosure).',
+    evidence: 'src/lib/legal/drafts.ts LICENSING_DRAFT (provider of record); the pay page and receipt name the partner (resolvePartnerDisclosure); the one provider line PROVIDER_LINE_TEMPLATE (src/lib/legal/provider-line.ts) shows only for a partner-approved block (partnerApproved).',
   },
   {
     topic: 'custody',
@@ -189,7 +189,7 @@ export const APPROVED_PUBLIC_PHRASINGS: readonly ApprovedPhrasing[] = [
   {
     topic: 'delivery',
     say: 'Delivery is not instant. Your receipt shows when the money is expected to arrive.',
-    evidence: 'resolvePartnerDisclosure deliveryBusinessDays; the receipt disclosure (buildReceiptDisclosure).',
+    evidence: 'resolvePartnerDisclosure deliveryBusinessDays; the receipt disclosure (buildReceiptDisclosure); stored per transfer at mint (transfers.delivery_business_days, deliveryDaysFor).',
   },
   {
     topic: 'encryption',

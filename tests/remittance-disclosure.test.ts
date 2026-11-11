@@ -44,6 +44,8 @@ describe('resolvePartnerDisclosure', () => {
       website: null,
       stateRegulator: null,
       deliveryBusinessDays: 1,
+      partnerApproved: false,
+      hash: null,
     });
   });
 
@@ -69,6 +71,8 @@ describe('resolvePartnerDisclosure', () => {
       website: 'https://acme.example',
       stateRegulator: { name: 'State Department of Financial Services', phone: '+1 800 555 0199', website: 'https://regulator.example' },
       deliveryBusinessDays: 2,
+      partnerApproved: false,
+      hash: expect.stringMatching(/^dh1:[0-9a-f]{64}$/),
     });
   });
 
@@ -106,7 +110,63 @@ describe('resolvePartnerDisclosure', () => {
       website: null,
       stateRegulator: null,
       deliveryBusinessDays: 1,
+      partnerApproved: false,
+      hash: expect.stringMatching(/^dh1:[0-9a-f]{64}$/),
     });
+  });
+
+  // Fix pack 4 T5 (C11): the approval stamp. A block is partner-approved only when it is
+  // configured (a licensed entity) and its stamp's hash equals the stored block's hash.
+  it('a block whose approval.hash equals its hash is partnerApproved; an edited block (hash mismatch) is not', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const approval = { by: 'acme.admin', at: new Date().toISOString(), hash: disclosureHash(FULL) };
+    const ok = resolvePartnerDisclosure(partner({ supportConfig: { disclosure: { ...FULL, approval } } }));
+    expect(ok.partnerApproved).toBe(true);
+    expect(ok.hash).toBe(disclosureHash(FULL));
+    const edited = resolvePartnerDisclosure(partner({ supportConfig: { disclosure: { ...FULL, phone: '+1 800 555 0101', approval } } }));
+    expect(edited.partnerApproved).toBe(false);
+    expect(edited.hash).not.toBe(approval.hash);
+  });
+
+  it('an approved stamp on an UNCONFIGURED block (no entity) is not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const block = { phone: '+1 800 555 0100' };
+    const r = resolvePartnerDisclosure(
+      partner({ displayName: 'Acme Send', supportConfig: { disclosure: { ...block, approval: { by: 'a', at: new Date().toISOString(), hash: disclosureHash(block) } } } }),
+    );
+    expect(r.configured).toBe(false);
+    expect(r.partnerApproved).toBe(false);
+    expect(r.hash).toBe(disclosureHash(block));
+  });
+
+  it('the default tenant with a stamped block is never approved and its hash is null', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const approval = { by: 'x', at: new Date().toISOString(), hash: disclosureHash(FULL) };
+    const r = resolvePartnerDisclosure(partner({ id: 'default', supportConfig: { disclosure: { ...FULL, approval } } }));
+    expect(r.partnerApproved).toBe(false);
+    expect(r.hash).toBeNull();
+  });
+
+  it('no stored block gives hash null and not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const r = resolvePartnerDisclosure(partner({ displayName: 'Acme Send' }));
+    expect(r.hash).toBeNull();
+    expect(r.partnerApproved).toBe(false);
+  });
+
+  it('a malformed approval (not an object, hash not a string) reads as not approved', async () => {
+    const { resolvePartnerDisclosure } = await cfg();
+    const { disclosureHash } = await import('@/lib/disclosure-hash');
+    const h = disclosureHash(FULL);
+    for (const approval of [h, 42, null, ['x'], { hash: 7 }, { hash: { h } }, {}]) {
+      const disclosure = { ...FULL, approval } as unknown as NonNullable<Partner['supportConfig']>['disclosure'];
+      const r = resolvePartnerDisclosure(partner({ supportConfig: { disclosure } }));
+      expect(r.partnerApproved).toBe(false);
+      expect(r.hash).toBe(h);
+    }
   });
 
   it('a regulator website that is not https is dropped but the name stays', async () => {
@@ -279,6 +339,60 @@ describe('buildReceiptDisclosure (§1005.31(b)(2))', () => {
     expect(buildReceiptDisclosure(transfer({ status: 'delivered', paidAt }), r, NOW)!.cancelDeadline).toBeNull();
     expect(buildReceiptDisclosure(transfer({ status: 'in_review', paidAt }), r, NOW)!.cancelDeadline).toBeNull();
   });
+
+  describe('stored delivery days (pack 4 C21)', () => {
+    const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    const dateLine = (d: { lines: { label: string; value: string }[] }) => d.lines.find((l) => l.label === 'Date available')?.value;
+    const partnerDays = (n: number) =>
+      partner({ supportConfig: { disclosure: { ...FULL, deliveryEstimate: { businessDays: n } } } });
+
+    it("stored days win over the partner's: a paid row stored with 3 -> On or about paidAt + 3 business days, partner set to 1", async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const r = resolvePartnerDisclosure(partnerDays(1));
+      expect(r.deliveryBusinessDays).toBe(1);
+      const paidAt = new Date(NOW - 10 * 60_000).toISOString();
+      const d = buildReceiptDisclosure({ ...transfer({ paidAt }), deliveryBusinessDays: 3 }, r, NOW)!;
+      expect(dateLine(d)).toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 3))} (estimate)`);
+      expect(dateLine(d)).not.toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 1))} (estimate)`);
+    });
+
+    it('stored 0 -> the paid day itself (weekend rule as addBusinessDays)', async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const r = resolvePartnerDisclosure(partnerDays(2));
+      // A weekday and a weekend payment, both relative to NOW.
+      for (const back of [0, 1, 2, 3, 4, 5, 6]) {
+        const paidAt = new Date(NOW - back * 86_400_000 - 10 * 60_000).toISOString();
+        const d = buildReceiptDisclosure({ ...transfer({ paidAt, status: 'paid' }), deliveryBusinessDays: 0 }, r, NOW)!;
+        const day = new Date(Date.parse(paidAt)).getUTCDay();
+        const expected = addBusinessDays(Date.parse(paidAt), 0);
+        expect(dateLine(d)).toBe(`On or about ${fmt.format(expected)} (estimate)`);
+        if (day !== 0 && day !== 6) expect(fmt.format(expected)).toBe(fmt.format(new Date(paidAt)));
+      }
+    });
+
+    it("no stored days -> the partner's current value (today's behaviour)", async () => {
+      const { buildReceiptDisclosure, addBusinessDays } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const paidAt = new Date(NOW - 10 * 60_000).toISOString();
+      const d = buildReceiptDisclosure(transfer({ paidAt }), resolvePartnerDisclosure(partnerDays(4)), NOW)!;
+      expect(dateLine(d)).toBe(`On or about ${fmt.format(addBusinessDays(Date.parse(paidAt), 4))} (estimate)`);
+      const unpaid = buildReceiptDisclosure(transfer({ status: 'awaiting_payment', paidAt: undefined }), resolvePartnerDisclosure(partnerDays(4)), NOW)!;
+      expect(dateLine(unpaid)).toBe('Within 4 business days of payment (estimate)');
+    });
+
+    it("an unpaid row stored with 2 -> 'Within 2 business days of payment (estimate)'", async () => {
+      const { buildReceiptDisclosure } = await mod();
+      const { resolvePartnerDisclosure } = await cfg();
+      const d = buildReceiptDisclosure(
+        { ...transfer({ status: 'awaiting_payment', paidAt: undefined }), deliveryBusinessDays: 2 },
+        resolvePartnerDisclosure(partnerDays(1)),
+        NOW,
+      )!;
+      expect(dateLine(d)).toBe('Within 2 business days of payment (estimate)');
+    });
+  });
 });
 
 describe('isDisclosureAckVersion (the optional pay POST field)', () => {
@@ -318,5 +432,84 @@ describe('the disclosure drafts', () => {
     expect(text).not.toMatch(/approv/i);
     expect(text).not.toMatch(/smartremit/i);
     expect(d.DISCLOSURE_DRAFT_BADGE).toMatch(/draft/i);
+  });
+});
+
+// Fix pack 4 (C16, landed by T2 because the transfer repo is typed by it): the stored
+// disclosure snapshot's parser. Pure; never throws; returns a fresh object with V1 keys only.
+describe('parseDisclosureSnapshot (fix pack 4, C16)', () => {
+  const ACK_AT = new Date(Date.now() - 60_000).toISOString();
+  const full = () => ({
+    v: 1,
+    version: 'draft-2026-09',
+    configHash: 'abc123',
+    shownHash: null,
+    figures: {
+      amountSource: 100, feeSource: 2.99, totalChargeSource: 102.99, sourceCurrency: 'USD',
+      amountDest: 8350.5, destinationCurrency: 'INR', fxRate: 83.505,
+    },
+    provider: {
+      kind: 'configured', licensedEntity: 'Acme Money Services LLC', licenceIds: ['NMLS 000000'],
+      phone: '+1 800 555 0100', website: 'https://acme.example', regulator: 'State Dept', approved: true,
+    },
+    deliveryBusinessDays: 2,
+    dateAvailable: 'on or about 2 business days',
+    acknowledgedAt: ACK_AT,
+    surface: 'transfer',
+  });
+
+  it('accepts a full V1 object and returns a fresh object with only V1 keys', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    const raw = { ...full(), extra: 'x', figures: { ...full().figures, junk: 1 }, provider: { ...full().provider, more: 2 } };
+    const out = parseDisclosureSnapshot(raw);
+    expect(out).toEqual(full());
+    expect(out).not.toBe(raw);
+    expect(out!.figures).not.toBe(raw.figures);
+    expect(out!.provider.licenceIds).not.toBe(raw.provider.licenceIds);
+    expect(out).not.toHaveProperty('extra');
+    expect(out!.figures).not.toHaveProperty('junk');
+    expect(out!.provider).not.toHaveProperty('more');
+  });
+
+  it('accepts the demo / pending kinds, the link surface, null provider fields and 0 delivery days', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    const s = { ...full(), surface: 'link', deliveryBusinessDays: 0, configHash: null,
+      provider: { kind: 'demo', licensedEntity: null, licenceIds: [], phone: null, website: null, regulator: null, approved: false } };
+    expect(parseDisclosureSnapshot(s)).toEqual(s);
+    expect(parseDisclosureSnapshot({ ...full(), provider: { ...full().provider, kind: 'pending' } })?.provider.kind).toBe('pending');
+  });
+
+  it.each<[string, (s: Record<string, unknown>) => unknown]>([
+    ['v !== 1', (s) => ({ ...s, v: 2 })],
+    ['v as a string', (s) => ({ ...s, v: '1' })],
+    ['an empty version', (s) => ({ ...s, version: '' })],
+    ['a numeric configHash', (s) => ({ ...s, configHash: 5 })],
+    ['a missing figure', (s) => { const f = { ...(s.figures as object) } as Record<string, unknown>; delete f.fxRate; return { ...s, figures: f }; }],
+    ['a non-finite number', (s) => ({ ...s, figures: { ...(s.figures as object), amountSource: Number.POSITIVE_INFINITY } })],
+    ['a NaN figure', (s) => ({ ...s, figures: { ...(s.figures as object), feeSource: Number.NaN } })],
+    ['a numeric currency', (s) => ({ ...s, figures: { ...(s.figures as object), sourceCurrency: 840 } })],
+    ['a bad provider kind', (s) => ({ ...s, provider: { ...(s.provider as object), kind: 'licensed' } })],
+    ['a non-string licence id', (s) => ({ ...s, provider: { ...(s.provider as object), licenceIds: [1] } })],
+    ['a non-boolean approved', (s) => ({ ...s, provider: { ...(s.provider as object), approved: 'yes' } })],
+    ['a missing provider', (s) => { const c = { ...s }; delete c.provider; return c; }],
+    ['fractional delivery days', (s) => ({ ...s, deliveryBusinessDays: 1.5 })],
+    ['delivery days above 10', (s) => ({ ...s, deliveryBusinessDays: 11 })],
+    ['negative delivery days', (s) => ({ ...s, deliveryBusinessDays: -1 })],
+    ['a non-date acknowledgedAt', (s) => ({ ...s, acknowledgedAt: 'yesterday-ish' })],
+    ['a numeric dateAvailable', (s) => ({ ...s, dateAvailable: 3 })],
+    ['a bad surface', (s) => ({ ...s, surface: 'portal' })],
+  ])('returns null for %s', async (_n, mutate) => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    expect(parseDisclosureSnapshot(mutate(full() as unknown as Record<string, unknown>))).toBeNull();
+  });
+
+  it('returns null for non-object input and never throws', async () => {
+    const { parseDisclosureSnapshot } = await import('@/lib/remittance-disclosure');
+    for (const raw of [null, undefined, 1, 'x', true, [], [full()]]) {
+      expect(parseDisclosureSnapshot(raw)).toBeNull();
+    }
+    const hostile = { get v() { throw new Error('boom'); } };
+    expect(() => parseDisclosureSnapshot(hostile)).not.toThrow();
+    expect(parseDisclosureSnapshot(hostile)).toBeNull();
   });
 });

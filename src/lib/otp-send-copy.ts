@@ -4,6 +4,7 @@
 //   502 { reason: 'otp_send_failed' } — the WhatsApp send failed (cooldown released)
 //   429 { reason: 'locked' }          — an issue cap was reached
 //   409 / 503 rate reasons (Step 0)   — the transfer's rate, see below
+//   409 { reason: 'not_available' }   — the payment cannot be completed here
 //   anything else (a limiter 429 with no reason, a 5xx) — a generic retry line.
 
 export const OTP_SEND_FAILED_MESSAGE =
@@ -21,11 +22,17 @@ export const OTP_RATE_EXPIRED_PAYMENT_PENDING_MESSAGE =
 export const OTP_FX_UNAVAILABLE_MESSAGE =
   'Exchange rates are temporarily unavailable — please try again in a few minutes.';
 
+// Review R1-P1 F2: request_otp answers 409 not_available when the payment
+// cannot be completed here (e.g. the provider block is not approved). Duplicates
+// fixedReply('cannot_complete') (hold-replies.ts); a test pins them equal.
+export const OTP_NOT_AVAILABLE_MESSAGE = "This transfer can't be completed right now.";
+
 export function otpRequestErrorMessage(reason: unknown): string {
   if (reason === 'otp_send_failed') return OTP_SEND_FAILED_MESSAGE;
   if (reason === 'locked') return OTP_LOCKED_MESSAGE;
   if (reason === 'rate_expired') return OTP_RATE_EXPIRED_MESSAGE;
   if (reason === 'rate_expired_payment_pending') return OTP_RATE_EXPIRED_PAYMENT_PENDING_MESSAGE;
   if (reason === 'fx_unavailable') return OTP_FX_UNAVAILABLE_MESSAGE;
+  if (reason === 'not_available') return OTP_NOT_AVAILABLE_MESSAGE;
   return OTP_RETRY_MESSAGE;
 }

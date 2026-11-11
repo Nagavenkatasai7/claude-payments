@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { WATCHLIST } from '@/lib/compliance';
-import { isRescreenOnlyHold, resolveCorridorRules } from '@/lib/compliance-config';
+import { isRecipientIdentityHold, isRescreenOnlyHold, resolveCorridorRules } from '@/lib/compliance-config';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -271,7 +271,13 @@ export default async function CompliancePage() {
                   ...transferCells(t, senderNames, purposeReasons),
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
-                      {canRelease(t) ? (
+                      {isRecipientIdentityHold(t) ? (
+                        // Pack 4 review R2 (I5): no release pays out without the account holder
+                        // name (C19, owner Q19); releaseTransfer refuses it. Reject & refund only.
+                        <span data-testid="release-identity-missing" className="text-xs text-muted-foreground self-center">
+                          Cannot be released without the account holder name. Reject and refund it.
+                        </span>
+                      ) : canRelease(t) ? (
                         <form action={releaseTransferAction} className="flex flex-col gap-1">
                           <input type="hidden" name="id" value={t.id} />
                           <div className="flex items-center gap-1">

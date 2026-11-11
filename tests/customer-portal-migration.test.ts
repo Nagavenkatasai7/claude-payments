@@ -140,7 +140,9 @@ describe('migration 0027 is NEW TABLES ONLY (safe for the build already in produ
   // Captured from the migrated DB at 0026, BEFORE this migration existed. A changed list means an
   // existing table was altered, which the old build's db.select().from(t) would break on.
   it('the column lists of the existing tables are unchanged', async () => {
-    expect(await columns(db, 'recipients')).toEqual([["sender_phone","text","NO"],["recipient_phone","text","NO"],["name","text","NO"],["payout_method","text","NO"],["payout_destination_enc","text","NO"],["payout_destination_last4","text","NO"],["last_used_at",TS,"NO"],["partner_id","text","NO"]]);
+    expect(await columns(db, 'recipients')).toEqual([["sender_phone","text","NO"],["recipient_phone","text","NO"],["name","text","NO"],["payout_method","text","NO"],["payout_destination_enc","text","NO"],["payout_destination_last4","text","NO"],["last_used_at",TS,"NO"],["partner_id","text","NO"],
+      // 0038 (fix pack 4) appends one NULLABLE column at the end; 0027 itself still alters nothing here.
+      ["legal_name_enc","text","YES"]]);
     expect(await columns(db, 'partner_sites')).toEqual([["partner_id","text","NO"],["slug","text","YES"],["accent_color","text","YES"],["created_at",TS,"NO"],["updated_at",TS,"NO"]]);
     expect(await columns(db, 'partners')).toEqual([["id","text","NO"],["name","text","NO"],["status","text","NO"],["countries","jsonb","NO"],["brand_name","text","YES"],["display_name","text","YES"],["primary_color","text","YES"],["logo_url","text","YES"],["support_contact","text","YES"],["bot_persona","text","YES"],["admin_note","text","YES"],["kyc_mode","text","NO"],["require_kyc_before_send","boolean","YES"],["corridor_compliance","jsonb","YES"],["created_at",TS,"NO"],["updated_at",TS,"NO"],["support_config","jsonb","YES"],["send_limits","jsonb","YES"],
       // 0037 (fix pack 3) appends one NOT NULL DEFAULT '{}' column at the end; this migration itself still alters nothing here.

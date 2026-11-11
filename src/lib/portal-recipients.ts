@@ -10,6 +10,7 @@ import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
 import { BANK_FIELDS_BY_COUNTRY, accountConfirmErrors, accountConfirmKey, validatePayoutFields } from './payout-format';
 import { countryForPhone } from './partner-currency';
 import { isValidPhone, normalizePhone } from './phone';
+import { validateAccountHolder } from './pay-body';
 import type { MessageKey } from './i18n';
 import type { CountryCode, PartnerId, PayoutMethod, Recipient, Schedule } from './types';
 
@@ -112,10 +113,27 @@ export interface RecipientFormErrors {
   country?: MessageKey;
   /** Per bank field, the pay page's own validator messages. */
   bank?: Record<string, string>;
+  /** Fix pack 4 (C18): the optional account-holder name. */
+  legalName?: MessageKey;
+}
+
+/**
+ * Fix pack 4 (C18, C13): the optional account-holder name, validated like the
+ * pay page. Blank -> absent (on edit: keep the saved name; the form never clears it).
+ */
+function readLegalName(fd: FormData, errors: RecipientFormErrors): string | undefined {
+  const raw = str(fd, 'legalName');
+  if (raw.trim() === '') return undefined;
+  const v = validateAccountHolder(raw);
+  if (!v.ok) {
+    errors.legalName = 'portal.recipients.legal_name_invalid';
+    return undefined;
+  }
+  return v.name;
 }
 
 export type AddInputResult =
-  | { ok: true; value: { name: string; recipientPhone: string; payoutMethod: PayoutMethod; payoutDestination: string } }
+  | { ok: true; value: { name: string; recipientPhone: string; payoutMethod: PayoutMethod; payoutDestination: string; legalName?: string } }
   | { ok: false; errors: RecipientFormErrors };
 
 /** Add: name, recipient phone (its calling code must be the chosen country) and bank details, via the pay page's validator. */
@@ -138,12 +156,25 @@ export function validateAddInput(fd: FormData): AddInputResult {
     if (v.ok) payoutDestination = v.payoutDestination;
     else errors.bank = v.errors;
   }
+  const legalName = readLegalName(fd, errors);
   if (Object.keys(errors).length > 0 || !name) return { ok: false, errors };
-  return { ok: true, value: { name, recipientPhone, payoutMethod: 'bank', payoutDestination } };
+  return {
+    ok: true,
+    value: { name, recipientPhone, payoutMethod: 'bank', payoutDestination, ...(legalName ? { legalName } : {}) },
+  };
 }
 
 export type EditInputResult =
-  | { ok: true; value: { name: string; payoutMethod: PayoutMethod; payoutDestination: string; fields: Array<'name' | 'destination'> } }
+  | {
+      ok: true;
+      value: {
+        name: string;
+        payoutMethod: PayoutMethod;
+        payoutDestination: string;
+        fields: RecipientAuditField[];
+        legalName?: string;
+      };
+    }
   | { ok: false; errors: RecipientFormErrors };
 
 /**
@@ -171,22 +202,26 @@ export function validateEditInput(fd: FormData, existing: Recipient): EditInputR
       }
     }
   }
+  const legalName = readLegalName(fd, errors);
   if (Object.keys(errors).length > 0 || !name) return { ok: false, errors };
-  const changed: Array<'name' | 'destination'> = [];
+  const changed: RecipientAuditField[] = [];
   if (name !== existing.name) changed.push('name');
   if (destinationChanged) changed.push('destination');
-  return { ok: true, value: { name, payoutMethod, payoutDestination, fields: changed } };
+  if (legalName) changed.push('legal_name');
+  return { ok: true, value: { name, payoutMethod, payoutDestination, fields: changed, ...(legalName ? { legalName } : {}) } };
 }
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
 
 export type RecipientAuditAction = 'recipient.create' | 'recipient.update' | 'recipient.delete' | 'schedule.cancel';
+/** Field NAMES only (never a value); 'legal_name' is the account-holder name (fix pack 4). */
+export type RecipientAuditField = 'name' | 'destination' | 'legal_name';
 export type RecipientAuditMeta =
-  | { rid: string; fields?: Array<'name' | 'destination'>; schedulesCancelled?: number }
+  | { rid: string; fields?: RecipientAuditField[]; schedulesCancelled?: number }
   | { scheduleId: string; via: 'recipient_delete' };
 
 const SCHEDULE_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
-const FIELD_NAMES: ReadonlySet<unknown> = new Set(['name', 'destination']);
+const FIELD_NAMES: ReadonlySet<unknown> = new Set<RecipientAuditField>(['name', 'destination', 'legal_name']);
 
 /** The meta allow-list: ids, field NAMES and counts only. Anything else throws (never a value). */
 function checkMeta(meta: Record<string, unknown>): void {

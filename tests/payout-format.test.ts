@@ -11,6 +11,7 @@ import {
   payoutMethodLabel,
   maskAccountDisplay,
   isMaskedDestination,
+  isStoredAccount,
   ACCOUNT_ON_FILE_PLACEHOLDER,
   NO_BANK_DETAILS_PLACEHOLDER,
   accountConfirmKey,
@@ -517,5 +518,15 @@ describe('accountConfirmErrors', () => {
       expect(accountFields.length, country).toBe(1);
     }
     expect(accountConfirmErrors('ZZ' as CountryCode, { accountNumber: '123456' })).toEqual({});
+  });
+});
+
+describe('isStoredAccount (review R3-X1 N2): a stored account is non-empty AND not a mask', () => {
+  it('a real destination is an account; empty, blank, null and every mask are not', () => {
+    expect(isStoredAccount('HDFC0001234 123456789012')).toBe(true);
+    expect(isStoredAccount('  HDFC0001234 123456789012 ')).toBe(true);
+    for (const v of ['', '   ', null, undefined, '****1234', ' ****1234 ', '••••5678', 'account on file']) {
+      expect(isStoredAccount(v), String(v)).toBe(false);
+    }
   });
 });

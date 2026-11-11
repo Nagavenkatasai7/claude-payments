@@ -338,3 +338,44 @@ describe('partner.kyc_mode.change (pack 3 review C3)', () => {
     expect(p.detail).toBeNull();
   });
 });
+
+describe('otp.verified (pack 4 C17)', () => {
+  // The full C17 meta of a pay-page payment: only the closed `channel` enum may reach a tenant.
+  const fullMeta = {
+    surface: 'transfer',
+    channel: 'wa',
+    issuedAt: '2026-09-01T09:59:00.000Z',
+    verifiedAt: '2026-09-01T10:00:00.000Z',
+    attempt: 1,
+    ipHash: 'ih1:SECRET_IP_HASH',
+    uaHash: 'uh1:SECRET_UA_HASH',
+    disclosureVersion: 'SECRET_DISCLOSURE_VERSION',
+    payloadHash: 'ph1:SECRET_PAYLOAD_HASH',
+    routeId: 'SECRET_ROUTE_ID',
+  };
+  const otpRow = () => row({ action: 'otp.verified', actor: 'pay-page', actorType: 'system', subjectId: 'tx_minted_0001', meta: fullMeta });
+  it("is in TENANT_AUDIT_ACTIONS with the label 'Payment approved with a code'", () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('otp.verified');
+    expect(t(actionLabelKey('otp.verified'))).toBe('Payment approved with a code');
+  });
+  it('a row with full C17 meta shows only channel=wa (never ipHash, uaHash, payloadHash, routeId, issuedAt, verifiedAt, attempt, disclosureVersion)', () => {
+    const p = projectAuditRow(otpRow(), tenant, platform);
+    expect(p.detail).toBe('channel=wa');
+    const json = JSON.stringify(p);
+    for (const v of ['ipHash', 'uaHash', 'payloadHash', 'routeId', 'issuedAt', 'verifiedAt', 'attempt', 'disclosureVersion', 'surface', 'SECRET']) {
+      expect(json).not.toContain(v);
+    }
+  });
+  it('the actor reads as the system label; the subject (a transfer id) is shown', () => {
+    const p = projectAuditRow(otpRow(), tenant, platform);
+    expect(p.actor).toBe(t('partner.audit.system'));
+    expect(p.actor).not.toContain('pay-page');
+    expect(p.subject).toBe('tx_minted_0001');
+  });
+  it('remittance.disclosure_ack and transfer.legal_name_set stay OUT of the feed', () => {
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('remittance.disclosure_ack');
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('transfer.legal_name_set');
+    expect(actionLabelKey('remittance.disclosure_ack')).toBe('partner.audit.action.other');
+    expect(actionLabelKey('transfer.legal_name_set')).toBe('partner.audit.action.other');
+  });
+});

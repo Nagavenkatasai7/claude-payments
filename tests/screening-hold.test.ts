@@ -11,6 +11,7 @@ import {
   SENDER_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
+  RECIPIENT_IDENTITY_MISSING_REASON,
 } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
@@ -21,11 +22,11 @@ import type { SanctionsScreener } from '@/lib/providers/sanctions-provider';
 // reason constants (never on copied copy), and the constants are exactly what
 // screenTransfer writes.
 describe('isScreeningHold', () => {
-  it('SCREENING_REASONS is exactly the six screening-derived reasons', () => {
+  it('SCREENING_REASONS is exactly the seven screening-derived reasons', () => {
     expect([...SCREENING_REASONS].sort()).toEqual(
       [
         POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_WATCHLIST_REASON,
-        SENDER_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON,
+        SENDER_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON, RECIPIENT_IDENTITY_MISSING_REASON,
       ].sort(),
     );
   });
@@ -41,6 +42,7 @@ describe('isScreeningHold', () => {
     SENDER_WATCHLIST_REASON,
     SENDER_IDENTITY_MISSING_REASON,
     SENDER_SCREENING_REASON,
+    RECIPIENT_IDENTITY_MISSING_REASON,
   ])('a hold with the screening reason %j is a screening hold', (reason) => {
     expect(isScreeningHold({ complianceReasons: [reason] })).toBe(true);
   });

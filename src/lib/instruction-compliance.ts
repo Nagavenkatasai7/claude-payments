@@ -2,13 +2,12 @@ import type { DbOrTx } from '@/db/client';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
 import {
   buildComplianceBlock,
   type ComplianceBlock,
   type ComplianceScreeningRef,
 } from '@/lib/providers/http-payment-provider';
-import { SANCTIONS_AUDIT_ACTION } from '@/lib/sanctions/evidence';
+import { listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
@@ -26,33 +25,24 @@ import type { Transfer } from '@/lib/types';
 // TENANT: the customer and the partner are read under the OWNER partnerId
 // (customers are keyed (partner_id, phone)), never the routed rail partner's.
 
-/** The fix 14 evidence row is written in the mint transaction; ±10 min of createdAt bounds the indexed read. */
-const EVIDENCE_WINDOW_MS = 10 * 60 * 1000;
-
-/** The latest sanctions.screen evidence for this transfer, as a name-free reference; null when none. */
-async function screeningRef(db: DbOrTx, transfer: Transfer): Promise<ComplianceScreeningRef | null> {
-  const created = new Date(transfer.createdAt).getTime();
-  if (!Number.isFinite(created)) return null;
-  const rows = await createAuditRepo(db).listBySubject(
-    transfer.partnerId,
-    transfer.id,
-    new Date(created - EVIDENCE_WINDOW_MS),
-    new Date(created + EVIDENCE_WINDOW_MS),
-  );
-  const row = rows.filter((r) => r.action === SANCTIONS_AUDIT_ACTION).at(-1);
-  if (!row) return null;
-  // meta is jsonb: whitelist the four reference fields, each type-checked.
-  // The per-party input hashes and scores are never copied onto the wire.
-  const { listSource, listVersion, decision, screenedAt } = row.meta;
-  if (
-    typeof listSource !== 'string' ||
-    typeof listVersion !== 'string' ||
-    typeof decision !== 'string' ||
-    typeof screenedAt !== 'string'
-  ) {
-    return null;
-  }
-  return { listSource, listVersion, decision, screenedAt };
+/**
+ * Fix pack 4 (C20): the newest sanctions.screen row, the same one the instruct gate judges
+ * (outbox-worker.ts, listScreenEvidence(...).at(-1)), as a name-free reference; null when none.
+ * Its own query on the action, window [createdAt - 10 min, now + 1 min), so a pay-time or list
+ * re-screen hours after the mint is the reference and no other audit row can crowd it out.
+ * Malformed rows are skipped (the previous valid row is the reference). parseEvidence already
+ * type-checked the four fields; the per-party input hashes and scores are never copied onto
+ * the wire. A read error throws into loadComplianceBlock's fail-open catch.
+ */
+async function screeningRef(db: DbOrTx, transfer: Transfer, now: Date): Promise<ComplianceScreeningRef | null> {
+  const newest = (await listScreenEvidence(db, transfer, now)).at(-1);
+  if (!newest) return null;
+  return {
+    listSource: newest.listSource,
+    listVersion: newest.listVersion,
+    decision: newest.decision,
+    screenedAt: newest.screenedAt,
+  };
 }
 
 export async function loadComplianceBlock(
@@ -67,7 +57,7 @@ export async function loadComplianceBlock(
       transfer.phone,
     );
     const partner = await createPartnerRepo(db).getPartner(transfer.partnerId);
-    const screening = await screeningRef(db, transfer);
+    const screening = await screeningRef(db, transfer, now);
     return buildComplianceBlock(transfer, customer, now, {
       kycGateActive: sendGateActive(partner),
       screening,

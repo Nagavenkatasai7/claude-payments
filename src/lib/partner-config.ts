@@ -1,5 +1,6 @@
 import type { KycMode, Partner } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
+import { disclosureHash } from './disclosure-hash';
 import type { PartnerIntegrations } from './partner-integrations';
 import { postureSigned } from './live-controls';
 import { EMPTY_PARTNER_INTEGRATIONS } from './partner-integrations';
@@ -84,6 +85,11 @@ export interface ResolvedDisclosure {
   website: string | null; // https only
   stateRegulator: { name: string; phone: string | null; website: string | null } | null;
   deliveryBusinessDays: number;
+  // Fix pack 4 T5 (C11): the stored block carries a partner admin's approval stamp whose hash equals
+  // this block's hash (and the block is configured). Never true for demo/default.
+  partnerApproved: boolean;
+  // disclosureHash of the stored block (a real partner with an object block), else null.
+  hash: string | null;
 }
 
 /** An absolute https URL (the only scheme a disclosure link may carry). */
@@ -103,15 +109,19 @@ export function isDisclosurePhone(v: unknown): v is string {
   return digits >= 7 && digits <= 15;
 }
 
+// Review R4-Z2 A1: the cap counts code points, as the form's clamp (DISCLOSURE_TEXT_MAX) and
+// providerLineFits do, so a stored name of astral characters is never dropped on read.
 function text(v: unknown, max = 200): string | null {
-  return typeof v === 'string' && v.trim() !== '' && v.length <= max ? v.trim() : null;
+  return typeof v === 'string' && v.trim() !== '' && [...v].length <= max ? v.trim() : null;
 }
 
 function isBusinessDays(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= MAX_DELIVERY_BUSINESS_DAYS;
 }
 
-export function resolvePartnerDisclosure(partner: Partner | null | undefined): ResolvedDisclosure {
+export function resolvePartnerDisclosure(
+  partner: Pick<Partner, 'id' | 'supportConfig' | 'displayName' | 'brandName'> | null | undefined,
+): ResolvedDisclosure {
   if (!partner || partner.id === DEFAULT_PARTNER_ID) {
     return {
       demo: true,
@@ -122,6 +132,8 @@ export function resolvePartnerDisclosure(partner: Partner | null | undefined): R
       website: null,
       stateRegulator: null,
       deliveryBusinessDays: DEFAULT_DELIVERY_BUSINESS_DAYS,
+      partnerApproved: false,
+      hash: null,
     };
   }
   const raw: unknown = partner.supportConfig?.disclosure;
@@ -135,9 +147,14 @@ export function resolvePartnerDisclosure(partner: Partner | null | undefined): R
   const est = c.deliveryEstimate && typeof c.deliveryEstimate === 'object'
     ? (c.deliveryEstimate as Record<string, unknown>).businessDays
     : undefined;
+  const isBlock = Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw);
+  const hash = isBlock ? disclosureHash(raw) : null;
+  const ap = c.approval && typeof c.approval === 'object' ? (c.approval as Record<string, unknown>).hash : undefined;
   return {
     demo: false,
     configured: entity !== null,
+    partnerApproved: entity !== null && hash !== null && typeof ap === 'string' && ap === hash,
+    hash,
     licensedEntity: entity ?? (brand !== DEFAULT_BRAND ? brand : null),
     licenseIds: Array.isArray(c.licenseIds)
       ? c.licenseIds.map((x) => text(x)).filter((x): x is string => x !== null)

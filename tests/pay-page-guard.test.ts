@@ -118,6 +118,7 @@ describe('/pay/[transferId] — guard runs before any read (Program-Fix 23)', ()
     expect(html).toContain('SmartRemit');
     expect(html).not.toContain('Acme Money Co');
     expect(html).not.toContain('Total charge');
+    expect(html).not.toContain('Approving'); // fix pack 4 (C15): nothing on dead-link sheets
     expect(html).not.toContain('Mom');
     expect(getTransfer).not.toHaveBeenCalled();
     expect(getTransferDecrypted).not.toHaveBeenCalled();
@@ -200,6 +201,7 @@ describe('/pay/[transferId] — infrastructure errors (fix D)', () => {
     expect(html).toContain('SmartRemit');
     expect(html).not.toContain('This link is no longer active');
     expect(html).not.toContain('Something went wrong');
+    expect(html).not.toContain('Approving'); // fix pack 4 (C15): nothing on the temporary sheet
     expect(getDraft).toHaveBeenCalledTimes(2);
   });
 

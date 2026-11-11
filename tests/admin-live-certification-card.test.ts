@@ -64,12 +64,13 @@ describe('LiveCertificationCard', () => {
     expect(stateOf(html({ liveControls: certified(), readiness: 'error' }))).toBe('Certified');
   });
 
-  it("12 readiness lines in contract order; not-built lines read 'not built (PR4)' etc.", () => {
+  it("12 readiness lines in contract order; not-built lines read 'not built (PR5)' etc.", () => {
     const h = html();
     const ids = [...h.matchAll(/data-line="([a-z_]+)"/g)].map((m) => m[1]);
     expect(ids).toEqual([...LIVE_READINESS_LINE_IDS]);
-    for (const pr of ['PR4', 'PR5', 'PR8', 'PR9']) expect(h).toContain(`not built (${pr})`);
-    expect((h.match(/not built \(/g) ?? []).length).toBe(6);
+    for (const pr of ['PR5', 'PR8', 'PR9']) expect(h).toContain(`not built (${pr})`);
+    expect((h.match(/not built \(/g) ?? []).length).toBe(5);
+    expect(h).not.toContain('not built (PR4)');
     expect(h).toContain('>pass<');
     expect(h).toContain('>fail<');
   });

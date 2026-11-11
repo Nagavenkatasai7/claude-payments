@@ -38,6 +38,7 @@ import type { AgentAuth } from '@/lib/agent-auth';
 import { handleMcpRequest, type McpSite } from '@/lib/mcp/http';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
+import { approveDisclosureForTest } from './helpers-live';
 import { FIXED_REPLIES } from '@/lib/hold-replies';
 
 // Stage C2: prepare_transfer makes ONE draft through the portal's own send path (the bot's
@@ -402,5 +403,27 @@ describe('R30: the cap refusals an app relays are the fixed replies (no figure, 
   });
   it('the EDD refusal is the fixed edd_elsewhere text', () => {
     expect(refusalMessage({ error: 'portal.send.edd_whatsapp' })).toBe(FIXED_REPLIES.edd_elsewhere);
+  });
+});
+
+describe('prepare_transfer provider_line (pack 4 C22 f)', () => {
+  const LINE = 'Payments by Acme Money Services LLC, licensed by State Department of Financial Services';
+
+  it('no provider_line key for the unapproved fixture partner', async () => {
+    const r = await prepareTransferTool(principal(), args(), deps);
+    if (!r.ok) throw new Error(`expected ok: ${JSON.stringify(r)}`);
+    expect(r.data).not.toHaveProperty('provider_line');
+  });
+
+  it('an approved owner -> data.provider_line is the line; a replay returns the same line', async () => {
+    await approveDisclosureForTest(db, 'pa');
+    const r = await prepareTransferTool(principal(), args(), deps);
+    if (!r.ok) throw new Error(`expected ok: ${JSON.stringify(r)}`);
+    expect(r.data.provider_line).toBe(LINE);
+    const again = await prepareTransferTool(principal(), args(), deps);
+    if (!again.ok) throw new Error(`expected ok: ${JSON.stringify(again)}`);
+    expect(again.draftId).toBe(r.draftId);
+    expect(again.data.provider_line).toBe(LINE);
+    expect(drafts()).toHaveLength(1);
   });
 });

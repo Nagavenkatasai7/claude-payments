@@ -340,7 +340,7 @@ describe('rate-limit backoff (131056 / HTTP 429)', () => {
 
     const p = sendText('15551230000', 'hi');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toBeUndefined();
+    await expect(p).resolves.toBe('wa'); // fix pack 4 (C5): sendText resolves its channel
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalled();
@@ -358,7 +358,7 @@ describe('rate-limit backoff (131056 / HTTP 429)', () => {
 
     const p = sendText('15551230000', 'hi');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toBeUndefined();
+    await expect(p).resolves.toBe('wa'); // fix pack 4 (C5): sendText resolves its channel
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
@@ -886,7 +886,7 @@ describe('outbound deadlines (META_TIMEOUT_MS — whatsapp-06)', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const p = sendText('15551230000', 'hi');
     await vi.runAllTimersAsync();
-    await expect(p).resolves.toBeUndefined();
+    await expect(p).resolves.toBe('wa'); // fix pack 4 (C5): sendText resolves its channel
     const [, a] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     const [, b] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
     expect(a.signal).toBeInstanceOf(AbortSignal);

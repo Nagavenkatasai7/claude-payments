@@ -61,6 +61,11 @@ const cases: Array<[string, CryptoContext]> = [
     'recipients.payout_destination_enc',
     recipientRowCtx({ partnerId: 'acme', senderPhone: '15551230000', recipientPhone: '919876543210' }),
   ],
+  // Fix pack 4 (C3): the recipient's account-holder name.
+  [
+    'recipients.legal_name_enc',
+    recipientRowCtx({ partnerId: 'acme', senderPhone: '15551230000', recipientPhone: '919876543210' }, 'legal_name_enc'),
+  ],
   ['beneficiaries.payout_destination_enc', ctx.beneficiary('ben_rb1')],
   ['schedules.payout_destination_enc', ctx.schedule('sch_rb1')],
   ...INTEGRATION_COLS.map((c): [string, CryptoContext] => [`partner_integrations.${c}`, ctx.integration('acme', c)]),
@@ -70,8 +75,8 @@ const cases: Array<[string, CryptoContext]> = [
 ];
 
 describe('46B-written blobs open on the frozen 46A reader (rollback safety)', () => {
-  it('covers all 27 write contexts', () => {
-    expect(cases).toHaveLength(27);
+  it('covers all 28 write contexts', () => {
+    expect(cases).toHaveLength(28);
   });
 
   it.each(cases)('%s: v2 written now opens with the 46A decryptField', (_name, context) => {

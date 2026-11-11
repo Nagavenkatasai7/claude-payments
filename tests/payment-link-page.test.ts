@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { PayableLink } from '@/lib/payment-link-finalize';
+import type { Partner } from '@/lib/types';
+import { approvedDisclosureConfig } from './helpers-live';
 
 /**
  * Batch B2: /pay/l/[token]. Every unpayable link renders the SAME sheet; a
@@ -16,7 +18,9 @@ vi.mock('@/lib/ip-rate-limit', async (orig) => ({
 }));
 vi.mock('@/lib/store', () => ({ getStore: () => ({}) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
-vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null }) }));
+// Fix pack 4 (T18): `owner.value` is the link owner's read (null: today's spec).
+const owner = vi.hoisted(() => ({ value: null as unknown }));
+vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => owner.value }) }));
 const resolvePayableLink = vi.hoisted(() => vi.fn<() => Promise<PayableLink | null>>());
 vi.mock('@/lib/payment-link-finalize', () => ({ resolvePayableLink }));
 const LOCKED_AT = '2026-10-08T12:00:00.000Z';
@@ -61,6 +65,7 @@ const payable = (): PayableLink =>
 
 beforeEach(() => {
   limited.value = false;
+  owner.value = null;
   formProps.last = null;
   resolvePayableLink.mockReset();
 });
@@ -105,5 +110,45 @@ describe('/pay/l/[token] page', () => {
     const html = await render();
     expect(html).toContain('1 USD = 84.00 INR');
     expect(formProps.last?.quoteLockedAt).toBeNull();
+  });
+
+  // Fix pack 4 (C15, C10; critic P13): the line beside the code box names the
+  // WHOLE payee and no account; the form posts the block hash it was rendered with.
+  it('the link form gets the payee name and the block hash, and shows the Approving line for the first option', async () => {
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    expect(formProps.last?.approvingName).toBe('Sunrise Public School');
+    expect(formProps.last?.disclosureHash).toBeNull(); // the spec's partner read gives no block
+    const line = html.match(/<p data-testid="approving-line"[^>]*>([^<]*)<\/p>/)?.[1];
+    expect(line).toBe('Approving 296.11 USD to Sunrise Public School.');
+    expect(html).not.toContain('account ending');
+  });
+
+  // Fix pack 4 T18 (C22 a): the owner's approved provider line, once, right under the heading.
+  it('an approved link owner -> one provider-line under Secure payment', async () => {
+    owner.value = { id: 'acme', displayName: 'Acme', supportConfig: { disclosure: approvedDisclosureConfig() } } as unknown as Partner;
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    expect(html.split('data-testid="provider-line"')).toHaveLength(2);
+    const h1Close = html.indexOf('Secure payment</h1>');
+    expect(html.slice(h1Close + 'Secure payment</h1>'.length)).toMatch(
+      /^<p data-testid="provider-line"[^>]*>Payments by Acme Money Services LLC, licensed by State Department of Financial Services<\/p>/,
+    );
+    expect(html.indexOf('data-testid="provider-line"')).toBeLessThan(html.indexOf('Pay to'));
+  });
+
+  it('getPartner null (no approved block) -> no provider-line', async () => {
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    expect(html).not.toContain('provider-line');
+    expect(html).not.toContain('Payments by');
+  });
+
+  it('an unpayable link of an approved owner -> the dead-link sheet has no line', async () => {
+    owner.value = { id: 'acme', displayName: 'Acme', supportConfig: { disclosure: approvedDisclosureConfig() } } as unknown as Partner;
+    resolvePayableLink.mockResolvedValue(null);
+    const dead = await render();
+    expect(dead).toContain('This link is no longer active');
+    expect(dead).not.toContain('provider-line');
   });
 });

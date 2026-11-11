@@ -1,0 +1,96 @@
+import { describe, it, expect } from 'vitest';
+import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
+
+// Fix pack 4 (C13): one pay-body parser for the transfer, link and B2B routes.
+const DH = `dh1:${'a'.repeat(64)}`;
+
+describe('parsePayBody', () => {
+  it('non-object input (null, \'x\', 42, [], undefined): action null, otp \'\', every field null, present all false; never throws', () => {
+    for (const raw of [null, 'x', 42, [], undefined]) {
+      for (const surface of ['transfer', 'link', 'b2b'] as const) {
+        expect(parsePayBody(raw, surface), `${JSON.stringify(raw)} ${surface}`).toEqual({
+          action: null, otp: '', disclosureVersion: null, disclosureHash: null, accountHolder: null,
+          country: null, fields: null, ach: null, fundingMethod: null, quoteLockedAt: null,
+          present: { disclosureVersion: false, disclosureHash: false, accountHolder: false },
+        });
+      }
+    }
+    const throwing = Object.defineProperty({}, 'otp', { enumerable: true, get() { throw new Error('boom'); } });
+    expect(() => parsePayBody(throwing, 'transfer')).not.toThrow();
+    expect(parsePayBody(throwing, 'transfer').otp).toBe('');
+  });
+
+  it("transfer surface: action only for exactly 'request_otp'; otp digits only; country, fields, ach, disclosureVersion, disclosureHash, accountHolder parsed; fundingMethod and quoteLockedAt null", () => {
+    expect(parsePayBody({ action: 'request_otp' }, 'transfer').action).toBe('request_otp');
+    expect(parsePayBody({ action: 'REQUEST_OTP' }, 'transfer').action).toBeNull();
+    expect(parsePayBody({ otp: 123456 }, 'transfer').otp).toBe('123456');
+    expect(parsePayBody({ otp: '12 34-56' }, 'transfer').otp).toBe('123456');
+    const ach = { routing: '1', account: '2' };
+    const p = parsePayBody({
+      country: 'IN', fields: { ifsc: 'X' }, ach, disclosureVersion: 'v1', disclosureHash: DH,
+      accountHolder: 'Ana', fundingMethod: 'card', quoteLockedAt: 5,
+    }, 'transfer');
+    expect(p).toMatchObject({
+      country: 'IN', fields: { ifsc: 'X' }, ach, disclosureVersion: 'v1', disclosureHash: DH, accountHolder: 'Ana',
+      fundingMethod: null, quoteLockedAt: null,
+      present: { disclosureVersion: true, disclosureHash: true, accountHolder: true },
+    });
+  });
+
+  it('link surface: fundingMethod and quoteLockedAt passed through; country, fields, ach and accountHolder null and not present', () => {
+    const p = parsePayBody({
+      fundingMethod: 'ach', quoteLockedAt: 1234, country: 'IN', fields: { a: 'b' }, ach: { x: 1 },
+      accountHolder: 'Ana', disclosureVersion: 'v1', disclosureHash: DH,
+    }, 'link');
+    expect(p).toMatchObject({
+      fundingMethod: 'ach', quoteLockedAt: 1234, country: null, fields: null, ach: null, accountHolder: null,
+      disclosureVersion: 'v1', disclosureHash: DH,
+      present: { disclosureVersion: true, disclosureHash: true, accountHolder: false },
+    });
+  });
+
+  it('b2b surface: country and fields; ach, disclosureVersion, disclosureHash, accountHolder null and not present', () => {
+    const p = parsePayBody({
+      country: 'IN', fields: { a: 'b' }, ach: { x: 1 }, disclosureVersion: 'v1', disclosureHash: DH, accountHolder: 'Ana',
+      fundingMethod: 'ach', quoteLockedAt: 1,
+    }, 'b2b');
+    expect(p).toEqual({
+      action: null, otp: '', country: 'IN', fields: { a: 'b' }, ach: null, disclosureVersion: null, disclosureHash: null,
+      accountHolder: null, fundingMethod: null, quoteLockedAt: null,
+      present: { disclosureVersion: false, disclosureHash: false, accountHolder: false },
+    });
+  });
+
+  it('disclosureHash: only /^dh1:[0-9a-f]{64}$/ is kept (uppercase hex, another prefix, 63 chars -> null) while present stays true', () => {
+    for (const bad of [`dh1:${'A'.repeat(64)}`, `dh2:${'a'.repeat(64)}`, `dh1:${'a'.repeat(63)}`, 42]) {
+      const p = parsePayBody({ disclosureHash: bad }, 'transfer');
+      expect(p.disclosureHash, String(bad)).toBeNull();
+      expect(p.present.disclosureHash).toBe(true);
+    }
+    expect(parsePayBody({ disclosureHash: DH }, 'link').disclosureHash).toBe(DH);
+  });
+
+  it("accountHolder presence: absent -> present false; '' -> '' and present true; '  Ana  ' -> 'Ana'; a non-string -> null with present true", () => {
+    expect(parsePayBody({}, 'transfer')).toMatchObject({ accountHolder: null, present: { accountHolder: false } });
+    expect(parsePayBody({ accountHolder: '' }, 'transfer')).toMatchObject({ accountHolder: '', present: { accountHolder: true } });
+    expect(parsePayBody({ accountHolder: '  Ana  ' }, 'transfer')).toMatchObject({ accountHolder: 'Ana', present: { accountHolder: true } });
+    expect(parsePayBody({ accountHolder: 7 }, 'transfer')).toMatchObject({ accountHolder: null, present: { accountHolder: true } });
+  });
+
+  it('fields keeps only string values of a plain object (an array or a non-object -> null)', () => {
+    expect(parsePayBody({ fields: { a: 'x', b: 1, c: null, d: 'y' } }, 'transfer').fields).toEqual({ a: 'x', d: 'y' });
+    expect(parsePayBody({ fields: ['x'] }, 'transfer').fields).toBeNull();
+    expect(parsePayBody({ fields: 'x' }, 'b2b').fields).toBeNull();
+    expect(parsePayBody({ country: 5 }, 'transfer').country).toBeNull();
+  });
+});
+
+describe('validateAccountHolder', () => {
+  it('trims and accepts a clean name up to 80 characters; refuses \'\', whitespace, 81 characters and a name with a control or zero-width character', () => {
+    expect(validateAccountHolder('  Priya Sharma  ')).toEqual({ ok: true, name: 'Priya Sharma' });
+    expect(validateAccountHolder('a'.repeat(80))).toEqual({ ok: true, name: 'a'.repeat(80) });
+    for (const bad of ['', '   ', 'a'.repeat(81), 'Pri\u0007ya', 'Pri​ya']) {
+      expect(validateAccountHolder(bad), JSON.stringify(bad)).toEqual({ ok: false });
+    }
+  });
+});

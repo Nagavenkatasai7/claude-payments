@@ -3,7 +3,9 @@ import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
-import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
+import { buildPrepaymentDisclosure, deliveryDaysFor } from '@/lib/remittance-disclosure';
+import { providerLineFor } from '@/lib/legal/provider-line';
+import { approvingAmountText } from '@/lib/approving-line';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
@@ -24,6 +26,8 @@ import { transferRewardOrNull } from '@/lib/rewards/read';
 import { rewardPayNote } from '@/lib/rewards/engine';
 import { usdToSource } from '@/lib/rewards/customer';
 import { bankDetailsLocked, preparedByLine } from '@/lib/pay-prepared-by';
+import { readLegalNameView } from '@/lib/recipient-legal-name';
+import { railPartnerOf } from '@/lib/live-gate';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -188,7 +192,18 @@ async function renderPayPage(transferId: string) {
     // Stage C2: "Prepared in <app>" for a draft an AI app prepared (MCP). Null: none.
     preparedByNote: string | null;
     bankDetailsLocked: boolean; // true ⇒ no "Edit bank details" (Stage C2)
+    // Fix pack 4 (C15, critic P2/C10): the 'Approving ...' line's last 4 digits,
+    // only where savedAccountLabel is shown today and only for a bank account
+    // (a UPI id's digits can be a phone number). Null: no 'account ending'.
+    approvingLast4: string | null;
+    // Fix pack 4 (C18, T16): the account-holder field. Two booleans only; a
+    // stored legal name never reaches the props or the markup.
+    legalNameRequired: boolean;
+    legalNameOnFile: boolean;
   };
+
+  // A row that is no longer payable, b2b or exempt: no field (and no read).
+  const NO_LEGAL_NAME_FIELD = { legalNameRequired: false, legalNameOnFile: true } as const;
 
   let view: View | null = null;
   // WL1: the partner that owns this payment — drives the Reg E disclosure below.
@@ -222,6 +237,18 @@ async function renderPayPage(transferId: string) {
     const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
     const reward =
       transfer.status === 'awaiting_payment' ? await transferRewardOrNull(getDb(), transfer.partnerId, transfer.id) : null;
+    const transferType = transfer.transferType ?? 'b2c';
+    // Fix pack 4 (C18): read only while the row awaits payment (never throws).
+    const legalName =
+      transfer.status === 'awaiting_payment'
+        ? await readLegalNameView(getDb(), {
+            ownerId: transfer.partnerId,
+            railPartnerId: railPartnerOf(transfer),
+            environment: transfer.environment,
+            transferType,
+            transfer: { id: transfer.id, partnerId: transfer.partnerId },
+          })
+        : NO_LEGAL_NAME_FIELD;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -234,13 +261,14 @@ async function renderPayPage(transferId: string) {
       sourceCurrency,
       fundingMethod: transfer.fundingMethod,
       fxRate: transfer.fxRate,
-      transferType: transfer.transferType ?? 'b2c',
+      transferType,
       awaitingPayment: transfer.status === 'awaiting_payment',
       // Usually a re-opened link with the destination already set → skip Step 1.
       // But a SCHEDULED/cron transfer is created with an EMPTY destination (Item
       // 2: never collected in chat) — collect the recipient's bank details here.
       needsBankDetails: transferNeedsDetails,
       savedAccountLabel: transferEditable ? savedAccountLabelFor(storedTransferDest) : null,
+      approvingLast4: transferEditable && transfer.payoutMethod === 'bank' ? accountLast4(storedTransferDest) || null : null,
       rewardNote: reward
         ? rewardPayNote(reward, (usd) =>
             formatMoney(usdToSource(usd, sourceCurrency, transfer.amountSource, transfer.amountUsd), sourceCurrency),
@@ -249,6 +277,8 @@ async function renderPayPage(transferId: string) {
       // A minted transfer has no draft marker (no ledger column, owner decision 2026-10-18).
       preparedByNote: null,
       bankDetailsLocked: false,
+      legalNameRequired: legalName.legalNameRequired,
+      legalNameOnFile: legalName.legalNameOnFile,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -266,6 +296,14 @@ async function renderPayPage(transferId: string) {
     // destination — collect it on Step 1 like a cold start.
     const storedDraftDest = (draft.recipient.payoutDestination ?? '').trim();
     const hasStoredDest = storedDraftDest !== '' && !isMaskedDestination(storedDraftDest);
+    // Fix pack 4 (C18): owner = the draft's tenant, rail = its routed partner (never throws).
+    const legalName = await readLegalNameView(getDb(), {
+      ownerId: brandPartnerId,
+      railPartnerId: draft.settlementPartnerId ?? brandPartnerId,
+      environment: undefined,
+      transferType: draft.transferType ?? 'b2c',
+      draft,
+    });
     view = {
       id: transferId,
       recipientName: draft.recipient.name,
@@ -282,6 +320,10 @@ async function renderPayPage(transferId: string) {
       awaitingPayment: true, // a draft is always awaiting payment
       needsBankDetails: !hasStoredDest,
       savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
+      approvingLast4:
+        hasStoredDest && draft.transferType !== 'b2b' && draft.recipient.payoutMethod === 'bank'
+          ? accountLast4(storedDraftDest) || null
+          : null,
       bankDetailsLocked: bankDetailsLocked(draft), // Stage C2: an app-prepared draft pays only its stored account
       rewardNote: draft.reward
         ? rewardPayNote(draft.reward, (usd) =>
@@ -289,6 +331,8 @@ async function renderPayPage(transferId: string) {
           )
         : null,
       preparedByNote: preparedByLine(draft.preparedBy),
+      legalNameRequired: legalName.legalNameRequired,
+      legalNameOnFile: legalName.legalNameOnFile,
     };
   }
 
@@ -300,8 +344,18 @@ async function renderPayPage(transferId: string) {
 
   // Program-Fix 15 PR B: the Reg E pre-payment disclosure (null for B2B). The
   // amounts are the view's own — the card can never disagree with the form.
+  // Fix pack 4 (C10): one resolve feeds the card and the hash the form posts.
+  const resolvedDisclosure = resolvePartnerDisclosure(partner);
+  // Fix pack 4 (C21): a minted transfer shows the days stored on it at mint
+  // (none stored -> the partner's current value); a draft has none stored.
+  const forPage = transfer
+    ? { ...resolvedDisclosure, deliveryBusinessDays: deliveryDaysFor(transfer, resolvedDisclosure) }
+    : resolvedDisclosure;
+  // Fix pack 4 (C22 a, R16): the owner's approved provider line, from the same
+  // resolve (never a second one). Null keeps the page byte-identical.
+  const providerLine = providerLineFor(resolvedDisclosure);
   const disclosure = view.awaitingPayment
-    ? buildPrepaymentDisclosure(view, resolvePartnerDisclosure(partner))
+    ? buildPrepaymentDisclosure(view, forPage)
     : null;
 
   const feeLabel =
@@ -314,6 +368,11 @@ async function renderPayPage(transferId: string) {
       <div className={sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>Secure payment</h1>
+        {providerLine && (
+          <p data-testid="provider-line" className="-mt-3 mb-4 text-[13px] leading-normal text-[#8696a0]">
+            {providerLine}
+          </p>
+        )}
         {view.awaitingPayment && view.preparedByNote && (
           <p data-prepared-by className="mb-4 rounded-xl border border-[#2a3942] p-3.5 text-sm leading-normal text-[#e9edef]">
             {view.preparedByNote}
@@ -349,6 +408,15 @@ async function renderPayPage(transferId: string) {
         {view.awaitingPayment ? (
           <PayForm
             disclosureVersion={disclosure?.version ?? null}
+            disclosureHash={disclosure ? resolvedDisclosure.hash : null}
+            approving={{
+              amountText: approvingAmountText(view.sourceTotalCharge),
+              currency: view.sourceCurrency,
+              recipientName: view.recipientName,
+              accountLast4: view.approvingLast4,
+            }}
+            legalNameRequired={view.legalNameRequired}
+            legalNameOnFile={view.legalNameOnFile}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

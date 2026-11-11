@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody,
+  PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
@@ -81,5 +83,98 @@ describe('payErrorMessage — Step 0 rate refusals', () => {
     expect(m).toBe(PAY_QUOTE_EXPIRED_COPY);
     expect(m).not.toBe(PAY_RATE_EXPIRED_COPY);
     expect(m).not.toMatch(/cancel/i);
+  });
+});
+
+// Fix pack 4 (C14): the reload and approval-not-recorded copies the pay routes answer with.
+describe('payErrorMessage: fix pack 4 copy', () => {
+  it('reload_required -> PAY_RELOAD_REQUIRED_COPY and approval_not_recorded -> PAY_APPROVAL_NOT_RECORDED_COPY', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', error: 'x' })).toBe(PAY_RELOAD_REQUIRED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', error: 'x' })).toBe(PAY_APPROVAL_NOT_RECORDED_COPY);
+  });
+
+  it('the three new constants equal the C14 strings exactly, and PAY_ACCOUNT_HOLDER_COPY is not returned by payErrorMessage', () => {
+    expect(PAY_RELOAD_REQUIRED_COPY).toBe('This page is out of date. Reload the page, check the details, then try again. Nothing was charged.');
+    expect(PAY_APPROVAL_NOT_RECORDED_COPY).toBe("We couldn't record your approval, so nothing was charged. Tap Resend for a new code, then try again.");
+    expect(PAY_ACCOUNT_HOLDER_COPY).toBe("Enter the account holder's name as it appears at the recipient's bank.");
+    for (const body of [{ reason: 'account_holder' }, { reason: 'account_holder_required' }, { fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } }]) {
+      expect(payErrorMessage(body), JSON.stringify(body)).toBeNull();
+    }
+  });
+});
+
+// Review R1-P1 A1: a funded row's answers carry `funded: true`; the form then
+// shows the variant that makes no "nothing was charged" claim.
+describe('payErrorMessage: funded variants (review R1-P1 A1)', () => {
+  it('funded: true -> the funded copy, which never mentions a charge', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', funded: true })).toBe(PAY_RELOAD_REQUIRED_FUNDED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', funded: true })).toBe(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY);
+    expect(PAY_RELOAD_REQUIRED_FUNDED_COPY).toBe('This page is out of date. Reload the page, check the details, then try again.');
+    expect(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY).toBe("We couldn't record your approval. Tap Resend for a new code, then try again.");
+    expect(PAY_RELOAD_REQUIRED_FUNDED_COPY).not.toMatch(/charged/i);
+    expect(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY).not.toMatch(/charged/i);
+  });
+
+  it('funded absent or not true -> the existing copy', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', funded: 'yes' })).toBe(PAY_RELOAD_REQUIRED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', funded: false })).toBe(PAY_APPROVAL_NOT_RECORDED_COPY);
+  });
+});
+
+// Fix pack 4 (C14): the client helper that replaces pay-form's ackField and the
+// link form's inline object.
+describe('disclosureAckBody', () => {
+  const HASH = 'dh1:' + 'a'.repeat(64);
+
+  it('not acked, or no version, is {}', () => {
+    expect(disclosureAckBody('2026-10-v1', HASH, false)).toEqual({});
+    expect(disclosureAckBody(null, HASH, true)).toEqual({});
+    expect(disclosureAckBody(null, null, false)).toEqual({});
+  });
+
+  it('acked carries the version, and the hash only when it is a dh1 hash', () => {
+    expect(disclosureAckBody('2026-10-v1', null, true)).toEqual({ disclosureVersion: '2026-10-v1' });
+    expect(disclosureAckBody('2026-10-v1', HASH, true)).toEqual({ disclosureVersion: '2026-10-v1', disclosureHash: HASH });
+    for (const bad of ['', 'dh1:', 'dh1:' + 'A'.repeat(64), 'dh2:' + 'a'.repeat(64), 'dh1:' + 'a'.repeat(63), ' ' + HASH]) {
+      expect(disclosureAckBody('2026-10-v1', bad, true), bad).toEqual({ disclosureVersion: '2026-10-v1' });
+    }
+  });
+});
+
+// Review R2-Q1 I2: a 409 not_available on the pay POST (the R18 gates, the live controls) shows
+// the fixed cannot_complete line on the pay, link and bill forms, never the generic retry text.
+describe('payErrorMessage — not_available (R2-Q1 I2)', () => {
+  it('maps to PAY_NOT_AVAILABLE_COPY, pinned equal to the server body and fixedReply(cannot_complete)', async () => {
+    const { PAY_NOT_AVAILABLE } = await import('@/lib/pay-not-available');
+    const { fixedReply } = await import('@/lib/hold-replies');
+    const { PAY_NOT_AVAILABLE_COPY } = await import('@/lib/pay-outcome');
+    expect(PAY_NOT_AVAILABLE_COPY).toBe(fixedReply('cannot_complete'));
+    expect(PAY_NOT_AVAILABLE_COPY).toBe(PAY_NOT_AVAILABLE.body.error);
+    expect(payErrorMessage({ ...PAY_NOT_AVAILABLE.body })).toBe(PAY_NOT_AVAILABLE_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'not_available', error: 'anything the server said' })).toBe(PAY_NOT_AVAILABLE_COPY);
+  });
+});
+
+// Review R3-Y2 R1: the B2B bill form's non-OK answer (bill-pay-form.tsx). quote_expired, otp and
+// fieldErrors stay the form's own branches; every other parsed body goes through this helper.
+describe('billPayErrorOutcome (R3-Y2 R1)', () => {
+  it('503 temporarily_unavailable: the temporary copy, and the code is cleared (it may be spent)', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ ok: false, reason: 'temporarily_unavailable', error: 'x' })).toEqual({ message: PAY_TEMPORARY_COPY, clearCode: true });
+  });
+  it('409 not_available: the cannot-complete copy, and the code is cleared', async () => {
+    const { billPayErrorOutcome, PAY_NOT_AVAILABLE_COPY } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ ok: false, reason: 'not_available' })).toEqual({ message: PAY_NOT_AVAILABLE_COPY, clearCode: true });
+  });
+  it('503 approval_not_recorded: today\'s copy (funded variant too), and the code is cleared', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ reason: 'approval_not_recorded' })).toEqual({ message: PAY_APPROVAL_NOT_RECORDED_COPY, clearCode: true });
+    expect(billPayErrorOutcome({ reason: 'approval_not_recorded', funded: true })).toEqual({ message: PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY, clearCode: true });
+  });
+  it('anything else: no message (the form keeps its fallback) and the code stays', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    for (const body of [null, 'x', {}, { reason: 'bad_request' }, { reason: 'rate_limited' }, { error: 'server text' }]) {
+      expect(billPayErrorOutcome(body), JSON.stringify(body)).toEqual({ message: null, clearCode: false });
+    }
   });
 });

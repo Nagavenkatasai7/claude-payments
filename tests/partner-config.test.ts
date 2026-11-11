@@ -148,4 +148,18 @@ describe('deliveryEstimatePhrase', () => {
     } as unknown as Parameters<typeof resolvePartnerDisclosure>[0];
     expect(deliveryEstimatePhrase(resolvePartnerDisclosure(partner).deliveryBusinessDays)).toBe('within 2 business days');
   });
+
+  it('caps the stored disclosure texts at 200 code points, not UTF-16 units (R4-Z2 A1)', async () => {
+    const { resolvePartnerDisclosure } = await import('@/lib/partner-config');
+    const astral = (n: number) => '\u{20000}'.repeat(n);
+    const read = (name: string) =>
+      resolvePartnerDisclosure({
+        id: 'acme', displayName: 'Acme', brandName: null,
+        supportConfig: { disclosure: { licensedEntity: name, licenseIds: [name], stateRegulator: { name } } },
+      } as unknown as Parameters<typeof resolvePartnerDisclosure>[0]);
+    const ok = read(astral(200));
+    expect([ok.configured, ok.licensedEntity, ok.licenseIds, ok.stateRegulator?.name]).toEqual([true, astral(200), [astral(200)], astral(200)]);
+    const over = read(astral(201));
+    expect([over.configured, over.licensedEntity, over.licenseIds, over.stateRegulator]).toEqual([false, 'Acme', [], null]);
+  });
 });

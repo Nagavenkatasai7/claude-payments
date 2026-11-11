@@ -251,6 +251,55 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
   });
 });
 
+describe('stage-1 delivery days (pack 4 C21)', () => {
+  const business = (over: Partial<Transfer> = {}): Transfer => ({
+    ...awaitingTransfer(),
+    transferType: 'b2b',
+    fundingMethod: 'ach_pull',
+    senderEntityType: 'business',
+    recipientEntityType: 'business',
+    recipientBusinessName: 'Mumbai Textiles Pvt Ltd',
+    ...over,
+  });
+
+  it("a transfer stored with 3 days -> 'within 3 business days' (consumer and business-funded shapes)", () => {
+    expect(buildStage1Message({ ...awaitingTransfer(), deliveryBusinessDays: 3 })).toBe(
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within 3 business days. Transfer ID: pay12345',
+    );
+    const b2b = buildStage1Message(business({ deliveryBusinessDays: 3 }));
+    expect(b2b).toContain('Mumbai Textiles Pvt Ltd will receive ₹42,600 within 3 business days.');
+    expect(b2b).not.toContain('within 1 business day');
+  });
+
+  it("stored 0 -> 'the same business day' (no truthiness fallback)", () => {
+    expect(buildStage1Message({ ...awaitingTransfer(), deliveryBusinessDays: 0 })).toBe(
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 the same business day. Transfer ID: pay12345',
+    );
+    expect(buildStage1Message(business({ deliveryBusinessDays: 0 }))).toContain('will receive ₹42,600 the same business day.');
+  });
+
+  it("no stored value -> 'within 1 business day' (today's text)", () => {
+    const t = awaitingTransfer();
+    expect(t.deliveryBusinessDays).toBeUndefined();
+    expect(buildStage1Message(t)).toBe(
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within 1 business day. Transfer ID: pay12345',
+    );
+    expect(buildStage1Message(business())).toContain('will receive ₹42,600 within 1 business day.');
+  });
+
+  it('the held variant is unchanged whatever the stored days', () => {
+    for (const days of [undefined, 0, 3, 10]) {
+      expect(buildStage1Message({ ...awaitingTransfer(), deliveryBusinessDays: days }, { held: true })).toBe(
+        buildStage1Message(awaitingTransfer(), { held: true }),
+      );
+      expect(buildStage1Message(business({ deliveryBusinessDays: days }), { held: true })).toBe(
+        buildStage1Message(business(), { held: true }),
+      );
+    }
+    expect(buildStage1Message({ ...awaitingTransfer(), deliveryBusinessDays: 3 }, { held: true })).not.toMatch(/business day/);
+  });
+});
+
 describe('completePaymentStage2', () => {
   it('sets status to delivered and deliveredAt, returns sender messages (INR → ₹)', async () => {
     const store = createStore(fakeRedis(), db);

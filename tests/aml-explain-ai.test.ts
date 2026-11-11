@@ -3,7 +3,7 @@ import type { ChatMessage, Transfer } from '@/lib/types';
 import { AML_DEFAULTS } from '@/lib/aml-rules';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { LARGE_AMOUNT_REASON } from '@/lib/compliance-config';
-import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 
 // A4 — the AML "Explain" copilot. Read-only, rung-1: it explains why a transfer
 // raised an AML alert or sits on hold; it never decides. Under test:
@@ -143,6 +143,19 @@ describe('buildAmlExplainBundle (pure)', () => {
     );
     expect(b.holdReasons).toEqual(['large_amount', 'sender_identity_missing', 'edd_required', 'other']);
     expect(JSON.stringify(amlExplainPrompt(b))).not.toContain('Priyanka');
+  });
+
+  // Pack 4 T12 (C19, C20): the recipient-identity hold has its own code and fallback text.
+  it('maps the recipient-identity hold reason to its own code and fallback text', () => {
+    const b = buildAmlExplainBundle(
+      makeTransfer({ complianceReasons: [RECIPIENT_IDENTITY_MISSING_REASON] }),
+      [],
+      CFG,
+      'platform',
+      NOW,
+    );
+    expect(b.holdReasons).toEqual(['recipient_identity_missing']);
+    expect(amlExplainFallback(b).summary).toContain('missing recipient identity');
   });
 
   it('a held row with no aml.alert yet uses the caller-recomputed hit, marked "recomputed"', () => {

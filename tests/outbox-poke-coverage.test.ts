@@ -56,13 +56,29 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/flag-switch.ts': ['applyFlagChange', 'applyPartnerFlagChange'],
   // Fix pack 3 T9 (contract 9): the typed live-controls writers run in the caller's
   // transaction; their callers (the partner / platform live-controls actions) poke.
-  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn'],
+  // Fix pack 4 T5 (C11): notifyLiveChange (the alert + email half, no audit row) is also called by
+  // partner-support-settings.ts setDisclosure, listed below.
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange'],
+  // Fix pack 4 T5 (C11): no .enqueue( of its own; setDisclosure calls notifyLiveChange
+  // (live-controls-write.ts) when a platform save clears a certified partner's provider
+  // approval. Its two callers (the partner settings and the admin partner disclosure actions) poke.
+  'src/lib/partner-support-settings.ts': ['setDisclosure'],
   // Pack 3 review I1: the livegate:stuck: alert — called only from the two
   // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
   'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
+  // Fix pack 4 T8 (C8, critic M9): the payevidence:<hour> alert when a pay-page
+  // payment's evidence could not be written; its callers (pay-process.ts, the
+  // B2B pay route and, from review R1-P1 A2, the transfer pay route) poke.
+  'src/lib/payment-evidence.ts': ['alertPayEvidenceUnavailable'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };
+/**
+ * Listed helpers with no .enqueue( of their own: they reach the outbox only through a listed
+ * function of ANOTHER helper. Fix pack 4 T5 (C11): setDisclosure -> notifyLiveChange
+ * (live-controls-write.ts). Every other helper must enqueue itself (the not-vacuous check).
+ */
+const INDIRECT = new Set(['src/lib/partner-support-settings.ts']);
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';
 const EXEMPT = new Set(['src/db/repos/outbox-repo.ts', 'src/lib/outbox.ts']);
@@ -101,7 +117,26 @@ describe('every outbox enqueue site is followed by a worker poke (partner-demo R
 
   it('finds the enqueue sites (the scan is not vacuous)', () => {
     expect(enqueuers.length).toBeGreaterThan(20);
-    for (const helper of Object.keys(HELPERS)) expect(enqueuers, helper).toContain(helper);
+    // Every listed helper enqueues itself, except the named INDIRECT ones (R2-Q3 G2).
+    for (const helper of Object.keys(HELPERS)) {
+      if (!INDIRECT.has(helper)) expect(enqueuers, helper).toContain(helper);
+    }
+  });
+
+  it('only src/lib/partner-support-settings.ts is excused from enqueuing itself (R2-Q3 G2)', () => {
+    expect([...INDIRECT]).toEqual(['src/lib/partner-support-settings.ts']);
+    const helperFns = (self: string) => Object.entries(HELPERS).filter(([rel]) => rel !== self).flatMap(([, fns]) => fns);
+    for (const helper of INDIRECT) {
+      expect(Object.keys(HELPERS), helper).toContain(helper);
+      // A member that enqueues itself again leaves the set (the check above then covers it).
+      expect(enqueuers, helper).not.toContain(helper);
+      const text = files.find((f) => f.rel === helper)?.text ?? '';
+      // It really reaches the outbox through a listed function of ANOTHER helper.
+      expect(
+        helperFns(helper).some((fn) => new RegExp(`\\b${fn}\\(`).test(text)),
+        helper,
+      ).toBe(true);
+    }
   });
 
   it('each one pokes, or is a helper whose every caller pokes / is the worker', () => {

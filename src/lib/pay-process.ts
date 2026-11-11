@@ -8,12 +8,17 @@ import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import { logError, logWarn } from './log';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
-import { liveRefusalForRail, settlementTargetUrl } from './live-gate';
-import { payNotAvailable } from './pay-not-available';
+import { isLiveCertified, liveRefusalForRail, realMoneyRail, settlementTargetUrl } from './live-gate';
+import { payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from './pay-not-available';
 import { settleOrHold } from './settlement';
 import { isPartnerPulled } from './funding-method';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { DEFAULT_PARTNER_ID } from './defaults';
+import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
+import { disclosureGateRefusal, disclosureMandatory, type DisclosureGateRefusal } from './pay-disclosure-gate';
+import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult, type PaymentEvidence } from './payment-evidence';
 import type { Store } from './store';
-import type { Transfer } from './types';
+import type { Partner, Transfer } from './types';
 
 // pay-process — Batch B2: the shared payment steps of the two hosted pay pages,
 // MOVED unchanged out of src/app/api/pay/[transferId]/route.ts so that route and
@@ -22,6 +27,8 @@ import type { Transfer } from './types';
 // change: the bodies below are byte-for-byte the route's (the pay-route-*
 // tests stay green unchanged). Keep it that way: a behaviour change here is a
 // change to both pages.
+// Fix pack 4 T8 (C9): gate 4 (R18) and the evidence commit ("authorise, then
+// capture") were added after the live gate, before the capture.
 
 /**
  * Charge the sender via the funding provider, then persist the charge ref
@@ -128,6 +135,22 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  *      rail, or the default tenant on one, is refused before any charge
  *      (409 not_available; the row stays awaiting_payment). It reads the
  *      rail type from the integrations already in hand (no second read).
+ *   4. R18 provider disclosure (fix pack 4, C9/C10; b2c rows only): when the
+ *      payment is MANDATORY (the owner is live-certified, or the rail is real
+ *      money), the owner's provider block must be approved (else 409
+ *      not_available) and the page must post a current acknowledgement whose
+ *      shown hash, when posted, is the block's (else 409 reload_required).
+ *      The default tenant makes no owner read (the demo block). Not mandatory
+ *      keeps today's lenient server.
+ * Then AUTHORISE, THEN CAPTURE (fix pack 4, C8): when the route passes the
+ * customer's evidence, it is committed (otp.verified, the disclosure ack, the
+ * snapshot) in its own transaction on the LOCKED awaiting row BEFORE any
+ * charge. A row no longer awaiting payment answers current truth uncharged;
+ * a write that fails answers 503 approval_not_recorded uncharged (one deduped
+ * ops alert). Callers with no customer at a pay page pass no evidence and
+ * write nothing. Partner API confirm writes no evidence or snapshot; a
+ * Partner-API-minted row paid on the hosted pay page carries the page's
+ * evidence like any other.
  * The masked-destination (fix 6), FX-unavailable (fix 9) and send-cap (fix 10)
  * guards do NOT live here: they are pay-finalize.ts's pre-claim contract
  * (kyc → masked destination → FX → cap → idem.claim) and run before a draft is
@@ -158,6 +181,7 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
 export async function processTransferPayment(
   store: Store,
   transfer: Transfer,
+  evidence?: PaymentEvidence,
 ): Promise<NextResponse> {
   const refused = refuseUnlessAwaiting(transfer);
   if (refused) return refused;
@@ -220,6 +244,66 @@ export async function processTransferPayment(
   if (live) {
     logWarn('pay.live-refused', 'live payment refused before capture', { transferId: transfer.id, code: live });
     return payNotAvailable();
+  }
+
+  // Fix pack 4 (gate #4, C9/C10): R18. A b2b row makes no owner read here
+  // (never mandatory; the commit writes the auth row only). The default tenant
+  // makes NO read either: its block is the demo block (never null, never
+  // approved). A non-default owner read that fails leaves the disclosure null,
+  // which refuses only when the payment is mandatory.
+  let disclosure: ResolvedDisclosure | null = null;
+  let mandatory = false;
+  if (transfer.transferType !== 'b2b') {
+    let owner: Partner | null = null;
+    if (transfer.partnerId === DEFAULT_PARTNER_ID) {
+      disclosure = resolvePartnerDisclosure(null);
+    } else {
+      try {
+        owner = await createPartnerRepo(getDb()).getPartner(transfer.partnerId);
+        disclosure = resolvePartnerDisclosure(owner);
+      } catch (err) {
+        // The error NAME only: a driver error can carry the connection string.
+        logWarn('pay.owner-read', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+        owner = null;
+        disclosure = null;
+      }
+    }
+    mandatory = disclosureMandatory({
+      ownerCertified: isLiveCertified(owner),
+      realMoney: realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null }),
+      transferType: 'b2c',
+    });
+    const refusal = disclosureGateRefusal({
+      mandatory,
+      disclosure,
+      ackVersion: evidence?.disclosureAck?.version ?? null,
+      postedHash: evidence?.disclosureAck?.shownHash ?? null,
+    });
+    if (refusal) return disclosureRefused(transfer, refusal, transferFunded(transfer));
+  }
+
+  // ── AUTHORISE, THEN CAPTURE (fix pack 4, C8) ─────────────────────────────
+  // The customer's evidence is committed on the locked awaiting row BEFORE any
+  // charge. If it cannot be written, nothing is charged (the code is spent).
+  if (evidence) {
+    let committed: EvidenceCommitResult;
+    try {
+      // Review R1-P3 C2: a mandatory payment's gate runs again under the owner row lock.
+      committed = await commitPaymentEvidence(getDb(), transfer, evidence, disclosure, Date.now(), { mandatory });
+    } catch (err) {
+      logWarn('pay.evidence-unavailable', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+      await alertPayEvidenceUnavailable(getDb(), evidence.auth?.surface ?? 'transfer'); // never throws
+      pokeWorker(); // the ops.alert row is ready now
+      return payApprovalNotRecorded(transferFunded(transfer));
+    }
+    // An approval stripped (or a block changed) after the gate read: the same answers, nothing written.
+    // The funded flag is the LOCKED row's (review round 2 M3), not the pre-lock `transfer`.
+    if (committed.kind === 'refused') return disclosureRefused(transfer, committed.refusal, committed.funded);
+    if (committed.kind === 'not_awaiting') {
+      // Moved since the caller's read: report current truth, never charge.
+      const current = await store.getTransfer(transfer.id);
+      return (current && refuseUnlessAwaiting(current)) || NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
+    }
   }
 
   // ── FUNDS CAPTURE — after every refusal gate, before any effect ──────────
@@ -288,4 +372,19 @@ export async function processTransferPayment(
       }
       return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
   }
+}
+
+/**
+ * The R18 answers (C10), from the gate read or the re-check under the owner lock (review R1-P3 C2).
+ * `funded` is the caller's row state at the gate read, or the LOCKED row's under the lock (M3).
+ */
+function disclosureRefused(transfer: Transfer, refusal: DisclosureGateRefusal, funded: boolean): NextResponse {
+  if (refusal === 'not_available') {
+    logWarn('pay.disclosure-refused', 'payment refused before capture: provider block not approved', {
+      transferId: transfer.id,
+      partnerId: transfer.partnerId,
+    });
+    return payNotAvailable();
+  }
+  return payReloadRequired(funded);
 }

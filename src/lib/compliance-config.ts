@@ -31,6 +31,12 @@ export const SENDER_IDENTITY_MISSING_REASON = 'Sender identity missing.';
 // Fix pack 2 (R06): the SENDER's customer row carries an uncleared screening
 // hit (senderScreeningHoldActive). Platform clears it with an audited action.
 export const SENDER_SCREENING_REASON = 'Sender screening needs manual review.';
+// Fix pack 4 (R03, C19): a real-money b2c transfer reached settlement with no
+// account-holder name on file (settleOrHold). Screening-derived: its recipient
+// cannot be name-screened by the name the payout bank checks. Platform staff
+// only; the release is refused while the name is missing (releaseHold), so
+// until PR7 such a row is rejected or refunded.
+export const RECIPIENT_IDENTITY_MISSING_REASON = 'Recipient identity missing.';
 // The non-screening flag reasons screenTransfer (compliance.ts) and the EDD
 // check (tier-rules.ts evaluateEddForTransfer) write (UI redesign M3-10).
 export const LARGE_AMOUNT_REASON = 'Large transfer amount.';
@@ -70,6 +76,7 @@ export const HOLD_REASONS: Readonly<Record<string, HoldReasonEntry>> = Object.fr
   [SENDER_WATCHLIST_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'block' },
   [SENDER_IDENTITY_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
   [SENDER_SCREENING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
+  [RECIPIENT_IDENTITY_MISSING_REASON]: { class: 'screening', releasableBy: 'platform', customerCopyKey: 'hold' },
   [LARGE_AMOUNT_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
   [VELOCITY_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
   [EDD_REQUIRED_REASON]: { class: 'kyc', releasableBy: 'partner', customerCopyKey: 'hold' },
@@ -128,6 +135,15 @@ export function holdReleasableBy(reasons: readonly string[] | null | undefined):
 /** A hold that only the automatic re-screen may lift (any rescreen reason present, e.g. LIST_UNAVAILABLE). */
 export function isRescreenOnlyHold(t: { complianceReasons?: readonly string[] | null }): boolean {
   return holdReleasableBy(t.complianceReasons) === 'rescreen';
+}
+
+/**
+ * Pack 4 review R2 (I5): the hold carries the recipient-identity reason. Such a row is never
+ * released (C19, owner Q19: only rejected or refunded until a later pack), so the staff pages say
+ * that instead of offering or promising a release. Pure, null-safe.
+ */
+export function isRecipientIdentityHold(t: { complianceReasons?: readonly string[] | null }): boolean {
+  return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON);
 }
 
 /**

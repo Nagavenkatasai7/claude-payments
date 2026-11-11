@@ -31,6 +31,12 @@ export type TransferEncColumn =
 /** The sealed columns of a schedule row (the default keeps every existing call site's AAD). */
 export type ScheduleEncColumn = 'payout_destination_enc' | 'purpose_detail_enc';
 
+/**
+ * The sealed columns of a saved recipient row (fix pack 4, C3: `legal_name_enc` is the
+ * recipient's account-holder name; the default keeps every existing call site's AAD).
+ */
+export type RecipientEncColumn = 'payout_destination_enc' | 'legal_name_enc';
+
 export type CustomerEncColumn =
   | 'full_name_enc'
   | 'date_of_birth_enc'
@@ -82,8 +88,12 @@ export const ctx = {
     make('customers', column, [partnerId, phone]),
   seller: (partnerId: PartnerId, phone: string): CryptoContext =>
     make('sellers', 'payout_destination_enc', [partnerId, phone]),
-  recipient: (partnerId: PartnerId, senderPhone: string, recipientPhone: string): CryptoContext =>
-    make('recipients', 'payout_destination_enc', [partnerId, senderPhone, recipientPhone]),
+  recipient: (
+    partnerId: PartnerId,
+    senderPhone: string,
+    recipientPhone: string,
+    column: RecipientEncColumn = 'payout_destination_enc',
+  ): CryptoContext => make('recipients', column, [partnerId, senderPhone, recipientPhone]),
   beneficiary: (id: string): CryptoContext => make('beneficiaries', 'payout_destination_enc', [id]),
   schedule: (id: string, column: ScheduleEncColumn = 'payout_destination_enc'): CryptoContext =>
     make('schedules', column, [id]),
@@ -165,11 +175,14 @@ export const customerRowCtx = (
 export const customerEmailCtx = (c: { partnerId?: PartnerId; senderPhone: string }): CryptoContext =>
   ctx.customer(c?.partnerId ?? DEFAULT_PARTNER_ID, c?.senderPhone, 'email_enc');
 
-export const recipientRowCtx = (row: {
-  partnerId: PartnerId;
-  senderPhone: string;
-  recipientPhone: string;
-}): CryptoContext => ctx.recipient(row?.partnerId, row?.senderPhone, row?.recipientPhone);
+export const recipientRowCtx = (
+  row: {
+    partnerId: PartnerId;
+    senderPhone: string;
+    recipientPhone: string;
+  },
+  column?: RecipientEncColumn,
+): CryptoContext => ctx.recipient(row?.partnerId, row?.senderPhone, row?.recipientPhone, column);
 
 export const sellerRowCtx = (row: { partnerId: PartnerId; phone: string }): CryptoContext =>
   ctx.seller(row?.partnerId, row?.phone);

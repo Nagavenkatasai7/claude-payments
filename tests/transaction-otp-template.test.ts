@@ -5,7 +5,7 @@
  * pinned, plus "a partner template never reaches the shared number".
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { authenticationTemplateParams } from '@/lib/whatsapp-templates';
+import { authenticationTemplateParams, transactionOtpMessage } from '@/lib/whatsapp-templates';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 
 const ORIGINAL = {
@@ -55,7 +55,7 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, PARTNER_TEMPLATE);
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, PARTNER_TEMPLATE)).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expectAllOnPartnerNumber(fetchMock);
@@ -79,7 +79,7 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, PARTNER_TEMPLATE);
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, PARTNER_TEMPLATE)).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expectAllOnPartnerNumber(fetchMock);
@@ -109,7 +109,7 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS);
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS)).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expectAllOnPartnerNumber(fetchMock);
@@ -121,7 +121,7 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE);
+    await expect(sendTransactionOtp(PHONE, CODE)).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(callsOf(fetchMock)[0][0]).toContain('/pn_shared/messages');
@@ -136,7 +136,7 @@ describe('sendTransactionOtp with a partner auth template (M2-6)', () => {
     const fetchMock = okFetch();
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE, undefined, undefined, PARTNER_TEMPLATE);
+    await expect(sendTransactionOtp(PHONE, CODE, undefined, undefined, PARTNER_TEMPLATE)).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const raw = callsOf(fetchMock).map(([, init]) => String(init.body)).join('\n');
@@ -182,7 +182,7 @@ describe('sendTransactionOtp partner-template failure handling (M2-14)', () => {
     const fetchMock = failThenOk();
     vi.stubGlobal('fetch', fetchMock);
 
-    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme Remit', PARTNER_TEMPLATE, { inWindow: async () => true });
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme Remit', PARTNER_TEMPLATE, { inWindow: async () => true })).resolves.toBe('wa');
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expectAllOnPartnerNumber(fetchMock);
@@ -216,7 +216,7 @@ describe('sendTransactionOtp partner-template failure handling (M2-14)', () => {
     const graphBody = '{"error":{"code":132001,"message":"(#132001) Template param 918273 does not exist"}}';
     vi.stubGlobal('fetch', failThenOk(graphBody));
 
-    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme', PARTNER_TEMPLATE, { inWindow: async () => true });
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme', PARTNER_TEMPLATE, { inWindow: async () => true })).resolves.toBe('wa');
 
     const logged = allLogs([warn, err, log]);
     expect(logged).toContain('132001');
@@ -229,10 +229,75 @@ describe('sendTransactionOtp partner-template failure handling (M2-14)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', failThenOk('{"error":{"code":132001,"message":"param 918273 bad"}}'));
 
-    await sendTransactionOtp(PHONE, CODE);
+    await expect(sendTransactionOtp(PHONE, CODE)).resolves.toBe('wa');
 
     const logged = allLogs([warn]);
     expect(logged).not.toContain('918273');
     expect(logged).not.toContain('param');
+  });
+});
+
+// Fix pack 4 (C5): the provider line reaches every free-form code text and
+// never a Meta template send (an AUTHENTICATION template cannot carry it).
+describe('sendTransactionOtp provider line (fix pack 4, C5)', () => {
+  const LINE = 'Your transfer is provided by Example Licensed Partner LLC.';
+  const failThenOk = () => {
+    let n = 0;
+    return vi.fn(async () =>
+      n++ === 0
+        ? { ok: false, status: 404, text: async (): Promise<string> => '{"error":{"code":132001}}' }
+        : { ok: true, text: async (): Promise<string> => '' },
+    );
+  };
+
+  it('reaches the partner fallback in window', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = failThenOk();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, 'Acme Remit', PARTNER_TEMPLATE, { inWindow: async () => true, providerLine: LINE }),
+    ).resolves.toBe('wa');
+    expect(bodyOf(fetchMock, 0).template.components).toEqual(authenticationTemplateParams(CODE));
+    expect(JSON.stringify(bodyOf(fetchMock, 0))).not.toContain(LINE);
+    expect(bodyOf(fetchMock, 1).text.body).toBe(`${transactionOtpMessage(CODE, 'Acme Remit')}\n${LINE}`);
+  });
+
+  it('reaches the free-form text with own creds (no partner template)', async () => {
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, undefined, { providerLine: LINE })).resolves.toBe('wa');
+    expect(bodyOf(fetchMock, 0).text.body).toBe(`${transactionOtpMessage(CODE)}\n${LINE}`);
+  });
+
+  it('reaches the free-form text when no env template is set', async () => {
+    delete process.env.WHATSAPP_AUTH_TEMPLATE;
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendTransactionOtp(PHONE, CODE, undefined, undefined, undefined, { providerLine: LINE })).resolves.toBe('wa');
+    expect(bodyOf(fetchMock, 0).text.body).toBe(`${transactionOtpMessage(CODE)}\n${LINE}`);
+  });
+
+  it('reaches the free-form fallback after the env template failed', async () => {
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = failThenOk();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendTransactionOtp(PHONE, CODE, undefined, undefined, undefined, { providerLine: LINE })).resolves.toBe('wa');
+    expect(bodyOf(fetchMock, 1).text.body).toBe(`${transactionOtpMessage(CODE)}\n${LINE}`);
+  });
+
+  it('the Meta template sends carry no provider line (body params unchanged)', async () => {
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    await sendTransactionOtp(PHONE, CODE, PARTNER_CREDS, undefined, PARTNER_TEMPLATE, { providerLine: LINE });
+    await sendTransactionOtp(PHONE, CODE, undefined, undefined, undefined, { providerLine: LINE });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 2; i++) {
+      expect(bodyOf(fetchMock, i).type).toBe('template');
+      expect(bodyOf(fetchMock, i).template.components).toEqual(authenticationTemplateParams(CODE));
+      expect(JSON.stringify(bodyOf(fetchMock, i))).not.toContain(LINE);
+    }
   });
 });

@@ -20,6 +20,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PLATFORM_RESCREEN_REFUSALS, RESCREEN_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
+import * as complianceConfig from '@/lib/compliance-config';
+import { HOLD_REASONS } from '@/lib/compliance-config';
 import {
   SANCTIONS_FUNDS_RULE,
   SANCTIONS_FUNDS_SENTENCE,
@@ -237,6 +239,22 @@ describe('sanctions screening spec says what the code does', () => {
     expect(gap).not.toContain('The alerts tell them not to before');
   });
 
+  // Fix pack 4 decision D5 (finding T1): the replaced account-holder name is a known gap, stated next
+  // to the Partner-API sender gap, and the coverage rule it names is the one the code holds
+  // (POSSIBLE_MATCH for a recipient; pinned in tests/pay-route-rescreen.test.ts).
+  it('D5: section 9 lists the replaced account-holder name, right after the Partner-API sender gap, as going to a person with POSSIBLE_MATCH', () => {
+    const gaps = section('## 9.').split('\n').filter((l) => l.startsWith('- **'));
+    const at = gaps.findIndex((l) => l.startsWith('- **A replaced account-holder name** (fix pack 4, the pay page): '));
+    expect(at, 'the D5 bullet').toBeGreaterThan(0);
+    expect(gaps[at - 1]).toMatch(/^- \*\*Partner-API sender names\*\*/);
+    const line = gaps[at];
+    expect(line).toContain('new bank details with a different account-holder name on a real-money rail');
+    expect(line).toContain('the coverage rule (section 4, rule 4) sends the transfer to a person with `POSSIBLE_MATCH`, never a silent clear');
+    expect(line).toContain('the new name and the chat name are screened on the live list first');
+    expect(section('## 4.')).toMatch(/`SENDER_IDENTITY_MISSING` \(sender\) or `POSSIBLE_MATCH` \(recipient\)/);
+    expect(complianceConfig.POSSIBLE_MATCH_REASON).toEqual(expect.any(String));
+  });
+
   // Review S6 (Y1, Y2, Y3).
   it('S6: section 10 has one S6 line after the S5 line', () => {
     const s10 = section('## 10.');
@@ -349,6 +367,36 @@ describe('sanctions screening spec says what pack 3 does', () => {
           expect(src, `${key} text piece "${piece}"`).toContain(piece);
         }
       }
+    }
+  });
+
+  // Pack 4 T12 (C19): the spec's hold-reason registry table matches HOLD_REASONS row for row.
+  it('the hold-reason registry table lists every HOLD_REASONS constant with its class, releaser and copy', () => {
+    const title = '### Hold-reason registry';
+    const start = spec.indexOf(title);
+    expect(start, title).toBeGreaterThanOrEqual(0);
+    const next = spec.indexOf('\n#', start + title.length);
+    const table = spec.slice(start, next === -1 ? undefined : next);
+    const rows = table.split('\n').filter((l) => /^\| `[A-Z_]+_REASON` \|/.test(l));
+    const named = Object.entries(complianceConfig).filter(
+      ([name, value]) => name.endsWith('_REASON') && typeof value === 'string' && Object.hasOwn(HOLD_REASONS, value),
+    ) as [string, string][];
+    const names = named.map(([n]) => n);
+    expect(names).toEqual(expect.arrayContaining(['EDD_REQUIRED_REASON', 'AML_HOLD_REASON']));
+    // every registry key has an exported constant, and the table has exactly one row per constant
+    expect(new Set(named.map(([, v]) => v))).toEqual(new Set(Object.keys(HOLD_REASONS)));
+    expect(rows).toHaveLength(names.length);
+    for (const [name, value] of named) {
+      const row = rows.find((l) => l.startsWith(`| \`${name}\` |`));
+      expect(row, name).toBeDefined();
+      const cells = row!.split('|').slice(1, -1).map((c) => c.trim());
+      const e = HOLD_REASONS[value]!;
+      expect(cells, name).toEqual([
+        `\`${name}\``,
+        e.class,
+        e.releasableBy === 'rescreen' ? 'rescreen (no person)' : e.releasableBy,
+        e.customerCopyKey,
+      ]);
     }
   });
 });

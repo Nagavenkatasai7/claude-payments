@@ -36,6 +36,14 @@ export const RESCREEN_ONLY_RELEASE_REFUSAL =
 export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sender screening hold first.';
 
 /**
+ * Fix pack 4 (R03, C19): the release refusal (partner and platform staff
+ * alike) for a real-money consumer row with no account-holder name on file,
+ * whatever reason it is held for. Until a capture path for a held row exists
+ * (PR7) such a row can only be rejected or refunded.
+ */
+export const RECIPIENT_IDENTITY_RELEASE_REFUSAL = 'This transfer cannot be released: the account holder name is missing. Reject or refund it.';
+
+/**
  * Pack 2 review F1 (A1): the refusal when a real-money release re-screened the
  * hold (its newest screen was not live and fresh) and the re-screen did not
  * clear it. Review R2 (J2): this is the PARTNER staff text, ONE for every
@@ -230,7 +238,7 @@ export async function assignTransfer(
  */
 export async function resendPaymentLink(
   store: Store,
-  sendText: (to: string, text: string) => Promise<void>,
+  sendText: (to: string, text: string) => Promise<unknown>, // fix pack 4 (C5): the channel it resolves is ignored
   id: string,
   consent?: OptOutLookup,
 ): Promise<void> {
@@ -420,6 +428,8 @@ export async function releaseTransfer(
     }
     // Review R1 (H2): a stamp that landed after the pre-read above (platform only).
     if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
+    // Fix pack 4 (C19): the clear re-screen's evidence is kept; nothing else written.
+    if (rr.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
         partnerRelease
@@ -442,6 +452,7 @@ export async function releaseTransfer(
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
   if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
+  if (r.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL); // fix pack 4 (C19): nothing written
   if (r.kind === 'already') {
     throw new Error(
       partnerRelease

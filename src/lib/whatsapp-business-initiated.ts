@@ -22,7 +22,8 @@ export interface BusinessTemplate {
   params: string[];
 }
 
-type SendTextFn = (to: string, text: string, creds?: WaCreds) => Promise<void>;
+// Fix pack 4 (C5): the real sendText resolves its channel; this seam ignores it.
+type SendTextFn = (to: string, text: string, creds?: WaCreds) => Promise<unknown>;
 type SendTemplateFn = (to: string, name: string, lang: string, params: string[], creds?: WaCreds) => Promise<void>;
 type WindowReader = { getLastInboundAt(partnerId: PartnerId, phone: string): Promise<string | null> };
 
@@ -73,7 +74,10 @@ export async function sendTextThenTemplate(
   const sendText = opts.sendText ?? realSendText;
   const sendTemplate = opts.sendTemplate ?? realSendTemplate;
   const t = msg.template;
-  if (!t) return sendText(to, msg.text, creds);
+  if (!t) {
+    await sendText(to, msg.text, creds);
+    return;
+  }
   const params = t.params.map(toTemplateParam);
 
   let inWindow = true;
@@ -135,7 +139,7 @@ export function rowTemplate(raw: unknown): BusinessTemplate | undefined {
   return { name, lang, params: flat };
 }
 
-async function attempt(fn: () => Promise<void>, via: 'text' | 'template'): Promise<SendOutcome> {
+async function attempt(fn: () => Promise<unknown>, via: 'text' | 'template'): Promise<SendOutcome> {
   try {
     await fn();
     return { ok: true, via };

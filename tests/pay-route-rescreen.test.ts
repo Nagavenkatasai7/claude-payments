@@ -6,14 +6,15 @@
  *   clear              → today's path unchanged (plus one evidence row)
  * A consumer sender with no legal name on file is refused (sender_name_required).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { realMoneyPayBody } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import {
@@ -39,10 +40,12 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
+// Review R2-Q3 (H1): a spy, so a test can tell whether the code was checked before the refusal.
+const otpVerify = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 vi.mock('@/lib/transaction-otp', () => ({
   getTransactionOtpStore: () => ({
     issue: async () => ({ ok: true, code: '000000' }),
-    verify: async () => ({ ok: true }),
+    verify: otpVerify,
   }),
 }));
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
@@ -81,7 +84,6 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-
 // The mock list never returns a possible match and never fails to load, so the
 // screener is switchable per test: 'real' is the production mock list.
 let screenerMode: 'real' | 'possible' | 'unavailable' = 'real';
@@ -153,6 +155,7 @@ async function outboxKinds() {
 
 const originalList = process.env.SANCTIONS_LIST;
 beforeEach(async () => {
+  otpVerify.mockClear();
   screenerMode = 'real';
   rails.byPartner = {};
   db = await freshDb();
@@ -316,6 +319,8 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
       await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
         VALUES (${partnerId}, ${partnerId}, 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
       if (o.certify ?? true) await certifyPartnerForTest(db, partnerId);
+      // Fix pack 4 T8: the owner of a real-money b2c payment needs an approved provider block (R18).
+      if (partnerId === OWNER) await approveDisclosureForTest(db, partnerId);
     }
     await setRailProviderType(db, partnerId, 'http');
     rails.byPartner[partnerId] = HTTP_RAIL;
@@ -335,8 +340,8 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
   it('http rail on the mock list (never live) → in_review LIST_UNAVAILABLE, not instructed', async () => {
     await httpRail(OWNER);
     await seedOwner('Alex Sender', OWNER);
-    await store.saveTransfer(makeTransfer({ id: 'lv-mock', partnerId: OWNER }));
-    expect(await (await post('lv-mock')).json()).toEqual({ ok: true, status: 'in_review' });
+    await store.saveTransfer(makeTransfer({ id: 'lv-mock', partnerId: OWNER, recipientLegalName: 'Anita Legal' }));
+    expect(await (await post('lv-mock', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-mock');
     expect(t?.complianceStatus).toBe('flagged');
     expect(t?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
@@ -347,9 +352,9 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await httpRail(OWNER);
     await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: 35 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-35', partnerId: OWNER }));
+    await store.saveTransfer(makeTransfer({ id: 'lv-35', partnerId: OWNER, recipientLegalName: 'Anita Legal' }));
     // A webhook-driven rail answers 'processing'; the ledger row is paid.
-    expect(await (await post('lv-35')).json()).toEqual({ ok: true, status: 'processing' });
+    expect(await (await post('lv-35', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'processing' });
     expect((await store.getTransfer('lv-35'))?.status).toBe('paid');
     expect(await kinds()).toContain('settlement.instruct');
   });
@@ -358,8 +363,8 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await httpRail(OWNER);
     await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: 37 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-37', partnerId: OWNER }));
-    expect(await (await post('lv-37')).json()).toEqual({ ok: true, status: 'in_review' });
+    await store.saveTransfer(makeTransfer({ id: 'lv-37', partnerId: OWNER, recipientLegalName: 'Anita Legal' }));
+    expect(await (await post('lv-37', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-37'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
     expect(await kinds()).not.toContain('settlement.instruct');
   });
@@ -372,22 +377,28 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     rails.byPartner[OWNER] = { providerType: 'mock' };
     await setRailProviderType(db, OWNER, 'mock');
     primeOfacSource({ checkedAgoMs: 37 * H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-routed', partnerId: OWNER, settlementPartnerId: 'railp' }));
-    expect(await (await post('lv-routed')).json()).toEqual({ ok: true, status: 'in_review' });
+    await store.saveTransfer(makeTransfer({ id: 'lv-routed', partnerId: OWNER, settlementPartnerId: 'railp', recipientLegalName: 'Anita Legal' }));
+    expect(await (await post('lv-routed', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
   });
 
-  it('a default-tenant transfer routed to an http partner -> 409 not_available, never charged, nothing written to the outbox', async () => {
+  it('a default-tenant transfer routed to an http partner -> 409 not_available from the route\'s early R18 gate (code not checked, no live-gate warn), never charged, nothing written to the outbox', async () => {
     // Pack 3 (contract 6): the default tenant may never own a real-money transfer, even on a
-    // certified routed rail. The pay-time re-screen (sanctions always runs) comes BEFORE the
-    // gate, which sits in pay-process right before the capture; it leaves the row awaiting_payment.
+    // certified routed rail. Fix pack 4 T9: the route's R18 pre-verify gate (C12) now gives the
+    // same 409 before the code is checked (the default block is never approved); pay-process's
+    // live gate stays the authoritative one (proven by tests/pay-route-rail-url.test.ts, review
+    // R2-Q3 H1). The row is left awaiting_payment.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
     await seedOwner('Alex Sender');
     await httpRail('railp');
     primeOfacSource({ checkedAgoMs: H });
     await store.saveTransfer(makeTransfer({ id: 'lv-default-routed', settlementPartnerId: 'railp' }));
-    const res = await post('lv-default-routed');
+    const res = await post('lv-default-routed', realMoneyPayBody({ otp: '000000' }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ ok: false, error: expect.any(String), reason: 'not_available' });
+    expect(otpVerify).not.toHaveBeenCalled(); // the code was not consumed
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.live-refused'))).toEqual([]);
     const t = await store.getTransfer('lv-default-routed');
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();
@@ -398,23 +409,63 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     await httpRail(OWNER);
     await seedOwner('Alex Sender', OWNER);
     primeOfacSource({ checkedAgoMs: H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-renamed', partnerId: OWNER }));
+    await store.saveTransfer(makeTransfer({ id: 'lv-renamed', partnerId: OWNER, recipientLegalName: 'Anita Legal' }));
     await seedLiveEvidence(db, { id: 'lv-renamed', partnerId: OWNER, recipientName: 'Mom', senderName: 'Alexandra Previous' });
-    expect(await (await post('lv-renamed')).json()).toEqual({ ok: true, status: 'in_review' });
+    expect(await (await post('lv-renamed', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
     const t = await store.getTransfer('lv-renamed');
     expect(t?.complianceStatus).toBe('flagged');
     expect(t?.complianceReasons).toEqual([SENDER_IDENTITY_MISSING_REASON]);
     expect(await kinds()).not.toContain('settlement.instruct');
   });
 
+  // Decision D5 (fix pack 4, finding T1): new bank details with a DIFFERENT typed account-holder
+  // name replace the name screened before, which can no longer be screened. The coverage rule
+  // sends the payment to a person (POSSIBLE_MATCH, in_review), the same posture as the sender
+  // rename above; a re-spelling of the same name (case, spacing) is covered.
+  const NEW_BANK = { country: 'IN', fields: { accountNumber: '987654321098', ifsc: 'ICIC0004321' } };
+  async function replacedHolderRow(id: string) {
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id, partnerId: OWNER, recipientLegalName: 'Alice Rao' }));
+    await seedLiveEvidence(db, { id, partnerId: OWNER, recipientName: 'Mom', alsoRecipientNames: ['Alice Rao'], senderName: 'Alex Sender' });
+  }
+
+  it('D5: new bank details with a different account-holder name → in_review POSSIBLE_MATCH (the old name is uncovered), new account written, not instructed', async () => {
+    await replacedHolderRow('lv-holder');
+    const res = await post('lv-holder', { ...realMoneyPayBody({ otp: '000000', accountHolder: 'Alicia Rao' }), ...NEW_BANK });
+    expect(await res.json()).toEqual({ ok: true, status: 'in_review' });
+    const t = await store.getTransferDecrypted('lv-holder');
+    expect(t?.complianceStatus).toBe('flagged');
+    expect(t?.complianceReasons).toContain(POSSIBLE_MATCH_REASON);
+    expect(t?.payoutDestination).toBe('ICIC0004321 987654321098');
+    expect(t?.recipientLegalName).toBe('Alicia Rao');
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('D5: the same account-holder name in another case and spacing is covered → paid and instructed, no POSSIBLE_MATCH', async () => {
+    await replacedHolderRow('lv-holder-same');
+    const res = await post('lv-holder-same', { ...realMoneyPayBody({ otp: '000000', accountHolder: '  alice   RAO ' }), ...NEW_BANK });
+    expect(await res.json()).toEqual({ ok: true, status: 'processing' });
+    const t = await store.getTransfer('lv-holder-same');
+    expect(t?.status).toBe('paid');
+    expect(t?.complianceReasons ?? []).not.toContain(POSSIBLE_MATCH_REASON);
+    expect(await kinds()).toContain('settlement.instruct');
+  });
+
   it('pay-time block writes notices', async () => {
-    // Fix pack 2 T5 (R04): the routed rail partner is emailed; the default owner is not.
-    await seedOwner('Alex Sender');
+    // Fix pack 2 T5 (R04): the routed rail partner is emailed; an owner with no alert address is not.
+    // Fix pack 4 T9: the owner is a certified, approved non-default partner on a mock rail (a
+    // default-tenant transfer on a real-money rail is now refused before the code is checked, C12).
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    rails.byPartner[OWNER] = { providerType: 'mock' };
+    await setRailProviderType(db, OWNER, 'mock');
     await httpRail('railp');
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ alertEmail: 'ops@railp.example' })}::jsonb WHERE id = 'railp'`);
     primeOfacSource({ checkedAgoMs: H });
-    await store.saveTransfer(makeTransfer({ id: 'lv-block', settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
-    expect((await post('lv-block')).status).toBe(400);
+    await store.saveTransfer(makeTransfer({ id: 'lv-block', partnerId: OWNER, settlementPartnerId: 'railp', recipientLegalName: 'Testa Fixturelli' }));
+    expect((await post('lv-block', realMoneyPayBody({ otp: '000000' }))).status).toBe(400);
     expect((await store.getTransfer('lv-block'))?.status).toBe('blocked');
     expect(await outboxKinds()).toEqual([
       ['ops.alert', 'sanctionsblock:lv-block'],
@@ -423,7 +474,7 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     const r = (await db.execute(sql`SELECT partner_id, meta FROM audit_events WHERE action = 'sanctions.block' AND subject_id = 'lv-block'`)) as unknown as {
       rows: Array<{ partner_id: string; meta: Record<string, unknown> }>;
     };
-    expect(r.rows).toMatchObject([{ partner_id: 'default', meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
+    expect(r.rows).toMatchObject([{ partner_id: OWNER, meta: { stage: 'pay', environment: 'live', realMoney: true, quiet: false } }]);
   });
 
   it('demo name on simulator -> audit only', async () => {
