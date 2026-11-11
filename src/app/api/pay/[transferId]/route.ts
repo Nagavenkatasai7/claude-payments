@@ -38,7 +38,8 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
+import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, payTemporarilyUnavailable, transferFunded } from '@/lib/pay-not-available';
+import { payEsignGate } from '@/lib/pay-esign-gate';
 import { originatorViewFor, writeOriginatorInfo } from '@/lib/originator-info';
 import { validateSenderAddress, validateSenderDob } from '@/lib/travel-rule';
 import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
@@ -489,8 +490,10 @@ export async function POST(
     // Fix pack 4 (C10 b, C12 step 3): the R18 refusals come BEFORE the code is
     // checked, so an old tab or an unapproved block never spends the code. The
     // owner is resolved in its OWN try (critic M8): a draft whose tenant cannot
-    // be resolved gets the SAFE context (not mandatory) and goes on exactly as
-    // today; pay-process's R18 gate on the minted row is the authoritative one.
+    // be resolved gets the SAFE context (not mandatory) through R18, the money
+    // gate, the account-holder and originator steps; pay-process's R18 gate on
+    // the minted row is the authoritative one. The SAFE context holds until the
+    // E-SIGN step, which answers 503 for an unresolved owner (fix pack 6 P5).
     let payOwnerId: PartnerId | undefined;
     try {
       payOwnerId = otpDraft ? await draftTenant(otpDraft, store.legacyTenantOf) : otpTransfer!.partnerId;
@@ -616,6 +619,19 @@ export async function POST(
     }
     const hasOriginator = originator.address !== undefined || originator.dateOfBirth !== undefined;
 
+    // Fix pack 6 (R46, P5, P7 step 9): the E-SIGN consent, on every tenant, after
+    // every cheaper pre-verify check and still BEFORE the code is checked: no code
+    // is spent and nothing is written by its answers (never at request_otp, P0
+    // rule 12). The customer is the OWNER (`payOwnerId`) and this payment's phone
+    // (`otpPhone`: the transfer's phone, else the draft's sender). Only an ACH
+    // debit (the row's, else the draft's fundingMethod) is exempt (D2); a non-ACH
+    // b2b payment is asked like a b2c one. An unresolved owner answers 503 here
+    // (P5 overrides PR4 M8 for this step: consent cannot be read without it).
+    const payMethod = otpTransfer?.fundingMethod ?? otpDraft?.fundingMethod;
+    const esign = await payEsignGate(getDb(), { ownerId: payOwnerId, phone: otpPhone, exempt: payMethod === 'ach_pull', body });
+    if (esign.kind === 'reload_required') return payReloadRequired(payFunded);
+    if (esign.kind === 'unavailable') return payTemporarilyUnavailable();
+
     // Fix pack 4 (C18 step 6): after a 2xx b2c payment with a typed name, fill the
     // saved recipient's EMPTY book entry (best-effort; never changes the answer).
     // Review R1-P2 D2/E1/F1: only while the book holds the account actually PAID
@@ -656,6 +672,10 @@ export async function POST(
       disclosureSnapshot: acked
         ? { surface: 'transfer', version: acked, shownHash: body.disclosureHash, acknowledgedAt: evidenceAt }
         : null,
+      // Fix pack 6 (P6, P7 step 11): the consent the page posted, recorded by the
+      // evidence commit in the same transaction as otp.verified (fail closed).
+      // b2c and non-ACH b2b alike; an ACH debit is exempt and never has it.
+      ...(esign.kind === 'consent' ? { esignConsent: { version: esign.version, routeId: transferId } } : {}),
     };
 
     // Stage C2: a draft an AI app prepared pays only its stored account (400 before any charge).
@@ -1073,10 +1093,7 @@ export async function POST(
     // code, and a re-POST converges (claim-first replay / refuseUnlessAwaiting).
     // Review R2-Q1 B4: a failed single-use code consume is retryable whatever its shape.
     if (isInfraError(err) || isOtpConsumeFailure(err)) {
-      return NextResponse.json(
-        { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
-        { status: 503 },
-      );
+      return payTemporarilyUnavailable();
     }
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
