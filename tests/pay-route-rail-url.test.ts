@@ -14,7 +14,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
@@ -178,6 +178,9 @@ async function acmeOnHttp(o: { certify?: boolean } = {}): Promise<void> {
     senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender',
     senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
   });
+  // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
+  // ORIGINATOR_INFO_MISSING hold (P22) stays out of the rail URL and live-gate cases.
+  await seedOriginatorForTest(db, 'acme', '15551234567', { address: true, dob: true });
 }
 
 const BAD_URLS = ['http://10.0.0.5/settle', 'https://169.254.169.254/latest', 'https://localhost/x', 'https://rail.acme.com:8443/x', '   '];

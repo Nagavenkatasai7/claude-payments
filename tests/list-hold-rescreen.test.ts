@@ -221,6 +221,9 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     await setRailProviderType(db, 'acme', 'http');
     await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme'`);
     await seedSender('acme', undefined);
+    // Fix pack 5 T20b (P0 rule 9): the DELETE above removed the travel-rule data; this row has no
+    // Partner-API claim, so put it back (this case is about the sender NAME only).
+    await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
     await heldRow({ id: 'lh_api' }, { senderName: 'Body Sender Name' });
     expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
     const after = await store.getTransfer('lh_api');

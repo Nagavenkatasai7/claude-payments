@@ -45,6 +45,16 @@ export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sende
 export const RECIPIENT_IDENTITY_RELEASE_REFUSAL = 'This transfer cannot be released: the account holder name is missing. Reject or refund it.';
 
 /**
+ * Fix pack 5 (R38, P22): the release refusal (partner and platform staff
+ * alike) for a real-money row whose sender's travel-rule data (the address,
+ * or the date of birth by band) is not on file, or that is routed to another
+ * tenant's rail, whatever reason it is held for. Until a capture path for a
+ * held row exists (PR7) such a row can only be rejected or refunded.
+ */
+export const ORIGINATOR_INFO_RELEASE_REFUSAL =
+  "This transfer cannot be released: the sender's address or date of birth is missing. Reject or refund it.";
+
+/**
  * Pack 2 review F1 (A1): the refusal when a real-money release re-screened the
  * hold (its newest screen was not live and fresh) and the re-screen did not
  * clear it. Review R2 (J2): this is the PARTNER staff text, ONE for every
@@ -431,6 +441,8 @@ export async function releaseTransfer(
     if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
     // Fix pack 4 (C19): the clear re-screen's evidence is kept; nothing else written.
     if (rr.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+    // Fix pack 5 (P22): the same, for missing travel-rule data (the evidence is kept).
+    if (rr.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
         partnerRelease
@@ -454,6 +466,7 @@ export async function releaseTransfer(
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
   if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL); // fix pack 4 (C19): nothing written
+  if (r.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL); // fix pack 5 (P22): nothing written
   if (r.kind === 'already') {
     throw new Error(
       partnerRelease

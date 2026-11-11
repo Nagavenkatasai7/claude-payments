@@ -4,7 +4,7 @@ import { createStore } from '@/lib/store';
 import {
   cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
-  SENDER_SCREENING_RELEASE_REFUSAL, RECIPIENT_IDENTITY_RELEASE_REFUSAL,
+  SENDER_SCREENING_RELEASE_REFUSAL, RECIPIENT_IDENTITY_RELEASE_REFUSAL, ORIGINATOR_INFO_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -19,7 +19,7 @@ import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
-import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { seedOriginatorForTest, seedRealMoneyRail } from './helpers-live';
@@ -1004,6 +1004,51 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
       await expect(releaseTransfer(store, db, 'rel_noname2', REL)).rejects.toThrow(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
       expect((await store.getTransfer('rel_noname2'))?.status).toBe('in_review');
       expect((await store.getTransfer('rel_noname2'))?.complianceReasons).toEqual([RECIPIENT_IDENTITY_MISSING_REASON]);
+      expect(await outboxRows()).toEqual([]);
+      expect((await auditRows()).map((r) => r.action)).toEqual(['sanctions.screen', 'sanctions.screen']);
+    });
+  });
+
+  // Fix pack 5 T20b (P22): a real-money consumer row whose sender's address
+  // (or date of birth, by band) is not on file is never released.
+  describe('an ORIGINATOR_INFO_MISSING hold with no address on file (pack 5 T20b, P22)', () => {
+    const originalList = process.env.SANCTIONS_LIST;
+    afterEach(() => restoreOfacSource(originalList));
+    async function originatorHeld(id: string): Promise<ReturnType<typeof createStore>> {
+      await db.execute(sql`INSERT INTO partners (id, name) VALUES ('rp', 'Rail Partner') ON CONFLICT DO NOTHING`);
+      await seedRealMoneyRail(db, 'rp');
+      const store = createStore(fakeRedis(), db);
+      await store.saveTransfer({
+        ...makeTransfer({
+          id, partnerId: 'rp', environment: 'live', status: 'in_review', complianceStatus: 'flagged',
+          complianceReasons: [ORIGINATOR_INFO_MISSING_REASON], fundingRef: `mockfund-${id}`,
+          paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+        }),
+        recipientLegalName: 'Test Recipient Legal',
+      });
+      return store;
+    }
+
+    it('a real-money release with no address on file is refused with ORIGINATOR_INFO_RELEASE_REFUSAL (platform and partner staff); nothing written', async () => {
+      const store = await originatorHeld('rel_noaddr');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noaddr'))!);
+      const auditBefore = (await auditRows()).length;
+      await expect(releaseTransfer(store, db, 'rel_noaddr', REL)).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect(ORIGINATOR_INFO_RELEASE_REFUSAL).toBe(
+        "This transfer cannot be released: the sender's address or date of birth is missing. Reject or refund it.",
+      );
+      await expect(releaseTransfer(store, db, 'rel_noaddr', REL, { partnerId: 'rp' })).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect((await store.getTransfer('rel_noaddr'))?.status).toBe('in_review');
+      expect(await outboxRows()).toEqual([]);
+      expect(await auditRows()).toHaveLength(auditBefore);
+    });
+
+    it('stale screen (the re-screen path): a live clear re-screen still refuses; only its evidence row is written', async () => {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const store = await originatorHeld('rel_noaddr2');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noaddr2'))!, { screenedAgoMs: 40 * 3_600_000, at: new Date(Date.now() - 40 * 3_600_000) });
+      await expect(releaseTransfer(store, db, 'rel_noaddr2', REL)).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect((await store.getTransfer('rel_noaddr2'))?.complianceReasons).toEqual([ORIGINATOR_INFO_MISSING_REASON]);
       expect(await outboxRows()).toEqual([]);
       expect((await auditRows()).map((r) => r.action)).toEqual(['sanctions.screen', 'sanctions.screen']);
     });

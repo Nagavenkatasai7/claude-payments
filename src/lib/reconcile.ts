@@ -9,7 +9,7 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import { readFlag } from '@/lib/flags';
-import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { liveRefusalFor, realMoneyFor, realMoneyRail } from '@/lib/live-gate';
 import { alertStuckLivegate } from '@/lib/livegate-alerts';
 import { alertStuckHeld, instructHeldOnPurpose } from '@/lib/instruct-gates';
@@ -387,7 +387,8 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         // Fix pack 2 T3: the LEDGER row's reasons (re-read after the hold)
         // decide the copy: a hold waiting on the list is not a staff release.
         // Fix pack 4 (C19, critic M6): a row with no account-holder name cannot
-        // be released at all (checked first).
+        // be released at all (checked first). Fix pack 5 (P22): nor can a row
+        // whose sender's travel-rule data is missing (checked second).
         const held = await transfers.getTransfer(t.id);
         await outbox.enqueue(
           'ops.alert',
@@ -396,9 +397,11 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
               prefix +
               (held?.complianceReasons?.includes(RECIPIENT_IDENTITY_MISSING_REASON)
                 ? 'HELD for compliance review (in_review), not instructed: the account holder name is missing, so it cannot be released. Reject or refund it in the dashboard.'
-                : waitsForList(held)
-                  ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
-                  : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
+                : held?.complianceReasons?.includes(ORIGINATOR_INFO_MISSING_REASON)
+                  ? "HELD for compliance review (in_review), not instructed: the sender's address or date of birth is missing, so it cannot be released. Reject or refund it in the dashboard."
+                  : waitsForList(held)
+                    ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
+                    : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
           },
           { dedupeKey: `fundhold:${t.id}` },
         );
