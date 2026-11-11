@@ -6,7 +6,7 @@
  *   clear              → today's path unchanged (plus one evidence row)
  * A consumer sender with no legal name on file is refused (sender_name_required).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
@@ -40,10 +40,12 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
+// Review R2-Q3 (H1): a spy, so a test can tell whether the code was checked before the refusal.
+const otpVerify = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 vi.mock('@/lib/transaction-otp', () => ({
   getTransactionOtpStore: () => ({
     issue: async () => ({ ok: true, code: '000000' }),
-    verify: async () => ({ ok: true }),
+    verify: otpVerify,
   }),
 }));
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
@@ -153,6 +155,7 @@ async function outboxKinds() {
 
 const originalList = process.env.SANCTIONS_LIST;
 beforeEach(async () => {
+  otpVerify.mockClear();
   screenerMode = 'real';
   rails.byPartner = {};
   db = await freshDb();
@@ -379,11 +382,14 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
   });
 
-  it('a default-tenant transfer routed to an http partner -> 409 not_available, never charged, nothing written to the outbox', async () => {
+  it('a default-tenant transfer routed to an http partner -> 409 not_available from the route\'s early R18 gate (code not checked, no live-gate warn), never charged, nothing written to the outbox', async () => {
     // Pack 3 (contract 6): the default tenant may never own a real-money transfer, even on a
     // certified routed rail. Fix pack 4 T9: the route's R18 pre-verify gate (C12) now gives the
     // same 409 before the code is checked (the default block is never approved); pay-process's
-    // live gate stays the authoritative one. The row is left awaiting_payment.
+    // live gate stays the authoritative one (proven by tests/pay-route-rail-url.test.ts, review
+    // R2-Q3 H1). The row is left awaiting_payment.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
     await seedOwner('Alex Sender');
     await httpRail('railp');
     primeOfacSource({ checkedAgoMs: H });
@@ -391,6 +397,8 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     const res = await post('lv-default-routed', realMoneyPayBody({ otp: '000000' }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ ok: false, error: expect.any(String), reason: 'not_available' });
+    expect(otpVerify).not.toHaveBeenCalled(); // the code was not consumed
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.live-refused'))).toEqual([]);
     const t = await store.getTransfer('lv-default-routed');
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();

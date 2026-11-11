@@ -43,13 +43,20 @@ vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => actual.createPartnerStore(db) };
 });
-// Fix pack 4 T5 (C11): only staffMfaEnrolled is mocked (default false); the step-up itself reads
-// the real MFA store (so its factor stays 'password' for these users).
-const mfa = vi.hoisted(() => ({ enrolled: false }));
-vi.mock('@/lib/staff-mfa-store', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
-  return { ...actual, staffMfaEnrolled: async () => mfa.enrolled };
-});
+// Fix pack 4 T5 (C11) and R2-Q3 (G1): the MFA store is mocked, not only staffMfaEnrolled, so the
+// action's enrolled read and the step-up's factor read (getStaffMfaStore().isEnrolled) agree, as in
+// tests/admin-live-actions.test.ts and tests/partner-controls-actions.test.ts. Default not enrolled
+// (factor 'password'); an enrolled admin's step-up takes the TOTP code mfa.code, never the password.
+const mfa = vi.hoisted(() => ({ enrolled: false, code: '123456' }));
+vi.mock('@/lib/staff-mfa-store', async (orig) => ({
+  ...(await orig<typeof import('@/lib/staff-mfa-store')>()),
+  getStaffMfaStore: () => ({
+    isEnrolled: async () => mfa.enrolled,
+    verifyCode: async (_u: string, c: string) => c === mfa.code,
+  }),
+  // The module's own staffMfaEnrolled reads its local getStaffMfaStore, so it is mocked on the same flag.
+  staffMfaEnrolled: async () => mfa.enrolled,
+}));
 const logWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/log', async (orig) => ({ ...(await orig<typeof import('@/lib/log')>()), logWarn: logWarnSpy }));
 
@@ -404,14 +411,30 @@ describe('saveDisclosureAction: the partner approval stamp (C11)', () => {
     mfa.enrolled = true;
     await signInAdmin();
     const before = Date.now();
-    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: PASSWORD }))).toEqual({ ok: true });
+    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: mfa.code }))).toEqual({ ok: true });
     const stored = (await sc('pa'))?.disclosure;
     expect(stored?.approval).toMatchObject({ by: 'pa-admin', hash: disclosureHash(DISCLOSURE) });
     expect(Date.parse(String(stored?.approval?.at))).toBeGreaterThanOrEqual(before - 1000);
     expect(resolvePartnerDisclosure(await createPartnerStore(db).getPartner('pa')).partnerApproved).toBe(true);
     const rows = await audits();
     expect(rows.map((r) => r.action)).toEqual(['auth.stepup', 'partner.disclosure_config']);
+    expect(rows[0].meta).toMatchObject({ factor: 'totp', target: 'disclosure.save', actorScope: 'partner' });
     expect(rows[1].meta).toMatchObject({ actorScope: 'partner', approved: true, clearedApproval: false });
+  });
+
+  it('an enrolled admin who submits the password as the step-up secret gets step_up_required, and the stored disclosure and the audit rows are unchanged', async () => {
+    mfa.enrolled = true;
+    await signInAdmin();
+    const before = await snapshot();
+    const r = await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: PASSWORD }));
+    expect(r).toMatchObject({ ok: false, code: 'step_up_required', factor: 'totp' });
+    expect(await sc('pa')).toEqual(before.a);
+    expect(await sc('pb')).toEqual(before.b);
+    // Only the failed step-up is audited (factor totp); no approval, no disclosure write.
+    const rows = await audits();
+    expect(rows.map((x) => x.action)).toEqual(['auth.stepup.failed']);
+    expect(rows[0].meta).toMatchObject({ factor: 'totp', target: 'disclosure.save' });
+    expect(JSON.stringify([rows, logWarnSpy.mock.calls])).not.toContain(PASSWORD);
   });
 
   it('an enrolled admin with a still-FRESH step-up (from before enrolment) and no secret in the form is asked for a step-up and nothing is stored', async () => {
@@ -437,7 +460,7 @@ describe('saveDisclosureAction: the partner approval stamp (C11)', () => {
   it('an unenrolled re-save over an approved block strips the approval', async () => {
     mfa.enrolled = true;
     await signInAdmin();
-    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: PASSWORD }))).toEqual({ ok: true });
+    expect(await saveDisclosureAction(null, disclosureForm({ [STEP_UP_FIELD]: mfa.code }))).toEqual({ ok: true });
     mfa.enrolled = false;
     expect(await saveDisclosureAction(null, disclosureForm())).toEqual({ ok: true });
     expect((await sc('pa'))?.disclosure).toEqual(DISCLOSURE);

@@ -73,6 +73,12 @@ const HELPERS: Record<string, string[]> = {
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
 };
+/**
+ * Listed helpers with no .enqueue( of their own: they reach the outbox only through a listed
+ * function of ANOTHER helper. Fix pack 4 T5 (C11): setDisclosure -> notifyLiveChange
+ * (live-controls-write.ts). Every other helper must enqueue itself (the not-vacuous check).
+ */
+const INDIRECT = new Set(['src/lib/partner-support-settings.ts']);
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';
 const EXEMPT = new Set(['src/db/repos/outbox-repo.ts', 'src/lib/outbox.ts']);
@@ -111,12 +117,25 @@ describe('every outbox enqueue site is followed by a worker poke (partner-demo R
 
   it('finds the enqueue sites (the scan is not vacuous)', () => {
     expect(enqueuers.length).toBeGreaterThan(20);
-    // A helper enqueues itself, or (fix pack 4 T5) calls a listed function of another helper that does.
-    const helperFns = (self: string) => Object.entries(HELPERS).filter(([rel]) => rel !== self).flatMap(([, fns]) => fns);
+    // Every listed helper enqueues itself, except the named INDIRECT ones (R2-Q3 G2).
     for (const helper of Object.keys(HELPERS)) {
+      if (!INDIRECT.has(helper)) expect(enqueuers, helper).toContain(helper);
+    }
+  });
+
+  it('only src/lib/partner-support-settings.ts is excused from enqueuing itself (R2-Q3 G2)', () => {
+    expect([...INDIRECT]).toEqual(['src/lib/partner-support-settings.ts']);
+    const helperFns = (self: string) => Object.entries(HELPERS).filter(([rel]) => rel !== self).flatMap(([, fns]) => fns);
+    for (const helper of INDIRECT) {
+      expect(Object.keys(HELPERS), helper).toContain(helper);
+      // A member that enqueues itself again leaves the set (the check above then covers it).
+      expect(enqueuers, helper).not.toContain(helper);
       const text = files.find((f) => f.rel === helper)?.text ?? '';
-      const viaHelper = helperFns(helper).some((fn) => new RegExp(`\\b${fn}\\(`).test(text));
-      if (!viaHelper) expect(enqueuers, helper).toContain(helper);
+      // It really reaches the outbox through a listed function of ANOTHER helper.
+      expect(
+        helperFns(helper).some((fn) => new RegExp(`\\b${fn}\\(`).test(text)),
+        helper,
+      ).toBe(true);
     }
   });
 

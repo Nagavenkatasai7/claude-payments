@@ -360,7 +360,10 @@ describe('POST /api/pay/l/[token] — MintRefusedError at the mint (pack 3)', ()
 // rail turned http (real money) without certification — here the default tenant, which may never
 // own real money — is refused at pay time BEFORE the capture: 409 not_available, never charged.
 describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { retry: 0 }, () => {
-  it('a minted link transfer whose owner rail turned http and is uncertified -> 409 not_available on resume, never charged', async () => {
+  // Review R2-Q3 (H1): since fix pack 4 the link route's early R18 gate answers this one (the
+  // default tenant's demo block is never approved): no code is issued, and pay-process's live gate
+  // is never reached. The 'acme' resume below proves the live gate on this route.
+  it('a minted link transfer whose owner rail turned http and is uncertified -> 409 not_available on resume from the early R18 gate (no code issued, no live-gate warn), never charged', async () => {
     // 1. Minted on the mock rail, but the capture is declined: a minted, unpaid transfer.
     funding.decline = true;
     await call({ action: 'request_otp' });
@@ -381,17 +384,85 @@ describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { 
     funding.captures = 0;
 
     // 3. The resume is refused before any capture. (A fresh OTP store: the issue cooldown.)
-    txOtp = createTransactionOtpStore(fakeRedis(), { randomInt: () => 654321 });
+    const resumeRedis = fakeRedis();
+    txOtp = createTransactionOtpStore(resumeRedis, { randomInt: () => 654321 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
     // Fix pack 4 (C10 c): the default owner on a real-money rail is mandatory and its
     // demo block is never approved, so no code is sent at all.
     const otp = await call({ action: 'request_otp' });
     expect(otp.status).toBe(409);
     expect(await otp.json()).toMatchObject({ ok: false, reason: 'not_available' });
+    expect([...resumeRedis.dump.keys()].filter((k) => k.startsWith('txotp:'))).toEqual([]); // no code issued
     const res = await call({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: lockedAt });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.live-refused'))).toEqual([]);
     expect(funding.captures).toBe(0);
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+    const t = await store.getTransfer(tid);
+    expect(t?.status).toBe('awaiting_payment');
+    expect(t?.fundingRef).toBeFalsy();
+  });
+  // Review R2-Q3 (H1 b): the early R18 gate passes (an approved block, a complete request), so on
+  // resume the refusal must come from pay-process's live gate (liveRefusalForRail).
+  it('a minted link transfer of a NON-default uncertified owner whose rail turned http, APPROVED block, complete request -> 409 not_available from the pay-time LIVE gate: one pay.live-refused warn, no capture, no evidence rows', async () => {
+    const ACME_LINK = 'pl_acme_live';
+    await seedPartner(db, 'acme');
+    await approveDisclosureForTest(db, 'acme');
+    sharedChannelFor.add('acme');
+    await customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
+      partnerId: 'acme', createdAt: T0, updatedAt: T0,
+    } as Customer);
+    const payees = createPayeeRepo(db);
+    await payees.insert({
+      id: 'pye_acme_live', partnerId: 'acme', legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',
+      payoutDestination: 'HDFC0001234 50100123456789', last4: '6789', screening: 'clear', createdBy: 'pa',
+    });
+    await payees.decide('pye_acme_live', ['pending'], 'approved', 'admin');
+    const acmeToken = newLinkToken();
+    await createPaymentLinkRepo(db).insertLinks([{
+      id: ACME_LINK, partnerId: 'acme', payeeId: 'pye_acme_live', token: acmeToken, reference: 'INV-99', customerName: 'Asha Patel',
+      customerPhone: PHONE, amountInr: 25000, purpose: 'education', expiresAt: linkExpiresAt(), createdBy: 'pa',
+    }]);
+    const acmeLock = (await quotes.lock(ACME_LINK, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' })).lockedAt;
+    const acmeHash = resolvePartnerDisclosure(await createPartnerRepo(db).getPartner('acme')).hash!;
+    const payBody = {
+      otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock,
+      disclosureVersion: DISCLOSURE_DRAFT_VERSION, disclosureHash: acmeHash, accountHolder: 'Sunrise School Trust',
+    };
+
+    // 1. Minted on the mock rail, the capture declined: a minted, unpaid transfer.
+    funding.decline = true;
+    expect((await call({ action: 'request_otp' }, acmeToken)).status).toBe(200);
+    expect((await call(payBody, acmeToken)).status).toBe(402);
+    const tid = ((await db.execute(sql.raw(`SELECT id FROM transfers WHERE partner_id = 'acme'`))) as unknown as { rows: Array<{ id: string }> }).rows[0].id;
+    expect((await store.getTransfer(tid))?.status).toBe('awaiting_payment');
+    // The declined first attempt wrote its own evidence (audit_events is append-only): the resume adds none.
+    const evidenceBefore = await evidenceRows();
+
+    // 2. The owner's rail turns http (stored type too); acme stays uncertified. A live list.
+    linkRails.byPartner.acme = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    await setRailProviderType(db, 'acme', 'http');
+    const originalList = process.env.SANCTIONS_LIST;
+    primeOfacSource({ checkedAgoMs: 3_600_000 });
+    onTestFinished(() => restoreOfacSource(originalList));
+    funding.decline = false;
+    funding.captures = 0;
+
+    // 3. The resume passes the early gate (a code is issued) and is refused by the live gate.
+    const resumeRedis = fakeRedis();
+    txOtp = createTransactionOtpStore(resumeRedis, { randomInt: () => 654321 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    expect((await call({ action: 'request_otp' }, acmeToken)).status).toBe(200);
+    const res = await call(payBody, acmeToken);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.live-refused'))).toHaveLength(1);
+    expect(funding.captures).toBe(0);
+    expect(await evidenceRows()).toEqual(evidenceBefore);
     const t = await store.getTransfer(tid);
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();

@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PROVIDER_LINE_TEMPLATE } from '@/lib/legal/provider-line';
-import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { RECIPIENT_IDENTITY_RELEASE_REFUSAL } from '@/lib/dashboard-ops';
 import { APPROVED_PUBLIC_PHRASINGS } from '@/lib/claims-register';
 
@@ -58,7 +58,7 @@ describe('pack 4 documents say what the code does', () => {
       'atomic consume',
       'Telegram',
       'What to check first',
-      "status = 'in_review' AND transfer_type = 'b2c' AND recipient_legal_name_enc IS NULL",
+      "t.status = 'in_review' AND t.transfer_type = 'b2c' AND t.recipient_legal_name_enc IS NULL",
       'do not release them during the rollback',
       '`accountHolder`',
       '`disclosureHash`',
@@ -67,6 +67,29 @@ describe('pack 4 documents say what the code does', () => {
       expect(p, s).toContain(s);
     }
     expect(p).toMatch(/keeps the old saved name until the next change on the new build/);
+  });
+
+  // Review R2-Q3 (L2, L4): the older build's list-hold sweep releases an untagged row by itself,
+  // and query (a) leaves out the rows the new build exempts (recipientIdentityMissing in
+  // src/db/repos/transfer-repo.ts: partnerApiMintedSql and paymentLinkSql).
+  it('ROLLBACK.md PR4 check (a) names the older list-hold sweep, the tagging UPDATE and the two exemptions', () => {
+    const p = pr4();
+    expect(p).toContain('list-hold sweep');
+    expect(p).toContain(`\`${LIST_UNAVAILABLE_REASON}\``);
+    // The tagging step appends the exact reason the older sweep keeps held.
+    expect(p).toContain(`compliance_reasons || '["${RECIPIENT_IDENTITY_MISSING_REASON}"]'::jsonb`);
+    expect(p).toContain('reviewed manual `UPDATE transfers SET compliance_reasons = compliance_reasons ||');
+    expect(p).toContain("NOT (compliance_reasons ? 'Recipient identity missing.')");
+    // The exemptions, with the conditions the code uses.
+    expect(p).toContain('Partner-API');
+    expect(p).toContain('payment-link');
+    expect(p).toContain("k.key LIKE 'paylink:%'");
+    expect(p).toContain("NOT (k.partner_id = 'default' AND k.key LIKE 'draft:%') AND k.key NOT LIKE 'sched:%'");
+    expect(p).toContain("a.action = 'transaction.create' AND a.actor_type = 'api_key'");
+    const repo = read('src/db/repos/transfer-repo.ts');
+    expect(repo).toContain("${idempotencyKeys.key} LIKE 'paylink:%'");
+    expect(repo).toContain("${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%'");
+    expect(repo).toContain("${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key'");
   });
 
   it('the PR3 paragraph is unchanged: the PR4 paragraph starts after it, as its own paragraph', () => {
