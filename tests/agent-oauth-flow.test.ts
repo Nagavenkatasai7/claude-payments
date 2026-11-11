@@ -11,6 +11,8 @@ import { recordAgentEvent } from '@/lib/agent-auth/audit';
 import { handleRegister, handleRevoke, handleToken, type AgentServerDeps, type HostCtx } from '@/lib/agent-auth/server';
 import { handleAuthorizeGet, handleAuthorizePost, type AuthorizeDeps, type AgentSession } from '@/lib/agent-auth/authorize-flow';
 import { createAgentAuth } from '@/lib/agent-auth/service';
+import { agentSecretHash } from '@/lib/agent-auth/secrets';
+import { SITE_SKINS, customHostBinding } from '@/lib/site-skins';
 import { buildCsp } from '@/lib/csp';
 
 // Stage C1: the OAuth 2.1 flow end to end against a real Postgres (PGlite) and a fake Redis:
@@ -586,6 +588,138 @@ describe('agent OAuth flow', { retry: 0 }, () => {
       expect((await handleRevoke(form({ token: json.refresh_token as string, client_id: other }), CTX, deps())).status).toBe(200);
       const [g] = await db.select().from(agentGrants);
       expect(g.revokedAt).toBeNull();
+    });
+  });
+
+  describe('refresh tokens are bound to a custom skin host (D8) and grants record the host (D15)', () => {
+    const CUSTOM = 'smartremitai.tgfl.org';
+    const SKIN_SUB = 'tgfl.smartremit.ai';
+    const ctxFor = (host: string): HostCtx => ({ partnerId: 'default', host });
+    const resourceFor = (host: string) => `https://${host}/api/mcp`;
+
+    /** The whole flow (register, consent, code, token) on one host. */
+    async function tokensOn(host: string) {
+      const ctx = ctxFor(host);
+      const iss = `https://${host}`;
+      const { json: reg } = await register(undefined, ctx);
+      const clientId = reg.client_id as string;
+      const sp = new URLSearchParams({
+        response_type: 'code', client_id: clientId, redirect_uri: REDIRECT, code_challenge: CHALLENGE,
+        code_challenge_method: 'S256', state: 'st-1', resource: resourceFor(host),
+      });
+      const page = await handleAuthorizeGet(new Request(`${iss}/oauth/authorize?${sp.toString()}`), ctx, deps());
+      expect(page.status).toBe(200);
+      const ticket = /name="ticket" value="([^"]+)"/.exec(await page.text())![1];
+      const allow = await handleAuthorizePost(
+        new Request(`${iss}/oauth/authorize`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', origin: iss },
+          body: new URLSearchParams({ ticket, decision: 'allow' }).toString(),
+        }),
+        ctx,
+        deps(),
+      );
+      expect(allow.status).toBe(303);
+      const code = new URL(allow.headers.get('location')!).searchParams.get('code')!;
+      const res = await handleToken(
+        form({ grant_type: 'authorization_code', client_id: clientId, code, redirect_uri: REDIRECT, code_verifier: VERIFIER, resource: resourceFor(host) }),
+        ctx,
+        deps(),
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as Record<string, unknown>;
+      return { clientId, refresh: json.refresh_token as string };
+    }
+
+    async function refreshOn(host: string, clientId: string, refreshToken: string) {
+      const res = await handleToken(form({ grant_type: 'refresh_token', client_id: clientId, refresh_token: refreshToken, resource: resourceFor(host) }), ctxFor(host), deps());
+      return { res, json: (await res.json()) as Record<string, unknown> };
+    }
+
+    const onlyGrant = async () => {
+      const rows = await db.select().from(agentGrants);
+      expect(rows).toHaveLength(1);
+      return rows[0];
+    };
+
+    it('a refresh token minted on the custom host is invalid_grant on send and on tgfl.smartremit.ai; nothing rotates, the grant is untouched', async () => {
+      const t = await tokensOn(CUSTOM);
+      const before = await onlyGrant();
+      for (const host of [HOST, SKIN_SUB]) {
+        expect((await refreshOn(host, t.clientId, t.refresh)).json.error).toBe('invalid_grant');
+      }
+      const after = await onlyGrant();
+      expect(after.refreshHash).toBe(before.refreshHash);
+      expect(after.revokedAt).toBeNull();
+      expect(await agentRows('agent.grant.revoked')).toHaveLength(0);
+      // Still good where it was minted.
+      expect((await refreshOn(CUSTOM, t.clientId, t.refresh)).res.status).toBe(200);
+    });
+
+    it('a refresh token minted on send is invalid_grant on the custom host; the grant is untouched', async () => {
+      const t = await tokensOn(HOST);
+      const before = await onlyGrant();
+      expect((await refreshOn(CUSTOM, t.clientId, t.refresh)).json.error).toBe('invalid_grant');
+      const after = await onlyGrant();
+      expect(after.refreshHash).toBe(before.refreshHash);
+      expect(after.revokedAt).toBeNull();
+      expect((await refreshOn(HOST, t.clientId, t.refresh)).res.status).toBe(200);
+    });
+
+    it('same-host refresh rotates on both hosts', async () => {
+      for (const host of [HOST, CUSTOM]) {
+        const t = await tokensOn(host);
+        const r1 = await refreshOn(host, t.clientId, t.refresh);
+        expect(r1.res.status).toBe(200);
+        const r2 = await refreshOn(host, t.clientId, r1.json.refresh_token as string);
+        expect(r2.res.status).toBe(200);
+        expect(r2.json.refresh_token).not.toBe(r1.json.refresh_token);
+      }
+    });
+
+    it('a smartremit.ai grant stores agentSecretHash(token) byte for byte; a custom-host grant hashes the binding in', async () => {
+      const send = await tokensOn(HOST);
+      const [g1] = await db.select().from(agentGrants).where(eq(agentGrants.clientId, send.clientId));
+      expect(g1.refreshHash).toBe(agentSecretHash(send.refresh, PEPPER));
+      const custom = await tokensOn(CUSTOM);
+      const [g2] = await db.select().from(agentGrants).where(eq(agentGrants.clientId, custom.clientId));
+      expect(g2.refreshHash).toBe(agentSecretHash(`${customHostBinding(CUSTOM)}\n${custom.refresh}`, PEPPER));
+      expect(g2.refreshHash).not.toBe(agentSecretHash(custom.refresh, PEPPER));
+    });
+
+    it('revoking a send refresh token at the custom host is a 200 no-op; revoking it at send works', async () => {
+      const t = await tokensOn(HOST);
+      const res = await handleRevoke(form({ token: t.refresh, client_id: t.clientId }), ctxFor(CUSTOM), deps());
+      expect(res.status).toBe(200);
+      expect((await onlyGrant()).revokedAt).toBeNull();
+      expect((await handleRevoke(form({ token: t.refresh, client_id: t.clientId }), ctxFor(HOST), deps())).status).toBe(200);
+      expect((await onlyGrant()).revokedReason).toBe('client');
+    });
+
+    it('revoking a custom-host refresh token at the custom host revokes the grant', async () => {
+      const t = await tokensOn(CUSTOM);
+      expect((await handleRevoke(form({ token: t.refresh, client_id: t.clientId }), ctxFor(CUSTOM), deps())).status).toBe(200);
+      expect((await onlyGrant()).revokedReason).toBe('client');
+    });
+
+    it('after a credentialEpoch bump a custom-host refresh token is invalid_grant', async () => {
+      const t = await tokensOn(CUSTOM);
+      const skin = SITE_SKINS.tgfl as { credentialEpoch: number };
+      const epoch = skin.credentialEpoch;
+      skin.credentialEpoch = epoch + 1;
+      try {
+        expect((await refreshOn(CUSTOM, t.clientId, t.refresh)).json.error).toBe('invalid_grant');
+      } finally {
+        skin.credentialEpoch = epoch;
+      }
+      expect((await refreshOn(CUSTOM, t.clientId, t.refresh)).res.status).toBe(200);
+    });
+
+    it('agent.grant.created records the host the grant was minted on', async () => {
+      await tokensOn(HOST);
+      await tokensOn(CUSTOM);
+      const created = await agentRows('agent.grant.created');
+      expect(created.map((r) => (r.meta as { host?: string }).host).sort()).toEqual([HOST, CUSTOM].sort());
     });
   });
 

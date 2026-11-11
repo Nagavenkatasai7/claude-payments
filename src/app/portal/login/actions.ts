@@ -119,13 +119,13 @@ export async function resendCodeAction(_prev: PortalLoginState | null, formData:
 }
 
 /** After a proven code (and TOTP where enrolled): consent if needed, else the session. */
-async function nextAfterProof(pid: PartnerId, phone: string, totp = false): Promise<PortalLoginState | 'signed_in'> {
+async function nextAfterProof(pid: PartnerId, host: string, phone: string, totp = false): Promise<PortalLoginState | 'signed_in'> {
   const customer = await portalCustomers().getCustomer(pid, phone);
   if (!customer?.optInAt) {
     const pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'consent' });
     return { step: 'consent', pending };
   }
-  await recordPortalReferral(pid, phone); // Batch B4: best effort, never blocks the sign-in
+  await recordPortalReferral(pid, phone, host); // Batch B4: best effort, never blocks the sign-in (D14: not on a custom host)
   await completePortalSignIn(pid, phone, { totp });
   return 'signed_in';
 }
@@ -186,7 +186,7 @@ export async function verifyCodeAction(_prev: PortalLoginState | null, formData:
       return { step: 'phone', error: 'portal.login.cant_send' }; // M2-14 (PR 394 L4): never a 500
     }
   }
-  const next = await nextAfterProof(pid, phone);
+  const next = await nextAfterProof(pid, site.host, phone);
   if (next !== 'signed_in') return next;
   redirect(safePortalNext(field(formData, 'next')));
 }
@@ -242,7 +242,7 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
     return { step: 'mfa', pending: pendingToken, error: 'portal.login.mfa_invalid' };
   }
   await pendingStore.consume(pendingToken);
-  const next = await nextAfterProof(pid, rec.phone, true);
+  const next = await nextAfterProof(pid, site.host, rec.phone, true);
   if (next !== 'signed_in') return next;
   redirect(safePortalNext(field(formData, 'next')));
 }
@@ -307,7 +307,7 @@ export async function consentAction(_prev: PortalLoginState | null, formData: Fo
   if (!before) await audit(pid, phone, 'register');
   await repo.setOptedIn(pid, phone);
   await audit(pid, phone, 'consent', { whatsapp: true, terms: true });
-  await recordPortalReferral(pid, phone); // Batch B4: the referral cookie; best effort, never blocks
+  await recordPortalReferral(pid, phone, site.host); // Batch B4: the referral cookie; best effort, never blocks (D14)
   await completePortalSignIn(pid, phone);
   redirect(safePortalNext(field(formData, 'next')));
 }

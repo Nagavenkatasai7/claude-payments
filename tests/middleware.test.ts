@@ -124,16 +124,16 @@ describe('proxy (auth gate)', () => {
   });
 
   it('matches only the two gated trees (/login and /login/mfa stay unmatched)', () => {
-    // UI redesign M1: the four legacy entries stay byte-identical; TWO host-conditioned entries
-    // (smartremit.ai subdomains other than www only) are appended. tests/site-matcher-parity.test.ts proves the apex
-    // match set is unchanged.
+    // UI redesign M1: the four legacy entries stay byte-identical; THREE host-conditioned entries
+    // (smartremit.ai subdomains other than www, plus the exact custom skin hosts of site-skins.ts) are
+    // appended. tests/site-matcher-parity.test.ts proves the apex match set is unchanged.
     expect(config.matcher.slice(0, 4)).toEqual([
       '/admin-dashboard',
       '/admin-dashboard/:path*',
       '/account',
       '/account/:path*',
     ]);
-    expect(config.matcher.slice(4)).toHaveLength(2);
+    expect(config.matcher.slice(4)).toHaveLength(3);
   });
 });
 

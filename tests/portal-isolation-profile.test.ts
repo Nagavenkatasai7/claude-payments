@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { customers, outbox } from '@/db/schema';
@@ -17,7 +18,7 @@ import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-pa
 // email_verified_tag = emailVerifiedTag(), and the M2-7 "Email me a receipt" action then works.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   stale: false,
   db: null as unknown,
@@ -63,7 +64,7 @@ import { setEmailReceiptsAction, setWhatsappNotificationsAction, updateEmailActi
 import { verifyEmailAction } from '@/app/portal/notifications/verify/actions';
 import { emailReceiptAction } from '@/app/portal/transfers/[id]/actions';
 
-const SITE = (partnerId: string) => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} });
+const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', host: partnerId === 'pa' ? 'acme.smartremit.ai' : 'bolt.smartremit.ai', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} as PortalSite['theme'] });
 const EMAIL = 'alice@example.com';
 const OTHER = '14155550188';
 

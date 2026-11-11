@@ -29,8 +29,9 @@ describe('refuseOnSiteHost', () => {
   beforeEach(() => {
     hostHeader.value = 'smartremit.ai';
   });
-  it.each(['acme.smartremit.ai', 'ACME.SmartRemit.ai:443', 'api.smartremit.ai', 'xn--abc.smartremit.ai', 'a.b.smartremit.ai'])(
-    '%s (a partner site or a refused subdomain) → 404',
+  it.each(['acme.smartremit.ai', 'ACME.SmartRemit.ai:443', 'api.smartremit.ai', 'xn--abc.smartremit.ai', 'a.b.smartremit.ai',
+    'smartremitai.tgfl.org', 'SMARTREMITAI.TGFL.ORG:443', 'smartremitai.tgfl.org.', 'x.smartremitai.tgfl.org'])(
+    '%s (a partner site, a custom skin host, or a refused subdomain) → 404',
     async (host) => {
       hostHeader.value = host;
       await expect(refuseOnSiteHost()).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents, customers, outbox, referralAttributions, tickets } from '@/db/schema';
@@ -12,9 +13,10 @@ import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 // failed code, register-by-verify under the host partner behind the O11 consent step, TOTP, rotation,
 // the cookie attributes, the per-IP limits and 404 on the apex.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
@@ -22,7 +24,7 @@ const SITE = (partnerId: string, slug: string) => ({
 
 const h = vi.hoisted(() => {
   const state = {
-    site: null as null | Record<string, unknown>,
+    site: null as null | PortalSite,
     ip: '203.0.113.1',
     ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1',
     jar: new Map<string, string>(),
@@ -378,7 +380,7 @@ describe('verifyCodeAction', () => {
     const { verify } = await codeStep(KNOWN);
     await expectRedirect(verify(), '/portal');
     const token = h.jar.get(PORTAL_SESSION_COOKIE)!;
-    const s = await sessions().resolve(token, 'pa');
+    const s = await sessions().resolve(token, 'pa', null);
     expect(s?.phone).toBe(KNOWN);
     expect(await auditCount('pa', 'portal.auth.login_success')).toBe(1);
     expect((await repo().getCustomer('pa', KNOWN))?.phoneVerifiedAt).toBeTruthy();
@@ -450,10 +452,10 @@ describe('verifyCodeAction', () => {
     const b = await codeStep(TWO_PARTNER_PHONE);
     await expectRedirect(b.verify(), '/portal');
     const tokB = h.jar.get(PORTAL_SESSION_COOKIE)!;
-    expect((await sessions().resolve(tokA, 'pa'))?.partnerId).toBe('pa');
-    expect((await sessions().resolve(tokB, 'pb'))?.partnerId).toBe('pb');
-    expect(await sessions().resolve(tokA, 'pb')).toBeNull();
-    expect(await sessions().resolve(tokB, 'pa')).toBeNull();
+    expect((await sessions().resolve(tokA, 'pa', null))?.partnerId).toBe('pa');
+    expect((await sessions().resolve(tokB, 'pb', null))?.partnerId).toBe('pb');
+    expect(await sessions().resolve(tokA, 'pb', null)).toBeNull();
+    expect(await sessions().resolve(tokB, 'pa', null)).toBeNull();
   });
 
   it("6. a pending token minted on A's host is expired on B's host", async () => {
@@ -535,12 +537,12 @@ describe('verifyCodeAction', () => {
   });
 
   it('9. rotation: a portal cookie presented at sign-in is destroyed', async () => {
-    const old = await sessions().create('pa', KNOWN, 'Safari on iOS');
+    const old = await sessions().create('pa', KNOWN, 'Safari on iOS', null);
     h.jar.set(PORTAL_SESSION_COOKIE, old.token);
     const { verify } = await codeStep(KNOWN);
     await expectRedirect(verify(), '/portal');
     expect(h.jar.get(PORTAL_SESSION_COOKIE)).not.toBe(old.token);
-    expect(await sessions().resolve(old.token, 'pa')).toBeNull();
+    expect(await sessions().resolve(old.token, 'pa', null)).toBeNull();
   });
 
   it('per-IP verify limit (60/h) → try_later without touching the OTP store', async () => {
@@ -569,7 +571,7 @@ describe('8. TOTP-enrolled customers', () => {
     await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid })), '/portal');
     expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(true);
     // the sign-in proved BOTH factors: the session is step-up fresh for a TOTP-enrolled customer
-    const sess = await sessions().resolve(h.jar.get(PORTAL_SESSION_COOKIE)!, 'pa');
+    const sess = await sessions().resolve(h.jar.get(PORTAL_SESSION_COOKIE)!, 'pa', null);
     expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(true);
   });
   it('five wrong TOTP codes → back to the phone step, audited', async () => {
@@ -826,6 +828,17 @@ describe('Batch B4: the portal referral cookie', () => {
     } finally {
       await db.execute(sql`DROP TRIGGER b4_fail ON referral_attributions`);
     }
+  });
+
+  it('D14: on the custom host the planted cookie is ignored on both paths (consent and sign-in)', async () => {
+    h.site = { ...SITE('pa', 'tgfl'), host: 'smartremitai.tgfl.org' };
+    h.jar.set(REFERRAL_COOKIE, 'REF-TANA01');
+    const { verify } = await codeStep(UNKNOWN);
+    const s = await verify();
+    await expectRedirect(consentAction(null, fd({ pending: s.pending!, consent: 'yes' })), '/portal');
+    await expectRedirect((await codeStep(KNOWN)).verify(), '/portal');
+    expect(await links()).toEqual([]);
+    expect(h.jar.get(REFERRAL_COOKIE)).toBe('REF-TANA01'); // never read, never spent
   });
 
   it('no cookie: no referral query, nothing written', async () => {

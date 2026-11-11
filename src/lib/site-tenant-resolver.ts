@@ -25,6 +25,10 @@
 // The skin ANSWER is never cached and never written to the slug cache, so turning the switch off
 // stops the host within the flag cache's 15 s, and a slug-cache entry can never carry a skin answer
 // (a negative entry written while the switch was off is ignored once it is on).
+//
+// A CUSTOM skin host (site-skins.ts `hosts`, e.g. smartremitai.tgfl.org) resolves through
+// resolveSkinHost instead: steps 1 and 2 only, never the normal path. 'held' is null there, so a
+// partner that holds the slug never answers on another organisation's DNS name.
 import { getRedis } from '@/lib/redis';
 import type { RedisLike } from '@/lib/store';
 import { getDb, type DbOrTx } from '@/db/client';
@@ -192,4 +196,19 @@ export async function resolveSiteSlug(slug: string, reqHeaders: Headers, deps: R
     }
   }
   return partnerId;
+}
+
+/**
+ * A custom skin host (parseSiteHost `custom: true`): the skin's tenant ONLY when the switch is clearly
+ * on and the skin status is 'ok'. Everything else (switch off, 'held', 'inactive', throttled, error,
+ * a slug that is not a skin) is null, and the proxy answers 404. It never runs the partner path
+ * (findActivePartnerIdBySlug) and never touches the slug cache; it shares the skin status cache and
+ * the per-IP limiter with `<slug>.smartremit.ai`.
+ */
+export async function resolveSkinHost(slug: string, reqHeaders: Headers, deps: ResolveSiteDeps = {}): Promise<string | null> {
+  if (!isValidSiteSlug(slug)) return null;
+  const skin = skinForSlug(slug);
+  if (!skin || !(await skinSwitchOn(slug, deps))) return null;
+  const { status } = await readSkinStatus(skin, reqHeaders, deps);
+  return status === 'ok' ? skin.partnerId : null;
 }

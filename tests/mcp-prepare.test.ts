@@ -35,7 +35,7 @@ import {
 } from '@/lib/mcp/prepare';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { AgentAuth } from '@/lib/agent-auth';
-import { handleMcpRequest } from '@/lib/mcp/http';
+import { handleMcpRequest, type McpSite } from '@/lib/mcp/http';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
 import { approveDisclosureForTest } from './helpers-live';
@@ -339,7 +339,7 @@ describe('through the MCP handler', () => {
         recorded.push(a.slice(1));
       },
     };
-    const d = { site: async () => ({ partnerId: 'pa', slug: 'send' }), auth, redis, toolDeps: deps.toolDeps, db };
+    const d = { site: async (): Promise<McpSite> => ({ partnerId: 'pa', slug: 'send', host: 'send.smartremit.ai' }), auth, redis, toolDeps: deps.toolDeps, db };
     const c = new Client({ name: 't', version: '0.0.1' });
     await c.connect(
       new StreamableHTTPClientTransport(new URL('https://send.smartremit.ai/api/mcp'), {

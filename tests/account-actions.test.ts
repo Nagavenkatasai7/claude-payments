@@ -863,14 +863,14 @@ describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', (
   it('a password reset leaves the customer portal alone (factor and portal sessions intact)', async () => {
     await enrolledAccount();
     const portal = createPortalSessionStore(redis);
-    const { token } = await portal.create('default', NORM, 'test device');
+    const { token } = await portal.create('default', NORM, 'test device', null);
     otpNowMs += 60_000;
     const req = await requestResetAction(null, form({ phone: PHONE }));
     await runAfter();
     const code = sentCodes[sentCodes.length - 1].code;
     await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }));
     expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(true);
-    expect(await portal.resolve(token, 'default')).not.toBeNull();
+    expect(await portal.resolve(token, 'default', null)).not.toBeNull();
   });
 
   it('a reset for an account without MFA writes no MFA audit row', async () => {

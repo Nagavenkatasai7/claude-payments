@@ -243,9 +243,9 @@ export const FLAG_DEFINITIONS: Readonly<Record<FlagKey, FlagDefinition>> = {
     key: 'portal.skins',
     label: 'TGFL demo portal',
     description:
-      'The address tgfl.smartremit.ai opens the SmartRemit customer portal with the TGFL name in the header, a demo line and "Powered by SmartRemit". ' +
-      'It uses SmartRemit\'s own accounts: the same sign-in, recipients and transfers as send.smartremit.ai. ' +
-      'Off: the address shows "This link is no longer active". A change takes up to 15 seconds.',
+      'The addresses tgfl.smartremit.ai and smartremitai.tgfl.org open the SmartRemit customer portal with the TGFL logo and name in the header, a demo line and "Powered by SmartRemit". ' +
+      'They use SmartRemit\'s own accounts: the same recipients and transfers as send.smartremit.ai, with a separate sign-in on each address. ' +
+      'Off: tgfl.smartremit.ai shows "This link is no longer active", smartremitai.tgfl.org answers "not found" (404), so no sign-in or AI-app connection made there can be used. A change takes up to 15 seconds.',
     bannerText: 'The TGFL demo portal is on',
     scopes: ['global'],
     killSwitch: false,

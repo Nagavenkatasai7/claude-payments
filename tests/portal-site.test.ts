@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // the partner is active. Any read that throws → null (fail closed).
 
 const h = vi.hoisted(() => ({
-  tenant: null as null | { partnerId: string; slug: string },
+  tenant: null as null | { partnerId: string; slug: string; host: string; custom: boolean },
   settings: { authTemplateName: 'login_otp', authTemplateLang: 'en', portalEnabledAt: new Date() as Date | null },
   partner: { id: 'pa', status: 'active', displayName: 'Acme Remit', logoUrl: undefined as string | undefined } as Record<string, unknown> | null,
   settingsThrows: false,
@@ -37,7 +37,7 @@ vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
 
 beforeEach(() => {
-  h.tenant = { partnerId: 'pa', slug: 'acme' };
+  h.tenant = { partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai', custom: false };
   h.settings = { authTemplateName: 'login_otp', authTemplateLang: 'en', portalEnabledAt: new Date() };
   h.partner = { id: 'pa', status: 'active', displayName: 'Acme Remit', logoUrl: undefined };
   h.settingsThrows = false;
@@ -63,33 +63,53 @@ describe('getPortalSite', () => {
   it('an ordinary site carries no skin', async () => {
     expect((await getPortalSite())?.skin).toBeNull();
   });
-  it('the skin host served by the skin\'s tenant → the skin (name, no logo, no colours yet), and the brand STAYS SmartRemit', async () => {
-    h.tenant = { partnerId: 'default', slug: 'tgfl' };
+  it('the skin host served by the skin\'s tenant → the skin (name, logo, no colours yet), and the brand STAYS SmartRemit', async () => {
+    h.tenant = { partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', custom: false };
     h.partner = { id: 'default', status: 'active' };
     const s = await getPortalSite();
     // brand feeds the sign-in code text, the WhatsApp consent label, receipts and the MFA issuer:
     // they come from SmartRemit's number and mail, so they must keep naming SmartRemit.
     expect(s).toMatchObject({ partnerId: 'default', slug: 'tgfl', brand: 'SmartRemit', logo: null });
-    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: null, theme: null, demo: true });
+    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true });
     expect(s?.theme.primary).toBe('#0c5bd2');
   });
   it('a real partner that holds the skin slug gets NO skin (the partner wins)', async () => {
-    h.tenant = { partnerId: 'pa', slug: 'tgfl' };
+    h.tenant = { partnerId: 'pa', slug: 'tgfl', host: 'tgfl.smartremit.ai', custom: false };
     expect((await getPortalSite())?.skin).toBeNull();
   });
   it('the skin\'s tenant on its own address (send) gets no skin', async () => {
-    h.tenant = { partnerId: 'default', slug: 'send' };
+    h.tenant = { partnerId: 'default', slug: 'send', host: 'send.smartremit.ai', custom: false };
     h.partner = { id: 'default', status: 'active' };
     expect((await getPortalSite())?.skin).toBeNull();
   });
   it('the skin host follows the tenant\'s portal gate: tenant portal off or tenant suspended → null', async () => {
-    h.tenant = { partnerId: 'default', slug: 'tgfl' };
+    h.tenant = { partnerId: 'default', slug: 'tgfl', host: 'tgfl.smartremit.ai', custom: false };
     h.partner = { id: 'default', status: 'active' };
     h.settings = { ...h.settings, portalEnabledAt: null };
     expect(await getPortalSite()).toBeNull();
     h.settings = { ...h.settings, portalEnabledAt: new Date() };
     h.partner = { id: 'default', status: 'suspended' };
     expect(await getPortalSite()).toBeNull();
+  });
+  // TGFL custom host (design D7): the canonical host travels from parseSiteHost through the tenant.
+  it('the site carries the canonical host of the tenant', async () => {
+    expect((await getPortalSite())?.host).toBe('acme.smartremit.ai');
+  });
+  it('send → host send.smartremit.ai, no skin', async () => {
+    h.tenant = { partnerId: 'default', slug: 'send', host: 'send.smartremit.ai', custom: false };
+    h.partner = { id: 'default', status: 'active' };
+    const s = await getPortalSite();
+    expect(s?.host).toBe('send.smartremit.ai');
+    expect(s?.skin).toBeNull();
+  });
+  it('the custom host → the TGFL skin and host smartremitai.tgfl.org (the same logo)', async () => {
+    h.tenant = { partnerId: 'default', slug: 'tgfl', host: 'smartremitai.tgfl.org', custom: true };
+    h.partner = { id: 'default', status: 'active' };
+    const s = await getPortalSite();
+    expect(s).toMatchObject({ partnerId: 'default', slug: 'tgfl', host: 'smartremitai.tgfl.org', brand: 'SmartRemit', logo: null });
+    expect(s?.skin).toEqual({ name: 'TGFL', logoSrc: '/brand/partners/tgfl.png', logoSize: { width: 150, height: 100 }, theme: null, demo: true });
+    // `custom` stays on SiteTenant: PortalSite never carries it (design D2).
+    expect(s && 'custom' in s).toBe(false);
   });
   it('apex host → null', async () => {
     h.tenant = null;

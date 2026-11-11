@@ -12,6 +12,7 @@ import { deviceLabel } from './portal-device-label';
 import { recordPortalAuthEventSafe } from './portal-auth-audit';
 import { logWarn } from './log';
 import { safeAuthorizeNext } from './agent-auth/authorize-request';
+import { customHostBinding } from './site-skins';
 import type { Customer, PartnerId } from './types';
 
 /**
@@ -41,7 +42,8 @@ async function loadPortalCustomer(): Promise<PortalCustomerContext | null> {
   const token = (await cookies()).get(PORTAL_SESSION_COOKIE)?.value;
   if (!token) return null;
   try {
-    const session = await getPortalSessionStore().resolve(token, site.partnerId);
+    // D8: a cookie minted on a custom skin host resolves only there (and the reverse).
+    const session = await getPortalSessionStore().resolve(token, site.partnerId, customHostBinding(site.host));
     if (!session) return null;
     const customer = await portalCustomers().getCustomer(site.partnerId, session.phone);
     if (!customer) return null;
@@ -133,19 +135,26 @@ export async function clearPortalCookie(): Promise<void> {
  * The last step of every sign-in (code, then TOTP and consent where needed): stamp the phone as
  * verified for THIS tenant row, rotate (the cookie presented at sign-in is destroyed), mint the
  * session, set the cookie, audit. The caller redirects afterwards.
+ *
+ * The session is bound to THIS host (D8: customHostBinding(site.host), null on every smartremit.ai
+ * host), and login_success records the canonical host (D15), so a compromise window on a custom
+ * skin host can be scoped from audit_events. `partnerId` must be the host tenant.
  */
 export async function completePortalSignIn(partnerId: PartnerId, phone: string, proof: { totp: boolean } = { totp: false }): Promise<void> {
+  const site = await requirePortalSite(); // request-cached; the host is the authority
+  if (site.partnerId !== partnerId) throw new Error('portal sign-in: partner is not the host tenant');
+  const binding = customHostBinding(site.host);
   await portalCustomers().setPhoneVerifiedIfUnset(partnerId, phone);
   const jar = await cookies();
   const existing = jar.get(PORTAL_SESSION_COOKIE)?.value;
   const ua = (await headers()).get('user-agent');
   const store = getPortalSessionStore();
-  const { token } = await store.create(partnerId, phone, deviceLabel(ua), existing);
+  const { token } = await store.create(partnerId, phone, deviceLabel(ua), binding, existing);
   // A sign-in that proved the TOTP too stamps it, so the first sensitive action within 15 minutes
   // does not ask an enrolled customer for both factors again.
-  if (proof.totp) await store.markStepUp(token, partnerId, { totp: true });
+  if (proof.totp) await store.markStepUp(token, partnerId, { totp: true }, binding);
   await setPortalCookie(token);
-  await recordPortalAuthEventSafe(getDb(), { partnerId, phone, event: 'login_success' });
+  await recordPortalAuthEventSafe(getDb(), { partnerId, phone, event: 'login_success', meta: { host: site.host } });
 }
 
 /**

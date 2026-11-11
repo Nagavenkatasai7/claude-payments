@@ -2,8 +2,9 @@ import { AGENT_SCOPES, mcpResourceUrl, type AgentScope } from './contract';
 
 // agent-auth config — the fixed policy of the AI-agent sign-in (Stage C1). PURE: no I/O.
 //
-// The authorization server lives on the customer-portal hosts (<slug>.smartremit.ai); the
-// issuer is https://<host> and the MCP resource is https://<host>/api/mcp (contract.ts).
+// The authorization server lives on the customer-portal hosts (<slug>.smartremit.ai, or a custom
+// skin host such as smartremitai.tgfl.org: PortalSite.host); the issuer is https://<host> and the
+// MCP resource is https://<host>/api/mcp (contract.ts).
 
 /** Authorization code lifetime (single-use, Redis, hash only). */
 export const AGENT_CODE_TTL_SEC = 300;
@@ -42,9 +43,6 @@ export const AGENT_IP_LIMITS = {
 /** Client and grant ids: a prefix plus 22 base64url characters (16 random bytes). */
 export const CLIENT_ID_RE = /^agc_[A-Za-z0-9_-]{22}$/;
 export const GRANT_ID_RE = /^agg_[A-Za-z0-9_-]{22}$/;
-
-/** The portal host of a site slug (site-host.ts SITE_HOST). */
-export const siteHostFor = (slug: string) => `${slug.toLowerCase()}.smartremit.ai`;
 
 export const issuerFor = (host: string) => `https://${host.toLowerCase()}`;
 

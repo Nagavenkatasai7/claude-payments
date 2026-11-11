@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite, type PortalSite } from '@/lib/portal-site';
 import { portalLayoutMetadata } from '@/lib/portal-metadata';
 import { skinLogoSrc } from '@/lib/site-skins';
 import { getPortalCustomer } from '@/lib/portal-auth';
@@ -28,17 +28,34 @@ export const dynamic = 'force-dynamic';
  * under it); the nav and sign-out show only for a signed-in customer.
  *
  * The ONE exception (owner go 2026-11-09): a site skin (src/lib/site-skins.ts, e.g. tgfl.smartremit.ai).
- * There the header shows the skin's name (or its logo file) in place of the SmartRemit logo, a demo
+ * There the header shows the skin's name (after its logo file, when it has one) in place of the SmartRemit logo, a demo
  * line sits under the header on every page, the footer adds "Powered by SmartRemit", and the skin's
  * colours apply when it has any (validated again by SiteThemeStyle). Nothing else changes: the pages,
  * the company line and the legal links are SmartRemit's, and `site.brand` stays SmartRemit. A
  * PARTNER's name, logo and colours are still never shown. Without a skin the markup is unchanged.
  */
+/** The header logo is at most this tall (the sm:max-h-9 cap); a smaller file keeps its natural size. */
+const SKIN_LOGO_MAX_HEIGHT = 36;
+
+/**
+ * The skin logo's <img> attributes, or null (the header then shows the name alone). It needs a file
+ * under /brand/partners/ (skinLogoSrc) and its natural size: width and height are set from that size
+ * so the layout does not shift while the file loads, and never above it.
+ */
+function skinLogoImage(skin: NonNullable<PortalSite['skin']>): { src: string; width: number; height: number } | null {
+  const src = skinLogoSrc(skin);
+  const size = skin.logoSize;
+  const dim = (n: unknown): n is number => typeof n === 'number' && Number.isInteger(n) && n > 0;
+  if (!src || !size || !dim(size.width) || !dim(size.height)) return null;
+  const height = Math.min(SKIN_LOGO_MAX_HEIGHT, size.height);
+  return { src, height, width: Math.max(1, Math.round((height * size.width) / size.height)) };
+}
+
 export default async function PortalLayout({ children }: { children: ReactNode }) {
   const site = await requirePortalSite();
   const skin = site.skin ?? null;
-  // Only a file under /brand/partners/ renders; anything else falls back to the name as text.
-  const skinLogo = skin ? skinLogoSrc(skin) : null;
+  // Only a file under /brand/partners/ with its size renders; the name always shows as text.
+  const skinLogo = skin ? skinLogoImage(skin) : null;
   const customer = await getPortalCustomer();
   // Stage C1: "Connected AI apps" shows while the gate is open or the customer has a live grant
   // (fails closed and time-bounded; the page gates itself as well).
@@ -58,13 +75,25 @@ export default async function PortalLayout({ children }: { children: ReactNode }
             <Link href="/portal" className="inline-flex rounded-ds-focus">
               {!skin ? (
                 <BrandLogo height={36} eager className="h-8 sm:h-9" />
-              ) : skinLogo ? (
-                // A same-origin file under /brand/partners/ of unknown size; next/image needs fixed dimensions.
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={skinLogo} alt={skin.name} className="h-8 w-auto sm:h-9" />
               ) : (
-                <span data-skin-brand className="text-xl font-extrabold tracking-tight text-ds-ink sm:text-2xl">
-                  {skin.name}
+                <span className="inline-flex items-center gap-2">
+                  {skinLogo ? (
+                    // A small same-origin static file under /brand/partners/ of known size: a plain <img> is enough.
+                    // Decorative (alt=""): the name follows as text, so the link is read once. No h-auto: the
+                    // height attribute keeps the box reserved while the file loads; max-h caps it.
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={skinLogo.src}
+                      alt=""
+                      width={skinLogo.width}
+                      height={skinLogo.height}
+                      className="w-auto max-h-8 sm:max-h-9"
+                    />
+                  ) : null}
+                  {/* The name stays as text: a logo's own lettering is too small to read at header size. */}
+                  <span data-skin-brand className="text-xl font-extrabold tracking-tight text-ds-ink sm:text-2xl">
+                    {skin.name}
+                  </span>
                 </span>
               )}
             </Link>

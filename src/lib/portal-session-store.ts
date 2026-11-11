@@ -27,6 +27,7 @@ export { PORTAL_SESSION_COOKIE, PORTAL_SESSION_POLICY, portalSessionCookieOption
  *
  * Key schema (no phone, partner id or token in any key):
  *   psess:<sha256(token)>              → JSON record, EX ≤ idle and ≤ the absolute remainder
+ *   psess:<sha256(binding + '\n' + token)> the same, for a session minted on a custom skin host
  *   psess_ix:<sha256(partnerId|phone)> → hash sid → sha256(token), EX = absolute, re-armed on create
  *
  * The index TTL is the ABSOLUTE cap, not the idle window: `resolve` slides only
@@ -37,6 +38,13 @@ export { PORTAL_SESSION_COOKIE, PORTAL_SESSION_POLICY, portalSessionCookieOption
  * `resolve` requires the session to still be listed in its customer's index
  * (constant-time compare of the stored hash), so a revoke that removed the index
  * entry but failed to delete the record still ends the session.
+ *
+ * Host binding (TGFL custom host, D8): `create`, `resolve`, `markStepUp` and `destroy` take a
+ * REQUIRED `binding` = customHostBinding(site.host): null on every smartremit.ai host (the key is
+ * byte-identical to before), `<host>#<epoch>` on a custom skin host. It enters the HASH of the
+ * token, not the record, so a cookie minted on the custom host finds no record on any other host
+ * (and the reverse), and bumping the skin's credentialEpoch orphans every such session. `list`,
+ * `revoke` and `revokeAll` work on the stored index hashes and see sessions of every binding.
  */
 
 export interface PortalSession {
@@ -72,6 +80,14 @@ const INDEX_TTL_S = Math.ceil(PORTAL_SESSION_POLICY.absoluteMs / 1000);
 
 const sha256hex = (s: string) => createHash('sha256').update(s).digest('hex');
 const recordKey = (tokenHash: string) => `psess:${tokenHash}`;
+/** The token's key hash under its host binding (null = every smartremit.ai host: today's hash). */
+const tokenKeyHash = (token: string, binding: string | null) => sha256hex(binding === null ? token : `${binding}\n${token}`);
+/**
+ * A binding is null (every smartremit.ai host) or a non-empty string (customHostBinding). Anything
+ * else (an omitted argument from an untyped caller) is refused: create throws, so no session is
+ * minted under an orphan key; resolve, markStepUp and destroy match nothing.
+ */
+const validBinding = (binding: unknown): binding is string | null => binding === null || (typeof binding === 'string' && binding.length > 0);
 // The phone is digits only, so the last '|' separates the two parts unambiguously.
 const indexKey = (partnerId: PartnerId, phone: string) => `psess_ix:${sha256hex(`${partnerId}|${phone}`)}`;
 
@@ -161,9 +177,10 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
   async function readLive(
     token: string,
     hostPartnerId: PartnerId,
+    binding: string | null,
   ): Promise<{ rec: PortalSession; tokenHash: string; t: number } | null> {
-    if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validPartner(hostPartnerId)) return null;
-    const tokenHash = sha256hex(token);
+    if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validPartner(hostPartnerId) || !validBinding(binding)) return null;
+    const tokenHash = tokenKeyHash(token, binding);
     const rec = parseRecord(await redis.get(recordKey(tokenHash)));
     if (!rec) return null;
     if (rec.partnerId !== hostPartnerId) return null;
@@ -204,21 +221,25 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
      * (the cookie presented at sign-in), that session is destroyed first:
      * rotation, so a pre-login token never becomes an authenticated one.
      * Beyond `maxSessionsPerCustomer` live sessions, the least recently used are evicted.
+     * `binding` is the host's customHostBinding (null on every smartremit.ai host); the rotated
+     * token is destroyed under the same binding.
      */
     async create(
       partnerId: PartnerId,
       phoneRaw: string,
       device: string,
+      binding: string | null,
       replaceToken?: string,
     ): Promise<{ token: string; sid: string }> {
       if (!validPartner(partnerId)) throw new Error('portal session: invalid partner');
+      if (!validBinding(binding)) throw new Error('portal session: invalid binding');
       const phone = customerPhone(phoneRaw);
       if (!phone) throw new Error('portal session: invalid phone');
-      if (replaceToken) await store.destroy(replaceToken);
+      if (replaceToken) await store.destroy(replaceToken, binding);
 
       const token = randomBytes(32).toString('hex');
       const sid = randomBytes(16).toString('hex');
-      const tokenHash = sha256hex(token);
+      const tokenHash = tokenKeyHash(token, binding);
       const t = now();
       const rec: PortalSession = {
         sid,
@@ -251,11 +272,11 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
     /**
      * The session for a cookie token on the host of `hostPartnerId`, or null when
      * the token is malformed or unknown, the session is idle > 30 days or older
-     * than 90 days, it was revoked, or it belongs to ANOTHER partner. A live
-     * session slides `lastSeenMs`.
+     * than 90 days, it was revoked, it belongs to ANOTHER partner, or it was
+     * minted under another host binding. A live session slides `lastSeenMs`.
      */
-    async resolve(token: string, hostPartnerId: PartnerId): Promise<PortalSession | null> {
-      const live = await readLive(token, hostPartnerId);
+    async resolve(token: string, hostPartnerId: PartnerId, binding: string | null): Promise<PortalSession | null> {
+      const live = await readLive(token, hostPartnerId, binding);
       if (!live) return null;
       const rec: PortalSession = { ...live.rec, lastSeenMs: live.t };
       await write(rec, live.tokenHash, live.t);
@@ -267,8 +288,8 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
      * `totp: true` when a TOTP code was ALSO verified (an enrolled customer).
      * Refuses (false) a malformed/unknown/expired token and another host's session.
      */
-    async markStepUp(token: string, hostPartnerId: PartnerId, proof: { totp: boolean }): Promise<boolean> {
-      const live = await readLive(token, hostPartnerId);
+    async markStepUp(token: string, hostPartnerId: PartnerId, proof: { totp: boolean }, binding: string | null): Promise<boolean> {
+      const live = await readLive(token, hostPartnerId, binding);
       if (!live) return false;
       const rec: PortalSession = {
         ...live.rec,
@@ -327,10 +348,13 @@ export function createPortalSessionStore(redis: RedisLike, opts: { now?: () => n
       return n;
     },
 
-    /** Sign out this token's session (sign-out, rotation). A malformed or unknown token is a no-op. */
-    async destroy(token: string): Promise<void> {
-      if (typeof token !== 'string' || !TOKEN_RE.test(token)) return;
-      const tokenHash = sha256hex(token);
+    /**
+     * Sign out this token's session (sign-out, rotation). A malformed or unknown token is a no-op, and
+     * so is a token under another host binding (its key hash finds nothing).
+     */
+    async destroy(token: string, binding: string | null): Promise<void> {
+      if (typeof token !== 'string' || !TOKEN_RE.test(token) || !validBinding(binding)) return;
+      const tokenHash = tokenKeyHash(token, binding);
       const rec = parseRecord(await redis.get(recordKey(tokenHash)));
       if (rec) await redis.hdel(indexKey(rec.partnerId, rec.phone), rec.sid);
       await redis.del(recordKey(tokenHash));

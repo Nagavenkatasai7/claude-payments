@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { NextRequest, NextResponse } from 'next/server';
 import type { Db } from '@/db/client';
 import { freshDb } from './helpers-db';
@@ -11,9 +12,10 @@ import { seedTwoPartners } from './helpers-portal-two-partner';
 // checks → the daily cap and the in-flight lock, both keyed by (partner, customer) → the existing
 // web-chat turn (web channel, WEB_TOOL_ALLOWLIST) for the session's own tenant row.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
@@ -21,7 +23,7 @@ const SITE = (partnerId: string, slug: string) => ({
 
 const h = vi.hoisted(() => {
   const state = {
-    site: null as null | Record<string, unknown>,
+    site: null as null | PortalSite,
     jar: new Map<string, string>(),
     cookieReads: 0,
     redis: null as unknown as Record<string, (...a: unknown[]) => unknown>,
@@ -113,7 +115,7 @@ function req(opts: { host?: string; origin?: string | null; body?: string; json?
   return new NextRequest(`https://${host}/api/portal/chat`, { method: 'POST', headers, body });
 }
 async function signIn(partnerId: 'pa' | 'pb') {
-  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS');
+  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 function onHost(partnerId: 'pa' | 'pb') {

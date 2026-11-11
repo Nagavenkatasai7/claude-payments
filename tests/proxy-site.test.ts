@@ -2,10 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { isRewrite, getRewrittenUrl } from 'next/experimental/testing/server';
 import { AGENT_SITE_ROUTES, classifySitePath, SITE_ROUTES } from '@/lib/site-routes';
-const { resolveSiteSlug } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn() })); // vi.mock factories are hoisted
-vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug }));
+const { resolveSiteSlug, resolveSkinHost } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn(), resolveSkinHost: vi.fn() })); // vi.mock factories are hoisted
+vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug, resolveSkinHost }));
 import { proxy } from '@/proxy';
-import { REFUSED_HOSTS } from './site-host-corpus';
+import { CUSTOM_HOSTS, CUSTOM_REFUSED_HOSTS, REFUSED_HOSTS } from './site-host-corpus';
 
 describe('classifySitePath (SPEC §8a; C4)', () => {
   // M2 allowlists the customer portal only (tests/site-routes-portal.test.ts); everything else stays denied.
@@ -135,5 +135,115 @@ describe('proxy on a REFUSED smartremit.ai subdomain (not a valid slug, not www)
     const r = await proxy(new NextRequest('https://smartremit.ai/', { headers: { host: 'admin.smartremit.ai', 'x-sr-site-partner': 'evil', 'x-sr-site-slug': 'admin' } }));
     expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBeNull();
     expect(r.headers.get('x-middleware-override-headers') ?? '').not.toContain('x-sr-site');
+  });
+});
+
+// The custom skin host (smartremitai.tgfl.org) resolves skin-only (resolveSkinHost) and answers 404 when it
+// does not resolve: never the apex app, never the /site-inactive sheet. EVERY case asserts the skin
+// resolver was called with ('tgfl', Headers), so a missing mock export cannot pass a 404 through the
+// proxy's catch.
+describe('proxy on the custom skin host', () => {
+  beforeEach(() => { resolveSiteSlug.mockReset(); resolveSkinHost.mockReset(); vi.unstubAllEnvs(); });
+  const custom = (path: string, headers: Record<string, string> = {}, method = 'GET', host = 'smartremitai.tgfl.org') =>
+    new NextRequest(`https://smartremitai.tgfl.org${path}`, {
+      method, headers: { host, ...headers }, ...(method === 'GET' || method === 'HEAD' ? {} : { body: '[]' }),
+    });
+  const calledWithTgfl = () => {
+    expect(resolveSkinHost).toHaveBeenCalledWith('tgfl', expect.any(Headers));
+    expect(resolveSiteSlug).not.toHaveBeenCalled();
+  };
+
+  describe('resolved (switch on, status ok), portal live', () => {
+    beforeEach(() => { vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1'); resolveSkinHost.mockResolvedValue('default'); });
+    it.each(CUSTOM_HOSTS)('%s: / → /portal with the tenant headers (slug tgfl)', async (host) => {
+      const r = await proxy(custom('/', {}, 'GET', host));
+      expect(rewrittenPath(r)).toBe('/portal');
+      expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBe('default');
+      expect(r.headers.get('x-middleware-request-x-sr-site-slug')).toBe('tgfl');
+      calledWithTgfl();
+    });
+    it('/portal/login passes through with the tenant headers', async () => {
+      const r = await proxy(custom('/portal/login'));
+      expect(r.headers.get('x-middleware-next')).toBe('1');
+      expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBe('default');
+      expect(r.headers.get('x-middleware-request-x-sr-site-slug')).toBe('tgfl');
+      calledWithTgfl();
+    });
+    it('apex paths → 404 via a non-existent route, never a redirect', async () => {
+      for (const p of ['/login', '/admin-dashboard', '/account', '/pay/x', '/docs', '/api/worker']) {
+        const r = await proxy(custom(p));
+        expect(rewrittenPath(r), p).toBe('/_site-not-found');
+        expect(r.headers.get('location'), p).toBeNull();
+      }
+      calledWithTgfl();
+    });
+    it('a POST with next-action on a denied path → bare 404', async () => {
+      const r = await proxy(custom('/login', { 'next-action': 'abc123', 'content-type': 'text/plain' }, 'POST'));
+      expect(r.status).toBe(404);
+      expect(isRewrite(r as never)).toBe(false);
+      expect(r.headers.get('x-middleware-next')).toBeNull();
+      expect(await r.text()).toBe('');
+      calledWithTgfl();
+    });
+    it('forged tenant headers are stripped before the resolver and overwritten upstream', async () => {
+      // The proxy sets the tenant headers on the same object after the call: read them at call time.
+      const seen: Array<[string | null, string | null]> = [];
+      resolveSkinHost.mockImplementation(async (_s: string, h: Headers) => { seen.push([h.get('x-sr-site-partner'), h.get('x-sr-site-slug')]); return 'default'; });
+      const r = await proxy(custom('/portal/login', { 'x-sr-site-partner': 'evil', 'x-sr-site-slug': 'acme' }));
+      expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBe('default');
+      expect(r.headers.get('x-middleware-request-x-sr-site-slug')).toBe('tgfl');
+      expect(seen).toEqual([[null, null]]);
+      calledWithTgfl();
+    });
+  });
+
+  describe('unresolved (switch off, held, inactive, throttled, error) → 404, not the inactive sheet', () => {
+    beforeEach(() => { vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1'); resolveSkinHost.mockResolvedValue(null); });
+    it('GET and HEAD of every path → /_site-not-found', async () => {
+      for (const method of ['GET', 'HEAD']) for (const p of ['/', '/portal', '/portal/login', '/login', '/admin-dashboard', '/api/mcp', '/pay/x']) {
+        const r = await proxy(custom(p, {}, method));
+        expect(rewrittenPath(r), `${method} ${p}`).toBe('/_site-not-found');
+        expect(r.headers.get('location')).toBeNull();
+      }
+      calledWithTgfl();
+    });
+    it('POST → bare 404', async () => {
+      for (const p of ['/', '/portal/login', '/api/mcp']) {
+        const r = await proxy(custom(p, { 'next-action': 'abc123', 'content-type': 'text/plain' }, 'POST'));
+        expect(r.status, p).toBe(404);
+        expect(isRewrite(r as never)).toBe(false);
+        expect(await r.text()).toBe('');
+      }
+      calledWithTgfl();
+    });
+    it('forged tenant headers never reach upstream', async () => {
+      const r = await proxy(custom('/', { 'x-sr-site-partner': 'default', 'x-sr-site-slug': 'tgfl' }));
+      expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBeNull();
+      expect(r.headers.get('x-middleware-request-x-sr-site-slug')).toBeNull();
+      calledWithTgfl();
+    });
+    it('a throwing resolver → 404 too', async () => {
+      resolveSkinHost.mockImplementation(async () => { throw new Error('boom'); });
+      expect(rewrittenPath(await proxy(custom('/portal/login')))).toBe('/_site-not-found');
+      expect((await proxy(custom('/', {}, 'POST'))).status).toBe(404);
+      calledWithTgfl();
+    });
+    it('tgfl.smartremit.ai unresolved still shows the /site-inactive sheet (unchanged)', async () => {
+      resolveSiteSlug.mockResolvedValue(null);
+      const r = await proxy(new NextRequest('https://tgfl.smartremit.ai/', { headers: { host: 'tgfl.smartremit.ai' } }));
+      expect(rewrittenPath(r)).toBe('/site-inactive');
+      expect(resolveSiteSlug).toHaveBeenCalledWith('tgfl', expect.any(Headers));
+      expect(resolveSkinHost).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(CUSTOM_REFUSED_HOSTS)('%s (trailing dot or sub-label): refused with no resolver call', async (host) => {
+    for (const p of ['/', '/portal/login', '/login', '/admin-dashboard']) {
+      const r = await proxy(custom(p, {}, 'GET', host));
+      expect(rewrittenPath(r), `${host}${p}`).toBe('/_site-not-found');
+      expect((await proxy(custom(p, { 'next-action': 'a', 'content-type': 'text/plain' }, 'POST', host))).status).toBe(404);
+    }
+    expect(resolveSkinHost).not.toHaveBeenCalled();
+    expect(resolveSiteSlug).not.toHaveBeenCalled();
   });
 });

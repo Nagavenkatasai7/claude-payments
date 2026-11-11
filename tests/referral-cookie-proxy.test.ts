@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
-const { resolveSiteSlug } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn() }));
-vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug }));
+const { resolveSiteSlug, resolveSkinHost } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn(), resolveSkinHost: vi.fn() }));
+vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug, resolveSkinHost }));
 import { proxy } from '@/proxy';
 import { REFERRAL_COOKIE, REFERRAL_COOKIE_MAX_AGE_S, referralCodeToStore, referralCookieOptions } from '@/lib/referral-code';
 
@@ -20,6 +20,8 @@ const refCookies = (r: Response) => r.headers.getSetCookie().filter((c) => c.sta
 beforeEach(() => {
   resolveSiteSlug.mockReset();
   resolveSiteSlug.mockResolvedValue('default');
+  resolveSkinHost.mockReset();
+  resolveSkinHost.mockResolvedValue('default');
   vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1');
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -69,5 +71,16 @@ describe('proxy: the portal sign-in page keeps the referral code', () => {
   it('the apex never sets it', async () => {
     const apex = new NextRequest('https://smartremit.ai/portal/login?ref=REF-TANA01', { headers: { host: 'smartremit.ai' } });
     expect(refCookies(await proxy(apex))).toEqual([]);
+  });
+});
+
+describe('proxy: the custom skin host never keeps a referral code (D14: tgfl.org can plant sr_ref)', () => {
+  it('GET /portal/login?ref=REF-XXXXXX on smartremitai.tgfl.org sets no sr_ref; send.smartremit.ai still does', async () => {
+    const custom = new NextRequest('https://smartremitai.tgfl.org/portal/login?ref=REF-TANA01', { headers: { host: 'smartremitai.tgfl.org' } });
+    const r = await proxy(custom);
+    expect(r.headers.get('x-middleware-next')).toBe('1'); // the page itself is served
+    expect(resolveSkinHost).toHaveBeenCalledWith('tgfl', expect.any(Headers));
+    expect(refCookies(r)).toEqual([]);
+    expect(refCookies(await proxy(site('/portal/login?ref=REF-TANA01')))).toHaveLength(1);
   });
 });

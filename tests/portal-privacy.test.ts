@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq } from 'drizzle-orm';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Db } from '@/db/client';
@@ -11,16 +12,17 @@ import { TWO_PARTNER_PHONE } from './helpers-portal-two-partner';
 // default). Only the REQUEST flow (§6b / X9): step-up, the retention copy, a typed reason (checked
 // again on the server), runOnce, one audit row and one deduped ops alert. No job, no erasure, no table.
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
 });
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   jar: new Map<string, string>(),
   redis: null as unknown,
   db: null as unknown,
@@ -90,7 +92,7 @@ const fd = (reason: string) => {
   return f;
 };
 async function signIn(partnerId = 'pa') {
-  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iPhone');
+  const { token } = await sessions().create(partnerId, PHONE, 'Safari on iPhone', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 const auditRows = (partnerId = 'pa') =>

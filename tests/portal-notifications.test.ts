@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '@/db/client';
@@ -21,7 +22,7 @@ import { seedTwoPartners } from './helpers-portal-two-partner';
 // own host + customer + current address); email receipts only once verified.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   stale: false,
   db: null as unknown,
@@ -69,7 +70,7 @@ import VerifyEmailPage from '@/app/portal/notifications/verify/page';
 import NotificationsPage from '@/app/portal/notifications/page';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
 
-const SITE = (partnerId: string) => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} });
+const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', host: partnerId === 'pa' ? 'acme.smartremit.ai' : 'bolt.smartremit.ai', brand: partnerId === 'pa' ? 'Acme Remit' : 'Bolt Pay', logo: null, theme: {} as PortalSite['theme'] });
 const EMAIL = 'alice@example.com';
 
 let db: Db;
