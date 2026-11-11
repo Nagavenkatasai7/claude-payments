@@ -247,36 +247,22 @@ describe('saveTransfer keeps the legal name (fill-or-keep, critic P14)', () => {
   });
 });
 
-// Review R1-P2 D1: the name the customer types next to NEW bank details is the name for
-// that account, so the pay page REPLACES a name already on the row (same guards otherwise),
-// and an account edit without a typed name drops the old account's name.
-describe('replaceRecipientLegalNameIfEditable (review R1-P2 D1)', () => {
-  it('overwrites a name already on the row: wrote and replaced', async () => {
-    await repo.saveTransfer(fixture({ recipientLegalName: 'Old Holder' }));
-    expect(await repo.replaceRecipientLegalNameIfEditable('tr_1', 'default', ` ${NAME} `)).toEqual({ wrote: true, replaced: true });
-    expect((await repo.getTransfer('tr_1', { decrypt: true }))?.recipientLegalName).toBe(NAME);
-  });
-
-  it('fills an empty row: wrote, not replaced', async () => {
-    await repo.saveTransfer(fixture());
-    expect(await repo.replaceRecipientLegalNameIfEditable('tr_1', 'default', NAME)).toEqual({ wrote: true, replaced: false });
-    expect(decryptField((await rawLegal('tr_1'))!, provider, ctx.transfer('tr_1', 'recipient_legal_name_enc'))).toBe(NAME);
-  });
-
-  it('a blank name, or a row the payout guard refuses (paid, partner-API, another tenant, missing), writes nothing', async () => {
+// Review R3-X1 N1 (decision D3): the name typed next to NEW bank details is written in the
+// same guarded UPDATE as the payout (setPayoutIfEditable legalName); the clear decision is
+// made under the row lock (lockEditablePayout), never derived in SQL.
+describe('lockEditablePayout (review R3-X1 N1)', () => {
+  it('returns the decrypted stored destination and whether a name is on the row; null when the payout guard refuses', async () => {
     await seedPartner(db, 'acme');
     await repo.saveTransfer(fixture({ recipientLegalName: 'Old Holder' }));
-    expect(await repo.replaceRecipientLegalNameIfEditable('tr_1', 'default', '  ')).toEqual({ wrote: false, replaced: false });
-    await repo.saveTransfer(fixture({ id: 'r_paid', status: 'paid', recipientLegalName: 'Old Holder' }));
-    await repo.saveTransfer(fixture({ id: 'r_api', recipientLegalName: 'Old Holder' }));
-    await createIdempotencyRepo(db).claim('default', 'order-9', 'r_api');
-    for (const id of ['r_paid', 'r_api']) {
-      expect(await repo.replaceRecipientLegalNameIfEditable(id, 'default', NAME), id).toEqual({ wrote: false, replaced: false });
-      expect((await repo.getTransfer(id, { decrypt: true }))?.recipientLegalName, id).toBe('Old Holder');
-    }
-    expect(await repo.replaceRecipientLegalNameIfEditable('tr_1', 'acme', NAME)).toEqual({ wrote: false, replaced: false });
-    expect(await repo.replaceRecipientLegalNameIfEditable('missing', 'default', NAME)).toEqual({ wrote: false, replaced: false });
-    expect((await repo.getTransfer('tr_1', { decrypt: true }))?.recipientLegalName).toBe('Old Holder');
+    const full = await repo.getTransfer('tr_1', { decrypt: true });
+    expect(await repo.lockEditablePayout('tr_1', 'default')).toEqual({ storedDestination: full!.payoutDestination, hasLegalName: true });
+    await repo.saveTransfer(fixture({ id: 'l_empty', payoutDestination: '' }));
+    expect(await repo.lockEditablePayout('l_empty', 'default')).toEqual({ storedDestination: '', hasLegalName: false });
+    await repo.saveTransfer(fixture({ id: 'l_paid', status: 'paid' }));
+    await repo.saveTransfer(fixture({ id: 'l_api' }));
+    await createIdempotencyRepo(db).claim('default', 'order-9', 'l_api');
+    for (const id of ['l_paid', 'l_api', 'missing']) expect(await repo.lockEditablePayout(id, 'default'), id).toBeNull();
+    expect(await repo.lockEditablePayout('tr_1', 'acme')).toBeNull();
   });
 });
 
@@ -296,25 +282,38 @@ describe('recipientIdentityExempt (review R1-P2 D1)', () => {
   });
 });
 
-describe('setPayoutIfEditable clearLegalNameOnReplace (review R1-P2 D1)', () => {
+describe('setPayoutIfEditable legalName / clearLegalName (review R3-X1 N1, N2)', () => {
   const NEW = { payoutMethod: 'bank' as const, payoutDestination: '987654321098 SBIN0005678' };
 
-  it('replacing a stored destination clears the old name in the same write', async () => {
+  it('legalName: the payout and the sealed name in ONE update (a name on the row is replaced)', async () => {
     await repo.saveTransfer(fixture({ recipientLegalName: 'Old Holder' }));
-    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { clearLegalNameOnReplace: true })).not.toBeNull();
+    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { legalName: ` ${NAME} ` })).not.toBeNull();
     const full = await repo.getTransfer('tr_1', { decrypt: true });
     expect(full?.payoutDestination).toBe(NEW.payoutDestination);
+    expect(full?.recipientLegalName).toBe(NAME);
+    expect(decryptField((await rawLegal('tr_1'))!, provider, ctx.transfer('tr_1', 'recipient_legal_name_enc'))).toBe(NAME);
+  });
+
+  it('a guard miss writes neither the payout nor the name', async () => {
+    await repo.saveTransfer(fixture({ status: 'paid', recipientLegalName: 'Old Holder' }));
+    const before = await repo.getTransfer('tr_1', { decrypt: true });
+    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { legalName: NAME })).toBeNull();
+    const after = await repo.getTransfer('tr_1', { decrypt: true });
+    expect(after?.payoutDestination).toBe(before?.payoutDestination);
+    expect(after?.recipientLegalName).toBe('Old Holder');
+  });
+
+  it('clearLegalName (no name typed): the old name is cleared in the same write', async () => {
+    await repo.saveTransfer(fixture({ recipientLegalName: 'Old Holder' }));
+    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { clearLegalName: true })).not.toBeNull();
+    expect((await repo.getTransfer('tr_1', { decrypt: true }))?.payoutDestination).toBe(NEW.payoutDestination);
     expect(await rawLegal('tr_1')).toBeNull();
   });
 
-  it('a first collection (empty stored destination) keeps the name', async () => {
-    await repo.saveTransfer(fixture({ payoutDestination: '', recipientLegalName: 'Old Holder' }));
-    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { clearLegalNameOnReplace: true })).not.toBeNull();
-    expect((await repo.getTransfer('tr_1', { decrypt: true }))?.recipientLegalName).toBe('Old Holder');
-  });
-
-  it('without the option the name survives (every other caller)', async () => {
+  it('clearLegalName false, or no option (every other caller): the name survives', async () => {
     await repo.saveTransfer(fixture({ recipientLegalName: 'Old Holder' }));
+    expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW, { clearLegalName: false })).not.toBeNull();
+    expect((await repo.getTransfer('tr_1', { decrypt: true }))?.recipientLegalName).toBe('Old Holder');
     expect(await repo.setPayoutIfEditable('tr_1', 'default', NEW)).not.toBeNull();
     expect((await repo.getTransfer('tr_1', { decrypt: true }))?.recipientLegalName).toBe('Old Holder');
   });

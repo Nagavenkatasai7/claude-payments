@@ -25,6 +25,7 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
+import { setRailProviderType } from './helpers-sanctions';
 import type { Transfer, Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -385,6 +386,18 @@ describe('a funded awaiting row (review R1-P1 A1)', { retry: 0 }, () => {
     const res = await post(TID, { otp: '654321' });
     expect(res.status).toBe(409);
     expect((await res.json()).error).not.toMatch(/charged/i);
+  });
+
+  it('review R3-X1 Q3: a valid ack and hash but NO accountHolder key (no name on file) -> 409 reload_required with funded: true, no "charged"', async () => {
+    await setRailProviderType(db, 'acme', 'http'); // a real-money rail: the name field is required
+    const { accountHolder: _drop, ...noHolder } = realMoneyPayBody();
+    expect(await createTransferRepo(db).recipientIdentityMissing(TID, 'acme')).toBe(true);
+    const res = await post(TID, noHolder);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, reason: 'reload_required', funded: true });
+    expect(body.error).not.toMatch(/charged/i);
+    expect(codeKeys()).toHaveLength(1); // answered before the code is checked
   });
 
   it('the evidence commit fails -> 503 approval_not_recorded with funded: true, and the text has no "charged"', async () => {

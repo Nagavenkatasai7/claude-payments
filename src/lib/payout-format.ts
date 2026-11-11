@@ -361,6 +361,17 @@ export function isMaskedDestination(dest: string | null | undefined): boolean {
   return lower === ACCOUNT_ON_FILE_PLACEHOLDER || lower === NO_BANK_DETAILS_PLACEHOLDER.toLowerCase();
 }
 
+/**
+ * Review R3-X1 N2: the ONE definition of "a stored payout account exists": the
+ * stored destination is non-empty AND not display text (isMaskedDestination).
+ * The pay page shows a first collection for anything else, so the pay route and
+ * pay-finalize treat new bank details over it as a first collection, never as an
+ * account being replaced. Pure; trims.
+ */
+export function isStoredAccount(dest: string | null | undefined): boolean {
+  return (dest ?? '').trim() !== '' && !isMaskedDestination(dest);
+}
+
 // ── USDC seller payout (2026-07-02 spec) ─────────────────────────────────────
 //
 // A cross-border SELLER may choose to receive payouts as USDC to a wallet

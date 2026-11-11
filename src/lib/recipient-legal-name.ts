@@ -15,32 +15,22 @@ import type { Draft, PartnerId, PayoutMethod, Transfer } from './types';
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'error');
 
 /**
- * ONE transaction: the guarded write and its `transfer.legal_name_set` audit row
- * (C17: meta `{ source: 'pay_page' }`). By default the write is fill-only
- * (setRecipientLegalNameIfEditable: this tenant's awaiting, unfunded, editable
- * b2c row with no name yet). Review R1-P2 D1: with `replace` (a name typed next
- * to NEW bank details, the name for that account) it overwrites a name already
- * on the row (replaceRecipientLegalNameIfEditable, same guard otherwise), and
- * the meta gains `replaced: true` only when a name was overwritten (a boolean,
- * never a name). False when a guard refused (nothing written). A failed audit
- * insert throws and rolls the name back. The audit partner is `t.partnerId`:
- * the WHERE pins it.
+ * ONE transaction: the guarded fill-only write (setRecipientLegalNameIfEditable:
+ * this tenant's awaiting, unfunded, editable b2c row with no name yet) and its
+ * `transfer.legal_name_set` audit row (C17: meta `{ source: 'pay_page' }`).
+ * False when a guard refused (nothing written). A failed audit insert throws and
+ * rolls the name back. The audit partner is `t.partnerId`: the WHERE pins it.
+ * Review R3-X1 N1: only for a request WITHOUT posted bank details; a name typed
+ * next to bank details is written with the payout (the pay route's
+ * writePayoutIfEditable, one guarded UPDATE after the re-screen).
  */
 export async function writeRecipientLegalName(
   db: Db,
   t: Pick<Transfer, 'id' | 'partnerId'>,
   name: string,
-  opts: { replace?: boolean } = {},
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
-    const repo = createTransferRepo(tx);
-    let wrote: boolean;
-    let replaced = false;
-    if (opts.replace) {
-      ({ wrote, replaced } = await repo.replaceRecipientLegalNameIfEditable(t.id, t.partnerId, name));
-    } else {
-      wrote = await repo.setRecipientLegalNameIfEditable(t.id, t.partnerId, name);
-    }
+    const wrote = await createTransferRepo(tx).setRecipientLegalNameIfEditable(t.id, t.partnerId, name);
     if (wrote) {
       await createAuditRepo(tx).record({
         partnerId: t.partnerId,
@@ -48,7 +38,7 @@ export async function writeRecipientLegalName(
         actorType: 'system',
         action: 'transfer.legal_name_set',
         subjectId: t.id,
-        meta: replaced ? { source: 'pay_page', replaced: true } : { source: 'pay_page' },
+        meta: { source: 'pay_page' },
       });
     }
     return wrote;

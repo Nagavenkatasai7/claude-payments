@@ -103,16 +103,11 @@ describe('writeRecipientLegalName (C18 step 3, C17)', () => {
     expect(await legalNameSetRows()).toEqual([]);
   });
 
-  it('review R1-P2 D1: replace overwrites a name on the row; the audit meta says replaced (a boolean, never a name)', async () => {
+  it('review R3-X1 N1: fill-only, never a replace: a name already on the row is kept, nothing audited', async () => {
     await store.saveTransfer(makeTransfer({ id: 'tr_r1', recipientLegalName: 'Old Holder' }));
-    expect(await writeRecipientLegalName(db, { id: 'tr_r1', partnerId: OWNER }, 'Anita Legal', { replace: true })).toBe(true);
-    expect(await legalOf('tr_r1')).toBe('Anita Legal');
-    await store.saveTransfer(makeTransfer({ id: 'tr_r2' }));
-    expect(await writeRecipientLegalName(db, { id: 'tr_r2', partnerId: OWNER }, 'Anita Legal', { replace: true })).toBe(true);
-    expect((await legalNameSetRows()).map((r) => [r.subject_id, r.meta])).toEqual([
-      ['tr_r1', { source: 'pay_page', replaced: true }],
-      ['tr_r2', { source: 'pay_page' }],
-    ]);
+    expect(await writeRecipientLegalName(db, { id: 'tr_r1', partnerId: OWNER }, 'Anita Legal')).toBe(false);
+    expect(await legalOf('tr_r1')).toBe('Old Holder');
+    expect(await legalNameSetRows()).toEqual([]);
   });
 
   it('an audit insert that fails -> throws and the name is NOT written (one transaction)', async () => {

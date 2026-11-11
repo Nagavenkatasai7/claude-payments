@@ -8,7 +8,7 @@ import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
-import { isMaskedDestination } from './payout-format';
+import { isMaskedDestination, isStoredAccount } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { hasSenderName } from './sender-identity';
 import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
@@ -327,7 +327,8 @@ export async function finalizeDraftPayment(
   // collection (no stored destination) and a body without bank details keep the old order.
   const typedLegalName = opts.recipientLegalName?.trim() || undefined;
   const draftOwnLegalName = draft.recipientLegalName?.trim() || undefined;
-  const replacesStoredAccount = bodyDestination !== '' && (draft.recipient.payoutDestination ?? '').trim() !== '';
+  // Review R3-X1 N2: a masked stored destination is no account (the page shows a first collection).
+  const replacesStoredAccount = bodyDestination !== '' && isStoredAccount(draft.recipient.payoutDestination);
   const recipientLegalName = isB2bDraft
     ? draft.recipientLegalName
     : bodyDestination !== ''

@@ -30,6 +30,9 @@ import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos
 import { PAY_ACCOUNT_HOLDER_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from '@/lib/pay-outcome';
 import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import type { Draft, Transfer } from '@/lib/types';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { defaultProvider, encryptField } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
 vi.mock('next/server', async (orig) => {
@@ -84,7 +87,13 @@ vi.mock('@/lib/partner-integrations-store', () => ({
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 // Faults: the guarded write misses, the book fill throws, the gate context's rail read fails once.
 // Review R1-P1 A2: nameThrows makes the guarded legal-name write itself throw.
-const fault = vi.hoisted(() => ({ guardMiss: false, bookThrows: false, railReadFailNext: false, nameThrows: false }));
+// Review R3-X1 N1: rescreenThrows makes the pay-time re-screen's evidence read fail (an infra
+// error); bindIntentAfterRescreen binds a funding intent to that row right after the re-screen,
+// so the payout guard misses between the route's read and its write.
+const fault = vi.hoisted(() => ({
+  guardMiss: false, bookThrows: false, railReadFailNext: false, nameThrows: false,
+  rescreenThrows: false, bindIntentAfterRescreen: null as string | null,
+}));
 vi.mock('@/db/repos/transfer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/transfer-repo')>();
   return {
@@ -93,15 +102,9 @@ vi.mock('@/db/repos/transfer-repo', async (orig) => {
       const repo = real.createTransferRepo(...a);
       if (fault.nameThrows) {
         const boom = async (): Promise<never> => { throw new TypeError('name-write-secret'); };
-        return { ...repo, setRecipientLegalNameIfEditable: boom, replaceRecipientLegalNameIfEditable: boom };
+        return { ...repo, setRecipientLegalNameIfEditable: boom, lockEditablePayout: boom, setPayoutIfEditable: boom };
       }
-      return fault.guardMiss
-        ? {
-            ...repo,
-            setRecipientLegalNameIfEditable: async () => false,
-            replaceRecipientLegalNameIfEditable: async () => ({ wrote: false, replaced: false }),
-          }
-        : repo;
+      return fault.guardMiss ? { ...repo, setRecipientLegalNameIfEditable: async () => false } : repo;
     },
   };
 });
@@ -125,7 +128,13 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
     ...real,
     rescreenBeforePay: async (...a: Parameters<typeof real.rescreenBeforePay>) => {
       screened.recipientNames.push(a[2].recipientName);
-      return real.rescreenBeforePay(...a);
+      if (fault.rescreenThrows) throw Object.assign(new Error('evidence read failed'), { code: 'ECONNRESET' });
+      const out = await real.rescreenBeforePay(...a);
+      if (fault.bindIntentAfterRescreen) {
+        const { createTransferRepo } = await import('@/db/repos/transfer-repo');
+        await createTransferRepo(db).bindFundingIntent(fault.bindIntentAfterRescreen, OWNER, 'stripe', 'pi_race');
+      }
+      return out;
     },
   };
 });
@@ -161,7 +170,7 @@ const ERROR_400 = { ok: false, error: 'Please check the account holder name.', f
 
 // Every console line of the file: the typed names and the phones must never appear.
 const consoleLines: string[] = [];
-const PII = ['Typed Holder', 'Anita Legal', 'Testa Fixturelli', 'Draft Legal', 'Other Book', 'Old Holder', 'New Holder', SENDER, RP];
+const PII = ['Alice A', 'Ravi K', 'Bob B', 'Typed Holder', 'Anita Legal', 'Testa Fixturelli', 'Draft Legal', 'Other Book', 'Old Holder', 'New Holder', SENDER, RP];
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -254,6 +263,8 @@ beforeEach(async () => {
   fault.bookThrows = false;
   fault.railReadFailNext = false;
   fault.nameThrows = false;
+  fault.rescreenThrows = false;
+  fault.bindIntentAfterRescreen = null;
   screened.recipientNames = [];
   otp.verify = vi.fn(async () => okVerify());
   db = await freshDb();
@@ -737,5 +748,149 @@ describe('review R1-P2 D1: new bank details on the pay page carry their own acco
     expect((await res.json()).reason).toBe('payout_locked');
     expect(await legalOf('d1-h')).toBe('Old Holder');
     expect(await legalNameSetRows()).toEqual([]);
+  });
+});
+
+async function payoutEditRows(id: string) {
+  const r = (await db.execute(
+    sql`SELECT meta FROM audit_events WHERE action = 'transfer.payout_edit' AND subject_id = ${id} ORDER BY id`,
+  )) as unknown as { rows: Array<{ meta: unknown }> };
+  return r.rows.map((x) => x.meta);
+}
+
+// Review R3-X1 N1 (decision D3): with posted bank details, the typed name and the account it
+// was typed for are ONE guarded write, after the re-screen. A request that stops before that
+// write leaves the old account with its old name.
+describe('review R3-X1 N1: the account-holder name and its account are one write, after the re-screen', { retry: 0 }, () => {
+  it('(a) the re-screen evidence read fails -> 503; the row keeps account A and "Alice A"; no legal_name_set row', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-a', recipientLegalName: 'Alice A' }));
+    fault.rescreenThrows = true;
+    const res = await post('n1-a', { ...realMoneyPayBody({ accountHolder: 'Bob B' }), ...NEW_FIELDS });
+    expect(res.status).toBe(503);
+    const t = await store.getTransferDecrypted('n1-a');
+    expect(t?.payoutDestination).toBe(ACCOUNT);
+    expect(t?.recipientLegalName).toBe('Alice A');
+    expect(await legalNameSetRows()).toEqual([]);
+    expect(await payoutEditRows('n1-a')).toEqual([]);
+  });
+
+  it('(b) the payout guard misses after the read (an intent bound meanwhile) -> 409 payout_locked; A and "Alice A" kept, nothing written', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-b', recipientLegalName: 'Alice A' }));
+    fault.bindIntentAfterRescreen = 'n1-b';
+    const res = await post('n1-b', { ...realMoneyPayBody({ accountHolder: 'Bob B' }), ...NEW_FIELDS });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe('payout_locked');
+    const t = await store.getTransferDecrypted('n1-b');
+    expect(t?.payoutDestination).toBe(ACCOUNT);
+    expect(t?.recipientLegalName).toBe('Alice A');
+    expect(await legalNameSetRows()).toEqual([]);
+    expect(await payoutEditRows('n1-b')).toEqual([]);
+  });
+
+  it('(c) happy path: account B, "Bob B" and both audit rows; the re-screen screened "Bob B"; settles', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-c', recipientLegalName: 'Alice A' }));
+    const res = await post('n1-c', { ...realMoneyPayBody({ accountHolder: 'Bob B' }), ...NEW_FIELDS });
+    expect(await res.json()).toEqual({ ok: true, status: 'processing' });
+    const t = await store.getTransferDecrypted('n1-c');
+    expect(t?.payoutDestination).toBe(NEW_DEST);
+    expect(t?.recipientLegalName).toBe('Bob B');
+    expect(screened.recipientNames).toEqual(['Bob B']);
+    expect(await legalNameSetRows('n1-c')).toEqual([
+      { partner_id: OWNER, subject_id: 'n1-c', meta: { source: 'pay_page', replaced: true } },
+    ]);
+    expect(await payoutEditRows('n1-c')).toEqual([{ last4: '7777' }]);
+    expect(t?.status).toBe('paid');
+    expect(t?.complianceReasons).not.toContain(RECIPIENT_IDENTITY_MISSING_REASON);
+  });
+
+  it('(c2) first collection with a typed name and no name before: meta has no replaced flag', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-c2', payoutDestination: '' }));
+    const res = await post('n1-c2', { ...realMoneyPayBody({ accountHolder: 'Bob B' }), ...NEW_FIELDS });
+    expect(await res.json()).toEqual({ ok: true, status: 'processing' });
+    expect(await legalOf('n1-c2')).toBe('Bob B');
+    expect(await legalNameSetRows('n1-c2')).toEqual([{ partner_id: OWNER, subject_id: 'n1-c2', meta: { source: 'pay_page' } }]);
+  });
+
+  it('(e) a watchlist name typed for account B is blocked; nothing is written: A and "Alice A" kept', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-e', recipientLegalName: 'Alice A' }));
+    const res = await post('n1-e', { ...realMoneyPayBody({ accountHolder: 'Testa Fixturelli' }), ...NEW_FIELDS });
+    expect(res.status).toBe(400);
+    expect(screened.recipientNames).toEqual(['Testa Fixturelli']);
+    const t = await store.getTransferDecrypted('n1-e');
+    expect(t?.status).toBe('blocked');
+    expect(t?.payoutDestination).toBe(ACCOUNT);
+    expect(t?.recipientLegalName).toBe('Alice A');
+    expect(await legalNameSetRows()).toEqual([]);
+  });
+
+  it('(f) the combined write throws -> 503 approval_not_recorded and one payevidence alert; nothing written; the error name only', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'n1-f', recipientLegalName: 'Alice A' }));
+    fault.nameThrows = true;
+    const before = consoleLines.length;
+    const res = await post('n1-f', { ...realMoneyPayBody({ accountHolder: 'Bob B' }), ...NEW_FIELDS });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
+    expect(await outboxKinds()).toEqual(['ops.alert']);
+    const t = await store.getTransferDecrypted('n1-f');
+    expect(t?.payoutDestination).toBe(ACCOUNT);
+    expect(t?.recipientLegalName).toBe('Alice A');
+    const lines = consoleLines.slice(before);
+    expect(lines.filter((l) => l.includes('pay.legal_name_write'))).toHaveLength(1);
+    for (const l of lines) expect(l).not.toContain('name-write-secret');
+  });
+});
+
+// Review R3-X1 M1 (= Q1, R3): a funded awaiting row never hears "nothing was charged" from a
+// failed account-holder write, on either arm (fill-only, or with the bank details).
+describe('review R3-X1 M1: the account-holder write 503 carries the funded flag', { retry: 0 }, () => {
+  it.each([
+    ['the fill-only write (no bank details)', {}],
+    ['the combined write (with bank details)', NEW_FIELDS],
+  ])('%s throws on a funded row -> 503 approval_not_recorded, funded: true, no "charged"', async (_label, extra) => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'm1-funded' }));
+    expect(await createTransferRepo(db).bindFundingIntent('m1-funded', OWNER, 'stripe', 'pi_m1')).toBeTruthy();
+    fault.nameThrows = true;
+    const res = await post('m1-funded', { ...realMoneyPayBody({ accountHolder: TYPED }), ...extra });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, reason: 'approval_not_recorded', funded: true });
+    expect(body.error).not.toMatch(/nothing was charged/i);
+    expect(body.error).not.toMatch(/charged/i);
+  });
+});
+
+// Review R3-X1 N2: a MASKED stored destination is not an account (the page shows a first
+// collection), so new bank details with no name keep the row's or the draft's own name.
+describe('review R3-X1 N2: a masked stored destination is not an account being replaced', { retry: 0 }, () => {
+  it('pay route: a demo transfer storing "****1234" with a legal name; bank details, no accountHolder -> the name is kept', async () => {
+    await seedOwner('Alex Sender', 'default');
+    await store.saveTransfer(makeTransfer({ id: 'n2-t', partnerId: 'default', recipientLegalName: 'Old Holder' }));
+    await db.execute(sql`UPDATE transfers SET payout_destination_enc = ${encryptField('****1234', defaultProvider(), ctx.transfer('n2-t', 'payout_destination_enc'))} WHERE id = 'n2-t'`);
+    expect((await store.getTransferDecrypted('n2-t'))?.payoutDestination).toBe('****1234');
+    const res = await post('n2-t', { otp: '000000', ...NEW_FIELDS });
+    expect(res.status).toBe(200);
+    const t = await store.getTransferDecrypted('n2-t');
+    expect(t?.payoutDestination).toBe(NEW_DEST);
+    expect(t?.recipientLegalName).toBe('Old Holder');
+    expect(screened.recipientNames).toEqual(['Old Holder']);
+  });
+
+  it('pay-finalize: a demo draft with "Ravi K" and a masked destination; bank details, no typed name -> the minted row keeps "Ravi K"', async () => {
+    await seedOwner('Alex Sender', 'default');
+    const draftId = await makeDraft({
+      partnerId: 'default',
+      recipientLegalName: 'Ravi K',
+      recipient: { name: 'Mom', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: '****1234' },
+    });
+    expect((await post(draftId, { otp: '000000', ...NEW_FIELDS })).status).toBe(200);
+    const [created] = await store.listTransfers();
+    expect(await legalOf(created.id)).toBe('Ravi K');
   });
 });

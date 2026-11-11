@@ -1191,18 +1191,21 @@ export function createTransferRepo(
      * read omits. Returns the updated (masked) row, or null when any guard
      * failed — the caller reports current truth.
      *
-     * Review R1-P2 D1: with `clearLegalNameOnReplace`, the SAME UPDATE also
-     * clears recipient_legal_name_enc when the row already stored a destination
-     * (the old name describes the old account); a first collection (stored
-     * destination empty) keeps it. Only the pay route passes it, when no name
-     * was typed for the new account in that request.
+     * Review R3-X1 N1/N2 (decision D3): the SAME guarded UPDATE also writes the
+     * account-holder name for the new account. `legalName` (trimmed, non-blank)
+     * seals it into recipient_legal_name_enc; with no name, `clearLegalName`
+     * sets it to NULL (the old name described the old account). The caller makes
+     * the clear decision under the row lock (lockEditablePayout), in the same
+     * transaction: a sealed destination cannot be tested in SQL, and a masked one
+     * is no account (isStoredAccount). Only the pay route passes either option.
      */
     async setPayoutIfEditable(
       id: string,
       partnerId: PartnerId,
       payout: { payoutMethod: PayoutMethod; payoutDestination: string },
-      opts: { clearLegalNameOnReplace?: boolean } = {},
+      opts: { legalName?: string; clearLegalName?: boolean } = {},
     ): Promise<Transfer | null> {
+      const name = (opts.legalName ?? '').trim();
       const rows = await db
         .update(transfers)
         .set({
@@ -1211,16 +1214,32 @@ export function createTransferRepo(
             ? encryptField(payout.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc')) // row id = the WHERE's id
             : '',
           payoutDestinationLast4: last4(payout.payoutDestination),
-          // SET expressions read the row's OLD values (Postgres UPDATE semantics).
-          ...(opts.clearLegalNameOnReplace
-            ? {
-                recipientLegalNameEnc: sql`CASE WHEN ${transfers.payoutDestinationEnc} <> '' THEN NULL ELSE ${transfers.recipientLegalNameEnc} END`,
-              }
-            : {}),
+          ...(name
+            ? { recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')) } // row id = the WHERE's id
+            : opts.clearLegalName
+              ? { recipientLegalNameEnc: null }
+              : {}),
         })
         .where(payoutEditable(id, partnerId))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Review R3-X1 N1 (decision D3): lock this tenant's editable row (the
+     * payoutEditable guard, FOR UPDATE) and return what the combined payout and
+     * name write decides on: the stored destination (decrypted, never logged)
+     * and whether a legal name is on the row. Null when the guard fails. Call it
+     * inside the transaction that then runs setPayoutIfEditable.
+     */
+    async lockEditablePayout(
+      id: string,
+      partnerId: PartnerId,
+    ): Promise<{ storedDestination: string; hasLegalName: boolean } | null> {
+      const rows = await db.select().from(transfers).where(payoutEditable(id, partnerId)).for('update');
+      if (!rows[0]) return null;
+      const t = toDomain(rows[0], true);
+      return { storedDestination: (t.payoutDestination ?? '').trim(), hasLegalName: rows[0].recipientLegalNameEnc !== null };
     },
 
     /**
@@ -1241,38 +1260,6 @@ export function createTransferRepo(
         .where(and(payoutEditable(id, partnerId), isNull(transfers.recipientLegalNameEnc)))
         .returning({ id: transfers.id });
       return rows.length > 0;
-    },
-
-    /**
-     * Review R1-P2 D1: the pay page's REPLACE write, for a name typed next to
-     * new bank details (it is the name for that account). The same guard as the
-     * fill (payoutEditable) without the "no name yet" test. One locked read then
-     * one UPDATE; call it inside a transaction (writeRecipientLegalName does).
-     * `replaced` is true only when a name was overwritten. Nothing for a blank
-     * name (no query) or a failed guard.
-     */
-    async replaceRecipientLegalNameIfEditable(
-      id: string,
-      partnerId: PartnerId,
-      legalName: string,
-    ): Promise<{ wrote: boolean; replaced: boolean }> {
-      const name = legalName.trim();
-      if (!name) return { wrote: false, replaced: false };
-      const locked = await db
-        .select({ had: sql<boolean>`${transfers.recipientLegalNameEnc} IS NOT NULL` })
-        .from(transfers)
-        .where(payoutEditable(id, partnerId))
-        .for('update');
-      if (locked.length === 0) return { wrote: false, replaced: false };
-      const rows = await db
-        .update(transfers)
-        .set({
-          recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')), // row id = the WHERE's id
-        })
-        .where(payoutEditable(id, partnerId))
-        .returning({ id: transfers.id });
-      if (rows.length === 0) return { wrote: false, replaced: false };
-      return { wrote: true, replaced: locked[0].had === true };
     },
 
     /**

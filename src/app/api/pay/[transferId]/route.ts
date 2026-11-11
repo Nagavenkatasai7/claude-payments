@@ -26,7 +26,7 @@ import { recordChannelHealth } from '@/lib/channel-health';
 import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
-import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
+import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, isStoredAccount, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, PartnerId, PayoutMethod, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
@@ -66,25 +66,36 @@ export const maxDuration = 300;
  * transaction: the guarded, column-targeted UPDATE (transfer-repo
  * setPayoutIfEditable: awaiting_payment, uncharged, consumer, this tenant, not
  * partner-API-minted) + a `transfer.payout_edit` audit row carrying the id and
- * last-4 only. Returns the updated (masked) row, or null when a guard failed.
- * Review R1-P2 D1: `clearLegalNameOnReplace` drops the old account's name in the
- * same UPDATE when a stored destination is replaced (see setPayoutIfEditable).
+ * last-4 only. Returns the updated (masked) row, or null when a guard failed
+ * (nothing written).
+ *
+ * Review R3-X1 N1/N2 (decision D3): the account-holder name typed for these bank
+ * details is written in the SAME guarded UPDATE, after the re-screen, with its
+ * `transfer.legal_name_set` row (meta `replaced: true` only when a name was on
+ * the row). With no typed name, the old name is cleared when the row stored a
+ * real account (isStoredAccount: a masked value is no account; a first
+ * collection keeps the name). Both decisions are made under the row lock
+ * (lockEditablePayout), never from the route's earlier read.
  */
 async function writePayoutIfEditable(
   transfer: Transfer,
   bankDetails: BankDetails,
-  opts: { clearLegalNameOnReplace?: boolean } = {},
+  legalName: string | null,
 ): Promise<Transfer | null> {
   const destination = bankDetails.payoutDestination ?? '';
   return getDb().transaction(async (tx) => {
-    const updated = await createTransferRepo(tx).setPayoutIfEditable(
+    const repo = createTransferRepo(tx);
+    const locked = await repo.lockEditablePayout(transfer.id, transfer.partnerId);
+    if (!locked) return null;
+    const updated = await repo.setPayoutIfEditable(
       transfer.id,
       transfer.partnerId,
       { payoutMethod: bankDetails.payoutMethod ?? 'bank', payoutDestination: destination },
-      opts,
+      legalName ? { legalName } : { clearLegalName: isStoredAccount(locked.storedDestination) },
     );
     if (updated) {
-      await createAuditRepo(tx).record({
+      const audit = createAuditRepo(tx);
+      await audit.record({
         partnerId: transfer.partnerId,
         actor: 'pay-page',
         actorType: 'system',
@@ -92,6 +103,16 @@ async function writePayoutIfEditable(
         subjectId: transfer.id,
         meta: { last4: accountLast4(destination) },
       });
+      if (legalName) {
+        await audit.record({
+          partnerId: transfer.partnerId,
+          actor: 'pay-page',
+          actorType: 'system',
+          action: 'transfer.legal_name_set',
+          subjectId: transfer.id,
+          meta: locked.hasLegalName ? { source: 'pay_page', replaced: true } : { source: 'pay_page' },
+        });
+      }
     }
     return updated;
   });
@@ -671,7 +692,15 @@ export async function POST(
       // no sender name to screen; lists change). Consumer rows only (the same
       // predicate pay-finalize uses): a B2B payer is screened by business name.
       let payable: Transfer = transfer;
-      let nameWrittenForAccount = false; // review R1-P2 D1: a typed name was written for the posted account
+      // Review R3-X1 M1: a failed name write on a funded row never says "nothing was charged".
+      const nameWriteFailed = async (err: unknown): Promise<NextResponse> => {
+        logWarn('pay.legal_name_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+        // Review R1-P1 A2: the code is already spent, so a lasting fault
+        // raises the same deduped payevidence alert as the evidence arms.
+        await alertPayEvidenceUnavailable(getDb(), 'transfer'); // never throws
+        pokeWorker(); // the ops.alert row is ready now
+        return payApprovalNotRecorded(transferFunded(transfer));
+      };
       if (transfer.transferType !== 'b2b') {
         if (!hasSenderName(owner)) {
           // Nothing screened or written; the SAME link works once the customer
@@ -685,43 +714,41 @@ export async function POST(
         // partner (routed, else owner) and its environment — never by the
         // owning partner — and then needs a live list and full name coverage.
         // The corridor rules stay the owner's.
-        // Fix pack 4 (C18 step 3): the typed account-holder name is written
-        // fill-only, with its audit row, BEFORE the re-screen, so the screened set
-        // equals the row (chat + legal). A guard miss writes nothing and goes on
-        // (the identity hold at settle catches a real-money row). A THROW answers
-        // 503 here (nothing is charged yet), never through the outer catch, which
-        // would log the raw error object. Review R1-P2 D1: a name typed next to
-        // posted bank details REPLACES a name already on the row (it is the name
-        // for the new account), in the same transaction as its audit row.
+        // Fix pack 4 (C18 step 3): WITHOUT posted bank details the typed
+        // account-holder name is written fill-only, with its audit row, BEFORE
+        // the re-screen, so the screened set equals the row (chat + legal). A
+        // guard miss writes nothing and goes on (the identity hold at settle
+        // catches a real-money row). A THROW answers 503 here, never through the
+        // outer catch, which would log the raw error object.
+        // Review R3-X1 N1 (decision D3): WITH posted bank details nothing is
+        // written here: the typed name and its account are one guarded write
+        // after the re-screen (writePayoutIfEditable), and the re-screen screens
+        // the typed name directly. New details with no typed name over a real
+        // stored account (isStoredAccount) drop the old name with the payout, so
+        // the re-screen screens what the row will hold: the chat name.
         let legalRow = decrypted;
-        if (typedLegalName) {
+        if (typedLegalName && bankDetails === undefined) {
           let wrote: boolean;
           try {
-            wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName, { replace: bankDetails !== undefined });
+            wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName);
           } catch (err) {
-            logWarn('pay.legal_name_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
-            // Review R1-P1 A2: the code is already spent, so a lasting fault
-            // raises the same deduped payevidence alert as the evidence arms.
-            await alertPayEvidenceUnavailable(getDb(), 'transfer'); // never throws
-            pokeWorker(); // the ops.alert row is ready now
-            return payApprovalNotRecorded();
+            return await nameWriteFailed(err);
           }
-          if (wrote) {
-            nameWrittenForAccount = true;
-            legalRow = await store.getTransferDecrypted(payId);
-          } else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
+          if (wrote) legalRow = await store.getTransferDecrypted(payId);
+          else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
         }
-        // Review R1-P2 D1 (R2): new bank details with no name written for them
-        // drop the old account's name with the payout (below), so the re-screen
-        // screens what the row will hold: the chat name.
-        const oldNameDropped = bankDetails !== undefined && !nameWrittenForAccount && storedDestination !== '';
+        const rowName = (legalRow?.recipientLegalName ?? '').trim();
+        const screenedLegalName =
+          bankDetails === undefined
+            ? rowName
+            : typedLegalName ?? (isStoredAccount(storedDestination) ? '' : rowName);
         const realMoney = await realMoneyFor(getDb(), transfer);
         const rescreen = await rescreenBeforePay(
           getDb(),
           transfer,
           {
             senderName: (owner?.fullName ?? '').trim(),
-            recipientName: (oldNameDropped ? '' : (legalRow?.recipientLegalName ?? '').trim()) || transfer.recipientName,
+            recipientName: screenedLegalName || transfer.recipientName,
           },
           resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
           { realMoney, stage: 'pay' },
@@ -741,21 +768,26 @@ export async function POST(
             break;
         }
       }
-      const hasDestination = storedDestination !== '' && !isMaskedDestination(storedDestination);
+      const hasDestination = isStoredAccount(storedDestination);
       // Sender-entered, server-validated, country-bound bank details (the page's
       // Step 1, or its "Edit bank details") fill or replace the payout of a
       // CONSUMER transfer through ONE guarded write. A B2B payee is never payer
       // input: its body is ignored.
       if (bankDetails && transfer.transferType !== 'b2b') {
-        // Review R1-P2 D1 (R2): no name was written for the new account in this
-        // request, so a replaced stored destination takes its old name with it
-        // (a first collection keeps the name).
-        const edited = await writePayoutIfEditable(transfer, bankDetails, { clearLegalNameOnReplace: !nameWrittenForAccount });
+        // Review R3-X1 N1 (decision D3): the payout, the typed name (or the clear
+        // of the old account's name) and both audit rows in ONE transaction.
+        let edited: Transfer | null;
+        try {
+          edited = await writePayoutIfEditable(transfer, bankDetails, typedLegalName);
+        } catch (err) {
+          if (!typedLegalName) throw err; // the payout write alone answers as before (outer catch)
+          return await nameWriteFailed(err);
+        }
         if (!edited) {
           // A guard failed after our read (a concurrent POST charged / settled /
           // held it — the OTP verify is not atomic), or the row is not editable
           // here (charged, partner-API-minted). Never write around the guard:
-          // report current truth.
+          // report current truth. Nothing was written: the old account keeps its name.
           const current = await store.getTransfer(payId);
           const nowRefused = current ? refuseUnlessAwaiting(current) : null;
           if (nowRefused) return nowRefused;
