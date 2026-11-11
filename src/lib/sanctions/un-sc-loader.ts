@@ -66,9 +66,9 @@
 
 import type { SanctionsList, SanctionsListEntry } from './list-source';
 import { entryElementsMatch, hashEntries, malformedElement, strictTag as tag } from './ofac-sdn-loader';
+import { fetchPinnedText } from './pinned-fetch';
 
 export const UN_SC_XML_URL = 'https://scsanctions.un.org/resources/xml/en/consolidated.xml';
-const USER_AGENT = 'SmartRemit-sanctions-loader/1.0 (+https://smartremit.ai)';
 const ERR = 'UN SC:';
 
 /**
@@ -199,27 +199,21 @@ function allowedUnFinalUrl(raw: string): boolean {
 }
 
 /**
- * Download and parse the live UN SC list. Bounded: the User-Agent, an abort
- * signal, a size cap (declared Content-Length and the actual body) and the
- * final URL pinned to the two verified hosts. Fetch errors read
- * 'UN SC fetch failed: ...'; parse errors start 'UN SC:'.
+ * Download and parse the live UN SC list. Bounded (fetchPinnedText): the
+ * User-Agent, one abort signal, each redirect hop checked against the two
+ * verified hosts BEFORE it is requested (at most 3), and a byte cap applied
+ * while the body streams. Fetch errors read 'UN SC fetch failed: ...'; parse
+ * errors start 'UN SC:'.
  */
 export async function fetchUnScList(
   fetchImpl: typeof fetch = fetch,
   opts: { maxBytes?: number; timeoutMs?: number } = {},
 ): Promise<SanctionsList> {
-  const maxBytes = opts.maxBytes ?? UN_SC_MAX_BYTES;
-  const res = await fetchImpl(UN_SC_XML_URL, {
-    headers: { 'User-Agent': USER_AGENT, Accept: 'application/xml' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(opts.timeoutMs ?? UN_SC_FETCH_TIMEOUT_MS),
+  const body = await fetchPinnedText(UN_SC_XML_URL, fetchImpl, {
+    label: 'UN SC',
+    maxBytes: opts.maxBytes ?? UN_SC_MAX_BYTES,
+    timeoutMs: opts.timeoutMs ?? UN_SC_FETCH_TIMEOUT_MS,
+    allowedUrl: allowedUnFinalUrl,
   });
-  if (!res.ok) throw new Error(`UN SC fetch failed: HTTP ${res.status}`);
-  // A stub without res.url is a test.
-  if (res.url && !allowedUnFinalUrl(res.url)) throw new Error('UN SC fetch failed: unexpected host after redirect');
-  const declared = Number(res.headers?.get?.('content-length') ?? NaN);
-  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('UN SC fetch failed: body too large');
-  const body = await res.text();
-  if (body.length > maxBytes) throw new Error('UN SC fetch failed: body too large');
   return parseUnScXml(body);
 }

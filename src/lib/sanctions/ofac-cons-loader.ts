@@ -48,7 +48,8 @@
 // the cron (only with SANCTIONS_LOADER_ENABLED and SANCTIONS_LIST=lists).
 
 import type { SanctionsList } from './list-source';
-import { fetchSlsExport, parseOfacSdnXml, type SdnXmlParseOptions } from './ofac-sdn-loader';
+import { allowedFinalUrl, parseOfacSdnXml, type SdnXmlParseOptions } from './ofac-sdn-loader';
+import { fetchPinnedText } from './pinned-fetch';
 
 export const OFAC_CONS_XML_URL =
   'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONSOLIDATED.XML';
@@ -77,18 +78,22 @@ export function parseOfacConsolidatedXml(xml: string): SanctionsList {
 }
 
 /**
- * Download and parse the live consolidated list. Bounded like fetchOfacSdn
- * (User-Agent, abort signal, size cap, redirect pin). Fetch errors read
- * 'OFAC CONS fetch failed: ...'; parse errors start 'OFAC CONS:'.
+ * Download and parse the live consolidated list. Bounded (fetchPinnedText):
+ * the User-Agent, one abort signal, each redirect hop checked BEFORE it is
+ * requested against the SDN pin (allowedFinalUrl: https on the SLS host or
+ * its us-gov-west-1 S3 host; at most 3 hops), and a byte cap applied while
+ * the body streams. Fetch errors read 'OFAC CONS fetch failed: ...'; parse
+ * errors start 'OFAC CONS:'.
  */
 export async function fetchOfacConsolidated(
   fetchImpl: typeof fetch = fetch,
   opts: { maxBytes?: number; timeoutMs?: number } = {},
 ): Promise<SanctionsList> {
-  const body = await fetchSlsExport(OFAC_CONS_XML_URL, fetchImpl, {
+  const body = await fetchPinnedText(OFAC_CONS_XML_URL, fetchImpl, {
     label: 'OFAC CONS',
     maxBytes: opts.maxBytes ?? OFAC_CONS_MAX_BYTES,
     timeoutMs: opts.timeoutMs ?? OFAC_CONS_FETCH_TIMEOUT_MS,
+    allowedUrl: allowedFinalUrl,
   });
   return parseOfacConsolidatedXml(body);
 }

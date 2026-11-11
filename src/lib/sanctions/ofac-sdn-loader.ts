@@ -369,7 +369,12 @@ function parseStrict(xml: string, opts: SdnXmlParseOptions): SanctionsList {
 
 const SLS_HOST = new URL(OFAC_SDN_XML_URL).hostname;
 
-function allowedFinalUrl(raw: string): boolean {
+/**
+ * True for an https URL on the SLS host or its us-gov-west-1 S3 download
+ * host. Exported (L1-LF3) for the OFAC consolidated loader's hop-by-hop
+ * redirect check (pinned-fetch.ts); fetchSlsExport uses it as before.
+ */
+export function allowedFinalUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== 'https:') return false;
@@ -391,7 +396,8 @@ export const OFAC_SDN_FETCH_TIMEOUT_MS = 120_000;
 
 /**
  * Fix pack 5 T26b: one bounded download from the Sanctions List Service,
- * shared by fetchOfacSdn and fetchOfacConsolidated (ofac-cons-loader.ts).
+ * used by fetchOfacSdn. (fetchOfacConsolidated moved to fetchPinnedText,
+ * pinned-fetch.ts, in list review L1-LF3; the SDN download is unchanged.)
  * Sends the User-Agent (SLS answers 403 without one), an abort signal and a
  * size cap (declared Content-Length and the actual body), and pins the final
  * URL to the SLS host or its us-gov-west-1 S3 bucket. Error texts are

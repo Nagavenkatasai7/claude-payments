@@ -243,7 +243,14 @@ describe("the SDN parser's output for the SDN fixture is unchanged (golden, take
 
 describe('fetchOfacConsolidated (a stub fetch; no network)', () => {
   const ok = (body = FIXTURE, extra: Record<string, unknown> = {}) =>
-    vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => body, ...extra }));
+    vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: null,
+      arrayBuffer: async () => new TextEncoder().encode(body).buffer,
+      ...extra,
+    }));
 
   it('constants: the verified SLS URL, a 100-entry floor, a 20 MB cap, a 60 s timeout', () => {
     expect(OFAC_CONS_XML_URL).toBe('https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/CONSOLIDATED.XML');
@@ -260,6 +267,7 @@ describe('fetchOfacConsolidated (a stub fetch; no network)', () => {
     expect(url).toBe(OFAC_CONS_XML_URL);
     expect(new Headers(init.headers).get('user-agent')).toMatch(/SmartRemit-sanctions-loader/);
     expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.redirect).toBe('manual');
     expect(list.source).toBe('ofac-cons');
     expect(list.entries).toHaveLength(4);
   });
@@ -285,6 +293,69 @@ describe('fetchOfacConsolidated (a stub fetch; no network)', () => {
     await expect(
       fetchOfacConsolidated(at('https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/CONSOLIDATED.XML?X-Amz-Signature=x') as unknown as typeof fetch),
     ).resolves.toMatchObject({ source: 'ofac-cons' });
+  });
+
+  // L1-LF3 (LB6): every hop is checked BEFORE it is requested.
+  const S3 = 'https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/CONSOLIDATED.XML?X-Amz-Signature=signed';
+  const redirectTo = (location: string) => ({ ok: false, status: 302, headers: new Headers({ location }), body: null });
+  const routed = (routes: Record<string, unknown>) =>
+    vi.fn(async (url: string) => routes[url] ?? { ok: false, status: 404, headers: new Headers(), body: null });
+
+  it('follows the SLS 302 to its us-gov-west-1 S3 download and parses the list', async () => {
+    const f = routed({ [OFAC_CONS_XML_URL]: redirectTo(S3), [S3]: await ok()() });
+    await expect(fetchOfacConsolidated(f as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-cons' });
+    expect(f.mock.calls.map((c) => c[0])).toEqual([OFAC_CONS_XML_URL, S3]);
+  });
+
+  it.each([
+    'http://169.254.169.254/latest/meta-data/',
+    'https://evil.example/CONSOLIDATED.XML',
+    'https://x.s3.us-east-1.amazonaws.com/C.XML',
+    'http://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/CONSOLIDATED.XML',
+  ])('a redirect to %s fails as a fetch error and is never requested', async (location) => {
+    const f = routed({ [OFAC_CONS_XML_URL]: redirectTo(location), [location]: await ok()() });
+    const err = await fetchOfacConsolidated(f as unknown as typeof fetch).catch((e: Error) => e);
+    expect((err as Error).message).toBe('OFAC CONS fetch failed: unexpected host after redirect');
+    expect(f.mock.calls.map((c) => c[0])).toEqual([OFAC_CONS_XML_URL]);
+  });
+
+  it('a redirect with no Location, or a fourth hop, fails with the same fetch error', async () => {
+    const none = routed({ [OFAC_CONS_XML_URL]: { ok: false, status: 302, headers: new Headers(), body: null } });
+    await expect(fetchOfacConsolidated(none as unknown as typeof fetch)).rejects.toThrow(/^OFAC CONS fetch failed: unexpected host after redirect$/);
+    const hop = (n: number) => `https://sanctionslistservice.ofac.treas.gov/hop${n}`;
+    const loop = routed({
+      [OFAC_CONS_XML_URL]: redirectTo(hop(1)),
+      [hop(1)]: redirectTo(hop(2)),
+      [hop(2)]: redirectTo(hop(3)),
+      [hop(3)]: redirectTo(hop(4)),
+    });
+    await expect(fetchOfacConsolidated(loop as unknown as typeof fetch)).rejects.toThrow(/^OFAC CONS fetch failed: unexpected host after redirect$/);
+    expect(loop.mock.calls.map((c) => c[0])).not.toContain(hop(4));
+  });
+
+  // L1-LF3 (LB4): the cap is counted in bytes while the body streams.
+  it('refuses a streamed body past the cap with no Content-Length, and stops reading it', async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(c) {
+          pulled += 1;
+          if (pulled > 1000) c.close();
+          else c.enqueue(new Uint8Array(1024).fill(32));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const f = vi.fn(async () => new Response(stream));
+    await expect(fetchOfacConsolidated(f as unknown as typeof fetch, { maxBytes: 10 * 1024 })).rejects.toThrow(
+      /^OFAC CONS fetch failed: body too large$/,
+    );
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThan(20);
   });
 
   it('a body of another structure fails as a parse error (OFAC CONS:), never a partial list', async () => {

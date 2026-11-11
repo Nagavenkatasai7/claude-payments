@@ -25,7 +25,14 @@ const UN_FIXTURE = readFileSync(join(__dirname, 'fixtures', 'un-sc-sample.xml'),
 const NOW = Date.parse('2026-09-23T13:00:00Z');
 
 const okFetch = (body = FIXTURE) =>
-  vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => body })) as unknown as typeof fetch;
+  vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    text: async () => body,
+    // L1-LF3: the new loaders read a body-less stub through arrayBuffer (pinned-fetch.ts); SDN still reads text().
+    arrayBuffer: async () => new TextEncoder().encode(body).buffer,
+  })) as unknown as typeof fetch;
 const failFetch = (status = 503) =>
   vi.fn(async () => ({ ok: false, status, headers: new Headers(), text: async () => '' })) as unknown as typeof fetch;
 
