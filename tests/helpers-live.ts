@@ -3,6 +3,7 @@ import { LIVE_CAPABILITIES, type LiveCapability, type LiveControls, type OptInRe
 import type { Db } from '@/db/client';
 import { disclosureHash } from '@/lib/disclosure-hash';
 import type { PartnerDisclosureConfig, PartnerId } from '@/lib/types';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 
 // helpers-live — Fix pack 3 (contract 16): a certified partner for money-path
 // fixtures. Use certifyPartnerForTest on a PGlite partner row (seedPartner
@@ -101,4 +102,29 @@ export async function approveDisclosureForTest(
     WHERE id = ${partnerId} RETURNING id`);
   const rows = (r as unknown as { rows: unknown[] }).rows;
   if (rows.length !== 1) throw new Error(`approveDisclosureForTest: no partner row '${partnerId}' (seedPartner first)`);
+}
+
+// Fix pack 5 T1 (P32): a real-money (http) rail for a money-path fixture: an
+// https settlement URL, a signing secret (unless `signingSecret: null`, for the
+// unsigned-rail refusals) and a webhook secret. Saved through
+// createIntegrationsRepo (the default test key), which also writes the plain
+// payment_provider_type column the real-money gate reads. Certification stays
+// certifyPartnerForTest; this helper writes only the rail.
+export async function seedRealMoneyRail(
+  db: Db,
+  partnerId: PartnerId,
+  o: { signingSecret?: string | null; webhookSecret?: string; url?: string } = {},
+): Promise<void> {
+  await createIntegrationsRepo(db).saveIntegrations(partnerId, {
+    kyc: {},
+    whatsapp: {},
+    payment: {
+      providerType: 'http',
+      credentials: {
+        settlementUrl: o.url ?? 'https://rail.acme-test.com/settle',
+        ...(o.signingSecret === null ? {} : { signingSecret: o.signingSecret ?? 'test-signing' }),
+      },
+      webhookSecret: o.webhookSecret ?? 'test-webhook',
+    },
+  });
 }

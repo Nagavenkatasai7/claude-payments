@@ -257,9 +257,21 @@ describe('settlement.instruct and the live-certification gate (pack 3 T6)', { re
     expect(await opsAlerts()).toEqual([]);
   });
 
-  it.each([['mock'], ['no integrations row']])('uncertified %s rail -> unchanged (no livegate alert)', async (kind) => {
+  // Fix pack 5 T1 (P5, G11): with no integrations row there is no signing secret, so the
+  // instruct is refused unsigned (a charged rail-config failure), still with no livegate alert.
+  // (In production a mock or absent rail never reaches instruct: settlement.ts enqueues mock.settle.)
+  it('uncertified rail with no integrations row -> refused unsigned (no fetch), no livegate alert', async () => {
+    await db.execute(sql`DELETE FROM partner_integrations WHERE partner_id = 'acme'`);
+    await enqueueInstruct();
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ processed: 0, failed: 1, released: 0 });
+    expect((await rowState()).last_error).toBe('Signing secret not configured.');
+    expect((await opsAlerts()).filter((k) => k.startsWith('livegate:'))).toEqual([]);
+  });
+
+  it.each([['mock']])('uncertified %s rail -> unchanged (no livegate alert)', async (kind) => {
     if (kind === 'mock') await saveRail('acme', 'mock');
-    else await db.execute(sql`DELETE FROM partner_integrations WHERE partner_id = 'acme'`);
     await enqueueInstruct();
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);

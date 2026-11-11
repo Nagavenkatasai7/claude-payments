@@ -16,6 +16,8 @@ import { logWarn } from '../log';
 //
 // verifyWebhookSignature (payment-webhook-verify.ts) is untouched: the Meta and
 // funding webhooks share it.
+//
+// Fix pack 5: signing with no secret throws UnsignedRailError.
 
 export const RAIL_SIG_HEADER = 'x-smartremit-signature';
 export const LEGACY_SIG_HEADER = 'x-signature';
@@ -26,6 +28,19 @@ export type RailSigResult =
   | { ok: false }
   | { ok: true; scheme: 'v2'; nonce: string }
   | { ok: true; scheme: 'legacy' };
+
+/**
+ * Fix pack 5 T1 (P5): thrown by signRailHeaders when there is no non-empty
+ * secret. Nothing is ever POSTed to or from a rail unsigned. Not a
+ * RailInstructError: the instruct refuses an empty secret itself, before it
+ * gets here; the reverse and rail.callback let this one fail the row.
+ */
+export class UnsignedRailError extends Error {
+  constructor() {
+    super('no_signing_secret');
+    this.name = 'UnsignedRailError';
+  }
+}
 
 interface HeaderReader {
   get(name: string): string | null;
@@ -38,7 +53,8 @@ function v1For(secret: string, t: number, rawBody: string): string {
 /**
  * The outbound headers for a rail POST. `secrets[0]` is the current secret and
  * the only one the legacy header uses; the new header carries one v1 per
- * secret. No secrets ⇒ no headers (the unsigned behaviour is unchanged).
+ * secret. No non-empty secret ⇒ UnsignedRailError: nothing is ever sent
+ * unsigned (fix pack 5, P5).
  */
 export function signRailHeaders(
   rawBody: string,
@@ -46,7 +62,7 @@ export function signRailHeaders(
   nowMs: number,
 ): Record<string, string> {
   const active = secrets.filter((s) => s !== '');
-  if (active.length === 0) return {};
+  if (active.length === 0) throw new UnsignedRailError();
   const t = Math.floor(nowMs / 1000);
   const v1s = active.map((s) => `v1=${v1For(s, t, rawBody)}`).join(',');
   return {

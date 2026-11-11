@@ -10,7 +10,8 @@ import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
 import { isLiveCertified, liveRefusalForRail, realMoneyRail, settlementTargetUrl } from './live-gate';
 import { payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from './pay-not-available';
-import { settleOrHold } from './settlement';
+import { isSandbox, settleOrHold } from './settlement';
+import { railSecrets } from './partner-integrations';
 import { isPartnerPulled } from './funding-method';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
@@ -131,6 +132,9 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  *   2. rail fail-closed (a routed rail must be webhook-driven, and — fix 22 —
  *      a webhook-driven rail, routed OR owner, must carry a settlement URL
  *      that passes checkSettlementUrl)
+ *   2b. signed rail (fix pack 5 T1, P5): a non-sandbox row on a
+ *      webhook-driven rail with no current signing secret is refused (409
+ *      not_available) before any capture or evidence write
  *   3. live certification (pack 3, contract 6): an uncertified real-money
  *      rail, or the default tenant on one, is refused before any charge
  *      (409 not_available; the row stays awaiting_payment). It reads the
@@ -233,6 +237,20 @@ export async function processTransferPayment(
       });
       return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
     }
+  }
+
+  // Fix pack 5 T1 (gate #2b, P5 / P13 step 5): never an unsigned instruction.
+  // A NON-SANDBOX row on a webhook-driven rail with no current signing secret
+  // can never be instructed (the worker refuses it: Signing secret not
+  // configured), so it is refused BEFORE any capture or evidence write with
+  // the neutral 409. A 'test' row settles on the mock rail and is never
+  // instructed (settlement.ts, isSandbox), so it still pays. Ids only.
+  if (!isSandbox(transfer) && railWebhookDriven && railSecrets(railIntegrations.payment, 'signing', new Date()).length === 0) {
+    logWarn('pay.rail-unsigned', 'webhook-driven rail has no signing secret; payment refused before capture', {
+      transferId: transfer.id,
+      railPartnerId,
+    });
+    return payNotAvailable();
   }
 
   // Pack 3 (gate #3, contract 6): live certification, AFTER the routed-rail and

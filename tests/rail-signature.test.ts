@@ -15,6 +15,7 @@ import {
   RAIL_SIG_HEADER,
   RAIL_SIG_TOLERANCE_SEC,
   signRailHeaders,
+  UnsignedRailError,
   verifyRailSignature,
 } from '@/lib/providers/rail-signature';
 import { signBody } from '@/lib/providers/http-payment-provider';
@@ -39,8 +40,24 @@ describe('signRailHeaders', () => {
     expect(out[RAIL_SIG_HEADER]).toBe(`t=${T},v1=${hmac('cur', `${T}.${RAW}`)},v1=${hmac('prev', `${T}.${RAW}`)}`);
   });
 
-  it('empty secrets → no headers', () => {
-    expect(signRailHeaders(RAW, [], NOW)).toEqual({});
+  // Fix pack 5 T1 (P5): nothing is ever sent unsigned.
+  it('empty or blank-only secrets throw UnsignedRailError (name UnsignedRailError, message no_signing_secret)', () => {
+    for (const secrets of [[], ['', '']]) {
+      let thrown: unknown;
+      try {
+        signRailHeaders(RAW, secrets, NOW);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(UnsignedRailError);
+      expect((thrown as Error).name).toBe('UnsignedRailError');
+      expect((thrown as Error).message).toBe('no_signing_secret');
+    }
+  });
+
+  it('UnsignedRailError is not a RailInstructError', async () => {
+    const { RailInstructError } = await import('@/lib/outbox-worker');
+    expect(new UnsignedRailError()).not.toBeInstanceOf(RailInstructError);
   });
 });
 

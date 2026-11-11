@@ -13,7 +13,7 @@ import {
   buildReverseInstruction,
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
-import { signRailHeaders } from '@/lib/providers/rail-signature';
+import { signRailHeaders, UnsignedRailError } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
@@ -906,6 +906,10 @@ async function handle(
       } catch (e) {
         throw new RailInstructError(railPartnerId, e);
       }
+      // Fix pack 5 T1 (P5, G11 in P8): never an unsigned instruction. No current
+      // signing secret is a rail configuration failure like a missing URL
+      // (checked after it): RailInstructError, charged retry, railfail alert.
+      if (signingSecrets.length === 0) throw new RailInstructError(railPartnerId, 'Signing secret not configured.');
       // Pack 2 T10 (R02): the live-list gate at the instruct chokepoint. A row
       // paid while the rail was a demo rail (screened on the mock list), then
       // retried, re-instructed or dead-letter-retried after the rail went 'http',
@@ -1046,6 +1050,8 @@ async function handle(
       const partnerId = str(p.partner_id) || str(p.partnerId);
       const { integrations } = await partner(partnerId);
       const webhookSecrets = railSecrets(integrations.payment, 'webhook', new Date());
+      // Fix pack 5 T1 (P5): never an unsigned callback (default policy).
+      if (webhookSecrets.length === 0) throw new UnsignedRailError();
       // fix 8: the reference rail's one failure mode rides the same row —
       // `status` (default paid_out) and an optional `reason` pass through.
       const cbStatus = str(p.status) || 'paid_out';
@@ -1109,6 +1115,8 @@ async function handle(
         const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
         assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
+        // Fix pack 5 T1 (P5): never an unsigned reverse (default policy: dead at 8 + dead:<id>; refund stays pending).
+        if (signingSecrets.length === 0) throw new UnsignedRailError();
         const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
         const res = await deps.fetchFn(settlementUrl, {
           method: 'POST',
