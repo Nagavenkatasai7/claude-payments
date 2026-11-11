@@ -125,3 +125,10 @@ export function disclosureAckBody(
   if (!acked || version === null) return {};
   return hash !== null && DISCLOSURE_HASH_RE.test(hash) ? { disclosureVersion: version, disclosureHash: hash } : { disclosureVersion: version };
 }
+
+// Fix pack 6 (P4): the E-SIGN consent field a pay form posts: the version the
+// page was rendered with, only when the box is ticked. Client-safe (no import of
+// esign.ts); the server checks the version (pay-esign-gate).
+export function esignConsentBody(version: string | null, ticked: boolean): { esignConsentVersion?: string } {
+  return ticked && version !== null ? { esignConsentVersion: version } : {};
+}

@@ -6,7 +6,8 @@
 //                        birth (fix pack 5; `originator: false` drops both); the
 //                        shown hash only when given)
 //   testEvidence(o?)     a PaymentEvidence (auth + ack + snapshot input; `ack: false`
-//                        drops the ack and the snapshot)
+//                        drops the ack and the snapshot; `esignVersion` adds the
+//                        E-SIGN consent (fix pack 6 P6), absent otherwise)
 //
 // Times are relative to now (never hardcoded: CLAUDE.md test fixtures rule).
 // Hashes are null: a test that is about the hashes builds them itself.
@@ -54,7 +55,14 @@ export function realMoneyPayBody(
 }
 
 export function testEvidence(
-  o: { routeId?: string; shownHash?: string | null; ack?: boolean; surface?: PaymentAuthEvidence['surface'] } = {},
+  o: {
+    routeId?: string;
+    shownHash?: string | null;
+    ack?: boolean;
+    surface?: PaymentAuthEvidence['surface'];
+    /** Fix pack 6 (P6): adds `esignConsent: { version, routeId }`; absent when not given. */
+    esignVersion?: string;
+  } = {},
 ): PaymentEvidence {
   const now = Date.now();
   const routeId = o.routeId ?? 'tx_test_evidence';
@@ -69,10 +77,12 @@ export function testEvidence(
     ipHash: null,
     uaHash: null,
   };
-  if (o.ack === false) return { auth, disclosureAck: null, disclosureSnapshot: null };
+  const esign = o.esignVersion !== undefined ? { esignConsent: { version: o.esignVersion, routeId } } : {};
+  if (o.ack === false) return { auth, disclosureAck: null, disclosureSnapshot: null, ...esign };
   return {
     auth,
     disclosureAck: { version: DISCLOSURE_DRAFT_VERSION, shownHash, routeId },
     disclosureSnapshot: { surface: o.surface === 'link' ? 'link' : 'transfer', version: DISCLOSURE_DRAFT_VERSION, shownHash, acknowledgedAt: now },
+    ...esign,
   };
 }

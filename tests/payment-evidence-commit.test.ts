@@ -5,6 +5,9 @@ import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live'
 import { testEvidence } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { auditSubjectId } from '@/lib/customer-ref';
+import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { commitPaymentEvidence } from '@/lib/payment-evidence';
 import { setDisclosure } from '@/lib/partner-support-settings';
 import { payloadHashFor } from '@/lib/payment-auth-evidence';
@@ -19,7 +22,7 @@ import type { Transfer } from '@/lib/types';
 // is committed in ONE transaction on the LOCKED awaiting row, before any charge.
 
 // The C4 snapshot writer can be made to miss (the guarded UPDATE matching no row).
-const toggle = vi.hoisted(() => ({ snapshotMiss: false }));
+const toggle = vi.hoisted(() => ({ snapshotMiss: false, esignMiss: false }));
 vi.mock('@/db/repos/transfer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/transfer-repo')>();
   return {
@@ -28,6 +31,16 @@ vi.mock('@/db/repos/transfer-repo', async (orig) => {
       const r = real.createTransferRepo(...a);
       return toggle.snapshotMiss ? { ...r, setDisclosureSnapshotIfAwaiting: async () => false } : r;
     },
+  };
+});
+
+// Fix pack 6 (P6): the consent writer can be made to miss (0 rows) on every call.
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  return {
+    ...real,
+    recordEsignConsent: async (...a: Parameters<typeof real.recordEsignConsent>) =>
+      toggle.esignMiss ? false : real.recordEsignConsent(...a),
   };
 });
 
@@ -66,6 +79,7 @@ let disclosure: ResolvedDisclosure;
 beforeEach(async () => {
   db = await freshDb();
   toggle.snapshotMiss = false;
+  toggle.esignMiss = false;
   await seedPartner(db, 'acme');
   await approveDisclosureForTest(db, 'acme');
   disclosure = resolvePartnerDisclosure(await createPartnerRepo(db).getPartner('acme'));
@@ -350,5 +364,171 @@ describe('commitPaymentEvidence: the R18 re-check under the owner lock (review R
     expect(qs.filter((q) => /"partners"/.test(q.sql))).toEqual([]);
     const stored = await createTransferRepo(db).getDisclosureSnapshot('tr_ev1', 'acme');
     expect(stored).toMatchObject({ provider: { approved: true } });
+  });
+});
+
+// Fix pack 6 (P6, P21 row 1, critic C10, critic P7): the E-SIGN consent is
+// written inside the same locked transaction: the customer.consent.esign row in
+// the ONE recordMany, then the tenant-scoped customers UPDATE after the
+// snapshot; a missing customers row is created by ensureCustomer and the write
+// retried once; a final miss throws, so nothing is written and nothing charged.
+describe('the E-SIGN consent write (pack 6 P6)', () => {
+  const V = ESIGN_CONSENT_VERSION;
+  type CustRow = {
+    partner_id: string; esign_consent_version: string | null; esign_consented_at: Date | string | null;
+    esign_withdrawn_at: Date | string | null; opt_in_at: Date | string | null; first_seen_at: Date | string;
+  };
+  async function customerRow(partnerId: string): Promise<CustRow | undefined> {
+    const r = (await db.execute(
+      sql`SELECT partner_id, esign_consent_version, esign_consented_at, esign_withdrawn_at, opt_in_at, first_seen_at
+          FROM customers WHERE partner_id = ${partnerId} AND phone = ${SENDER}`,
+    )) as unknown as { rows: CustRow[] };
+    return r.rows[0];
+  }
+  async function allRows(): Promise<AuditRow[]> {
+    const r = (await db.execute(
+      sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events
+          WHERE action IN ('otp.verified', 'remittance.disclosure_ack', 'customer.consent.esign') ORDER BY id`,
+    )) as unknown as { rows: AuditRow[] };
+    return r.rows;
+  }
+  const ms = (v: Date | string | null | undefined) => (v === null || v === undefined ? null : new Date(v).getTime());
+  const customersSql = (qs: Array<{ sql: string }>) => qs.filter((q) => /"customers"/.test(q.sql));
+
+  beforeEach(async () => {
+    await createCustomerRepo(db, async () => null).ensureCustomer('acme', SENDER);
+  });
+
+  it('esignConsent set: ONE recordMany carries otp.verified, remittance.disclosure_ack and customer.consent.esign with the P21 meta; customerRef is the keyed subject', async () => {
+    const ev = testEvidence({ routeId: 'tr_ev1', esignVersion: V });
+    const stop = captureQueries();
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure)).toEqual({ kind: 'written' });
+    expect(stop().filter((q) => /insert into "audit_events"/.test(q.sql))).toHaveLength(1);
+    const rows = await allRows();
+    expect(rows.map((r) => r.action)).toEqual(['otp.verified', 'remittance.disclosure_ack', 'customer.consent.esign']);
+    const consent = rows[2];
+    expect(consent).toMatchObject({ partner_id: 'acme', actor: 'pay-page', actor_type: 'system', subject_id: 'tr_ev1' });
+    expect(consent.meta).toEqual({ version: V, surface: 'transfer', on: true, routeId: 'tr_ev1', customerRef: auditSubjectId('acme', SENDER) });
+    expect(String(consent.meta.customerRef)).toMatch(/^cust:[0-9a-f]+$/);
+    expect(auditSubjectId('beta', SENDER)).not.toBe(consent.meta.customerRef);
+  });
+
+  it("the owner's customers row holds the version, consented_at = now, withdrawn_at NULL; another tenant's row with the same phone is unchanged", async () => {
+    await seedPartner(db, 'beta');
+    await createCustomerRepo(db, async () => null).ensureCustomer('beta', SENDER);
+    const now = Date.now() - 1_000;
+    expect(await commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', esignVersion: V }), disclosure, now)).toEqual({ kind: 'written' });
+    const acme = await customerRow('acme');
+    expect(acme?.esign_consent_version).toBe(V);
+    expect(ms(acme?.esign_consented_at)).toBe(now);
+    expect(acme?.esign_withdrawn_at).toBeNull();
+    const beta = await customerRow('beta');
+    expect(beta).toMatchObject({ esign_consent_version: null, esign_consented_at: null, esign_withdrawn_at: null });
+  });
+
+  it("a link evidence (auth.surface 'link') writes surface 'link'", async () => {
+    const ev = testEvidence({ routeId: 'pl_1', surface: 'link', esignVersion: V });
+    await commitPaymentEvidence(db, fixture(), ev, disclosure);
+    const consent = (await allRows()).find((r) => r.action === 'customer.consent.esign');
+    expect(consent?.meta).toMatchObject({ surface: 'link', routeId: 'pl_1', on: true });
+  });
+
+  it('auth and ack null but esignConsent set -> still written (the consent row and the customers write)', async () => {
+    const ev = { auth: null, disclosureAck: null, disclosureSnapshot: null, esignConsent: { version: V, routeId: 'tr_ev1' } };
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure)).toEqual({ kind: 'written' });
+    const rows = await allRows();
+    expect(rows.map((r) => r.action)).toEqual(['customer.consent.esign']);
+    expect(rows[0].meta).toMatchObject({ surface: 'transfer', routeId: 'tr_ev1' });
+    expect((await customerRow('acme'))?.esign_consent_version).toBe(V);
+  });
+
+  it('no customers row (critic C10) -> ensureCustomer creates it inside the transaction (no opt_in_at, first_seen_at = the first live transfer) and the consent is recorded', async () => {
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme' AND phone = ${SENDER}`);
+    expect(await customerRow('acme')).toBeUndefined();
+    const now = Date.now();
+    expect(await commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', esignVersion: V }), disclosure, now)).toEqual({ kind: 'written' });
+    const row = await customerRow('acme');
+    expect(row).toBeDefined();
+    expect(row?.esign_consent_version).toBe(V);
+    expect(ms(row?.esign_consented_at)).toBe(now);
+    expect(row?.esign_withdrawn_at).toBeNull();
+    expect(row?.opt_in_at).toBeNull();
+    const t = await createTransferRepo(db).getTransfer('tr_ev1');
+    expect(ms(row?.first_seen_at)).toBe(new Date(t!.createdAt).getTime());
+    expect((await allRows()).map((r) => r.action)).toContain('customer.consent.esign');
+  });
+
+  it("the update still misses after ensureCustomer -> throws 'esign_consent_not_written'; NOTHING is written (no audit row, no snapshot, no customers row)", async () => {
+    await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme' AND phone = ${SENDER}`);
+    toggle.esignMiss = true;
+    await expect(
+      commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', esignVersion: V }), disclosure),
+    ).rejects.toThrow('esign_consent_not_written');
+    expect(await allRows()).toEqual([]);
+    expect(await rawSnapshot('tr_ev1')).toBeNull();
+    expect(await customerRow('acme')).toBeUndefined();
+  });
+
+  it('the customers UPDATE fails (a BEFORE UPDATE trigger on customers) -> throws; nothing written', async () => {
+    await db.execute(sql.raw(`CREATE FUNCTION fail_ev_cust() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'cust-leak'; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_ev_cust BEFORE UPDATE ON customers FOR EACH ROW
+      EXECUTE FUNCTION fail_ev_cust()`));
+    onTestFinished(async () => {
+      await db.execute(sql.raw('DROP TRIGGER IF EXISTS fail_ev_cust ON customers'));
+      await db.execute(sql.raw('DROP FUNCTION IF EXISTS fail_ev_cust()'));
+    });
+    await expect(
+      commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', esignVersion: V }), disclosure),
+    ).rejects.toThrow();
+    expect(await allRows()).toEqual([]);
+    expect(await rawSnapshot('tr_ev1')).toBeNull();
+    expect(await customerRow('acme')).toMatchObject({ esign_consent_version: null, esign_consented_at: null });
+  });
+
+  it('mandatory and refused (approval stripped) -> refused; no consent row and the customers row unchanged', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    const p = await createPartnerRepo(db).getPartner('acme');
+    expect(await setDisclosure(db, 'acme', { username: 'ops-staff', actorScope: 'platform' }, p!.supportConfig!.disclosure!)).toEqual({ ok: true });
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash, esignVersion: V });
+    const stop = captureQueries();
+    const r = await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true });
+    expect(r).toMatchObject({ kind: 'refused', refusal: 'not_available' });
+    expect(customersSql(stop())).toEqual([]);
+    expect(await allRows()).toEqual([]);
+    expect(await customerRow('acme')).toMatchObject({ esign_consent_version: null, esign_consented_at: null });
+  });
+
+  it('lock order: transfers FOR UPDATE, then (mandatory) partners FOR SHARE, then UPDATE "customers"', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash, esignVersion: V });
+    const stop = captureQueries();
+    expect(await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true })).toEqual({ kind: 'written' });
+    const qs = stop();
+    const transferLock = qs.findIndex((q) => /for update/i.test(q.sql) && /"transfers"/.test(q.sql));
+    const partnerShare = qs.findIndex((q) => /"partners"/.test(q.sql) && /for share/i.test(q.sql));
+    const custUpdate = qs.findIndex((q) => /^update "customers"/i.test(q.sql));
+    expect(transferLock).toBeGreaterThanOrEqual(0);
+    expect(partnerShare).toBeGreaterThan(transferLock);
+    expect(custUpdate).toBeGreaterThan(partnerShare);
+    expect(qs[custUpdate].params).toEqual(expect.arrayContaining(['acme', SENDER]));
+    // The common path is ONE customers statement (no ensureCustomer read).
+    expect(customersSql(qs)).toHaveLength(1);
+  });
+
+  it('no PII: the consent row carries no phone, name or destination', async () => {
+    await commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash, esignVersion: V }), disclosure);
+    const rows = await allRows();
+    expect(rows.map((r) => r.action)).toContain('customer.consent.esign');
+    const json = JSON.stringify(rows);
+    for (const v of [SENDER, RECIPIENT_PHONE, RECIPIENT_NAME, '123456789012', 'HDFC0001234']) expect(json).not.toContain(v);
+  });
+
+  it('esignConsent absent -> byte-identical behaviour: no customers SQL at all and no consent row', async () => {
+    const stop = captureQueries();
+    expect(await commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash }), disclosure)).toEqual({ kind: 'written' });
+    expect(customersSql(stop())).toEqual([]);
+    expect((await allRows()).map((r) => r.action)).toEqual(['otp.verified', 'remittance.disclosure_ack']);
+    expect(await customerRow('acme')).toMatchObject({ esign_consent_version: null });
   });
 });

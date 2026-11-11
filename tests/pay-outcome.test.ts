@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
-  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, esignConsentBody,
   PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
@@ -138,6 +138,16 @@ describe('disclosureAckBody', () => {
     for (const bad of ['', 'dh1:', 'dh1:' + 'A'.repeat(64), 'dh2:' + 'a'.repeat(64), 'dh1:' + 'a'.repeat(63), ' ' + HASH]) {
       expect(disclosureAckBody('2026-10-v1', bad, true), bad).toEqual({ disclosureVersion: '2026-10-v1' });
     }
+  });
+});
+
+// Fix pack 6 (P4): the E-SIGN consent field a pay form posts: the version only when ticked.
+describe('esignConsentBody (fix pack 6 P4)', () => {
+  it("ticked with a version -> { esignConsentVersion }; not ticked or no version -> {}", () => {
+    expect(esignConsentBody('v', true)).toEqual({ esignConsentVersion: 'v' });
+    expect(esignConsentBody('v', false)).toEqual({});
+    expect(esignConsentBody(null, true)).toEqual({});
+    expect(esignConsentBody(null, false)).toEqual({});
   });
 });
 
