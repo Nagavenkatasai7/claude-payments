@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
 import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
-import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import { setListSourceForTests, setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import { SANCTIONS_SOURCES, type SanctionsSourceId } from '@/lib/sanctions/list-sets';
+import { createHash } from 'node:crypto';
 import type { ActiveSanctionsVersion } from '@/db/repos/sanctions-list-repo';
 import type { SanctionsList, SanctionsListSource } from '@/lib/sanctions/list-source';
 import { inputHash, sanctionsAuditEvent, type ScreeningEvidence } from '@/lib/sanctions/evidence';
@@ -115,6 +117,66 @@ export function restoreOfacSource(original: string | undefined): void {
   if (original === undefined) delete process.env.SANCTIONS_LIST;
   else process.env.SANCTIONS_LIST = original;
   setOfacListSourceForTests(null);
+  // Fix pack 5 T28: every list source of the 'lists' mode back to its Postgres default.
+  for (const s of SANCTIONS_SOURCES) setListSourceForTests(s, null);
+}
+
+/**
+ * Fix pack 5 T28 (R08): one invented listed name per source. ofac-sdn is the
+ * SDN sample fixture ('Testa Fixturelli' is sdn:1003); the others are
+ * hand-built one-entry lists with ids cons:1, unsc:1, inmha:1.
+ */
+export const LIST_SET_NAMES: Readonly<Record<SanctionsSourceId, string>> = Object.freeze({
+  'ofac-sdn': 'Testa Fixturelli',
+  'ofac-cons': 'Consolida Inventedname',
+  'un-sc': 'Unsc Inventedperson',
+  'in-mha-uapa': 'Mha Inventedgroup',
+});
+
+const LIST_SET_PREFIX: Readonly<Record<SanctionsSourceId, string>> = Object.freeze({
+  'ofac-sdn': 'sdn', 'ofac-cons': 'cons', 'un-sc': 'unsc', 'in-mha-uapa': 'inmha',
+});
+
+/** An invented one-entry list for a source (the SDN sample for ofac-sdn). */
+export function listSetList(source: SanctionsSourceId): SanctionsList {
+  if (source === 'ofac-sdn') return ofacSampleList();
+  const name = LIST_SET_NAMES[source];
+  return {
+    source,
+    version: '2026-10-01',
+    hash: createHash('sha256').update(`${source}:${name}`, 'utf8').digest('hex'),
+    entries: [{ id: `${LIST_SET_PREFIX[source]}:1`, names: [name], type: 'Individual', programs: ['TEST'] }],
+  };
+}
+
+/**
+ * Fix pack 5 T28 (R08): SANCTIONS_LIST=lists over four in-memory sources.
+ * `checkedAgoMs[source]` (default 1 h = live) sets each checkedAt relative to
+ * now on every call; a `missing` source's load rejects (no active version).
+ * Undo with restoreOfacSource(original).
+ */
+export function primeListSet(opts: {
+  checkedAgoMs?: Partial<Record<SanctionsSourceId, number>>;
+  missing?: SanctionsSourceId[];
+}): Record<SanctionsSourceId, SanctionsListSource> {
+  const out = {} as Record<SanctionsSourceId, SanctionsListSource>;
+  for (const source of SANCTIONS_SOURCES) {
+    const list = listSetList(source);
+    const missing = (opts.missing ?? []).includes(source);
+    const ago = opts.checkedAgoMs?.[source] ?? 3_600_000;
+    const src: SanctionsListSource = {
+      load: async () => {
+        if (missing) throw new Error(`no active ${source} list version is loaded`);
+        return list;
+      },
+      warm: async () => {},
+      checkedAt: () => (missing ? null : new Date(Date.now() - ago)),
+    };
+    setListSourceForTests(source, src);
+    out[source] = src;
+  }
+  process.env.SANCTIONS_LIST = 'lists';
+  return out;
 }
 
 /**
