@@ -422,3 +422,32 @@ describe('sanctions screening spec says what pack 5 does', () => {
     }
   });
 });
+
+// Fix pack 5 review round 1 RE1: outside SANCTIONS_LIST=lists only the
+// screening and its evidence are byte-identical; the instruction's compliance
+// block is version 2 in every mode. Section 2 names the lists-mode evidence
+// fields and the lists-mode entry-id prefixes (the ones the loaders write).
+describe('sanctions screening spec: lists-mode evidence and the version 2 block (RE1)', () => {
+  it('section 3 says the screening and its evidence are byte-identical and the compliance block is version 2 in every mode', () => {
+    const s3 = section('## 3.');
+    expect(s3).not.toContain('everything is byte-identical');
+    expect(s3).toContain('the screening and its evidence are byte-identical to before fix pack 5');
+    expect(s3).toContain("the instruction's compliance block is version 2 in every mode (`names_screened`, `funding`)");
+  });
+
+  it('section 2 lists lists[], parties[].unscreened and the lists-mode entry-id prefixes the loaders write', () => {
+    const s2 = section('## 2.');
+    expect(s2).toContain('`lists[]` (`source`, `version`, `hash`, `fitness`, `checkedAt`)');
+    expect(s2).toContain('`parties[].unscreened`');
+    expect(s2).toContain('this party was not screened; never a clear');
+    const src = srcText();
+    for (const [prefix, code] of [
+      ['cons:<uid>', "idPrefix: 'cons'"],
+      ['unsc:<ref>', 'id: `unsc:${ref}`'],
+      ['inmha:<id>', 'id: `inmha:${id}`'],
+    ] as const) {
+      expect(s2, prefix).toContain(`\`${prefix}\``);
+      expect(src, code).toContain(code);
+    }
+  });
+});

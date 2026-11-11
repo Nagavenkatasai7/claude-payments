@@ -728,6 +728,19 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
     expect(call?.[2]).toEqual({ transferId: 'tr_unknown', refTransferId: null, partnerId: null, provider: 'uniteller' });
   });
 
+  it("review round 1 RG3: a paid_out signed with the PARTNER's own secret whose reference names no known transfer → 401 (the secret is chosen from the referenced transfer), nothing parsed or recorded", async () => {
+    const ghost = JSON.stringify({ reference: 'tr_unknown', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+    handleWebhook.mockResolvedValue({ transferId: 'tr_unknown', status: 'delivered' });
+    const res = await post('simulator', ghost, undefined, v2(ghost, 'owner_whk'));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(railRec.calls).toEqual([]);
+    expect(outboxFake.enqueued).toEqual([]);
+    expect(logWarnSpy.mock.calls.some((c) => c[0] === 'payment-webhook.reference_unresolved')).toBe(false);
+  });
+
   it('the railamount: hold still answers 200 held first (marker + no amount → 200 held, no railnoamount alert)', async () => {
     outboxFake.keys.add('railamount:wh_1');
     const res = await post('simulator', noAmount, undefined, v2(noAmount, 'owner_whk'));

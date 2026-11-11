@@ -179,7 +179,20 @@ describe('pack 5 documents say what the code does', () => {
     };
     expect(row('401', '`x-signature`')).toMatch(/only the legacy `x-signature`/);
     row('422', '"error": "amount_required"');
-    row('422', '"error": "reference_unresolved"');
+    const unresolved = row('422', '"error": "reference_unresolved"');
+    // Review round 1 RG3: the verifying secret is chosen from the transfer the
+    // callback's reference names, so a reference we cannot resolve fails the
+    // signature check (401) before the reference check; 422
+    // reference_unresolved means the reference resolves but names a different
+    // transfer than the one the callback reports.
+    expect(unresolved).not.toMatch(/does not name a transfer we know/);
+    expect(unresolved).toContain('resolves to a transfer but does not match the transfer the callback reports');
+    const sig401 = rows.filter((l) => l.startsWith('| `401`'));
+    expect(sig401.some((l) => l.includes('a `reference` we cannot resolve to a transfer'))).toBe(true);
+    const changelog = read('src/content/docs/changelog.mdx');
+    expect(changelog).not.toContain('names no known transfer gets');
+    expect(changelog).toContain('a reference we cannot resolve gets `401`');
+    expect(changelog).toContain('does not match the transfer the callback reports gets `422`');
     row('200', '"held": true');
     row('200', '"duplicate": true');
     const route = read('src/app/api/payment-webhook/[provider]/route.ts');
@@ -244,6 +257,13 @@ describe('pack 5 documents say what the code does', () => {
     expect(line).toContain('opt-in');
     expect(line).toContain('`src/lib/sanctions/list-sets.ts`');
     expect(line).toMatch(/fails? closed/);
+    // Review round 1 RE2: a MISSING required list holds every transfer; a stale
+    // or not-live one holds real-money transfers only (compliance.ts holds on
+    // fitness only under requireLiveList).
+    expect(line).not.toContain('a missing or not-live required list holds the transfer');
+    expect(line).toContain(
+      'a missing required list holds every transfer; a stale or not-live one holds real-money transfers only (an exact match on any list still blocks)',
+    );
   });
 
   it("0039's header says NOT a privilege boundary (P2); RECORDS-RETENTION.md says TRUNCATE and has the erasure section (P1)", () => {
