@@ -125,24 +125,56 @@ export async function settleReachedLiveRail(db: DbOrTx, t: Pick<Transfer, 'id' |
   return liveAt !== null && settledAt.getTime() >= liveAt.getTime();
 }
 
+/**
+ * Final check F8 (X1, U1): was this row paid on its live rail and HELD before
+ * its first instruction? On a real-money rail the settle record is written at
+ * the instruct's `record` step, after `funding_mode` and `travel_rule`, so a
+ * row those gates hold has NO outbound 'settle' record, yet a partner-collected
+ * row's money is with the partner. True when no outbound 'settle' record
+ * exists for this transfer and its rail partner (railPartnerOf), EXCEPT a
+ * demo-era row: paidAt known AND the rail's go-live (railGoLiveAt) known AND
+ * paidAt older than it. A missing (or unparseable) paidAt or a missing go-live
+ * counts as held (the careful side: a person looks; the ledger never says
+ * "refunded" for money a partner may hold). A row WITH a settle record is
+ * never held (one older than the go-live stays demo era, RC2). Ids only; a
+ * failed read THROWS (never true, never false).
+ */
+export async function heldBeforeFirstSettle(
+  db: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'settlementPartnerId' | 'paidAt'>,
+): Promise<boolean> {
+  const rail = railPartnerOf(t);
+  const settledAt = await createRailMessageRepo(db).lastSettleOutAt(t.partnerId, t.id, rail);
+  if (settledAt !== null) return false;
+  const paidAt = Date.parse(t.paidAt ?? '');
+  if (Number.isNaN(paidAt)) return true;
+  const liveAt = await railGoLiveAt(db, rail);
+  if (liveAt === null) return true;
+  return paidAt >= liveAt.getTime();
+}
+
 type RefundAdmissionRow = Pick<
   Transfer,
-  'id' | 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId'
+  'id' | 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId' | 'paidAt'
 >;
 
 /**
  * Review round 1 RC2/RC3/RF1: THE admission of a refund with no charge, for
  * issueRefund (and the flag approveRefund / retryRefund carry in the
  * funding.refund payload): no fundingRef, refundWithoutCharge on the rail's
- * current real-money read (not routed, class partner_collected), and
- * settleReachedLiveRail. The rail type is read only when fundingRef is null;
- * the settle record and the go-live only for such a real-money row. A failed
- * settle or go-live read THROWS.
+ * current real-money read (not routed, class partner_collected), and either
+ * settleReachedLiveRail or (final check F8, X1 U1) heldBeforeFirstSettle: a
+ * row a gate held before its first instruction (the partner holds the money;
+ * the worker then sends no reverse, leaves the refund pending and raises
+ * refundheld:<id>). A demo-era row is still refused. The rail type is read
+ * only when fundingRef is null; the settle record and the go-live only for
+ * such a real-money row. A failed settle or go-live read THROWS.
  */
 export async function collectedOnRealMoneyFor(db: DbOrTx, t: RefundAdmissionRow): Promise<boolean> {
   if (t.fundingRef) return false;
   if (!refundWithoutCharge(t, await realMoneyFor(db, t))) return false;
-  return settleReachedLiveRail(db, t);
+  if (await settleReachedLiveRail(db, t)) return true;
+  return heldBeforeFirstSettle(db, t);
 }
 
 /**

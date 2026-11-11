@@ -178,13 +178,24 @@ describe('issueRefundAction', () => {
     expect(await refundStatus('tr_pc')).toBe('pending');
     expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:tr_pc' }]);
   });
-  it('review round 1 RC2: the same row whose settle never went to this rail after go-live is refused notCharged, nothing queued', async () => {
+  it('review round 1 RC2: the same row paid in the demo era (before the go-live, no settle record after it) is refused notCharged, nothing queued', async () => {
     await seedRealMoneyRail(db, 'pa');
     await certifyPartnerForTest(db, 'pa');
     await seedPartnerTransfer(db, { id: 'tr_pc0', partnerId: 'pa', status: 'paid', fundingMethod: 'bank_transfer' });
+    await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 2 * 3_600_000).toISOString()} WHERE id = 'tr_pc0'`);
     await asAdmin();
     expect(await issueRefundAction(form('tr_pc0'))).toEqual(refused('partner.transferOps.refund.notCharged'));
     expect(await count(outbox)).toBe(0);
+  });
+  it('final check F8 (X1, U1): the same row paid after the go-live and held before its first instruction (no settle record) is refunded through the core', async () => {
+    await seedRealMoneyRail(db, 'pa');
+    await certifyPartnerForTest(db, 'pa');
+    await seedPartnerTransfer(db, { id: 'tr_pc1', partnerId: 'pa', status: 'paid', fundingMethod: 'bank_transfer' });
+    await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 5_000).toISOString()} WHERE id = 'tr_pc1'`);
+    await asAdmin();
+    expect(await issueRefundAction(form('tr_pc1'))).toEqual({ ok: true });
+    expect(await refundStatus('tr_pc1')).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:tr_pc1' }]);
   });
   it('the other refusals map to their own copy', async () => {
     await seedPartnerTransfer(db, { id: 'tr_unpaid', partnerId: 'pa', status: 'awaiting_payment' });

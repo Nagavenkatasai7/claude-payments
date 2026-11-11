@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest, seedRealMoneyRail, seedOriginatorForTest, seedSettleRecordForTest } from './helpers-live';
+import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail, seedOriginatorForTest, seedSettleRecordForTest } from './helpers-live';
 import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { railBodySha256 } from '@/db/repos/rail-message-repo';
@@ -413,7 +413,8 @@ describe('funding.refund: a partner-collected reverse only for a settle sent to 
     await expectClosedNoSettle();
   });
 
-  it('issueRefund refuses the demo-era row (no settle record after go-live), as before pack 5, and enqueues nothing', async () => {
+  it('issueRefund refuses the demo-era row (paid before the go-live, no settle record after it), as before pack 5, and enqueues nothing', async () => {
+    // transferFixture's paidAt (50 minutes ago) is older than certifyPartnerForTest's go-live (a minute ago).
     await store.saveTransfer(transferFixture({ refundStatus: 'none' }));
     await expect(issueRefund(db, ID)).rejects.toThrow('never charged');
     await seedSettle({ agoMs: 2 * 3_600_000 });
@@ -491,5 +492,104 @@ describe('issueRefund: a routed partner-collected row is refused (review round 1
     await seedSettle({ rail: 'railp' });
     await expect(issueRefund(db, ID)).rejects.toThrow('never charged');
     expect(await dedupeKeys('funding.refund')).toEqual([]);
+  });
+});
+
+// Final check F8 (X1, U1): a real-money partner-collected row PAID after its
+// rail went live and held by a gate (funding_mode, travel_rule) BEFORE its
+// first instruction has no settle record, but the partner holds the sender's
+// money. Issue refund admits it; the worker sends NO reverse (the rail never
+// got the transfer), leaves the refund pending, tells the customer nothing and
+// raises ONE refundheld:<id>. The pending refund then stops every instruct.
+describe('funding.refund: a partner-collected row held before its first instruction (final check F8, X1 U1)', { retry: 0 }, () => {
+  const HID = 'rm_h1';
+  const heldText = (id: string, owner: string, rail: string) =>
+    `⚠️ SmartRemit ops: the refund of transfer ${id} (partner ${owner}, rail ${rail}) was NOT sent: the partner collected the money, but no payout instruction for this transfer went to the partner's rail, so there is nothing to reverse there. The refund stays pending, the transfer is not paid out, and the customer was not told; a person must arrange the return of the sender's money with the partner.`;
+  async function heldRow(): Promise<void> {
+    await certifyPartnerForTest(db, 'acme', { fundingMode: null });
+    await paidRealMoneyTransfer(db, { id: HID });
+    // Paid AFTER the go-live (certifyPartnerForTest certifies a minute ago).
+    await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 5_000).toISOString()} WHERE id = ${HID}`);
+    await outbox.enqueue('settlement.instruct', { transferId: HID }, { dedupeKey: `instruct:${HID}` });
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`]);
+    expect(await countRecords()).toBe(0);
+  }
+  async function refundPayloads(): Promise<unknown[]> {
+    const r = (await db.execute(sql`SELECT payload FROM outbox WHERE kind = 'funding.refund' ORDER BY id`)) as unknown as { rows: Array<{ payload: unknown }> };
+    return r.rows.map((x) => x.payload);
+  }
+  async function expectHeldPending(): Promise<void> {
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect(providerRefund).not.toHaveBeenCalled();
+    const t = (await store.getTransfer(HID))!;
+    expect(t.refundStatus).toBe('pending');
+    expect(t.refundRef ?? '').not.toBe(`nofunds-${HID}`);
+    expect(t.status).toBe('paid');
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`, `refundheld:${HID}`]);
+    const msgs = await alertMessages();
+    expect(msgs[1]).toBe(heldText(HID, 'acme', 'acme'));
+    for (const leak of ['123456789012', 'Test Sender', 'Test Recipient', '15551239876', '200']) expect(msgs[1]).not.toContain(leak);
+  }
+
+  it('approveRefund of the customer request: payload carries collectedOnRealMoney; NO POST, NO record, refund pending, no customer message, ONE refundheld:<id>; a replay adds nothing; a later funding mode sends nothing', async () => {
+    await heldRow();
+    await db.execute(sql`UPDATE transfers SET refund_status = 'requested' WHERE id = ${HID}`);
+    await approveRefund(db, HID);
+    expect(await refundPayloads()).toEqual([{ transferId: HID, collectedOnRealMoney: true }]);
+    await drainOnce(deps(), 'w1');
+    await expectHeldPending();
+    expect(logWarnSpy.mock.calls.filter((c) => c[0] === 'outbox.refund-nosettle')).toHaveLength(0);
+
+    await outbox.enqueue('funding.refund', { transferId: HID, collectedOnRealMoney: true }, { dedupeKey: `refund:${HID}:retry:1` });
+    await drainOnce(deps(), 'w1');
+    await expectHeldPending();
+
+    // The funding mode is recorded; the deferred instruct's next attempt: the pending refund makes it not payable.
+    await certifyPartnerForTest(db, 'acme');
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    const st = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = ${`instruct:${HID}`}`)) as unknown as { rows: Array<{ status: string }> };
+    expect(st.rows[0].status).toBe('done');
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
+  });
+
+  it('issueRefund admits the held row (refund pending, payload collectedOnRealMoney true); the drain raises refundheld:<id> and sends nothing', async () => {
+    await heldRow();
+    await issueRefund(db, HID);
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
+    expect(await refundPayloads()).toEqual([{ transferId: HID, collectedOnRealMoney: true }]);
+    await drainOnce(deps(), 'w1');
+    await expectHeldPending();
+  });
+
+  it('a row paid after the go-live WITH a live settle record still gets its signed reverse (no refundheld:)', async () => {
+    await paidRealMoneyTransfer(db, { id: HID });
+    await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 5_000).toISOString()} WHERE id = ${HID}`);
+    await seedSettle({ id: HID });
+    await issueRefund(db, HID);
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('completed');
+    expect((await alertKeys()).filter((k) => k.startsWith('refundheld:'))).toEqual([]);
+  });
+
+  it('a routed held row: issueRefund still refuses it; a queued refund still gets refundrouted:<id>, never refundheld:', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await seedRealMoneyRail(db, 'railp', { url: 'https://railp.example/settle', signingSecret: 'rail-secret' });
+    await paidRealMoneyTransfer(db, { id: HID, routedVia: 'railp' });
+    await db.execute(sql`UPDATE transfers SET paid_at = ${new Date(Date.now() - 5_000).toISOString()} WHERE id = ${HID}`);
+    await expect(issueRefund(db, HID)).rejects.toThrow('never charged');
+    await db.execute(sql`UPDATE transfers SET refund_status = 'pending' WHERE id = ${HID}`);
+    await outbox.enqueue('funding.refund', { transferId: HID }, { dedupeKey: `refund:${HID}` });
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await alertKeys()).toEqual([`refundrouted:${HID}`]);
   });
 });

@@ -330,6 +330,9 @@ describe('pack 5 documents say what the code does', () => {
       "Issue refund refuses a card payment through the partner's Stripe key",
       // Review round 2 R2 (F6-D1): partner_psp lets only a funding-mode hold go out.
       "so for that one either, when it is held for its funding mode (`fundmode:<id>`), record `partner_psp` on the go-live card and let it go out before rolling back, or return the money in the partner's Stripe dashboard and do not roll back while its row is paid",
+      // Final check F8 (X1, U1): a partner-collected row per class.
+      'for a partner-collected row that is not routed, Issue refund sends nothing to a rail that never got the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
+      'Issue refund is not available for a routed partner-collected row, so do not roll back while such a row is paid and held',
       // Review round 2 GD1: what else a build serving without 0039 breaks.
       // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
       // closes as sandbox-reverse-<id>, a routed partner-collected row raises refundrouted:<id>.
@@ -374,7 +377,7 @@ describe('pack 5 documents say what the code does', () => {
     const docs = [SPEC, ROLLBACK, CLAUDE, WEBHOOKS].join('\n');
     const reasons: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
     for (const r of reasons) expect(heldStuckDedupeKey(r, 'x1')).toBe(`${r}:stuck:x1`);
-    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:'];
+    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:', 'refundheld:'];
     for (const k of keys) {
       expect(src, k).toContain(k);
       expect(docs, k).toContain(`\`${k}`);
@@ -401,14 +404,38 @@ describe('pack 5 documents say what the code does', () => {
     expect(cardTexts).toHaveLength(2);
     for (const text of cardTexts) expect(text).not.toContain('Issue refund');
     expectQuotedInSrc(stuckCard!, src, 'stuck card');
+    // Final check F8 (TR1): the travelrule:<id> row quotes the card-payment tail too, which never names Issue refund.
+    const tr = rows.find((l) => l.startsWith('| `travelrule:<id>`'))!;
+    expect(tr).toContain("Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer).");
+    expect(stuckCard!).not.toContain('still names Issue refund');
+    // Final check F8 (X1, U1): a partner-collected row's own texts, routed or not, worker and sweeps.
+    const pcRow = rows.find((l) => l.startsWith('| `fundmode:<id>`, `travelrule:<id>` for a partner-collected row'));
+    expect(pcRow, 'the partner-collected worker row').toBeDefined();
+    expect([...pcRow!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
+    expectQuotedInSrc(pcRow!, src, 'partner-collected');
+    expect(pcRow!).toContain('`refundheld:<id>`');
+    const pcStuck = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a partner-collected row'));
+    expect(pcStuck, 'the partner-collected stuck row').toBeDefined();
+    expect([...pcStuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
+    expectQuotedInSrc(pcStuck!, src, 'partner-collected stuck');
+    for (const routedText of ["Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner."]) {
+      expect(pcRow!).toContain(routedText);
+      expect(pcStuck!).toContain(routedText);
+    }
     // The other pack 5 alerts (not compliance alerts) have their rows in section 14.
     const other = section(SPEC, '## 14.').split('\n').filter((l) => l.startsWith('| `'));
     // Review round 1 (RC2, RF1): the two funding.refund alerts.
-    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:']) {
+    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:', 'refundheld:']) {
       const row = other.find((l) => l.startsWith(`| \`${k}`));
       expect(row, k).toBeDefined();
       expectQuotedInSrc(row!, src, k);
     }
+    // Final check F8 (X1, U1): refundnosettle:<id> is the demo era only; a row held before its first instruction is refundheld:<id>.
+    const nosettle = other.find((l) => l.startsWith('| `refundnosettle:'))!;
+    expect(nosettle).toContain('demo era');
+    expect(nosettle).toContain('a row held before its first instruction raises `refundheld:<id>` instead');
+    const held = other.find((l) => l.startsWith('| `refundheld:<id>`'))!;
+    for (const s of ['the refund stays `pending`', 'no reverse', 'no customer message', 'not paid out']) expect(held, s).toContain(s);
   });
 
   it('the list-track alert keys: sanctions-archive-lag:<source>:<day> and sanctions-archive-unconfigured:<source>:<day> have their section 11 rows', () => {

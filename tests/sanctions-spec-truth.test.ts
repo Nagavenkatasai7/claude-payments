@@ -424,6 +424,16 @@ describe('sanctions screening spec says what pack 5 does', () => {
     for (const k of ['funding class `stripe`', '`partner_psp`', "the partner's Stripe dashboard", 'review round 2 GE1']) {
       expect(rest, k).toContain(k);
     }
+    // Final check F8 (X1, U1, TR1): the exits per class. A card payment's travelrule:<id> names the Stripe dashboard too;
+    // a partner-collected row held before its first instruction is refunded with no reverse (refund pending, refundheld:<id>);
+    // a routed one cannot be refunded here.
+    for (const k of [
+      'its `fundmode:<id>`, `travelrule:<id>` and `fundmode:stuck:<id>` / `travelrule:stuck:<id>` alerts name instead',
+      'For a partner-collected row (final check F8) held at either step, Issue refund sends no reverse (the rail never got the transfer): the refund stays `pending` with one `refundheld:<id>` alert',
+      'a routed partner-collected row cannot be refunded from SmartRemit, so its texts do not offer Issue refund',
+    ]) {
+      expect(rest, k).toContain(k);
+    }
   });
 });
 

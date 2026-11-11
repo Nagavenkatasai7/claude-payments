@@ -321,7 +321,8 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
     await instructRow(ID, 'done');
     expect(await alertStuckHeld(db, fixture(), reason)).toBe(true);
     const a = await alerts();
-    expect(a).toEqual([{ k: `${reason}:stuck:${ID}`, m: stuckHeldMessage(ID, reason) }]);
+    // fixture() is a partner-collected row (final check F8: its own variant).
+    expect(a).toEqual([{ k: `${reason}:stuck:${ID}`, m: stuckHeldMessage(ID, reason, 'partner_collected', false) }]);
     expect(heldStuckDedupeKey(reason, ID)).toBe(`${reason}:stuck:${ID}`);
     for (const pii of ['15551230000', 'Anita', '919876543210', '123456789012', '200']) expect(a[0].m).not.toContain(pii);
   });
@@ -383,9 +384,49 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
       expect(stuckHeldMessage(ID, r, 'stripe')).not.toContain('Issue refund');
       expect(stuckHeldMessage(ID, r, 'stripe')).not.toMatch(/cancel/i);
     }
-    for (const cls of ['mock', 'partner_collected', 'partner_pull', 'sandbox'] as const) {
+    for (const cls of ['mock', 'partner_pull', 'sandbox'] as const) {
       for (const r of REASONS) expect(stuckHeldMessage(ID, r, cls)).toBe(stuckHeldMessage(ID, r));
     }
+    for (const r of ['fundmode', 'travelrule'] as const) expect(stuckHeldMessage(ID, r, 'stripe', true)).toBe(stuckHeldMessage(ID, r, 'stripe'));
+  });
+
+  // Final check F8 (X1, U1): a partner-collected row. Not routed: Issue refund
+  // is admitted, but when the rail never got the transfer no reverse is sent
+  // and the refund stays pending. Routed: Issue refund is refused (RF1), so the
+  // text never names it. The first sentence is byte for byte; mockfund unchanged.
+  it('a partner-collected row: its own fundmode and travelrule texts, routed or not; mockfund unchanged; every other class unchanged', () => {
+    const head = (r: string) =>
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (${r}), so it is not re-instructed. `;
+    expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', false)).toBe(
+      head('fundmode') +
+        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'partner_collected', false)).toBe(
+      head('travelrule') +
+        "Stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+    );
+    expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', true)).toBe(
+      head('fundmode') +
+        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once). Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'partner_collected', true)).toBe(
+      head('travelrule') +
+        "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.",
+    );
+    for (const r of ['fundmode', 'travelrule'] as const) {
+      expect(stuckHeldMessage(ID, r, 'partner_collected', true)).not.toMatch(/with Issue refund|or Issue refund/);
+      expect(stuckHeldMessage(ID, r, 'partner_collected', false)).not.toMatch(/cancel/i);
+    }
+    for (const routed of [false, true]) expect(stuckHeldMessage(ID, 'mockfund', 'partner_collected', routed)).toBe(stuckHeldMessage(ID, 'mockfund'));
+    for (const cls of ['mock', 'partner_pull', 'sandbox', undefined] as const) {
+      for (const r of REASONS) expect(stuckHeldMessage(ID, r, cls, true)).toBe(stuckHeldMessage(ID, r));
+    }
+  });
+
+  it('alertStuckHeld passes the routed fact: a routed partner-collected row gets the routed text', async () => {
+    expect(await alertStuckHeld(db, fixture({ settlementPartnerId: 'railp' }), 'travelrule')).toBe(true);
+    expect(await alerts()).toEqual([{ k: `travelrule:stuck:${ID}`, m: stuckHeldMessage(ID, 'travelrule', 'partner_collected', true) }]);
+    expect((await alerts())[0].m).not.toBe(stuckHeldMessage(ID, 'travelrule', 'partner_collected', false));
   });
 
   it('alertStuckHeld reads the class from the row: a stripe-funded row gets the stripe text', async () => {

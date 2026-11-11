@@ -672,7 +672,7 @@ describe('issueRefund: real-money partner-collected rows (pack 5 T15)', () => {
     expect(await refundPayloads()).toEqual([{ transferId: 'pc1', collectedOnRealMoney: true }]);
   });
 
-  it('review round 1 RC2: no settle record for this rail, or one older than the go-live, is refused "never charged"', async () => {
+  it('review round 1 RC2 (final check F8: a demo-era row): no settle record for a row paid before the go-live, or one older than the go-live, is refused "never charged"', async () => {
     const store = createStore(fakeRedis(), db);
     await seedRealMoneyRail(db, 'default');
     // no certification on record: no go-live, refused even with a fresh settle record
@@ -680,11 +680,26 @@ describe('issueRefund: real-money partner-collected rows (pack 5 T15)', () => {
     await seedSettleRecordForTest(db, { transferId: 'pc8', partnerId: 'default' });
     await expect(issueRefund(db, 'pc8')).rejects.toThrow(/never charged/i);
     await certifyPartnerForTest(db, 'default');
-    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'paid', fundingMethod: 'bank_transfer' }));
+    // Paid two hours ago, before the go-live a minute ago: the demo era.
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'paid', fundingMethod: 'bank_transfer', paidAt: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
     await expect(issueRefund(db, 'pc7')).rejects.toThrow(/never charged/i);
     await seedSettleRecordForTest(db, { transferId: 'pc7', partnerId: 'default', agoMs: 2 * 3_600_000 });
     await expect(issueRefund(db, 'pc7')).rejects.toThrow(/never charged/i);
     expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('final check F8 (X1, U1): a row paid after the go-live (or with no paidAt) and held before its first instruction (no settle record) is admitted, with collectedOnRealMoney', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await certifyPartnerForTest(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc6', status: 'paid', fundingMethod: 'bank_transfer', paidAt: new Date(Date.now() - 5_000).toISOString() }));
+    await issueRefund(db, 'pc6');
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await issueRefund(db, 'pc5');
+    expect(await refundPayloads()).toEqual([
+      { transferId: 'pc6', collectedOnRealMoney: true },
+      { transferId: 'pc5', collectedOnRealMoney: true },
+    ]);
   });
 
   it('review round 1 RC2: the go-live is the EARLIEST certification on record (a partner.live.certify audit row before a re-certification)', async () => {

@@ -35,7 +35,7 @@
 import type { DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { fundingClassOf, fundingModeMatches, type FundingClass } from './funding-class';
+import { fundingClassOf, fundingModeMatches, isRoutedRow, type FundingClass } from './funding-class';
 import type { FundingMode } from './live-controls';
 import { railPartnerOf, readRailProviderType, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
@@ -174,15 +174,34 @@ export function heldStuckDedupeKey(reason: InstructHeldReason, transferId: strin
  * Review round 2 GE1: a row of funding class 'stripe' (a card payment through
  * the partner's Stripe key) is never sent to Issue refund, which cannot refund
  * a card payment yet (issueRefund refuses it): its fundmode and travelrule
- * texts name partner_psp and the partner's Stripe dashboard instead. Every
- * other class (or none given) keeps the text byte for byte.
+ * texts name partner_psp and the partner's Stripe dashboard instead.
+ * Final check F8 (X1, U1): a partner-collected row has its own fundmode and
+ * travelrule texts, one for a routed row (`routed`, isRoutedRow) and one for a
+ * row that is not. Every other class (or none given) keeps the text byte for
+ * byte; mockfund is the same for every class.
  */
-export function stuckHeldMessage(transferId: string, reason: InstructHeldReason, cls?: FundingClass): string {
+export function stuckHeldMessage(transferId: string, reason: InstructHeldReason, cls?: FundingClass, routed = false): string {
   if (cls === 'stripe' && reason === 'fundmode') {
     return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. If the partner's own payment provider collects card payments, record the funding mode partner_psp on the go-live card (then the stuck-paid sweep re-instructs it once); otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).`;
   }
   if (cls === 'stripe' && reason === 'travelrule') {
     return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).`;
+  }
+  // Final check F8 (X1, U1): a partner-collected row. Routed: Issue refund
+  // refuses it (RF1), so its texts never offer it. Not routed: Issue refund is
+  // admitted, and when the rail never got the transfer the worker sends no
+  // reverse (refundheld:<id>), so the text says what then happens.
+  if (cls === 'partner_collected' && routed && reason === 'fundmode') {
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once). Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.`;
+  }
+  if (cls === 'partner_collected' && routed && reason === 'travelrule') {
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.`;
+  }
+  if (cls === 'partner_collected' && reason === 'fundmode') {
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
+  }
+  if (cls === 'partner_collected' && reason === 'travelrule') {
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
   }
   switch (reason) {
     case 'mockfund':
@@ -205,7 +224,10 @@ export function stuckHeldMessage(transferId: string, reason: InstructHeldReason,
  */
 export async function alertStuckHeld(
   db: DbOrTx,
-  t: Pick<Transfer, 'id' | 'complianceStatus' | 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef'>,
+  t: Pick<
+    Transfer,
+    'id' | 'complianceStatus' | 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId'
+  >,
   reason: InstructHeldReason,
 ): Promise<boolean> {
   if (t.complianceStatus === 'blocked') return false;
@@ -213,7 +235,7 @@ export async function alertStuckHeld(
   if (await outbox.hasLiveInstruction(t.id)) return false;
   return outbox.enqueue(
     'ops.alert',
-    { message: stuckHeldMessage(t.id, reason, fundingClassOf(t)) },
+    { message: stuckHeldMessage(t.id, reason, fundingClassOf(t), isRoutedRow(t)) },
     { dedupeKey: heldStuckDedupeKey(reason, t.id) },
   );
 }
