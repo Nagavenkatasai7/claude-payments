@@ -25,6 +25,9 @@ import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import type { ComplianceResult } from '@/lib/compliance';
 import { sanctionsAuditEvent } from '@/lib/sanctions/evidence';
 import { originatorInfoMissing } from '@/lib/originator-info';
+import { isOpaqueTransferId } from '@/lib/id';
+import { payUrlFor } from '@/lib/pay-url';
+import { logWarn } from '@/lib/log';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
 //
@@ -183,18 +186,23 @@ async function enqueueRailEffect(
  * THIS transaction (in_review, SENDER_SCREENING added, the held stage-1, no
  * rail effect) ⇒ 'held'. A read error throws (nothing paid). Not real money:
  * no new read and no new lock.
+ *
+ * Pack 6 (P10): the stage-1 receipt link is decided by receiptUrlFor on the
+ * ROOT handle BEFORE the transaction (nothing is added inside it; a read error
+ * means "no link", never a failed settle).
  */
 export async function beginSettlement(
   db: Db,
   transfer: Transfer,
   integrations: PartnerIntegrations,
 ): Promise<SettlementResult> {
+  const receiptUrl = await receiptUrlFor(db, transfer);
   return db.transaction(async (tx): Promise<SettlementResult> => {
     const repo = createTransferRepo(tx);
     if (realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null })) {
       const locked = await repo.getTransferForUpdate(transfer.id);
       if (locked && senderScreeningHoldActive(await readSenderScreeningFlags(tx, locked.partnerId, locked.phone, { forUpdate: true }))) {
-        return holdInTx(tx, transfer, [SENDER_SCREENING_REASON]);
+        return holdInTx(tx, transfer, [SENDER_SCREENING_REASON], receiptUrl);
       }
     }
     const paid = await repo.markPaidIfAwaiting(transfer.id);
@@ -216,7 +224,7 @@ export async function beginSettlement(
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
       // Program-Fix 49A: essential (a settlement stage message survives STOP).
-      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential', ...(isSandbox(paid) ? { sandbox: true } : {}) },
+      { to: paid.phone, body: buildStage1Message(paid, { receiptUrl }), partnerId: paid.partnerId, category: 'essential', ...(isSandbox(paid) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${paid.id}` },
     );
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
@@ -249,6 +257,9 @@ export async function beginSettlement(
  * (de-duplicated) — applyRescreenIfAwaiting, which never touches a blocked or
  * no-longer-awaiting row; such a row is 'already' and nothing is written.
  * Without it the hold never rewrites compliance (unchanged).
+ *
+ * Pack 6 (P10): the held stage-1's receipt link is decided by receiptUrlFor on
+ * the ROOT handle BEFORE the transaction, as in beginSettlement.
  */
 export async function beginHold(
   db: Db,
@@ -256,11 +267,31 @@ export async function beginHold(
   opts: { addReasons?: string[] } = {},
 ): Promise<HoldResult> {
   const addReasons = opts.addReasons ?? [];
-  return db.transaction((tx): Promise<HoldResult> => holdInTx(tx, transfer, addReasons));
+  const receiptUrl = await receiptUrlFor(db, transfer);
+  return db.transaction((tx): Promise<HoldResult> => holdInTx(tx, transfer, addReasons, receiptUrl));
+}
+
+/**
+ * Pack 6 (P10): the pay-page link the stage-1 message carries as its receipt
+ * line, or null. Only a 22-character opaque id (isOpaqueTransferId: legacy
+ * 8-char ids are guessable and make NO query) that is not a payment-link
+ * transfer (its pay page is dead after payment) gets one; Partner-API rows
+ * included. Callers run it on the ROOT handle before the paid-flip
+ * transaction, so a read error can never abort the money transaction: it
+ * gives null and one warn by error name (never the error object).
+ */
+export async function receiptUrlFor(db: DbOrTx, t: Pick<Transfer, 'id'>): Promise<string | null> {
+  if (!isOpaqueTransferId(t.id)) return null;
+  try {
+    return (await createTransferRepo(db).isPaymentLinkTransfer(t.id)) ? null : payUrlFor(t.id);
+  } catch (err) {
+    logWarn('settle.receipt-link', err instanceof Error ? err.name : 'error', { transferId: t.id });
+    return null;
+  }
 }
 
 /** beginHold's body on the caller's transaction (also beginSettlement's locked sender-hold branch). */
-async function holdInTx(tx: DbOrTx, transfer: Transfer, addReasons: string[]): Promise<HoldResult> {
+async function holdInTx(tx: DbOrTx, transfer: Transfer, addReasons: string[], receiptUrl: string | null): Promise<HoldResult> {
   const repo = createTransferRepo(tx);
   if (addReasons.length > 0) {
     // The ledger row's reasons (row-locked), never the caller's copy.
@@ -281,7 +312,7 @@ async function holdInTx(tx: DbOrTx, transfer: Transfer, addReasons: string[]): P
     // 24-hour window; `body` stays the free-form fallback (and is all an older
     // worker build reads). R30: the template is transfer_processing, the fixed
     // hold text; until Meta approves it the worker sends `body` (132001 fallback).
-    { to: held.phone, body: buildStage1Message(held, { held: true }), template: processingTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
+    { to: held.phone, body: buildStage1Message(held, { held: true, receiptUrl }), template: processingTemplate(held), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
     { dedupeKey: `stage1:${held.id}` },
   );
   return { kind: 'held' };

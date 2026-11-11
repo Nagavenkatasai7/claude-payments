@@ -100,12 +100,23 @@ export interface FixedReplyOptions {
 export function fixedReply(kind: FixedReplyKind, opts: FixedReplyOptions = {}): string {
   let text: string = FIXED_REPLIES[kind];
   if (opts.help) text = `${text} ${HELP_SUFFIX}`;
-  const receipt = boundUntrustedText(opts.receiptUrl, RECEIPT_MAX).trim();
-  if (receipt) text = `${text}\n${RECEIPT_LABEL} ${receipt}`;
+  const receipt = receiptLine(opts.receiptUrl);
+  if (receipt) text = `${text}\n${receipt}`;
   // Review R2-Q1 K1: a backstop; an approved line always fits PROVIDER_LINE_MAX (provider-line.ts).
   const provider = boundUntrustedText(opts.providerLine, PROVIDER_LINE_MAX).trim();
   if (provider) text = `${text}\n${provider}`;
   return text;
+}
+
+/**
+ * Pack 6 (P10): the receipt link line, `Receipt: <url>`, flattened to one line
+ * and bounded (RECEIPT_MAX). A blank url, or one blank after bounding, gives
+ * `''`, and callers add nothing for `''`. fixedReply and the stage-1 message
+ * (payment.ts buildStage1Message) both build the line here.
+ */
+export function receiptLine(url: string | null | undefined): string {
+  const u = boundUntrustedText(url, RECEIPT_MAX).trim();
+  return u ? `${RECEIPT_LABEL} ${u}` : '';
 }
 
 /** Which fixed reply a cap refusal reason (tier-rules.ts CapReason) gets. Unknown ⇒ cannot_complete. */

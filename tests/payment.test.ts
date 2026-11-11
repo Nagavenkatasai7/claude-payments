@@ -14,7 +14,7 @@ import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
-import { HELP_SUFFIX, HOLD_REPLY } from '@/lib/hold-replies';
+import { HELP_SUFFIX, HOLD_REPLY, receiptLine } from '@/lib/hold-replies';
 
 let db: Db;
 beforeEach(async () => {
@@ -248,6 +248,52 @@ describe('buildStage1Message — B2B / ACH-pull wording', () => {
     expect(msg).toContain(`${HOLD_REPLY} ${HELP_SUFFIX}`);
     expect(msg.toLowerCase()).not.toContain('review');
     expect(msg).not.toContain('within 1 business day');
+  });
+});
+
+describe('buildStage1Message receipt line (pack 6 P10)', () => {
+  const ID = 'AbCdEfGhIjKlMnOpQrStUw';
+  const url = `https://smartremit.ai/pay/${ID}`;
+  const b2c = (): Transfer => ({ ...awaitingTransfer(), id: ID });
+  const b2b = (): Transfer => ({
+    ...awaitingTransfer(),
+    id: ID,
+    transferType: 'b2b',
+    fundingMethod: 'ach_pull',
+    senderEntityType: 'business',
+    recipientEntityType: 'business',
+    recipientBusinessName: 'Mumbai Textiles Pvt Ltd',
+  });
+  const variants: Array<[string, () => Transfer, boolean]> = [
+    ['b2c paid', b2c, false],
+    ['b2c held', b2c, true],
+    ['b2b paid', b2b, false],
+    ['b2b held', b2b, true],
+  ];
+
+  for (const [name, make, held] of variants) {
+    it(`${name}: with receiptUrl -> the old text + a new line + receiptLine(url)`, () => {
+      const before = buildStage1Message(make(), { held });
+      const msg = buildStage1Message(make(), { held, receiptUrl: url });
+      expect(msg).toBe(`${before}\n${receiptLine(url)}`);
+      expect(msg.slice(0, msg.lastIndexOf('\n'))).toBe(before);
+      expect(before.endsWith(`Transfer ID: ${ID}`)).toBe(true);
+    });
+
+    it(`${name}: receiptUrl null, undefined, '' -> byte-identical to no opts`, () => {
+      const base = held ? buildStage1Message(make(), { held: true }) : buildStage1Message(make());
+      for (const receiptUrl of [null, undefined, '', '   ']) {
+        expect(buildStage1Message(make(), { held, receiptUrl })).toBe(base);
+      }
+    });
+  }
+
+  it('the held variant with a receipt never says review', () => {
+    for (const make of [b2c, b2b]) {
+      const msg = buildStage1Message(make(), { held: true, receiptUrl: url });
+      expect(msg.toLowerCase()).not.toContain('review');
+      expect(msg).toContain(`${HOLD_REPLY} ${HELP_SUFFIX}`);
+    }
   });
 });
 
