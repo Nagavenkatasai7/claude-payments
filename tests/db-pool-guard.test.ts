@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { inspect } from 'node:util';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import type { EventEmitter } from 'node:events';
 
 // Weekly reliability check 2026-11-09, item 1: a dropped IDLE Neon connection
@@ -215,5 +216,45 @@ describe('pool-guard helpers', () => {
     });
     expect(dbErrorFields('plain string')).toEqual({ name: 'UnknownError', detail: 'plain string' });
     expect(dbErrorFields(undefined)).toEqual({ name: 'UnknownError' });
+  });
+
+  // 2026-11-10: a drizzle query error carries the bound values in its message
+  // and `params`, the Postgres `detail` in its cause, and the SQLSTATE on the
+  // cause, not on itself.
+  it('dbErrorFields gives a query error a fixed name, the SQLSTATE of its cause and no params or detail', () => {
+    const cause = Object.assign(new Error('duplicate key value violates unique constraint "customers_phone_key"'), {
+      code: '23505',
+      detail: 'Key (phone)=(+15551234567) already exists.',
+      constraint: 'customers_phone_key',
+      table: 'customers',
+    });
+    const err = new DrizzleQueryError(
+      'insert into "customers" ("phone", "name", "email") values ($1, $2, $3)',
+      ['+15551234567', 'Ravi Traders', 'jane@example.com'],
+      cause,
+    );
+    const fields = dbErrorFields(err);
+    expect(fields.name).toBe('DrizzleQueryError');
+    expect(fields.code).toBe('23505');
+    expect(fields.detail).toBe(
+      'db query failed [23505] duplicate key value violates unique constraint "customers_phone_key"' +
+        ' constraint=customers_phone_key table=customers' +
+        ' | query: insert into "customers" ("phone", "name", "email") values ($1, $2, $3) | params: <redacted>',
+    );
+    const text = JSON.stringify(fields);
+    for (const v of ['15551234567', 'Ravi Traders', 'jane@example.com', 'already exists']) {
+      expect(text).not.toContain(v);
+    }
+    // The redactor still runs over the description.
+    const sneaky = new DrizzleQueryError('select 1', [], Object.assign(new Error(`dial ${h.dbUrl}`), { code: '08006' }));
+    expect(JSON.stringify(dbErrorFields(sneaky, redactorFor(h.dbUrl)))).not.toContain(h.canary);
+  });
+
+  it('getDb() also installs the query-error inspect guard (src/db/query-error-guard.ts)', () => {
+    getDb();
+    const err = new DrizzleQueryError('select * from customers where phone = $1', ['+15551234567'], undefined);
+    const out = inspect({ err });
+    expect(out).not.toContain('15551234567');
+    expect(out).toContain('DrizzleQueryError: db query failed');
   });
 });

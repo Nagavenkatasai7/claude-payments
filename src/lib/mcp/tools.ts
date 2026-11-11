@@ -3,6 +3,8 @@ import type { AgentScope } from '@/lib/agent-auth';
 import type { DbOrTx } from '@/db/client';
 import type { ToolContextDeps } from '@/lib/tool-context';
 import { executeTool, maskAccount } from '@/lib/tools';
+import { logWarn } from '@/lib/log';
+import { isQueryError } from '@/lib/db-error';
 import { boundUntrustedText, NAME_MAX } from '@/lib/untrusted-text';
 import { portalToolContext, sendLimitsForPortal, PORTAL_FUNDING_METHODS } from '@/lib/portal-send';
 import { getPortalTransfer, type PortalOwner } from '@/lib/portal-transfers';
@@ -214,7 +216,11 @@ export async function listRecipientsTool(owner: PortalOwner, deps: McpDataDeps =
   try {
     rows = await ctx.store.listRecipients(owner.partnerId, owner.phone, MCP_RECIPIENTS_MAX);
   } catch (err) {
-    console.warn('mcp list_recipients failed; returning []:', err instanceof Error ? err.name : 'error');
+    // A query error is reduced to its fixed line by the logger (SQLSTATE, no
+    // values). Any other error keeps the older, stricter rule here: the name only.
+    logWarn('mcp.list_recipients', isQueryError(err) ? err : err instanceof Error ? err.name : 'error', {
+      partnerId: owner.partnerId,
+    });
     rows = [];
   }
   const recipients = rows.map((row) => {

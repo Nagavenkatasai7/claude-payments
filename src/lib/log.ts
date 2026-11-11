@@ -8,6 +8,35 @@
 // (e.g. a provider echoing the request back in its error body).
 
 import { redactSensitive } from './inbound-redact';
+import { driverErrorText, isDriverError, isQueryError, queryErrorText, stripQueryParams } from './db-error';
+
+/** JSON.stringify replacer: a query or driver error inside an object becomes its fixed description. */
+function nestedQueryErrors(_key: string, v: unknown): unknown {
+  return isQueryError(v) ? queryErrorText(v) : isDriverError(v) ? driverErrorText(v) : v;
+}
+
+/**
+ * The first stack frames of an error (`    at fn (file:line)`), never the stack
+ * header: the header repeats the message, and a message can hold customer data.
+ * When the header cannot be found (the message changed after the stack was
+ * taken) nothing is returned, because a message line can itself look like a frame.
+ */
+export function stackFrames(err: unknown, max = 3): string {
+  try {
+    if (!(err instanceof Error) || typeof err.stack !== 'string') return '';
+    const header = `${err.name}: ${err.message}`;
+    if (!err.stack.startsWith(header)) return '';
+    return err.stack
+      .slice(header.length)
+      .split('\n')
+      .filter((l) => /^\s+at /.test(l))
+      .slice(0, max)
+      .map((l) => l.trim())
+      .join(' | ');
+  } catch {
+    return '';
+  }
+}
 
 /**
  * Mask emails and any 7+ digit run (phones, accounts, IBAN/PAN bodies) to
@@ -22,12 +51,20 @@ import { redactSensitive } from './inbound-redact';
  * keyword) become their fixed label. The labels hold no digits.
  */
 export function scrub(value: unknown): string {
+  // 2026-11-10: a database query error never reaches the rules below whole. Its
+  // message and `params` carry the bound values and its cause the Postgres
+  // `detail` (src/lib/db-error.ts); the object becomes the fixed description,
+  // and the params tail of any "Failed query:" text is cut.
   const s =
     typeof value === 'string'
-      ? value
-      : value instanceof Error
-        ? `${value.name}: ${value.message}`
-        : JSON.stringify(value) ?? String(value);
+      ? stripQueryParams(value)
+      : isQueryError(value)
+        ? queryErrorText(value)
+        : isDriverError(value)
+          ? driverErrorText(value)
+          : value instanceof Error
+          ? stripQueryParams(`${value.name}: ${value.message}`)
+          : stripQueryParams(JSON.stringify(value, nestedQueryErrors) ?? String(value));
   const capped = capInput(s);
   // The URL-credentials rule runs FIRST (2026-11-09 DATABASE_URL leak), on the
   // raw text: a later mask must not break a password into parts it cannot see.

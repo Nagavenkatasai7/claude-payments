@@ -26,6 +26,7 @@ import { env } from '@/lib/env';
 import { seedLiveEvidence } from './helpers-sanctions';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import { recentlyFailingRails } from '@/lib/rail-health';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 // R17: the AI notice and its durable marker are covered by
 // tests/outbox-worker-turn-router.test.ts. Here the notice counts as already
@@ -3549,5 +3550,132 @@ describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
     expect(fetchFn).not.toHaveBeenCalled();
     expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done']);
     expect((await rowsOf('ops.alert')).map((x) => x.dedupe_key)).toEqual(['sandboxinstruct:wk_t1']);
+  });
+});
+
+// 2026-11-10: a handler's error text goes to outbox.last_error (kept until a
+// retry), to the dead-letter ops alert and to the ops copilot. A drizzle query
+// error carries the bound values (phones, names, reply text) in its message and
+// the Postgres `detail` in its cause; any other error can carry a phone or an
+// email. The worker stores the scrubbed text, and the ops.alert handler scrubs
+// again for rows stored by an older build.
+describe('drainOnce — stored error text holds no customer data (2026-11-10)', { retry: 0 }, () => {
+  const FAKES = ['+15551234567', '15551234567', 'Ravi Traders', 'jane@example.com', 'already exists'];
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  function queryError() {
+    const cause = Object.assign(new Error('duplicate key value violates unique constraint "customers_phone_key"'), {
+      code: '23505',
+      detail: 'Key (phone)=(+15551234567) already exists.',
+      constraint: 'customers_phone_key',
+      table: 'customers',
+    });
+    return new DrizzleQueryError(
+      'insert into "customers" ("phone", "name", "email") values ($1, $2, $3)',
+      ['+15551234567', 'Ravi Traders', 'jane@example.com'],
+      cause,
+    );
+  }
+  type Row = { status: string; last_error: string };
+  async function textRow(): Promise<Row> {
+    const r = (await db.execute(
+      sql`SELECT status, last_error FROM outbox WHERE kind = 'whatsapp.text' ORDER BY id LIMIT 1`,
+    )) as unknown as { rows: Row[] };
+    return r.rows[0];
+  }
+  async function alertMessages(): Promise<string[]> {
+    const r = (await db.execute(sql`SELECT payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as {
+      rows: Array<{ payload: { message: string } }>;
+    };
+    return r.rows.map((x) => x.payload.message);
+  }
+  const clean = (text: string) => {
+    for (const v of FAKES) expect(text).not.toContain(v);
+    expect(text).not.toMatch(/params: (?!<redacted>)/);
+  };
+
+  it('a query error leaves last_error and the dead alert without params or detail, with the SQLSTATE', async () => {
+    sendText.mockRejectedValueOnce(queryError());
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    await db.execute(sql`UPDATE outbox SET attempts = 7 WHERE kind = 'whatsapp.text'`);
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ dead: 1 });
+    const row = await textRow();
+    expect(row.status).toBe('dead');
+    clean(row.last_error);
+    expect(row.last_error).toContain('db query failed [23505]');
+    expect(row.last_error).toContain('constraint=customers_phone_key');
+    const [alert] = await alertMessages();
+    clean(alert);
+    expect(alert).toContain('db query failed [23505]');
+  });
+
+  it('a plain Error leaves a scrubbed last_error', async () => {
+    sendText.mockRejectedValueOnce(new Error('boom 15551234567 jane@example.com'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ failed: 1 });
+    expect((await textRow()).last_error).toBe('boom …4567 <email>');
+  });
+
+  it('a Graph error keeps its 6-digit code readable for permanentCodeInError (the copilot reader)', async () => {
+    sendText.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { message: '(#131047) x', code: 131047 } })),
+    );
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    const stored = (await textRow()).last_error;
+    expect(stored).toContain('(#131047)');
+    expect(stored).toContain('"code":131047');
+  });
+
+  it('the ops.alert handler scrubs an old raw query-error text before the WhatsApp send', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
+    await outbox.enqueue('ops.alert', {
+      message: 'DEAD after 8 attempts: Failed query: select * from "customers" where "phone" = $1\nparams: +15551234567,Ravi Traders',
+    });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const text = String(sendText.mock.calls[0][1]);
+    expect(text.startsWith(OPS_ALERT_TEXT_PREFIX)).toBe(true);
+    clean(text);
+    expect(text).toContain('params: <redacted>');
+  });
+
+  // Review 2026-11-10 (R1-F1): the handler must not run the full scrub() on
+  // the alert text. Its 7-digit mask would turn a row id of 1,000,000 or more
+  // and an all-digit short SHA into `…4567` on the ops phone.
+  it('the ops.alert handler keeps a 7-digit row id and an all-digit short SHA readable', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
+    await outbox.enqueue('ops.alert', { message: 'DEAD outbox #1234567 (whatsapp.text) on build 7654321: boom' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const text = String(sendText.mock.calls[0][1]);
+    expect(text).toContain('outbox #1234567');
+    expect(text).toContain('build 7654321');
+  });
+
+  it('mock.settle logs a failed recipient template through the scrubbing logger, never the raw error', async () => {
+    await store.saveTransfer(transferFixture());
+    await store.recordInboundNow('acme', '15551230000');
+    sendTemplate.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp template send failed', 400, JSON.stringify({ error: { message: 'bad 919876543210' } })),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).toHaveBeenCalled();
+    const lines = warn.mock.calls.map((c) => c.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    const settle = lines.filter((l) => l.includes('mock.settle'));
+    expect(settle).toHaveLength(1);
+    expect(settle[0]).not.toContain('919876543210');
+    expect(JSON.parse(settle[0])).toMatchObject({ level: 'warn', scope: 'mock.settle.recipient_template' });
+    for (const call of warn.mock.calls) for (const a of call) expect(a).not.toBeInstanceOf(Error);
   });
 });
