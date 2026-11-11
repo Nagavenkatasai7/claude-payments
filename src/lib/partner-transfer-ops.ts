@@ -101,7 +101,7 @@ export function resendEligibility(t: Pick<Transfer, 'status' | 'environment' | '
 
 // ── Issue refund ────────────────────────────────────────────────────────────
 
-/** Fix pack 5 T15 (P15): the page mirror's view of refundWithoutCharge. */
+/** Fix pack 5 T15 (P15): the page mirror's view of collectedOnRealMoneyFor (funding-class.ts). */
 export interface IssueRefundOptions {
   collectedOnRealMoney?: boolean;
 }
@@ -116,7 +116,8 @@ export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus'
  *  - sandbox: a test transfer moved no money.
  * The core's money rules are mirrored here so the page hides the button too.
  * Fix pack 5 T15 (P15, M3): `collectedOnRealMoney` (the caller computes
- * `!t.fundingRef && refundWithoutCharge(t, await realMoneyFor(db, t))`) lets a
+ * `!t.fundingRef && await collectedOnRealMoneyView(db, t)`: not routed, and the settle went to
+ * the rail after go-live, review round 1 RC2 and RF1) lets a
  * real-money partner-collected row with no fundingRef through, as the core does.
  */
 export function issueRefundEligibility(

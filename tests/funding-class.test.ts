@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { fundingClassOf, fundingModeMatches } from '@/lib/funding-class';
+import { fundingClassOf, fundingModeMatches, isRoutedRow, refundWithoutCharge } from '@/lib/funding-class';
 import type { FundingModeRecord } from '@/lib/live-controls';
 import type { Transfer } from '@/lib/types';
 
@@ -81,5 +81,25 @@ describe('fundingModeMatches (T14)', () => {
   });
   it('a missing record mismatches every non-pull class', () => {
     for (const c of ['stripe', 'partner_collected', 'mock', 'sandbox'] as const) expect(fundingModeMatches(c, undefined)).toBe(false);
+  });
+});
+
+// Review round 1 RF1: on a ROUTED row the owner collected the money but the
+// settlement partner's rail would get the reverse, so the class is refused there
+// until the owner decides who returns the money.
+describe('refundWithoutCharge (T15, review round 1 RF1)', { retry: 0 }, () => {
+  const pc = (over: Partial<Transfer> = {}) =>
+    ({ environment: 'live', fundingMethod: 'bank_transfer', partnerId: 'acme', ...over }) as Transfer;
+  it('true only for a real-money partner-collected row that is not routed', () => {
+    expect(refundWithoutCharge(pc(), true)).toBe(true);
+    expect(refundWithoutCharge(pc(), false)).toBe(false);
+    expect(refundWithoutCharge(pc({ fundingRef: 'mockfund-x' }), true)).toBe(false);
+  });
+  it('a routed row (settlementPartnerId set and not the owner) is refused; settlementPartnerId = the owner is not routed', () => {
+    expect(refundWithoutCharge(pc({ settlementPartnerId: 'railp' }), true)).toBe(false);
+    expect(refundWithoutCharge(pc({ settlementPartnerId: 'acme' }), true)).toBe(true);
+    expect(isRoutedRow(pc({ settlementPartnerId: 'railp' }))).toBe(true);
+    expect(isRoutedRow(pc({ settlementPartnerId: 'acme' }))).toBe(false);
+    expect(isRoutedRow(pc())).toBe(false);
   });
 });

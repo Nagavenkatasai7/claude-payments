@@ -317,7 +317,7 @@ describe('pack 5 documents say what the code does', () => {
     const docs = [SPEC, ROLLBACK, CLAUDE, WEBHOOKS].join('\n');
     const reasons: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
     for (const r of reasons) expect(heldStuckDedupeKey(r, 'x1')).toBe(`${r}:stuck:x1`);
-    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:'];
+    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:'];
     for (const k of keys) {
       expect(src, k).toContain(k);
       expect(docs, k).toContain(`\`${k}`);
@@ -336,7 +336,8 @@ describe('pack 5 documents say what the code does', () => {
     expectQuotedInSrc(stuck!, src, 'stuck');
     // The other pack 5 alerts (not compliance alerts) have their rows in section 14.
     const other = section(SPEC, '## 14.').split('\n').filter((l) => l.startsWith('| `'));
-    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:']) {
+    // Review round 1 (RC2, RF1): the two funding.refund alerts.
+    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:']) {
       const row = other.find((l) => l.startsWith(`| \`${k}`));
       expect(row, k).toBeDefined();
       expectQuotedInSrc(row!, src, k);

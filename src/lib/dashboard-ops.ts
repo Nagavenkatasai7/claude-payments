@@ -15,8 +15,8 @@ import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
 import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
-import { realMoneyFor, realMoneyRail } from './live-gate';
-import { refundWithoutCharge } from './funding-class';
+import { realMoneyRail } from './live-gate';
+import { collectedOnRealMoneyFor } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -603,8 +603,11 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     // Fix pack 5 (P15, M3): a real-money partner-collected row has no fundingRef
     // (the partner holds the money); its refund is the signed reverse of P15
     // step 5. realMoneyFor is read only when fundingRef is null (no new read on
-    // a charged row).
-    if (!transfer.fundingRef && !refundWithoutCharge(transfer, await realMoneyFor(tx, transfer))) {
+    // a charged row). Review round 1: never a routed row (RF1), and only when
+    // this row's settle instruction went to its rail after go-live (RC2; a
+    // demo-era row is refused as before pack 5). A failed read throws.
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
+    if (!transfer.fundingRef && !collectedOnRealMoney) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
     }
     // An async debit that is still pending, failed, or was returned is not money we hold.
@@ -620,9 +623,12 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Review round 1 RC3: the issue-time real-money decision rides the payload,
+    // so a rail that is no longer real money at the drain never sends this
+    // refund down the mock path. Absent for every other row (unchanged payload).
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}` },
     );
     if (!fresh) {
@@ -659,9 +665,12 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
+    // Review round 1 RC3: carry the real-money decision (as issueRefund). No
+    // admission here: a row that fails it is closed by the worker (RC2, RF1).
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}` },
     );
     if (audit) {
@@ -729,9 +738,11 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
+    // Review round 1 RC3: carry the real-money decision (as issueRefund).
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}:retry:${Date.now()}` },
     );
     if (audit) {

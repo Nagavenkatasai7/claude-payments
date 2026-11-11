@@ -217,3 +217,26 @@ describe('createRailMessageRepo.listForTransfer', () => {
     expect(own[0].routed).toBe(false);
   });
 });
+
+// Review round 1 RC2: the refund path's one lookup. Owner-scoped, this rail
+// partner only, outbound 'settle' only, the newest time, nothing else.
+describe('createRailMessageRepo.lastSettleOutAt (review round 1 RC2)', () => {
+  it('the newest outbound settle for (owner, transfer, rail partner); null when none; other kinds, directions, rails and owners do not count', async () => {
+    const repo = createRailMessageRepo(db, provider);
+    expect(await repo.lastSettleOutAt('pa', 't1', 'pa')).toBeNull();
+    const base = { partnerId: 'pa', railPartnerId: 'pa', transferId: 't1', direction: RAIL_OUT, kind: 'settle' as const, body: BODY, signatureHeader: HEADER };
+    await repo.append(base);
+    await repo.append({ ...base, kind: 'reverse' });
+    await repo.append({ ...base, direction: RAIL_IN, kind: 'callback' });
+    await repo.append({ ...base, railPartnerId: 'pb' });
+    await repo.append({ ...base, partnerId: 'pb' });
+    const rows = (await db.execute(sql`SELECT created_at FROM rail_messages WHERE partner_id = 'pa' AND rail_partner_id = 'pa' AND kind = 'settle' AND direction = 1`)) as unknown as { rows: Array<{ created_at: string | Date }> };
+    const expected = Math.max(...rows.rows.map((r) => new Date(r.created_at).getTime()));
+    const got = await repo.lastSettleOutAt('pa', 't1', 'pa');
+    expect(got).toBeInstanceOf(Date);
+    expect(got!.getTime()).toBe(expected);
+    expect(await repo.lastSettleOutAt('pa', 't2', 'pa')).toBeNull();
+    expect(await repo.lastSettleOutAt('pb', 't1', 'pb')).toBeNull(); // owner pb has a settle only to rail pa
+    expect(await repo.lastSettleOutAt('pa', 't1', 'pb')).not.toBeNull();
+  });
+});

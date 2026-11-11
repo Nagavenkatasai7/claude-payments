@@ -3,10 +3,11 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest, seedRealMoneyRail, seedOriginatorForTest } from './helpers-live';
+import { certifyPartnerForTest, seedRealMoneyRail, seedOriginatorForTest, seedSettleRecordForTest } from './helpers-live';
 import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { railBodySha256 } from '@/db/repos/rail-message-repo';
+import { issueRefund, approveRefund } from '@/lib/dashboard-ops';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { ctx } from '@/lib/crypto-context';
 import { decryptField, defaultProvider } from '@/lib/field-crypto';
@@ -113,6 +114,19 @@ async function dedupeKeys(kind: string): Promise<string[]> {
   const r = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as { rows: Array<{ dedupe_key: string }> };
   return r.rows.map((x) => x.dedupe_key);
 }
+// Review round 1 RC2: the settle record of this row, for a rail partner, agoMs before now.
+const seedSettle = (o: { id?: string; owner?: string; rail?: string; agoMs?: number } = {}) =>
+  seedSettleRecordForTest(db, { transferId: o.id ?? ID, partnerId: o.owner ?? 'acme', railPartnerId: o.rail ?? 'acme', agoMs: o.agoMs });
+async function reverseRecords(): Promise<RecRow[]> {
+  return (await records()).filter((r) => r.kind === 'reverse');
+}
+async function alertKeys(): Promise<string[]> {
+  return dedupeKeys('ops.alert');
+}
+async function alertMessages(): Promise<string[]> {
+  const r = (await db.execute(sql`SELECT payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as { rows: Array<{ payload: { message: string } }> };
+  return r.rows.map((x) => x.payload.message);
+}
 const enqueueRefund = (key = `refund:${ID}`) => outbox.enqueue('funding.refund', { transferId: ID }, { dedupeKey: key });
 const ok = (providerRef = 'rev-1') => new Response(JSON.stringify({ providerRef }), { status: 200 });
 
@@ -140,6 +154,7 @@ beforeEach(async () => {
 describe('funding.refund on a real-money rail: partner-collected row (P15 step 5)', { retry: 0 }, () => {
   it("one signed POST to the stored URL: action 'reverse', reference 'reverse-<id>', funding partner_collected/null, partner_id = rail; completed with the providerRef; refundmsg queued; the mock provider never called", async () => {
     await store.saveTransfer(transferFixture());
+    await seedSettle();
     await enqueueRefund();
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -164,11 +179,12 @@ describe('funding.refund on a real-money rail: partner-collected row (P15 step 5
 
   it('the reverse is recorded before the POST: the sealed body equals the POSTed bytes', async () => {
     await store.saveTransfer(transferFixture());
+    await seedSettle();
     await enqueueRefund();
     await drainOnce(deps(), 'w1');
-    expect(rowsAtFetch).toEqual([1]);
+    expect(rowsAtFetch).toEqual([2]); // the seeded settle + the reverse
     const [, init] = fetchFn.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }];
-    const [r] = await records();
+    const [r] = await reverseRecords();
     expect(r).toMatchObject({ partner_id: 'acme', rail_partner_id: 'acme', transfer_id: ID, kind: 'reverse' });
     expect(Number(r.direction)).toBe(1);
     expect(open(r)).toBe(init.body);
@@ -176,28 +192,40 @@ describe('funding.refund on a real-money rail: partner-collected row (P15 step 5
     expect(r.signature_header).toBe(init.headers['x-smartremit-signature']);
   });
 
-  it("routed: the rail partner's URL and secret, partner_id = rail; the record's partner_id = the owner", async () => {
+  it('routed (review round 1 RF1): NO reverse to the settlement rail, no record, refund stays pending, no refundmsg, ONE refundrouted:<id> alert (ids only); a re-drain adds nothing', async () => {
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp');
     await seedRealMoneyRail(db, 'railp', { url: 'https://railp.example/settle', signingSecret: 'rail-secret' });
     // The owner's own rail is a mock: the rail that matters is the settlement partner's.
     await createIntegrationsRepo(db).saveIntegrations('acme', { kyc: {}, whatsapp: {}, payment: { providerType: 'mock' } });
     await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    await seedSettle({ rail: 'railp' });
     await enqueueRefund();
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await reverseRecords()).toEqual([]);
+    expect(providerRefund).not.toHaveBeenCalled();
+    const t = (await store.getTransfer(ID))!;
+    expect(t.refundStatus).toBe('pending');
+    expect(t.refundRef).toBeUndefined();
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect(await alertKeys()).toEqual([`refundrouted:${ID}`]);
+    const [msg] = await alertMessages();
+    expect(msg).toContain(ID);
+    expect(msg).toContain('a person must arrange the return with the owner partner');
+    for (const leak of [ACCOUNT, 'Anita', '15551230000', '200']) expect(msg).not.toContain(leak);
+    await enqueueRefund(`refund:${ID}:retry:1`);
     await drainOnce(deps(), 'w1');
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('https://railp.example/settle');
-    expect(JSON.parse(String(init.body))).toMatchObject({ partner_id: 'railp', funding: { method: 'partner_collected' } });
-    const [r] = await records();
-    expect(r).toMatchObject({ partner_id: 'acme', rail_partner_id: 'railp', kind: 'reverse' });
-    expect((await store.getTransfer(ID))!.refundStatus).toBe('completed');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await alertKeys()).toEqual([`refundrouted:${ID}`]);
+    expect((await store.getTransfer(ID))!.refundStatus).toBe('pending');
   });
 
   it('a non-2xx reverse: refund stays pending, the row fails (default policy) and retries; dead at MAX_ATTEMPTS with dead:<id>', async () => {
     fetchFn.mockReset();
     fetchFn.mockImplementation(async () => new Response('no', { status: 500 }));
     await store.saveTransfer(transferFixture());
+    await seedSettle();
     await enqueueRefund();
     expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
     expect(await refundRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'Reverse instruction rejected (500)' });
@@ -214,10 +242,11 @@ describe('funding.refund on a real-money rail: partner-collected row (P15 step 5
   it('no signing secret: no fetch, no record, UnsignedRailError in last_error, refund pending', async () => {
     await seedRealMoneyRail(db, 'acme', { signingSecret: null });
     await store.saveTransfer(transferFixture());
+    await seedSettle();
     await enqueueRefund();
     expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
     expect(fetchFn).not.toHaveBeenCalled();
-    expect(await countRecords()).toBe(0);
+    expect(await reverseRecords()).toEqual([]);
     expect(await refundRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'no_signing_secret' });
     expect((await store.getTransfer(ID))!.refundStatus).toBe('pending');
     expect(providerRefund).not.toHaveBeenCalled();
@@ -312,6 +341,7 @@ describe('funding.refund: no PII in logs or last_error', { retry: 0 }, () => {
     fetchFn.mockReset();
     fetchFn.mockImplementation(async () => new Response('no', { status: 502 }));
     await store.saveTransfer(transferFixture());
+    await seedSettle();
     await enqueueRefund();
     await drainOnce(deps(), 'w1');
     // and a mock-class nofunds close on a second row
@@ -325,5 +355,141 @@ describe('funding.refund: no PII in logs or last_error', { retry: 0 }, () => {
       expect(logged).not.toContain(leak);
       expect(errs).not.toContain(leak);
     }
+  });
+});
+
+// Review round 1 RC2: a row settled in the demo era (simulator rail, or a settle
+// record older than the rail partner's go-live) and refunded after the partner
+// went live gets NO reverse: it closes as nofunds-<id> with one
+// refundnosettle:<id> alert and no customer message.
+describe('funding.refund: a partner-collected reverse only for a settle sent to this rail after go-live (review round 1 RC2)', { retry: 0 }, () => {
+  async function simulatorRail(): Promise<void> {
+    await createIntegrationsRepo(db).saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sim' }, webhookSecret: 'simw' },
+    });
+  }
+  async function expectClosedNoSettle(): Promise<void> {
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await reverseRecords()).toEqual([]);
+    expect(providerRefund).not.toHaveBeenCalled();
+    const t = (await store.getTransfer(ID))!;
+    expect(t.refundStatus).toBe('completed');
+    expect(t.refundRef).toBe(`nofunds-${ID}`);
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect(await alertKeys()).toEqual([`refundnosettle:${ID}`]);
+    const [msg] = await alertMessages();
+    expect(msg).toContain(ID);
+    expect(msg).toContain('no settle instruction went to this rail after it went live');
+    expect(msg).toContain('the partner must return the money outside SmartRemit');
+    for (const leak of [ACCOUNT, 'Anita', '15551230000', '200']) expect(msg).not.toContain(leak);
+    const warns = logWarnSpy.mock.calls.filter((c) => c[0] === 'outbox.refund-nosettle');
+    expect(warns).toHaveLength(1);
+    expect(warns[0][2]).toEqual({ transferId: ID });
+  }
+
+  it('settled on a simulator rail (no settle record), the rail becomes real money, the customer refund is approved: no POST, nofunds-<id>, one refundnosettle:<id>', async () => {
+    await simulatorRail();
+    await store.saveTransfer(transferFixture({ status: 'delivered', refundStatus: 'requested' }));
+    await seedRealMoneyRail(db, 'acme');
+    await approveRefund(db, ID);
+    expect((await drainOnce(deps(), 'w1')).processed).toBeGreaterThanOrEqual(1);
+    await expectClosedNoSettle();
+  });
+
+  it('a settle record OLDER than the go-live (the simulator era): no POST, nofunds-<id>, one refundnosettle:<id>', async () => {
+    await store.saveTransfer(transferFixture());
+    await seedSettle({ agoMs: 2 * 3_600_000 });
+    await enqueueRefund();
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    await expectClosedNoSettle();
+  });
+
+  it("a settle record for ANOTHER rail partner does not count", async () => {
+    await store.saveTransfer(transferFixture());
+    await seedSettle({ rail: 'default' });
+    await enqueueRefund();
+    await drainOnce(deps(), 'w1');
+    await expectClosedNoSettle();
+  });
+
+  it('issueRefund refuses the demo-era row (no settle record after go-live), as before pack 5, and enqueues nothing', async () => {
+    await store.saveTransfer(transferFixture({ refundStatus: 'none' }));
+    await expect(issueRefund(db, ID)).rejects.toThrow('never charged');
+    await seedSettle({ agoMs: 2 * 3_600_000 });
+    await expect(issueRefund(db, ID)).rejects.toThrow('never charged');
+    expect(await dedupeKeys('funding.refund')).toEqual([]);
+  });
+
+  it('positive: a settle recorded after go-live; issueRefund admits it and carries collectedOnRealMoney; ONE signed reverse', async () => {
+    await store.saveTransfer(transferFixture({ refundStatus: 'none' }));
+    await seedSettle();
+    await issueRefund(db, ID);
+    const r = (await db.execute(sql`SELECT payload FROM outbox WHERE kind = 'funding.refund'`)) as unknown as { rows: Array<{ payload: unknown }> };
+    expect(r.rows.map((x) => x.payload)).toEqual([{ transferId: ID, collectedOnRealMoney: true }]);
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(await reverseRecords()).toHaveLength(1);
+    expect((await store.getTransfer(ID))!.refundStatus).toBe('completed');
+    expect(await alertKeys()).toEqual([]);
+  });
+
+  it('a failed settle-record read throws (retry), never falls through: no POST, refund pending', async () => {
+    await store.saveTransfer(transferFixture());
+    await seedSettle();
+    await enqueueRefund();
+    await db.execute(sql`ALTER TABLE rail_messages RENAME TO rail_messages_gone`);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    await db.execute(sql`ALTER TABLE rail_messages_gone RENAME TO rail_messages`);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await store.getTransfer(ID))!.refundStatus).toBe('pending');
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect(await alertKeys()).toEqual([]);
+  });
+});
+
+// Review round 1 RC3: the issue-time real-money decision rides the payload; a
+// rail that is no longer real money at the drain never sends it down the mock.
+describe('funding.refund: collectedOnRealMoney in the payload (review round 1 RC3)', { retry: 0 }, () => {
+  it('issueRefund on a real-money partner-collected row, then the rail switches to simulator: the row fails, never mockrefund-, refund pending, no refundmsg', async () => {
+    await store.saveTransfer(transferFixture({ refundStatus: 'none' }));
+    await seedSettle();
+    await issueRefund(db, ID);
+    await createIntegrationsRepo(db).saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sim' }, webhookSecret: 'simw' },
+    });
+    expect((await drainOnce(deps({ injectProvider: false }), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const t = (await store.getTransfer(ID))!;
+    expect(t.refundRef ?? '').not.toBe(`mockrefund-${ID}`);
+    expect(t.refundStatus).toBe('pending');
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect((await refundRow()).last_error).toBe('refund_collected_on_real_money_rail_not_real_money');
+  });
+
+  it('a payload without the field on a simulator rail keeps today: mockrefund-<id> with its refundmsg', async () => {
+    await createIntegrationsRepo(db).saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sim' }, webhookSecret: 'simw' },
+    });
+    await store.saveTransfer(transferFixture());
+    await enqueueRefund();
+    expect((await drainOnce(deps({ injectProvider: false }), 'w1')).processed).toBe(1);
+    expect((await store.getTransfer(ID))!.refundRef).toBe(`mockrefund-${ID}`);
+    expect(await dedupeKeys('whatsapp.text')).toEqual([`refundmsg:${ID}`]);
+  });
+});
+
+// Review round 1 RF1: issueRefund refuses a routed partner-collected row.
+describe('issueRefund: a routed partner-collected row is refused (review round 1 RF1)', { retry: 0 }, () => {
+  it('routed to a real-money rail with a settle record after go-live: refused, nothing enqueued', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await seedRealMoneyRail(db, 'railp', { url: 'https://railp.example/settle', signingSecret: 'rail-secret' });
+    await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp', refundStatus: 'none' }));
+    await seedSettle({ rail: 'railp' });
+    await expect(issueRefund(db, ID)).rejects.toThrow('never charged');
+    expect(await dedupeKeys('funding.refund')).toEqual([]);
   });
 });

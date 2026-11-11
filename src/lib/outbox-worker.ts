@@ -28,7 +28,7 @@ import {
 } from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
 import { fundingGateRefusal, travelRuleBlockIncomplete, travelRuleBlocksInstruct, travelRuleFor } from '@/lib/instruct-gates';
-import { fundingClassOf } from '@/lib/funding-class';
+import { fundingClassOf, isRoutedRow, settleReachedLiveRail } from '@/lib/funding-class';
 import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
@@ -1255,6 +1255,16 @@ async function handle(
         const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
         const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
         const cls = fundingClassOf(transfer);
+        // Review round 1 RC3: issueRefund / approveRefund / retryRefund decided
+        // this row was collected on real money (collectedOnRealMoneyFor) and
+        // said so in the payload. A rail that is no longer real money now
+        // must never send it down the mock path (a "refunded" message while the
+        // partner still holds the money): throw (default policy: retry, dead at
+        // 8 + dead:<id>); the refund stays pending. A payload without the field
+        // is unchanged.
+        if (p.collectedOnRealMoney === true && !realMoney) {
+          throw new Error('refund_collected_on_real_money_rail_not_real_money');
+        }
         if (isPartnerPulled(transfer.fundingMethod)) {
           // NON-CUSTODIAL reverse: SmartRemit captured nothing on a partner-pulled
           // transfer (ach_pull / bank_pull), so there is no funds-provider charge to
@@ -1269,6 +1279,52 @@ async function handle(
           // money; it returns it on a signed, recorded reverse
           // (funding.method 'partner_collected'). Only approve/retry reach
           // here (dashboard-ops.ts approveRefund / retryRefund via issueRefund).
+          if (isRoutedRow(transfer)) {
+            // Review round 1 RF1: the OWNER collected the money, but the reverse
+            // would go to the settlement partner's rail. Until the owner decides
+            // who returns it: no reverse, no record, no customer message; the
+            // refund stays pending and ONE refundrouted:<id> alert asks a person
+            // to arrange it. This handler has no non-retryable path, so the row
+            // completes (done) without completing the refund.
+            logWarn('outbox.refund-routed', 'partner-collected refund on a routed row; no reverse sent', { transferId });
+            await createOutboxRepo(deps.db).enqueue(
+              'ops.alert',
+              {
+                message:
+                  `⚠️ SmartRemit ops: the refund of transfer ${transferId} (owner partner ${transfer.partnerId}, rail ${railPartnerId}) was NOT sent: ` +
+                  'the owner partner collected the money but another partner settles this transfer, so no reverse was sent to either rail. ' +
+                  'The refund stays pending and the customer was not told; a person must arrange the return with the owner partner.',
+              },
+              { dedupeKey: `refundrouted:${transferId}` },
+            );
+            return;
+          }
+          if (!(await settleReachedLiveRail(deps.db, transfer))) {
+            // Review round 1 RC2: no settle instruction for this row was
+            // recorded for this rail at or after its go-live (a demo-era row).
+            // POST nothing, record nothing, tell the customer nothing; close it
+            // like the mock-class branch below, with ONE refundnosettle:<id>
+            // alert, in one transaction. A failed read threw above.
+            logWarn('outbox.refund-nosettle', 'no settle instruction went to this rail after go-live; refund closed without moving money', { transferId });
+            await deps.db.transaction(async (tx) => {
+              await createTransferRepo(tx).updateRefund(transferId, {
+                refundStatus: 'completed',
+                refundRef: `nofunds-${transferId}`,
+                refundedAt: new Date().toISOString(),
+              });
+              await createOutboxRepo(tx).enqueue(
+                'ops.alert',
+                {
+                  message:
+                    `⚠️ SmartRemit ops: the refund of transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) was closed as nofunds-${transferId} without sending anything: ` +
+                    'no settle instruction went to this rail after it went live, so no reverse was sent and the customer was not told. ' +
+                    'If this transfer was paid out with real money, the partner must return the money outside SmartRemit.',
+                },
+                { dedupeKey: `refundnosettle:${transferId}` },
+              );
+            });
+            return;
+          }
           const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
           if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
           refundRef = await sendSignedReverse(deps, full, railPartnerId, integrations);

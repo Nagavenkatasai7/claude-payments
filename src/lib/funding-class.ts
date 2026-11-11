@@ -3,9 +3,15 @@ import { selectFundingProvider } from './providers/funding-provider';
 import type { FundingModeRecord } from './live-controls';
 import type { PartnerFundingConfig } from './partner-integrations';
 import type { Transfer } from './types';
+import type { DbOrTx } from '@/db/client';
+import { createRailMessageRepo } from '@/db/repos/rail-message-repo';
+import { railGoLiveAt, railPartnerOf, realMoneyFor } from './live-gate';
+import { logWarn } from './log';
 
 // funding-class (fix pack 5 T12, P12): THE answer to "how was this sender's
 // money collected", pure, from the ledger row only.
+// (Review round 1: settleReachedLiveRail, collectedOnRealMoneyFor and
+// collectedOnRealMoneyView at the end read the store; everything else is pure.)
 //
 // Order (first match wins):
 //   1. environment 'test'                          -> 'sandbox'
@@ -72,15 +78,83 @@ export function payFundingRefusal(
 }
 
 /**
+ * Review round 1 RF1: a ROUTED row: settlementPartnerId set and not the owner.
+ * The owner collected the sender's money but another partner's rail settles
+ * it. Pure.
+ */
+export function isRoutedRow(t: Pick<Transfer, 'partnerId' | 'settlementPartnerId'>): boolean {
+  return !!t.settlementPartnerId && t.settlementPartnerId !== t.partnerId;
+}
+
+/**
  * Fix pack 5 T15 (P15, M3): may this row be refunded although it carries no
  * fundingRef? Only a real-money PARTNER-COLLECTED row: the partner holds the
  * sender's money, so its refund is the signed reverse of P15 step 5. Pure; the
  * caller decides `realMoney` (realMoneyFor) and reads it only when the row has
  * no fundingRef.
+ * Review round 1 RF1: never on a ROUTED row (isRoutedRow). The owner collected
+ * the money, but the reverse would go to the settlement partner's rail. Who
+ * returns it there is an owner question; until it is answered the class is
+ * refused there (and the worker sends no reverse for it).
+ * Review round 1 RC2: true here is necessary, not sufficient: the stored
+ * admission is collectedOnRealMoneyFor (the settle instruction went to this
+ * rail after its go-live).
  */
 export function refundWithoutCharge(
-  t: Pick<Transfer, 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef'>,
+  t: Pick<Transfer, 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId'>,
   realMoney: boolean,
 ): boolean {
+  if (isRoutedRow(t)) return false;
   return realMoney && fundingClassOf(t) === 'partner_collected';
+}
+
+/**
+ * Review round 1 RC2: did this row's settle instruction go to its rail partner
+ * (railPartnerOf) at or after that partner went live? (a) the newest outbound
+ * 'settle' record in rail_messages for this transfer and this rail partner
+ * (ids only: no body is read or decrypted), and (b) its created_at is not older
+ * than railGoLiveAt. A row settled in the demo era (a simulator rail, or before
+ * pack 5 recorded anything) answers false. A failed read THROWS (never false,
+ * never true).
+ */
+export async function settleReachedLiveRail(db: DbOrTx, t: Pick<Transfer, 'id' | 'partnerId' | 'settlementPartnerId'>): Promise<boolean> {
+  const rail = railPartnerOf(t);
+  const settledAt = await createRailMessageRepo(db).lastSettleOutAt(t.partnerId, t.id, rail);
+  if (settledAt === null) return false;
+  const liveAt = await railGoLiveAt(db, rail);
+  return liveAt !== null && settledAt.getTime() >= liveAt.getTime();
+}
+
+type RefundAdmissionRow = Pick<
+  Transfer,
+  'id' | 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef' | 'partnerId' | 'settlementPartnerId'
+>;
+
+/**
+ * Review round 1 RC2/RC3/RF1: THE admission of a refund with no charge, for
+ * issueRefund (and the flag approveRefund / retryRefund carry in the
+ * funding.refund payload): no fundingRef, refundWithoutCharge on the rail's
+ * current real-money read (not routed, class partner_collected), and
+ * settleReachedLiveRail. The rail type is read only when fundingRef is null;
+ * the settle record and the go-live only for such a real-money row. A failed
+ * settle or go-live read THROWS.
+ */
+export async function collectedOnRealMoneyFor(db: DbOrTx, t: RefundAdmissionRow): Promise<boolean> {
+  if (t.fundingRef) return false;
+  if (!refundWithoutCharge(t, await realMoneyFor(db, t))) return false;
+  return settleReachedLiveRail(db, t);
+}
+
+/**
+ * The page mirrors' view of collectedOnRealMoneyFor (show or hide Issue
+ * refund): a failed read hides the button (logged by the error name, ids
+ * only); issueRefund re-checks inside its transaction.
+ */
+export async function collectedOnRealMoneyView(db: DbOrTx, t: RefundAdmissionRow): Promise<boolean> {
+  try {
+    return await collectedOnRealMoneyFor(db, t);
+  } catch (err) {
+    logWarn('funding-class.refund-admission', err instanceof Error ? err.name : 'error', { transferId: t.id });
+    return false;
+  }
 }

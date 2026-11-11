@@ -10,6 +10,8 @@
 // transfer routed to an http partner is real money; an http owner routed to a
 // simulator partner is not.
 
+import { and, eq, min } from 'drizzle-orm';
+import { auditEvents } from '@/db/schema';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import type { DbOrTx } from '@/db/client';
@@ -107,6 +109,42 @@ export function hasStandingCertification(lc: Pick<LiveControls, 'certification'>
   const c = lc?.certification;
   if (!c) return false;
   return c.revokedAt === undefined || Date.parse(c.revokedAt) < Date.parse(c.certifiedAt);
+}
+
+/** The action of the audit row certifyLiveAction writes (writeCertification, live-controls-write.ts). */
+export const LIVE_CERTIFY_AUDIT_ACTION = 'partner.live.certify';
+
+/**
+ * Review round 1 RC2: when did this rail partner go live? The EARLIEST
+ * certification the stored data gives: the oldest 'partner.live.certify' audit
+ * row for the partner (written in the certification's own transaction) or the
+ * current live_controls.certification.certifiedAt, whichever is older. A
+ * re-certification replaces certifiedAt, so the audit row keeps the first one.
+ * A partner certified without an audit row (a direct write) has only its
+ * current certifiedAt. null = never certified (or no row). Reads only: no
+ * behaviour of the live gates changes. A failed read THROWS.
+ */
+export async function railGoLiveAt(db: DbOrTx, railPartnerId: PartnerId): Promise<Date | null> {
+  const partner = await createPartnerRepo(db).getPartner(railPartnerId);
+  const times: number[] = [];
+  const certifiedAt = Date.parse(partner?.liveControls?.certification?.certifiedAt ?? '');
+  if (!Number.isNaN(certifiedAt)) times.push(certifiedAt);
+  const rows = await db
+    .select({ first: min(auditEvents.at) })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.partnerId, railPartnerId),
+        eq(auditEvents.subjectId, railPartnerId),
+        eq(auditEvents.action, LIVE_CERTIFY_AUDIT_ACTION),
+      ),
+    );
+  const first = rows[0]?.first;
+  if (first !== null && first !== undefined) {
+    const at = new Date(first).getTime();
+    if (!Number.isNaN(at)) times.push(at);
+  }
+  return times.length === 0 ? null : new Date(Math.min(...times));
 }
 
 /** Not real money -> null; owner 'default' -> default_on_live_rail; uncertified rail -> live_not_certified. Pure. */
