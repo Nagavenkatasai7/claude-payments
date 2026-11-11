@@ -859,8 +859,11 @@ async function mintLocked(
   // authority): only a valid one is stored, or an invalid one that matches a
   // scam pattern (keptPurposeDetail, security review L2: the bot sends one on
   // when purpose.detect is off). A scam-pattern reason holds the
-  // transfer, cleared → flagged with the generic reason, never a downgrade and
-  // never touching blocked (applyPurposeHold). OWNER DECISION 2026-10-08: this
+  // transfer: a cleared or flagged verdict becomes flagged with the generic
+  // reason added once (a row already flagged for amount, velocity or EDD keeps
+  // its reasons and gains this one, so it is no longer partner-releasable: fix
+  // pack 6 P15), never a downgrade and never touching blocked
+  // (applyPurposeHold). OWNER DECISION 2026-10-08: this
   // hold applies to EVERY partner, the default (demo) tenant and simulator
   // rails included (unlike the optional AML hold above), so the owner can test it.
   const keptPurpose = input.purposeDetail ? keptPurposeDetail(input.purposeDetail) : undefined;

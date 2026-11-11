@@ -6,6 +6,7 @@ import {
   amlHoldHit,
   applyAmlHold,
   applyPurposeHold,
+  addHoldReason,
 } from '@/lib/aml-hold';
 import { AML_DEFAULTS, type SenderAmlStats } from '@/lib/aml-rules';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -101,11 +102,15 @@ describe('applyAmlHold (cleared → flagged is the ONLY change)', { retry: 0 }, 
     expect(applyAmlHold(v, null)).toBe(v);
   });
 
-  it('a flagged or blocked verdict is never touched, hit or not', () => {
+  it('a flagged verdict gains the reason once; a blocked verdict is never touched', () => {
     const flagged = { complianceStatus: 'flagged' as const, complianceReasons: ['Large transfer amount.'] };
     const blocked = { complianceStatus: 'blocked' as const, complianceReasons: ['Recipient matched watchlist.'] };
-    expect(applyAmlHold(flagged, hit)).toBe(flagged);
+    expect(applyAmlHold(flagged, hit)).toEqual({
+      complianceStatus: 'flagged',
+      complianceReasons: ['Large transfer amount.', AML_HOLD_REASON],
+    });
     expect(applyAmlHold(blocked, hit)).toBe(blocked);
+    expect(applyAmlHold(flagged, null)).toBe(flagged);
   });
 });
 
@@ -118,12 +123,63 @@ describe('applyPurposeHold', { retry: 0 }, () => {
     });
   });
 
-  it('no risk ⇒ unchanged; flagged or blocked are never touched', () => {
+  it('no risk ⇒ unchanged; a flagged verdict gains the reason once; a blocked verdict is never touched', () => {
     const v = { complianceStatus: 'cleared' as const, complianceReasons: [] as string[] };
     const flagged = { complianceStatus: 'flagged' as const, complianceReasons: ['Large transfer amount.'] };
     const blocked = { complianceStatus: 'blocked' as const, complianceReasons: ['Recipient matched watchlist.'] };
     expect(applyPurposeHold(v, undefined)).toBe(v);
-    expect(applyPurposeHold(flagged, 'prize')).toBe(flagged);
+    expect(applyPurposeHold(flagged, undefined)).toBe(flagged);
+    expect(applyPurposeHold(flagged, 'prize')).toEqual({
+      complianceStatus: 'flagged',
+      complianceReasons: ['Large transfer amount.', AML_HOLD_REASON],
+    });
     expect(applyPurposeHold(blocked, 'prize')).toBe(blocked);
+  });
+});
+
+// Fix pack 6 (P15): the ONE hold verdict. A flagged row keeps its own reasons and
+// gains the generic one, so the strictest release authority wins (a scam-pattern
+// row flagged for amount is no longer partner-releasable).
+describe('addHoldReason (pack 6 P15)', { retry: 0 }, () => {
+  it('cleared [] -> flagged [AML_HOLD_REASON]', () => {
+    expect(addHoldReason({ complianceStatus: 'cleared', complianceReasons: [] })).toEqual({
+      complianceStatus: 'flagged',
+      complianceReasons: [AML_HOLD_REASON],
+    });
+  });
+
+  it('flagged keeps its reasons in order and gains the generic reason last', () => {
+    expect(addHoldReason({ complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] })).toEqual({
+      complianceStatus: 'flagged',
+      complianceReasons: ['Large transfer amount.', AML_HOLD_REASON],
+    });
+  });
+
+  it('a verdict already carrying the reason is not given it twice', () => {
+    const v = { complianceStatus: 'flagged' as const, complianceReasons: ['Large transfer amount.', AML_HOLD_REASON] };
+    const out = addHoldReason(v);
+    expect(out.complianceStatus).toBe('flagged');
+    expect(out.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
+    expect(addHoldReason(addHoldReason({ complianceStatus: 'cleared', complianceReasons: [] })).complianceReasons)
+      .toEqual([AML_HOLD_REASON]);
+  });
+
+  it('blocked -> the SAME object', () => {
+    const blocked = { complianceStatus: 'blocked' as const, complianceReasons: ['Recipient matched watchlist.'] };
+    expect(addHoldReason(blocked)).toBe(blocked);
+  });
+
+  it('pure: the input object and its reasons array are not mutated', () => {
+    const reasons = Object.freeze(['Large transfer amount.']) as unknown as string[];
+    const v = Object.freeze({ complianceStatus: 'flagged' as const, complianceReasons: reasons });
+    const out = addHoldReason(v);
+    expect(out).not.toBe(v);
+    expect(v.complianceReasons).toEqual(['Large transfer amount.']);
+    expect(out.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
+  });
+
+  it('extra fields of the verdict are kept', () => {
+    const v = { complianceStatus: 'cleared' as const, complianceReasons: [] as string[], extra: 42 };
+    expect(addHoldReason(v)).toEqual({ complianceStatus: 'flagged', complianceReasons: [AML_HOLD_REASON], extra: 42 });
   });
 });
