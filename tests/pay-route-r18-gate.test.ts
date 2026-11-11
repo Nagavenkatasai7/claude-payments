@@ -212,6 +212,37 @@ describe('pay, before the code is checked (C12 step 3)', { retry: 0 }, () => {
     expect(await statusOf(TID)).toBe('paid');
   });
 
+  it('R1-P4 B2: the code consume hits a network error -> 503 temporarily_unavailable (never the wrong-code 403); nothing charged; the retry pays', async () => {
+    let fail = true;
+    const consume = {
+      ...redis,
+      async getdel(k: string) {
+        if (fail) {
+          fail = false;
+          throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+        }
+        return redis.getdel(k);
+      },
+    };
+    txOtp = createTransactionOtpStore(redis, { randomInt: () => 654321, consume });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    onTestFinished(() => err.mockRestore());
+    const issuedBefore = [...redis.dump.entries()].filter(([k]) => k.startsWith('txotp:issued:'));
+    const res = await post(TID, realMoneyPayBody());
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable',
+    });
+    expect(await statusOf(TID)).toBe('awaiting_payment');
+    expect(await evidenceRows()).toEqual([]);
+    // The issue budget is untouched, and the error is logged by the scrubbing logger only.
+    expect([...redis.dump.entries()].filter(([k]) => k.startsWith('txotp:issued:'))).toEqual(issuedBefore);
+    for (const [line] of err.mock.calls) expect(() => JSON.parse(String(line))).not.toThrow();
+    const again = await post(TID, realMoneyPayBody());
+    expect(again.status).toBe(200);
+    expect(await statusOf(TID)).toBe('paid');
+  });
+
   it('a wrong code on a mandatory payment with a good body -> 403, no rows', async () => {
     const res = await post(TID, realMoneyPayBody({ otp: '000000' }));
     expect(res.status).toBe(403);

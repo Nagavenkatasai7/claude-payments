@@ -1,4 +1,4 @@
-import { getRedis } from './redis';
+import { getConsumeRedis, getRedis } from './redis';
 import { createHash, randomInt as cryptoRandomInt, timingSafeEqual } from 'node:crypto';
 import type { RedisLike } from './store';
 import { raiseLimiterDownAlert } from './limiter-alert';
@@ -18,10 +18,15 @@ import { DEFAULT_PARTNER_ID } from './defaults';
  * Authorisation record (fix pack 4, C5): the record carries `issuedAt`, and a
  * successful verify reports `issuedAt`, the per-code `attempt` and the delivery
  * `channel`. The channel is NOT in the record: the route notes it afterwards in
- * a separate `txotp:ch:<sha(txId)>` key (`noteDelivery`, value
- * `<issuedAt>|<wa|tg>`), so a late note can never recreate a consumed code or
- * tag a newer one. A correct code is consumed atomically with GETDEL; the
- * record is never rewritten after issue.
+ * a separate key per code, `txotp:ch:<sha(txId)>:<issuedAt>` (`noteDelivery`,
+ * value `<issuedAt>|<wa|tg>`), so a late note can never recreate a consumed
+ * code, tag a newer one, or overwrite a newer code's note (review R1-P4 B1: a
+ * late note lands on its own code's key, which nobody reads, and expires). A
+ * correct code is consumed atomically with GETDEL on the no-retry consume
+ * client (R1-P4 B2: a GETDEL is never resent, so a lost response throws rather
+ * than answering "wrong code"); the record is never rewritten after issue. An
+ * expired or exhausted record is burned only if it is still the one verify read
+ * (R1-P4 B3: a Resend landing in between keeps its new code).
  *
  * Attempt caps (Program-Fix 19, F59/F60): every verify RESERVES its attempt with
  * an atomic INCR before any compare — a parallel burst cannot read one stale
@@ -68,8 +73,13 @@ const cdKey = (txId: string) => `txotp:cd:${sha(txId)}`;
 const attKey = (txId: string) => `txotp:att:${sha(txId)}`;
 const failKey = (txId: string, t: number) => `txotp:fail:${sha(txId)}:${Math.floor(t / DAY_MS)}`;
 const issuedKey = (txId: string) => `txotp:issued:${sha(txId)}`;
-/** Fix pack 4 (C5): the delivery channel of the live code, `<issuedAt>|<wa|tg>`. */
-const chKey = (txId: string) => `txotp:ch:${sha(txId)}`;
+/**
+ * Fix pack 4 (C5), review R1-P4 (B1): the delivery channel of the code issued
+ * at `issuedAt`, value `<issuedAt>|<wa|tg>`. One key per code, so a late note
+ * for an older code never overwrites the live code's note. (The previous
+ * build's `txotp:ch:<sha>` key is never read here; it expires within TTL_S.)
+ */
+const chKey = (txId: string, issuedAt: number) => `txotp:ch:${sha(txId)}:${issuedAt}`;
 /**
  * Which per-phone daily budget an issue draws from. Budgets are separate per
  * caller kind AND per partner, so one flow (or one tenant) reaching its cap can
@@ -120,11 +130,18 @@ export interface TxOtpOptions {
    * Its own failure is swallowed so the original error always propagates.
    */
   onStoreError?: (scope: string) => Promise<void> | void;
+  /**
+   * Review R1-P4 (B2): the client for the code's single-use GETDEL ONLY. It
+   * must not retry (getConsumeRedis): a GETDEL whose response was lost would
+   * be resent and answer null. Defaults to `redis` (tests, fakes).
+   */
+  consume?: RedisLike;
 }
 
 export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions = {}) {
   const now = opts.now ?? (() => Date.now());
   const randomInt = opts.randomInt ?? ((min: number, max: number) => cryptoRandomInt(min, max));
+  const consume = opts.consume ?? redis;
 
   async function readCounter(k: string): Promise<number> {
     const raw = await redis.get(k);
@@ -135,6 +152,29 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
     const n = await redis.incr(k);
     if (n === 1) await redis.expire(k, ttlS);
     return n;
+  }
+
+  /** Put a newer record back that a GETDEL took by mistake (never one that was compared). */
+  async function restoreNewer(txId: string, taken: string, t: number): Promise<void> {
+    try {
+      const newer = JSON.parse(taken) as Rec;
+      const ttl = Math.ceil((newer.expiresAt - t) / 1000);
+      if (ttl > 0) await redis.set(key(txId), taken, { ex: ttl, nx: true });
+    } catch {
+      /* an unparseable record is not restored */
+    }
+  }
+
+  /**
+   * Review R1-P4 (B3): burn the expired or exhausted record `raw` that verify
+   * read, and only that one. A Resend that landed after the GET wrote a newer
+   * record; a plain DEL would delete it, so take with GETDEL and put a newer
+   * record back (NX). The main client is used: a lost response here only means
+   * the burn already happened.
+   */
+  async function burn(txId: string, raw: string, t: number): Promise<void> {
+    const taken = await redis.getdel(key(txId));
+    if (taken !== null && taken !== raw) await restoreNewer(txId, taken, t);
   }
 
   async function issueInner(txId: string, phone: string, budget: TxOtpBudget): Promise<IssueResult> {
@@ -178,8 +218,8 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
     // record lands so a reservation racing this issue counts against the new
     // code rather than being erased.
     await redis.del(attKey(txId));
-    // A channel noted for an earlier code never carries over (C5).
-    await redis.del(chKey(txId));
+    // A channel noted for an earlier code never carries over (C5): it sits on
+    // that code's own key (R1-P4 B1), which verify never reads for this one.
     await redis.set(key(txId), JSON.stringify(rec), { ex: TTL_S });
     await redis.set(cdKey(txId), String(t), { ex: COOLDOWN_S });
     return { ok: true, code, issuedAt: t }; // caller delivers it; never logged here
@@ -230,7 +270,7 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
     async noteDelivery(txId: string, issuedAt: number, channel: TxOtpChannel | null): Promise<void> {
       if (channel === null || !Number.isFinite(issuedAt)) return;
       try {
-        await redis.set(chKey(txId), `${issuedAt}|${channel}`, { ex: TTL_S });
+        await redis.set(chKey(txId, issuedAt), `${issuedAt}|${channel}`, { ex: TTL_S });
       } catch {
         /* best-effort: never blocks the send; nothing logged */
       }
@@ -253,7 +293,7 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
         return { ok: false, reason: 'no_code' };
       }
       if (t > rec.expiresAt) {
-        await redis.del(key(txId));
+        await burn(txId, raw, t);
         return { ok: false, reason: 'expired' };
       }
       // 3. Reserve this attempt atomically BEFORE the compare: the daily ceiling
@@ -261,12 +301,12 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       //    record is burned; the per-code counter is left to its TTL (see header).
       const dayN = await bump(failKey(txId, t), FAIL_BUCKET_TTL_S);
       if (dayN > TXOTP_MAX_FAILS_PER_DAY) {
-        await redis.del(key(txId));
+        await burn(txId, raw, t);
         return { ok: false, reason: 'locked' };
       }
       const n = await bump(attKey(txId), TTL_S);
       if (n > MAX_ATTEMPTS) {
-        await redis.del(key(txId));
+        await burn(txId, raw, t);
         return { ok: false, reason: 'locked' };
       }
       // 4. Compare (constant-time on the hash).
@@ -276,27 +316,27 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       const okCode = a.length === b.length && timingSafeEqual(a, b);
       if (okPhone && okCode) {
         // Single-use, atomically (C5): only the request whose GETDEL returns the
-        // exact record it compared is accepted.
-        const taken = await redis.getdel(key(txId));
+        // exact record it compared is accepted. R1-P4 (B2): on the no-retry
+        // consume client, so a network error PROPAGATES (the route answers its
+        // retryable 503) instead of a resent GETDEL answering null ("wrong
+        // code"). Nothing is restored after a throw: whether the server ran it
+        // is unknown, and another request may already have accepted the code.
+        const taken = await consume.getdel(key(txId));
         if (taken === null) return { ok: false, reason: 'no_code' }; // another request consumed it
         if (taken !== raw) {
           // A Resend re-issued between the GET and the GETDEL: put the newer
           // record back (it was never compared, so this cannot double-accept).
           // Its per-code counter belongs to the new code: left alone.
-          try {
-            const newer = JSON.parse(taken) as Rec;
-            const ttl = Math.ceil((newer.expiresAt - t) / 1000);
-            if (ttl > 0) await redis.set(key(txId), taken, { ex: ttl, nx: true });
-          } catch {
-            /* an unparseable record is not restored */
-          }
+          await restoreNewer(txId, taken, t);
           return { ok: false, reason: 'no_code' };
         }
         await redis.del(attKey(txId));
         const issuedAt = typeof rec.issuedAt === 'number' ? rec.issuedAt : rec.expiresAt - TTL_S * 1000;
         let channel: TxOtpChannel | null = null;
         try {
-          const noted = await redis.getdel(chKey(txId));
+          // The main (retrying) client: the code is already consumed, and a
+          // resent GETDEL can only lose the note (null), never accept anything.
+          const noted = await redis.getdel(chKey(txId, issuedAt));
           if (noted === `${issuedAt}|wa`) channel = 'wa';
           else if (noted === `${issuedAt}|tg`) channel = 'tg';
         } catch {
@@ -318,6 +358,7 @@ export function getTransactionOtpStore(): TransactionOtpStore {
     // Program-Fix 45: a Redis error fails the send closed AND tells ops (deduped, scope-only payload).
     cached = createTransactionOtpStore(getRedis(), {
       onStoreError: (scope) => raiseLimiterDownAlert(scope, 'fail-closed'),
+      consume: getConsumeRedis(), // R1-P4 B2: the code GETDEL is never resent
     });
   }
   return cached;

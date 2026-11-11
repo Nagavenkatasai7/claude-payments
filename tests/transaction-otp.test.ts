@@ -304,6 +304,7 @@ describe('getTransactionOtpStore — wires the fail-closed ops signal (fix 45)',
     vi.doMock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert: raise }));
     vi.doMock('@/lib/redis', () => ({
       getRedis: () => ({ ...fakeRedis(), get: async () => { throw new Error('redis down'); } }),
+      getConsumeRedis: () => fakeRedis(),
     }));
     const mod = await import('@/lib/transaction-otp');
     await expect(mod.getTransactionOtpStore().issue(TX, PHONE)).rejects.toThrow('redis down');
@@ -350,7 +351,7 @@ describe('transaction-otp shortenCooldown (Program-Fix 25 PR B)', { retry: 0 }, 
 describe('transaction-otp - authorisation record (fix pack 4, C5)', () => {
   const sha = (s: string) => createHash('sha256').update(s).digest('hex');
   const recKey = (tx: string) => `txotp:${sha(tx)}`;
-  const chKey = (tx: string) => `txotp:ch:${sha(tx)}`;
+  const chKey = (tx: string, issuedAt: number) => `txotp:ch:${sha(tx)}:${issuedAt}`;
   const chKeys = () => [...redis.dump.keys()].filter((k) => k.startsWith('txotp:ch:'));
 
   it('issue returns issuedAt = now and the record stores it', async () => {
@@ -376,7 +377,7 @@ describe('transaction-otp - authorisation record (fix pack 4, C5)', () => {
     const issued = await store.issue(TX, PHONE);
     if (!issued.ok) throw new Error('issue failed');
     await store.noteDelivery(TX, issued.issuedAt, 'tg');
-    expect(redis.dump.has(chKey(TX))).toBe(true);
+    expect(redis.dump.has(chKey(TX, issued.issuedAt))).toBe(true);
     expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: 'tg' });
     expect(chKeys()).toEqual([]);
   });
@@ -390,14 +391,18 @@ describe('transaction-otp - authorisation record (fix pack 4, C5)', () => {
     expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: null });
   });
 
-  it('issue deletes an earlier channel key before it writes the record', async () => {
+  it("an earlier code's channel note never carries over: it stays on that code's own key, which verify of the new code never reads (R1-P4 B1)", async () => {
     const first = await store.issue(TX, PHONE);
     if (!first.ok) throw new Error('issue failed');
     await store.noteDelivery(TX, first.issuedAt, 'wa');
-    expect(chKeys()).toHaveLength(1);
+    expect(chKeys()).toEqual([chKey(TX, first.issuedAt)]);
     nowMs += 31_000;
-    expect((await store.issue(TX, PHONE)).ok).toBe(true);
-    expect(chKeys()).toEqual([]);
+    const second = await store.issue(TX, PHONE);
+    if (!second.ok) throw new Error('issue failed');
+    expect(chKeys()).not.toContain(chKey(TX, second.issuedAt));
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: null });
+    // The old note is left to its 10-minute TTL; it is never read again.
+    expect(chKeys()).toEqual([chKey(TX, first.issuedAt)]);
   });
 
   it("noteDelivery with a null channel or a missing issuedAt writes nothing; a throwing redis.set never escapes", async () => {
@@ -485,12 +490,127 @@ describe('transaction-otp - authorisation record (fix pack 4, C5)', () => {
     if (!issued.ok) throw new Error('issue failed');
     await store.noteDelivery(TX, issued.issuedAt, 'wa');
     const [k] = chKeys();
-    expect(k).toBe(chKey(TX));
+    expect(k).toBe(chKey(TX, issued.issuedAt));
     const v = redis.dump.get(k)!;
     expect(v).toBe(`${issued.issuedAt}|wa`);
     for (const s of [TX, PHONE, '123456']) {
       expect(k).not.toContain(s);
       expect(v).not.toContain(s);
     }
+  });
+});
+
+// Fix pack 4 review R1-P4 (B1, B2, B3).
+describe('transaction-otp - review R1-P4 (B1 channel note per code, B2 no-retry consume, B3 compare before burn)', () => {
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const recKey = (tx: string) => `txotp:${sha(tx)}`;
+  // An undici-shaped network failure: `TypeError: fetch failed` with a socket cause.
+  const netError = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+
+  it('B1: a late noteDelivery for an older code never overwrites the live code note (verify of the live code -> channel wa)', async () => {
+    const a = await store.issue(TX, PHONE);
+    if (!a.ok) throw new Error('issue A failed');
+    nowMs += 31_000; // past the 30-s cooldown
+    const b = await store.issue(TX, PHONE);
+    if (!b.ok) throw new Error('issue B failed');
+    await store.noteDelivery(TX, b.issuedAt, 'wa');
+    await store.noteDelivery(TX, a.issuedAt, 'wa'); // A's send resolved late
+    expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: true, issuedAt: b.issuedAt, attempt: 1, channel: 'wa' });
+  });
+
+  it("B1: the note key is txotp:ch:<sha(txId)>:<issuedAt>; an old-format key left by the previous build is ignored and harmless", async () => {
+    const issued = await store.issue(TX, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+    redis.dump.set(`txotp:ch:${sha(TX)}`, `${issued.issuedAt}|tg`); // previous build's format
+    await store.noteDelivery(TX, issued.issuedAt, 'wa');
+    expect(redis.dump.get(`txotp:ch:${sha(TX)}:${issued.issuedAt}`)).toBe(`${issued.issuedAt}|wa`);
+    expect(await store.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, channel: 'wa' });
+    expect(redis.dump.has(`txotp:ch:${sha(TX)}:${issued.issuedAt}`)).toBe(false);
+  });
+
+  it('B2: the code GETDEL runs on the consume client; a network error there propagates and is never a no_code answer', async () => {
+    // The main client behaves like the retrying Upstash client after a lost
+    // response: the record is gone and the retried GETDEL answers null.
+    const retrying = {
+      ...redis,
+      async getdel(k: string) {
+        await redis.getdel(k);
+        return null;
+      },
+    };
+    const consumeCalls: string[] = [];
+    const consume = {
+      ...redis,
+      async getdel(k: string) {
+        consumeCalls.push(k);
+        await redis.getdel(k); // executed on the server...
+        throw netError(); // ...but the response was lost
+      },
+    };
+    const s = createTransactionOtpStore(retrying, { now: () => nowMs, randomInt: () => 123456, consume });
+    await s.issue(TX, PHONE);
+    await expect(s.verify(TX, PHONE, '123456')).rejects.toThrow('fetch failed');
+    expect(consumeCalls).toEqual([recKey(TX)]);
+  });
+
+  it('B2: a consume client that throws before the server ran the command leaves the code valid for the retry', async () => {
+    let fail = true;
+    const consume = {
+      ...redis,
+      async getdel(k: string) {
+        if (fail) {
+          fail = false;
+          throw netError();
+        }
+        return redis.getdel(k);
+      },
+    };
+    const s = createTransactionOtpStore(redis, { now: () => nowMs, randomInt: () => 123456, consume });
+    await s.issue(TX, PHONE);
+    await expect(s.verify(TX, PHONE, '123456')).rejects.toThrow('fetch failed');
+    expect(await s.verify(TX, PHONE, '123456')).toMatchObject({ ok: true, attempt: 2 });
+  });
+
+  // B3: a Resend that lands between verify's GET and its burn of an expired or
+  // exhausted code must survive: the burn takes only the record it read.
+  const racingBurn = () => {
+    const reissuer = createTransactionOtpStore(redis, { now: () => nowMs, randomInt: () => 654321 });
+    let raced = false;
+    const race = async (k: string) => {
+      if (!raced && k === recKey(TX)) {
+        raced = true;
+        expect((await reissuer.issue(TX, PHONE)).ok).toBe(true);
+      }
+    };
+    return {
+      ...redis,
+      async del(k: string) {
+        await race(k);
+        return redis.del(k);
+      },
+      async getdel(k: string) {
+        await race(k);
+        return redis.getdel(k);
+      },
+    };
+  };
+
+  it('B3: a code re-issued while verify burns an EXPIRED code stays valid', async () => {
+    const s = createTransactionOtpStore(racingBurn(), { now: () => nowMs, randomInt: () => 123456 });
+    await s.issue(TX, PHONE);
+    nowMs += 11 * 60 * 1000;
+    expect(await s.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'expired' });
+    expect(JSON.parse(redis.dump.get(recKey(TX))!).codeHash).toBe(sha('654321'));
+    expect(await store.verify(TX, PHONE, '654321')).toMatchObject({ ok: true });
+  });
+
+  it('B3: a code re-issued while verify burns an EXHAUSTED code (attempt cap) stays valid', async () => {
+    await store.issue(TX, PHONE);
+    for (let i = 0; i < 5; i++) await store.verify(TX, PHONE, '000000');
+    nowMs += 31_000; // past the cooldown, so the Resend can issue
+    const s = createTransactionOtpStore(racingBurn(), { now: () => nowMs, randomInt: () => 123456 });
+    expect(redis.dump.has(recKey(TX))).toBe(true); // 5 wrong guesses leave it; the 6th reservation burns it
+    expect(await s.verify(TX, PHONE, '000000')).toEqual({ ok: false, reason: 'locked' });
+    expect(await store.verify(TX, PHONE, '654321')).toMatchObject({ ok: true });
   });
 });

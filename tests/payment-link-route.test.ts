@@ -487,6 +487,37 @@ describe('link route R18 gate (pack 4)', { retry: 0 }, () => {
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
   });
 
+  it('R1-P4 B2: the code consume hits a network error -> 503 temporarily_unavailable (never the wrong-code 403); no transfer; the retry pays', async () => {
+    await approveDisclosureForTest(db, 'acme');
+    await acmeCall({ action: 'request_otp' });
+    let fail = true;
+    const consume = {
+      ...redis,
+      async getdel(k: string) {
+        if (fail) {
+          fail = false;
+          throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+        }
+        return redis.getdel(k);
+      },
+    };
+    txOtp = createTransactionOtpStore(redis, { randomInt: () => 654321, consume });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    onTestFinished(() => err.mockRestore());
+    const body = { otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock, disclosureVersion: DISCLOSURE_DRAFT_VERSION };
+    const res = await acmeCall(body);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable',
+    });
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+    // The route logs the error NAME only.
+    expect(err.mock.calls.map(([l]) => JSON.parse(String(l)).msg)).toEqual(['TypeError']);
+    const ok = await acmeCall(body);
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).status).toBe('paid');
+  });
+
   it('pay on an unapproved block -> 409 not_available before the code is checked', async () => {
     // A code issued while the block was approved; the approval is then cleared.
     await approveDisclosureForTest(db, 'acme');
