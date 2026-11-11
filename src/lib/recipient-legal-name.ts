@@ -3,7 +3,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo, createRecipientRepo } from '@/db/repos/aux-repos';
 import { logWarn } from './log';
 import { readPayGateContext } from './pay-gate-context';
-import type { Draft, PartnerId, Transfer } from './types';
+import type { Draft, PartnerId, PayoutMethod, Transfer } from './types';
 
 /**
  * Fix pack 4 (C18, R03): the recipient's account-holder name typed on the pay
@@ -15,19 +15,32 @@ import type { Draft, PartnerId, Transfer } from './types';
 const errName = (err: unknown): string => (err instanceof Error ? err.name : 'error');
 
 /**
- * ONE transaction: the fill-only guarded write (setRecipientLegalNameIfEditable:
- * this tenant's awaiting, unfunded, editable b2c row with no name yet) and its
- * `transfer.legal_name_set` audit row (C17: meta `{ source: 'pay_page' }` only).
- * False when a guard refused (nothing written). A failed audit insert throws and
- * rolls the name back. The audit partner is `t.partnerId`: the WHERE pins it.
+ * ONE transaction: the guarded write and its `transfer.legal_name_set` audit row
+ * (C17: meta `{ source: 'pay_page' }`). By default the write is fill-only
+ * (setRecipientLegalNameIfEditable: this tenant's awaiting, unfunded, editable
+ * b2c row with no name yet). Review R1-P2 D1: with `replace` (a name typed next
+ * to NEW bank details, the name for that account) it overwrites a name already
+ * on the row (replaceRecipientLegalNameIfEditable, same guard otherwise), and
+ * the meta gains `replaced: true` only when a name was overwritten (a boolean,
+ * never a name). False when a guard refused (nothing written). A failed audit
+ * insert throws and rolls the name back. The audit partner is `t.partnerId`:
+ * the WHERE pins it.
  */
 export async function writeRecipientLegalName(
   db: Db,
   t: Pick<Transfer, 'id' | 'partnerId'>,
   name: string,
+  opts: { replace?: boolean } = {},
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
-    const wrote = await createTransferRepo(tx).setRecipientLegalNameIfEditable(t.id, t.partnerId, name);
+    const repo = createTransferRepo(tx);
+    let wrote: boolean;
+    let replaced = false;
+    if (opts.replace) {
+      ({ wrote, replaced } = await repo.replaceRecipientLegalNameIfEditable(t.id, t.partnerId, name));
+    } else {
+      wrote = await repo.setRecipientLegalNameIfEditable(t.id, t.partnerId, name);
+    }
     if (wrote) {
       await createAuditRepo(tx).record({
         partnerId: t.partnerId,
@@ -35,7 +48,7 @@ export async function writeRecipientLegalName(
         actorType: 'system',
         action: 'transfer.legal_name_set',
         subjectId: t.id,
-        meta: { source: 'pay_page' },
+        meta: replaced ? { source: 'pay_page', replaced: true } : { source: 'pay_page' },
       });
     }
     return wrote;
@@ -43,22 +56,26 @@ export async function writeRecipientLegalName(
 }
 
 export type PayLegalNameInput =
-  | { transfer: Pick<Transfer, 'id' | 'partnerId'> }
+  | { transfer: Pick<Transfer, 'id' | 'partnerId'>; newBankFields?: boolean }
   | { draft: Draft; ownerId: PartnerId; newBankFields: boolean };
 
 /**
  * C18's "not needed" rule, one helper for the route and the page (T16):
  * - a minted transfer: a name on the row, or a row C19's hold exempts
- *   (Partner-API-minted, payment link, b2b) -> true;
- * - a draft: b2b -> true; else its own legal name, or (only when the request
- *   posts no new bank fields) the saved recipient's name for the SAME account
- *   the draft stores (C3 `match`).
+ *   (Partner-API-minted, payment link, b2b) -> true. Review R1-P2 D1: when the
+ *   request posts NEW bank fields only an exempt row counts (a name on the row
+ *   describes the stored account, not the new one);
+ * - a draft: b2b -> true; else, only when the request posts no new bank fields,
+ *   its own legal name or the saved recipient's name for the SAME account the
+ *   draft stores (C3 `match`).
  * Any read error -> false (the field is then required on real money); never throws.
  */
 export async function payLegalNameOnFile(db: DbOrTx, i: PayLegalNameInput): Promise<boolean> {
   if ('transfer' in i) {
     try {
-      return !(await createTransferRepo(db).recipientIdentityMissing(i.transfer.id, i.transfer.partnerId));
+      const repo = createTransferRepo(db);
+      if (i.newBankFields) return await repo.recipientIdentityExempt(i.transfer.id, i.transfer.partnerId);
+      return !(await repo.recipientIdentityMissing(i.transfer.id, i.transfer.partnerId));
     } catch (err) {
       logWarn('pay.legal_name_read', errName(err), { transferId: i.transfer.id, partnerId: i.transfer.partnerId });
       return false;
@@ -66,9 +83,10 @@ export async function payLegalNameOnFile(db: DbOrTx, i: PayLegalNameInput): Prom
   }
   const { draft, ownerId, newBankFields } = i;
   if (draft.transferType === 'b2b') return true;
+  if (newBankFields) return false;
   if ((draft.recipientLegalName ?? '').trim() !== '') return true;
   const recipient = draft.recipient as Draft['recipient'] | undefined;
-  if (newBankFields || !recipient?.recipientPhone) return false;
+  if (!recipient?.recipientPhone) return false;
   try {
     const name = await createRecipientRepo(db).getRecipientLegalName(ownerId, draft.senderPhone, recipient.recipientPhone, {
       payoutMethod: recipient.payoutMethod,
@@ -83,16 +101,19 @@ export async function payLegalNameOnFile(db: DbOrTx, i: PayLegalNameInput): Prom
 
 /**
  * After a 2xx payment with a typed name: fill the saved recipient's EMPTY book
- * entry (live row only; never overwrites, never un-deletes). Best-effort: an
- * error is one warn with the transfer id; never throws.
+ * entry (live row only; never overwrites, never un-deletes), only while the
+ * book holds the account that was PAID (review R1-P2 D2/E1/F1: `paid` is the
+ * raw method and destination, never a masked value). Best-effort: an error is
+ * one warn with the transfer id; never throws.
  */
 export async function fillRecipientBookLegalName(
   db: DbOrTx,
   t: Pick<Transfer, 'id' | 'partnerId' | 'phone' | 'recipientPhone'>,
   name: string,
+  paid: { payoutMethod: PayoutMethod; payoutDestination: string },
 ): Promise<void> {
   try {
-    await createRecipientRepo(db).fillRecipientLegalName(t.partnerId, t.phone, t.recipientPhone, name);
+    await createRecipientRepo(db).fillRecipientLegalName(t.partnerId, t.phone, t.recipientPhone, name, paid);
   } catch (err) {
     logWarn('pay.legal_name_book', errName(err), { transferId: t.id });
   }

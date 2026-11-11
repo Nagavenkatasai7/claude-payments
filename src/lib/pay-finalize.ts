@@ -303,9 +303,10 @@ export async function finalizeDraftPayment(
   // link falls through the claim's replay branch and mints THAT id (the
   // existing crash-replay shape). Never the route's generic 400.
   // Fix pack 4 (C18, C3): the recipient's legal name for the mint (screened there, C20). A
-  // consumer draft takes its own name, else the one typed on the pay page, else the saved
-  // recipient's book name ONLY for the account actually minted (method + last4 of the final
-  // destination, after any bank details). A book read error mints without a name (the identity
+  // consumer draft paid without new bank details takes its own name, else the one typed on the
+  // pay page, else the saved recipient's book name ONLY for the account actually minted (method +
+  // last4 of the final destination, after any bank details; review R1-P2 D1 below for a body
+  // with bank details). A book read error mints without a name (the identity
   // hold at settle is the backstop) and logs the draft id only. B2B drafts take only their own.
   const bookLegalName = async (): Promise<string | undefined> => {
     try {
@@ -319,9 +320,19 @@ export async function finalizeDraftPayment(
       return undefined;
     }
   };
+  // Review R1-P2 D1: posted bank details carry their own account-holder name. With bank details
+  // in the body the TYPED name wins over the draft's own; when they REPLACE a destination the
+  // draft already stores and nothing was typed, the draft's own name (it describes the old
+  // account) is not used: only the book name for the FINAL account, else none. A first
+  // collection (no stored destination) and a body without bank details keep the old order.
+  const typedLegalName = opts.recipientLegalName?.trim() || undefined;
+  const draftOwnLegalName = draft.recipientLegalName?.trim() || undefined;
+  const replacesStoredAccount = bodyDestination !== '' && (draft.recipient.payoutDestination ?? '').trim() !== '';
   const recipientLegalName = isB2bDraft
     ? draft.recipientLegalName
-    : draft.recipientLegalName?.trim() || opts.recipientLegalName?.trim() || (await bookLegalName()) || undefined;
+    : bodyDestination !== ''
+      ? typedLegalName || (replacesStoredAccount ? undefined : draftOwnLegalName) || (await bookLegalName()) || undefined
+      : draftOwnLegalName || typedLegalName || (await bookLegalName()) || undefined;
 
   let transfer: Awaited<ReturnType<typeof createTransfer>>;
   try {

@@ -1190,11 +1190,18 @@ export function createTransferRepo(
      * not engage) it writes recipient_legal_name_enc = NULL, which the default
      * read omits. Returns the updated (masked) row, or null when any guard
      * failed — the caller reports current truth.
+     *
+     * Review R1-P2 D1: with `clearLegalNameOnReplace`, the SAME UPDATE also
+     * clears recipient_legal_name_enc when the row already stored a destination
+     * (the old name describes the old account); a first collection (stored
+     * destination empty) keeps it. Only the pay route passes it, when no name
+     * was typed for the new account in that request.
      */
     async setPayoutIfEditable(
       id: string,
       partnerId: PartnerId,
       payout: { payoutMethod: PayoutMethod; payoutDestination: string },
+      opts: { clearLegalNameOnReplace?: boolean } = {},
     ): Promise<Transfer | null> {
       const rows = await db
         .update(transfers)
@@ -1204,6 +1211,12 @@ export function createTransferRepo(
             ? encryptField(payout.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc')) // row id = the WHERE's id
             : '',
           payoutDestinationLast4: last4(payout.payoutDestination),
+          // SET expressions read the row's OLD values (Postgres UPDATE semantics).
+          ...(opts.clearLegalNameOnReplace
+            ? {
+                recipientLegalNameEnc: sql`CASE WHEN ${transfers.payoutDestinationEnc} <> '' THEN NULL ELSE ${transfers.recipientLegalNameEnc} END`,
+              }
+            : {}),
         })
         .where(payoutEditable(id, partnerId))
         .returning();
@@ -1227,6 +1240,58 @@ export function createTransferRepo(
         })
         .where(and(payoutEditable(id, partnerId), isNull(transfers.recipientLegalNameEnc)))
         .returning({ id: transfers.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Review R1-P2 D1: the pay page's REPLACE write, for a name typed next to
+     * new bank details (it is the name for that account). The same guard as the
+     * fill (payoutEditable) without the "no name yet" test. One locked read then
+     * one UPDATE; call it inside a transaction (writeRecipientLegalName does).
+     * `replaced` is true only when a name was overwritten. Nothing for a blank
+     * name (no query) or a failed guard.
+     */
+    async replaceRecipientLegalNameIfEditable(
+      id: string,
+      partnerId: PartnerId,
+      legalName: string,
+    ): Promise<{ wrote: boolean; replaced: boolean }> {
+      const name = legalName.trim();
+      if (!name) return { wrote: false, replaced: false };
+      const locked = await db
+        .select({ had: sql<boolean>`${transfers.recipientLegalNameEnc} IS NOT NULL` })
+        .from(transfers)
+        .where(payoutEditable(id, partnerId))
+        .for('update');
+      if (locked.length === 0) return { wrote: false, replaced: false };
+      const rows = await db
+        .update(transfers)
+        .set({
+          recipientLegalNameEnc: encryptField(name, provider, ctx.transfer(id, 'recipient_legal_name_enc')), // row id = the WHERE's id
+        })
+        .where(payoutEditable(id, partnerId))
+        .returning({ id: transfers.id });
+      if (rows.length === 0) return { wrote: false, replaced: false };
+      return { wrote: true, replaced: locked[0].had === true };
+    },
+
+    /**
+     * Review R1-P2 D1: true when this tenant's row carries its own identity and
+     * is never asked for a name (b2b, Partner-API-minted, payment link: the rows
+     * recipientIdentityMissing exempts). False for a missing row or another tenant.
+     */
+    async recipientIdentityExempt(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.id, id),
+            eq(transfers.partnerId, partnerId),
+            sql`(${transfers.transferType} <> 'b2c' OR ${partnerApiMintedSql()} OR ${paymentLinkSql()})`,
+          ),
+        )
+        .limit(1);
       return rows.length > 0;
     },
 

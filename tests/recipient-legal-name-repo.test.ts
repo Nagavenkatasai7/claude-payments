@@ -213,13 +213,16 @@ describe('updateLiveRecipient and the saved name', () => {
   });
 });
 
+// Review R1-P2 D2/E1/F1: the fill names the account that was PAID (bound to it, like the reader).
+const PAID = { payoutMethod: 'bank' as const, payoutDestination: 'HDFC0000001 000011112222' };
+
 describe('fillRecipientLegalName', () => {
   it('fills only an empty live row: true once, then false when a name exists (unchanged)', async () => {
     await repo.upsertRecipient('pa', SENDER, rec({ lastUsedAt: at(10) }));
     const lastUsedBefore = (await repo.getRecipient('pa', SENDER, RP))?.lastUsedAt;
-    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, `  ${NAME} `)).toBe(true);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, `  ${NAME} `, PAID)).toBe(true);
     expect(await repo.getRecipientLegalName('pa', SENDER, RP)).toBe(NAME);
-    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, 'Someone Else')).toBe(false);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, 'Someone Else', PAID)).toBe(false);
     expect(await repo.getRecipientLegalName('pa', SENDER, RP)).toBe(NAME);
     expect((await repo.getRecipient('pa', SENDER, RP))?.lastUsedAt).toBe(lastUsedBefore);
   });
@@ -227,19 +230,36 @@ describe('fillRecipientLegalName', () => {
   it('false when tombstoned (never un-deletes: the tombstone stays)', async () => {
     await repo.upsertRecipient('pa', SENDER, rec());
     await repo.tombstoneRecipient('pa', SENDER, RP);
-    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME)).toBe(false);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, PAID)).toBe(false);
     expect(await tombstoneCount()).toBe(1);
     expect(await rawLegal()).toBeNull();
   });
 
   it('false when missing, for another tenant, and for a blank name with no query', async () => {
-    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME)).toBe(false);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, PAID)).toBe(false);
     await repo.upsertRecipient('pa', SENDER, rec());
-    expect(await repo.fillRecipientLegalName('pb', SENDER, RP, NAME)).toBe(false);
+    expect(await repo.fillRecipientLegalName('pb', SENDER, RP, NAME, PAID)).toBe(false);
     expect(await rawLegal()).toBeNull();
     const stop = captureQueries();
-    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, '   ')).toBe(false);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, '   ', PAID)).toBe(false);
     expect(stop()).toHaveLength(0);
+  });
+
+  it('review R1-P2 D2: a book row on ANOTHER account (method or last 4) is never filled; the same account is', async () => {
+    await repo.upsertRecipient('pa', SENDER, rec());
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, { payoutMethod: 'bank', payoutDestination: 'HDFC0000001 000099995555' })).toBe(false);
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, { payoutMethod: 'upi', payoutDestination: 'x2222@upi' })).toBe(false);
+    expect(await rawLegal()).toBeNull();
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, PAID)).toBe(true);
+    expect(await repo.getRecipientLegalName('pa', SENDER, RP, PAID)).toBe(NAME);
+  });
+
+  it('review R1-P2 D2: an empty paid account writes nothing and makes no query', async () => {
+    await repo.upsertRecipient('pa', SENDER, rec());
+    const stop = captureQueries();
+    expect(await repo.fillRecipientLegalName('pa', SENDER, RP, NAME, { payoutMethod: 'bank', payoutDestination: '' })).toBe(false);
+    expect(stop()).toHaveLength(0);
+    expect(await rawLegal()).toBeNull();
   });
 });
 

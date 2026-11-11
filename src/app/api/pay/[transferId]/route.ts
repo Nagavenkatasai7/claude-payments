@@ -27,7 +27,7 @@ import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
-import type { CountryCode, PartnerId, Transfer } from '@/lib/types';
+import type { CountryCode, PartnerId, PayoutMethod, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -66,14 +66,22 @@ export const maxDuration = 300;
  * setPayoutIfEditable: awaiting_payment, uncharged, consumer, this tenant, not
  * partner-API-minted) + a `transfer.payout_edit` audit row carrying the id and
  * last-4 only. Returns the updated (masked) row, or null when a guard failed.
+ * Review R1-P2 D1: `clearLegalNameOnReplace` drops the old account's name in the
+ * same UPDATE when a stored destination is replaced (see setPayoutIfEditable).
  */
-async function writePayoutIfEditable(transfer: Transfer, bankDetails: BankDetails): Promise<Transfer | null> {
+async function writePayoutIfEditable(
+  transfer: Transfer,
+  bankDetails: BankDetails,
+  opts: { clearLegalNameOnReplace?: boolean } = {},
+): Promise<Transfer | null> {
   const destination = bankDetails.payoutDestination ?? '';
   return getDb().transaction(async (tx) => {
-    const updated = await createTransferRepo(tx).setPayoutIfEditable(transfer.id, transfer.partnerId, {
-      payoutMethod: bankDetails.payoutMethod ?? 'bank',
-      payoutDestination: destination,
-    });
+    const updated = await createTransferRepo(tx).setPayoutIfEditable(
+      transfer.id,
+      transfer.partnerId,
+      { payoutMethod: bankDetails.payoutMethod ?? 'bank', payoutDestination: destination },
+      opts,
+    );
     if (updated) {
       await createAuditRepo(tx).record({
         partnerId: transfer.partnerId,
@@ -450,13 +458,31 @@ export async function POST(
     if (gateRefusal === 'reload_required') return payReloadRequired(payFunded);
     if (gateRefusal === 'not_available') return payNotAvailable();
 
+    // Does this request post bank details (the page's Step 1 or "Edit bank details")?
+    // Pure body parsing; the fields are validated further down, before any write.
+    const country =
+      typeof body.country === 'string' && VALID_COUNTRY_CODES.has(body.country.toUpperCase())
+        ? (body.country.toUpperCase() as CountryCode)
+        : undefined;
+    const rawFields = body.fields ?? undefined;
+    const hasSubmittedFields =
+      country !== undefined &&
+      rawFields !== undefined &&
+      BANK_FIELDS_BY_COUNTRY[country].some((f) => {
+        const v = rawFields[f.key];
+        return typeof v === 'string' && v.trim() !== '';
+      });
+
     // Fix pack 4 (C18 step 1, R03): the recipient's account-holder name, b2c only,
     // still BEFORE the code is checked (none of these answers consumes it). The
     // default tenant and the simulator make no read at all for an old tab (no key):
     // `realMoneyForField` is never true for the default owner (critic M3). An
     // unresolved owner (SAFE context) skips the rule: the identity hold at settle
-    // is the backstop. A name already on file (or an exempt row: Partner-API,
-    // b2b) skips it too, so a typed name is then ignored (fill-only).
+    // is the backstop. Without posted bank details, a name already on file (or an
+    // exempt row: Partner-API, payment link, b2b) skips it too, so a typed name is
+    // then ignored (fill-only). Review R1-P2 D1: WITH posted bank details the name
+    // posted next to them is the name for that account, so a name on the row or the
+    // draft does not count (an exempt row still does: never asked).
     let typedLegalName: string | null = null;
     if ((otpTransfer?.transferType ?? otpDraft?.transferType ?? 'b2c') !== 'b2b') {
       const skip = !payCtx.realMoneyForField && !body.present.accountHolder;
@@ -466,8 +492,8 @@ export async function POST(
           : await payLegalNameOnFile(
               getDb(),
               otpTransfer
-                ? { transfer: otpTransfer }
-                : { draft: otpDraft!, ownerId: payOwnerId, newBankFields: body.fields !== null },
+                ? { transfer: otpTransfer, newBankFields: hasSubmittedFields }
+                : { draft: otpDraft!, ownerId: payOwnerId, newBankFields: hasSubmittedFields },
             );
       if (!onFile) {
         if (payCtx.realMoneyForField && !body.present.accountHolder) return payReloadRequired(payFunded);
@@ -485,8 +511,14 @@ export async function POST(
 
     // Fix pack 4 (C18 step 6): after a 2xx b2c payment with a typed name, fill the
     // saved recipient's EMPTY book entry (best-effort; never changes the answer).
-    const withBookFill = async (res: NextResponse, t: Transfer): Promise<NextResponse> => {
-      if (typedLegalName && res.status < 300) await fillRecipientBookLegalName(getDb(), t, typedLegalName);
+    // Review R1-P2 D2/E1/F1: only while the book holds the account actually PAID
+    // (`paid`: raw method and destination, never a masked value).
+    const withBookFill = async (
+      res: NextResponse,
+      t: Transfer,
+      paid: { payoutMethod: PayoutMethod; payoutDestination: string },
+    ): Promise<NextResponse> => {
+      if (typedLegalName && res.status < 300) await fillRecipientBookLegalName(getDb(), t, typedLegalName, paid);
       return res;
     };
 
@@ -518,19 +550,6 @@ export async function POST(
         ? { surface: 'transfer', version: acked, shownHash: body.disclosureHash, acknowledgedAt: evidenceAt }
         : null,
     };
-
-    const country =
-      typeof body.country === 'string' && VALID_COUNTRY_CODES.has(body.country.toUpperCase())
-        ? (body.country.toUpperCase() as CountryCode)
-        : undefined;
-    const rawFields = body.fields ?? undefined;
-    const hasSubmittedFields =
-      country !== undefined &&
-      rawFields !== undefined &&
-      BANK_FIELDS_BY_COUNTRY[country].some((f) => {
-        const v = rawFields[f.key];
-        return typeof v === 'string' && v.trim() !== '';
-      });
 
     // Stage C2: a draft an AI app prepared pays only its stored account (400 before any charge).
     if (hasSubmittedFields && bankDetailsLocked(otpDraft)) {
@@ -651,6 +670,7 @@ export async function POST(
       // no sender name to screen; lists change). Consumer rows only (the same
       // predicate pay-finalize uses): a B2B payer is screened by business name.
       let payable: Transfer = transfer;
+      let nameWrittenForAccount = false; // review R1-P2 D1: a typed name was written for the posted account
       if (transfer.transferType !== 'b2b') {
         if (!hasSenderName(owner)) {
           // Nothing screened or written; the SAME link works once the customer
@@ -669,12 +689,14 @@ export async function POST(
         // equals the row (chat + legal). A guard miss writes nothing and goes on
         // (the identity hold at settle catches a real-money row). A THROW answers
         // 503 here (nothing is charged yet), never through the outer catch, which
-        // would log the raw error object.
+        // would log the raw error object. Review R1-P2 D1: a name typed next to
+        // posted bank details REPLACES a name already on the row (it is the name
+        // for the new account), in the same transaction as its audit row.
         let legalRow = decrypted;
         if (typedLegalName) {
           let wrote: boolean;
           try {
-            wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName);
+            wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName, { replace: bankDetails !== undefined });
           } catch (err) {
             logWarn('pay.legal_name_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
             // Review R1-P1 A2: the code is already spent, so a lasting fault
@@ -683,16 +705,22 @@ export async function POST(
             pokeWorker(); // the ops.alert row is ready now
             return payApprovalNotRecorded();
           }
-          if (wrote) legalRow = await store.getTransferDecrypted(payId);
-          else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
+          if (wrote) {
+            nameWrittenForAccount = true;
+            legalRow = await store.getTransferDecrypted(payId);
+          } else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
         }
+        // Review R1-P2 D1 (R2): new bank details with no name written for them
+        // drop the old account's name with the payout (below), so the re-screen
+        // screens what the row will hold: the chat name.
+        const oldNameDropped = bankDetails !== undefined && !nameWrittenForAccount && storedDestination !== '';
         const realMoney = await realMoneyFor(getDb(), transfer);
         const rescreen = await rescreenBeforePay(
           getDb(),
           transfer,
           {
             senderName: (owner?.fullName ?? '').trim(),
-            recipientName: (legalRow?.recipientLegalName ?? '').trim() || transfer.recipientName,
+            recipientName: (oldNameDropped ? '' : (legalRow?.recipientLegalName ?? '').trim()) || transfer.recipientName,
           },
           resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
           { realMoney, stage: 'pay' },
@@ -718,7 +746,10 @@ export async function POST(
       // CONSUMER transfer through ONE guarded write. A B2B payee is never payer
       // input: its body is ignored.
       if (bankDetails && transfer.transferType !== 'b2b') {
-        const edited = await writePayoutIfEditable(transfer, bankDetails);
+        // Review R1-P2 D1 (R2): no name was written for the new account in this
+        // request, so a replaced stored destination takes its old name with it
+        // (a first collection keeps the name).
+        const edited = await writePayoutIfEditable(transfer, bankDetails, { clearLegalNameOnReplace: !nameWrittenForAccount });
         if (!edited) {
           // A guard failed after our read (a concurrent POST charged / settled /
           // held it — the OTP verify is not atomic), or the row is not editable
@@ -732,7 +763,10 @@ export async function POST(
             { status: 409 },
           );
         }
-        return await withBookFill(await processTransferPayment(store, edited, evidence), transfer);
+        return await withBookFill(await processTransferPayment(store, edited, evidence), transfer, {
+          payoutMethod: bankDetails.payoutMethod ?? 'bank',
+          payoutDestination: bankDetails.payoutDestination ?? '',
+        });
       }
       if (!hasDestination) {
         // A SCHEDULED/cron transfer can be created with an empty destination (Item 2:
@@ -745,7 +779,10 @@ export async function POST(
       }
       // Destination already set (re-opened link) → process exactly as before
       // (with the re-screened row: a flagged verdict takes the normal hold).
-      return await withBookFill(await processTransferPayment(store, payable, evidence), transfer);
+      return await withBookFill(await processTransferPayment(store, payable, evidence), transfer, {
+        payoutMethod: transfer.payoutMethod,
+        payoutDestination: storedDestination,
+      });
     }
 
     // ── Draft branch: treat id as a draftId and finalize at pay time ──────
@@ -866,7 +903,13 @@ export async function POST(
       if (withToken instanceof NextResponse) return withToken;
       return await processTransferPayment(store, withToken, evidence);
     }
-    return await withBookFill(await processTransferPayment(store, created, evidence), created);
+    // Review R1-P2 D2/E1/F1: the account the mint paid, from plaintext already in
+    // scope (the posted details, else the draft's stored account; never the masked
+    // row). A crash-replay that minted another body's account just fills nothing.
+    return await withBookFill(await processTransferPayment(store, created, evidence), created, {
+      payoutMethod: created.payoutMethod,
+      payoutDestination: (bankDetails?.payoutDestination ?? '').trim() || (otpDraft?.recipient?.payoutDestination ?? '').trim(),
+    });
   } catch (err) {
     logError('pay.route', err, { transferId });
     // Fix D: an infrastructure error (Redis / Neon) is retryable, not a refusal.

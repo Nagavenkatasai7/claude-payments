@@ -237,14 +237,21 @@ export function createRecipientRepo(
      * Fix pack 4 (C3): set the saved account-holder name only on a LIVE row that has none. Never
      * un-deletes, never touches lastUsedAt. False for a blank name (no query), an existing name,
      * a tombstoned or missing row.
+     * Review R1-P2 D2/E1/F1: bound to the account that was PAID, by the same rule as
+     * getRecipientLegalName's `match`: only a row whose payout method equals match.payoutMethod
+     * AND whose stored last 4 equal last4(match.payoutDestination). An empty last 4 writes
+     * nothing (no query). Pass raw values, never a masked destination.
      */
     async fillRecipientLegalName(
       partnerId: PartnerId,
       senderPhone: string,
       recipientPhone: string,
       legalName: string,
+      match: { payoutMethod: PayoutMethod; payoutDestination: string },
     ): Promise<boolean> {
       const key = { partnerId, senderPhone, recipientPhone };
+      const want = last4(match.payoutDestination ?? '');
+      if (!want) return false; // an empty account matches no saved recipient
       const legalNameEnc = sealLegalName(key, legalName);
       if (!legalNameEnc) return false;
       const rows = await db
@@ -255,6 +262,8 @@ export function createRecipientRepo(
             eq(recipients.partnerId, partnerId),
             eq(recipients.senderPhone, senderPhone),
             eq(recipients.recipientPhone, recipientPhone),
+            eq(recipients.payoutMethod, match.payoutMethod),
+            eq(recipients.payoutDestinationLast4, want),
             isNull(recipients.legalNameEnc),
             live(db),
           ),

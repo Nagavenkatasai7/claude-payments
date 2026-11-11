@@ -5,8 +5,13 @@
  *     '' or invalid -> 400), answered before the code is checked;
  *   - a typed valid name is written fill-only with its transfer.legal_name_set
  *     row in ONE transaction, then the re-screen covers it (chat + legal);
- *   - a name already on file is never replaced; exempt rows are never asked;
- *   - after a 2xx the saved recipient's EMPTY book entry is filled;
+ *   - without new bank details a name already on file is never replaced; exempt
+ *     rows are never asked;
+ *   - review R1-P2 D1: a name posted next to new bank details is the name for
+ *     that account (it replaces the row's or the draft's name; on real money it
+ *     is required); new details with no name drop the old account's name;
+ *   - after a 2xx the saved recipient's EMPTY book entry is filled, only while
+ *     it holds the account paid (review R1-P2 D2/E1/F1);
  *   - the default tenant (not real money) makes no new read for an old tab.
  * The typed name never reaches a log line (checked over the whole file).
  */
@@ -87,9 +92,16 @@ vi.mock('@/db/repos/transfer-repo', async (orig) => {
     createTransferRepo: (...a: Parameters<typeof real.createTransferRepo>) => {
       const repo = real.createTransferRepo(...a);
       if (fault.nameThrows) {
-        return { ...repo, setRecipientLegalNameIfEditable: async () => { throw new TypeError('name-write-secret'); } };
+        const boom = async (): Promise<never> => { throw new TypeError('name-write-secret'); };
+        return { ...repo, setRecipientLegalNameIfEditable: boom, replaceRecipientLegalNameIfEditable: boom };
       }
-      return fault.guardMiss ? { ...repo, setRecipientLegalNameIfEditable: async () => false } : repo;
+      return fault.guardMiss
+        ? {
+            ...repo,
+            setRecipientLegalNameIfEditable: async () => false,
+            replaceRecipientLegalNameIfEditable: async () => ({ wrote: false, replaced: false }),
+          }
+        : repo;
     },
   };
 });
@@ -102,6 +114,18 @@ vi.mock('@/db/repos/aux-repos', async (orig) => {
       return fault.bookThrows
         ? { ...repo, fillRecipientLegalName: async () => { throw new TypeError('book down'); } }
         : repo;
+    },
+  };
+});
+// Review R1-P2 D1: the names the pay-time re-screen was given (the screening input seam).
+const screened = vi.hoisted(() => ({ recipientNames: [] as string[] }));
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-rescreen')>();
+  return {
+    ...real,
+    rescreenBeforePay: async (...a: Parameters<typeof real.rescreenBeforePay>) => {
+      screened.recipientNames.push(a[2].recipientName);
+      return real.rescreenBeforePay(...a);
     },
   };
 });
@@ -137,7 +161,7 @@ const ERROR_400 = { ok: false, error: 'Please check the account holder name.', f
 
 // Every console line of the file: the typed names and the phones must never appear.
 const consoleLines: string[] = [];
-const PII = ['Typed Holder', 'Anita Legal', 'Testa Fixturelli', 'Draft Legal', 'Other Book', SENDER, RP];
+const PII = ['Typed Holder', 'Anita Legal', 'Testa Fixturelli', 'Draft Legal', 'Other Book', 'Old Holder', 'New Holder', SENDER, RP];
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -230,6 +254,7 @@ beforeEach(async () => {
   fault.bookThrows = false;
   fault.railReadFailNext = false;
   fault.nameThrows = false;
+  screened.recipientNames = [];
   otp.verify = vi.fn(async () => okVerify());
   db = await freshDb();
   store = createStore(fakeRedis(), db);
@@ -538,5 +563,179 @@ describe('pay route, draft branch, real money (C18 draft branch)', { retry: 0 },
     expect(body.reason).not.toBe('reload_required');
     expect(body.fieldErrors?.accountHolder).toBeUndefined();
     expect(otp.verify).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Review R1-P2: the account-holder name is bound to the account it was typed for.
+// The composed IN destination is '<IFSC> <account>' (SAME_DEST, NEW_DEST); the repo's
+// last 4 are the last 4 DIGITS, so ACCOUNT ('...|HDFC0001234', '1234'), SAME_DEST ('9012')
+// and NEW_DEST ('7777') are three accounts.
+const SAME_FIELDS = { country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' } };
+const NEW_FIELDS = { country: 'IN', fields: { accountNumber: '555566667777', ifsc: 'SBIN0005678' } };
+const NEW_DEST = 'SBIN0005678 555566667777';
+const SAME_DEST = 'HDFC0001234 123456789012';
+const bookNameFor = (partnerId: string, payoutDestination: string) =>
+  createRecipientRepo(db).getRecipientLegalName(partnerId, SENDER, RP, { payoutMethod: 'bank', payoutDestination });
+
+describe('review R1-P2 D2/E1/F1: the book fill names the account that was PAID', { retry: 0 }, () => {
+  it('edit path: the book holds account A, the transfer is paid to account B with a typed name -> 200, the book name for A stays empty', async () => {
+    await liveOwner();
+    await saveBook(OWNER);
+    await store.saveTransfer(makeTransfer({ id: 'bf-edit' }));
+    const res = await post('bf-edit', { ...realMoneyPayBody({ accountHolder: TYPED }), ...NEW_FIELDS });
+    expect(res.status).toBe(200);
+    expect(await legalOf('bf-edit')).toBe(TYPED);
+    expect((await store.getTransferDecrypted('bf-edit'))?.payoutDestination).toBe(NEW_DEST);
+    expect(await bookName(OWNER)).toBeNull();
+    expect(await bookNameFor(OWNER, ACCOUNT)).toBeNull();
+  });
+
+  it('stored path: the book moved to another account after the mint -> 200, the book name stays empty', async () => {
+    await liveOwner();
+    await saveBook(OWNER);
+    await store.saveTransfer(makeTransfer({ id: 'bf-stored' }));
+    await saveBook(OWNER, { payoutDestination: NEW_DEST }); // a portal edit after the mint
+    const res = await post('bf-stored', realMoneyPayBody({ accountHolder: TYPED }));
+    expect(res.status).toBe(200);
+    expect(await legalOf('bf-stored')).toBe(TYPED);
+    expect(await bookName(OWNER)).toBeNull();
+  });
+
+  it('happy path, edit to the SAME account the book holds (a first collection): the book is filled', async () => {
+    await liveOwner();
+    await saveBook(OWNER, { payoutDestination: SAME_DEST });
+    await store.saveTransfer(makeTransfer({ id: 'bf-same', payoutDestination: '' }));
+    const res = await post('bf-same', { ...realMoneyPayBody({ accountHolder: TYPED }), ...SAME_FIELDS });
+    expect(res.status).toBe(200);
+    expect(await bookNameFor(OWNER, SAME_DEST)).toBe(TYPED);
+  });
+
+  it('draft path: the mint moves the book to the paid account, which is filled', async () => {
+    await liveOwner();
+    await saveBook(OWNER);
+    const draftId = await makeDraft();
+    expect((await post(draftId, { ...realMoneyPayBody({ accountHolder: TYPED }), ...NEW_FIELDS })).status).toBe(200);
+    expect(await bookNameFor(OWNER, NEW_DEST)).toBe(TYPED);
+  });
+});
+
+describe('review R1-P2 D1: new bank details on the pay page carry their own account-holder name', { retry: 0 }, () => {
+  it('(a) real money: the typed name for the new account REPLACES the old one, is screened, one audit row replaced:true', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'd1-a', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-a', { ...realMoneyPayBody({ accountHolder: 'New Holder' }), ...NEW_FIELDS });
+    expect(await res.json()).toEqual({ ok: true, status: 'processing' });
+    expect(await legalOf('d1-a')).toBe('New Holder');
+    expect(screened.recipientNames).toEqual(['New Holder']);
+    expect(await legalNameSetRows('d1-a')).toEqual([
+      { partner_id: OWNER, subject_id: 'd1-a', meta: { source: 'pay_page', replaced: true } },
+    ]);
+    expect((await store.getTransfer('d1-a'))?.status).toBe('paid');
+  });
+
+  it('(b) real money: bank fields and NO accountHolder key -> 409 reload_required, nothing written, the code not checked', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'd1-b', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-b', { ...noHolderBody(), ...NEW_FIELDS });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe('reload_required');
+    expect(otp.verify).not.toHaveBeenCalled();
+    const t = await store.getTransferDecrypted('d1-b');
+    expect(t?.recipientLegalName).toBe('Old Holder');
+    expect(t?.payoutDestination).toBe(ACCOUNT);
+    expect(await legalNameSetRows()).toEqual([]);
+  });
+
+  it('(b2) real money: bank fields and an invalid name -> the account-holder 400', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'd1-b2', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-b2', { ...realMoneyPayBody({ accountHolder: '' }), ...NEW_FIELDS });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(ERROR_400);
+    expect(otp.verify).not.toHaveBeenCalled();
+  });
+
+  it('(c) real money: a watchlist name typed for the new account is blocked; the old clean name does not shield it', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'd1-c', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-c', { ...realMoneyPayBody({ accountHolder: 'Testa Fixturelli' }), ...NEW_FIELDS });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: "We can't process this transfer." });
+    expect((await store.getTransfer('d1-c'))?.status).toBe('blocked');
+    expect(await outboxKinds()).not.toContain('settlement.instruct');
+  });
+
+  it('(d) demo owner: bank fields for another account and no name -> 2xx and the old name is cleared with the payout', async () => {
+    await seedOwner('Alex Sender', 'default');
+    await store.saveTransfer(makeTransfer({ id: 'd1-d', partnerId: 'default', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-d', { otp: '000000', ...NEW_FIELDS });
+    expect(res.status).toBe(200);
+    const t = await store.getTransferDecrypted('d1-d');
+    expect(t?.payoutDestination).toBe(NEW_DEST);
+    expect(t?.recipientLegalName).toBeUndefined();
+    // The re-screen screened what the row will hold (the chat name), not the old holder.
+    expect(screened.recipientNames).toEqual(['Mom']);
+  });
+
+  it('(e) demo owner, first collection (empty stored destination): bank fields and no name keep the name', async () => {
+    await seedOwner('Alex Sender', 'default');
+    await store.saveTransfer(makeTransfer({ id: 'd1-e', partnerId: 'default', payoutDestination: '', recipientLegalName: 'Old Holder' }));
+    const res = await post('d1-e', { otp: '000000', ...NEW_FIELDS });
+    expect(res.status).toBe(200);
+    expect(await legalOf('d1-e')).toBe('Old Holder');
+    expect(screened.recipientNames).toEqual(['Old Holder']);
+  });
+
+  it('(f) draft with its own name and a stored account: new bank fields plus a typed name -> the mint carries (and screened) the typed name', async () => {
+    await liveOwner();
+    const draftId = await makeDraft({ recipientLegalName: 'Draft Legal' });
+    expect((await post(draftId, { ...realMoneyPayBody({ accountHolder: TYPED }), ...NEW_FIELDS })).status).toBe(200);
+    const [created] = await store.listTransfers();
+    expect(await legalOf(created.id)).toBe(TYPED);
+    // Screened at the mint: a watchlist name typed the same way is blocked.
+    const listed = await makeDraft({ recipientLegalName: 'Draft Legal' });
+    const res = await post(listed, { ...realMoneyPayBody({ accountHolder: 'Testa Fixturelli' }), ...NEW_FIELDS });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: "We can't process this transfer." });
+  });
+
+  it('(f2) real money draft with its own name: new bank fields and no accountHolder key -> 409 reload_required', async () => {
+    await liveOwner();
+    const draftId = await makeDraft({ recipientLegalName: 'Draft Legal' });
+    const res = await post(draftId, { ...noHolderBody(), ...NEW_FIELDS });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe('reload_required');
+    expect(await store.listTransfers()).toEqual([]);
+  });
+
+  it('(f3) demo draft with its own name and a stored account: new bank fields, no name -> the draft name is not minted', async () => {
+    await seedOwner('Alex Sender', 'default');
+    const draftId = await makeDraft({ partnerId: 'default', recipientLegalName: 'Draft Legal' });
+    expect((await post(draftId, { otp: '000000', ...NEW_FIELDS })).status).toBe(200);
+    const [created] = await store.listTransfers();
+    expect(await legalOf(created.id)).toBeUndefined();
+  });
+
+  it('(f4) demo draft with its own name and NO stored account (first collection): bank fields, no name -> the draft name is minted', async () => {
+    await seedOwner('Alex Sender', 'default');
+    const draftId = await makeDraft({
+      partnerId: 'default',
+      recipientLegalName: 'Draft Legal',
+      recipient: { name: 'Mom', recipientPhone: RP, payoutMethod: 'bank', payoutDestination: '' },
+    });
+    expect((await post(draftId, { otp: '000000', ...NEW_FIELDS })).status).toBe(200);
+    const [created] = await store.listTransfers();
+    expect(await legalOf(created.id)).toBe('Draft Legal');
+  });
+
+  it('(h) a Partner-API-minted row with bank fields: never asked (no 409 reload), the payout edit is refused as today', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'd1-h', recipientLegalName: 'Old Holder' }));
+    await createIdempotencyRepo(db).claim(OWNER, 'order-h', 'd1-h');
+    const res = await post('d1-h', { ...noHolderBody(), ...NEW_FIELDS });
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason).toBe('payout_locked');
+    expect(await legalOf('d1-h')).toBe('Old Holder');
+    expect(await legalNameSetRows()).toEqual([]);
   });
 });

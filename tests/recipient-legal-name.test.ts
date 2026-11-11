@@ -103,6 +103,18 @@ describe('writeRecipientLegalName (C18 step 3, C17)', () => {
     expect(await legalNameSetRows()).toEqual([]);
   });
 
+  it('review R1-P2 D1: replace overwrites a name on the row; the audit meta says replaced (a boolean, never a name)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'tr_r1', recipientLegalName: 'Old Holder' }));
+    expect(await writeRecipientLegalName(db, { id: 'tr_r1', partnerId: OWNER }, 'Anita Legal', { replace: true })).toBe(true);
+    expect(await legalOf('tr_r1')).toBe('Anita Legal');
+    await store.saveTransfer(makeTransfer({ id: 'tr_r2' }));
+    expect(await writeRecipientLegalName(db, { id: 'tr_r2', partnerId: OWNER }, 'Anita Legal', { replace: true })).toBe(true);
+    expect((await legalNameSetRows()).map((r) => [r.subject_id, r.meta])).toEqual([
+      ['tr_r1', { source: 'pay_page', replaced: true }],
+      ['tr_r2', { source: 'pay_page' }],
+    ]);
+  });
+
   it('an audit insert that fails -> throws and the name is NOT written (one transaction)', async () => {
     await store.saveTransfer(makeTransfer({ id: 'tr_fail' }));
     await db.execute(sql.raw(`CREATE FUNCTION fail_legal_audit() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -143,10 +155,22 @@ describe('payLegalNameOnFile (C18 "not needed" rule)', () => {
     expect(await payLegalNameOnFile(db, { draft: makeDraft({ transferType: 'b2b' }), ownerId: OWNER, newBankFields: false })).toBe(true);
   });
 
-  it('a draft with its own legal name -> true, even with new bank fields', async () => {
+  it('a draft with its own legal name -> true; with new bank fields -> false (review R1-P2 D1: it describes the stored account)', async () => {
     const draft = makeDraft({ recipientLegalName: 'Draft Legal' });
     expect(await payLegalNameOnFile(db, { draft, ownerId: OWNER, newBankFields: false })).toBe(true);
-    expect(await payLegalNameOnFile(db, { draft, ownerId: OWNER, newBankFields: true })).toBe(true);
+    expect(await payLegalNameOnFile(db, { draft, ownerId: OWNER, newBankFields: true })).toBe(false);
+  });
+
+  it('review R1-P2 D1: a transfer posting new bank fields -> a name on the row does not count; an exempt row still does', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'tr_has', recipientLegalName: 'Anita Legal' }));
+    await store.saveTransfer(makeTransfer({ id: 'tr_api' }));
+    await createIdempotencyRepo(db).claim(OWNER, 'order-1', 'tr_api');
+    await store.saveTransfer(makeTransfer({ id: 'tr_link' }));
+    await createIdempotencyRepo(db).claim(OWNER, 'paylink:lnk_1', 'tr_link');
+    expect(await payLegalNameOnFile(db, { transfer: { id: 'tr_has', partnerId: OWNER }, newBankFields: true })).toBe(false);
+    expect(await payLegalNameOnFile(db, { transfer: { id: 'tr_has', partnerId: OWNER }, newBankFields: false })).toBe(true);
+    expect(await payLegalNameOnFile(db, { transfer: { id: 'tr_api', partnerId: OWNER }, newBankFields: true })).toBe(true);
+    expect(await payLegalNameOnFile(db, { transfer: { id: 'tr_link', partnerId: OWNER }, newBankFields: true })).toBe(true);
   });
 
   it('a draft whose saved recipient has a name for the SAME account -> true; for another account -> false', async () => {
@@ -182,24 +206,32 @@ describe('payLegalNameOnFile (C18 "not needed" rule)', () => {
 
 describe('fillRecipientBookLegalName (C18 step 6)', () => {
   const t = { id: 'tr_book', partnerId: OWNER, phone: SENDER, recipientPhone: RP };
+  // Review R1-P2 D2/E1/F1: the account that was paid (raw values, never a mask).
+  const PAID = { payoutMethod: 'bank' as const, payoutDestination: ACCOUNT };
   const bookName = () => createRecipientRepo(db).getRecipientLegalName(OWNER, SENDER, RP);
 
   it('fills an empty live book row', async () => {
     await createRecipientRepo(db).upsertRecipient(OWNER, SENDER, rec());
-    await fillRecipientBookLegalName(db, t, 'Anita Legal');
+    await fillRecipientBookLegalName(db, t, 'Anita Legal', PAID);
     expect(await bookName()).toBe('Anita Legal');
+  });
+
+  it('review R1-P2 D2: never fills a book row that holds ANOTHER account than the one paid', async () => {
+    await createRecipientRepo(db).upsertRecipient(OWNER, SENDER, rec());
+    await fillRecipientBookLegalName(db, t, 'Anita Legal', { payoutMethod: 'bank', payoutDestination: OTHER_ACCOUNT });
+    expect(await bookName()).toBeNull();
   });
 
   it('never overwrites a saved name', async () => {
     await createRecipientRepo(db).upsertRecipient(OWNER, SENDER, rec(), { legalName: 'Saved Legal' });
-    await fillRecipientBookLegalName(db, t, 'Anita Legal');
+    await fillRecipientBookLegalName(db, t, 'Anita Legal', PAID);
     expect(await bookName()).toBe('Saved Legal');
   });
 
   it('never un-deletes a tombstoned row', async () => {
     await createRecipientRepo(db).upsertRecipient(OWNER, SENDER, rec());
     await createRecipientRepo(db).tombstoneRecipient(OWNER, SENDER, RP);
-    await fillRecipientBookLegalName(db, t, 'Anita Legal');
+    await fillRecipientBookLegalName(db, t, 'Anita Legal', PAID);
     expect(await bookName()).toBeNull();
     expect(await createRecipientRepo(db).listRecipients(OWNER, SENDER, 10)).toEqual([]);
     const raw = (await db.execute(sql`SELECT legal_name_enc FROM recipients`)) as unknown as { rows: Array<{ legal_name_enc: string | null }> };
@@ -212,7 +244,7 @@ describe('fillRecipientBookLegalName (C18 step 6)', () => {
       update: () => { throw new TypeError('db down'); },
       select: () => { throw new TypeError('db down'); },
     } as unknown as DbOrTx;
-    await expect(fillRecipientBookLegalName(broken, t, 'Anita Legal')).resolves.toBeUndefined();
+    await expect(fillRecipientBookLegalName(broken, t, 'Anita Legal', PAID)).resolves.toBeUndefined();
     const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('pay.legal_name_book'));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('tr_book');
