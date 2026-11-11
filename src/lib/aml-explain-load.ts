@@ -3,7 +3,7 @@ import { createAuditRepo, type AuditRow } from '@/db/repos/aux-repos';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { resolveCorridorRules } from '@/lib/compliance-config';
-import { AML_HOLD_REASON, amlHoldHit } from '@/lib/aml-hold';
+import { AML_HOLD_REASON, amlHoldHits } from '@/lib/aml-hold';
 import { logWarn } from '@/lib/log';
 import type { AmlHit, AmlRuleConfig } from '@/lib/aml-rules';
 import type { PurposeHoldFact } from '@/lib/aml-explain-ai';
@@ -58,7 +58,13 @@ export async function loadAmlExplainContext(
       const prior = await createTransferRepo(db).senderAmlStats(
         t.partnerId, t.phone, { at: new Date(t.createdAt), id: t.id }, cfg.largeAmountUsd, cfg.band,
       );
-      recomputed = amlHoldHit(prior, t.amountUsd, cfg);
+      // Fix pack 6 (T17): today's pre-pack-6 pair (structuring, then first
+      // transfer on the stats' own count, no destination verdict); T18 recomputes
+      // with the rules the row's own aml.hold row names.
+      recomputed = amlHoldHits({
+        stats: prior, sends: { total: prior.priorCount, toRecipient: null }, amountUsd: t.amountUsd, cfg,
+        rules: ['structuring', 'first_transfer'],
+      })[0] ?? null;
     } catch (err) {
       // No recomputed facts; the explanation still covers the hold reasons.
       logWarn('aml.explain.recompute', err instanceof Error ? err.name : 'error', { transferId: t.id });

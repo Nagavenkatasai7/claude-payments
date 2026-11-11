@@ -15,13 +15,40 @@ import type { Db } from '@/db/client';
 import { LIST_UNAVAILABLE_REASON } from '@/lib/compliance-config';
 import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { certifyPartnerForTest } from './helpers-live';
+import { amlMintFixture, seedPriorSends } from './helpers-mint';
+import { AML_HOLD_AUDIT_ACTOR } from '@/lib/transfer-create';
+import { isPartnerReleasableHold } from '@/lib/compliance-config';
+import { partnerMayRejectHold } from '@/lib/partner-reviews';
+import { canReleaseHeld } from '@/lib/dashboard-ops';
 
-// Program-Fix 43 PR B: the optional per-partner AML hold inside mintLocked.
-// Owner decision (binding): AML rules raise alerts only; a hard hold comes ONLY
-// from partners.corridor_compliance[<country>].amlHolds === true (OFF by
-// default), only on a real `http` rail, and NEVER on the default (demo) tenant.
-// A hold is cleared → flagged (generic reason) — flagged/blocked are never
-// touched — and the check can never throw out of the mint.
+// Fix pack 6 (P16): a REAL SQL error in the in-mint stats read, on the handle
+// the store gave the repo (the mint's savepoint), while `fault.stats` is on.
+const fault = vi.hoisted(() => ({ stats: false }));
+vi.mock('@/db/repos/transfer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/transfer-repo')>();
+  return {
+    ...real,
+    createTransferRepo: (handle: Parameters<typeof real.createTransferRepo>[0]) => {
+      const repo = real.createTransferRepo(handle);
+      return {
+        ...repo,
+        senderAmlStats: async (...args: Parameters<typeof repo.senderAmlStats>) => {
+          if (fault.stats) await handle.execute(sql`SELECT 1/0`);
+          return repo.senderAmlStats(...args);
+        },
+      };
+    },
+  };
+});
+
+// Program-Fix 43 PR B and fix pack 6 (P16): the optional per-partner AML hold
+// inside mintLocked. Owner decision (binding): AML rules raise alerts only; a
+// hard hold comes ONLY from partners.corridor_compliance[<country>].amlHolds
+// === true with at least one rule (OFF by default), only on real money
+// (p.realMoney), and NEVER on the default (demo) tenant. A hold adds the
+// generic reason to a cleared or flagged verdict (blocked is never touched),
+// writes one ids-only `aml.hold` audit row, and FAILS CLOSED: a check that
+// cannot run holds the row. The check never throws out of the mint.
 
 const PHONE = '15550100043';
 
@@ -29,6 +56,7 @@ const PHONE = '15550100043';
 // every test here screens against a fresh one (checked an hour ago).
 const ORIGINAL_LIST = process.env.SANCTIONS_LIST;
 beforeEach(() => {
+  fault.stats = false;
   resetRateCacheForTests();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }));
   primeOfacSource({ checkedAgoMs: 3_600_000 });
@@ -101,6 +129,18 @@ function amlStatements(log: Array<{ sql: string }>): string[] {
 /** Fix pack 2 (R02): the one real-money rail read, on the root handle ABOVE the lock. */
 function preLockRailReads(log: Array<{ sql: string }>): string[] {
   return atLock(log).pre.filter((s) => s.includes('partner_integrations'));
+}
+
+async function amlAudits(db: Db, subjectId?: string) {
+  const r = await db.execute(sql`
+    SELECT partner_id, actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'aml.hold' ORDER BY id`);
+  const rows = r.rows as Array<{ partner_id: string; actor: string; actor_type: string; subject_id: string; meta: unknown }>;
+  return subjectId ? rows.filter((x) => x.subject_id === subjectId) : rows;
+}
+
+async function screenAudits(db: Db, subjectId: string) {
+  const r = await db.execute(sql`SELECT id FROM audit_events WHERE action = 'sanctions.screen' AND subject_id = ${subjectId}`);
+  return r.rows;
 }
 
 async function alerts(db: Db) {
@@ -182,6 +222,11 @@ describe('AML hold — setting ON, http rail', { retry: 0 }, () => {
     expect(stored?.complianceStatus).toBe('flagged');
     expect(await settleOrHold(db, stored!, EMPTY_PARTNER_INTEGRATIONS)).toEqual({ kind: 'held' });
     expect((await createTransferRepo(db).getTransfer(t.id))?.status).toBe('in_review');
+    // Fix pack 6 (P16): one ids-only aml.hold row (no phone, amount or name).
+    const audits = await amlAudits(db);
+    expect(audits).toEqual([{
+      partner_id: 'acme', actor: AML_HOLD_AUDIT_ACTOR, actor_type: 'system', subject_id: t.id, meta: { rules: ['first_transfer'] },
+    }]);
   });
 
   it('no hit (a small first send) stays cleared', async () => {
@@ -213,17 +258,23 @@ describe('AML hold — setting ON, http rail', { retry: 0 }, () => {
   it('never downgrades: a watchlist-blocked row stays blocked with its own reasons', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', { holds: true, rail: 'http' });
+    const stop = captureQueries();
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', recipientName: 'John Doe' });
+    const log = stop();
     expect(t.complianceStatus).toBe('blocked');
     expect(t.complianceReasons).not.toContain(AML_HOLD_REASON);
+    expect(await amlAudits(db)).toEqual([]);
+    expect(amlStatements(log)).toEqual([]);
   });
 
-  it('never touches an already-flagged verdict: the reasons are exactly the screen\'s', async () => {
+  it('an already-flagged verdict gains the AML reason once (first send $1,500)', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', { holds: true, rail: 'http' });
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 1500 });
     expect(t.complianceStatus).toBe('flagged');
-    expect(t.complianceReasons).toEqual(['Large transfer amount.']);
+    expect(t.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
+    expect((await createTransferRepo(db).getTransfer(t.id))?.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
+    expect((await amlAudits(db, t.id)).map((a) => a.meta)).toEqual([{ rules: ['first_transfer'] }]);
   });
 });
 
@@ -267,22 +318,28 @@ describe('AML hold — routed settlement: the RAIL partner\'s provider decides',
 });
 
 describe('AML hold — the check never throws out of the mint', { retry: 0 }, () => {
-  it('a real SQL error inside the check: the mint still commits cleared, and ONE ops alert is queued', async () => {
+  it('a real SQL error in the stats read: held, the transaction stays usable, ONE alert saying HELD', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
-    await partnerWith(db, 'acme', { holds: true, rail: 'http' });
-    await db.execute(sql`ALTER TABLE partner_integrations RENAME TO partner_integrations_gone`);
-    try {
-      const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
-      expect(t.complianceStatus).toBe('cleared');
-      expect((await createTransferRepo(db).getTransfer(t.id))?.complianceStatus).toBe('cleared');
-      const t2 = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
-      expect(t2.complianceStatus).toBe('cleared');
-    } finally {
-      await db.execute(sql`ALTER TABLE partner_integrations_gone RENAME TO partner_integrations`);
+    await amlMintFixture(db, { phone: PHONE });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    fault.stats = true;
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    const t2 = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+    fault.stats = false;
+    for (const x of [t, t2]) {
+      expect(x.complianceStatus).toBe('flagged');
+      expect(x.complianceReasons).toEqual([AML_HOLD_REASON]);
+      const stored = await createTransferRepo(db).getTransfer(x.id);
+      expect(stored?.complianceStatus).toBe('flagged');
+      expect(stored?.complianceReasons).toEqual([AML_HOLD_REASON]);
+      expect((await amlAudits(db, x.id)).map((a) => a.meta)).toEqual([{ rules: ['check_failed'] }]);
+      // The outer transaction kept working after the savepoint rollback.
+      expect(await screenAudits(db, x.id)).toHaveLength(1);
     }
     const a = await alerts(db);
     expect(a).toHaveLength(1); // hour-bucketed dedupe: one alert, not one per mint
     expect(a[0].dedupe_key).toMatch(/^aml-hold-check:acme:\d+$/);
+    expect(a[0].payload.message).toContain('HELD');
     expect(a[0].payload.message).toContain('AML hold check');
     expect(a[0].payload.message).not.toContain(PHONE);
     expect(Object.keys(a[0].payload)).toEqual(['message']);
@@ -308,15 +365,18 @@ describe('AML hold — the check never throws out of the mint', { retry: 0 }, ()
     }
   });
 
-  it('an ops method that throws is absorbed: no hold, the transfer is minted', async () => {
+  it('an ops method that throws HOLDS (fail closed): flagged, one aml.hold check_failed row, the mint commits', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await partnerWith(db, 'acme', { holds: true, rail: 'http' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const real = store.mintUnderSenderLock.bind(store);
     vi.spyOn(store, 'mintUnderSenderLock').mockImplementation(((p: string, ph: string, fn: (ops: SenderLedgerOps) => Promise<unknown>) =>
       real(p, ph, (ops) => fn({ ...ops, amlHoldInputs: async () => { throw new Error('boom'); } }))) as typeof store.mintUnderSenderLock);
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
-    expect(t.complianceStatus).toBe('cleared');
-    expect(await createTransferRepo(db).getTransfer(t.id)).not.toBeNull();
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual([AML_HOLD_REASON]);
+    expect((await createTransferRepo(db).getTransfer(t.id))?.complianceStatus).toBe('flagged');
+    expect((await amlAudits(db, t.id)).map((a) => a.meta)).toEqual([{ rules: ['check_failed'] }]);
   });
 
   it('inSavepoint: a failed statement rolls back to the savepoint and the outer transaction carries on', async () => {
@@ -330,5 +390,89 @@ describe('AML hold — the check never throws out of the mint', { retry: 0 }, ()
     });
     const r = await db.execute(sql`SELECT name FROM partners WHERE id = 'default'`);
     expect((r.rows[0] as { name: string }).name).toBe('still-writable');
+  });
+});
+
+describe('AML hold — per-corridor rules on real money (fix pack 6 P16)', { retry: 0 }, () => {
+  it('a sandbox (test) mint on a certified http rail with holds on: cleared, zero AML statements', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE });
+    const stop = captureQueries();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', environment: 'test' });
+    const log = stop();
+    expect(t.complianceStatus).toBe('cleared');
+    expect(amlStatements(log)).toEqual([]);
+    expect(await amlAudits(db)).toEqual([]);
+  });
+
+  it('holds on but every rule off (amlHoldRules []): cleared, zero AML statements, even when the read would fail', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE, rules: [] });
+    fault.stats = true;
+    const stop = captureQueries();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    const log = stop();
+    expect(t.complianceStatus).toBe('cleared');
+    expect(amlStatements(log)).toEqual([]);
+    expect(await amlAudits(db)).toEqual([]);
+    expect(await alerts(db)).toEqual([]);
+  });
+
+  it('per-corridor rules: only structuring stored -> a $600 first send is cleared', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE, rules: ['structuring'] });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    expect(t.complianceStatus).toBe('cleared');
+    expect(await amlAudits(db)).toEqual([]);
+  });
+
+  it('new_beneficiary: seedPriorSends(paid 2, toRecipient 0) then $600 -> held, aml.hold { rules: ["new_beneficiary"] }', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE });
+    await seedPriorSends(db, 'acme', PHONE, { paid: 2, toRecipient: 0, recipientPhone: base.recipientPhone });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual([AML_HOLD_REASON]);
+    expect((await amlAudits(db, t.id)).map((a) => a.meta)).toEqual([{ rules: ['new_beneficiary'] }]);
+  });
+
+  it('an awaiting_payment prior row does not count as a prior send: $600 -> first_transfer hold', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE });
+    await seedLedgerSpend(db, {
+      partnerId: 'acme', phone: PHONE, amountUsd: 100, status: 'awaiting_payment',
+      createdAt: new Date(Date.now() - 86_400_000), recipientPhone: base.recipientPhone,
+    });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    expect(t.complianceStatus).toBe('flagged');
+    expect((await amlAudits(db, t.id)).map((a) => a.meta)).toEqual([{ rules: ['first_transfer'] }]);
+  });
+
+  it('empty recipient phone (Partner API shape) with 2 prior paid sends: no new_beneficiary verdict, cleared', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE });
+    await seedPriorSends(db, 'acme', PHONE, { paid: 2, toRecipient: 0, recipientPhone: base.recipientPhone });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', recipientPhone: '' });
+    expect(t.complianceStatus).toBe('cleared');
+    expect(await amlAudits(db)).toEqual([]);
+  });
+
+  it('a check_failed hold is platform-only: isPartnerReleasableHold and partnerMayRejectHold are false for a delegated owner; platform staff may release it (releaseTransferAction -> canReleaseHeld)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await amlMintFixture(db, { phone: PHONE });
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'acme'`);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    fault.stats = true;
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', amountSource: 100 });
+    fault.stats = false;
+    expect(t.complianceReasons).toEqual([AML_HOLD_REASON]);
+    expect((await amlAudits(db, t.id)).map((a) => a.meta)).toEqual([{ rules: ['check_failed'] }]);
+    const owner = { kycMode: 'delegated' as const };
+    const sender = { watchlistHit: false, pepHit: false };
+    const held = { ...t, status: 'in_review' as const };
+    expect(isPartnerReleasableHold(held, owner, sender)).toBe(false);
+    expect(partnerMayRejectHold(held, owner, sender)).toBe(false);
+    expect(canReleaseHeld({ kind: 'partner', partnerId: 'acme' }, owner, held, sender)).toBe(false);
+    expect(canReleaseHeld({ kind: 'platform' }, owner, held, sender)).toBe(true);
   });
 });

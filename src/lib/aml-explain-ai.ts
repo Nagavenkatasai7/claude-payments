@@ -180,7 +180,7 @@ function ruleFact(
  * Build the facts bundle (PURE). `alerts` are the transfer's aml.alert rows
  * (malformed rows are dropped, one fact per rule). When there is none, the
  * caller may pass `recomputed` — the in-mint rules re-run on the sender's
- * ledger (senderAmlStats → amlHoldHit) — marked "recomputed". `purposeHold`
+ * ledger (senderAmlStats → amlHoldHits) — marked "recomputed". `purposeHold`
  * (the transfer has a purpose.flag row) turns the generic hold reason into
  * `purpose_hold`; its category reaches the PLATFORM audience only (the partner
  * transfer page never names it either).

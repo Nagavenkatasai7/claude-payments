@@ -1,30 +1,37 @@
 import { describe, it, expect } from 'vitest';
 import {
   AML_HOLD_REASON,
+  AML_HOLD_RULES,
   amlHoldGate,
-  amlHoldRailEligible,
-  amlHoldHit,
+  amlHoldHits,
+  type AmlHoldRule,
   applyAmlHold,
   applyPurposeHold,
   addHoldReason,
 } from '@/lib/aml-hold';
 import { AML_DEFAULTS, type SenderAmlStats } from '@/lib/aml-rules';
+import type { PriorSends } from '@/db/repos/transfer-repo';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 // Program-Fix 43 PR B: the optional per-partner AML hold, as PURE decisions.
 // Owner decision (binding): AML rules raise alerts only; a hard hold comes
 // ONLY from a per-partner setting that is OFF by default, and a demo transfer
-// (the default tenant, or any non-http rail) is NEVER held.
+// (the default tenant, or anything that is not real money) is NEVER held.
 
 const cfg = { ...AML_DEFAULTS, largeAmountUsd: 1000 };
 const none: SenderAmlStats = { bandCount7d: 0, subTSumCents30d: 0, subTCount30d: 0, priorCount: 0 };
 const seasoned: SenderAmlStats = { bandCount7d: 0, subTSumCents30d: 0, subTCount30d: 5, priorCount: 5 };
 
 describe('amlHoldGate (the pre-read gate: false ⇒ zero AML statements)', { retry: 0 }, () => {
-  const on = { amlHolds: true, partnerId: 'acme', railPartnerId: 'acme', complianceStatus: 'cleared' as const };
+  const on = { realMoney: true, amlHolds: true, partnerId: 'acme', railPartnerId: 'acme', complianceStatus: 'cleared' as const };
 
-  it('setting ON, a non-default tenant, a cleared verdict ⇒ run the check', () => {
+  it('setting ON, real money, a non-default tenant, a cleared verdict ⇒ run the check', () => {
     expect(amlHoldGate(on)).toBe(true);
+  });
+
+  it('not real money (sandbox, simulator, mock) => never', () => {
+    expect(amlHoldGate({ ...on, realMoney: false })).toBe(false);
+    expect(amlHoldGate({ ...on, realMoney: 'true' as unknown as boolean })).toBe(false);
   });
 
   it('setting OFF (the default) ⇒ never', () => {
@@ -40,8 +47,8 @@ describe('amlHoldGate (the pre-read gate: false ⇒ zero AML statements)', { ret
     expect(amlHoldGate({ ...on, railPartnerId: DEFAULT_PARTNER_ID })).toBe(false);
   });
 
-  it('never downgrades: a flagged or blocked verdict is left alone (no read either)', () => {
-    expect(amlHoldGate({ ...on, complianceStatus: 'flagged' })).toBe(false);
+  it('a flagged verdict still runs the check; a blocked one never', () => {
+    expect(amlHoldGate({ ...on, complianceStatus: 'flagged' })).toBe(true);
     expect(amlHoldGate({ ...on, complianceStatus: 'blocked' })).toBe(false);
   });
 
@@ -51,34 +58,45 @@ describe('amlHoldGate (the pre-read gate: false ⇒ zero AML statements)', { ret
   });
 });
 
-describe('amlHoldRailEligible (demo = any non-http rail)', { retry: 0 }, () => {
-  it('only a real http rail can hold', () => {
-    expect(amlHoldRailEligible('http')).toBe(true);
-    for (const t of ['simulator', 'mock', '', 'HTTP', null, undefined]) {
-      expect(amlHoldRailEligible(t)).toBe(false);
-    }
-  });
-});
+describe('amlHoldHits (pack 6 P16)', { retry: 0 }, () => {
+  const all = AML_HOLD_RULES;
+  const hits = (stats: SenderAmlStats, sends: PriorSends, amountUsd: number, rules: readonly AmlHoldRule[] = all) =>
+    amlHoldHits({ stats, sends, amountUsd, cfg, rules }).map((h) => h.rule);
 
-describe('amlHoldHit (R1 structuring + R2 first transfer; R2b/R3 are sweep-only)', { retry: 0 }, () => {
-  it('a large first-ever transfer is a hit', () => {
-    expect(amlHoldHit(none, 600, cfg)?.rule).toBe('first_transfer');
+  it('first-ever paid send $600 -> [first_transfer] only, even with toRecipient 0', () => {
+    expect(hits(none, { total: 0, toRecipient: 0 }, 600)).toEqual(['first_transfer']);
   });
 
-  it('a small first-ever transfer is not', () => {
-    expect(amlHoldHit(none, 200, cfg)).toBeNull();
+  it('total 2, toRecipient 0, $600 -> [new_beneficiary]', () => {
+    expect(hits(seasoned, { total: 2, toRecipient: 0 }, 600)).toEqual(['new_beneficiary']);
   });
 
-  it('the send that completes a structuring run is a hit', () => {
-    expect(amlHoldHit({ ...seasoned, bandCount7d: 2 }, 900, cfg)?.rule).toBe('structuring');
+  it('total 2, toRecipient null (no recipient phone) -> []', () => {
+    expect(hits(seasoned, { total: 2, toRecipient: null }, 600)).toEqual([]);
   });
 
-  it('an ordinary repeat send is not', () => {
-    expect(amlHoldHit(seasoned, 900, cfg)).toBeNull();
+  it('total 2, toRecipient 1 -> []', () => {
+    expect(hits(seasoned, { total: 2, toRecipient: 1 }, 600)).toEqual([]);
   });
 
-  it('a new-beneficiary verdict is never taken in the mint (the destination history lives in the sweep)', () => {
-    expect(amlHoldHit(seasoned, 900, cfg)).toBeNull();
+  it('stats.priorCount 5 but sends.total 0 -> first_transfer (unpaid rows no longer defeat it)', () => {
+    expect(hits(seasoned, { total: 0, toRecipient: 0 }, 600)).toEqual(['first_transfer']);
+  });
+
+  it('bandCount7d 2, $900, total 3, toRecipient 0 -> [structuring, new_beneficiary] (order)', () => {
+    expect(hits({ ...seasoned, bandCount7d: 2 }, { total: 3, toRecipient: 0 }, 900)).toEqual(['structuring', 'new_beneficiary']);
+  });
+
+  it('rules without first_transfer, first-ever -> [] (Q17)', () => {
+    expect(hits(none, { total: 0, toRecipient: 0 }, 600, ['structuring', 'new_beneficiary'])).toEqual([]);
+  });
+
+  it('rules [] -> []', () => {
+    expect(hits({ ...seasoned, bandCount7d: 2 }, { total: 3, toRecipient: 0 }, 900, [])).toEqual([]);
+  });
+
+  it('$200 first-ever -> []', () => {
+    expect(hits(none, { total: 0, toRecipient: 0 }, 200)).toEqual([]);
   });
 });
 

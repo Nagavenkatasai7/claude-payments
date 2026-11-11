@@ -9,7 +9,7 @@ import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
 import { SendsPausedError } from './flags';
-import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold, applyPurposeHold } from './aml-hold';
+import { addHoldReason, amlHoldGate, amlHoldHits, applyPurposeHold } from './aml-hold';
 import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
@@ -146,6 +146,8 @@ export interface CreateTransferInput {
 
 /** Batch B follow-up A4: the actor of the `purpose.flag` audit row. */
 export const PURPOSE_AUDIT_ACTOR = 'system:purpose-check';
+/** Fix pack 6 (P16): the actor of the `aml.hold` audit row. */
+export const AML_HOLD_AUDIT_ACTOR = 'system:aml-hold';
 
 /** B3: what a customer sees when the reward on an approved quote ended before the mint. */
 export { REWARD_ENDED_MESSAGE } from './rewards/copy';
@@ -742,8 +744,11 @@ async function lockedFeeTierQuote(
  *   1. same-id replay (claim-first callers) → return the existing row, no
  *      second insert and no cap check;
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
- *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
- *       demo, cleared → flagged only, never throws);
+ *   2a. the optional AML hold (Program-Fix 43 PR B, fix pack 6 P16: real
+ *       money only, OFF by default, per-corridor rules, never demo; a hit,
+ *       a null read or a thrown check adds the generic reason to a cleared
+ *       or flagged verdict (fail closed), never throws; the `aml.hold` audit
+ *       row is written after the insert);
  *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction
  *       (PR C: the same evidence is stored on the inserted row, transfers.screening);
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
@@ -810,33 +815,48 @@ async function mintLocked(
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
   const id = input.id ?? newTransferId();
-  // ── Optional AML hold (Program-Fix 43 PR B) ──────────────────────────────
-  // OFF unless the partner's corridor switch is the literal `true`; never on
-  // the default (demo) tenant on either side; never on a non-http rail; only
-  // ever cleared → flagged. The gate is pure, so OFF / demo / an already
-  // flagged or blocked verdict costs ZERO statements. Past it, the two reads
-  // run in a savepoint that never throws (null ⇒ failed, alert queued ⇒ no
-  // hold), and this block is wrapped again: it can never fail the mint.
+  // ── Optional AML hold (Program-Fix 43 PR B, fix pack 6 P16) ─────────────
+  // Real money only (p.realMoney: computed on the RAIL partner, a failed rail
+  // read counts as real), OFF unless the corridor switch is the literal `true`
+  // with at least one rule, never on the default (demo) tenant on either
+  // side, never on a blocked verdict. The gate is pure, so all of those cost
+  // ZERO statements. Past it, the reads run in ONE savepoint that never throws
+  // (null ⇒ failed, alert queued). FAIL CLOSED: a rule hit, a null read or a
+  // thrown check adds the generic reason (a flagged row gains it too), and
+  // the mint goes on: this block never throws (a throw would roll back and
+  // leave the idempotency claim bound: a refusal, not a hold).
+  let amlAudit: string[] | null = null;
   if (amlHoldGate({
-    amlHolds: p.rules.amlHolds,
+    realMoney: p.realMoney,
+    amlHolds: p.rules.amlHolds && p.rules.amlHoldRules.length > 0,
     partnerId: input.partnerId,
     railPartnerId: p.settlementPartnerId ?? input.partnerId,
     complianceStatus,
   })) {
     try {
       const inputs = await ops.amlHoldInputs({
-        railPartnerId: p.settlementPartnerId ?? input.partnerId,
         anchor: { at: now, id },
         largeAmountUsd: p.rules.largeAmountUsd,
         band: p.rules.aml.band,
+        recipientPhone: input.recipientPhone ?? '',
       });
-      if (inputs?.prior && amlHoldRailEligible(inputs.railProviderType)) {
-        const hit = amlHoldHit(inputs.prior, q.amountUsd, { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd });
-        ({ complianceStatus, complianceReasons } = applyAmlHold({ complianceStatus, complianceReasons }, hit));
+      if (!inputs) {
+        amlAudit = ['check_failed'];
+      } else {
+        const hits = amlHoldHits({
+          stats: inputs.stats,
+          sends: inputs.sends,
+          amountUsd: q.amountUsd,
+          cfg: { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd },
+          rules: p.rules.amlHoldRules,
+        });
+        if (hits.length > 0) amlAudit = [...new Set(hits.map((h) => h.rule))];
       }
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
+      amlAudit = ['check_failed'];
     }
+    if (amlAudit) ({ complianceStatus, complianceReasons } = addHoldReason({ complianceStatus, complianceReasons }));
   }
   // ── Sender screening hold (fix pack 2 T6, R06) ────────────────────────────
   // Real-money rails only (no read otherwise): a sender with a Persona
@@ -986,6 +1006,19 @@ async function mintLocked(
   await ops.insertTransfer(transfer, { screening: compliance.evidence });
   // One reward per transfer (the PK), committed with the transfer or not at all.
   if (rewardWrite) await ops.insertRedemption({ transferId: transfer.id, ...rewardWrite });
+  // Fix pack 6 (P16): the in-mint AML hold, audited with the row (ids and rule
+  // ids only: never a phone, amount or name). The blocked early return above
+  // never reaches here (the gate excluded blocked).
+  if (amlAudit) {
+    await ops.recordAudit({
+      partnerId: input.partnerId,
+      actor: AML_HOLD_AUDIT_ACTOR,
+      actorType: 'system',
+      action: 'aml.hold',
+      subjectId: transfer.id,
+      meta: { rules: amlAudit },
+    });
+  }
   // Batch B follow-up A4: a scam-pattern reason is audited (category and id, no
   // free text) and raises one deduped ops alert, committed with the row. Also
   // when another rule already flagged it: staff should know the category. A

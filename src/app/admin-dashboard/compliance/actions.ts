@@ -74,8 +74,11 @@ export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
 /**
  * Program-Fix 43 PR B: the per-partner × corridor AML HOLD switch
  * (partners.corridor_compliance[<country>].amlHolds). OFF by default; when ON,
- * a cleared transfer on that partner's real `http` rail that hits R1/R2 in the
- * mint is flagged for review instead of settling (transfer-create.ts).
+ * a real-money transfer (live, on a real `http` rail) of that partner and
+ * corridor that hits one of the corridor's rules in the mint (amlHoldRules:
+ * structuring, first transfer, new beneficiary) is held for review instead
+ * of settling; a check that cannot run holds too (fail closed,
+ * transfer-create.ts, fix pack 6 P16).
  *
  * Server actions are PUBLIC POST endpoints, so this self-gates in order:
  *   1. requirePlatformAdmin — platform admins only (never partner staff: a

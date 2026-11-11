@@ -1,10 +1,37 @@
 import { prepareSendDraft, type ToolContext } from '@/lib/tools';
 import { finalizeDraftPayment, type BankDetails, type FinalizeStores } from '@/lib/pay-finalize';
+import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
+import { seedPartner, seedSender } from './helpers-db';
+import { certifyPartnerForTest, seedRealMoneyRail } from './helpers-live';
 
 // P24: the prior-send seeder lives in helpers-db (repo tests must not pull in tools.ts).
 export { seedPriorSends } from './helpers-db';
+
+/**
+ * Fix pack 6 (P24, T17): a real-money AML hold fixture. A non-default partner
+ * on a signed http rail (seedRealMoneyRail), certified for live money
+ * (certifyPartnerForTest), its US corridor entry written by a raw UPDATE
+ * (`amlHolds`, default true; `amlHoldRules` only when `rules` is given, so the
+ * resolver's all-rules default applies otherwise), and a seasoned T1 sender
+ * (first seen 10 days ago, verified). Defaults: 'acme' and a fake 555 phone.
+ */
+export async function amlMintFixture(
+  db: Db,
+  o: { partnerId?: string; rules?: string[]; amlHolds?: boolean; phone?: string } = {},
+): Promise<{ partnerId: string; phone: string }> {
+  const partnerId = o.partnerId ?? 'acme';
+  const phone = o.phone ?? '15550100171';
+  await seedPartner(db, partnerId);
+  await seedRealMoneyRail(db, partnerId);
+  await certifyPartnerForTest(db, partnerId);
+  const entry = { amlHolds: o.amlHolds ?? true, ...(o.rules ? { amlHoldRules: o.rules } : {}) };
+  await db.execute(sql`
+    UPDATE partners SET corridor_compliance = ${JSON.stringify({ US: entry })}::jsonb WHERE id = ${partnerId}`);
+  await seedSender(db, { partnerId, phone, firstSeenDaysAgo: 10, kycStatus: 'verified' });
+  return { partnerId, phone };
+}
 
 // helpers-mint — mint a transfer in a test through the CURRENT send path.
 //

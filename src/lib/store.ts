@@ -1,10 +1,9 @@
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { stripProviderContent } from './llm-translate';
 import { getRedis } from './redis';
 import { easternDayStart, easternMonth, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
 import { getDb, type Db, type Tx } from '@/db/client';
-import { partnerIntegrations } from '@/db/schema';
 import { createTransferRepo, type PriorSends, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
@@ -14,7 +13,6 @@ import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { readRailProviderType } from './live-gate';
 import { listNotLiveDedupeKey } from './sanctions/list-health';
 import { enqueueSanctionsBlockNotices, type SanctionsBlockNotice } from './sanctions/notices';
-import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
@@ -48,17 +46,18 @@ export interface SenderLedgerOps {
   /** Program-Fix 14: the sanctions.screen evidence row, in the SAME transaction as the insert. */
   recordAudit(e: AuditEvent): Promise<void>;
   /**
-   * Program-Fix 43 PR B: the optional AML hold's two reads — the RAIL
-   * partner's payment provider type (a plain column, no decrypt) and, only on
-   * an `http` rail, the sender's AML aggregates before `anchor`. mintLocked
-   * calls it ONLY past amlHoldGate (setting ON, not demo, verdict cleared), so
-   * a partner with the setting OFF pays zero statements.
+   * Program-Fix 43 PR B, fix pack 6 (P16): the AML hold's two reads — the
+   * sender's AML aggregates before `anchor` (senderAmlStats) and its prior
+   * paid/delivered live sends, in total and to `recipientPhone` (priorSends).
+   * mintLocked calls it ONLY past amlHoldGate (real money, setting ON with at
+   * least one rule, not demo, verdict not blocked), so a partner with the
+   * setting OFF pays zero statements.
    *
-   * NEVER throws. Both reads run inside a SAVEPOINT: a failed statement rolls
-   * back to it and the mint transaction carries on (without the savepoint any
-   * SQL error would abort the whole mint). On failure it logs (scrubbed),
-   * queues ONE hour-deduped ops.alert in this transaction, and returns null ⇒
-   * the caller does not hold (fail to "no hold" + alert).
+   * NEVER throws. Both reads run inside ONE SAVEPOINT: a failed statement
+   * rolls back to it and the mint transaction carries on (without the
+   * savepoint any SQL error would abort the whole mint). On failure it logs
+   * (scrubbed), queues ONE hour-deduped ops.alert in this transaction, and
+   * returns null ⇒ the caller HOLDS (fail closed).
    */
   amlHoldInputs(q: AmlHoldQuery): Promise<AmlHoldInputs | null>;
   /**
@@ -135,16 +134,16 @@ export interface RewardMintFacts {
 }
 
 export interface AmlHoldQuery {
-  railPartnerId: PartnerId;
   anchor: { at: Date; id: string };
   largeAmountUsd: number;
   band: number;
+  /** The new transfer's recipient phone ('' when none: no new_beneficiary verdict). */
+  recipientPhone: string;
 }
 
 export interface AmlHoldInputs {
-  railProviderType: string | null;
-  /** Null when the rail is not eligible (the stats are never read then). */
-  prior: SenderAmlStats | null;
+  stats: SenderAmlStats;
+  sends: PriorSends;
 }
 
 /**
@@ -171,15 +170,10 @@ async function readAmlHoldInputs(
   q: AmlHoldQuery,
 ): Promise<AmlHoldInputs | null> {
   const read = await inSavepoint(tx, async (sp): Promise<AmlHoldInputs> => {
-    const rows = await sp
-      .select({ providerType: partnerIntegrations.paymentProviderType })
-      .from(partnerIntegrations)
-      .where(eq(partnerIntegrations.partnerId, q.railPartnerId))
-      .limit(1);
-    const railProviderType = rows[0]?.providerType ?? null;
-    if (!amlHoldRailEligible(railProviderType)) return { railProviderType, prior: null };
-    const prior = await createTransferRepo(sp).senderAmlStats(partnerId, phone, q.anchor, q.largeAmountUsd, q.band);
-    return { railProviderType, prior };
+    const repo = createTransferRepo(sp);
+    const stats = await repo.senderAmlStats(partnerId, phone, q.anchor, q.largeAmountUsd, q.band);
+    const sends = await repo.priorSends(partnerId, phone, q.recipientPhone, 'live', q.anchor);
+    return { stats, sends };
   });
   if (read.ok) return read.value;
   logError('aml.hold_check', read.error, { partnerId });
@@ -192,7 +186,7 @@ async function readAmlHoldInputs(
       {
         message:
           `⚠️ SmartRemit ops: the AML hold check failed for partner ${partnerId}; ` +
-          `transfers are being minted WITHOUT it (no hold) until it recovers. Check the aml.hold_check logs.`,
+          `transfers are being HELD for review until it recovers. Check the aml.hold_check logs.`,
       },
       { dedupeKey: `aml-hold-check:${partnerId}:${hour}` },
     ),
