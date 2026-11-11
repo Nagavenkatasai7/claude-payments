@@ -377,14 +377,33 @@ export function originatorShown(v: OriginatorView): OriginatorShown {
   return { address: v.addressRequired && !v.addressOnFile, dob: v.dobRequired && !v.dobOnFile };
 }
 
-/** The pay body keys: only the shown fields, trimmed. */
+/**
+ * Review round 2 (GB1): the DOB field opens the number pad (an iPhone's has no
+ * hyphen key), so the field formats as the customer types: digits only, at most
+ * 8, a hyphen after the 4th and the 6th ("19800102" -> "1980-01-02"). No hyphen
+ * is added before the next digit, so a backspace is never undone. Pure.
+ */
+export function formatDobInput(raw: string): string {
+  const d = raw.replace(/\D/g, '').slice(0, 8);
+  if (d.length <= 4) return d;
+  if (d.length <= 6) return `${d.slice(0, 4)}-${d.slice(4)}`;
+  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`;
+}
+
+/** The DOB as posted: trimmed; exactly 8 digits become YYYY-MM-DD; any other value is sent as is (the server refuses it). Pure. */
+export function normalizeDobForBody(v: string): string {
+  const t = v.trim();
+  return /^\d{8}$/.test(t) ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6)}` : t;
+}
+
+/** The pay body keys: only the shown fields, trimmed (the DOB normalised, see normalizeDobForBody). */
 export function originatorBody(
   shown: OriginatorShown,
   values: { address: string; dob: string },
 ): { senderAddress?: string; senderDob?: string } {
   return {
     ...(shown.address ? { senderAddress: values.address.trim() } : {}),
-    ...(shown.dob ? { senderDob: values.dob.trim() } : {}),
+    ...(shown.dob ? { senderDob: normalizeDobForBody(values.dob) } : {}),
   };
 }
 
@@ -448,7 +467,7 @@ export function OriginatorFields({
             type="text"
             required
             value={dob}
-            onChange={(e) => onDob(e.target.value)}
+            onChange={(e) => onDob(formatDobInput(e.target.value))}
             placeholder="YYYY-MM-DD"
             inputMode="numeric"
             maxLength={10}

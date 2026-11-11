@@ -62,13 +62,27 @@ export const LIMIT_NEEDS_ADDRESS_COPY = "Capture the sender's address first: lim
 const ADDRESS_MIN = 5;
 const ADDRESS_MAX = 300;
 
+/**
+ * Review round 2 (GB3): the web-address TLD list endings that are also a US state code
+ * or "us" / "in" ("Denver.CO 80202", "Indianapolis.IN 46204"). For the address only, a
+ * single label followed by one of these, then the end, a space or punctuation other than
+ * "/", ":", "." or "-", is read as an address; the dot becomes a space before the
+ * web-address check. A scheme, "www.", an IPv4 address, a path or port ("evil.co/a",
+ * "evil.co:80"), a dotted chain ("pay.evil.co"), an email ("a@evil.co") and every other
+ * ending are still refused. Known limit: a bare "name.co" is accepted in an address.
+ */
+const ADDRESS_CLASHING_ENDING =
+  /(?<![\p{L}\p{N}.@/:-])([\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?)\.(ca|co|de|in|me|us)(?![\p{L}\p{N}./:-])/giu;
+
 /** The sender's address as typed: trimmed, 5..300 characters on one line, printable, no web address. */
 export function validateSenderAddress(v: string): { ok: true; value: string } | { ok: false } {
   if (typeof v !== 'string') return { ok: false };
   const s = v.trim();
   const len = [...s].length;
   if (len < ADDRESS_MIN || len > ADDRESS_MAX) return { ok: false };
-  if (!isBoundedPrintable(s, ADDRESS_MAX) || hasWebAddress(s)) return { ok: false };
+  if (!isBoundedPrintable(s, ADDRESS_MAX) || hasWebAddress(s.replace(ADDRESS_CLASHING_ENDING, '$1 $2'))) {
+    return { ok: false };
+  }
   return { ok: true, value: s };
 }
 

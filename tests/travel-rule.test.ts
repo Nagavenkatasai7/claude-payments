@@ -105,6 +105,39 @@ describe('validateSenderAddress', () => {
       expect(validateSenderAddress(v as string), JSON.stringify(v)).toEqual({ ok: false });
     }
   });
+
+  // Fix pack 5 review round 2 (GB3): a dot before a US state / territory code, "us" or
+  // "in" with no space is an address, not a web address. Only the bare-domain rule is
+  // relaxed, and only for the clashing endings ca, co, de, in, me, us.
+  it('accepts a dot before a clashing state / country code (no space)', () => {
+    for (const v of [
+      '12 Elm St, Denver.CO 80202',
+      'Indianapolis.IN 46204',
+      '9 Main St, Sacramento.ca 95814',
+      '4 Front St, Dover.DE',
+      '7 Pine Rd, Portland.Me 04101',
+      '1 Liberty Ave, Anytown.US',
+    ]) {
+      expect(validateSenderAddress(v), v).toEqual({ ok: true, value: v });
+    }
+  });
+
+  it('still refuses a scheme, www., an IPv4 address, another ending, or a clashing ending used as a host', () => {
+    for (const v of [
+      'pay at evil.com now',
+      'http://x.co/a',
+      'www.evil.co',
+      '10.0.0.1',
+      'see evil.co/a',
+      'evil.co:8080 Main St',
+      'pay.evil.co now',
+      'mail me at a@evil.co',
+      'send to evil.uk now',
+      'evil[.]co please',
+    ]) {
+      expect(validateSenderAddress(v), v).toEqual({ ok: false });
+    }
+  });
 });
 
 /** The 18 / 120 / 121 year boundaries at `now` (shared by the today and the leap-day cases). */
