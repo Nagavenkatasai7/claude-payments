@@ -37,15 +37,20 @@ vi.mock('@/lib/partner-integrations-store', () => ({
 
 import { POST } from '@/app/api/partner-rail/route';
 
+/**
+ * Fix pack 5 T2: a legacy-only instruction is refused, so `sign` returns the
+ * v2 header value (`t=..,v1=..` over the raw body, the documented recipe).
+ */
 function sign(raw: string): string {
-  return createHmac('sha256', SIGNING_SECRET).update(raw).digest('hex');
+  const t = Math.floor(Date.now() / 1000);
+  return `t=${t},v1=${createHmac('sha256', SIGNING_SECRET).update(`${t}.${raw}`).digest('hex')}`;
 }
 
 function postInstruction(body: unknown) {
   const raw = JSON.stringify(body);
   const req = new NextRequest('http://localhost/api/partner-rail', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-signature': sign(raw) },
+    headers: { 'Content-Type': 'application/json', 'x-smartremit-signature': sign(raw) },
     body: raw,
   });
   return POST(req);

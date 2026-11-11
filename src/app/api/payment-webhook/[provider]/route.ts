@@ -95,6 +95,13 @@ export async function POST(
     route: 'payment-webhook',
   });
   if (!verified.ok) {
+    // Fix pack 5 T2 (P6): the verifier already logged the reason. A refused
+    // legacy-only callback whose old HMAC verified is a genuine rail partner
+    // still on the old scheme: tell ops (deduped per rail per hour). An
+    // invalid legacy header raises nothing (no anonymous alert spam).
+    if (verified.reason === 'legacy_rejected' && verified.legacyValid) {
+      await alertRailLegacy(railPartnerId);
+    }
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
@@ -108,6 +115,30 @@ export async function POST(
   const response = await handleVerified(provider, body, railPartnerId, railIntegrations, refTransfer);
   if (verified.scheme === 'v2') await markRailNonce(verified.nonce);
   return response;
+}
+
+/**
+ * Fix pack 5 T2 (P30): one `raillegacy:<rail|unresolved>:<hour>` ops alert.
+ * Ids only. Best-effort: a failed write is logged by error name and the
+ * caller still answers the same 401.
+ */
+async function alertRailLegacy(railPartnerId: string | null): Promise<void> {
+  const rail = railPartnerId ?? 'unresolved';
+  const message =
+    `⚠️ SmartRemit ops: a rail callback for rail partner ${rail} was refused (401): ` +
+    'it was signed only with the legacy x-signature header. Ask the rail partner to sign with ' +
+    'x-smartremit-signature (see the webhooks docs); the rail keeps retrying until it does. ' +
+    'Further refusals for this rail this hour are coalesced into this alert.';
+  try {
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      { message },
+      { dedupeKey: `raillegacy:${rail}:${Math.floor(Date.now() / 3_600_000)}` },
+    );
+    pokeWorker();
+  } catch (err) {
+    logWarn('payment-webhook.raillegacy', err instanceof Error ? err.name : 'error', { partnerId: railPartnerId });
+  }
 }
 
 async function handleVerified(

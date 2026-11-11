@@ -141,12 +141,26 @@ const deliveredGbp = {
 };
 const SECRET = 'uniteller-secret';
 const body = JSON.stringify({ reference: 'wh_1', status: 'paid_out' });
-const sig = (b: string, s = SECRET) => createHmac('sha256', s).update(b).digest('hex');
+/**
+ * Fix pack 5 T2: since a legacy-only callback is refused, `sig()` returns the
+ * v2 header VALUE (`t=..,v1=..`, straight from the documented recipe) and
+ * `post()` puts it into x-smartremit-signature. Each call signs with its own
+ * timestamp (one second earlier than the last, well inside the ±300 s window),
+ * as a rail re-signs every retry, so two posts of the same body are two
+ * messages (two nonces), not a replay. `legacySig()` is the old body-only HMAC
+ * for the cases that need a real legacy x-signature header.
+ */
+const sigClock = { back: 0 };
+const sig = (b: string, s = SECRET) => {
+  const t = Math.floor(Date.now() / 1000) - (sigClock.back++ % 200);
+  return `t=${t},v1=${createHmac('sha256', s).update(`${t}.${b}`).digest('hex')}`;
+};
+const legacySig = (b: string, s = SECRET) => createHmac('sha256', s).update(b).digest('hex');
 
 function post(provider: string, raw: string, signature?: string, extra: Record<string, string> = {}) {
   const req = new NextRequest('https://x/api/payment-webhook/' + provider, {
     method: 'POST', body: raw,
-    headers: { ...(signature ? { 'x-signature': signature } : {}), ...extra },
+    headers: { ...(signature ? { 'x-smartremit-signature': signature } : {}), ...extra },
   });
   return POST(req, { params: Promise.resolve({ provider }) });
 }
@@ -164,7 +178,7 @@ beforeEach(() => {
   afterPending.length = 0; // never leak an unflushed after() into the next test
   process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER = SECRET;
   delete process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS;
-  replay.marked.clear(); replay.state = null; replay.markCalls = 0;
+  replay.marked.clear(); replay.state = null; replay.markCalls = 0; sigClock.back = 0;
   outboxFake.keys.clear(); outboxFake.enqueued.length = 0;
   logWarnSpy.mockClear();
   setPayoutReference.mockReset(); setPayoutReference.mockResolvedValue(true);
@@ -477,17 +491,95 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
   });
 
   it('a bad v2 header next to a VALID legacy header → 401 (the new header decides alone)', async () => {
-    const res = await post('simulator', body, sig(body, 'owner_whk'), { 'x-smartremit-signature': `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}` });
+    const res = await post('simulator', body, undefined, {
+      'x-signature': legacySig(body, 'owner_whk'),
+      'x-smartremit-signature': `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}`,
+    });
     expect(res.status).toBe(401);
     expect(handleWebhook).not.toHaveBeenCalled();
   });
 
-  it('legacy-only header → 200 with a deprecation log that names the rail partner', async () => {
-    const res = await post('simulator', body, sig(body, 'owner_whk'));
-    expect(res.status).toBe(200);
-    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'rail-sig.legacy');
-    expect(call?.[2]).toMatchObject({ partnerId: 'owner' });
-    expect(replay.markCalls).toBe(0); // legacy carries no nonce
+  // Fix pack 5 T2 (P6, P30): a legacy-only callback is refused with the same
+  // bare 401; a genuine legacy HMAC raises one deduped raillegacy alert.
+  const hour = () => Math.floor(Date.now() / 3_600_000);
+  const legacyAlerts = () => outboxFake.enqueued.filter((e) => e.kind === 'ops.alert' && e.dedupeKey?.startsWith('raillegacy:'));
+
+  it('legacy-only header with a VALID HMAC → 401 { ok: false }, handleWebhook never called, one ops.alert raillegacy:owner:<hour> naming only the rail partner, no nonce mark', async () => {
+    const res = await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'owner_whk') });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    const alerts = legacyAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupeKey).toBe(`raillegacy:owner:${hour()}`);
+    const message = (alerts[0].payload as { message: string }).message;
+    expect(message).toBe(
+      '⚠️ SmartRemit ops: a rail callback for rail partner owner was refused (401): it was signed only with the legacy x-signature header. Ask the rail partner to sign with x-smartremit-signature (see the webhooks docs); the rail keeps retrying until it does. Further refusals for this rail this hour are coalesced into this alert.',
+    );
+    expect(Object.keys(alerts[0].payload as object)).toEqual(['message']);
+    expect(message).not.toContain('owner_whk');
+    expect(message).not.toContain('wh_1');
+    expect(replay.markCalls).toBe(0);
+  });
+
+  it('a second legacy-only callback in the same hour → still 401, still ONE alert', async () => {
+    expect((await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'owner_whk') })).status).toBe(401);
+    expect((await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'owner_whk') })).status).toBe(401);
+    expect(legacyAlerts()).toHaveLength(1);
+    expect(handleWebhook).not.toHaveBeenCalled();
+  });
+
+  it('legacy-only with an INVALID HMAC → 401 and no alert', async () => {
+    const res = await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'not-the-secret') });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(outboxFake.enqueued).toHaveLength(0);
+  });
+
+  it('legacy-only on an unresolved reference verified against the env secret → raillegacy:unresolved:<hour>', async () => {
+    const ghost = JSON.stringify({ reference: 'tr_unknown', status: 'paid_out' });
+    const res = await post('uniteller', ghost, undefined, { 'x-signature': legacySig(ghost, SECRET) });
+    expect(res.status).toBe(401);
+    const alerts = legacyAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupeKey).toBe(`raillegacy:unresolved:${hour()}`);
+    expect((alerts[0].payload as { message: string }).message).toContain('for rail partner unresolved was refused');
+  });
+
+  it('a failing alert write is best-effort: still the same 401, logged by error name only', async () => {
+    const spy = vi.spyOn(outboxFake.keys, 'has').mockImplementation(() => {
+      throw new TypeError('redis exploded with a secret');
+    });
+    try {
+      const res = await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'owner_whk') });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ ok: false });
+    } finally {
+      spy.mockRestore();
+    }
+    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'payment-webhook.raillegacy');
+    expect(call?.[1]).toBe('TypeError');
+    expect(call?.[2]).toEqual({ partnerId: 'owner' });
+  });
+
+  it('every refusal logs rail-sig.refused with { reason, partnerId, route: payment-webhook } and never the body or a header value', async () => {
+    const stale = Math.floor(Date.now() / 1000) - 3600;
+    const staleHeader = v2(body, 'owner_whk', stale);
+    const legacy = legacySig(body, 'owner_whk');
+    expect((await post('simulator', body)).status).toBe(401);
+    expect((await post('simulator', body, undefined, staleHeader)).status).toBe(401);
+    expect((await post('simulator', body, undefined, { 'x-signature': legacy })).status).toBe(401);
+    const refused = logWarnSpy.mock.calls.filter((c) => c[0] === 'rail-sig.refused');
+    expect(refused.map((c) => c[2])).toEqual([
+      { reason: 'missing', partnerId: 'owner', route: 'payment-webhook' },
+      { reason: 'stale', partnerId: 'owner', route: 'payment-webhook' },
+      { reason: 'legacy_rejected', partnerId: 'owner', route: 'payment-webhook' },
+    ]);
+    const logged = JSON.stringify(logWarnSpy.mock.calls);
+    for (const secretish of [body, legacy, staleHeader['x-smartremit-signature'], 'owner_whk', 'paid_out']) {
+      expect(logged).not.toContain(secretish);
+    }
   });
 
   it('the same v2 message again → 200 duplicate, NO handling', async () => {

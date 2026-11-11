@@ -77,9 +77,9 @@ export async function POST(req: NextRequest) {
   if (integrations.payment.providerType !== 'simulator') {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
-  // fix 29: the timestamped header decides alone when present; the legacy
-  // x-signature is still accepted without it (deprecation log). Current +
-  // unexpired previous signing secret (rotation grace).
+  // fix 29: the timestamped header decides alone. Fix pack 5 T2 (P6): a
+  // legacy-only instruction is refused (401; the verifier logs the reason, no
+  // alert). Current + unexpired previous signing secret (rotation grace).
   const nowMs = Date.now();
   const verified = verifyRailSignature(
     raw,
