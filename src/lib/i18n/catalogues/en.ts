@@ -428,6 +428,8 @@ export const en = {
   'partner.transfers.holdBody': 'This transfer is held for review. Reasons:',
   'partner.transfers.holdRelease': 'SmartRemit compliance reviews and releases this hold.',
   'partner.transfers.holdIdentity': 'This transfer cannot be released without the account holder name. It can only be rejected or refunded.',
+  // Review R3-Y2 P1: the page line (no Reject or Refund control there); holdIdentity stays the release refusal.
+  'partner.transfers.holdIdentityPage': 'This transfer cannot be released without the account holder name. SmartRemit compliance rejects and refunds it.',
   'partner.transfers.reason.screening': 'Name screening needs manual review',
   'partner.transfers.reason.identity': 'Sender identity missing',
   'partner.transfers.reason.recipientIdentity': 'Recipient identity missing',

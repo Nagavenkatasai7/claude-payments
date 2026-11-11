@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import { billPayErrorOutcome, payOkStatus } from '@/lib/pay-outcome';
 import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/payout-format';
@@ -238,13 +238,16 @@ export function BillPayForm({
         }
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
-        } else if (data.reason === 'approval_not_recorded') {
-          // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
-          setErrorMessage(payErrorMessage(data));
-          setCode('');
         } else if (data.fieldErrors) {
           setErrors(data.fieldErrors);
           setStep('details');
+        } else {
+          // Fix pack 4 (C14) and review R3-Y2 R1: approval_not_recorded, temporarily_unavailable and
+          // not_available get their own copy and clear the (possibly spent) code; anything else
+          // keeps the generic fallback below.
+          const outcome = billPayErrorOutcome(data);
+          setErrorMessage(outcome.message);
+          if (outcome.clearCode) setCode('');
         }
       } catch {
         /* non-JSON error body — fall through to the generic error message */

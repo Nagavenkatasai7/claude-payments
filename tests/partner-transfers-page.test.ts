@@ -337,15 +337,18 @@ describe('/partner/transfers/[id]: M3-10 Release button (UX only; the action is 
 });
 
 describe('/partner/transfers/[id]: a recipient-identity hold (pack 4 review R2 I5)', () => {
-  it('says it cannot be released without the account holder name and can only be rejected or refunded', async () => {
+  it('says it cannot be released without the account holder name and that SmartRemit compliance rejects and refunds it (R3-Y2 P1)', async () => {
     await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'pa'`);
     await createCustomerRepo(db, async () => null).ensureCustomer('pa', PHONE);
     await seedPartnerTransfer(db, { id: 'tr_A_noname', partnerId: 'pa', status: 'in_review', complianceStatus: 'flagged', complianceReasons: [RECIPIENT_IDENTITY_MISSING_REASON] });
     for (const as of [asAdmin, asAgent]) {
       await as();
       const html = (await detail('tr_A_noname')).replace(/&#x27;/g, "'");
-      expect(html).toContain(t('partner.transfers.holdIdentity'));
-      expect(t('partner.transfers.holdIdentity')).toBe('This transfer cannot be released without the account holder name. It can only be rejected or refunded.');
+      // R3-Y2 P1: the page offers no Reject or Refund control on this hold, so the line names the actor.
+      expect(t('partner.transfers.holdIdentityPage')).toBe('This transfer cannot be released without the account holder name. SmartRemit compliance rejects and refunds it.');
+      expect(html).toContain(t('partner.transfers.holdIdentityPage'));
+      expect(html).not.toContain('It can only be rejected or refunded.');
+      expect(html).not.toContain('data-testid="partner-reject"');
       expect(html).not.toContain(t('partner.transfers.holdRelease'));
       expect(html).not.toContain('data-testid="partner-release"');
     }

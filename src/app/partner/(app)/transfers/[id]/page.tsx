@@ -142,6 +142,8 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const reasons = holdReasonKeys(transfer.complianceReasons);
   // Pack 4 review R2 (I5): a recipient-identity hold is never released (C19, owner Q19): it can only
   // be rejected or refunded, so the page says that instead of "SmartRemit releases this hold".
+  // R3-Y2 P1: it is class 'screening' (never partner-releasable), so this page shows no Reject or
+  // Refund control for it; the line names SmartRemit compliance as the party that rejects and refunds.
   const identityHold = isRecipientIdentityHold(transfer);
   const funding = fundingView(transfer);
   const events = detail.fundingEvents.map(fundingEventView);
@@ -316,7 +318,7 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
               </div>
             ) : (
               <p className="mt-3 text-[13px] text-ds-ink-muted">
-                {t(identityHold ? 'partner.transfers.holdIdentity' : releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
+                {t(identityHold ? 'partner.transfers.holdIdentityPage' : releasable ? 'partner.release.adminOnly' : 'partner.transfers.holdRelease')}
               </p>
             )}
             {/* A4 (D5: admins only; the action re-gates): read-only AML explain. */}

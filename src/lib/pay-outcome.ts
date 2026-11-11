@@ -88,6 +88,21 @@ export function payErrorMessage(body: unknown): string | null {
   return null;
 }
 
+// Review R3-Y2 R1: the B2B bill form's answer to a parsed non-OK body that is not quote_expired,
+// otp or fieldErrors (the form's own branches). Each of these three comes after the code was
+// verified (or may have been spent), so the form clears it: the copy says to tap Resend or that
+// the transfer cannot go ahead. Anything else is null and the form keeps its generic fallback.
+export type BillPayErrorOutcome = { message: string | null; clearCode: boolean };
+
+export function billPayErrorOutcome(body: unknown): BillPayErrorOutcome {
+  if (!body || typeof body !== 'object') return { message: null, clearCode: false };
+  const reason = (body as { reason?: unknown }).reason;
+  if (reason === 'temporarily_unavailable' || reason === 'not_available' || reason === 'approval_not_recorded') {
+    return { message: payErrorMessage(body), clearCode: true };
+  }
+  return { message: null, clearCode: false };
+}
+
 // Fix pack 4 (C14, C10): the acknowledgement fields a pay form posts. The
 // version only when the box is ticked; the hash of the block the page was
 // rendered with only when it is a dh1 hash (optional for one release: the

@@ -154,3 +154,27 @@ describe('payErrorMessage — not_available (R2-Q1 I2)', () => {
     expect(payErrorMessage({ ok: false, reason: 'not_available', error: 'anything the server said' })).toBe(PAY_NOT_AVAILABLE_COPY);
   });
 });
+
+// Review R3-Y2 R1: the B2B bill form's non-OK answer (bill-pay-form.tsx). quote_expired, otp and
+// fieldErrors stay the form's own branches; every other parsed body goes through this helper.
+describe('billPayErrorOutcome (R3-Y2 R1)', () => {
+  it('503 temporarily_unavailable: the temporary copy, and the code is cleared (it may be spent)', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ ok: false, reason: 'temporarily_unavailable', error: 'x' })).toEqual({ message: PAY_TEMPORARY_COPY, clearCode: true });
+  });
+  it('409 not_available: the cannot-complete copy, and the code is cleared', async () => {
+    const { billPayErrorOutcome, PAY_NOT_AVAILABLE_COPY } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ ok: false, reason: 'not_available' })).toEqual({ message: PAY_NOT_AVAILABLE_COPY, clearCode: true });
+  });
+  it('503 approval_not_recorded: today\'s copy (funded variant too), and the code is cleared', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    expect(billPayErrorOutcome({ reason: 'approval_not_recorded' })).toEqual({ message: PAY_APPROVAL_NOT_RECORDED_COPY, clearCode: true });
+    expect(billPayErrorOutcome({ reason: 'approval_not_recorded', funded: true })).toEqual({ message: PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY, clearCode: true });
+  });
+  it('anything else: no message (the form keeps its fallback) and the code stays', async () => {
+    const { billPayErrorOutcome } = await import('@/lib/pay-outcome');
+    for (const body of [null, 'x', {}, { reason: 'bad_request' }, { reason: 'rate_limited' }, { error: 'server text' }]) {
+      expect(billPayErrorOutcome(body), JSON.stringify(body)).toEqual({ message: null, clearCode: false });
+    }
+  });
+});
