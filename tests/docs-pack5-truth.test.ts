@@ -255,7 +255,8 @@ describe('pack 5 documents say what the code does', () => {
       '`MIGRATE_ON_BUILD_SKIP=1`',
       'answers 500 to every verified callback until it is applied',
       // Review round 2 GD1: what else a build serving without 0039 breaks.
-      'sends no reverse (a refund stays pending and dead-letters at 8)',
+      // Review round 2 R2 (F7-D1): only the paths that send a reverse.
+      'sends no reverse (a refund of a non-sandbox partner-pulled row or of an unrouted real-money partner-collected row stays pending and dead-letters at 8)',
       "fails the partner webhooks page's delivery log",
       "reports a \"Send test event\" ping that reached the partner's endpoint as failed (no delivery row, no `webhook.test` audit row)",
     ]) {
@@ -327,8 +328,12 @@ describe('pack 5 documents say what the code does', () => {
       'Set `SANCTIONS_LIST` back to `ofac-sdn` (or unset) BEFORE rolling back past PR5: an older build treats `lists` as unknown and screens with the mock',
       // Review round 2 GE1: Issue refund refuses a real-money card payment.
       "Issue refund refuses a card payment through the partner's Stripe key",
+      // Review round 2 R2 (F6-D1): partner_psp lets only a funding-mode hold go out.
+      "so for that one either, when it is held for its funding mode (`fundmode:<id>`), record `partner_psp` on the go-live card and let it go out before rolling back, or return the money in the partner's Stripe dashboard and do not roll back while its row is paid",
       // Review round 2 GD1: what else a build serving without 0039 breaks.
-      'it also sends no reverse instruction, so a queued refund of a partner-pulled or partner-collected row stays pending and dead-letters after 8 attempts (`dead:<id>`)',
+      // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
+      // closes as sandbox-reverse-<id>, a routed partner-collected row raises refundrouted:<id>.
+      'it also sends no reverse instruction, so a queued refund of a non-sandbox partner-pulled row, or of a real-money partner-collected row that is not routed, stays pending and dead-letters after 8 attempts (`dead:<id>`)',
       'the delivery log section of the partner webhooks page fails to load',
       "a \"Send test event\" ping still reaches the partner's endpoint but is reported as failed, with no delivery row and no `webhook.test` audit row",
     ]) {

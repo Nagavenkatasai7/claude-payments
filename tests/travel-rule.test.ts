@@ -117,6 +117,9 @@ describe('validateSenderAddress', () => {
       '4 Front St, Dover.DE',
       '7 Pine Rd, Portland.Me 04101',
       '1 Liberty Ave, Anytown.US',
+      // Review round 2 R2 (F5-D2): a period that only closes the code.
+      '12 Elm St, Denver.CO. 80202',
+      'Indianapolis.IN.',
     ]) {
       expect(validateSenderAddress(v), v).toEqual({ ok: true, value: v });
     }
@@ -134,6 +137,17 @@ describe('validateSenderAddress', () => {
       'mail me at a@evil.co',
       'send to evil.uk now',
       'evil[.]co please',
+      // Review round 2 R2 (F5-D1): full-width "/", ":" and "@", a query and a fragment.
+      'evil.co\uFF0Fpath here',
+      'evil.co\uFF1A8080 Main',
+      'a\uFF20evil.co main st',
+      'evil.co?x=1 main',
+      'evil.co#x main',
+      // (F5-D2): a dot that continues a chain or a path is still a host.
+      'x.co.uk main',
+      'evil.co./path',
+      'evil.co]/path',
+      'evil\u3002co/path',
     ]) {
       expect(validateSenderAddress(v), v).toEqual({ ok: false });
     }
