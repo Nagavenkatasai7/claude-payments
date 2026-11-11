@@ -281,6 +281,13 @@
       "when": 1794380337017,
       "tag": "0039_rail_messages",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794418390627,
+      "tag": "0040_customer_esign_consent",
+      "breakpoints": true
     }
   ]
 }

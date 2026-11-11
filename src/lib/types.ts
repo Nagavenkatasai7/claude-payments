@@ -694,7 +694,14 @@ export interface Customer {
   // a stale whole-row saveCustomer can never rewrite them.
   screeningFlaggedAt?: string;
   screeningClearedAt?: string;
-  kycSubmittedAt?: string;   // ISO — inquiry created / customer entered the hosted flow
+  // Fix pack 6 (0040, R46): the E-SIGN consent version agreed to and the ISO
+  // times it was given and withdrawn. READ-ONLY here (mapped in rowToCustomer
+  // only, never in customerToRow): recordEsignConsent / withdrawEsignConsent
+  // own them, so a whole-row saveCustomer can never set or clear a consent.
+  esignConsentVersion?: string;
+  esignConsentedAt?: string;
+  esignWithdrawnAt?: string;
+  kycSubmittedAt?: string;  // ISO — inquiry created / customer entered the hosted flow
   kycApprovedBy?: string;    // staff username who approved (audit)
   kycApprovedAt?: string;    // ISO
   kycRejectedAt?: string;    // ISO

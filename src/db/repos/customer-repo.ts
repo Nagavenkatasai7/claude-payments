@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -102,6 +102,12 @@ export function createCustomerRepo(
     // single-column writers, so saveCustomer's whole-row upsert cannot touch them.
     set('screeningFlaggedAt', isoOpt(row.screeningFlaggedAt));
     set('screeningClearedAt', isoOpt(row.screeningClearedAt));
+    // Fix pack 6 (R46): READ-ONLY here (never in customerToRow):
+    // recordEsignConsent / withdrawEsignConsent are the only writers, so no
+    // whole-row save or insert can set or clear a consent.
+    set('esignConsentVersion', row.esignConsentVersion);
+    set('esignConsentedAt', isoOpt(row.esignConsentedAt));
+    set('esignWithdrawnAt', isoOpt(row.esignWithdrawnAt));
     set('kycSubmittedAt', isoOpt(row.kycSubmittedAt));
     set('kycApprovedBy', row.kycApprovedBy);
     set('kycApprovedAt', isoOpt(row.kycApprovedAt));
@@ -754,4 +760,90 @@ export async function readSenderScreeningFlags(
   // node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
   const rows = opts.forUpdate ? await q.for('update') : await q;
   return rows[0] ?? null;
+}
+
+/**
+ * Fix pack 6 (R46, P2): the customer's E-SIGN consent as stored. `version` is ANY version on file
+ * (the repo does not know the current one: lib/esign.ts esignConsentNeeded decides).
+ */
+export interface EsignConsentState {
+  version: string | null;
+  consentedAt: Date | null;
+  withdrawnAt: Date | null;
+}
+
+const ESIGN_CONSENT_COLUMNS = {
+  version: customers.esignConsentVersion,
+  consentedAt: customers.esignConsentedAt,
+  withdrawnAt: customers.esignWithdrawnAt,
+};
+
+/**
+ * The narrow reader: the three consent columns only (no PII, no decrypt), TENANT-SCOPED by the
+ * owner key (partner_id, phone). null when this tenant has no row for the phone. Throws on a DB
+ * error (callers decide; lib/esign.ts readEsignConsentNeeded treats it as "ask again").
+ */
+export async function readEsignConsent(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+): Promise<EsignConsentState | null> {
+  const rows = await db
+    .select(ESIGN_CONSENT_COLUMNS)
+    .from(customers)
+    .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * One of the two ONLY writers of the consent columns: records `version` as given at `at` and
+ * clears any withdrawal (a re-consent). true = the row was updated; false = this tenant has no row
+ * for the phone (nothing written). drizzle update().set().where().returning({...}):
+ * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:157-166.
+ */
+export async function recordEsignConsent(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  version: string,
+  at: Date,
+): Promise<boolean> {
+  const rows = await db
+    .update(customers)
+    .set({ esignConsentVersion: version, esignConsentedAt: at, esignWithdrawnAt: null, updatedAt: at })
+    .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
+    .returning({ phone: customers.phone });
+  return rows.length > 0;
+}
+
+/**
+ * The other writer: withdraws a consent that is on file (any version, not already withdrawn
+ * after it was given). withdrawn_at = greatest(at, consented_at), so clock skew never leaves a
+ * withdrawal that does not count. Returns the version withdrawn, or null when nothing was on file
+ * (no row, never consented, already withdrawn): then nothing is written.
+ */
+export async function withdrawEsignConsent(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  at: Date,
+): Promise<string | null> {
+  const rows = await db
+    .update(customers)
+    .set({
+      esignWithdrawnAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.esignConsentedAt})`,
+      updatedAt: at,
+    })
+    .where(
+      and(
+        eq(customers.partnerId, partnerId),
+        eq(customers.phone, phone),
+        isNotNull(customers.esignConsentVersion),
+        isNotNull(customers.esignConsentedAt),
+        or(isNull(customers.esignWithdrawnAt), lt(customers.esignWithdrawnAt, customers.esignConsentedAt)),
+      ),
+    )
+    .returning({ version: customers.esignConsentVersion });
+  return rows[0]?.version ?? null;
 }

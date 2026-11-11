@@ -149,7 +149,9 @@ describe('migration 0027 is NEW TABLES ONLY (safe for the build already in produ
       ["live_controls","jsonb","NO"]]);
     expect(await columns(db, 'customers')).toEqual([["phone","text","NO"],["partner_id","text","NO"],["first_seen_at",TS,"NO"],["sender_country","text","NO"],["kyc_status","text","NO"],["kyc_review_state","text","YES"],["kyc_inquiry_id","text","YES"],["kyc_provider_ref","text","YES"],["kyc_rejected_reason","text","YES"],["kyc_verified_at",TS,"YES"],["kyc_submitted_at",TS,"YES"],["kyc_approved_by","text","YES"],["kyc_approved_at",TS,"YES"],["kyc_rejected_at",TS,"YES"],["full_name_enc","text","YES"],["date_of_birth_enc","text","YES"],["residential_address_enc","text","YES"],["email_enc","text","YES"],["gov_id_number_enc","text","YES"],["gov_id_type","text","YES"],["id_last4","text","YES"],["id_doc_type","text","YES"],["nationality","text","YES"],["pep_declared","boolean","YES"],["watchlist_hit","boolean","YES"],["pep_hit","boolean","YES"],["source_of_funds","text","YES"],["occupation","text","YES"],["edd_captured_at",TS,"YES"],["last_funding_method","text","YES"],["last_funding_method_at",TS,"YES"],["password_hash","text","YES"],["password_updated_at",TS,"YES"],["phone_verified_at",TS,"YES"],["opt_in_at",TS,"YES"],["opted_out_at",TS,"YES"],["created_at",TS,"NO"],["updated_at",TS,"NO"],["send_limit_override","jsonb","YES"],["mfa_totp_enc","text","YES"],["mfa_enrolled_at",TS,"YES"],
       // 0036 (fix pack 2) appends two NULLABLE columns at the end; 0027 itself still alters nothing here.
-      ["screening_flagged_at",TS,"YES"],["screening_cleared_at",TS,"YES"]]);
+      ["screening_flagged_at",TS,"YES"],["screening_cleared_at",TS,"YES"],
+      // 0040 (fix pack 6) appends three NULLABLE columns at the end; 0027 itself still alters nothing here.
+      ["esign_consent_version","text","YES"],["esign_consented_at",TS,"YES"],["esign_withdrawn_at",TS,"YES"]]);
   });
 
   it('the SQL only creates the three new tables; every ALTER TABLE adds an FK to a NEW table', () => {
