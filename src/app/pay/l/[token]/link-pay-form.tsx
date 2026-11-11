@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { disclosureAckBody, esignConsentBody, payErrorMessage } from '@/lib/pay-outcome';
+import { PAY_HELD_LABEL, disclosureAckBody, esignConsentBody, payErrorMessage } from '@/lib/pay-outcome';
 import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
@@ -240,7 +240,7 @@ export function LinkPayForm({
             <circle cx="12" cy="12" r="10" />
             <path d="M8 12.5l2.5 2.5L16 9" />
           </svg>
-          {paid.status === 'in_review' ? 'Payment received. It is being checked.' : 'Payment complete'}
+          {paid.status === 'in_review' ? PAY_HELD_LABEL : 'Payment complete'}
         </p>
         <div className={panelClasses}>
           <Line label="Paid to" value={receipt.payeeName} />

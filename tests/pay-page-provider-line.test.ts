@@ -56,6 +56,7 @@ vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => false,
     isPaymentLinkTransfer: async () => linkTransfer.value,
+    getDisclosureSnapshot: async () => null, // pack 6 T11: the paid page's receipt read
     isPartnerApiMinted: async () => false,
     recipientIdentityMissing: async () => false,
   }),

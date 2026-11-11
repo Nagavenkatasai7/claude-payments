@@ -13,6 +13,10 @@ import {
   esignConsentBody,
   payErrorMessage,
   payOkStatus,
+  payOkHeld,
+  payDoneCopy,
+  PAY_HELD_LABEL,
+  PAY_SUCCESS_RECEIPT_COPY,
 } from '@/lib/pay-outcome';
 // Type only: originator-info.ts is server code (database reads) and never enters the client bundle.
 import type { OriginatorView } from '@/lib/originator-info';
@@ -99,6 +103,8 @@ const hiddenTextClasses = '[-webkit-text-security:disc]';
 const showToggleClasses =
   'mb-3 cursor-pointer bg-transparent p-0 text-xs font-semibold text-[#53bdeb] underline-offset-2 hover:underline focus-visible:underline';
 const successClasses = 'flex items-center justify-center gap-2 font-semibold text-[#25d366]';
+// Fix pack 6 (P11): the held done state: neutral, no check icon.
+const heldClasses = 'text-center font-semibold text-[#e9edef]';
 const panelClasses = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
 const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
 
@@ -119,6 +125,7 @@ export function PayForm({
   originator = NO_ORIGINATOR_VIEW,
   esignVersion = null,
   disclosureSlot = null,
+  receiptOnReload = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -149,6 +156,11 @@ export function PayForm({
   esignVersion?: string | null;
   /** Fix pack 6 (P8): the page's Reg E disclosure, rendered by the form below the consent block (only when esignVersion is set). */
   disclosureSlot?: ReactNode;
+  /**
+   * Fix pack 6 (P11): true = the reloaded page shows a printable receipt, so the done state
+   * says so (PAY_SUCCESS_RECEIPT_COPY). Default false: today's text. The ACH form ignores it.
+   */
+  receiptOnReload?: boolean;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -182,6 +194,7 @@ export function PayForm({
         originator={originator}
         esignVersion={esignVersion}
         disclosureSlot={disclosureSlot}
+        receiptOnReload={receiptOnReload}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -199,6 +212,7 @@ export function PayForm({
       originator={originator}
       esignVersion={esignVersion}
       disclosureSlot={disclosureSlot}
+      receiptOnReload={receiptOnReload}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -520,6 +534,7 @@ function SimplePayForm({
   originator = NO_ORIGINATOR_VIEW,
   esignVersion = null,
   disclosureSlot = null,
+  receiptOnReload = false,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
@@ -532,8 +547,11 @@ function SimplePayForm({
   originator?: OriginatorView;
   esignVersion?: string | null;
   disclosureSlot?: ReactNode;
+  receiptOnReload?: boolean;
 }) {
   const [status, setStatus] = useState<Status>('idle');
+  // Fix pack 6 (P11): a held answer (in_review) shows the neutral label, never "complete".
+  const [held, setHeld] = useState(false);
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
   // Fix pack 6 (P8): the E-SIGN tick, asked only when the page passed a version.
@@ -579,7 +597,9 @@ function SimplePayForm({
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
-        setStatus(payOkStatus(await res.json().catch(() => null)));
+        const body: unknown = await res.json().catch(() => null);
+        setStatus(payOkStatus(body));
+        setHeld(payOkHeld(body));
         return;
       }
       try {
@@ -623,6 +643,15 @@ function SimplePayForm({
   }
 
   if (status === 'done') {
+    const done = payDoneCopy(held, receiptOnReload);
+    if (done === 'held') {
+      return (
+        <>
+          {top}
+          <p className={heldClasses}>{PAY_HELD_LABEL}</p>
+        </>
+      );
+    }
     return (
       <>
         {top}
@@ -645,7 +674,7 @@ function SimplePayForm({
           <circle cx="12" cy="12" r="10" />
           <path d="M8 12.5l2.5 2.5L16 9" />
         </svg>
-        Payment complete! Check WhatsApp for your receipt.
+        {done === 'receipt' ? PAY_SUCCESS_RECEIPT_COPY : 'Payment complete! Check WhatsApp for your receipt.'}
       </p>
       </>
     );
@@ -726,6 +755,7 @@ function BankDetailsPayForm({
   originator = NO_ORIGINATOR_VIEW,
   esignVersion = null,
   disclosureSlot = null,
+  receiptOnReload = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -739,11 +769,14 @@ function BankDetailsPayForm({
   originator?: OriginatorView;
   esignVersion?: string | null;
   disclosureSlot?: ReactNode;
+  receiptOnReload?: boolean;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
   const [step, setStep] = useState<Step>('details');
   const [status, setStatus] = useState<Status>('idle');
+  // Fix pack 6 (P11): a held answer (in_review) shows the neutral label, never "complete".
+  const [held, setHeld] = useState(false);
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(defs.map((d) => [d.key, ''])),
   );
@@ -842,7 +875,9 @@ function BankDetailsPayForm({
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
-        setStatus(payOkStatus(await res.json().catch(() => null)));
+        const body: unknown = await res.json().catch(() => null);
+        setStatus(payOkStatus(body));
+        setHeld(payOkHeld(body));
         return;
       }
       // Surface server-side errors: a wrong/expired OTP stays on the review step;
@@ -887,6 +922,15 @@ function BankDetailsPayForm({
   }
 
   if (status === 'done') {
+    const done = payDoneCopy(held, receiptOnReload);
+    if (done === 'held') {
+      return (
+        <>
+          {top}
+          <p className={heldClasses}>{PAY_HELD_LABEL}</p>
+        </>
+      );
+    }
     return (
       <>
         {top}
@@ -909,7 +953,7 @@ function BankDetailsPayForm({
           <circle cx="12" cy="12" r="10" />
           <path d="M8 12.5l2.5 2.5L16 9" />
         </svg>
-        Payment complete! Check WhatsApp for your receipt.
+        {done === 'receipt' ? PAY_SUCCESS_RECEIPT_COPY : 'Payment complete! Check WhatsApp for your receipt.'}
       </p>
       </>
     );

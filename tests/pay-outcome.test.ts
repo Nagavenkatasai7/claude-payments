@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
-  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, esignConsentBody,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, esignConsentBody, payOkHeld, payDoneCopy,
   PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
@@ -186,5 +186,25 @@ describe('billPayErrorOutcome (R3-Y2 R1)', () => {
     for (const body of [null, 'x', {}, { reason: 'bad_request' }, { reason: 'rate_limited' }, { error: 'server text' }]) {
       expect(billPayErrorOutcome(body), JSON.stringify(body)).toEqual({ message: null, clearCode: false });
     }
+  });
+});
+
+describe('payOkHeld and payDoneCopy (fix pack 6 P4, P11)', () => {
+  it("payOkHeld: only an object with status 'in_review' is held", () => {
+    expect(payOkHeld({ ok: true, status: 'in_review' })).toBe(true);
+    for (const body of [{ ok: true, status: 'paid' }, { ok: true, status: 'cancelled' }, { ok: true }, null, 'x', undefined]) {
+      expect(payOkHeld(body), JSON.stringify(body)).toBe(false);
+    }
+  });
+
+  it('payOkStatus is unchanged for a held answer (done)', () => {
+    expect(payOkStatus({ ok: true, status: 'in_review' })).toBe('done');
+  });
+
+  it('payDoneCopy: held wins, then receipt, else legacy', () => {
+    expect(payDoneCopy(true, true)).toBe('held');
+    expect(payDoneCopy(true, false)).toBe('held');
+    expect(payDoneCopy(false, true)).toBe('receipt');
+    expect(payDoneCopy(false, false)).toBe('legacy');
   });
 });

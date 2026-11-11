@@ -69,6 +69,7 @@ vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => editable.value && current.transferType !== 'b2b',
     isPaymentLinkTransfer: async () => false,
+    getDisclosureSnapshot: async () => null, // pack 6 T11: the paid page's receipt read
     // Fix pack 4 (T16): read only by the real readLegalNameView (legalView.real).
     isPartnerApiMinted: async () => false,
     recipientIdentityMissing: async () => false,

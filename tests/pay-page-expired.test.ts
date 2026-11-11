@@ -47,7 +47,7 @@ vi.mock('@/lib/originator-info', async (orig) => {
   return { ...real, readOriginatorView: async () => real.NO_ORIGINATOR_FIELDS };
 });
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer }),
+  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer, getDisclosureSnapshot: async () => null }),
 }));
 
 import PayPage from '@/app/pay/[transferId]/page';
