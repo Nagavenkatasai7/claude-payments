@@ -12,7 +12,7 @@ import {
   OFAC_CONS_MAX_BYTES,
   OFAC_CONS_FETCH_TIMEOUT_MS,
 } from '@/lib/sanctions/ofac-cons-loader';
-import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
+import { entryElementsMatch, malformedElement, parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
 
 const FIXTURE = readFileSync(join(__dirname, 'fixtures', 'ofac-cons-sample.xml'), 'utf8');
 const SDN_FIXTURE = readFileSync(join(__dirname, 'fixtures', 'ofac-sdn-sample.xml'), 'utf8');
@@ -139,6 +139,43 @@ describe('parseOfacConsolidatedXml (fixture: 4 invented consolidated entries)', 
         expect(FIXTURE.includes(from)).toBe(true);
         expect(() => parseOfacConsolidatedXml(FIXTURE.replace(from, to)), to).toThrow(new RegExp(`^OFAC CONS: entry ${entry} has a malformed <`));
       }
+    });
+
+    // L1-LR1 (LF2-D1): CDATA, a comment or a processing instruction inside an
+    // entry would make a read element vanish (or be read from a comment).
+    it('CDATA, a comment or a processing instruction inside an entry -> the WHOLE parse throws (position only)', () => {
+      const cases: Array<[string, string, number]> = [
+        ['<lastName>INVENTATI</lastName>', '<lastName><![CDATA[INVENTATI]]></lastName>', 3],
+        ['<lastName>EXAMPLE PETRO</lastName>', '<lastName><![CDATA[EXAMPLE PETRO]]></lastName>', 1],
+        ['<lastName>EXAMPLE PETRO</lastName>', '<lastName>EXAMPLE <!-- x -->PETRO</lastName>', 1],
+        ['<lastName>EXAMPLE PETRO</lastName>', '<lastName>EXAMPLE <?pi x?>PETRO</lastName>', 1],
+        ['<program>SAMPLE-MBS</program>', '<program><![CDATA[SAMPLE-MBS]]></program>', 4],
+        ['<firstName>Placido</firstName>', '<!-- <firstName>ZED</firstName> --><firstName>Placido</firstName>', 3],
+        ['<firstName>Placido</firstName>', '<!-- <firstName>ZED</firstName> -->', 3],
+      ];
+      for (const [from, to, entry] of cases) {
+        expect(FIXTURE.includes(from)).toBe(true);
+        expect(() => parseOfacConsolidatedXml(FIXTURE.replace(from, to)), to).toThrow(new RegExp(`^OFAC CONS: entry ${entry} has unsupported markup$`));
+      }
+      // The prolog comment and the XML declaration outside the entries stay accepted.
+      expect(FIXTURE.startsWith('<?xml')).toBe(true);
+      expect(parseOfacConsolidatedXml(FIXTURE).entries).toHaveLength(4);
+    });
+
+    // L1-LR1 (LF2-D2): a long '<a' run with no '>' inside one entry must not
+    // make the tag scan super-linear.
+    it("linear on hostile input: a ~1 MB '<a' run with no '>' inside an entry throws quickly", () => {
+      const junk = '<a'.repeat(512 * 1024);
+      const bad = FIXTURE.replace('<firstName>Placido</firstName>', `<firstName>Placido</firstName>${junk}`);
+      const t0 = performance.now();
+      expect(() => parseOfacConsolidatedXml(bad)).toThrow(/^OFAC CONS: entry 3 has unsupported markup$/);
+      expect(performance.now() - t0).toBeLessThan(3_000);
+      // The tag scans themselves stay linear on the same run (they were about
+      // cubic / quadratic before L1-LR1): malformedElement and the entry check.
+      const t1 = performance.now();
+      expect(malformedElement(`<lastName>X</lastName>${junk}`, ['lastName'])).toBeNull();
+      expect(entryElementsMatch(`<sdnList>${junk}</sdnList>`, 'sdnEntry', [], ['sdnEntry'])).toBe(true);
+      expect(performance.now() - t1).toBeLessThan(3_000);
     });
 
     it('a primary name that is only an encoded space is decoded BEFORE the trim -> no primary name', () => {

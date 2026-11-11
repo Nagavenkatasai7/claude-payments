@@ -178,6 +178,34 @@ describe('parseUnScXml (fixture: 2 invented individuals + 2 invented entities)',
       }
     });
 
+    // L1-LR1 (LF2-D1): CDATA, a comment or a processing instruction inside an
+    // entry would make a read element vanish.
+    it('CDATA, a comment or a processing instruction inside an entry -> the WHOLE parse throws (position only)', () => {
+      const cases: Array<[string, string]> = [
+        ['<ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>', '<ALIAS_NAME><![CDATA[Zeph MOCKOVANI]]></ALIAS_NAME>'],
+        ['<SECOND_NAME>MOCKOVANI</SECOND_NAME>', '<SECOND_NAME><![CDATA[MOCKOVANI]]></SECOND_NAME>'],
+        ['<ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>', '<ALIAS_NAME>Zeph <!-- x -->MOCKOVANI</ALIAS_NAME>'],
+        ['<ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>', '<ALIAS_NAME>Zeph <?pi x?>MOCKOVANI</ALIAS_NAME>'],
+        ['<UN_LIST_TYPE>Sampleland</UN_LIST_TYPE>', '<UN_LIST_TYPE><![CDATA[Sampleland]]></UN_LIST_TYPE>'],
+      ];
+      for (const [from, to] of cases) {
+        expect(FIXTURE.includes(from)).toBe(true);
+        expect(() => parseUnScXml(FIXTURE.replace(from, to)), to).toThrow(/^UN SC: entry 1 has unsupported markup$/);
+      }
+      expect(FIXTURE.startsWith('<?xml')).toBe(true);
+      expect(parseUnScXml(FIXTURE).entries).toHaveLength(4);
+    });
+
+    // L1-LR1 (LF2-D2): a long '<a' run with no '>' inside one entry must not
+    // make the tag scan super-linear.
+    it("linear on hostile input: a ~1 MB '<a' run with no '>' inside an entry throws quickly", () => {
+      const junk = '<a'.repeat(512 * 1024);
+      const bad = FIXTURE.replace('<SECOND_NAME>MOCKOVANI</SECOND_NAME>', `<SECOND_NAME>MOCKOVANI</SECOND_NAME>${junk}`);
+      const t0 = performance.now();
+      expect(() => parseUnScXml(bad)).toThrow(/^UN SC: entry 1 has unsupported markup$/);
+      expect(performance.now() - t0).toBeLessThan(3_000);
+    });
+
     it('a name that is only an encoded space is decoded BEFORE the trim -> no name', () => {
       expect(thrown(() => parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE TRADING', '&#32;')))).toBe('UN SC: entry 4 has no name');
       expect(thrown(() => parseUnScXml(FIXTURE.replace('MOCK &amp; SAMPLE TRADING', ' &#x20;&#9; ')))).toBe('UN SC: entry 4 has no name');

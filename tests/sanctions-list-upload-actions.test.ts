@@ -60,6 +60,7 @@ import { isStepUpRequired } from '@/lib/staff-step-up-result';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
 import { hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
 import { parseInMhaCsv } from '@/lib/sanctions/in-mha-list';
+import { t } from '@/lib/i18n';
 import { confirmMhaListCurrentAction, uploadMhaListAction } from '@/app/admin-dashboard/compliance/sanctions-lists/actions';
 
 const HEADER = 'id,type,name,aliases,weak_aliases,program,reference';
@@ -346,7 +347,9 @@ describe('uploadMhaListAction: step-up and store', () => {
     await uploadMhaListAction(uploadForm({ version: dayOffset(-1) }));
     const r = await uploadMhaListAction(uploadForm({ csv: csvOf(26), version: dayOffset(-4) }));
     expect(r).toMatchObject({ ok: false });
-    expect((r as { error: string }).error).toMatch(/older/);
+    // L1-LR1 (LF5-T1): the typed-date copy exactly, never the older-CONTENT copy.
+    expect((r as { error: string }).error).toBe(t('admin.compliance.sanctionsLists.refused.stale'));
+    expect((r as { error: string }).error).not.toBe(t('admin.compliance.sanctionsLists.refused.staleContent'));
     expect(await createSanctionsListRepo(db).activeVersion('in-mha-uapa')).toMatchObject({ version: dayOffset(-1), entryCount: 25 });
     expect((await audits()).at(-1)!.meta.outcome).toBe('stale');
   });
@@ -385,7 +388,7 @@ describe('uploadMhaListAction: step-up and store', () => {
     await uploadMhaListAction(uploadForm({ csv: b, version: dayOffset(-3) }));
     const r = await uploadMhaListAction(uploadForm({ csv: a, version: dayOffset(-1) }));
     expect(r).toMatchObject({ ok: false, activeVersion: dayOffset(-3), activeHash: pb.list.hash });
-    expect((r as { error: string }).error).toMatch(/older version/);
+    expect((r as { error: string }).error).toBe(t('admin.compliance.sanctionsLists.refused.staleContent'));
     expect(await createSanctionsListRepo(db).activeVersion('in-mha-uapa')).toMatchObject({ version: dayOffset(-3), hash: pb.list.hash, entryCount: 26 });
     expect((await audits()).at(-1)!.meta).toEqual({
       source: 'in-mha-uapa',

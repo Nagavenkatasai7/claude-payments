@@ -65,7 +65,7 @@
 // the cron (only with SANCTIONS_LOADER_ENABLED and SANCTIONS_LIST=lists).
 
 import type { SanctionsList, SanctionsListEntry } from './list-source';
-import { entryElementsMatch, hashEntries, malformedElement, strictTag as tag } from './ofac-sdn-loader';
+import { entryElementsMatch, hashEntries, hasUnsupportedMarkup, malformedElement, strictTag as tag } from './ofac-sdn-loader';
 import { fetchPinnedText } from './pinned-fetch';
 
 export const UN_SC_XML_URL = 'https://scsanctions.un.org/resources/xml/en/consolidated.xml';
@@ -147,6 +147,8 @@ function parseUnchecked(xml: string): SanctionsList {
       const malformed = (name: string | null) => {
         if (name !== null) throw new Error(`${ERR} entry ${position} has a malformed <${name}> element`);
       };
+      // L1-LR1 (LF2-D1): CDATA, a comment or a PI would hide a read element.
+      if (hasUnsupportedMarkup(block)) throw new Error(`${ERR} entry ${position} has unsupported markup`);
       malformed(malformedElement(block, UN_LEAVES, [`${kind}_ALIAS`]));
       const own = ownFields(block);
       malformed(malformedElement(own, UN_LEAVES, [], UN_OWN_ONCE));

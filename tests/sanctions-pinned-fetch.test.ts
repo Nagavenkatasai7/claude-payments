@@ -63,6 +63,10 @@ describe('fetchPinnedText: redirects followed by hand (LB6)', () => {
     ['a look-alike host', 'https://files.example.test.evil.example/final.xml'],
     ['a protocol-relative other host', '//evil.example/x'],
     ['a non-http scheme', 'file:///etc/passwd'],
+    // L1-LR1 (LF3-D1): userinfo on an allowed host (undici would throw a
+    // TypeError that carries the full URL and its signed query).
+    ['userinfo on an allowed host', 'https://u:p@files.example.test/x?sig=s'],
+    ['a user name only on an allowed host', 'https://u@files.example.test/x?sig=s'],
   ])('refuses a hop to %s and never requests it', async (_what, location) => {
     const f = stub({ [START]: { status: 302, location }, [location]: { status: 200, body: '<ok/>' } });
     await expect(message(fetchPinnedText(START, f as unknown as typeof fetch, OPTS))).resolves.toBe(BAD_HOST);

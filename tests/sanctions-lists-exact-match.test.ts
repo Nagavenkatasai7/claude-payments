@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   screenTransfer,
   LIST_UNAVAILABLE_REASON,
@@ -6,7 +7,10 @@ import {
   SENDER_WATCHLIST_REASON,
 } from '@/lib/compliance';
 import { screenPayee } from '@/lib/payees';
-import { inputHash } from '@/lib/sanctions/evidence';
+import { inputHash, type ScreeningEvidence } from '@/lib/sanctions/evidence';
+import { ListSanctionsScreener } from '@/lib/sanctions/list-screener';
+import { MultiListSanctionsScreener } from '@/lib/sanctions/multi-list-screener';
+import type { SanctionsList, SanctionsListSource } from '@/lib/sanctions/list-source';
 import { LIST_SET_NAMES, primeListSet, restoreOfacSource } from './helpers-sanctions';
 
 // LA1 (pack 5 list review round 1): under the opt-in SANCTIONS_LIST=lists, an
@@ -87,5 +91,80 @@ describe('screenTransfer under SANCTIONS_LIST=lists with in-mha-uapa unloaded (L
     const r = await screenPayee({ legalName: SDN_NAME, accountHolder: 'Plain Invented Holder' });
     expect(r.verdict).toBe('match');
     expect(r.listUnavailable).toBe(false);
+  });
+});
+
+// LF1-D1 (list review L1): a partial-set block must say the set was not
+// checked even when the failing member loads again before the screen ends.
+// The composite listInfo read AFTER every party is screened would otherwise
+// show the full set's version, hash and check time for a party that was
+// never screened. Invented names only.
+describe('screenTransfer: a member that recovers mid-screen (LF1-D1)', () => {
+  const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
+  const mk = (source: 'ofac-sdn' | 'ofac-cons', id: string, names: string[]): SanctionsList => ({
+    source,
+    version: 'v1',
+    hash: sha(`${source}:${names.join('|')}`),
+    entries: names.map((n, i) => ({ id: `${id}:${i + 1}`, type: 'Individual', programs: ['TEST'], names: [n] })),
+  });
+  const SDN_LIST = mk('ofac-sdn', 'sdn', ['Zorvan Quillet']);
+  const CONS_LIST = mk('ofac-cons', 'cons', ['Marlowe Tessaract']);
+  const at = new Date(Date.now() - 3_600_000);
+  /** A source whose first `fails` loads reject and every later one succeeds. */
+  const flaky = (l: SanctionsList, fails: number): SanctionsListSource => {
+    let n = 0;
+    return {
+      load: async () => {
+        n += 1;
+        if (n <= fails) throw new Error('transient');
+        return l;
+      },
+      checkedAt: () => at,
+    };
+  };
+  const steady = (l: SanctionsList): SanctionsListSource => ({ load: async () => l, checkedAt: () => at });
+  const multi = (cons: SanctionsListSource) =>
+    new MultiListSanctionsScreener([
+      { source: 'ofac-sdn', screener: new ListSanctionsScreener(steady(SDN_LIST), { sourceName: 'ofac-sdn' }) },
+      { source: 'ofac-cons', screener: new ListSanctionsScreener(cons, { sourceName: 'ofac-cons' }) },
+    ]);
+  const notChecked = (e: ScreeningEvidence | undefined) => {
+    expect(e!.listSource).toBe('lists:ofac-sdn+ofac-cons');
+    expect(e!.listVersion).toBe('unavailable');
+    expect(e!.listHash).toBe('');
+    expect(e!.listFitness).toBe('not_live');
+    expect('listCheckedAt' in e!).toBe(false);
+    expect('listBaseHash' in e!).toBe(false);
+  };
+
+  it('the recipient screen failed closed, the member recovers, the sender is an exact SDN entry -> blocked, evidence says not checked', async () => {
+    const m = multi(flaky(CONS_LIST, 1));
+    const r = await screenTransfer({ amountUsd: 100, recipientName: 'Plain Payee', senderName: 'Zorvan Quillet', transfersToday: 0, screener: m });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toEqual([SENDER_WATCHLIST_REASON]);
+    // The member did load again before listInfo was read: the full identity is there.
+    expect(m.listInfo().hash).toMatch(/^[0-9a-f]{64}$/);
+    notChecked(r.evidence);
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('Plain Payee'), matched: false, matchScore: 0 },
+      { role: 'sender', inputHash: inputHash('Zorvan Quillet'), matched: true, matchScore: 1, matchedEntryId: 'sdn:1' },
+    ]);
+  });
+
+  it('the exact match itself came from a partial set, the member recovers for the next party -> evidence says not checked', async () => {
+    const m = multi(flaky(CONS_LIST, 1));
+    const r = await screenTransfer({ amountUsd: 100, recipientName: 'Zorvan Quillet', senderName: 'Plain Sender', transfersToday: 0, screener: m });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toEqual([RECIPIENT_WATCHLIST_REASON]);
+    notChecked(r.evidence);
+  });
+
+  it('a full set (no member failed) keeps the composite version, hash and check time', async () => {
+    const m = multi(steady(CONS_LIST));
+    const r = await screenTransfer({ amountUsd: 100, recipientName: 'Zorvan Quillet', transfersToday: 0, screener: m });
+    expect(r.status).toBe('blocked');
+    expect(r.evidence!.listVersion).toBe('v1+v1');
+    expect(r.evidence!.listHash).toBe(m.listInfo().hash);
+    expect(r.evidence!.listCheckedAt).toBe(at.toISOString());
   });
 });

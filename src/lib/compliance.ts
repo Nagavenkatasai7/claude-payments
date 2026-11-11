@@ -16,7 +16,7 @@ import {
 } from './providers/sanctions-provider';
 import { inputHash, type ScreeningEvidence, type ScreeningEvidenceParty, type SanctionsDecision } from './sanctions/evidence';
 import { SanctionsListUnavailableError } from './sanctions/list-screener';
-import { isMultiListScreener } from './sanctions/multi-list-screener';
+import { fromPartialSet, isMultiListScreener } from './sanctions/multi-list-screener';
 import { listFitness, type ListFitness } from './sanctions/list-policy';
 import { normalizeName } from './sanctions/normalize';
 import type { SanctionsListInfo } from './providers/sanctions-provider';
@@ -138,6 +138,8 @@ export async function screenTransfer(input: {
   let recipientHit: SanctionsHit;
   let senderHit: SanctionsHit;
   const extraHits: SanctionsHit[] = [];
+  // LF1-D1 (lists only): set when any party's screen saw a partial set.
+  let partialSet = false;
   try {
     if (isMultiListScreener(screener)) {
       // Fix pack 5 LA1 (SANCTIONS_LIST=lists only): an exact match on any
@@ -158,6 +160,7 @@ export async function screenTransfer(input: {
       for (const name of extraNames) ex.push(await settle(name));
       const all = [r, s, ...ex];
       if (all.some((h) => h === null) && !all.some((h) => h?.matched)) throw new SanctionsListUnavailableError();
+      partialSet = all.some((h) => h === null || fromPartialSet(h));
       const unscreenedHit: SanctionsHit = { matched: false, matchScore: 0 };
       recipientHit = r ?? unscreenedHit;
       senderHit = s ?? unscreenedHit;
@@ -197,8 +200,12 @@ export async function screenTransfer(input: {
     };
   }
 
-  const info = screener.listInfo();
-  const fitness = listFitness(info, input.now ?? new Date());
+  // LF1-D1: a block found on a partial set records that the set was NOT
+  // checked (a member may have loaded again before this read).
+  const info: SanctionsListInfo = partialSet
+    ? { source: screener.listInfo().source, version: 'unavailable', hash: '' }
+    : screener.listInfo();
+  const fitness = partialSet ? 'not_live' : listFitness(info, input.now ?? new Date());
   const parties = [party('recipient', recipientName, recipientHit)];
   if (input.senderName) parties.push(party('sender', senderName, senderHit));
   extraNames.forEach((name, i) => parties.push(party('recipient', name, extraHits[i])));

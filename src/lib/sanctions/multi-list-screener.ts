@@ -16,6 +16,11 @@
 //     (LIST_UNAVAILABLE);
 //   • else any member's possible match flags for review (the first one).
 //
+// An exact match from a partial set is marked (fromPartialSet): screenTransfer
+// then writes the not-checked list fields on the block's evidence (version
+// 'unavailable', hash '', not_live), never the composite identity read after
+// the screen, which a member that loads again meanwhile would make look full.
+//
 // A stale member does not throw: the set fitness (list-policy.ts
 // listSetFitness over memberInfos()) is what holds real money (T29).
 // Hashes, versions and entry ids only: never a name.
@@ -46,6 +51,19 @@ function loaded(info: SanctionsListInfo): boolean {
   return !NOT_LOADED.has(info.version) && info.hash !== '';
 }
 
+/**
+ * LF1-D1: the exact-match hits returned while the set was partial (a member
+ * rejected or was not loaded during THAT screen). Kept out of SanctionsHit so
+ * the shared type and every other screener stay unchanged; the composite
+ * listInfo() read later cannot tell, because a member may load again before.
+ */
+const PARTIAL_HITS = new WeakSet<SanctionsHit>();
+
+/** True when this hit is an exact match found while the set was partial. */
+export function fromPartialSet(hit: SanctionsHit): boolean {
+  return PARTIAL_HITS.has(hit);
+}
+
 export class MultiListSanctionsScreener implements SanctionsScreener {
   private readonly members: ReadonlyArray<ListMember>;
   private readonly compositeSource: string;
@@ -63,15 +81,18 @@ export class MultiListSanctionsScreener implements SanctionsScreener {
     // cheap. allSettled: a member's failure never drops another member's hit.
     const settled = await Promise.allSettled(this.members.map((m) => m.screener.screen(input)));
     const source = this.compositeSource;
+    const partial =
+      settled.some((r) => r.status === 'rejected') || !this.members.every((m) => loaded(m.screener.listInfo()));
     // An exact match on any member blocks, whatever the other members did.
     for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value.matched) return { ...r.value, listSource: source };
+      if (r.status === 'fulfilled' && r.value.matched) {
+        const hit: SanctionsHit = { ...r.value, listSource: source };
+        if (partial) PARTIAL_HITS.add(hit);
+        return hit;
+      }
     }
     // Anything else on a partial set fails closed: no partial result.
-    if (settled.some((r) => r.status === 'rejected')) throw new SanctionsListUnavailableError();
-    if (!this.members.every((m) => loaded(m.screener.listInfo()))) {
-      throw new SanctionsListUnavailableError();
-    }
+    if (partial) throw new SanctionsListUnavailableError();
     const hits = settled.map((r) => (r as PromiseFulfilledResult<SanctionsHit>).value);
     const possible = hits.find((h) => Boolean(h.possibleMatch));
     if (possible) return { ...possible, listSource: source };

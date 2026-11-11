@@ -108,7 +108,11 @@ export async function fetchPinnedText(url: string, fetchImpl: typeof fetch, opts
     if (!location) throw badHost();
     let next: string;
     try {
-      next = new URL(location, current).href;
+      const n = new URL(location, current);
+      // L1-LR1 (LF3-D1): a Location with userinfo is refused here; undici
+      // would throw a TypeError carrying the full URL (and its signed query).
+      if (n.username || n.password) throw badHost();
+      next = n.href;
     } catch {
       throw badHost();
     }

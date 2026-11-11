@@ -164,8 +164,13 @@ export function strictTag(block: string, name: string): string | undefined {
  * tag), and a leaf may hold text only (no other tag before its end tag).
  * `atMostOnce` names may occur at most once in `block` (a second one would
  * be dropped by the reader). Returns the first offending name, or null.
- * Linear: one /g regex over the block whose only quantifiers are single
- * negated character classes ([^>]*, [^\s/>]*), no nesting.
+ * Linear (L1-LR1, LF2-D2): one /g regex over the block. Every class stops
+ * at '<', so a match attempt never scans past the next '<'; the name class
+ * and the rest are disjoint (the rest must start with whitespace or '/'), so
+ * a failed attempt backtracks in O(1) per character. Each '<' starts at most
+ * one attempt of length up to the next '<': O(n) for the block. (The earlier
+ * /<(\/?)([A-Za-z_][^\s/>]*)([^>]*)>/ was about cubic on a '<a' run with no
+ * '>'.) The match set on well-formed tags is unchanged.
  */
 export function malformedElement(
   block: string,
@@ -179,7 +184,7 @@ export function malformedElement(
   const seen = new Map<string, number>();
   const once = new Set(atMostOnce);
   let leafOpen: string | null = null;
-  for (const m of block.matchAll(/<(\/?)([A-Za-z_][^\s/>]*)([^>]*)>/g)) {
+  for (const m of block.matchAll(/<(\/?)([A-Za-z_][^\s/<>]*)((?:[\s/][^<>]*)?)>/g)) {
     const [, slash, qname, rest] = m;
     const colon = qname.lastIndexOf(':');
     const local = colon >= 0 ? qname.slice(colon + 1) : qname;
@@ -219,7 +224,9 @@ export function malformedElement(
  * `name` (any shape: plain, attribute, namespace prefix, self-closing) and
  * every end tag (any shape) must belong to one of the plain blocks matched,
  * and no matched block may hold another entry opening of any of `entryNames`.
- * Linear: two /g regexes over the document plus one per block.
+ * Linear: two /g regexes over the document plus one per block; the prefix
+ * class stops at '<' (L1-LR1, LF2-D2), so an attempt never scans past the
+ * next '<' (it was quadratic on a long '<a' run with no ':' or '>').
  */
 export function entryElementsMatch(
   xml: string,
@@ -227,11 +234,28 @@ export function entryElementsMatch(
   blocks: readonly string[],
   entryNames: readonly string[],
 ): boolean {
-  const opened = xml.match(new RegExp(`<(?:[A-Za-z_][^\\s/>:]*:)?${name}[\\s>/]`, 'g'))?.length ?? 0;
-  const ended = xml.match(new RegExp(`</(?:[A-Za-z_][^\\s/>:]*:)?${name}[\\s>]`, 'g'))?.length ?? 0;
+  const opened = xml.match(new RegExp(`<(?:[A-Za-z_][^\\s/<>:]*:)?${name}[\\s>/]`, 'g'))?.length ?? 0;
+  const ended = xml.match(new RegExp(`</(?:[A-Za-z_][^\\s/<>:]*:)?${name}[\\s>]`, 'g'))?.length ?? 0;
   if (opened !== blocks.length || ended !== blocks.length) return false;
-  const inner = new RegExp(`<(?:[A-Za-z_][^\\s/>:]*:)?(?:${entryNames.join('|')})[\\s>/]`);
+  const inner = new RegExp(`<(?:[A-Za-z_][^\\s/<>:]*:)?(?:${entryNames.join('|')})[\\s>/]`);
   return !blocks.some((b) => inner.test(b));
+}
+
+/**
+ * L1-LR1 (LF2-D1, LF2-D2): true when an entry block holds CDATA, a comment, a
+ * DOCTYPE style declaration or a processing instruction ('<!' or '<?'), or a
+ * '<' that does not open a tag closed by '>' before the next '<'. The strict
+ * readers match plain text only, so such markup would make a read element
+ * vanish or be read from a comment: the strict parses refuse the block.
+ * Linear: two indexOf scans, one count of '<' and one /g regex whose classes
+ * all stop at '<' (see malformedElement). The prolog is not checked.
+ */
+export function hasUnsupportedMarkup(block: string): boolean {
+  if (block.includes('<!') || block.includes('<?')) return true;
+  let lt = 0;
+  for (let i = block.indexOf('<'); i !== -1; i = block.indexOf('<', i + 1)) lt += 1;
+  const tags = block.match(/<\/?[A-Za-z_][^\s/<>]*(?:[\s/][^<>]*)?>/g)?.length ?? 0;
+  return tags !== lt;
 }
 
 /** The text elements and containers the OFAC strict parse reads. */
@@ -332,6 +356,7 @@ function parseStrict(xml: string, opts: SdnXmlParseOptions): SanctionsList {
     const malformed = (name: string | null) => {
       if (name !== null) throw new Error(`${p} entry ${position} has a malformed <${name}> element`);
     };
+    if (hasUnsupportedMarkup(block)) throw new Error(`${p} entry ${position} has unsupported markup`);
     malformed(malformedElement(block, OFAC_LEAVES, OFAC_CONTAINERS, ['akaList', 'programList']));
     const own = stripNestedLists(block);
     malformed(malformedElement(own, OFAC_LEAVES, [], ['uid', 'firstName', 'lastName', 'sdnType']));
