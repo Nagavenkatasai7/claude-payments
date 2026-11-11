@@ -117,8 +117,10 @@ async function resealColumn(
     const cursor = after
       ? sql` AND (${sql.join(t.key.map(id), sql`, `)}) > (${sql.join(after.map(castVal), sql`, `)})`
       : sql``;
+    // P3 body check: also read the verify column (`::text`), never logged.
+    const verifySel = t.verify ? sql`, ${id(t.verify.column)}::text AS verify_value` : sql``;
     const res = await db.execute(
-      sql`SELECT ${sql.join(t.key.map((k) => sql`${id(k)}::text AS ${id(k)}`), sql`, `)}, ${id(column)} AS enc
+      sql`SELECT ${sql.join(t.key.map((k) => sql`${id(k)}::text AS ${id(k)}`), sql`, `)}, ${id(column)} AS enc${verifySel}
             FROM ${id(t.table)}
            WHERE ${staleWhere(column, kid)}${cursor}
            ORDER BY ${sql.join(t.key.map((k) => sql`${id(t.table)}.${id(k)}`), sql`, `)}
@@ -133,6 +135,8 @@ async function resealColumn(
       let next: string;
       try {
         const plain = decryptField(oldBlob, opts.provider, context);
+        // A body that no longer matches its stored check (e.g. rail_messages.body_sha256) is not re-sealed.
+        if (t.verify && !t.verify.check(plain, String(row.verify_value))) throw new Error('verify');
         next = sealFieldV2(plain, opts.provider, context, kid);
         if (decryptField(next, opts.provider, context) !== plain) throw new Error('verify');
       } catch {

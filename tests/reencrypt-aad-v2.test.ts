@@ -118,6 +118,7 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
         'partner_integrations.kyc_api_key_enc', 'partner_integrations.kyc_webhook_secret_enc',
         'partner_integrations.payment_credentials_enc', 'partner_integrations.payment_webhook_secret_enc',
         'partner_integrations.wa_app_secret_enc', 'partner_integrations.wa_token_enc', 'partner_integrations.wa_verify_token_enc',
+        'rail_messages.body_enc', // fix pack 5 (born v2; registered for key-ring rotation)
         'recipients.legal_name_enc', // fix pack 4 (born v2; registered for key-ring rotation)
         'recipients.payout_destination_enc',
         'schedules.payout_destination_enc', 'schedules.purpose_detail_enc', // Batch B follow-up A2 (born v2)

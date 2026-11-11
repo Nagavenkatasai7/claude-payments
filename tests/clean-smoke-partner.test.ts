@@ -6,6 +6,7 @@ import { createStaffRepo } from '@/db/repos/staff-repo';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
+import { RAIL_OUT, createRailMessageRepo } from '@/db/repos/rail-message-repo';
 import { partnerGoLive, partnerPortalSettings, partnerReportJobs, partnerSites, partnerSlugTombstones, partnerWebhookDeliveries } from '@/db/schema';
 
 // Program-Fix 45 P5: the staff ledger's partner_id FK means the smoke
@@ -78,6 +79,31 @@ describe('clean-smoke-partner', () => {
     expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
     expect(await count(`SELECT count(*)::int AS n FROM conversation_messages WHERE partner_id = 'p_smoke'`)).toBe(1);
     expect(lines.join('\n')).toMatch(/skip p_smoke .*1 conversation messages/);
+  });
+
+  it('SKIPS a smoke partner that OWNS rail_messages rows, and keeps them', async () => {
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    await createRailMessageRepo(db).append({
+      partnerId: 'p_smoke', railPartnerId: 'p_smoke', transferId: 't_smoke', direction: RAIL_OUT, kind: 'settle', body: '{}', signatureHeader: null,
+    });
+    const lines: string[] = [];
+    await cleanSmokePartners(db, (l) => lines.push(l));
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM rail_messages WHERE partner_id = 'p_smoke'`)).toBe(1);
+    expect(lines.join('\n')).toMatch(/skip p_smoke .*1 rail messages/);
+  });
+
+  it('SKIPS a smoke partner that is only the RAIL partner of a row (routed, zero transfers)', async () => {
+    await seedPartner(db, 'pa');
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    await createRailMessageRepo(db).append({
+      partnerId: 'pa', railPartnerId: 'p_smoke', transferId: 't_routed', direction: RAIL_OUT, kind: 'settle', body: '{}', signatureHeader: null,
+    });
+    const lines: string[] = [];
+    await cleanSmokePartners(db, (l) => lines.push(l));
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM rail_messages WHERE rail_partner_id = 'p_smoke'`)).toBe(1);
+    expect(lines.join('\n')).toMatch(/skip p_smoke .*1 rail messages/);
   });
 
   it('never touches a partner with a different name', async () => {

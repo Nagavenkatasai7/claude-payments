@@ -77,6 +77,11 @@ export type CryptoPurpose = 'customer_ref' | 'outbox.apply_link' | 'transfer_sea
  */
 const V1_EXEMPT_PURPOSES: ReadonlySet<CryptoPurpose> = new Set<CryptoPurpose>(['customer_ref']);
 
+/** Fix pack 5 (P3/P4): rail_messages.direction, 1 out (we POSTed it), 2 in (a callback). Declared here so lib never imports a repo. */
+export type RailMessageDirection = 1 | 2;
+/** Fix pack 5 (P3/P4): rail_messages.kind (CHECK rail_messages_kind). */
+export type RailMessageKind = 'settle' | 'reverse' | 'callback';
+
 const s = (v: unknown): string => (typeof v === 'string' ? v : String(v ?? ''));
 
 const make = (table: string, column: string, row: unknown[], v1Exempt = false): CryptoContext =>
@@ -121,6 +126,16 @@ export const ctx = {
     channel: number,
     direction: number,
   ): CryptoContext => make('conversation_messages', 'body_enc', [partnerId, id, threadKeyHex, channel, direction]),
+  /**
+   * Fix pack 5 (P3): `rail_messages.body_enc`, the sealed exact bytes of one
+   * signed rail message (an instruction or reverse we POSTed, or a callback we
+   * verified). The row parts bind the row id, the direction (1 out, 2 in) and
+   * the kind, so a body moved to another row, direction or kind does not open.
+   * All three parts are NOT NULL columns (the re-encrypt scripts would turn a
+   * NULL part into 'null'). Pinned by tests/crypto-context.test.ts.
+   */
+  railMessage: (id: string, direction: RailMessageDirection, kind: RailMessageKind): CryptoContext =>
+    make('rail_messages', 'body_enc', [id, direction, kind]),
   /**
    * UI redesign M3-16: `partner_report_jobs.content_enc`, the sealed (already masked) report CSV.
    * Binds the tenant and the job id, so a blob copied to another tenant's or another job's row
