@@ -484,6 +484,28 @@ describe('pay-process: the approval stripped between the gate read and the commi
     expect(warnLines(warn, 'pay.disclosure-refused')).toHaveLength(1);
   });
 
+  // Review round 2 M3: the funded flag of a refusal under the lock comes from the LOCKED row,
+  // not the caller's pre-lock object. A parallel attempt binds a debit and the block is
+  // re-approved with a new hash, both after the gate read: 409 reload_required, funded.
+  it('block hash changed and a debit bound after the gate read (caller object unfunded) -> 409 reload_required, funded, no "charged"', async () => {
+    await acme({ approve: true });
+    const hash = await acmeHash();
+    const t = makeTransfer({ id: 's3', partnerId: 'acme' });
+    await store.saveTransfer(t);
+    owner.afterRead = async () => {
+      await approveDisclosureForTest(db, 'acme', { entity: 'Acme Remit Two LLC' });
+      expect(await createTransferRepo(db).bindFundingIntent('s3', 'acme', 'stripe', 'pi_s3')).toBeTruthy();
+    };
+    const res = await pay(t, testEvidence({ routeId: 's3', shownHash: hash }));
+    expect(owner.afterRead).toBeNull();
+    expect(t.fundingIntentRef ?? null).toBeNull(); // the caller's object stayed unfunded
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ ok: false, reason: 'reload_required', funded: true });
+    expect(res.body.error).not.toMatch(/charged/i);
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceRows()).toEqual([]);
+  });
+
   it('the same without the strip -> paid as before', async () => {
     await acme({ approve: true });
     const hash = await acmeHash();

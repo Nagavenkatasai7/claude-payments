@@ -12,6 +12,7 @@ import { DEFAULT_PARTNER_ID } from './defaults';
 import { logWarn } from './log';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
 import { disclosureGateRefusal, type DisclosureGateRefusal } from './pay-disclosure-gate';
+import { transferFunded } from './pay-not-available';
 import { payloadHashFor, type PaymentAuthEvidence } from './payment-auth-evidence';
 import { buildDisclosureSnapshot, disclosureProviderKind } from './remittance-disclosure';
 import type { Transfer } from './types';
@@ -41,8 +42,10 @@ export type EvidenceCommitResult =
   | { kind: 'nothing' }
   // Review R1-P3 C2: a mandatory payment whose R18 gate no longer passes on the
   // owner row read under the lock. Nothing was written; a correct refusal, not a
-  // write failure (no payevidence alert).
-  | { kind: 'refused'; refusal: DisclosureGateRefusal };
+  // write failure (no payevidence alert). `funded` is the LOCKED row's funded
+  // state (review round 2 M3): a parallel attempt may have bound a debit since
+  // the caller's read, so the refusal copy must not say "Nothing was charged".
+  | { kind: 'refused'; refusal: DisclosureGateRefusal; funded: boolean };
 
 export interface EvidenceCommitOptions {
   /** The caller's R18 decision (disclosureMandatory). True re-checks the gate under the owner lock. */
@@ -97,7 +100,7 @@ export async function commitPaymentEvidence(
         ackVersion: ev.disclosureAck?.version ?? null,
         postedHash: ev.disclosureAck?.shownHash ?? null,
       });
-      if (refusal) return { kind: 'refused', refusal };
+      if (refusal) return { kind: 'refused', refusal, funded: transferFunded(locked) };
     }
     const rows: AuditEvent[] = [];
     if (ev.auth) {

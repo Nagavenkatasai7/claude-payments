@@ -558,6 +558,35 @@ describe('link route R18 gate (pack 4)', { retry: 0 }, () => {
     expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
   });
 
+  // Review round 2 Q3: the early reload on a minted link row with a bound debit says funded,
+  // never "nothing was charged" (the route passes transferFunded(payable.transfer)).
+  it('a minted link row with a bound debit, then a stale disclosureHash -> 409 reload_required, funded: true, no "charged"', async () => {
+    await approveDisclosureForTest(db, 'acme');
+    const hash = await acmeHash();
+    // 1. A declined first attempt leaves a minted, unpaid link transfer.
+    funding.decline = true;
+    await acmeCall({ action: 'request_otp' });
+    const first = await acmeCall({ otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock, disclosureVersion: DISCLOSURE_DRAFT_VERSION, disclosureHash: hash });
+    expect(first.status).toBe(402);
+    const tid = ((await db.execute(sql.raw('SELECT id FROM transfers'))) as unknown as { rows: Array<{ id: string }> }).rows[0].id;
+    // 2. A bank debit is bound to that row (still awaiting payment).
+    expect(await createTransferRepo(db).bindFundingIntent(tid, 'acme', 'stripe', `pi_${tid}`)).toBeTruthy();
+    expect(await store.getTransfer(tid)).toMatchObject({ status: 'awaiting_payment', fundingIntentRef: `pi_${tid}` });
+    funding.decline = false;
+    funding.captures = 0;
+    // 3. An old tab posts a stale hash: refused before the code is checked, and funded.
+    const res = await acmeCall({
+      otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock,
+      disclosureVersion: DISCLOSURE_DRAFT_VERSION, disclosureHash: `dh1:${'0'.repeat(64)}`,
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, reason: 'reload_required', funded: true });
+    expect(body.error).not.toMatch(/charged/i);
+    expect(funding.captures).toBe(0);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(1);
+  });
+
   it('R1-P4 B2: the code consume hits a network error -> 503 temporarily_unavailable (never the wrong-code 403); no transfer; the retry pays', async () => {
     await approveDisclosureForTest(db, 'acme');
     await acmeCall({ action: 'request_otp' });

@@ -279,7 +279,7 @@ export async function processTransferPayment(
       ackVersion: evidence?.disclosureAck?.version ?? null,
       postedHash: evidence?.disclosureAck?.shownHash ?? null,
     });
-    if (refusal) return disclosureRefused(transfer, refusal);
+    if (refusal) return disclosureRefused(transfer, refusal, transferFunded(transfer));
   }
 
   // ── AUTHORISE, THEN CAPTURE (fix pack 4, C8) ─────────────────────────────
@@ -297,7 +297,8 @@ export async function processTransferPayment(
       return payApprovalNotRecorded(transferFunded(transfer));
     }
     // An approval stripped (or a block changed) after the gate read: the same answers, nothing written.
-    if (committed.kind === 'refused') return disclosureRefused(transfer, committed.refusal);
+    // The funded flag is the LOCKED row's (review round 2 M3), not the pre-lock `transfer`.
+    if (committed.kind === 'refused') return disclosureRefused(transfer, committed.refusal, committed.funded);
     if (committed.kind === 'not_awaiting') {
       // Moved since the caller's read: report current truth, never charge.
       const current = await store.getTransfer(transfer.id);
@@ -373,8 +374,11 @@ export async function processTransferPayment(
   }
 }
 
-/** The R18 answers (C10), from the gate read or the re-check under the owner lock (review R1-P3 C2). */
-function disclosureRefused(transfer: Transfer, refusal: DisclosureGateRefusal): NextResponse {
+/**
+ * The R18 answers (C10), from the gate read or the re-check under the owner lock (review R1-P3 C2).
+ * `funded` is the caller's row state at the gate read, or the LOCKED row's under the lock (M3).
+ */
+function disclosureRefused(transfer: Transfer, refusal: DisclosureGateRefusal, funded: boolean): NextResponse {
   if (refusal === 'not_available') {
     logWarn('pay.disclosure-refused', 'payment refused before capture: provider block not approved', {
       transferId: transfer.id,
@@ -382,5 +386,5 @@ function disclosureRefused(transfer: Transfer, refusal: DisclosureGateRefusal): 
     });
     return payNotAvailable();
   }
-  return payReloadRequired(transferFunded(transfer));
+  return payReloadRequired(funded);
 }

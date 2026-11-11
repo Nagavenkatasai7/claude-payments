@@ -280,7 +280,7 @@ describe('commitPaymentEvidence: the R18 re-check under the owner lock (review R
     await stripApproval();
     const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
     const r = await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true });
-    expect(r).toEqual({ kind: 'refused', refusal: 'not_available' });
+    expect(r).toEqual({ kind: 'refused', refusal: 'not_available', funded: false });
     expect(await auditRows()).toEqual([]);
     expect(await rawSnapshot('tr_ev1')).toBeNull();
     expect((await createTransferRepo(db).getTransfer('tr_ev1'))?.status).toBe('awaiting_payment');
@@ -295,9 +295,24 @@ describe('commitPaymentEvidence: the R18 re-check under the owner lock (review R
     expect(await commitPaymentEvidence(db, fixture(), ev, disclosure, Date.now(), { mandatory: true })).toEqual({
       kind: 'refused',
       refusal: 'reload_required',
+      funded: false,
     });
     expect(await auditRows()).toEqual([]);
     expect(await rawSnapshot('tr_ev1')).toBeNull();
+  });
+
+  it('mandatory refusal on a row whose debit was bound after the caller read -> funded from the LOCKED row (review round 2 M3)', async () => {
+    await approveDisclosureForTest(db, 'acme', { entity: 'Acme Remit Two LLC' });
+    expect(await createTransferRepo(db).bindFundingIntent('tr_ev1', 'acme', 'stripe', 'pi_tr_ev1')).toBeTruthy();
+    const callerRead = fixture(); // read before the bind: unfunded
+    expect(callerRead.fundingIntentRef ?? null).toBeNull();
+    const ev = testEvidence({ routeId: 'tr_ev1', shownHash: disclosure.hash });
+    expect(await commitPaymentEvidence(db, callerRead, ev, disclosure, Date.now(), { mandatory: true })).toEqual({
+      kind: 'refused',
+      refusal: 'reload_required',
+      funded: true,
+    });
+    expect(await auditRows()).toEqual([]);
   });
 
   it('mandatory, still approved -> written; the owner row is read FOR SHARE after the transfer lock; snapshot approved', async () => {
