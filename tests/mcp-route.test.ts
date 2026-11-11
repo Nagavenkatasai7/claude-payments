@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server';
 import { Client, StreamableHTTPClientTransport, extractWWWAuthenticateParams } from '@modelcontextprotocol/client';
 import type { AgentAuth, AgentPrincipal, AgentScope } from '@/lib/agent-auth';
 import { TOOLS_OFF_MESSAGE } from '@/lib/mcp/guard';
+import type { McpSite } from '@/lib/mcp/http';
 import { fakeRedis, type FakeRedis } from './helpers';
 
 // Stage C1: /api/mcp through the REAL route module (src/app/api/mcp/route.ts), with the host site,
@@ -17,7 +18,7 @@ const CHALLENGE = `Bearer resource_metadata="${METADATA}", scope="quotes:read re
 const ALL: AgentScope[] = ['quotes:read', 'recipients:read', 'transfers:read', 'transfers:prepare', 'schedules:manage'];
 
 const state: {
-  site: { partnerId: string; slug: string } | null;
+  site: McpSite | null;
   auth: AgentAuth;
   redis: FakeRedis;
   ipLimited: boolean;
@@ -124,7 +125,7 @@ async function connect(token: string, opts: { modern?: boolean; versions?: strin
 }
 
 beforeEach(() => {
-  state.site = { partnerId: 'pa', slug: 'send' };
+  state.site = { partnerId: 'pa', slug: 'send', host: HOST };
   state.auth = fakeAuth({ sra_good: principal() });
   state.redis = fakeRedis();
   state.ipLimited = false;
@@ -156,6 +157,51 @@ describe('/api/mcp: host = tenant', () => {
     state.auth = auth;
     await route.POST(jsonRpc(initialize('2025-06-18'), { authorization: 'Bearer sra_good' }));
     expect(auth.seen).toEqual([{ token: 'sra_good', resource: RESOURCE }]);
+  });
+});
+
+// TGFL custom host (design D7): the resource and the 401 challenge follow the site's canonical host,
+// so a token minted for tgfl.smartremit.ai (another resource) is refused on smartremitai.tgfl.org.
+describe('/api/mcp: custom skin host', () => {
+  const C_HOST = 'smartremitai.tgfl.org';
+  const C_RESOURCE = `https://${C_HOST}/api/mcp`;
+  const C_METADATA = `https://${C_HOST}/.well-known/oauth-protected-resource/api/mcp`;
+  /** Tokens bound to one resource each, as the real store binds them (service.ts verifyAccessToken). */
+  function resourceAuth(byToken: Record<string, string>): FakeAuth {
+    const seen: FakeAuth['seen'] = [];
+    return {
+      seen,
+      recorded: [],
+      async verifyAccessToken(token, resource) {
+        seen.push({ token, resource });
+        if (!token) return { ok: false, reason: 'missing' };
+        return byToken[token] === resource ? { ok: true, principal: principal({ partnerId: 'default' }) } : { ok: false, reason: 'invalid' };
+      },
+      async toolsActive() {
+        return false;
+      },
+      async recordToolCall() {},
+    };
+  }
+  beforeEach(() => {
+    state.site = { partnerId: 'default', slug: 'tgfl', host: C_HOST };
+    state.auth = resourceAuth({ sra_custom: C_RESOURCE, sra_sub: 'https://tgfl.smartremit.ai/api/mcp' });
+  });
+  it('no token → the 401 resource_metadata names the custom host', async () => {
+    const res = await route.POST(jsonRpc(initialize('2025-06-18')));
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe(CHALLENGE.replace(METADATA, C_METADATA));
+  });
+  it('a token minted for tgfl.smartremit.ai is refused on the custom host', async () => {
+    const res = await route.POST(jsonRpc(initialize('2025-06-18'), { authorization: 'Bearer sra_sub' }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get('www-authenticate')).toBe(`${CHALLENGE.replace(METADATA, C_METADATA)}, error="invalid_token"`);
+    expect((state.auth as FakeAuth).seen).toEqual([{ token: 'sra_sub', resource: C_RESOURCE }]);
+  });
+  it('a custom-host token works there', async () => {
+    const res = await route.POST(jsonRpc(initialize('2025-06-18'), { authorization: 'Bearer sra_custom' }));
+    expect(res.status).toBe(200);
+    expect((await rpcBody(res)).result).toBeTruthy();
   });
 });
 

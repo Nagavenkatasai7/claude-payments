@@ -21,6 +21,15 @@ import { Button, Card, EmptyState, Money, PageHeader } from '@/components/ds';
 import { TransferRows } from './transfers/transfer-rows';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { loadMyRewards, type MyRewards } from '@/lib/rewards/read';
+import { agentGateOpen, agentToolsOn } from '@/lib/agent-auth/gate';
+import { isFlagOn } from '@/lib/flags';
+import { telegramConfigured } from '@/lib/telegram';
+import { telegramSwitchOn } from '@/lib/telegram-link';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { waLink, WA_MESSAGES } from '@/app/landing/wa';
+import { TELEGRAM_BOT_HREF } from '@/app/landing/channels';
+import { waysToSend } from '@/lib/portal-ways-to-send';
+import { WaysToSendCard } from './ways-to-send-card';
 
 export const generateMetadata = () => portalMetadata('portal.home.title');
 
@@ -99,14 +108,34 @@ export default async function PortalHomePage() {
   const site = await requirePortalSite();
   const ctx = await requirePortalCustomer();
   const owner = portalOwner(ctx);
-  const [recent, partner, scanned, todayUsedCents, book, rewards] = await Promise.all([
+  const sharedBot = site.partnerId === DEFAULT_PARTNER_ID;
+  const [recent, partner, scanned, todayUsedCents, book, rewards, aiAppsOn, aiSwitchOn, telegramOn, agentPaused] = await Promise.all([
     listPortalTransfers(owner, { limit: 5 }),
     getPartnerStore().getPartner(site.partnerId),
     getStore().listTransfersByPhone(owner.partnerId, owner.phone, STATS_SCAN),
     getDailyVolumeStore().getTodayCents(owner.partnerId, owner.phone),
     createRecipientRepo(getDb()).listAllForSender(owner.partnerId, owner.phone),
     loadMyRewards(getDb(), getStore(), owner.partnerId, owner.phone, new Date(), (usd) => formatMoney(usd, 'USD')),
+    // "Ways to send" (TGFL custom host, design §5.2): three reads, each fails closed. The AI links
+    // need the full gate (switch AND demo phone), not the page's visible(): a customer who only
+    // keeps a live grant could not finish the steps (authorize answers 403), so they get names only.
+    // It also spares the layout's hasCustomerGrants query a second run per render.
+    agentGateOpen(getDb(), owner.partnerId, owner.phone),
+    agentToolsOn(getDb(), site.partnerId),
+    sharedBot && telegramConfigured() ? telegramSwitchOn().catch(() => false) : false,
+    // The agent.paused kill switch (fix pack 3): the bot answers only the fixed reply, so the card
+    // hides WhatsApp and Telegram. isFlagOn never throws and fails open, exactly like the bot's read.
+    sharedBot ? isFlagOn(getDb(), 'agent.paused', { partnerId: site.partnerId }) : false,
   ]);
+  const ways = waysToSend({
+    sharedBot,
+    agentPaused,
+    whatsappHref: waLink(WA_MESSAGES.generic),
+    telegramOn,
+    telegramHref: TELEGRAM_BOT_HREF,
+    aiSwitchOn,
+    aiAppsOn,
+  });
   const gateActive = sendGateActive(partner);
   const kycNeeded = gateActive && !isSendVerified(ctx.customer);
   const cap = buildSummaryContext(ctx.customer, scanned, todayUsedCents, gateActive, resolveEffectiveSendLimits(partner, ctx.customer));
@@ -160,6 +189,8 @@ export default async function PortalHomePage() {
             </Link>
           </Button>
         </Card>
+
+        <WaysToSendCard ways={ways} />
 
         {rewards ? <MyRewardsCard rewards={rewards} /> : null}
 

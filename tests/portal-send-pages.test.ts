@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents } from '@/db/schema';
@@ -34,7 +35,7 @@ import { ctx as cryptoCtx } from '@/lib/crypto-context';
 // replay-safe by request key. The portal never mints: the redirect is the existing pay page.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   stale: false,
   db: null as unknown,
@@ -101,7 +102,7 @@ import ReviewPage from '@/app/portal/send/review/page';
 import TransferDetailPage from '@/app/portal/transfers/[id]/page';
 import { continueToPayAction } from '@/app/portal/send/actions';
 
-const SITE = (partnerId: string) => ({ partnerId, slug: partnerId, brand: `Brand ${partnerId}`, logo: null, theme: {} });
+const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId, host: `${partnerId}.smartremit.ai`, brand: `Brand ${partnerId}`, logo: null, theme: {} as PortalSite['theme'] });
 const MOM = '919876543210';
 
 let db: Db;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { hasStaffSessionCookie } from '@/lib/session-cookie';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
-import { parseSiteHost, stripSiteHeaders, SITE_HEADERS } from '@/lib/site-host';
+import { parseSiteHost, stripSiteHeaders, SITE_HEADERS, type SiteHostSite } from '@/lib/site-host';
 import { classifySitePath, type SitePathClass } from '@/lib/site-routes';
 import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-session-cookie';
 import { continuePath, legacyDeepLink } from '@/lib/legacy-deep-link';
@@ -12,11 +12,13 @@ import { REFERRAL_COOKIE, referralCodeToStore, referralCookieOptions } from '@/l
 // every server action self-gates (the server-action security checklist); the
 // middleware just stops anonymous traffic from reaching protected trees.
 //
-// UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) is dispatched
-// FIRST to siteProxy, before any cookie gate; any other smartremit.ai subdomain except www is refused
-// (404), so the apex app is never served on it. The apex (smartremit.ai, www, previews, localhost)
-// runs the unchanged legacy gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
-// headers are stripped from every request this proxy sees; only siteProxy sets them.
+// UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) or a custom
+// skin host (src/lib/site-skins.ts `hosts`, e.g. smartremitai.tgfl.org) is dispatched FIRST to
+// siteProxy, before any cookie gate; any other smartremit.ai subdomain except www, and the trailing-dot
+// form or a sub-label of a custom skin host, is refused (404), so the apex app is never served on it.
+// The apex (smartremit.ai, www, previews, localhost) runs the unchanged legacy gate, synchronously
+// (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant headers are stripped from
+// every request this proxy sees; only siteProxy sets them.
 
 /**
  * /account sub-paths that must stay PUBLIC (they ARE the auth entry points). /account/continue is the
@@ -31,7 +33,7 @@ const hasSiteHeader = (h: Headers) => h.has(SITE_HEADERS.partner) || h.has(SITE_
 
 export function proxy(req: NextRequest): NextResponse | Promise<NextResponse> {
   const site = parseSiteHost(req.headers.get('host'));
-  if (site.kind === 'site') return siteProxy(req, site.slug);
+  if (site.kind === 'site') return siteProxy(req, site);
   if (site.kind === 'refused') return refuse(req);
   if (!isLegacyGatedPath(req.nextUrl.pathname)) {
     // Only reachable if the platform ever dropped the host condition: never the /login fallthrough.
@@ -92,17 +94,21 @@ function refuse(req: NextRequest, headers: Headers = stripSiteHeaders(req.header
   return isRead(req.method) ? NextResponse.rewrite(new URL('/_site-not-found', req.url), { request: { headers } }) : bare404();
 }
 
-async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> {
+async function siteProxy(req: NextRequest, site: SiteHostSite): Promise<NextResponse> {
+  const { slug } = site;
   const headers = stripSiteHeaders(req.headers);
   let partnerId: string | null = null;
   try {
-    const { resolveSiteSlug } = await import('@/lib/site-tenant-resolver'); // lazy: apex never loads it
-    partnerId = await resolveSiteSlug(slug, headers);
+    const mod = await import('@/lib/site-tenant-resolver'); // lazy: apex never loads it
+    // A custom skin host resolves skin-only: it never falls through to a partner that holds the slug.
+    partnerId = site.custom ? await mod.resolveSkinHost(slug, headers) : await mod.resolveSiteSlug(slug, headers);
   } catch {
-    partnerId = null; // fail closed: the same sheet as an unknown slug
+    partnerId = null; // fail closed: the same answer as an unknown slug
   }
-  // Unknown, disabled, throttled and errored all look identical (no oracle).
+  // Unknown, disabled, throttled and errored all look identical (no oracle). A custom skin host is
+  // another organisation's DNS name: it answers a plain 404 instead of the SmartRemit inactive sheet.
   if (!partnerId) {
+    if (site.custom) return refuse(req, headers);
     return isRead(req.method) ? NextResponse.rewrite(new URL('/site-inactive', req.url), { request: { headers } }) : bare404();
   }
   const route: SitePathClass = siteRoutesLive() ? classifySitePath(req.nextUrl.pathname) : DENY;
@@ -113,7 +119,8 @@ async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> 
     ? NextResponse.rewrite(new URL(route.rewriteTo, req.url), { request: { headers } })
     : NextResponse.next({ request: { headers } });
   refreshPortalCookie(req, res);
-  rememberReferralCode(req, res);
+  // D14: tgfl.org can plant a Domain=tgfl.org sr_ref, so a custom skin host never stores a referral code.
+  if (!site.custom) rememberReferralCode(req, res);
   return res;
 }
 
@@ -165,11 +172,12 @@ export const config = {
     '/admin-dashboard/:path*',
     '/account',
     '/account/:path*',
-    // UI redesign M1: subdomains of smartremit.ai ONLY. Next lowercases the Host, strips the port and
-    // tests ^value$ (next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so the apex
-    // (smartremit.ai, www.smartremit.ai) and every non-smartremit.ai host never satisfy either `has`,
-    // and the apex match set is unchanged (tests/site-matcher-parity.test.ts). The values are
-    // hand-written literals of the parseSiteHost rules; the parity test fails if they drift.
+    // UI redesign M1: subdomains of smartremit.ai and the exact custom skin hosts ONLY. Next lowercases
+    // the Host, strips the port and tests ^value$ (next 16.4.3,
+    // next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so the apex (smartremit.ai,
+    // www.smartremit.ai) and every other host never satisfy any `has`, and the apex match set is
+    // unchanged (tests/site-matcher-parity.test.ts). The values are hand-written literals of the
+    // parseSiteHost rules (a matcher must be a constant); the parity test fails if they drift.
     // Static assets are excluded explicitly (end-anchored).
     // (1) <valid slug>.smartremit.ai: a partner site.
     {
@@ -187,6 +195,13 @@ export const config = {
     {
       source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
       has: [{ type: 'host', value: '(?!www\\.smartremit\\.ai\\.?$).+\\.smartremit\\.ai\\.?' }],
+    },
+    // (3) the custom skin hosts of site-skins.ts (CUSTOM_SKIN_HOSTS), their trailing-dot form and every
+    // sub-label: the exact host is the skin's site, the rest is refused. Rebuilt from CUSTOM_SKIN_HOSTS
+    // and compared byte for byte by tests/site-matcher-parity.test.ts.
+    {
+      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
+      has: [{ type: 'host', value: '(?:.+\\.)?(?:smartremitai\\.tgfl\\.org)\\.?' }],
     },
   ],
 };

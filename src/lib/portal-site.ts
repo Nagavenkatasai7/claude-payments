@@ -39,6 +39,8 @@ export interface PortalSkin {
   name: string;
   /** A path under /brand/partners/ (the layout re-checks it with skinLogoSrc), or null for text. */
   logoSrc: string | null;
+  /** The logo's natural size in pixels; the header shows no logo without it. */
+  logoSize: { width: number; height: number } | null;
   /** Skin colours (the layout re-validates them), or null for SmartRemit's. */
   theme: { primary: string; accent: string } | null;
   /** true shows the demo line on every portal page. */
@@ -48,6 +50,12 @@ export interface PortalSkin {
 export interface PortalSite {
   partnerId: PartnerId;
   slug: string;
+  /**
+   * The canonical public host from parseSiteHost's code table (`<slug>.smartremit.ai`, or a custom
+   * skin host such as smartremitai.tgfl.org), never the raw header: the OAuth issuer, the MCP
+   * resource, verify links and the credential binding use it.
+   */
+  host: string;
   /** The end-customer brand: always SmartRemit (resolvePartnerBranding, 2026-10-04), on a skin host too. */
   brand: string;
   /** Always null: a PARTNER's logo is never shown (2026-10-04). A skin's logo lives in `skin`. */
@@ -77,10 +85,11 @@ async function loadPortalSite(): Promise<PortalSite | null> {
     return {
       partnerId: tenant.partnerId,
       slug: tenant.slug,
+      host: tenant.host,
       brand: resolvePartnerBranding(partner).brand,
       logo: null,
       theme: resolveSiteTheme({}),
-      skin: skin ? { name: skin.name, logoSrc: skin.logoSrc, theme: skin.theme, demo: skin.demo } : null,
+      skin: skin ? { name: skin.name, logoSrc: skin.logoSrc, logoSize: skin.logoSize, theme: skin.theme, demo: skin.demo } : null,
     };
   } catch {
     return null;

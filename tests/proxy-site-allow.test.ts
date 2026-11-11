@@ -4,8 +4,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { NextRequest } from 'next/server';
 import { isRewrite, getRewrittenUrl } from 'next/experimental/testing/server';
-const { resolveSiteSlug, classifySitePath } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn(), classifySitePath: vi.fn() }));
-vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug }));
+const { resolveSiteSlug, resolveSkinHost, classifySitePath } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn(), resolveSkinHost: vi.fn(), classifySitePath: vi.fn() }));
+vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug, resolveSkinHost }));
 vi.mock('@/lib/site-routes', () => ({ classifySitePath }));
 import { proxy } from '@/proxy';
 
@@ -35,6 +35,23 @@ describe('proxy allow branch', () => {
     classifySitePath.mockClear();
     resolveSiteSlug.mockResolvedValue(null);
     await proxy(site('/portal'));
+    expect(classifySitePath).not.toHaveBeenCalled();
+  });
+});
+
+describe('the custom skin host with the portal off', () => {
+  it('a resolved custom host still 404s on every path while CUSTOMER_PORTAL_ENABLED is unset (the portal gate, not the catch)', async () => {
+    vi.unstubAllEnvs();
+    resolveSkinHost.mockReset();
+    resolveSkinHost.mockResolvedValue('default');
+    classifySitePath.mockClear();
+    classifySitePath.mockReturnValue({ kind: 'allow' });
+    for (const p of ['/', '/portal', '/portal/login', '/api/mcp']) {
+      const r = await proxy(new NextRequest(`https://smartremitai.tgfl.org${p}`, { headers: { host: 'smartremitai.tgfl.org' } }));
+      expect(new URL(getRewrittenUrl(r as never)!).pathname, p).toBe('/_site-not-found');
+      expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBeNull();
+    }
+    expect(resolveSkinHost).toHaveBeenCalledWith('tgfl', expect.any(Headers));
     expect(classifySitePath).not.toHaveBeenCalled();
   });
 });

@@ -3,11 +3,15 @@ import { Bot } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { agentPortal } from '@/lib/agent-auth/portal-wiring';
+import { agentGateOpen } from '@/lib/agent-auth/gate';
+import { getDb } from '@/db/client';
 import { t } from '@/lib/i18n';
 import { Card, EmptyState, PageHeader } from '@/components/ds';
 import { portalMetadata } from '@/lib/portal-metadata';
 import { disconnectAgentAppAction } from './actions';
 import { DisconnectApp } from './disconnect-form';
+import { mcpResourceUrl } from '@/lib/agent-auth/contract';
+import { ConnectorBox } from './connector-box';
 
 export const generateMetadata = () => portalMetadata('portal.agentApps.title');
 
@@ -18,7 +22,8 @@ const when = (d: Date) => `${WHEN.format(d)} UTC`;
  * Connected AI apps (Stage C1 spec item 10): the signed-in customer's live AI-app grants, scoped to
  * (host partner, session phone). Each row is the app's own (unverified, React-escaped, never a
  * link) name and two times, with a Disconnect button. Shown while the AI-agent gate is open OR the
- * customer still has a live grant, so an app can always be disconnected; otherwise a 404.
+ * customer still has a live grant, so an app can always be disconnected; otherwise a 404. The
+ * "Connect an AI app" box shows only while the gate is open.
  */
 export default async function AgentAppsPage() {
   await requirePortalSite();
@@ -27,12 +32,15 @@ export default async function AgentAppsPage() {
   const phone = ctx.session.phone;
   const apps = agentPortal();
   if (!(await apps.visible(partnerId, phone))) notFound();
-  const grants = await apps.list(partnerId, phone);
+  // The connector box only while the gate itself is open: a customer who only keeps a live grant
+  // may disconnect it here, but the steps would end in authorize's 403.
+  const [grants, canConnect] = await Promise.all([apps.list(partnerId, phone), agentGateOpen(getDb(), partnerId, phone)]);
 
   return (
     <>
       <PageHeader title={t('portal.agentApps.title')} sub={t('portal.agentApps.sub')} />
       <div className="flex flex-col gap-6">
+        {canConnect ? <ConnectorBox url={mcpResourceUrl(ctx.site.host)} /> : null}
         {grants.length === 0 ? (
           <EmptyState icon={<Bot aria-hidden="true" className="size-6" />} title={t('portal.agentApps.emptyTitle')} body={t('portal.agentApps.emptyBody')} />
         ) : (

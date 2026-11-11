@@ -16,6 +16,7 @@ import { oauthError, oauthJson, readCapped, readForm } from './http';
 import { verifyPkceS256 } from './pkce';
 import { parseClientRegistration } from './registration';
 import { agentSecretHash, newAgentId, newAgentSecret, sameHash } from './secrets';
+import { customHostBinding } from '@/lib/site-skins';
 import type { AgentTokenStore } from './stores';
 
 // The AI-agent authorization server's machine endpoints (Stage C1): RFC 7591 registration,
@@ -44,6 +45,16 @@ export interface AgentServerDeps {
   audit(e: AgentAuditInput): Promise<void>;
   /** True when this request is over the per-IP limit `name` (fail-open: false on a limiter error). */
   limited(name: keyof typeof AGENT_IP_LIMITS, req: Request): Promise<boolean>;
+}
+
+/**
+ * The stored hash of a refresh token (D8). On a custom skin host the host binding enters the hash, so a
+ * token minted there finds no grant on any smartremit.ai host (and the reverse), and bumping the skin's
+ * credentialEpoch kills it. Every smartremit.ai host has a null binding: agentSecretHash(token), as before.
+ */
+function refreshHash(token: string, ctx: HostCtx, deps: AgentServerDeps): string {
+  const binding = customHostBinding(ctx.host);
+  return agentSecretHash(binding ? `${binding}\n${token}` : token, deps.pepper);
 }
 
 const tooMany = () => oauthError('slow_down', 'Too many requests. Try again in a minute.', 429, { 'Retry-After': '60' });
@@ -188,13 +199,13 @@ async function exchangeCode(form: URLSearchParams, client: AgentClientRow, ctx: 
     phone: rec.phone,
     clientId: client.id,
     scopes: rec.scopes,
-    refreshHash: agentSecretHash(refresh, deps.pepper),
+    refreshHash: refreshHash(refresh, ctx, deps),
     now: new Date(now),
     expiresAt: new Date(now + AGENT_GRANT_TTL_MS),
   });
   await deps.store.markCodeUsed(code, { partnerId: ctx.partnerId, grantId: rec.grantId });
   const access = await deps.store.issueAccess({ grantId: rec.grantId, partnerId: ctx.partnerId, phone: rec.phone, clientId: client.id, scopes: rec.scopes, resource });
-  await deps.audit({ partnerId: ctx.partnerId, phone: rec.phone, clientId: client.id, action: 'agent.grant.created', meta: { grantId: rec.grantId, scopes: rec.scopes.join(' ') } });
+  await deps.audit({ partnerId: ctx.partnerId, phone: rec.phone, clientId: client.id, action: 'agent.grant.created', meta: { grantId: rec.grantId, scopes: rec.scopes.join(' '), host: ctx.host } });
   return tokenResponse(access, refresh, rec.scopes);
 }
 
@@ -202,7 +213,7 @@ async function refreshGrant(form: URLSearchParams, client: AgentClientRow, ctx: 
   const presented = form.get('refresh_token');
   if (!presented) return oauthError('invalid_request', 'refresh_token is required.');
   if (!presented.startsWith(REFRESH_TOKEN_PREFIX) || presented.length > 128) return oauthError('invalid_grant');
-  const hash = agentSecretHash(presented, deps.pepper);
+  const hash = refreshHash(presented, ctx, deps);
   const found = await deps.repo.findGrantByRefreshHash(ctx.partnerId, hash);
   if (!found) {
     // Older than the one rotation the grant row remembers: still theft.
@@ -228,7 +239,7 @@ async function refreshGrant(form: URLSearchParams, client: AgentClientRow, ctx: 
     if (want.length > 0) scopes = want;
   }
   const next = newAgentSecret(REFRESH_TOKEN_PREFIX);
-  const rotated = await deps.repo.rotateRefresh(ctx.partnerId, grant.id, hash, agentSecretHash(next, deps.pepper), new Date(now), new Date(now + AGENT_GRANT_TTL_MS));
+  const rotated = await deps.repo.rotateRefresh(ctx.partnerId, grant.id, hash, refreshHash(next, ctx, deps), new Date(now), new Date(now + AGENT_GRANT_TTL_MS));
   if (!rotated) return oauthError('invalid_grant');
   await deps.store.markRefreshRetired(presented, { partnerId: ctx.partnerId, grantId: grant.id }).catch(() => undefined);
   const access = await deps.store.issueAccess({ grantId: grant.id, partnerId: ctx.partnerId, phone: grant.phone, clientId: client.id, scopes, resource });
@@ -263,7 +274,7 @@ export async function handleRevoke(req: Request, ctx: HostCtx, deps: AgentServer
     const rec = await deps.store.readAccess(token);
     if (rec && rec.partnerId === ctx.partnerId && rec.clientId === auth.client.id) await deps.store.dropAccess(token);
   } else if (token.startsWith(REFRESH_TOKEN_PREFIX) && token.length <= 128) {
-    const found = await deps.repo.findGrantByRefreshHash(ctx.partnerId, agentSecretHash(token, deps.pepper));
+    const found = await deps.repo.findGrantByRefreshHash(ctx.partnerId, refreshHash(token, ctx, deps));
     if (found && found.match === 'current' && !found.revoked && found.grant.clientId === auth.client.id) {
       await revokeAndAudit(ctx.partnerId, found.grant.id, 'client', deps, found.grant);
     }

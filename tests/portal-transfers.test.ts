@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
@@ -21,6 +22,10 @@ import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
 import { DEFAULT_CATALOG } from '@/lib/rewards/settings';
 import { easternMonth } from '@/lib/dates';
+import { createAgentOAuthRepo } from '@/db/repos/agent-oauth-repo';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { waLink, WA_MESSAGES } from '@/app/landing/wa';
+import { TELEGRAM_BOT_HREF } from '@/app/landing/channels';
 
 // UI redesign M2-7, Task 7.2: Home, the transfer list, the detail page and the printable receipt
 // (render tests over the real PGlite fixture; the UI itself is walked after enablement). Pinned:
@@ -28,7 +33,7 @@ import { easternMonth } from '@/lib/dates';
 // a URL), the empty state, and 404 for another customer's or another partner's transfer.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   ctx: null as null | Record<string, unknown>,
   db: null as unknown,
   redis: null as unknown,
@@ -79,7 +84,7 @@ let B: TwoPartnerFixture;
 let phone: string;
 
 function signIn(partnerId: string, p: string, kycStatus = 'verified') {
-  h.site = { partnerId, slug: partnerId, brand: `Brand ${partnerId}`, logo: null, theme: {} };
+  h.site = { partnerId, slug: partnerId, host: `${partnerId}.smartremit.ai`, brand: `Brand ${partnerId}`, logo: null, theme: {} as PortalSite['theme'] };
   h.ctx = { site: h.site, session: { phone: p, sid: 's1' }, token: 'tok', customer: { partnerId, senderPhone: p, kycStatus } };
 }
 
@@ -194,6 +199,125 @@ describe('Home', () => {
     signIn('pa', phone);
     h.ctx = null;
     await expect(PortalHomePage()).rejects.toThrow('REDIRECT:/portal/login');
+  });
+});
+
+// TGFL custom host, design §5.2-5.3 / §6 item 26: the "Ways to send" card on the home.
+describe('Home: Ways to send', () => {
+  const AGC = 'agc_WWWWWWWWWWWWWWWWWWWWWW';
+  const AGG = 'agg_WWWWWWWWWWWWWWWWWWWWWW';
+  const amp = (s: string) => s.replaceAll('&', '&amp;').replaceAll("'", '&#x27;'); // React's attribute escaping
+  async function agentTools(on: boolean) {
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.tools', scopeType: 'partner', scopeId: DEFAULT_PARTNER_ID, enabled: on, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+  }
+  async function agentToolsFor(partnerId: string) {
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.tools', scopeType: 'partner', scopeId: partnerId, enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+  }
+  async function liveGrant() {
+    const repo = createAgentOAuthRepo(db);
+    await repo.insertClient({ id: AGC, partnerId: DEFAULT_PARTNER_ID, name: 'App', redirectUris: ['https://app.example/cb'], authMethod: 'none', secretHash: null });
+    await repo.insertGrant({ id: AGG, partnerId: DEFAULT_PARTNER_ID, phone, clientId: AGC, scopes: ['quotes:read'], refreshHash: `h-${AGG}`, now: new Date(), expiresAt: new Date(Date.now() + 86_400_000) });
+  }
+  afterEach(() => {
+    delete process.env.DEMO_PHONES;
+    invalidateFlagCache(db);
+  });
+
+  it('shown on every portal; on the default tenant WhatsApp opens the SmartRemit bot in a new tab', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    expect(html).toContain('data-ways-to-send');
+    expect(html).toContain('Ways to send');
+    expect(html).toContain(`href="${amp(waLink(WA_MESSAGES.generic))}" target="_blank" rel="noopener noreferrer"`);
+    expect(html).not.toContain(TELEGRAM_BOT_HREF); // no token and no telegram.bot switch here
+    expect(html).not.toMatch(/\b(test|testing)\b/i);
+  });
+
+  it('a partner tenant shows the card without the shared bots (agent.tools on there)', async () => {
+    await agentToolsFor('pa');
+    const html = await home(); // signed in on 'pa'
+    expect(html).toContain('data-ways-to-send');
+    expect(html).toContain('Claude');
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+  });
+
+  it('a partner tenant with agent.tools off has nothing to list → no card at all (F9)', async () => {
+    const html = await home(); // signed in on 'pa'
+    expect(html).not.toContain('data-ways-to-send');
+    expect(html).not.toContain('An AI app never pays');
+  });
+
+  it('agent.tools off on the default tenant → the card shows WhatsApp but no AI-app pay sentence (F9)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    expect(html).toContain('data-ways-to-send');
+    expect(html).not.toContain('An AI app never pays');
+    expect(html).toContain('SmartRemit pay page');
+  });
+
+  it('agent.tools off → no AI app is named', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).not.toContain(app);
+  });
+
+  it('agent.paused on for the default tenant → the card hides WhatsApp (the bot answers only the fixed reply)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'partner', scopeId: DEFAULT_PARTNER_ID, enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+    expect(html).not.toContain('data-ways-to-send'); // agent.tools is off here, so nothing is left to list
+  });
+
+  it('agent.paused on for every tenant (a global row) → the card hides WhatsApp too', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'global', scopeId: '', enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+  });
+
+  it('agent.paused on for ANOTHER tenant leaves the default tenant\'s WhatsApp entry in place', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'partner', scopeId: 'pa', enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).toContain('data-way="whatsapp"');
+  });
+
+  it('agent.tools on, gate shut → the names without a /portal/ai-apps link, by invitation', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).toContain(app);
+    expect(html).not.toContain('/portal/ai-apps');
+    expect(html).toContain('By invitation');
+    expect(html).toContain('not affiliated');
+  });
+
+  it('agent.tools on and the gate open (phone in demo mode) → each AI app links to its section of /portal/ai-apps', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    process.env.DEMO_PHONES = phone;
+    const html = await home();
+    for (const id of ['claude', 'chatgpt', 'perplexity']) expect(html).toContain(`href="/portal/ai-apps#connect-${id}"`);
+    expect(html).toContain('An AI app never pays');
+  });
+
+  it('agent.tools on, gate shut but a live grant → names only, by invitation: no Set up link that ends in a 403 (F2)', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await agentTools(true);
+    await liveGrant();
+    const html = await home();
+    for (const app of ['Claude', 'ChatGPT', 'Perplexity']) expect(html).toContain(app);
+    expect(html).not.toContain('/portal/ai-apps#connect-');
+    expect(html).toContain('By invitation');
   });
 });
 

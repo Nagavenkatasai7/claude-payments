@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 // Owner, 2026-10-11: "Contact us" on the portal. The page opens without sign-in (a visitor who cannot
@@ -6,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 // as text, and offers a support request only to a signed-in customer whose partner has support on.
 
 const h = vi.hoisted(() => ({
-  site: null as null | Record<string, unknown>,
+  site: null as null | PortalSite,
   customer: null as null | Record<string, unknown>,
   supportOn: true,
 }));
@@ -22,7 +23,7 @@ vi.mock('@/lib/portal-tickets', () => ({ portalSupportEnabled: async () => h.sup
 import PortalContactPage from '@/app/portal/contact/page';
 import { WA_PHONE, formatWaPhone } from '@/app/landing/wa';
 
-const SITE = { partnerId: 'pa', slug: 'acme', brand: 'SmartRemit' };
+const SITE: PortalSite = { partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai', brand: 'SmartRemit', logo: null, theme: {} as PortalSite['theme'] };
 const render = async () => renderToStaticMarkup(await PortalContactPage());
 
 beforeEach(() => {

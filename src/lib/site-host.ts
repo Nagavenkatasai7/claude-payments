@@ -1,18 +1,24 @@
 // site-host — the ONE host contract for partner subdomains (<slug>.smartremit.ai).
 //
-// PURE and dependency-free: src/proxy.ts imports it on every matched request, so it must never pull
-// Redis, the DB or anything with I/O into the proxy's hot path.
+// PURE: src/proxy.ts imports it on every matched request, so it must never pull Redis, the DB or
+// anything with I/O into the proxy's hot path. Its only import is the pure skin table (site-skins.ts),
+// which never imports this file.
 //
 // Three results:
-// - site:    EXACTLY `<valid slug>.smartremit.ai` (after lowercasing and stripping a port).
+// - site:    EXACTLY `<valid slug>.smartremit.ai` (after lowercasing and stripping a port), or EXACTLY
+//            a custom skin host of site-skins.ts (CUSTOM_SKIN_HOSTS, e.g. smartremitai.tgfl.org), with
+//            `custom: true`. `host` is the canonical public host, rebuilt from the slug or taken from the
+//            code table, never copied from the header.
 // - apex:    the platform itself (smartremit.ai and www.smartremit.ai, with or without a trailing
-//            dot) and every host outside smartremit.ai (*.vercel.app previews, localhost, IPs,
+//            dot) and every other host outside smartremit.ai (*.vercel.app previews, localhost, IPs,
 //            look-alike domains, a missing Host). Apex runs the legacy app unchanged.
 // - refused: every other *.smartremit.ai host (reserved labels, ??-- labels, bad lengths or edges,
-//            multi-label names, the trailing-dot form of a slug). The proxy answers 404; the apex
-//            app is never served on such a host.
+//            multi-label names, the trailing-dot form of a slug), and the trailing-dot form and every
+//            sub-label of a custom skin host. The proxy answers 404; the apex app is never served on
+//            such a host.
 // The compiled proxy matcher in src/proxy.ts carries literal copies of these rules;
 // tests/site-matcher-parity.test.ts fails if the two ever disagree.
+import { CUSTOM_SKIN_HOSTS } from './site-skins';
 
 /** Labels that can never be a partner slug (spec §1.8 plus the Q5 additions). */
 export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
@@ -34,15 +40,25 @@ const ANY_SUBDOMAIN = /^(?!www\.smartremit\.ai\.?$).+\.smartremit\.ai\.?$/;
 
 export const SITE_HEADERS = { partner: 'x-sr-site-partner', slug: 'x-sr-site-slug' } as const;
 
-export type SiteHost = { kind: 'apex' } | { kind: 'site'; slug: string } | { kind: 'refused' };
+export type SiteHost =
+  | { kind: 'apex' }
+  | { kind: 'site'; slug: string; host: string; custom: boolean }
+  | { kind: 'refused' };
+export type SiteHostSite = Extract<SiteHost, { kind: 'site' }>;
+
+const reEscape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** A custom skin host, its trailing-dot form, or any sub-label of it: same literal as proxy matcher entry (3). */
+const CUSTOM_ANY = CUSTOM_SKIN_HOSTS.size
+  ? new RegExp(`^(?:.+\\.)?(?:${[...CUSTOM_SKIN_HOSTS.keys()].map(reEscape).join('|')})\\.?$`)
+  : null;
 
 export function isValidSiteSlug(s: string): boolean {
   return typeof s === 'string' && SLUG_PATTERN.test(s) && !RESERVED_DNS_LABEL.test(s) && !RESERVED_SLUGS.has(s);
 }
 
 /**
- * Exactly what Next's `has: host` matcher compares (next/dist/shared/lib/router/utils/prepare-destination.js:87-90
- * in 16.3.5): everything before the FIRST ':' (the port), lowercased. An IPv6 literal (`[::1]`) becomes '[' and is
+ * Exactly what Next's `has: host` matcher compares (next/dist/shared/lib/router/utils/prepare-destination.js:84-89
+ * in 16.4.3): everything before the FIRST ':' (the port), lowercased. An IPv6 literal (`[::1]`) becomes '[' and is
  * never a site host. No trimming: the matcher does not trim either.
  */
 function hostnameOf(host: string): string {
@@ -53,7 +69,10 @@ export function parseSiteHost(host: string | null | undefined): SiteHost {
   if (typeof host !== 'string') return { kind: 'apex' };
   const hostname = hostnameOf(host);
   const m = SITE_HOST.exec(hostname);
-  if (m && isValidSiteSlug(m[1])) return { kind: 'site', slug: m[1] };
+  if (m && isValidSiteSlug(m[1])) return { kind: 'site', slug: m[1], host: `${m[1]}.smartremit.ai`, custom: false };
+  const skinSlug = CUSTOM_SKIN_HOSTS.get(hostname);
+  if (skinSlug !== undefined && isValidSiteSlug(skinSlug)) return { kind: 'site', slug: skinSlug, host: hostname, custom: true };
+  if (CUSTOM_ANY?.test(hostname)) return { kind: 'refused' };
   return ANY_SUBDOMAIN.test(hostname) ? { kind: 'refused' } : { kind: 'apex' };
 }
 

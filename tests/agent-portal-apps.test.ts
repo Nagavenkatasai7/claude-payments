@@ -86,9 +86,9 @@ describe('Connected AI apps', { retry: 0 }, () => {
 
 // The server action: the owner is the SESSION's (partner, phone), never a form field.
 const a = vi.hoisted(() => ({ calls: [] as unknown[][], throws: false }));
-vi.mock('@/lib/portal-site', () => ({ requirePortalSite: async () => ({ partnerId: 'pa', slug: 'acme' }) }));
+vi.mock('@/lib/portal-site', () => ({ requirePortalSite: async () => ({ partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai' }) }));
 vi.mock('@/lib/portal-auth', () => ({
-  requirePortalCustomer: async () => ({ site: { partnerId: 'pa' }, session: { phone: '15551230000', sid: 's' } }),
+  requirePortalCustomer: async () => ({ site: { partnerId: 'pa', slug: 'acme', host: 'acme.smartremit.ai' }, session: { phone: '15551230000', sid: 's' } }),
 }));
 vi.mock('next/cache', () => ({ revalidatePath: () => {} }));
 vi.mock('@/lib/agent-auth/portal-wiring', () => ({

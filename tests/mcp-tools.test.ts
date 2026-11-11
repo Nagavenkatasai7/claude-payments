@@ -32,7 +32,7 @@ import {
   MCP_RECIPIENTS_MAX,
   type McpDataDeps,
 } from '@/lib/mcp/tools';
-import { handleMcpRequest } from '@/lib/mcp/http';
+import { handleMcpRequest, type McpSite } from '@/lib/mcp/http';
 import { capRefusalReply } from '@/lib/hold-replies';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
@@ -350,7 +350,7 @@ describe('end to end through the MCP handler (gate on)', () => {
   };
 
   async function client(a: AgentAuth, versions?: string[]) {
-    const deps = { site: async () => ({ partnerId: 'pa', slug: 'send' }), auth: a, redis: fakeRedis(), toolDeps: toolDeps(), db };
+    const deps = { site: async (): Promise<McpSite> => ({ partnerId: 'pa', slug: 'send', host: 'send.smartremit.ai' }), auth: a, redis: fakeRedis(), toolDeps: toolDeps(), db };
     const c = new Client({ name: 'e2e', version: '0.0.1' }, versions ? { supportedProtocolVersions: versions } : {});
     // The handler under test is in-process; the FX stub stays on global fetch.
     await c.connect(

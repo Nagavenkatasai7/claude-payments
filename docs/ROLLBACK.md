@@ -21,6 +21,39 @@ A rollback swaps code, never the database. The older build must work with every 
 
 Check quickly: `git log --oneline <target-sha>..origin/main -- drizzle/` lists every migration added since the target build.
 
+## Before you roll back: the TGFL custom address
+
+The custom-host PR (`smartremitai.tgfl.org`, CLAUDE.md "Site skins") taught the code that this host is the TGFL skin. An older build parses it as the apex and would serve the staff `/login` and the rest of the apex app on TGFL's address. So, while the domain is attached in Vercel and TGFL's CNAME points at it:
+
+1. **Switch "TGFL demo portal" off first** (`/admin-dashboard/switches`). Within about 15 seconds the custom host answers 404 on every page and API route, and every portal cookie and AI-app refresh token minted there is useless. This covers only cookies and refresh tokens minted on the custom host: whoever controls tgfl.org's DNS can relay a WhatsApp code or TOTP in real time and finish the sign-in on any smartremit.ai host of the tenant, which neither the switch nor the epoch bump revokes (see "Suspected compromise of tgfl.org's DNS" below). Keep the domain **attached**, so no other Vercel account can claim the name.
+2. **Ask TGFL to delete the CNAME** for `smartremitai.tgfl.org`. Confirm it is gone: `dig +short CNAME smartremitai.tgfl.org` prints nothing. Only then remove the domain in Vercel (Settings, Domains). Never detach while the CNAME is live: a detached domain with a live CNAME may be claimed by another Vercel account (the owner confirms against Vercel's current domain rules).
+3. **Only after step 2**, Instant Rollback or revert to a build older than the custom-host PR. If TGFL cannot be reached, do not detach and do not roll back past that PR: stay on step 1 and roll forward with a fix.
+
+A rollback to a build that still has the custom-host code needs none of this. Never remove a host from `SITE_SKINS.<slug>.hosts` while its CNAME may point at Vercel, for the same reason. The PR adds no migration, so a revert is safe for the data.
+
+### After attaching smartremitai.tgfl.org
+
+Order: the custom-host PR is merged and its `smoke.yml` run is green; Vercel env has `APP_BASE_URL=https://smartremit.ai`; the switch "TGFL demo portal" is on; the domain is added in Vercel (Production, no redirect); TGFL adds the CNAME (and the `_vercel` TXT if asked; a CAA record, if any, must allow Vercel's CA) and Vercel shows "Valid Configuration" with a certificate. Then check each line for the stated status. No automated smoke covers this host, so these checks are the only proof that the staff app is not served on TGFL's address:
+
+- `curl -sI https://smartremitai.tgfl.org/login` → 404; the same for `/admin-dashboard`, `/account`, `/pay/x`, `/docs` and `/api/worker`.
+- `curl -sI -H 'Host: SMARTREMITAI.TGFL.ORG' https://smartremitai.tgfl.org/login` → 404; the same for `/admin-dashboard` and `/api/worker`.
+- `curl -sI https://smartremitai.tgfl.org./login` (trailing dot) → 404; the same for `/admin-dashboard` and `/api/worker`.
+- `curl -sI https://smartremitai.tgfl.org/` → 307 to `/portal/login`.
+- `curl -s https://smartremitai.tgfl.org/.well-known/oauth-authorization-server | jq .issuer` → `"https://smartremitai.tgfl.org"`.
+- `curl -sI -X POST https://smartremitai.tgfl.org/api/mcp` → 401 with `resource_metadata="https://smartremitai.tgfl.org/..."`.
+- Switch off: within about 15 s `/portal/login` → 404. Switch back on.
+- Walk through in a browser: sign in on the custom host, TGFL header, "Ways to send" card, connector box with the custom address; the same cookie does not sign you in on `tgfl.smartremit.ai`.
+- Record a baseline, and re-run it after any TGFL DNS change: `dig +short CNAME smartremitai.tgfl.org` and the certificate issuer (`openssl s_client -connect smartremitai.tgfl.org:443 -servername smartremitai.tgfl.org </dev/null | openssl x509 -noout -issuer`).
+
+If any staff route answers anything but 404 on the custom host, switch off at once and follow the rollback order above.
+
+### Suspected compromise of tgfl.org's DNS or registrar
+
+1. Switch "TGFL demo portal" off at once (domain stays attached).
+2. Scope the window from `audit_events`: every phone with a `login_success` or an `agent.grant.created` row on ANY host during the window. Do not rely on `meta.host = 'smartremitai.tgfl.org'` alone: a relayed code finishes the sign-in on a smartremit.ai host and its row carries that host.
+3. For each of those phones, end all its portal sessions (`getPortalSessionStore().revokeAll(partnerId, phone)`, the same call the Devices page's "sign out everywhere" uses) and revoke its AI-app grants (`revokeCustomerGrant` / `revokeGrant` in `src/db/repos/agent-oauth-repo.ts`). Revoking a grant also ends its access tokens at once (the live-grant check).
+4. Before turning the switch on again, merge a PR that bumps `SITE_SKINS.tgfl.credentialEpoch`. It orphans every session and refresh token minted on the custom host, but AI-app access tokens are not epoch-bound and live up to `AGENT_ACCESS_TTL_SEC` (1 h): keep the switch off for at least 1 h after step 1 even once the bump is merged, unless step 3 revoked those grants. Sessions orphaned by the bump stay listed on the customer's Devices page as dead entries until their 30-day idle timeout; they cannot be used.
+
 ## How
 
 1. Pick the target: the last production deployment whose smoke run was green (Actions, workflow "Smoke", push runs on main).

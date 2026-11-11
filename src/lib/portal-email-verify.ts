@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { RedisLike } from './store';
 import type { PartnerId } from './types';
 import { EMAIL_MAX_LENGTH } from './customer-auth-store';
-import { isValidSiteSlug } from './site-host';
+import { parseSiteHost } from './site-host';
 
 /**
  * portal-email-verify — the customer portal's email address checks and single-use verify link
@@ -44,10 +44,15 @@ export function maskEmail(email: string): string {
   return `${local.length > 1 ? local[0] : ''}${MASK}${email.slice(at)}`;
 }
 
-/** The verify link, on the partner's OWN host (never the apex, never a caller-supplied host). */
-export function portalEmailVerifyUrl(slug: string, token: string): string {
-  if (!isValidSiteSlug(slug)) throw new Error('portal-email-verify: invalid site slug');
-  return `https://${slug}.smartremit.ai/portal/notifications/verify?token=${encodeURIComponent(token)}`;
+/**
+ * The verify link, on the site's OWN canonical host (PortalSite.host: `<slug>.smartremit.ai` or a
+ * custom skin host). Never the apex: the host must parse as a site AND equal its canonical form, so
+ * a raw header value (case, port, trailing dot) or any other host throws.
+ */
+export function portalEmailVerifyUrl(siteHost: string, token: string): string {
+  const p = parseSiteHost(siteHost);
+  if (p.kind !== 'site' || p.host !== siteHost) throw new Error('portal-email-verify: invalid site host');
+  return `https://${p.host}/portal/notifications/verify?token=${encodeURIComponent(token)}`;
 }
 
 export function isPortalEmailToken(v: unknown): v is string {

@@ -8,7 +8,7 @@ import { createAgentTokenStore } from '@/lib/agent-auth/stores';
 import { createAgentAuth } from '@/lib/agent-auth/service';
 import { handleRegister, handleToken, type HostCtx } from '@/lib/agent-auth/server';
 import { handleAuthorizeGet, handleAuthorizePost, type AuthorizeDeps } from '@/lib/agent-auth/authorize-flow';
-import { handleMcpRequest } from '@/lib/mcp/http';
+import { handleMcpRequest, type McpSite } from '@/lib/mcp/http';
 import { createStore, type Store } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -128,7 +128,7 @@ async function signIn(): Promise<{ accessToken: string; grantId: string }> {
 }
 
 const mcpDeps = (slug: string, partnerId: string) => ({
-  site: async () => ({ partnerId, slug }),
+  site: async (): Promise<McpSite> => ({ partnerId, slug, host: `${slug}.smartremit.ai` }),
   auth: agentAuth(),
   redis,
   toolDeps: toolDeps(),

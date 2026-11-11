@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 import { requirePortalSite } from '@/lib/portal-site';
 import { clearPortalCookie, requireFreshPortalAuth, requirePortalCustomer } from '@/lib/portal-auth';
 import { getPortalSessionStore } from '@/lib/portal-session-store';
+import { customHostBinding } from '@/lib/site-skins';
 import { portalAudit } from '@/lib/portal-login-flow';
 import { PORTAL_DEVICE_SIGNOUT_LIMIT } from '@/lib/portal-devices';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
@@ -51,7 +52,7 @@ export async function signOutDeviceAction(_prev: PortalDeviceActionState, formDa
 
   const store = getPortalSessionStore();
   if (sid === ctx.session.sid) {
-    await store.destroy(ctx.token);
+    await store.destroy(ctx.token, customHostBinding(ctx.site.host));
     await portalAudit(partnerId, phone, 'signout_one', { current: true });
     await clearPortalCookie();
     redirect('/portal/login');
@@ -81,7 +82,7 @@ export async function signOutEverywhereAction(): Promise<void> {
   } finally {
     // Whatever happened to the others, THIS session ends and its cookie goes (a failure still errors).
     try {
-      await store.destroy(ctx.token);
+      await store.destroy(ctx.token, customHostBinding(ctx.site.host));
     } catch (err) {
       failure ??= err;
     } finally {

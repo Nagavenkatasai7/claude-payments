@@ -118,7 +118,7 @@ export async function updateEmailAction(_prev: NotificationsActionState, formDat
   const ctx = await requireFreshPortalAuth(NOTIFICATIONS_PATH);
   const email = normalizePortalEmail(formData.get('email'));
   if (!email) return { error: 'portal.email.invalid' };
-  const { partnerId, slug, brand } = ctx.site;
+  const { partnerId, host, brand } = ctx.site;
   const phone = ctx.session.phone;
   const requestKey = String(formData.get('requestKey') ?? '');
   let code: string;
@@ -131,7 +131,7 @@ export async function updateEmailAction(_prev: NotificationsActionState, formDat
         });
         if (!rl.allowed) return { code: 'rate_limited' };
         const token = await mintEmailVerifyToken(getRedis(), { partnerId, phone, tag: emailVerifiedTag(partnerId, phone, email) });
-        const body = t('portal.email.verify_body', { brand, link: portalEmailVerifyUrl(slug, token) });
+        const body = t('portal.email.verify_body', { brand, link: portalEmailVerifyUrl(host, token) });
         await getDb().transaction(async (tx) => {
           if (!(await createCustomerStore(tx, getStore()).setEmail(partnerId, phone, email))) throw new Error('customer row missing');
           await clearEmailVerification(tx, partnerId, phone);

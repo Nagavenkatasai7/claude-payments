@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { PortalSite } from '@/lib/portal-site';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { and, eq } from 'drizzle-orm';
@@ -14,9 +15,10 @@ import { seedTwoPartners, TWO_PARTNER_PHONE } from './helpers-portal-two-partner
 // two-partner fixture. Partner A's customer can never read, edit or delete partner B's (or another
 // customer's) recipient; every miss is the same "not found".
 
-const SITE = (partnerId: string, slug: string) => ({
+const SITE = (partnerId: string, slug: string): PortalSite => ({
   partnerId,
   slug,
+  host: `${slug}.smartremit.ai`,
   brand: `Brand ${slug}`,
   logo: null,
   theme: { primary: '#0c5bd2', accent: '#0e7490', primaryFromPartner: false, accentFromPartner: false },
@@ -24,7 +26,7 @@ const SITE = (partnerId: string, slug: string) => ({
 
 const h = vi.hoisted(() => {
   const state = {
-    site: null as null | Record<string, unknown>,
+    site: null as null | PortalSite,
     jar: new Map<string, string>(),
     redis: null as unknown as Record<string, (...a: unknown[]) => unknown>,
     db: null as unknown,
@@ -98,7 +100,7 @@ async function expectRedirect(p: Promise<unknown>, to: string) {
   await expect(p).rejects.toThrow(`REDIRECT:${to}`);
 }
 async function signIn(partnerId: string, phone = PHONE) {
-  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS');
+  const { token } = await createPortalSessionStore(redis).create(partnerId, phone, 'Safari on iOS', null);
   h.jar.set(PORTAL_SESSION_COOKIE, token);
 }
 const onHost = (partnerId: 'pa' | 'pb') => {
