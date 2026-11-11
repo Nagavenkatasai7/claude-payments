@@ -28,6 +28,8 @@ import { usdToSource } from '@/lib/rewards/customer';
 import { bankDetailsLocked, preparedByLine } from '@/lib/pay-prepared-by';
 import { readLegalNameView } from '@/lib/recipient-legal-name';
 import { railPartnerOf } from '@/lib/live-gate';
+import { NO_ORIGINATOR_FIELDS, readOriginatorView, type OriginatorView } from '@/lib/originator-info';
+import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -200,6 +202,9 @@ async function renderPayPage(transferId: string) {
     // stored legal name never reaches the props or the markup.
     legalNameRequired: boolean;
     legalNameOnFile: boolean;
+    // Fix pack 5 (P19, T21b): the sender's address / date-of-birth fields. Four
+    // booleans only; a stored address or DOB never reaches the props or the markup.
+    originator: OriginatorView;
   };
 
   // A row that is no longer payable, b2b or exempt: no field (and no read).
@@ -249,6 +254,26 @@ async function renderPayPage(transferId: string) {
             transfer: { id: transfer.id, partnerId: transfer.partnerId },
           })
         : NO_LEGAL_NAME_FIELD;
+    // Fix pack 5 (P19): read only while the row awaits payment (never throws).
+    // b2b, routed, exempt, sandbox and non-real-money rows -> NO_ORIGINATOR_FIELDS.
+    const originator =
+      transfer.status === 'awaiting_payment'
+        ? await readOriginatorView(getDb(), {
+            ownerId: transfer.partnerId,
+            railPartnerId: railPartnerOf(transfer),
+            environment: transfer.environment,
+            transferType,
+            subject: {
+              partnerId: transfer.partnerId,
+              phone: transfer.phone,
+              amountUsd: transfer.amountUsd,
+              destinationCountry: transfer.destinationCountry,
+              transferType,
+              transferId: transfer.id,
+              routed: !!transfer.settlementPartnerId,
+            },
+          })
+        : NO_ORIGINATOR_FIELDS;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -279,6 +304,7 @@ async function renderPayPage(transferId: string) {
       bankDetailsLocked: false,
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
+      originator,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -303,6 +329,21 @@ async function renderPayPage(transferId: string) {
       environment: undefined,
       transferType: draft.transferType ?? 'b2c',
       draft,
+    });
+    // Fix pack 5 (P19): the draft's amount and destination, as the pay route asks (never throws).
+    const originator = await readOriginatorView(getDb(), {
+      ownerId: brandPartnerId,
+      railPartnerId: draft.settlementPartnerId ?? brandPartnerId,
+      environment: undefined,
+      transferType: draft.transferType ?? 'b2c',
+      subject: {
+        partnerId: brandPartnerId,
+        phone: draft.senderPhone,
+        amountUsd: draft.amountUsd,
+        destinationCountry: draft.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
+        transferType: draft.transferType ?? 'b2c',
+        routed: !!draft.settlementPartnerId,
+      },
     });
     view = {
       id: transferId,
@@ -333,6 +374,7 @@ async function renderPayPage(transferId: string) {
       preparedByNote: preparedByLine(draft.preparedBy),
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
+      originator,
     };
   }
 
@@ -417,6 +459,7 @@ async function renderPayPage(transferId: string) {
             }}
             legalNameRequired={view.legalNameRequired}
             legalNameOnFile={view.legalNameOnFile}
+            originator={view.originator}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

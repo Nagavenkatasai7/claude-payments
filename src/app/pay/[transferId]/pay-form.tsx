@@ -2,7 +2,19 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
+import {
+  PAY_ACCOUNT_HOLDER_COPY,
+  PAY_SENDER_ADDRESS_HINT,
+  PAY_SENDER_ADDRESS_INVALID_COPY,
+  PAY_SENDER_ADDRESS_LABEL,
+  PAY_SENDER_DOB_INVALID_COPY,
+  PAY_SENDER_DOB_LABEL,
+  disclosureAckBody,
+  payErrorMessage,
+  payOkStatus,
+} from '@/lib/pay-outcome';
+// Type only: originator-info.ts is server code (database reads) and never enters the client bundle.
+import type { OriginatorView } from '@/lib/originator-info';
 import { approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
@@ -101,6 +113,7 @@ export function PayForm({
   approving = null,
   legalNameRequired = false,
   legalNameOnFile = true,
+  originator = NO_ORIGINATOR_VIEW,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -121,6 +134,8 @@ export function PayForm({
   legalNameRequired?: boolean;
   /** Fix pack 4 (C18): a name is on file for the STORED account (or the row is exempt). Defaults: no field. */
   legalNameOnFile?: boolean;
+  /** Fix pack 5 (P19): which sender fields to ask (booleans only). Default: none. The ACH (b2b) form never asks. */
+  originator?: OriginatorView;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -151,6 +166,7 @@ export function PayForm({
         approvingText={approving ? approvingLine(approving) : null}
         legalNameRequired={legalNameRequired}
         legalNameOnFile={legalNameOnFile}
+        originator={originator}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -165,6 +181,7 @@ export function PayForm({
       approving={approving}
       legalNameRequired={legalNameRequired}
       legalNameOnFile={legalNameOnFile}
+      originator={originator}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -336,6 +353,114 @@ function AccountHolderField({
   );
 }
 
+// ── Fix pack 5 (P19, P31): the sender's home address and date of birth ──────
+// Shown only where the page asks (real money, b2c, not exempt, not routed, not
+// on file); never pre-filled (no stored value ever reaches the browser), and
+// posted as `senderAddress` / `senderDob` only when shown. A 400
+// originator_invalid shows the fixed copy under its field.
+
+/** Nothing asked (the client-side twin of NO_ORIGINATOR_FIELDS; the server module is not imported here). */
+const NO_ORIGINATOR_VIEW: OriginatorView = Object.freeze({
+  addressRequired: false,
+  addressOnFile: true,
+  dobRequired: false,
+  dobOnFile: true,
+});
+
+export interface OriginatorShown {
+  address: boolean;
+  dob: boolean;
+}
+
+/** A field shows when it is required and not on file (P19). */
+export function originatorShown(v: OriginatorView): OriginatorShown {
+  return { address: v.addressRequired && !v.addressOnFile, dob: v.dobRequired && !v.dobOnFile };
+}
+
+/** The pay body keys: only the shown fields, trimmed. */
+export function originatorBody(
+  shown: OriginatorShown,
+  values: { address: string; dob: string },
+): { senderAddress?: string; senderDob?: string } {
+  return {
+    ...(shown.address ? { senderAddress: values.address.trim() } : {}),
+    ...(shown.dob ? { senderDob: values.dob.trim() } : {}),
+  };
+}
+
+/** A shown field left empty: the pay / continue button waits for it. */
+export function originatorMissing(shown: OriginatorShown, values: { address: string; dob: string }): boolean {
+  return (shown.address && values.address.trim() === '') || (shown.dob && values.dob.trim() === '');
+}
+
+/** The route's 400 fieldErrors -> the fixed copy per field (never the server's text). */
+export function originatorFieldErrors(fieldErrors: unknown): { senderAddress?: string; senderDob?: string } {
+  if (!fieldErrors || typeof fieldErrors !== 'object') return {};
+  const f = fieldErrors as Record<string, unknown>;
+  return {
+    ...(f.senderAddress !== undefined ? { senderAddress: PAY_SENDER_ADDRESS_INVALID_COPY } : {}),
+    ...(f.senderDob !== undefined ? { senderDob: PAY_SENDER_DOB_INVALID_COPY } : {}),
+  };
+}
+
+export function OriginatorFields({
+  shown,
+  address,
+  dob,
+  onAddress,
+  onDob,
+  errors = {},
+}: {
+  shown: OriginatorShown;
+  address: string;
+  dob: string;
+  onAddress: (v: string) => void;
+  onDob: (v: string) => void;
+  errors?: { senderAddress?: string; senderDob?: string };
+}) {
+  if (!shown.address && !shown.dob) return null;
+  return (
+    <>
+      {shown.address && (
+        <label className={labelClasses}>
+          {PAY_SENDER_ADDRESS_LABEL}
+          <input
+            className={inputClasses}
+            name="senderAddress"
+            required
+            value={address}
+            onChange={(e) => onAddress(e.target.value)}
+            maxLength={300}
+            autoComplete="street-address"
+          />
+          <span data-testid="sender-address-help" className="mt-1 block text-xs leading-normal text-[#8696a0]">
+            {PAY_SENDER_ADDRESS_HINT}
+          </span>
+          {errors.senderAddress && <span className={fieldErrorClasses}>{errors.senderAddress}</span>}
+        </label>
+      )}
+      {shown.dob && (
+        <label className={labelClasses}>
+          {PAY_SENDER_DOB_LABEL}
+          <input
+            className={inputClasses}
+            name="senderDob"
+            type="text"
+            required
+            value={dob}
+            onChange={(e) => onDob(e.target.value)}
+            placeholder="YYYY-MM-DD"
+            inputMode="numeric"
+            maxLength={10}
+            autoComplete="bday"
+          />
+          {errors.senderDob && <span className={fieldErrorClasses}>{errors.senderDob}</span>}
+        </label>
+      )}
+    </>
+  );
+}
+
 // ── Single-step path (scheduled / re-opened links) ──────────────────────────
 
 function SimplePayForm({
@@ -347,6 +472,7 @@ function SimplePayForm({
   approvingText = null,
   legalNameRequired = false,
   legalNameOnFile = true,
+  originator = NO_ORIGINATOR_VIEW,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
@@ -356,6 +482,7 @@ function SimplePayForm({
   approvingText?: string | null;
   legalNameRequired?: boolean;
   legalNameOnFile?: boolean;
+  originator?: OriginatorView;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [acked, setAcked] = useState(false);
@@ -365,6 +492,13 @@ function SimplePayForm({
   const [holder, setHolder] = useState('');
   const [holderError, setHolderError] = useState('');
   const holderMissing = showHolder && legalNameRequired && holder.trim() === '';
+  // Fix pack 5 (P19): the sender's address / DOB when asked.
+  const shownOrig = originatorShown(originator);
+  const [senderAddress, setSenderAddress] = useState('');
+  const [senderDob, setSenderDob] = useState('');
+  const [origErrors, setOrigErrors] = useState<{ senderAddress?: string; senderDob?: string }>({});
+  const origMissing = originatorMissing(shownOrig, { address: senderAddress, dob: senderDob });
+  const origError = !!(origErrors.senderAddress || origErrors.senderDob);
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const otp = useOtpRequest(transferId, setSent);
@@ -373,10 +507,11 @@ function SimplePayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing || holderMissing) return; // the button is disabled too; this covers implicit (Enter) submission
+    if (ackMissing || holderMissing || origMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
     setHolderError('');
+    setOrigErrors({});
     setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
@@ -386,6 +521,7 @@ function SimplePayForm({
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
+          ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
       });
       if (res.ok) {
@@ -394,11 +530,16 @@ function SimplePayForm({
         return;
       }
       try {
-        const data = (await res.json()) as { reason?: string; fieldErrors?: { accountHolder?: unknown } };
+        const data = (await res.json()) as {
+          reason?: string;
+          fieldErrors?: { accountHolder?: unknown; senderAddress?: unknown; senderDob?: unknown };
+        };
         setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') setOtpError('That code is incorrect or expired — resend and try again.');
         // Fix pack 4 (C14): an account-holder 400 shows under the field, not under the code.
         if (data.fieldErrors?.accountHolder !== undefined) setHolderError(PAY_ACCOUNT_HOLDER_COPY);
+        // Fix pack 5 (P31): an originator 400 shows its fixed copy under the field.
+        setOrigErrors(originatorFieldErrors(data.fieldErrors));
         // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
         if (data.reason === 'approval_not_recorded') setCode('');
       } catch {
@@ -461,12 +602,26 @@ function SimplePayForm({
           error={holderError}
         />
       )}
+      <OriginatorFields
+        shown={shownOrig}
+        address={senderAddress}
+        dob={senderDob}
+        onAddress={(v) => {
+          setSenderAddress(v);
+          if (origErrors.senderAddress) setOrigErrors((p) => ({ ...p, senderAddress: undefined }));
+        }}
+        onDob={(v) => {
+          setSenderDob(v);
+          if (origErrors.senderDob) setOrigErrors((p) => ({ ...p, senderDob: undefined }));
+        }}
+        errors={origErrors}
+      />
       <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
       {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
       <button
         type="submit"
         className={primaryBtnClasses}
-        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || holderMissing}
+        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || holderMissing || origMissing}
       >
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
@@ -476,7 +631,7 @@ function SimplePayForm({
           Edit bank details
         </button>
       )}
-      {status === 'error' && !otpError && !holderError && (
+      {status === 'error' && !otpError && !holderError && !origError && (
         <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}
     </form>
@@ -495,6 +650,7 @@ function BankDetailsPayForm({
   approving = null,
   legalNameRequired = false,
   legalNameOnFile = true,
+  originator = NO_ORIGINATOR_VIEW,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -505,6 +661,7 @@ function BankDetailsPayForm({
   approving?: PayApproving | null;
   legalNameRequired?: boolean;
   legalNameOnFile?: boolean;
+  originator?: OriginatorView;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
@@ -529,6 +686,16 @@ function BankDetailsPayForm({
   // exempt row ({ required: false, onFile: true }) never shows it.
   const showHolder = legalNameRequired || !legalNameOnFile;
   const [holder, setHolder] = useState('');
+  // Fix pack 5 (P19): the sender's address / DOB when asked, on step 1 (errors in `errors`).
+  const shownOrig = originatorShown(originator);
+  const [senderAddress, setSenderAddress] = useState('');
+  const [senderDob, setSenderDob] = useState('');
+
+  function setOriginatorValue(key: 'senderAddress' | 'senderDob', v: string) {
+    if (key === 'senderAddress') setSenderAddress(v);
+    else setSenderDob(v);
+    if (errors[key]) setErrors((prev) => ({ ...prev, [key]: '' }));
+  }
 
   function setHolderValue(v: string) {
     setHolder(v);
@@ -553,8 +720,17 @@ function BankDetailsPayForm({
     const confirmErrors = accountConfirmErrors(destinationCountry, { ...values, ...confirms });
     const holderErrors: Record<string, string> =
       showHolder && legalNameRequired && holder.trim() === '' ? { accountHolder: PAY_ACCOUNT_HOLDER_COPY } : {};
-    if (!result.ok || Object.keys(confirmErrors).length > 0 || Object.keys(holderErrors).length > 0) {
-      setErrors({ ...(result.ok ? {} : result.errors), ...confirmErrors, ...holderErrors });
+    const origErrors: Record<string, string> = {
+      ...(shownOrig.address && senderAddress.trim() === '' ? { senderAddress: PAY_SENDER_ADDRESS_INVALID_COPY } : {}),
+      ...(shownOrig.dob && senderDob.trim() === '' ? { senderDob: PAY_SENDER_DOB_INVALID_COPY } : {}),
+    };
+    if (
+      !result.ok ||
+      Object.keys(confirmErrors).length > 0 ||
+      Object.keys(holderErrors).length > 0 ||
+      Object.keys(origErrors).length > 0
+    ) {
+      setErrors({ ...(result.ok ? {} : result.errors), ...confirmErrors, ...holderErrors, ...origErrors });
       return;
     }
     setErrors({});
@@ -579,6 +755,7 @@ function BankDetailsPayForm({
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
+          ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
       });
       if (res.ok) {
@@ -596,7 +773,8 @@ function BankDetailsPayForm({
         } else if (data.reason === 'approval_not_recorded') {
           setCode(''); // Fix pack 4 (C14): the code is spent; the copy says to tap Resend.
         } else if (data.fieldErrors) {
-          setErrors(data.fieldErrors);
+          // Fix pack 5 (P31): an originator field error shows its fixed copy.
+          setErrors({ ...data.fieldErrors, ...originatorFieldErrors(data.fieldErrors) });
           setStep('details');
         }
       } catch {
@@ -776,6 +954,14 @@ function BankDetailsPayForm({
           error={errors.accountHolder || undefined}
         />
       )}
+      <OriginatorFields
+        shown={shownOrig}
+        address={senderAddress}
+        dob={senderDob}
+        onAddress={(v) => setOriginatorValue('senderAddress', v)}
+        onDob={(v) => setOriginatorValue('senderDob', v)}
+        errors={{ senderAddress: errors.senderAddress || undefined, senderDob: errors.senderDob || undefined }}
+      />
       <button type="submit" className={primaryBtnClasses}>Continue</button>
     </form>
   );
