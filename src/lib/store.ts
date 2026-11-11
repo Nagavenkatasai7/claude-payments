@@ -5,7 +5,7 @@ import { easternDayStart, easternMonth, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
 import { getDb, type Db, type Tx } from '@/db/client';
 import { partnerIntegrations } from '@/db/schema';
-import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
+import { createTransferRepo, type PriorSends, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
 import { logError, logWarn } from './log';
@@ -108,6 +108,14 @@ export interface SenderLedgerOps {
    * written). mintLocked calls it on a real-money rail only.
    */
   senderScreeningFlags(): Promise<SenderScreeningFlags | null>;
+  /**
+   * Fix pack 6 (P14): this sender's prior paid/delivered LIVE sends (the ONE
+   * rule, transfer-repo priorSends), in total and to `recipientPhone`
+   * (digits), strictly before `before` when given, in its OWN savepoint.
+   * NEVER throws: on failure it logs (`mint.prior_sends`, the partner id
+   * only, no alert) and returns null; the mint transaction stays usable.
+   */
+  priorSends(recipientPhone: string, before?: { at: Date; id: string }): Promise<PriorSends | null>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -193,6 +201,22 @@ async function readAmlHoldInputs(
   // partner-demo R4: after() runs post-response — after the mint transaction
   // commits (a rolled-back mint makes it a harmless empty poke).
   else pokeWorker();
+  return null;
+}
+
+/** Fix pack 6 (P14): SenderLedgerOps.priorSends — 'live' only (AML needs real money; risk signals never apply to 'test'). */
+async function readPriorSends(
+  tx: Tx,
+  partnerId: PartnerId,
+  phone: string,
+  recipientPhone: string,
+  before?: { at: Date; id: string },
+): Promise<PriorSends | null> {
+  const read = await inSavepoint(tx, (sp) =>
+    createTransferRepo(sp).priorSends(partnerId, phone, recipientPhone, 'live', before),
+  );
+  if (read.ok) return read.value;
+  logError('mint.prior_sends', read.error, { partnerId });
   return null;
 }
 
@@ -490,6 +514,14 @@ export function createStore(redis: RedisLike, db: Db) {
     async hasB2bTransferTo(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<boolean> {
       return transfersRepo.hasB2bTransferTo(partnerId, phone, recipientPhone);
     },
+    /**
+     * Fix pack 6 (P14): this sender's prior paid/delivered LIVE sends (draft
+     * time, root handle). THROWS on a read error: the caller treats it as
+     * "fact unknown".
+     */
+    async priorSends(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<PriorSends> {
+      return transfersRepo.priorSends(partnerId, phone, recipientPhone, 'live');
+    },
     /** fix 6: DECRYPTED newest settled consumer transfer to this number in this country (rehydration only). */
     async latestSettledConsumerTransferTo(
       partnerId: PartnerId,
@@ -604,6 +636,7 @@ export function createStore(redis: RedisLike, db: Db) {
                 pokeWorker();
               },
               senderScreeningFlags: () => readSenderScreeningFlags(tx, partnerId, phone),
+              priorSends: (r, before) => readPriorSends(tx, partnerId, phone, r, before),
               recordSanctionsBlock: async (n) => {
                 await enqueueSanctionsBlockNotices(tx, { ...n, partnerId });
                 // partner-demo R4: after() runs post-response, after the mint commits.

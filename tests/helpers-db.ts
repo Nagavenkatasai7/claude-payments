@@ -6,7 +6,7 @@ import * as schema from '@/db/schema';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { newTransferId } from '@/lib/id';
 import type { Db } from '@/db/client';
-import type { PartnerId, Transfer, TransferStatus } from '@/lib/types';
+import type { PartnerId, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 
 // helpers-db — REAL Postgres in-process (PGlite) for repo/outbox/transaction
 // tests. A hand-rolled fake cannot honor UNIQUE(partner_id,key), FOR UPDATE
@@ -146,6 +146,10 @@ export async function seedLedgerSpend(
     createdAt?: Date | string;
     id?: string;
     complianceReasons?: string[];
+    /** Fix pack 6 (P24): default '919000000000'. */
+    recipientPhone?: string;
+    /** Fix pack 6 (P24): unset = the column default ('live'). */
+    environment?: TransferEnvironment;
   },
 ): Promise<string> {
   const id = input.id ?? newTransferId();
@@ -162,7 +166,7 @@ export async function seedLedgerSpend(
     fxRate: 85,
     amountInr: input.amountUsd * 85,
     recipientName: 'Seeded Recipient',
-    recipientPhone: '919000000000',
+    recipientPhone: input.recipientPhone ?? '919000000000',
     payoutMethod: 'bank',
     payoutDestination: '000011112222|HDFC0000001',
     fundingMethod: 'bank_transfer',
@@ -178,9 +182,42 @@ export async function seedLedgerSpend(
     amountSource: input.amountUsd,
     feeSource: 0,
     totalChargeSource: input.amountUsd,
+    ...(input.environment ? { environment: input.environment } : {}),
   };
   await createTransferRepo(db).saveTransfer(t);
   return id;
+}
+
+const normalizeDigits = (p: string) => p.replace(/\D/g, '');
+
+/**
+ * Fix pack 6 (P24): `paid` LIVE rows with status 'paid', created 1..n days ago
+ * (relative), the first `toRecipient` of them to `recipientPhone` and the rest
+ * to another number. What priorSends (P14) counts as "sent before". Returns
+ * the row ids, newest first.
+ */
+export async function seedPriorSends(
+  db: Db,
+  partnerId: PartnerId,
+  phone: string,
+  o: { paid: number; toRecipient: number; recipientPhone: string; amountUsd?: number },
+): Promise<string[]> {
+  const ids: string[] = [];
+  const now = Date.now();
+  const other = normalizeDigits(o.recipientPhone) === '919000000000' ? '919000000001' : '919000000000';
+  for (let i = 0; i < o.paid; i++) {
+    ids.push(
+      await seedLedgerSpend(db, {
+        partnerId,
+        phone,
+        amountUsd: o.amountUsd ?? 100,
+        status: 'paid',
+        createdAt: new Date(now - (i + 1) * 86_400_000),
+        recipientPhone: i < o.toRecipient ? o.recipientPhone : other,
+      }),
+    );
+  }
+  return ids;
 }
 
 /**

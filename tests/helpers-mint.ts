@@ -3,6 +3,9 @@ import { finalizeDraftPayment, type BankDetails, type FinalizeStores } from '@/l
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
+// P24: the prior-send seeder lives in helpers-db (repo tests must not pull in tools.ts).
+export { seedPriorSends } from './helpers-db';
+
 // helpers-mint — mint a transfer in a test through the CURRENT send path.
 //
 // R30 deleted the legacy chat create_transfer tool (and its test seam
