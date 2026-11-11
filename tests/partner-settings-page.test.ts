@@ -297,6 +297,10 @@ describe('a save by a viewer without two-step sign-in clears the approval (pack 
     const w = warning(decode(await render()));
     expect(w).toBe(t('partner.settings.disclosure.clearWarningLive'));
     expect(w).toContain('certified for live money');
+    // Review R4-Z1 (D2): such a save alerts SmartRemit and emails the compliance contact.
+    expect(w).toBe(
+      'You are certified for live money. Saving clears the current approval, and your live payments stop until an admin with two-step sign-in saves this block again. SmartRemit and your compliance contact are told about the change.',
+    );
   });
 
   it('no warning when the viewer is enrolled or the block is not approved', async () => {

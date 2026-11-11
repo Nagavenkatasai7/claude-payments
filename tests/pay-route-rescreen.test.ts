@@ -418,6 +418,41 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     expect(await kinds()).not.toContain('settlement.instruct');
   });
 
+  // Decision D5 (fix pack 4, finding T1): new bank details with a DIFFERENT typed account-holder
+  // name replace the name screened before, which can no longer be screened. The coverage rule
+  // sends the payment to a person (POSSIBLE_MATCH, in_review), the same posture as the sender
+  // rename above; a re-spelling of the same name (case, spacing) is covered.
+  const NEW_BANK = { country: 'IN', fields: { accountNumber: '987654321098', ifsc: 'ICIC0004321' } };
+  async function replacedHolderRow(id: string) {
+    await httpRail(OWNER);
+    await seedOwner('Alex Sender', OWNER);
+    primeOfacSource({ checkedAgoMs: H });
+    await store.saveTransfer(makeTransfer({ id, partnerId: OWNER, recipientLegalName: 'Alice Rao' }));
+    await seedLiveEvidence(db, { id, partnerId: OWNER, recipientName: 'Mom', alsoRecipientNames: ['Alice Rao'], senderName: 'Alex Sender' });
+  }
+
+  it('D5: new bank details with a different account-holder name → in_review POSSIBLE_MATCH (the old name is uncovered), new account written, not instructed', async () => {
+    await replacedHolderRow('lv-holder');
+    const res = await post('lv-holder', { ...realMoneyPayBody({ otp: '000000', accountHolder: 'Alicia Rao' }), ...NEW_BANK });
+    expect(await res.json()).toEqual({ ok: true, status: 'in_review' });
+    const t = await store.getTransferDecrypted('lv-holder');
+    expect(t?.complianceStatus).toBe('flagged');
+    expect(t?.complianceReasons).toContain(POSSIBLE_MATCH_REASON);
+    expect(t?.payoutDestination).toBe('ICIC0004321 987654321098');
+    expect(t?.recipientLegalName).toBe('Alicia Rao');
+    expect(await kinds()).not.toContain('settlement.instruct');
+  });
+
+  it('D5: the same account-holder name in another case and spacing is covered → paid and instructed, no POSSIBLE_MATCH', async () => {
+    await replacedHolderRow('lv-holder-same');
+    const res = await post('lv-holder-same', { ...realMoneyPayBody({ otp: '000000', accountHolder: '  alice   RAO ' }), ...NEW_BANK });
+    expect(await res.json()).toEqual({ ok: true, status: 'processing' });
+    const t = await store.getTransfer('lv-holder-same');
+    expect(t?.status).toBe('paid');
+    expect(t?.complianceReasons ?? []).not.toContain(POSSIBLE_MATCH_REASON);
+    expect(await kinds()).toContain('settlement.instruct');
+  });
+
   it('pay-time block writes notices', async () => {
     // Fix pack 2 T5 (R04): the routed rail partner is emailed; an owner with no alert address is not.
     // Fix pack 4 T9: the owner is a certified, approved non-default partner on a mock rail (a

@@ -738,6 +738,9 @@ export async function POST(
           else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
         }
         const rowName = (legalRow?.recipientLegalName ?? '').trim();
+        // Decision D5: a typed name that differs from a name screened before leaves that old
+        // name uncovered on real money, so the row goes to a person (POSSIBLE_MATCH, in_review;
+        // pinned in tests/pay-route-rescreen.test.ts).
         const screenedLegalName =
           bankDetails === undefined
             ? rowName

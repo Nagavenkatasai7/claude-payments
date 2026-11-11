@@ -78,11 +78,12 @@ export function primeOfacSource(opts: { checkedAgoMs: number }): SanctionsListSo
  */
 export async function seedLiveEvidence(
   db: Db,
-  t: Pick<Transfer, 'id' | 'partnerId' | 'recipientName'> & { senderName?: string },
+  t: Pick<Transfer, 'id' | 'partnerId' | 'recipientName'> & { senderName?: string; alsoRecipientNames?: string[] },
   opts: { listFitness?: ListFitness | null; screenedAgoMs?: number; at?: Date; decision?: ScreeningEvidence['decision'] } = {},
 ): Promise<ScreeningEvidence> {
   const parties: ScreeningEvidence['parties'] = [
     { role: 'recipient', inputHash: inputHash(t.recipientName), matched: false, matchScore: 0 },
+    ...(t.alsoRecipientNames ?? []).map((n) => ({ role: 'recipient' as const, inputHash: inputHash(n), matched: false, matchScore: 0 })),
   ];
   if (t.senderName !== undefined) {
     parties.push({ role: 'sender', inputHash: inputHash(t.senderName), matched: false, matchScore: 0 });

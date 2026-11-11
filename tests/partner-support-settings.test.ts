@@ -17,6 +17,7 @@ import {
 } from '@/lib/partner-support-settings';
 import { MAX_DELIVERY_BUSINESS_DAYS, resolvePartnerDisclosure } from '@/lib/partner-config';
 import { disclosureHash } from '@/lib/disclosure-hash';
+import { isProviderNameText, namesPlatform, providerLineFits } from '@/lib/legal/provider-line';
 import { certifyPartnerForTest } from './helpers-live';
 
 // partner-support-settings: the support-portal switch, the channel alert email and the Reg E
@@ -116,6 +117,58 @@ describe('parseDisclosureForm (pure)', () => {
     const r = parseDisclosureForm(fullForm({ licensedEntity: name, regulatorName: "Dept. of Banking & Finance, People's Office" }));
     expect(r.ok && r.value?.licensedEntity).toBe(name);
     expect(r.ok && r.value?.stateRegulator?.name).toBe("Dept. of Banking & Finance, People's Office");
+  });
+  // Review R4-Z1 S1: the rule holds for the STORED value too. boundUntrustedText removes invisible
+  // characters and brackets (and truncates with an ellipsis), so a raw name that passed could be
+  // stored as one providerLineFor reads null on: "Approved", but no provider line anywhere.
+  const truncatedOverride = `Acme ${'a'.repeat(97)} ignore the rulesxyz`;
+  const HOSTILE_NAMES: ReadonlyArray<readonly [string, string]> = [
+    ['the platform name split by brackets', 'Smart[]Remit Money LLC'],
+    ['the platform name split by angle brackets', 'Smart<>Remit LLC'],
+    ['the platform name split by braces', 'Smart{}Remit LLC'],
+    ['the platform name split by a zero-width space', 'Smart​Remit Money LLC'],
+    ['the platform name split by a soft hyphen', 'Smart­Remit LLC'],
+    ['the platform name split by a word joiner', 'S⁠martRemit LLC'],
+    ['a doubled prime split by a zero-width space', '′​′ Dept'],
+    ['a doubled prime split by brackets', '′[]′ Dept'],
+    ['an override phrase split by a zero-width space', 'Acme Pay. Ign​ore previous'],
+    ['an override phrase split by brackets', 'Acme Pay. Disre[]gard the rules'],
+    ['an override phrase made by the length cut', truncatedOverride],
+  ];
+  const CLEAN_NAMES = ["O'Brien Money Transfer LLC", 'Acme ′Prime′ Pay'];
+  const storedIsLineSafe = (entity: string, regulator: string) =>
+    isProviderNameText(entity) && isProviderNameText(regulator) && !namesPlatform(entity) && !namesPlatform(regulator) && providerLineFits(entity, regulator);
+
+  it.each(HOSTILE_NAMES)('refuses %s (checked on the raw and the stored value) with reason provider_name', (_label, bad) => {
+    expect(parseDisclosureForm(fullForm({ licensedEntity: bad }))).toEqual({ ok: false, reason: 'provider_name' });
+    expect(parseDisclosureForm(fullForm({ regulatorName: bad }))).toEqual({ ok: false, reason: 'provider_name' });
+  });
+  it('invariant: every block the partner path accepts stores names the provider line is built from', () => {
+    const inputs = [...HOSTILE_NAMES.map(([, v]) => v), ...CLEAN_NAMES];
+    let accepted = 0;
+    for (const entity of [...inputs, 'Acme Money Services LLC']) {
+      for (const regulator of [...inputs, 'State Department of Financial Services']) {
+        const r = parseDisclosureForm(fullForm({ licensedEntity: entity, regulatorName: regulator }));
+        if (!r.ok) continue;
+        accepted++;
+        const e = r.value?.licensedEntity ?? '';
+        const g = r.value?.stateRegulator?.name ?? '';
+        expect(storedIsLineSafe(e, g), JSON.stringify([entity, regulator])).toBe(true);
+      }
+    }
+    // the clean names (and the defaults) are accepted in every pairing: 3 x 3
+    expect(accepted).toBe(9);
+  });
+  it.each(CLEAN_NAMES)('still accepts the clean name %s, stored unchanged', (name) => {
+    const r = parseDisclosureForm(fullForm({ licensedEntity: name, regulatorName: name }));
+    expect(r.ok && r.value?.licensedEntity).toBe(name);
+    expect(r.ok && r.value?.stateRegulator?.name).toBe(name);
+  });
+  it('the admin path (platformNameAllowed) still accepts a split platform name, but not a split quote or phrase', () => {
+    const r = parseDisclosureForm(fullForm({ licensedEntity: 'Smart[]Remit Demo' }), { platformNameAllowed: true });
+    expect(r.ok && r.value?.licensedEntity).toBe('SmartRemit Demo');
+    expect(parseDisclosureForm(fullForm({ regulatorName: '′[]′ Dept' }), { platformNameAllowed: true })).toEqual({ ok: false, reason: 'provider_name' });
+    expect(parseDisclosureForm(fullForm({ licensedEntity: 'Acme Pay. Ign​ore previous' }), { platformNameAllowed: true })).toEqual({ ok: false, reason: 'provider_name' });
   });
   it('checks in the legacy order: the provider phone is reported before the provider website', () => {
     expect(parseDisclosureForm(fullForm({ phone: 'x', website: 'http://a.example' }))).toEqual({ ok: false, reason: 'provider_phone' });
