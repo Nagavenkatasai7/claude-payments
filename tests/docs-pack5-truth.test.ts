@@ -186,13 +186,21 @@ describe('pack 5 documents say what the code does', () => {
     // reference_unresolved means the reference resolves but names a different
     // transfer than the one the callback reports.
     expect(unresolved).not.toMatch(/does not name a transfer we know/);
-    expect(unresolved).toContain('resolves to a transfer but does not match the transfer the callback reports');
+    // Review round 1 R1 (F3-D1): the reference and the reported transfer come
+    // from the same parse (railCallbackTransferId), so a resolving reference
+    // always matches: 422 reference_unresolved is a defensive refusal that a
+    // correctly signed callback naming a real transfer never gets.
+    expect(unresolved).not.toContain('resolves to a transfer but does not match the transfer the callback reports');
+    expect(unresolved).toContain('Defensive: the transfer we read from the callback differs from the one its `reference` names');
+    expect(unresolved).toContain('a correctly signed callback that names a real transfer never gets it');
     const sig401 = rows.filter((l) => l.startsWith('| `401`'));
     expect(sig401.some((l) => l.includes('a `reference` we cannot resolve to a transfer'))).toBe(true);
     const changelog = read('src/content/docs/changelog.mdx');
     expect(changelog).not.toContain('names no known transfer gets');
     expect(changelog).toContain('a reference we cannot resolve gets `401`');
-    expect(changelog).toContain('does not match the transfer the callback reports gets `422`');
+    expect(changelog).not.toContain('does not match the transfer the callback reports gets `422`');
+    expect(changelog).toContain('`422` `"error": "reference_unresolved"` is a defensive refusal');
+    expect(read('src/lib/providers/http-payment-provider.ts')).toContain('const transferId = railCallbackTransferId(body);');
     row('200', '"held": true');
     row('200', '"duplicate": true');
     const route = read('src/app/api/payment-webhook/[provider]/route.ts');
@@ -430,5 +438,26 @@ describe('pack 5 documents say what the code does', () => {
     for (const s of ['version `2`', '`x-signature`', '`401`', '"error": "amount_required"', '`compliance.funding`', '"method": "partner_collected"']) {
       expect(nov, s).toContain(s);
     }
+  });
+
+  it('the changelog, funding.mdx and webhooks.mdx limit the partner_collected reverse to a settle sent to the rail after go-live (review round 1 R1, F2-D1)', () => {
+    const line = section(CHANGELOG, '## 2026-11').split('\n').find((l) => l.includes('**Refunds of partner-collected funds.**'));
+    expect(line).toBeDefined();
+    expect(line!).toContain('when its settlement instruction went to your rail after you went live');
+    expect(line!).toContain('A transfer settled before you went live, or on another partner\'s rail, gets no reverse');
+    expect(FUNDING).toContain('when its settlement instruction went to your rail after you went live');
+    expect(WEBHOOKS).toContain('whose settlement instruction we sent to your rail after you went live');
+  });
+
+  it('spec: a key-configuration error at the build step retries like a transient read failure; the instructblock alert says so (review round 1 R1, F1-D1)', () => {
+    const rule = 'a transient read failure or a field-crypto key-configuration error retries with one `instructblock:<rail>:<hour>` alert from attempt 3, any other failure is dead-lettered at once';
+    expect(SPEC).toContain(rule);
+    expect(SPEC).not.toContain('`build` fails closed: a transient read failure retries with one');
+    const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `instructblock:'));
+    expect(row).toBeDefined();
+    expect(row!).toContain('a database, network or key-configuration error');
+    expect(row!).toContain('A transient read failure or a field-crypto key-configuration error retries; any other failure is dead-lettered at once');
+    expect(row!).toContain('`FIELD_ENCRYPTION_*` key configuration');
+    expect(read('src/lib/instruction-compliance.ts')).toContain('isTransientInstructError(err) || isKeyConfigError(err)');
   });
 });

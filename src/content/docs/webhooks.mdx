@@ -140,7 +140,7 @@ Content-Type: application/json
 | `200` `{ "ok": true, "ignored": true }` | Nothing to apply (an unknown status). |
 | `401` `{ "ok": false }` | Unsigned, mis-signed or out of window, or signed with only the legacy `x-signature` header. Also a callback whose `reference` is missing or is a `reference` we cannot resolve to a transfer: we check the signature with the key of the transfer the reference names, so without one your signature cannot be checked. Check the `reference` before you retry. |
 | `422` `{ "ok": false, "error": "amount_required" }` | A `paid_out` without `amount.destination` and `destination_currency`. Nothing was saved: send it again with the amount. |
-| `422` `{ "ok": false, "error": "reference_unresolved" }` | A `paid_out` whose `reference` resolves to a transfer but does not match the transfer the callback reports. Nothing was saved. |
+| `422` `{ "ok": false, "error": "reference_unresolved" }` | Defensive: the transfer we read from the callback differs from the one its `reference` names. We read both from the same `reference`, so a correctly signed callback that names a real transfer never gets it. Nothing was saved. |
 | `500` `{ "ok": false }` | We could not record the callback. Nothing was applied: retry. |
 
 ## Signatures

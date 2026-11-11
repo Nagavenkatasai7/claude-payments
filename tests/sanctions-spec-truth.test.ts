@@ -433,6 +433,15 @@ describe('sanctions screening spec: lists-mode evidence and the version 2 block 
     expect(s3).not.toContain('everything is byte-identical');
     expect(s3).toContain('the screening and its evidence are byte-identical to before fix pack 5');
     expect(s3).toContain("the instruction's compliance block is version 2 in every mode (`names_screened`, `funding`)");
+    // Review round 1 R1 (F3-D2): each claim names the test that pins it.
+    expect(s3).not.toContain('(both pinned by `tests/sanctions-golden-modes.test.ts`)');
+    expect(s3).toContain('version 2 and `funding` are pinned by `tests/compliance-block-schema.test.ts`');
+    expect(s3).toContain('the screening keys and the absent `lists` key are pinned by `tests/sanctions-golden-modes.test.ts`');
+    const schema = readFileSync(join(ROOT, 'tests/compliance-block-schema.test.ts'), 'utf8');
+    expect(schema).toContain('expect(block.version).toBe(2);');
+    expect(schema).toContain('expect(Object.keys(block.funding)).toEqual(FUNDING_KEYS);');
+    const golden = readFileSync(join(ROOT, 'tests/sanctions-golden-modes.test.ts'), 'utf8');
+    expect(golden).toContain('names_screened');
   });
 
   it('section 2 lists lists[], parties[].unscreened and the lists-mode entry-id prefixes the loaders write', () => {

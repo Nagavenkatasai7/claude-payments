@@ -210,7 +210,7 @@ describe('instruct dispositions: ComplianceBlockUnavailableError (G15 transient)
     expect(a.map((x) => x.k)).toEqual([`instructblock:acme:${hour}`]);
     expect(a[0].m).toBe(
       `⚠️ SmartRemit ops: settlement instructions for rail acme are waiting: the compliance block could not be read ` +
-        `(transfer ${ID}, attempt 3 of ${INSTRUCT_MAX_ATTEMPTS}; a database or network error). ` +
+        `(transfer ${ID}, attempt 3 of ${INSTRUCT_MAX_ATTEMPTS}; a database, network or key-configuration error). ` +
         'Nothing was sent. They keep retrying for about a day, then dead-letter (partner Replay / ops Retry). ' +
         'Further failures on this rail this hour are coalesced into this alert.',
     );

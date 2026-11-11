@@ -2000,7 +2000,7 @@ async function alertInstructBlock(outbox: OutboxRepo, row: OutboxRow, err: Compl
       {
         message:
           `⚠️ SmartRemit ops: settlement instructions for rail ${err.railPartnerId} are waiting: the compliance block could not be read ` +
-          `(transfer ${err.transferId}, attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}; a database or network error). ` +
+          `(transfer ${err.transferId}, attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}; a database, network or key-configuration error). ` +
           'Nothing was sent. They keep retrying for about a day, then dead-letter (partner Replay / ops Retry). ' +
           'Further failures on this rail this hour are coalesced into this alert.',
       },
