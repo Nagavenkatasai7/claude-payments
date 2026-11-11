@@ -5,7 +5,16 @@ import { sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
-import { runOfacSdnLoad, SANCTIONS_LOAD_AUDIT_ACTION, OFAC_SDN_MIN_ENTRIES } from '@/lib/sanctions/list-loader';
+import {
+  runOfacSdnLoad,
+  runListLoad,
+  easternDay,
+  SANCTIONS_LOAD_AUDIT_ACTION,
+  OFAC_SDN_MIN_ENTRIES,
+  type ListLoadDef,
+} from '@/lib/sanctions/list-loader';
+import { hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
+import type { SanctionsList } from '@/lib/sanctions/list-source';
 
 // Program-Fix 14 PR C: the daily OFAC SDN loader. Tests never touch the
 // network: fetch is always a stub returning the checked-in fixture.
@@ -117,5 +126,126 @@ describe('runOfacSdnLoad', () => {
       enqueueAlert: async () => { throw new Error('outbox down'); },
     });
     expect(res).toMatchObject({ status: 'failed', reason: 'fetch' });
+  });
+});
+
+// Fix pack 5 T26 (P27): the generic per-source loader. The def's fetch is a
+// stub returning a hand-built list with INVENTED names; nothing touches the network.
+describe('runListLoad', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+
+  const entry = (i: number) => ({ id: `cons:${900 + i}`, names: [`INVENTED CONS ${i}`], type: 'Entity', programs: ['X'] });
+  const stubList = (n = 4, version = '2026-09-18'): SanctionsList => {
+    const entries = Array.from({ length: n }, (_, i) => entry(i));
+    return { source: 'ofac-cons', version, hash: hashEntries(entries), entries };
+  };
+  const def = (fetchFn: () => Promise<SanctionsList>, o: Partial<ListLoadDef> = {}): ListLoadDef => ({
+    source: 'ofac-cons',
+    label: 'OFAC consolidated (non-SDN)',
+    minEntries: 3,
+    parseErrorPrefix: 'OFAC CONS:',
+    fetch: fetchFn,
+    ...o,
+  });
+
+  it('activated, then unchanged on the same list; audit meta source ofac-cons', async () => {
+    const first = await runListLoad({ db, now: NOW }, def(async () => stubList()));
+    expect(first).toMatchObject({ status: 'activated', version: '2026-09-18', entryCount: 4 });
+    const second = await runListLoad({ db, now: NOW + 3600_000 }, def(async () => stubList()));
+    expect(second.status).toBe('unchanged');
+    expect((await createSanctionsListRepo(db).activeVersion('ofac-cons'))!.version).toBe('2026-09-18');
+    const rows = await audits(db);
+    expect(rows.map((r) => r.meta.source)).toEqual(['ofac-cons', 'ofac-cons']);
+    expect(rows.map((r) => r.meta.status)).toEqual(['activated', 'unchanged']);
+    expect(JSON.stringify(rows.map((r) => r.meta))).not.toMatch(/INVENTED/);
+    expect(await alerts(db)).toHaveLength(0);
+  });
+
+  it('a fetch error -> failed fetch, ONE alert keyed per source and Eastern day; the SDN key is untouched', async () => {
+    const boom = def(async () => { throw new TypeError('fetch failed'); });
+    const a = await runListLoad({ db, now: NOW }, boom);
+    const b = await runListLoad({ db, now: NOW + 4 * 3600_000 }, boom);
+    expect(a).toEqual({ status: 'failed', reason: 'fetch' });
+    expect(b).toEqual({ status: 'failed', reason: 'fetch' });
+    const rows = await alerts(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toBe(`sanctions-list-load-failed:ofac-cons:${easternDay(NOW)}`);
+    expect(rows.some((r) => r.dedupe_key.includes(':ofac-sdn:'))).toBe(false);
+    expect((await audits(db)).map((r) => r.meta)).toEqual([
+      { source: 'ofac-cons', status: 'failed', reason: 'fetch' },
+      { source: 'ofac-cons', status: 'failed', reason: 'fetch' },
+    ]);
+  });
+
+  it("an error whose message starts with the def's parseErrorPrefix -> parse", async () => {
+    const res = await runListLoad({ db, now: NOW }, def(async () => { throw new Error('OFAC CONS: no entries parsed'); }));
+    expect(res).toEqual({ status: 'failed', reason: 'parse' });
+    // Another source's prefix is not a parse error for this def.
+    const other = await runListLoad({ db, now: NOW }, def(async () => { throw new Error('OFAC SDN: no entries parsed'); }));
+    expect(other).toEqual({ status: 'failed', reason: 'fetch' });
+    expect(await createSanctionsListRepo(db).activeVersion('ofac-cons')).toBeNull();
+  });
+
+  it('shrink and stale map as for SDN; the def floor applies unless deps override it', async () => {
+    expect(await runListLoad({ db, now: NOW }, def(async () => stubList(2)))).toEqual({ status: 'failed', reason: 'shrink' });
+    expect((await runListLoad({ db, now: NOW, minEntries: 1 }, def(async () => stubList(2)))).status).toBe('activated');
+    expect(await runListLoad({ db, now: NOW }, def(async () => stubList(4, '2026-09-01')))).toEqual({ status: 'failed', reason: 'stale' });
+    expect((await createSanctionsListRepo(db).activeVersion('ofac-cons'))!.version).toBe('2026-09-18');
+  });
+
+  it('the generic alert text names the label and never a list entry', async () => {
+    await runListLoad({ db, now: NOW }, def(async () => stubList(2)));
+    const [row] = await alerts(db);
+    const day = easternDay(NOW);
+    expect(row.payload.message).toBe(
+      `⚠️ SmartRemit ops: the OFAC consolidated (non-SDN) list load failed on ${day} ` +
+        '(the downloaded list has too few entries (against the minimum or the last stored version) and was refused). ' +
+        'Screening keeps using the last good loaded version of this list (under SANCTIONS_LIST=lists a list that was ' +
+        'never loaded holds every transfer for review). The 17:00 UTC cron run retries automatically; check the ' +
+        "'sanctions.list.load' audit rows for the cause.",
+    );
+    expect(row.payload.message).not.toMatch(/INVENTED|Treasury Sanctions List Service|SDN list/);
+  });
+
+  it('a def alertText replaces the generic text', async () => {
+    await runListLoad({ db, now: NOW }, def(async () => { throw new Error('x'); }, { alertText: (day, reason) => `custom ${day} ${reason}` }));
+    expect((await alerts(db))[0].payload.message).toBe(`custom ${easternDay(NOW)} fetch`);
+  });
+
+  it('the alert write failing still returns the failure', async () => {
+    const res = await runListLoad(
+      { db, now: NOW, enqueueAlert: async () => { throw new Error('outbox down'); } },
+      def(async () => { throw new Error('x'); }),
+    );
+    expect(res).toEqual({ status: 'failed', reason: 'fetch' });
+  });
+
+  it('two sources failing on one day -> two alerts (keys differ)', async () => {
+    await runListLoad({ db, now: NOW }, def(async () => { throw new Error('x'); }));
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: failFetch(503), now: NOW });
+    const keys = (await alerts(db)).map((r) => r.dedupe_key).sort();
+    expect(keys).toEqual([
+      `sanctions-list-load-failed:ofac-cons:${easternDay(NOW)}`,
+      `sanctions-list-load-failed:ofac-sdn:${easternDay(NOW)}`,
+    ]);
+  });
+});
+
+describe('runOfacSdnLoad alert text (pack 5 T26: byte-identical through runListLoad)', () => {
+  it('keeps the SDN wording exactly', async () => {
+    const db = await freshDb();
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch('<html>maintenance</html>'), now: NOW });
+    const [row] = await alerts(db);
+    expect(row.dedupe_key).toBe('sanctions-list-load-failed:ofac-sdn:2026-09-23');
+    expect(row.payload.message).toBe(
+      '⚠️ SmartRemit ops: the OFAC SDN list load failed on 2026-09-23 (the downloaded file did not parse as the SDN list). ' +
+        'Screening keeps using the last good loaded version (if SANCTIONS_LIST=ofac-sdn and none was ever loaded, ' +
+        'every transfer goes to manual review). The 17:00 UTC cron run retries automatically; check the ' +
+        "'sanctions.list.load' audit rows for the cause.",
+    );
+    expect((await audits(db))[0].meta).toEqual({ source: 'ofac-sdn', status: 'failed', reason: 'parse' });
   });
 });

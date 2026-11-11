@@ -30,7 +30,7 @@ const HELPERS: Record<string, string[]> = {
   // Callers poke (or are the worker / the cron route, which pokes).
   'src/lib/stale-money.ts': ['escalateStuckPaid', 'expireUnpaidLinks'],
   'src/lib/cron-run.ts': ['runDueSchedules'],
-  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
+  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad', 'runListLoad'],
   // partner-demo R3a: the storage cap-watch — called only from the cron route.
   'src/lib/storage-watch.ts': ['checkStorageCap'],
   // Fix pack 2 (R02): the list-not-live alert — called only from the cron route.
