@@ -22,6 +22,7 @@ import type { Transfer } from '@/lib/types';
 import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
+import { seedRealMoneyRail } from './helpers-live';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -645,6 +646,63 @@ describe('issueRefund (admin-proactive, no prior request)', () => {
 
   it('throws for a missing transfer', async () => {
     await expect(issueRefund(db, 'missing')).rejects.toThrow(/not found/i);
+  });
+});
+
+// Fix pack 5 T15 (P15, M3): Issue refund is the one exit for a held real-money
+// partner-collected row (the partner holds the money, so there is no
+// fundingRef); its refund is the signed reverse. Every other guard unchanged.
+describe('issueRefund: real-money partner-collected rows (pack 5 T15)', () => {
+  it('a real-money partner-collected paid row with no fundingRef: refund pending, one funding.refund row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc1', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await issueRefund(db, 'pc1');
+    expect((await store.getTransfer('pc1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:pc1' }]);
+  });
+
+  it('the same row on a simulator rail is still refused "never charged"', async () => {
+    const store = createStore(fakeRedis(), db);
+    await createIntegrationsRepo(db).saveIntegrations('default', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 's' }, webhookSecret: 'w' },
+    });
+    await store.saveTransfer(makeTransfer({ id: 'pc2', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await expect(issueRefund(db, 'pc2')).rejects.toThrow(/never charged/i);
+    expect((await store.getTransfer('pc2'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('a real-money row of any other class with no fundingRef is still refused', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    // stripe-bound (an intent, no capture ref yet)
+    await store.saveTransfer(makeTransfer({ id: 'pc3', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_pc3' WHERE id = 'pc3'`);
+    await expect(issueRefund(db, 'pc3')).rejects.toThrow(/never charged/i);
+    // partner-pulled (the B2B reverse has its own seam)
+    await store.saveTransfer(makeTransfer({ id: 'pc4', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await expect(issueRefund(db, 'pc4')).rejects.toThrow(/never charged/i);
+    // a mock-provider row whose ref is missing
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'mock' WHERE id = 'pc5'`);
+    await expect(issueRefund(db, 'pc5')).rejects.toThrow(/never charged/i);
+    // a sandbox row
+    await store.saveTransfer(makeTransfer({ id: 'pc6', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id = 'pc6'`);
+    await expect(issueRefund(db, 'pc6')).rejects.toThrow(/never charged/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('the other guards still run first for such a row (status, refund in progress)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'awaiting_payment', fundingMethod: 'bank_transfer' }));
+    await expect(issueRefund(db, 'pc7')).rejects.toThrow(/only paid or delivered/i);
+    await store.saveTransfer(makeTransfer({ id: 'pc8', status: 'paid', fundingMethod: 'bank_transfer', refundStatus: 'requested' }));
+    await expect(issueRefund(db, 'pc8')).rejects.toThrow(/already in progress or complete/i);
+    expect(await outboxRows()).toHaveLength(0);
   });
 });
 

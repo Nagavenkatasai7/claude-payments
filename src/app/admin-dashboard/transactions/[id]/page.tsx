@@ -14,6 +14,8 @@ import { RefundConfirmButton } from '../refund-confirm-button';
 import { SenderCell, FundingRefs } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
+import { refundWithoutCharge } from '@/lib/funding-class';
+import { realMoneyFor } from '@/lib/live-gate';
 import { purposeView } from '@/lib/purpose-codes';
 import { readPurposeDetailsForStaff } from '@/lib/purpose-detail-staff';
 import type { RefundStatus } from '@/lib/types';
@@ -66,12 +68,17 @@ export default async function TransactionDetailPage({
   const senderName = senderNames.get(senderNameKey(t.partnerId, t.phone));
   const routed = !!t.settlementPartnerId && t.settlementPartnerId !== t.partnerId;
   const charged = !!t.fundingRef;
+  // Fix pack 5 T15 (P15, M3): a real-money partner-collected row has no fundingRef (the partner
+  // holds the money); Issue refund is its exit (the signed reverse). The rail is read only when
+  // fundingRef is null. The Funding badge and the refund-account row keep showing the charge only.
+  const collectedOnRealMoney = !charged && refundWithoutCharge(t, await realMoneyFor(getDb(), t));
+  const refundable = charged || collectedOnRealMoney;
   const refundStatus = (t.refundStatus ?? 'none') as RefundStatus;
   const refundBadge = refundStatus !== 'none' ? REFUND_BADGE[refundStatus] : null;
 
   const canIssueRefund =
     viewer.role === 'admin' &&
-    charged &&
+    refundable &&
     refundStatus === 'none' &&
     (t.status === 'paid' || t.status === 'delivered');
 
@@ -257,7 +264,7 @@ export default async function TransactionDetailPage({
                     <Link href="/admin-dashboard/refunds">Manage in the refund ledger →</Link>
                   </Button>
                 </div>
-              ) : !charged ? (
+              ) : !refundable ? (
                 <p className="text-sm text-muted-foreground">
                   This transfer was never charged, so there is nothing to refund.
                 </p>

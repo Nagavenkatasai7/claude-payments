@@ -67,7 +67,7 @@ import { ReportDeferredError, runPartnerReportJob } from '@/lib/partner-report-w
 import { rowTemplate, sendBusinessInitiated, sendTextThenTemplate, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import { deliveredSenderTemplate } from '@/lib/whatsapp-templates';
 import { simulatorPayoutReference } from '@/lib/order-references';
-import type { PartnerId, Staff, TurnContext } from '@/lib/types';
+import type { PartnerId, Staff, Transfer, TurnContext } from '@/lib/types';
 import { MEDIA_REPLY } from '@/lib/consent';
 import { routeTurn, pausedReply } from '@/lib/turn-router';
 import { cancelCaseWanted, openHelpCase, type HelpCaseChannel } from '@/lib/help-case';
@@ -1222,57 +1222,54 @@ async function handle(
         // reverse to the partner's rail, no funds-provider call. It completes
         // with a deterministic sandbox ref so the refund lifecycle still ends.
         refundRef = `sandbox-reverse-${transferId}`;
-      } else if (isPartnerPulled(transfer.fundingMethod)) {
-        // NON-CUSTODIAL reverse: SmartRemit captured nothing on a partner-pulled
-        // transfer (ach_pull / bank_pull), so there is no funds-provider charge to
-        // refund. Instead we POST a SIGNED REVERSE instruction to the partner's
-        // rail — it debited the payer, so it owns the return. Reuses the
-        // settlement.instruct POST+sign recipe.
-        const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
-        if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
-        const railPartnerId = full.settlementPartnerId ?? full.partnerId;
-        const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
-        // Pack 2 T10: same target rule as settlement.instruct. No list gate on a reverse (it returns money).
-        const settlementUrl = settlementTargetUrl(integrations.payment);
-        const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
-        if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
-        assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
-        // Fix pack 5 T1 (P5): never an unsigned reverse (default policy: dead at 8 + dead:<id>; refund stays pending).
-        if (signingSecrets.length === 0) throw new UnsignedRailError();
-        const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
-        // Fix pack 5 T9 (P4, P15 step 4): signed once, recorded (kind 'reverse')
-        // and awaited BEFORE the POST of the same bytes and headers. A failed
-        // record is a RailRecordError (default policy; railrecord:<hour>); the
-        // refund stays pending.
-        const signed = signRailHeaders(rawBody, signingSecrets, Date.now()); // fix 29: both headers
-        const headers = { 'Content-Type': 'application/json', ...signed };
-        await recordRailOut(deps.db, {
-          partnerId: full.partnerId,
-          railPartnerId,
-          transferId,
-          kind: 'reverse',
-          body: rawBody,
-          signatureHeader: signed['x-smartremit-signature'] ?? null,
-        });
-        const res = await deps.fetchFn(settlementUrl, {
-          method: 'POST',
-          headers,
-          body: rawBody,
-          signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
-        });
-        if (!res.ok) throw new Error(`Reverse instruction rejected (${res.status})`);
-        refundRef = `reverse-${transferId}`;
-        try {
-          const parsed = (await res.json()) as { providerRef?: unknown };
-          refundRef = safeProviderRef(parsed.providerRef) ?? refundRef; // fix 22: same rule as the settle ack
-        } catch {
-          /* non-JSON 2xx ack — keep the deterministic ref */
-        }
       } else {
-        // Program-Fix 7: the provider that CHARGED this row (ledger
-        // funding_provider), never the current flag — a Stripe-funded row must
-        // never get a fake 'mockrefund-' completion.
-        ({ refundRef } = await (deps.fundingProvider ?? refundProviderFor(transfer)).refund(transfer));
+        // Fix pack 5 T15 (P15 step 3): read the rail integrations FIRST, before
+        // branching. A failed read throws (default policy: retry, dead at 8 +
+        // dead:<id>); it never falls through to the mock provider.
+        const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
+        const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
+        const realMoney = realMoneyRail({ environment: transfer.environment, railProviderType: integrations.payment.providerType ?? null });
+        const cls = fundingClassOf(transfer);
+        if (isPartnerPulled(transfer.fundingMethod)) {
+          // NON-CUSTODIAL reverse: SmartRemit captured nothing on a partner-pulled
+          // transfer (ach_pull / bank_pull), so there is no funds-provider charge to
+          // refund. Instead we POST a SIGNED REVERSE instruction to the partner's
+          // rail — it debited the payer, so it owns the return. Reuses the
+          // settlement.instruct POST+sign recipe.
+          const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
+          if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
+          refundRef = await sendSignedReverse(deps, full, railPartnerId, integrations);
+        } else if (realMoney && cls === 'partner_collected') {
+          // Fix pack 5 T15 (P15 step 5): the partner collected the sender's
+          // money; it returns it on a signed, recorded reverse
+          // (funding.method 'partner_collected'). Only approve/retry reach
+          // here (dashboard-ops.ts approveRefund / retryRefund via issueRefund).
+          const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
+          if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
+          refundRef = await sendSignedReverse(deps, full, railPartnerId, integrations);
+        } else if (realMoney && cls === 'mock') {
+          // Fix pack 5 T15 (P15 step 6): nothing was collected for a mock-funded
+          // row on a real-money rail (the mock captured nothing and G14a never
+          // instructed it). No money call, no POST, no record, and no customer
+          // "refunded" message. The deterministic ref follows
+          // sandbox-reverse-<id> above; never mockrefund-.
+          logWarn(
+            'outbox.refund-nofunds',
+            'nothing was collected for this mock-funded row on a real-money rail; refund closed without moving money',
+            { transferId },
+          );
+          await createTransferRepo(deps.db).updateRefund(transferId, {
+            refundStatus: 'completed',
+            refundRef: `nofunds-${transferId}`,
+            refundedAt: new Date().toISOString(),
+          });
+          return;
+        } else {
+          // Program-Fix 7: the provider that CHARGED this row (ledger
+          // funding_provider), never the current flag — a Stripe-funded row must
+          // never get a fake 'mockrefund-' completion.
+          ({ refundRef } = await (deps.fundingProvider ?? refundProviderFor(transfer)).refund(transfer));
+        }
       }
       await deps.db.transaction(async (tx) => {
         const updated = await createTransferRepo(tx).updateRefund(transferId, {
@@ -1931,6 +1928,60 @@ async function alertInstructBlock(outbox: OutboxRepo, row: OutboxRow, err: Compl
   } catch (e) {
     logWarn('worker.instructblock', 'instruct-block alert not enqueued', { id: row.id, error: e instanceof Error ? e.name : 'error' });
   }
+}
+
+/**
+ * Fix pack 5 T15 (P15 steps 4-5, P5, P4): the ONE signed reverse send of
+ * funding.refund, shared by the partner-pulled branch and the real-money
+ * partner-collected branch. Same target rule as settlement.instruct (pack 2
+ * T10), the fix 22 URL rule, never unsigned (T1: UnsignedRailError before the
+ * body is built), signed ONCE, recorded (kind 'reverse') and awaited BEFORE
+ * the POST of the same bytes and headers (T9; a failed record is a
+ * RailRecordError). No list gate on a reverse (it returns money). Returns the
+ * refund reference: the rail's safe providerRef, else `reverse-<id>`.
+ */
+async function sendSignedReverse(
+  deps: WorkerDeps,
+  full: Transfer,
+  railPartnerId: PartnerId,
+  integrations: PartnerIntegrations,
+): Promise<string> {
+  const settlementUrl = settlementTargetUrl(integrations.payment);
+  const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
+  if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+  assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
+  // Fix pack 5 T1 (P5): never an unsigned reverse (default policy: dead at 8 + dead:<id>; refund stays pending).
+  if (signingSecrets.length === 0) throw new UnsignedRailError();
+  const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
+  // Fix pack 5 T9 (P4, P15 step 4): signed once, recorded (kind 'reverse')
+  // and awaited BEFORE the POST of the same bytes and headers. A failed
+  // record is a RailRecordError (default policy; railrecord:<hour>); the
+  // refund stays pending.
+  const signed = signRailHeaders(rawBody, signingSecrets, Date.now()); // fix 29: both headers
+  const headers = { 'Content-Type': 'application/json', ...signed };
+  await recordRailOut(deps.db, {
+    partnerId: full.partnerId,
+    railPartnerId,
+    transferId: full.id,
+    kind: 'reverse',
+    body: rawBody,
+    signatureHeader: signed['x-smartremit-signature'] ?? null,
+  });
+  const res = await deps.fetchFn(settlementUrl, {
+    method: 'POST',
+    headers,
+    body: rawBody,
+    signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
+  });
+  if (!res.ok) throw new Error(`Reverse instruction rejected (${res.status})`);
+  let refundRef = `reverse-${full.id}`;
+  try {
+    const parsed = (await res.json()) as { providerRef?: unknown };
+    refundRef = safeProviderRef(parsed.providerRef) ?? refundRef; // fix 22: same rule as the settle ack
+  } catch {
+    /* non-JSON 2xx ack — keep the deterministic ref */
+  }
+  return refundRef;
 }
 
 /**

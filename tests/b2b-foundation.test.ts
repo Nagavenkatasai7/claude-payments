@@ -89,6 +89,27 @@ describe('B2B foundation — settlement instruction stays non-custodial', () => 
     const parties = rev.parties as Record<string, unknown>;
     expect(parties.sender_business_name).toBe('Globex Trading LLC');
   });
+  // Fix pack 5 T15 (P15): goldens captured BEFORE the partner_collected change;
+  // the pulled reverses stay byte-identical.
+  it('golden: the ach_pull reverse bytes are unchanged', () => {
+    expect(JSON.stringify(buildReverseInstruction(b2bTransfer()))).toBe(
+      '{"action":"reverse","reference":"reverse-t_b2b1","partner_id":"default","funding":{"method":"ach_debit","token":"achtok_xyz"},"amount":{"source":1000,"currency":"USD"},"parties":{"sender_entity_type":"business","recipient_entity_type":"business","sender_business_name":"Globex Trading LLC","recipient_business_name":"Acme Imports Ltd"}}',
+    );
+  });
+  it('golden: the bank_pull reverse bytes are unchanged', () => {
+    expect(
+      JSON.stringify(buildReverseInstruction(b2bTransfer({ fundingMethod: 'bank_pull', sourceCurrency: 'EUR', amountSource: 950 }))),
+    ).toBe(
+      '{"action":"reverse","reference":"reverse-t_b2b1","partner_id":"default","funding":{"method":"bank_debit","token":"achtok_xyz"},"amount":{"source":950,"currency":"EUR"},"parties":{"sender_entity_type":"business","recipient_entity_type":"business","sender_business_name":"Globex Trading LLC","recipient_business_name":"Acme Imports Ltd"}}',
+    );
+  });
+  it("buildReverseInstruction of a non-pulled row says method 'partner_collected', token null", () => {
+    const rev = buildReverseInstruction(
+      b2bTransfer({ transferType: 'b2c', fundingMethod: 'bank_transfer', achTokenRef: undefined }),
+    ) as Record<string, unknown>;
+    expect(rev.funding).toEqual({ method: 'partner_collected', token: null });
+    expect(rev.amount).toEqual({ source: 1000, currency: 'USD' });
+  });
 });
 
 describe('B2B foundation — fee + KYB gate', () => {

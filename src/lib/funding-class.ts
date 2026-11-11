@@ -70,3 +70,17 @@ export function payFundingRefusal(
   if (t.fundingProvider === 'stripe' || !!t.fundingIntentRef) return false;
   return selectFundingProvider(t, { enabled: o.stripeEnabled, config: o.config }).kind !== 'stripe';
 }
+
+/**
+ * Fix pack 5 T15 (P15, M3): may this row be refunded although it carries no
+ * fundingRef? Only a real-money PARTNER-COLLECTED row: the partner holds the
+ * sender's money, so its refund is the signed reverse of P15 step 5. Pure; the
+ * caller decides `realMoney` (realMoneyFor) and reads it only when the row has
+ * no fundingRef.
+ */
+export function refundWithoutCharge(
+  t: Pick<Transfer, 'environment' | 'fundingMethod' | 'fundingProvider' | 'fundingRef' | 'fundingIntentRef'>,
+  realMoney: boolean,
+): boolean {
+  return realMoney && fundingClassOf(t) === 'partner_collected';
+}

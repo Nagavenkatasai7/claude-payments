@@ -359,8 +359,16 @@ export function buildReverseInstruction(transfer: Transfer) {
     // Cross-border bank_pull reverses a local-bank debit ('bank_debit'); the
     // US-domestic ach_pull reverse stays byte-identical ('ach_debit'). Either way
     // the partner returns the buyer's debit in the source currency it pulled.
+    // Fix pack 5 (P15): a partner-collected consumer row (the partner holds the
+    // sender's money) reverses with method 'partner_collected'; pulled rows
+    // byte-identical. The amount stays the principal (amountSource ?? amountUsd).
     funding: {
-      method: transfer.fundingMethod === 'bank_pull' ? ('bank_debit' as const) : ('ach_debit' as const),
+      method:
+        transfer.fundingMethod === 'bank_pull'
+          ? ('bank_debit' as const)
+          : isPartnerPulled(transfer.fundingMethod)
+            ? ('ach_debit' as const)
+            : ('partner_collected' as const),
       token: transfer.achTokenRef ?? null,
     },
     amount: {

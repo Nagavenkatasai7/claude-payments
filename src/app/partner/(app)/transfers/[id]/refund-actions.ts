@@ -8,6 +8,8 @@ import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { issueRefund } from '@/lib/dashboard-ops';
 import { issueRefundEligibility, type IssueRefundEligibility } from '@/lib/partner-transfer-ops';
+import { refundWithoutCharge } from '@/lib/funding-class';
+import { realMoneyFor } from '@/lib/live-gate';
 import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
 import { requireStaffReason, STAFF_REASON_MIN } from '@/lib/send-limits';
 import { isReasonValid } from '@/lib/ui/confirm-reason';
@@ -68,7 +70,10 @@ export async function issueRefundAction(formData: FormData): Promise<ActionResul
   }
   if (!isPartnerNoteShaped(reason)) return refused('partner.transferOps.refund.reasonHasNumber');
 
-  const eligibility = issueRefundEligibility(transfer, ctx.partnerId);
+  // Fix pack 5 T15 (P15, M3): a real-money partner-collected row has no fundingRef; the rail
+  // read runs only for such a row (the core re-checks it inside its transaction).
+  const collectedOnRealMoney = !transfer.fundingRef && refundWithoutCharge(transfer, await realMoneyFor(getDb(), transfer));
+  const eligibility = issueRefundEligibility(transfer, ctx.partnerId, { collectedOnRealMoney });
   if (eligibility !== 'ok') return refused(ELIGIBILITY_COPY[eligibility]);
   if (transfer.status === 'delivered' && formData.get('clawback') !== 'yes') return refused('partner.transferOps.refund.clawbackRequired');
 

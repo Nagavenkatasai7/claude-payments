@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { expectPartnerActionContract, seedPartnerTransfer, seedTwoTenants, signInAs } from './helpers-partner-app';
+import { seedRealMoneyRail } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
@@ -165,6 +166,15 @@ describe('issueRefundAction', () => {
     expect(await count(outbox)).toBe(0);
     expect(await count(auditEvents)).toBe(0);
     expect(await refundStatus('tr_A1')).toBe('none');
+  });
+  it('pack 5 T15 (P15): a paid partner-collected row with no fundingRef on a real-money rail is refunded through the core', async () => {
+    await seedRealMoneyRail(db, 'pa');
+    await seedPartnerTransfer(db, { id: 'tr_pc', partnerId: 'pa', status: 'paid', fundingMethod: 'bank_transfer' });
+    await asAdmin();
+    expect(await issueRefundAction(form('tr_pc'))).toEqual({ ok: true });
+    expect(gate.calls).toEqual(['refund.issue']);
+    expect(await refundStatus('tr_pc')).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:tr_pc' }]);
   });
   it('the other refusals map to their own copy', async () => {
     await seedPartnerTransfer(db, { id: 'tr_unpaid', partnerId: 'pa', status: 'awaiting_payment' });

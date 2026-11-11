@@ -15,7 +15,8 @@ import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
 import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
-import { realMoneyRail } from './live-gate';
+import { realMoneyFor, realMoneyRail } from './live-gate';
+import { refundWithoutCharge } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -586,7 +587,11 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
         `Cannot refund: transfer is ${transfer.status} — only paid or delivered transfers can be refunded.`,
       );
     }
-    if (!transfer.fundingRef) {
+    // Fix pack 5 (P15, M3): a real-money partner-collected row has no fundingRef
+    // (the partner holds the money); its refund is the signed reverse of P15
+    // step 5. realMoneyFor is read only when fundingRef is null (no new read on
+    // a charged row).
+    if (!transfer.fundingRef && !refundWithoutCharge(transfer, await realMoneyFor(tx, transfer))) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
     }
     // An async debit that is still pending, failed, or was returned is not money we hold.
