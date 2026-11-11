@@ -272,6 +272,25 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(await repo.archiveSummary('other')).toEqual({ versions: 0, archived: 0, pending: 0, withEntries: 0 });
   });
 
+  it('pack 5 LC2: pendingArchiveAge counts the unarchived versions of ONE source and gives the oldest loaded_at', async () => {
+    const repo = createSanctionsListRepo(db);
+    expect(await repo.pendingArchiveAge('ofac-cons')).toEqual({ pending: 0, oldestLoadedAt: null });
+    for (const n of [1, 2, 3]) await repo.storeList({ ...realVariant(n), source: 'ofac-cons' });
+    await repo.storeList(realVariant(4)); // ofac-sdn: never counted for ofac-cons
+    const cons = await repo.pendingArchive('ofac-cons', 10);
+    const old = new Date(Date.now() - 5 * 86_400_000);
+    const older = new Date(Date.now() - 9 * 86_400_000);
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${older.toISOString()} WHERE id = ${cons[0].id}`);
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${old.toISOString()} WHERE id = ${cons[1].id}`);
+    // The oldest one archived: it no longer counts.
+    await repo.markArchived(cons[0].id, cons[0].hash, 'sanctions-archive/x', 's', new Date());
+    const age = await repo.pendingArchiveAge('ofac-cons');
+    expect(age.pending).toBe(2);
+    expect(age.oldestLoadedAt?.toISOString()).toBe(old.toISOString());
+    expect((await repo.pendingArchiveAge('ofac-sdn')).pending).toBe(1);
+    expect(await repo.pendingArchiveAge('un-sc')).toEqual({ pending: 0, oldestLoadedAt: null });
+  });
+
   it('an OLDER publication (a replayed or stale export) is refused: the list only moves forward', async () => {
     const repo = createSanctionsListRepo(db);
     await repo.storeList(variant(1));

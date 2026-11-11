@@ -9,7 +9,7 @@
 //
 // Public-domain list data only: no customer data is read or written here.
 
-import { and, asc, count, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, min, sql } from 'drizzle-orm';
 import { sanctionsListEntries, sanctionsListVersions } from '@/db/schema';
 import type { Db, DbOrTx } from '@/db/client';
 import type { SanctionsList, SanctionsListEntry } from '@/lib/sanctions/list-source';
@@ -416,6 +416,20 @@ export function createSanctionsListRepo(db: Db) {
         await tx.delete(sanctionsListEntries).where(inArray(sanctionsListEntries.versionId, drop));
         return total;
       });
+    },
+
+    /**
+     * Pack 5 review LC2: how far the archive lags for ONE source (platform
+     * table, no tenant): the number of versions with no stamped archive and
+     * the oldest loaded_at among them (null when none is pending).
+     */
+    async pendingArchiveAge(source: string): Promise<{ pending: number; oldestLoadedAt: Date | null }> {
+      const rows = await db
+        .select({ pending: count(), oldest: min(sanctionsListVersions.loadedAt) })
+        .from(sanctionsListVersions)
+        .where(and(eq(sanctionsListVersions.source, source), isNull(sanctionsListVersions.archivedAt)));
+      const oldest = rows[0]?.oldest ?? null;
+      return { pending: Number(rows[0]?.pending ?? 0), oldestLoadedAt: oldest === null ? null : new Date(oldest) };
     },
 
     /** Counts for the compliance page card. */

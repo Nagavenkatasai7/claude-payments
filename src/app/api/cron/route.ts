@@ -15,7 +15,7 @@ import { fetchOfacConsolidated, OFAC_CONS_MIN_ENTRIES } from '@/lib/sanctions/of
 import { fetchUnScList, UN_SC_MIN_ENTRIES } from '@/lib/sanctions/un-sc-loader';
 import { SANCTIONS_SOURCES, type SanctionsSourceId } from '@/lib/sanctions/list-sets';
 import { checkSanctionsListHealth } from '@/lib/sanctions/list-health';
-import { archivePending, ARCHIVE_BUDGET_MS } from '@/lib/sanctions/list-archive';
+import { alertArchiveLag, archivePending, ARCHIVE_BUDGET_MS } from '@/lib/sanctions/list-archive';
 import { withTimeout } from '@/lib/health';
 import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
@@ -47,6 +47,8 @@ export const maxDuration = 300;
 // store or database never costs the poke.
 const CRON_TAIL_MS = 20_000;
 const ARCHIVE_GRACE_MS = 10_000;
+// Pack 5 review LC2 (lists mode only): the wait for the per-source archive-lag checks.
+const ARCHIVE_LAG_TIMEOUT_MS = 5_000;
 
 // Fix pack 5 (R08, P27): under SANCTIONS_LIST=lists, with the loader ON, the
 // daily run also loads OFAC consolidated (non-SDN) and the UN Security Council
@@ -311,6 +313,27 @@ export async function GET(req: NextRequest) {
       } catch (err) {
         logError('cron.sanctions-archive', err instanceof Error ? err.name : 'unknown', { source });
       }
+    }
+    // Pack 5 review LC2: the loop shares one budget (ofac-sdn first), so a source
+    // can be deferred run after run. One deduped alert per source per day once its
+    // oldest unarchived version is older than ARCHIVE_LAG_ALERT_DAYS; every source,
+    // deferred or not. Time-boxed so a hung read never costs the poke.
+    const lagNow = new Date();
+    try {
+      await withTimeout(
+        Promise.all(
+          SANCTIONS_SOURCES.map(async (source) => {
+            try {
+              await alertArchiveLag(getDb(), source, lagNow);
+            } catch (err) {
+              logError('cron.sanctions-archive-lag', err instanceof Error ? err.name : 'unknown', { source });
+            }
+          }),
+        ),
+        ARCHIVE_LAG_TIMEOUT_MS,
+      );
+    } catch (err) {
+      logError('cron.sanctions-archive-lag', err instanceof Error ? err.name : 'unknown');
     }
   } else if (env.sanctionsLoaderEnabled) {
     const budgetMs = Math.max(0, Math.min(ARCHIVE_BUDGET_MS, invocationStart + maxDuration * 1000 - CRON_TAIL_MS - ARCHIVE_GRACE_MS - Date.now()));

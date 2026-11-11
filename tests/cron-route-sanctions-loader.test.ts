@@ -40,12 +40,15 @@ const checkSanctionsListHealth = vi.hoisted(() => vi.fn(async () => ({ alerted: 
 vi.mock('@/lib/sanctions/list-health', () => ({ checkSanctionsListHealth }));
 // Fix pack 2 T7 (R07): the verified Blob archive runs after a load.
 const archivePending = vi.hoisted(() => vi.fn(async () => ({ status: 'done', archived: 1, failed: 0, pruned: 0 })));
-vi.mock('@/lib/sanctions/list-archive', () => ({ archivePending, ARCHIVE_BUDGET_MS: 150_000 }));
+// Pack 5 review LC2: the lists-mode archive-lag alert (its row behaviour is pinned in tests/sanctions-list-archive.test.ts).
+const alertArchiveLag = vi.hoisted(() => vi.fn(async (_db: unknown, _source: string, _now?: Date) => false));
+vi.mock('@/lib/sanctions/list-archive', () => ({ archivePending, alertArchiveLag, ARCHIVE_BUDGET_MS: 150_000 }));
 // Pack 2 review F3 (C3): the poke, observed (a hanging archive must not cost it).
 const pokeWorker = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/outbox', async (orig) => ({ ...(await orig<typeof import('@/lib/outbox')>()), pokeWorker }));
 
 import { GET } from '@/app/api/cron/route';
+import { SANCTIONS_SOURCES } from '@/lib/sanctions/list-sets';
 
 const req = () =>
   new NextRequest('https://smartremit.test/api/cron', { method: 'GET', headers: { authorization: `Bearer ${SECRET}` } });
@@ -127,7 +130,10 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
   // Pack 2 review F3 (C3): loader, then the list health check, then the archive, then the poke.
   it('ON: archivePending runs after the load AND after the health check, with the same db and a budget', async () => {
     process.env.SANCTIONS_LOADER_ENABLED = '1';
+    alertArchiveLag.mockClear();
     await GET(req());
+    // Pack 5 review LC2: the old-mode branch never raises the lag alert.
+    expect(alertArchiveLag).not.toHaveBeenCalled();
     expect(archivePending).toHaveBeenCalledTimes(1);
     const [db, opts] = archivePending.mock.calls[0] as unknown as [unknown, { budgetMs: number }];
     expect(db).toBe(fakeDb);
@@ -160,8 +166,10 @@ describe('/api/cron — the OFAC SDN loader behind SANCTIONS_LOADER_ENABLED', ()
 
   it('OFF: never runs; response unchanged', async () => {
     delete process.env.SANCTIONS_LOADER_ENABLED;
+    alertArchiveLag.mockClear();
     const res = await GET(req());
     expect(archivePending).not.toHaveBeenCalled();
+    expect(alertArchiveLag).not.toHaveBeenCalled();
     expect(await res.json()).toEqual({ ok: true, fired: 2, failed: 1, expired: 4, scrubbed: 7 });
   });
 
@@ -191,6 +199,7 @@ describe('/api/cron - the list set under SANCTIONS_LIST=lists (fix pack 5 T30)',
     runListLoad.mockClear();
     checkSanctionsListHealth.mockClear();
     archivePending.mockClear();
+    alertArchiveLag.mockClear();
     pokeWorker.mockClear();
   });
   afterEach(() => {
@@ -212,6 +221,8 @@ describe('/api/cron - the list set under SANCTIONS_LIST=lists (fix pack 5 T30)',
     expect(runListLoad).not.toHaveBeenCalled();
     expect(archivePending).toHaveBeenCalledTimes(1);
     expect(Object.keys((archivePending.mock.calls[0] as unknown as [unknown, object])[1])).toEqual(['budgetMs']);
+    // Pack 5 review LC2: the lag alert is lists-only.
+    expect(alertArchiveLag).not.toHaveBeenCalled();
   });
 
   it('loader OFF, SANCTIONS_LIST=lists: no load at all, response unchanged', async () => {
@@ -222,6 +233,7 @@ describe('/api/cron - the list set under SANCTIONS_LIST=lists (fix pack 5 T30)',
     expect(runOfacSdnLoad).not.toHaveBeenCalled();
     expect(runListLoad).not.toHaveBeenCalled();
     expect(archivePending).not.toHaveBeenCalled();
+    expect(alertArchiveLag).not.toHaveBeenCalled();
     expect(checkSanctionsListHealth).toHaveBeenCalledTimes(1);
   });
 
@@ -345,6 +357,71 @@ describe('/api/cron - the list set under SANCTIONS_LIST=lists (fix pack 5 T30)',
     expect(budgets).toEqual([150_000, 90_000, 30_000]);
     for (const c of calls) expect(c[0]).toBe(fakeDb);
     expect(pokeWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('pack 5 LE4: archivePending reaches EVERY source in SANCTIONS_SOURCES order (ending with in-mha-uapa), budgets <= 150 s and non-increasing', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    process.env.SANCTIONS_LIST = 'lists';
+    await GET(req());
+    const calls = archivePending.mock.calls as unknown as Array<[unknown, { source: string; budgetMs: number }]>;
+    expect(calls.map((c) => c[1].source)).toEqual([...SANCTIONS_SOURCES]);
+    expect(calls.map((c) => c[1].source)).toEqual(['ofac-sdn', 'ofac-cons', 'un-sc', 'in-mha-uapa']);
+    const budgets = calls.map((c) => c[1].budgetMs);
+    for (let i = 0; i < budgets.length; i++) {
+      expect(budgets[i]).toBeGreaterThan(0);
+      expect(budgets[i]).toBeLessThanOrEqual(150_000);
+      if (i > 0) expect(budgets[i]).toBeLessThanOrEqual(budgets[i - 1]);
+    }
+    for (const c of calls) expect(c[0]).toBe(fakeDb);
+  });
+
+  it('pack 5 LC2: after the archive loop, alertArchiveLag runs once per source (also the deferred ones), before the poke', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    process.env.SANCTIONS_LIST = 'lists';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    // The SDN archive spends the whole budget: the other sources are deferred.
+    archivePending.mockImplementationOnce(async () => {
+      vi.setSystemTime(Date.now() + 150_000);
+      return { status: 'done', archived: 1, failed: 0, pruned: 0 };
+    });
+    alertArchiveLag.mockImplementation(async (_db: unknown, source: string) => source === 'ofac-cons');
+    try {
+      const res = await GET(req());
+      expect(res.status).toBe(200);
+    } finally {
+      alertArchiveLag.mockImplementation(async () => false);
+    }
+    expect(archivePending).toHaveBeenCalledTimes(1);
+    const calls = alertArchiveLag.mock.calls as unknown as Array<[unknown, string, Date]>;
+    expect(calls.map((c) => c[1])).toEqual([...SANCTIONS_SOURCES]);
+    for (const c of calls) {
+      expect(c[0]).toBe(fakeDb);
+      expect(c[2]).toBeInstanceOf(Date);
+    }
+    expect(Math.max(...archivePending.mock.invocationCallOrder)).toBeLessThan(Math.min(...alertArchiveLag.mock.invocationCallOrder));
+    expect(Math.max(...alertArchiveLag.mock.invocationCallOrder)).toBeLessThan(pokeWorker.mock.invocationCallOrder[0]);
+  });
+
+  it('pack 5 LC2: a hung or throwing lag check never costs the poke or the answer', async () => {
+    process.env.SANCTIONS_LOADER_ENABLED = '1';
+    process.env.SANCTIONS_LIST = 'lists';
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    alertArchiveLag.mockImplementationOnce(() => new Promise(() => {}));
+    alertArchiveLag.mockImplementationOnce(async () => {
+      throw new Error('boom');
+    });
+    let settled = false;
+    const pending = GET(req()).then((r) => {
+      settled = true;
+      return r;
+    });
+    for (let i = 0; i < 40 && !settled; i++) await vi.advanceTimersByTimeAsync(1_000);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls.some((c) => String(c[0]).includes('cron.sanctions-archive-lag'))).toBe(true);
+    err.mockRestore();
   });
 
   it('a hung archive of one source still lets the poke run and the cron answer, inside the budget plus one grace', async () => {

@@ -6,10 +6,14 @@ export const dynamic = 'force-dynamic';
 // sanctionsListStatus (one row per source under SANCTIONS_LIST=lists, else the OFAC SDN row plus
 // the curated India MHA row); each read fails soft to "unavailable". The upload and confirm forms
 // show for a platform admin only (the actions re-gate). No list entry or name is ever shown.
+// Pack 5 review LC2: an archive card shows, per source, the verified-archive counts the compliance
+// card shows for ofac-sdn (archiveSummary) plus the oldest pending version's age (pendingArchiveAge).
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
+import { createSanctionsListRepo, type ArchiveSummary } from '@/db/repos/sanctions-list-repo';
+import { ARCHIVE_LAG_ALERT_DAYS } from '@/lib/sanctions/list-archive';
+import { isBlobConfigured } from '@/lib/blob';
 import { sanctionsListStatus, type SanctionsListStatus } from '@/lib/sanctions/list-health';
 import { sourceFitness, type ListFitness } from '@/lib/sanctions/list-policy';
 import { MHA_SOURCE } from '@/lib/sanctions/in-mha-list';
@@ -65,11 +69,36 @@ async function loadRows(now: Date): Promise<{ status: SanctionsListStatus | null
   return { status, rows };
 }
 
+interface ArchiveRow {
+  source: string;
+  summary: ArchiveSummary | null;
+  oldestPendingAt: string | null;
+}
+
+/** Per source, fail soft: a read that throws shows "unavailable" for that source only. */
+async function loadArchiveRows(sources: string[]): Promise<ArchiveRow[]> {
+  const repo = createSanctionsListRepo(getDb());
+  const out: ArchiveRow[] = [];
+  for (const source of sources) {
+    try {
+      const summary = await repo.archiveSummary(source);
+      const age = await repo.pendingArchiveAge(source);
+      out.push({ source, summary, oldestPendingAt: age.oldestLoadedAt ? age.oldestLoadedAt.toISOString() : null });
+    } catch (err) {
+      logError('compliance.sanctions-lists-archive', err instanceof Error ? err.name : 'unknown', { source });
+      out.push({ source, summary: null, oldestPendingAt: null });
+    }
+  }
+  return out;
+}
+
 export default async function SanctionsListsPage() {
   const { staff, scope } = await requireScope();
   if (scope.kind === 'partner') notFound();
   const now = new Date();
   const { status, rows } = await loadRows(now);
+  const archiveRows = await loadArchiveRows(rows.map((r) => r.source));
+  const blobConfigured = isBlobConfigured();
   const isAdmin = staff.role === 'admin';
 
   return (
@@ -125,6 +154,52 @@ export default async function SanctionsListsPage() {
             )}
           </CardContent>
         </Card>
+
+        {archiveRows.length > 0 && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>{t('admin.compliance.sanctionsLists.archive.title')}</CardTitle>
+              <CardDescription>{t('admin.compliance.sanctionsLists.archive.help', { days: ARCHIVE_LAG_ALERT_DAYS })}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {!blobConfigured && (
+                <p className="mb-3 text-sm text-destructive">{t('admin.compliance.sanctionsLists.archive.blobUnconfigured')}</p>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" data-testid="sanctions-list-archive-rows">
+                  <thead>
+                    <tr className="text-left text-muted-foreground">
+                      <th className="py-1.5 pr-4 font-medium">{t('admin.compliance.sanctionsLists.col.source')}</th>
+                      <th className="py-1.5 pr-4 font-medium">{t('admin.compliance.sanctionsLists.archive.col.archived')}</th>
+                      <th className="py-1.5 pr-4 font-medium">{t('admin.compliance.sanctionsLists.archive.col.pending')}</th>
+                      <th className="py-1.5 pr-4 font-medium">{t('admin.compliance.sanctionsLists.archive.col.withEntries')}</th>
+                      <th className="py-1.5 font-medium">{t('admin.compliance.sanctionsLists.archive.col.oldestPending')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {archiveRows.map((a) => (
+                      <tr key={a.source} className="border-t border-border">
+                        <td className="py-1.5 pr-4 font-mono">{a.source}</td>
+                        {a.summary ? (
+                          <>
+                            <td className="py-1.5 pr-4">{a.summary.archived}</td>
+                            <td className="py-1.5 pr-4">{a.summary.pending}</td>
+                            <td className="py-1.5 pr-4">{`${a.summary.withEntries} / ${a.summary.versions}`}</td>
+                            <td className="py-1.5">{a.oldestPendingAt ? ageText(a.oldestPendingAt, now.getTime()) : '—'}</td>
+                          </>
+                        ) : (
+                          <td className="py-1.5 text-muted-foreground" colSpan={4}>
+                            {t('admin.compliance.sanctionsLists.archive.unavailable')}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {isAdmin && (
           <>

@@ -2657,5 +2657,14 @@ export const en = {
   'admin.compliance.sanctionsLists.code.bad_text': 'A cell holds a control or invisible character.',
   'admin.compliance.sanctionsLists.code.too_many_rows': 'The file has more than 2,000 rows.',
   'admin.compliance.sanctionsLists.code.no_rows': 'The file has no data rows.',
+  // Pack 5 review LC2: the verified archive per source (counts and dates only).
+  'admin.compliance.sanctionsLists.archive.title': 'Verified archive',
+  'admin.compliance.sanctionsLists.archive.help': 'Each list version is archived to the private store before its entries may be pruned. In lists mode an ops alert is raised once a day when a source has a version waiting more than {days} days.',
+  'admin.compliance.sanctionsLists.archive.col.archived': 'Archived',
+  'admin.compliance.sanctionsLists.archive.col.pending': 'Pending',
+  'admin.compliance.sanctionsLists.archive.col.withEntries': 'Versions holding entries',
+  'admin.compliance.sanctionsLists.archive.col.oldestPending': 'Oldest pending',
+  'admin.compliance.sanctionsLists.archive.unavailable': 'unavailable',
+  'admin.compliance.sanctionsLists.archive.blobUnconfigured': 'The private Blob store is not configured: no version is archived or pruned until it is.',
   // ── end fix pack 5 T31 ──
 } as const;

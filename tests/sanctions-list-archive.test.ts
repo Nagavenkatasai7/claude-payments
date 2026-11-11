@@ -46,8 +46,10 @@ vi.mock('@/db/repos/sanctions-list-repo', async (orig) => {
 });
 
 import {
+  alertArchiveLag,
   archivePending,
   archivePathOf,
+  ARCHIVE_LAG_ALERT_DAYS,
   readArchivedVersion,
   MAX_ARCHIVES_PER_RUN,
   SANCTIONS_ARCHIVE_PREFIX,
@@ -414,6 +416,36 @@ describe('sanctions list archive (R07)', () => {
     expect(a[0].dedupe_key).toBe(`sanctions-archive-unconfigured:${easternDay(Date.now())}`);
   });
 
+  it('pack 5 LC3: Blob unconfigured, pending ofac-cons and un-sc on the same day -> one alert per source, each naming its own; the ofac-sdn key keeps no source', async () => {
+    delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList({ ...realVariant(1), source: 'ofac-cons' });
+    await repo.storeList({ ...realVariant(2), source: 'un-sc' });
+    const day = easternDay(Date.now());
+    for (const source of ['ofac-cons', 'un-sc', 'ofac-cons', 'un-sc']) {
+      expect(await archivePending(db, { source })).toEqual({ status: 'unconfigured', archived: 0, failed: 0, pruned: 0 });
+    }
+    let a = await alerts(db);
+    expect(a.map((r) => r.dedupe_key)).toEqual([
+      `sanctions-archive-unconfigured:ofac-cons:${day}`,
+      `sanctions-archive-unconfigured:un-sc:${day}`,
+    ]);
+    expect(a[0].payload.message).toContain('ofac-cons list versions are kept in the database');
+    expect(a[0].payload.message).not.toContain('un-sc');
+    expect(a[1].payload.message).toContain('un-sc list versions are kept in the database');
+    expect(a[1].payload.message).not.toContain('ofac-cons');
+    // ofac-sdn (the old modes' only caller) keeps the key byte-identical.
+    await repo.storeList(realVariant(3));
+    await archivePending(db);
+    a = await alerts(db);
+    expect(a).toHaveLength(3);
+    expect(a[2].dedupe_key).toBe(`sanctions-archive-unconfigured:${day}`);
+    expect(a[2].payload.message).toBe(
+      `⚠️ SmartRemit ops: the sanctions list archive cannot run: the private partner-docs Blob store is not ` +
+        `configured. ofac-sdn list versions are kept in the database (none is pruned) until it is.`,
+    );
+  });
+
   it('prunes only after a verified archive (4 loads + archive -> old entries gone, rows kept)', async () => {
     const repo = createSanctionsListRepo(db);
     for (const n of [1, 2, 3, 4]) await repo.storeList(realVariant(n));
@@ -427,6 +459,45 @@ describe('sanctions list archive (R07)', () => {
     // The archive still holds the pruned version, byte-for-byte.
     const text = await readArchivedVersion(rows[0].archive_path!);
     expect(sha(text!)).toBe(rows[0].hash);
+  });
+
+  it(`pack 5 LC2: alertArchiveLag raises ONE deduped alert per source per day when the oldest unarchived version is older than ${3} days`, async () => {
+    expect(ARCHIVE_LAG_ALERT_DAYS).toBe(3);
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList({ ...realVariant(1), source: 'ofac-cons' });
+    await repo.storeList({ ...realVariant(2), source: 'ofac-cons' });
+    await repo.storeList({ ...realVariant(3), source: 'un-sc' });
+    const now = new Date();
+    // Young (just loaded): nothing.
+    expect(await alertArchiveLag(db, 'ofac-cons', now)).toBe(false);
+    expect(await alerts(db)).toEqual([]);
+    // Make the first ofac-cons version 4 days old (the loop deferred it).
+    const [first] = await repo.pendingArchive('ofac-cons', 1);
+    const fourDays = new Date(now.getTime() - 4 * 86_400_000 - 60_000);
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${fourDays.toISOString()} WHERE id = ${first.id}`);
+    expect(await alertArchiveLag(db, 'ofac-cons', now)).toBe(true);
+    expect(await alertArchiveLag(db, 'ofac-cons', now)).toBe(true); // same day: deduped
+    expect(await alertArchiveLag(db, 'un-sc', now)).toBe(false); // young
+    expect(await alertArchiveLag(db, 'in-mha-uapa', now)).toBe(false); // nothing pending
+    const a = await alerts(db);
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toBe(`sanctions-archive-lag:ofac-cons:${easternDay(now.getTime())}`);
+    expect(Object.keys(a[0].payload)).toEqual(['message']);
+    expect(a[0].payload.message).toBe(
+      `⚠️ SmartRemit ops: the sanctions list archive is behind for ofac-cons: the oldest unarchived version is 4 day(s) old ` +
+        `and 2 version(s) wait. They keep their entries (nothing unarchived is pruned). ` +
+        `Check the sanctions lists page and the logs.`,
+    );
+    // Exactly 3 days old: not over the limit.
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${new Date(now.getTime() - 3 * 86_400_000).toISOString()} WHERE source = 'un-sc'`);
+    expect(await alertArchiveLag(db, 'un-sc', now)).toBe(false);
+  });
+
+  it('pack 5 LC2: alertArchiveLag never throws on a db error', async () => {
+    const broken = { select: () => { throw new Error('db down'); } } as unknown as Db;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(alertArchiveLag(broken, 'ofac-cons', new Date())).resolves.toBe(false);
+    err.mockRestore();
   });
 
   it('alert payloads carry no names, entry ids or token words', async () => {
