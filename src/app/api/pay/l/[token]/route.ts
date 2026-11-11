@@ -17,20 +17,23 @@ import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payNotAvailable, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
+import { payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
 import { parsePayBody } from '@/lib/pay-body';
 import { readPayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
 import { payMoneyGateRefusal } from '@/lib/pay-money-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { providerLineFor } from '@/lib/legal/provider-line';
-import type { PaymentEvidence } from '@/lib/payment-evidence';
+import { alertPayEvidenceUnavailable, type PaymentEvidence } from '@/lib/payment-evidence';
+import { originatorViewFor } from '@/lib/originator-info';
+import { validateSenderAddress, validateSenderDob } from '@/lib/travel-rule';
+import { QuoteError } from '@/lib/fx';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 import { pokeWorker } from '@/lib/outbox';
 import { processTransferPayment } from '@/lib/pay-process';
-import { finalizeLinkPayment, resolvePayableLink } from '@/lib/payment-link-finalize';
+import { finalizeLinkPayment, resolvePayableLink, type LinkOriginatorInput } from '@/lib/payment-link-finalize';
 import { getLinkQuoteStore } from '@/lib/payment-link-quote';
-import { isLinkFundingMethod, LINK_INACTIVE_MESSAGE, type LinkFundingMethod } from '@/lib/payment-links';
+import { isLinkFundingMethod, LINK_INACTIVE_MESSAGE, linkQuote, type LinkFundingMethod } from '@/lib/payment-links';
 
 // Batch B2: the customer's payment of a payment link (/pay/l/[token]).
 //
@@ -205,6 +208,60 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     if (gateRefusal === 'not_available') return payNotAvailable();
     if (await moneyGateRefused(fundingMethod)) return payNotAvailable();
 
+    // Fix pack 5 T22 (P21, R38): the paying customer's home address and date of
+    // birth, on real money only, after the R18 refusals and the money gate and
+    // still BEFORE the code is checked (a refusal never spends it). No read at
+    // all unless realMoneyForField (never true for the default owner). A link's
+    // owner is its rail (never routed) and a link row is never exempt. The band
+    // is the minted row's principal on a resume, else the principal of the
+    // locked quote for the method chosen; a quote that cannot be priced skips
+    // the rule (finalize refuses that payment, nothing written). A field asked
+    // with its key absent (an old tab) -> 409 reload; a bad value -> 400 on that
+    // field; a typed value when on file is ignored. finalizeLinkPayment writes
+    // the values after its KYC gate, before the claim (fresh) or the re-screen
+    // (resume).
+    const linkFunded = !!payable.transfer && transferFunded(payable.transfer);
+    const originator: LinkOriginatorInput = {};
+    if (ctx.realMoneyForField) {
+      let amountUsd: number | null = null;
+      if (payable.transfer) {
+        amountUsd = payable.transfer.amountUsd;
+      } else if (rate) {
+        try {
+          amountUsd = linkQuote(link.amountInr, { toInr: rate.toInr }, fundingMethod).amountUsd;
+        } catch (err) {
+          if (!(err instanceof QuoteError)) throw err;
+        }
+      }
+      if (amountUsd !== null) {
+        const view = await originatorViewFor(db, true, {
+          partnerId: link.partnerId,
+          phone,
+          amountUsd,
+          destinationCountry: 'IN',
+          transferType: 'b2c',
+          ...(payable.transfer ? { transferId: payable.transfer.id } : {}),
+          routed: false,
+        });
+        const askAddress = view.addressRequired && !view.addressOnFile;
+        const askDob = view.dobRequired && !view.dobOnFile;
+        if ((askAddress && !body.present.senderAddress) || (askDob && !body.present.senderDob)) {
+          return payReloadRequired(linkFunded);
+        }
+        if (askAddress) {
+          const valid = body.senderAddress === null ? null : validateSenderAddress(body.senderAddress);
+          if (!valid?.ok) return payOriginatorInvalid('senderAddress');
+          originator.address = valid.value;
+        }
+        if (askDob) {
+          const valid = body.senderDob === null ? null : validateSenderDob(body.senderDob, new Date());
+          if (!valid?.ok) return payOriginatorInvalid('senderDob');
+          originator.dateOfBirth = valid.value;
+        }
+      }
+    }
+    const hasOriginator = originator.address !== undefined || originator.dateOfBirth !== undefined;
+
     const otpCheck = await otpStore.verify(otpKey(link.id), phone, body.otp);
     if (!otpCheck.ok) {
       return NextResponse.json(
@@ -237,7 +294,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
         db,
       },
       // A resume (transfer already minted) never reads the rate; the lock may have lapsed by then.
-      { token, fundingMethod, rate },
+      { token, fundingMethod, rate, ...(hasOriginator ? { originator } : {}) },
     );
     if (!minted.ok) {
       switch (minted.error) {
@@ -271,6 +328,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
         case 'payee_unavailable':
           // One generic answer: never which check refused (no compliance leak).
           return NextResponse.json({ ok: false, error: "We can't process this payment." }, { status: 400 });
+        case 'originator_not_recorded':
+          // Fix pack 5 T22 (P21): the finalizer could not write the sender's
+          // travel-rule data (it logged the error name). Nothing was claimed or
+          // charged; the code is spent, so the same deduped alert as the
+          // evidence arms.
+          logWarn('paylink.originator_not_recorded', 'originator_not_recorded', { linkId: link.id });
+          await alertPayEvidenceUnavailable(db, 'link'); // never throws
+          pokeWorker();
+          return payApprovalNotRecorded(linkFunded);
       }
     }
 

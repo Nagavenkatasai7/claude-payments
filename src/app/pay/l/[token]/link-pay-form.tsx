@@ -6,12 +6,24 @@ import { disclosureAckBody, payErrorMessage } from '@/lib/pay-outcome';
 import { approvingAmountText, approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
+// Type only: originator-info.ts is server code (database reads) and never enters the client bundle.
+import type { OriginatorView } from '@/lib/originator-info';
+import {
+  OriginatorFields,
+  originatorBody,
+  originatorFieldErrors,
+  originatorMissing,
+  originatorShown,
+} from '@/app/pay/[transferId]/pay-form';
 
 // Batch B2: the payment-link form. Pick how to pay (bank $1.99 / debit card
 // $2.99), read the disclosure for that choice, get a WhatsApp code, pay, then
 // the receipt. Every figure comes from the server render; the POST carries only
 // the method, the code, the acknowledged disclosure version and the identity of
 // the rate lock the figures came from (the route refuses any other lock).
+// Fix pack 5 T22 (P19): on a real-money link it also asks the sender's home
+// address and date of birth (the transfer pay page's OriginatorFields), posted
+// only when shown.
 
 export type LinkPayMethod = 'bank_transfer' | 'debit_card';
 
@@ -74,6 +86,7 @@ export function LinkPayForm({
   receipt,
   approvingName,
   disclosureHash,
+  originator,
 }: {
   token: string;
   options: LinkPayOption[];
@@ -86,6 +99,8 @@ export function LinkPayForm({
   approvingName: string;
   /** Fix pack 4 (C10): the hash of the provider block the page was rendered with. */
   disclosureHash: string | null;
+  /** Fix pack 5 T22 (P19): which travel-rule fields to ask (booleans only); absent = none. */
+  originator?: OriginatorView;
 }) {
   const router = useRouter();
   const [method, setMethod] = useState<LinkPayMethod>(options[0]?.method ?? 'bank_transfer');
@@ -98,6 +113,11 @@ export function LinkPayForm({
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [paid, setPaid] = useState<{ transferId: string; status: string } | null>(null);
+  const [senderAddress, setSenderAddress] = useState('');
+  const [senderDob, setSenderDob] = useState('');
+  const [origErrors, setOrigErrors] = useState<{ senderAddress?: string; senderDob?: string }>({});
+  const shownOrig = originator ? originatorShown(originator) : { address: false, dob: false };
+  const origMissing = originatorMissing(shownOrig, { address: senderAddress, dob: senderDob });
 
   const chosen = options.find((o) => o.method === method) ?? options[0];
   const disclosure = disclosures[method] ?? null;
@@ -135,10 +155,11 @@ export function LinkPayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing || !chosen) return;
+    if (ackMissing || origMissing || !chosen) return;
     setStatus('paying');
     setOtpError('');
     setErrorMessage(null);
+    setOrigErrors({});
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
@@ -148,10 +169,11 @@ export function LinkPayForm({
           fundingMethod: chosen.method,
           ...disclosureAckBody(disclosure !== null ? disclosureVersion : null, disclosureHash, acked),
           ...(quoteLockedAt ? { quoteLockedAt } : {}),
+          ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
       });
       const data = (await res.json().catch(() => null)) as
-        | { ok?: boolean; reason?: string; status?: string; transferId?: string }
+        | { ok?: boolean; reason?: string; status?: string; transferId?: string; fieldErrors?: unknown }
         | null;
       if (res.ok && data?.ok) {
         if (data.status === 'cancelled') {
@@ -176,6 +198,14 @@ export function LinkPayForm({
         setErrorMessage(RATE_CHANGED_COPY);
         setStatus('error');
         router.refresh();
+        return;
+      }
+      // Fix pack 5 (P31): an originator 400 shows its fixed copy under the field;
+      // the code was not checked, so it stays in the box (no generic error line).
+      const fieldErrs = originatorFieldErrors(data?.fieldErrors);
+      if (fieldErrs.senderAddress || fieldErrs.senderDob) {
+        setOrigErrors(fieldErrs);
+        setStatus('idle');
         return;
       }
       if (data?.reason === 'otp') setOtpError('That code is incorrect or expired. Resend and try again.');
@@ -246,6 +276,14 @@ export function LinkPayForm({
         </div>
       )}
       {disclosure}
+      <OriginatorFields
+        shown={shownOrig}
+        address={senderAddress}
+        dob={senderDob}
+        onAddress={setSenderAddress}
+        onDob={setSenderDob}
+        errors={origErrors}
+      />
       {!sent ? (
         <div>
           {approvingEl}
@@ -286,7 +324,7 @@ export function LinkPayForm({
           <span>{ACKNOWLEDGEMENT_LABEL}</span>
         </label>
       )}
-      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
+      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || origMissing}>
         {status === 'paying' ? 'Processing…' : chosen ? `Pay ${money(chosen.totalUsd, 'USD')}` : 'Pay now'}
       </button>
       {sent && (

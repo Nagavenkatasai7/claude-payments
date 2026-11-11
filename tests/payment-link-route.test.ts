@@ -435,6 +435,8 @@ describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { 
     const payBody = {
       otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock,
       disclosureVersion: DISCLOSURE_DRAFT_VERSION, disclosureHash: acmeHash, accountHolder: 'Sunrise School Trust',
+      // Fix pack 5 T22 (P21): once the rail is http the link asks the sender's address (none on file).
+      senderAddress: '3 Fixture Road, Testtown 00000',
     };
 
     // 1. Minted on the mock rail, the capture declined: a minted, unpaid transfer.

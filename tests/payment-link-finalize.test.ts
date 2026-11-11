@@ -15,6 +15,7 @@ import { createPayeeRepo } from '@/db/repos/payee-repo';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
@@ -27,6 +28,58 @@ import type { Db } from '@/db/client';
 // pending / suspended / other-partner payee; crash and retry ⇒ one transfer;
 // switch off, sends paused, not a demo phone ⇒ refused with nothing saved;
 // purpose and reference copied onto the transfer.
+
+// Fix pack 5 T22 (P21): the order of the originator write, the claim, the mint
+// and the resume re-screen, and a write fault. The modules are the real ones
+// (spread); the wrappers only record and, on demand, throw.
+const linkSeam = vi.hoisted(() => ({ order: [] as string[], writeThrows: false }));
+vi.mock('@/lib/originator-info', async (orig) => {
+  const real = await orig<typeof import('@/lib/originator-info')>();
+  return {
+    ...real,
+    writeOriginatorInfo: async (...a: Parameters<typeof real.writeOriginatorInfo>) => {
+      linkSeam.order.push('writeOriginatorInfo');
+      if (linkSeam.writeThrows) throw new TypeError('originator write failed');
+      return real.writeOriginatorInfo(...a);
+    },
+  };
+});
+vi.mock('@/lib/transfer-create', async (orig) => {
+  const real = await orig<typeof import('@/lib/transfer-create')>();
+  return {
+    ...real,
+    createTransfer: async (...a: Parameters<typeof real.createTransfer>) => {
+      linkSeam.order.push('createTransfer');
+      return real.createTransfer(...a);
+    },
+  };
+});
+vi.mock('@/lib/pay-rescreen', async (orig) => {
+  const real = await orig<typeof import('@/lib/pay-rescreen')>();
+  return {
+    ...real,
+    rescreenBeforePay: async (...a: Parameters<typeof real.rescreenBeforePay>) => {
+      linkSeam.order.push('rescreenBeforePay');
+      return real.rescreenBeforePay(...a);
+    },
+  };
+});
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return {
+    ...real,
+    createIdempotencyRepo: (...a: Parameters<typeof real.createIdempotencyRepo>) => {
+      const repo = real.createIdempotencyRepo(...a);
+      return {
+        ...repo,
+        claim: async (...c: Parameters<typeof repo.claim>) => {
+          linkSeam.order.push('claim');
+          return repo.claim(...c);
+        },
+      };
+    },
+  };
+});
 
 const PHONE = '14155550100';
 const RATE = () => ({ toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb', lockedAt: new Date().toISOString() });
@@ -491,6 +544,82 @@ describe('finalizeLinkPayment — live certification before the claim (pack 3 T4
     const l = await link({ payeeId: await payee({ partnerId: 'acme' }), partnerId: 'acme' });
     const r = await pay(l.token);
     expect(r.ok).toBe(true);
+    expect(await transfersN()).toBe(1);
+  });
+});
+
+// Fix pack 5 T22 (P21): the travel-rule values the link route validated are
+// written on the link owner's customer AFTER ensureCustomer and the KYC gate,
+// and BEFORE the claim (fresh) or the re-screen (resume). A throw answers
+// 'originator_not_recorded' with nothing claimed.
+describe('finalizeLinkPayment — the sender\'s address and date of birth (pack 5 T22)', { retry: 0 }, () => {
+  const ADDRESS = '12 Placeholder Lane, Sampletown 00000';
+  const onFile = () => createCustomerRepo(db, async () => null).originatorOnFile('default', PHONE);
+  const travelAudits = async () =>
+    ((await db.execute(sql.raw(`SELECT meta FROM audit_events WHERE action = 'customer.travel_rule_set'`))) as unknown as {
+      rows: Array<{ meta: unknown }>;
+    }).rows.map((r) => (typeof r.meta === 'string' ? JSON.parse(r.meta) : r.meta));
+  beforeEach(() => {
+    linkSeam.order = [];
+    linkSeam.writeThrows = false;
+  });
+
+  it('input.originator is written after ensureCustomer and the KYC gate, before the claim and the mint', async () => {
+    const l = await link({ payeeId: await payee() });
+    const r = await pay(l.token, { originator: { address: ADDRESS } });
+    expect(r.ok).toBe(true);
+    expect(linkSeam.order).toEqual(['writeOriginatorInfo', 'claim', 'createTransfer']);
+    expect(await onFile()).toEqual({ address: true, dateOfBirth: false });
+    expect(await travelAudits()).toEqual([{ source: 'payment_link', fields: ['address'], routeId: l.id }]);
+  });
+
+  it('no originator -> no write (demo links unchanged)', async () => {
+    const l = await link({ payeeId: await payee() });
+    expect((await pay(l.token)).ok).toBe(true);
+    expect(linkSeam.order).not.toContain('writeOriginatorInfo');
+    expect(await travelAudits()).toEqual([]);
+  });
+
+  it('a KYC refusal writes nothing', async () => {
+    const dflt = await stores.partnerStore.ensureDefaultPartner();
+    await stores.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    const l = await link({ payeeId: await payee() });
+    expect(await pay(l.token, { originator: { address: ADDRESS } })).toEqual({ ok: false, error: 'kyc_required' });
+    expect(linkSeam.order).toEqual([]);
+    expect(await onFile()).toEqual({ address: false, dateOfBirth: false });
+    expect(await travelAudits()).toEqual([]);
+  });
+
+  it("a throw -> { ok:false, error:'originator_not_recorded' }, no claim row, the link still open", async () => {
+    linkSeam.writeThrows = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const l = await link({ payeeId: await payee() });
+    expect(await pay(l.token, { originator: { address: ADDRESS } })).toEqual({ ok: false, error: 'originator_not_recorded' });
+    expect(await keysN()).toBe(0);
+    expect(await transfersN()).toBe(0);
+    expect((await linkStatus(l.id)).status).toBe('open');
+    expect(linkSeam.order).toEqual(['writeOriginatorInfo']);
+    // The log line names the error and the link only, never the value.
+    const logged = warn.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+    expect(logged).not.toContain('Placeholder');
+  });
+
+  it('resumeMinted writes before rescreenBeforePay (meta names the transfer); a throw never resumes', async () => {
+    const l = await link({ payeeId: await payee() });
+    const first = await pay(l.token);
+    if (!first.ok) throw new Error(`unexpected ${first.error}`);
+    linkSeam.order = [];
+    linkSeam.writeThrows = true;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await pay(l.token, { originator: { address: ADDRESS } })).toEqual({ ok: false, error: 'originator_not_recorded' });
+    expect(linkSeam.order).toEqual(['writeOriginatorInfo']);
+    linkSeam.order = [];
+    linkSeam.writeThrows = false;
+    expect(await pay(l.token, { originator: { address: ADDRESS } })).toEqual({ ok: true, transferId: first.transferId });
+    expect(linkSeam.order).toEqual(['writeOriginatorInfo', 'rescreenBeforePay']);
+    expect(await travelAudits()).toEqual([
+      { source: 'payment_link', fields: ['address'], transferId: first.transferId, routeId: l.id },
+    ]);
     expect(await transfersN()).toBe(1);
   });
 });
