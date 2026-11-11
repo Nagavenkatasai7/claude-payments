@@ -114,6 +114,21 @@ describe('/partner/integrations/webhooks: the delivery log (M3-15b)', () => {
     expect(html).not.toContain(t('partner.webhooks.log.empty'));
   });
 
+  // Fix pack 5 T10 (P31, P33): the full 64-hex body hash in a mono break-all cell.
+  it('shows each delivery\'s body hash under Body hash, and — for a row without one', async () => {
+    const shaA = 'ab'.repeat(32);
+    const shaB = 'cd'.repeat(32);
+    await delivery('pa', 1, { bodySha256: shaA });
+    await delivery('pa', 2);
+    await delivery('pb', 3, { bodySha256: shaB });
+    await signInAs({});
+    const html = await render();
+    expect(html).toContain(t('partner.webhooks.col.bodyHash'));
+    expect(html).toContain(`<dd class="font-mono text-[13.5px] break-all text-ds-ink">${shaA}</dd>`);
+    expect(html).toContain('<dd class="font-mono text-[13.5px] break-all text-ds-ink">—</dd>');
+    expect(html).not.toContain(shaB);
+  });
+
   it('pages 50 at a time: Older links a strict id cursor; the next page shows the rest and a Newest link', async () => {
     for (let i = 0; i < 52; i++) await delivery('pa', i);
     await signInAs({});

@@ -125,6 +125,21 @@ vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
   return { ...real, logWarn: (...a: unknown[]) => { logWarnSpy(...a); } };
 });
+// Fix pack 5 T10 (P4): every verified callback is appended to rail_messages
+// before it is handled. A fake append records its input and the call order;
+// `fail` makes it throw like a dropped Neon connection.
+const railRec = vi.hoisted(() => ({ calls: [] as unknown[], fail: false, order: [] as string[] }));
+vi.mock('@/db/repos/rail-message-repo', async (orig) => ({
+  ...(await orig<typeof import('@/db/repos/rail-message-repo')>()),
+  createRailMessageRepo: () => ({
+    append: async (i: unknown) => {
+      railRec.order.push('append');
+      if (railRec.fail) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
+      railRec.calls.push(i);
+      return { id: 'rm_1', bodySha256: '0'.repeat(64), inserted: true };
+    },
+  }),
+}));
 
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 import { WhatsAppSendError } from '@/lib/whatsapp-errors';
@@ -186,6 +201,7 @@ beforeEach(() => {
   logWarnSpy.mockClear();
   setPayoutReference.mockReset(); setPayoutReference.mockResolvedValue(true);
   partnersById.map = {};
+  railRec.calls.length = 0; railRec.order.length = 0; railRec.fail = false;
 });
 
 describe('POST /api/payment-webhook/[provider]', () => {
@@ -1119,5 +1135,121 @@ describe('rail callback on an uncertified real-money rail (pack 3)', { retry: 0 
     expect(await res.json()).toEqual({ ok: true });
     expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'paid');
     expect(liveAlerts()).toHaveLength(0);
+  });
+});
+
+// Fix pack 5 T10 (P4, P6, D6): the sealed record of every verified callback is
+// written after the signature and nonce checks and before anything acts on it.
+describe('pack 5 (T10): every verified callback is recorded before it is handled', { retry: 0 }, () => {
+  const hour = () => Math.floor(Date.now() / 3_600_000);
+  const ownerInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'owner_whk' }, whatsapp: {} };
+  const railInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'rail_whk' }, whatsapp: {} };
+  const recordAlerts = () => outboxFake.enqueued.filter((e) => e.kind === 'ops.alert' && e.dedupeKey?.startsWith('railrecord:'));
+
+  beforeEach(() => {
+    fixtures.transfersById['wh_1'] = { ...baseWh1, partnerId: 'owner' };
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockImplementation(async () => {
+      railRec.order.push('handle');
+      return { transferId: 'wh_1', status: 'delivered' };
+    });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, partnerId: 'owner', environment: 'test' });
+  });
+
+  it('a verified callback for a known transfer is appended once, before handleWebhook', async () => {
+    const h = v2(body, 'owner_whk');
+    const res = await post('simulator', body, undefined, h);
+    expect(res.status).toBe(200);
+    expect(railRec.order).toEqual(['append', 'handle']);
+    expect(railRec.calls).toEqual([{
+      partnerId: 'owner', railPartnerId: 'owner', transferId: 'wh_1', direction: 2, kind: 'callback',
+      body, signatureHeader: h['x-smartremit-signature'],
+    }]);
+  });
+
+  it('a routed transfer: partnerId is the owner, railPartnerId the settlement partner', async () => {
+    fixtures.transfersById['wh_1'] = { ...baseWh1, partnerId: 'owner', settlementPartnerId: 'railp' };
+    fixtures.integrationsByPartner['railp'] = railInteg;
+    const res = await post('simulator', body, undefined, v2(body, 'rail_whk'));
+    expect(res.status).toBe(200);
+    expect(railRec.calls).toHaveLength(1);
+    expect(railRec.calls[0]).toMatchObject({ partnerId: 'owner', railPartnerId: 'railp', transferId: 'wh_1' });
+  });
+
+  it('an unresolved reference verified with the env secret is stored with partnerId and railPartnerId null and the claimed reference', async () => {
+    handleWebhook.mockImplementation(async () => { railRec.order.push('handle'); return null; });
+    const ghost = JSON.stringify({ reference: 'tr_unknown', status: 'paid_out' });
+    expect((await post('uniteller', ghost, undefined, v2(ghost))).status).toBe(200);
+    expect(railRec.calls[0]).toMatchObject({ partnerId: null, railPartnerId: null, transferId: 'tr_unknown', body: ghost });
+    // A body with no reference at all is stored with transferId null.
+    const bare = JSON.stringify({ status: 'paid_out' });
+    expect((await post('uniteller', bare, undefined, v2(bare))).status).toBe(200);
+    expect(railRec.calls[1]).toMatchObject({ partnerId: null, railPartnerId: null, transferId: null, body: bare });
+    expect(railRec.order).toEqual(['append', 'handle', 'append', 'handle']);
+  });
+
+  it('a bad signature, a stale one and a legacy-only one append nothing', async () => {
+    const stale = Math.floor(Date.now() / 1000) - 3600;
+    expect((await post('simulator', body, 'deadbeef')).status).toBe(401);
+    expect((await post('simulator', body, undefined, v2(body, 'owner_whk', stale))).status).toBe(401);
+    expect((await post('simulator', body, undefined, { 'x-signature': legacySig(body, 'owner_whk') })).status).toBe(401);
+    expect(railRec.order).toEqual([]);
+  });
+
+  it('a nonce already seen answers duplicate and appends nothing', async () => {
+    const h = v2(body, 'owner_whk');
+    expect((await post('simulator', body, undefined, h)).status).toBe(200);
+    railRec.order.length = 0; railRec.calls.length = 0;
+    const res = await post('simulator', body, undefined, h);
+    expect(await res.json()).toEqual({ ok: true, duplicate: true });
+    expect(railRec.order).toEqual([]);
+  });
+
+  it('a store failure answers 500 { ok: false }: not handled, nonce NOT marked, ONE railrecord:<hour> alert, log has the error name and ids only', async () => {
+    railRec.fail = true;
+    const h = v2(body, 'owner_whk');
+    const res = await post('simulator', body, undefined, h);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(replay.markCalls).toBe(0);
+    const alerts = recordAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].dedupeKey).toBe(`railrecord:${hour()}`);
+    expect((alerts[0].payload as { message: string }).message).toBe(
+      '⚠️ SmartRemit ops: a verified rail callback (transfer wh_1) could not be recorded in rail_messages, so it was NOT processed (answered 500; the rail retries). Further failures this hour are coalesced into this alert.',
+    );
+    // A second failing POST in the same hour adds no second alert.
+    expect((await post('simulator', body, undefined, v2(body, 'owner_whk'))).status).toBe(500);
+    expect(recordAlerts()).toHaveLength(1);
+    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'payment-webhook.rail-record');
+    expect(call).toEqual(['payment-webhook.rail-record', 'NeonDbError', { transferId: 'wh_1', railPartnerId: 'owner' }]);
+    for (const c of logWarnSpy.mock.calls) {
+      const text = JSON.stringify(c);
+      expect(text).not.toContain(body);
+      expect(text).not.toContain('paid_out');
+      expect(text).not.toContain(h['x-smartremit-signature']);
+    }
+  });
+
+  it('an unresolved reference whose record fails names it unresolved in the alert', async () => {
+    railRec.fail = true;
+    const bare = JSON.stringify({ status: 'paid_out' });
+    expect((await post('uniteller', bare, undefined, v2(bare))).status).toBe(500);
+    expect((recordAlerts()[0].payload as { message: string }).message).toContain('(transfer unresolved)');
+  });
+
+  it("the rail's retry after a failure is recorded and handled", async () => {
+    const h = v2(body, 'owner_whk');
+    railRec.fail = true;
+    expect((await post('simulator', body, undefined, h)).status).toBe(500);
+    railRec.fail = false;
+    const res = await post('simulator', body, undefined, h);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(railRec.calls).toHaveLength(1);
+    expect(handleWebhook).toHaveBeenCalledTimes(1);
+    expect(replay.markCalls).toBe(1);
   });
 });

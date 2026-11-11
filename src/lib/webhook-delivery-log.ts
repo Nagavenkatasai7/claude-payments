@@ -130,6 +130,8 @@ export interface DeliveryView {
   httpStatus: number | null;
   latencyMs: number | null;
   attempt: number;
+  /** fix pack 5: sha256 of the exact bytes POSTed; null on rows an older build wrote. */
+  bodySha256: string | null;
   createdAt: Date;
 }
 
@@ -156,7 +158,7 @@ export function parsePositiveId(v: unknown): number | null {
 export async function listDeliveries(db: DbOrTx, partnerId: string, opts: { before?: number | null }): Promise<{ rows: DeliveryView[]; nextBefore: number | null }> {
   const d = partnerWebhookDeliveries;
   const rows = await db
-    .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, createdAt: d.createdAt })
+    .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, bodySha256: d.bodySha256, createdAt: d.createdAt })
     .from(d)
     .where(and(eq(d.partnerId, partnerId), eq(d.kind, 'settlement.instruct'), opts.before ? lt(d.id, opts.before) : undefined))
     .orderBy(desc(d.id))

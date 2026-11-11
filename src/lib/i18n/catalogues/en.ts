@@ -970,6 +970,7 @@ export const en = {
   'partner.webhooks.log.newest': 'Newest',
   'partner.webhooks.col.transfer': 'Transfer',
   'partner.webhooks.col.attempt': 'Attempt',
+  'partner.webhooks.col.bodyHash': 'Body hash',
   'partner.webhooks.dead.title': 'Failed instructions',
   'partner.webhooks.dead.hint': 'Settlement instructions that failed every retry while the transfer is still waiting to be paid out. Replay sends one again. Your endpoint must treat a repeated transfer id as the same instruction.',
   'partner.webhooks.dead.empty': 'No failed instructions.',

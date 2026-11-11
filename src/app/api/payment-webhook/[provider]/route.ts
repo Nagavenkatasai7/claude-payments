@@ -11,6 +11,8 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createRailMessageRepo, RAIL_IN } from '@/db/repos/rail-message-repo';
+import { railRecordAlertKey } from '@/lib/instruct-errors';
 import { parsePayoutReference } from '@/lib/order-references';
 import { pokeWorker } from '@/lib/outbox';
 import { resolvePartnerBranding } from '@/lib/partner-config';
@@ -112,6 +114,32 @@ export async function POST(
   if (verified.scheme === 'v2' && (await railNonceSeen(verified.nonce)) === 'seen') {
     return NextResponse.json({ ok: true, duplicate: true });
   }
+  // fix pack 5 (P4, D6): the sealed record of every verified callback, before
+  // any effect; the nonce is marked only after handling, so a failed record is
+  // retried by the rail; the stored body is the verified text from req.text(),
+  // so a leading BOM is dropped and invalid UTF-8 becomes U+FFFD, and
+  // body_sha256 hashes that text. The insert is ON CONFLICT (id) DO NOTHING
+  // under inboundRailMessageId, so a replay that passes the nonce check (Redis
+  // down, fail-open) adds no row and is still handled (idempotent effects).
+  try {
+    await createRailMessageRepo(getDb()).append({
+      partnerId: refTransfer?.partnerId ?? null,
+      railPartnerId,
+      transferId: refTransfer?.id ?? refTransferId ?? null,
+      direction: RAIL_IN,
+      kind: 'callback',
+      body: raw,
+      signatureHeader: req.headers.get('x-smartremit-signature'),
+    });
+  } catch (err) {
+    logWarn('payment-webhook.rail-record', err instanceof Error ? err.name : 'error', {
+      transferId: refTransferId ?? null,
+      railPartnerId,
+    });
+    await alertRailRecordInbound(refTransferId ?? null); // best-effort, never throws
+    pokeWorker();
+    return NextResponse.json({ ok: false }, { status: 500 });
+  }
   const response = await handleVerified(provider, body, railPartnerId, railIntegrations, refTransfer);
   // Fix pack 5 T3 (P6): mark only after a HANDLED 2xx. A 422 (amount_required,
   // reference_unresolved) leaves the nonce unmarked, so a corrected retry of
@@ -141,6 +169,23 @@ async function alertRailLegacy(railPartnerId: string | null): Promise<void> {
     pokeWorker();
   } catch (err) {
     logWarn('payment-webhook.raillegacy', err instanceof Error ? err.name : 'error', { partnerId: railPartnerId });
+  }
+}
+
+/**
+ * Fix pack 5 T10 (P30): one `railrecord:<hour>` ops alert (the key the worker
+ * shares) when a verified callback could not be recorded. Ids only.
+ * Best-effort: a failed write is logged by error name and the caller still
+ * answers the same 500.
+ */
+async function alertRailRecordInbound(transferId: string | null): Promise<void> {
+  const message =
+    `⚠️ SmartRemit ops: a verified rail callback (transfer ${transferId ?? 'unresolved'}) could not be recorded in rail_messages, ` +
+    'so it was NOT processed (answered 500; the rail retries). Further failures this hour are coalesced into this alert.';
+  try {
+    await createOutboxRepo(getDb()).enqueue('ops.alert', { message }, { dedupeKey: railRecordAlertKey() });
+  } catch (err) {
+    logWarn('payment-webhook.railrecord', err instanceof Error ? err.name : 'error', { transferId });
   }
 }
 

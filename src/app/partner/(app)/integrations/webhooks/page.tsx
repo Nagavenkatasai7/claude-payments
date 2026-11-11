@@ -111,7 +111,7 @@ function DeliveryLog({ page, before }: { page: { rows: DeliveryView[]; nextBefor
         <ul className="flex flex-col gap-3">
           {page.rows.map((d) => (
             <Card as="li" key={d.id} className="p-4 sm:p-5">
-              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1 text-[14px] sm:grid-cols-3 lg:grid-cols-6 sm:gap-y-3">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1 text-[14px] sm:grid-cols-3 lg:grid-cols-7 sm:gap-y-3">
                 <div className="contents sm:block">
                   <dt className="text-ds-ink-muted">{t('partner.webhooks.col.when')}</dt>
                   <dd className="text-ds-ink">{whenUtc(d.createdAt.toISOString())}</dd>
@@ -137,6 +137,10 @@ function DeliveryLog({ page, before }: { page: { rows: DeliveryView[]; nextBefor
                 <div className="contents sm:block">
                   <dt className="text-ds-ink-muted">{t('partner.webhooks.col.attempt')}</dt>
                   <dd className="text-ds-ink tabular-nums">{d.attempt}</dd>
+                </div>
+                <div className="contents sm:block">
+                  <dt className="text-ds-ink-muted">{t('partner.webhooks.col.bodyHash')}</dt>
+                  <dd className="font-mono text-[13.5px] break-all text-ds-ink">{d.bodySha256 ?? '—'}</dd>
                 </div>
               </dl>
             </Card>

@@ -60,6 +60,10 @@ import { createStore } from '@/lib/store';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { env } from '@/lib/env';
+import { createHmac } from 'node:crypto';
+import { railBodySha256 } from '@/db/repos/rail-message-repo';
+import { decryptField, defaultProvider } from '@/lib/field-crypto';
+import { ctx, type RailMessageKind } from '@/lib/crypto-context';
 
 const RAIL_URL = `${env.appBaseUrl}/api/partner-rail`;
 const HOOK_URL = `${env.appBaseUrl}/api/payment-webhook/simulator`;
@@ -203,5 +207,75 @@ describe('rail loop end to end (fix 29)', () => {
     expect(calls.filter((c) => c.url === RAIL_URL).length).toBe(before);
     const st = ((await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'reinstruct:e2e_t1'`)) as unknown as { rows: Array<{ status: string }> }).rows[0].status;
     expect(st).toBe('done');
+  });
+});
+
+// Fix pack 5 T10 (P1, P4): the sealed rail record of the whole loop. The
+// instruction's settle row (T9) and the verified callback's row (T10), each
+// with the exact body, its hash and the signature header that went on the wire.
+type RecRow = {
+  id: string; direction: number; kind: string; partner_id: string | null; rail_partner_id: string | null;
+  transfer_id: string | null; body_enc: string; body_sha256: string; signature_header: string | null;
+};
+const records = async () =>
+  ((await db.execute(sql`
+    SELECT id, direction, kind, partner_id, rail_partner_id, transfer_id, body_enc, body_sha256, signature_header
+    FROM rail_messages ORDER BY created_at, direction`)) as unknown as { rows: RecRow[] }).rows;
+const openRec = (r: RecRow) =>
+  decryptField(r.body_enc, defaultProvider(), ctx.railMessage(r.id, r.direction as 1 | 2, r.kind as RailMessageKind));
+
+describe('pack 5 (T10): the rail record of the simulator loop', { retry: 0 }, () => {
+  it('pack 5: a simulator payment leaves exactly two rail_messages rows, settle out and callback in, matching the bytes on the wire', async () => {
+    await drainOnce(deps(), 'w1');
+    await releaseDelayedCallback();
+    await drainOnce(deps(), 'w2');
+    const cb = calls.find((c) => c.url === HOOK_URL)!;
+    expect(cb.status).toBe(200);
+    const rows = await records();
+    expect(rows.map((r) => [r.direction, r.kind, r.partner_id, r.rail_partner_id, r.transfer_id])).toEqual([
+      [1, 'settle', 'acme', 'acme', 'e2e_t1'],
+      [2, 'callback', 'acme', 'acme', 'e2e_t1'],
+    ]);
+    const [settle, callback] = rows;
+    expect(settle.body_sha256).toBe(railBodySha256(calls[0].body));
+    expect(callback.body_sha256).toBe(railBodySha256(cb.body));
+    expect(settle.signature_header).toBe(calls[0].headers['x-smartremit-signature']);
+    expect(callback.signature_header).toBe(cb.headers['x-smartremit-signature']);
+    expect(openRec(settle)).toBe(calls[0].body);
+    expect(openRec(callback)).toBe(cb.body);
+  });
+
+  it('a replayed callback adds no row', async () => {
+    await drainOnce(deps(), 'w1');
+    await releaseDelayedCallback();
+    await drainOnce(deps(), 'w2');
+    const cb = calls.find((c) => c.url === HOOK_URL)!;
+    const res = await webhookPOST(
+      new NextRequest(HOOK_URL, { method: 'POST', headers: cb.headers, body: cb.body }),
+      { params: Promise.resolve({ provider: 'simulator' }) },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, duplicate: true });
+    expect(await records()).toHaveLength(2);
+  });
+
+  it('a body with a leading UTF-8 BOM is stored as the verified text (BOM dropped), and body_sha256 is the hash of that text, not of the wire bytes', async () => {
+    // The transfer is paid and the rail is acme (whk_e2e); no instruction runs here.
+    const text = JSON.stringify({ reference: 'e2e_t1', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+    const t = Math.floor(Date.now() / 1000);
+    const header = `t=${t},v1=${createHmac('sha256', 'whk_e2e').update(`${t}.${text}`).digest('hex')}`;
+    const wire = new TextEncoder().encode('\uFEFF' + text);
+    expect([...wire.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    const res = await webhookPOST(
+      new NextRequest(HOOK_URL, { method: 'POST', headers: { 'x-smartremit-signature': header }, body: wire }),
+      { params: Promise.resolve({ provider: 'simulator' }) },
+    );
+    expect(res.status).toBe(200);
+    const rows = (await records()).filter((r) => r.direction === 2);
+    expect(rows).toHaveLength(1);
+    expect(openRec(rows[0])).toBe(text);
+    expect(rows[0].body_sha256).toBe(railBodySha256(text));
+    expect(rows[0].body_sha256).not.toBe(railBodySha256('\uFEFF' + text));
+    expect(rows[0].signature_header).toBe(header);
   });
 });
