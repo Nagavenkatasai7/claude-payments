@@ -15,11 +15,13 @@ import {
 } from '@/lib/sanctions/list-loader';
 import { hashEntries } from '@/lib/sanctions/ofac-sdn-loader';
 import type { SanctionsList } from '@/lib/sanctions/list-source';
+import { fetchUnScList, UN_SC_MIN_ENTRIES } from '@/lib/sanctions/un-sc-loader';
 
 // Program-Fix 14 PR C: the daily OFAC SDN loader. Tests never touch the
 // network: fetch is always a stub returning the checked-in fixture.
 
 const FIXTURE = readFileSync(join(__dirname, 'fixtures', 'ofac-sdn-sample.xml'), 'utf8');
+const UN_FIXTURE = readFileSync(join(__dirname, 'fixtures', 'un-sc-sample.xml'), 'utf8');
 const NOW = Date.parse('2026-09-23T13:00:00Z');
 
 const okFetch = (body = FIXTURE) =>
@@ -221,6 +223,25 @@ describe('runListLoad', () => {
       def(async () => { throw new Error('x'); }),
     );
     expect(res).toEqual({ status: 'failed', reason: 'fetch' });
+  });
+
+  it("pack 5 T27: the un-sc def - a parse error prefixed 'UN SC:' -> parse; one alert sanctions-list-load-failed:un-sc:<easternDay>", async () => {
+    const unDef = (fetchFn: () => Promise<SanctionsList>): ListLoadDef => ({
+      source: 'un-sc',
+      label: 'UN Security Council',
+      minEntries: UN_SC_MIN_ENTRIES,
+      parseErrorPrefix: 'UN SC:',
+      fetch: fetchFn,
+    });
+    const bad = unDef(() => fetchUnScList(okFetch(UN_FIXTURE.replace('</CONSOLIDATED_LIST>', ''))));
+    expect(await runListLoad({ db, now: NOW }, bad)).toEqual({ status: 'failed', reason: 'parse' });
+    expect(await runListLoad({ db, now: NOW + 3600_000 }, bad)).toEqual({ status: 'failed', reason: 'parse' });
+    // A fetch error ('UN SC fetch failed: ...') is not a parse error.
+    expect(await runListLoad({ db, now: NOW }, unDef(() => fetchUnScList(failFetch(503))))).toEqual({ status: 'failed', reason: 'fetch' });
+    const rows = await alerts(db);
+    expect(rows.map((r) => r.dedupe_key)).toEqual([`sanctions-list-load-failed:un-sc:${easternDay(NOW)}`]);
+    expect(rows[0].payload.message).toContain('the UN Security Council list load failed');
+    expect(await createSanctionsListRepo(db).activeVersion('un-sc')).toBeNull();
   });
 
   it('two sources failing on one day -> two alerts (keys differ)', async () => {
