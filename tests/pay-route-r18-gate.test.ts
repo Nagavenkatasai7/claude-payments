@@ -64,8 +64,13 @@ vi.mock('@/lib/partner-store', () => ({
     }),
   }),
 }));
+// Fix pack 5 T13b: a current signing secret (no provider type: still the mock
+// rail for pay-process), so a case whose stored rail type turns http passes the
+// pre-verify money gate's rail half; its funding half passes on a Stripe-bound row.
 vi.mock('@/lib/partner-integrations-store', () => ({
-  getPartnerIntegrationsStore: () => ({ getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }) }),
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async () => ({ kyc: {}, payment: { credentials: { signingSecret: 's' } }, whatsapp: {} }),
+  }),
 }));
 vi.mock('@/lib/ip-rate-limit', async (orig) => ({ ...(await orig<typeof import('@/lib/ip-rate-limit')>()), enforceIpRateLimit: async () => null }));
 // The draft finalizer is observed (the pay path must reach it, never the outer catch).

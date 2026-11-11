@@ -61,10 +61,13 @@ vi.mock('@/lib/daily-volume-store', async (orig) => ({ ...(await orig<typeof imp
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
 vi.mock('@/lib/payment-link-quote', async (orig) => ({ ...(await orig<typeof import('@/lib/payment-link-quote')>()), getLinkQuoteStore: () => quotes }));
 // Pack 3: the rail config per partner (empty ⇒ the mock rail, as before); a test may switch it.
-const linkRails = vi.hoisted(() => ({ byPartner: {} as Record<string, unknown> }));
+// Fix pack 5 T13b: `funding` is the partner's funding config (null = none), read
+// by the pre-verify money gate and pay-process only on real money with the flag on.
+const linkRails = vi.hoisted(() => ({ byPartner: {} as Record<string, unknown>, funding: {} as Record<string, unknown> }));
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
     getIntegrations: async (id: string) => ({ kyc: {}, payment: linkRails.byPartner[id] ?? {}, whatsapp: {} }),
+    getFundingConfig: async (id: string) => linkRails.funding[id] ?? null,
   }),
 }));
 // Pack 3: the real mock funding provider, with a switch to decline the capture (a minted,
@@ -155,6 +158,7 @@ beforeEach(async () => {
   lockedAt = (await quotes.lock(linkId, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' })).lockedAt;
   sendTransactionOtp.mockClear();
   linkRails.byPartner = {};
+  linkRails.funding = {};
   sharedChannelFor.clear();
   funding.decline = false;
   funding.captures = 0;
@@ -445,6 +449,10 @@ describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { 
     // 2. The owner's rail turns http (stored type too); acme stays uncertified. A live list.
     linkRails.byPartner.acme = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
     await setRailProviderType(db, 'acme', 'http');
+    // Fix pack 5 T13b: a Stripe funding config, so the pre-verify money gate (no
+    // mock funding on real money) passes and the LIVE gate is what refuses.
+    linkRails.funding.acme = { providerType: 'stripe', secretKey: 'rk_test_link' };
+    vi.stubEnv('STRIPE_FUNDING_ENABLED', 'true');
     const originalList = process.env.SANCTIONS_LIST;
     primeOfacSource({ checkedAgoMs: 3_600_000 });
     onTestFinished(() => restoreOfacSource(originalList));
@@ -501,6 +509,47 @@ describe('link route R18 gate (pack 4)', { retry: 0 }, () => {
       customerPhone: PHONE, amountInr: 25000, purpose: 'education', expiresAt: linkExpiresAt(), createdBy: 'pa',
     }]);
     acmeLock = (await quotes.lock(ACME_LINK, { toInr: 85, fetchedAt: Date.now(), asOf: '2026-10-07', provider: 'ecb' })).lockedAt;
+  });
+
+  // Fix pack 5 T13b (P13 route pre-verify, M5): a real-money link (acme's rail
+  // is http and signed, the block approved) whose funding would be the mock is
+  // refused BEFORE a code is issued and BEFORE the code is checked: no code
+  // spent, nothing minted.
+  const realMoneyMockFunded = async () => {
+    await approveDisclosureForTest(db, 'acme');
+    linkRails.byPartner.acme = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 's' } };
+    await setRailProviderType(db, 'acme', 'http');
+  };
+
+  it('pack 5 T13b: a real-money mock-funded link: request_otp 409, no code', async () => {
+    await realMoneyMockFunded();
+    const res = await acmeCall({ action: 'request_otp' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+    expect(codeKeys()).toEqual([]);
+  });
+
+  it('pack 5 T13b: pay: 409 before verify, no mint, the code not spent; one pay.preverify-refused warn naming the link id and code only', async () => {
+    await realMoneyMockFunded();
+    await txOtp.issue(`paylink:${ACME_LINK}`, PHONE);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const res = await acmeCall({
+      otp: '654321', fundingMethod: 'bank_transfer', quoteLockedAt: acmeLock,
+      disclosureVersion: DISCLOSURE_DRAFT_VERSION, disclosureHash: await acmeHash(), accountHolder: 'Sunrise School Trust',
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: fixedReply('cannot_complete'), reason: 'not_available' });
+    expect(codeKeys()).toHaveLength(1);
+    expect(await count('SELECT count(*)::int AS n FROM transfers')).toBe(0);
+    expect(await evidenceRows()).toEqual([]);
+    expect(funding.captures).toBe(0);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('pay.preverify-refused'));
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(line).toMatchObject({ scope: 'pay.preverify-refused', linkId: ACME_LINK, code: 'mock_on_real_money' });
+    expect(Object.keys(line).sort()).toEqual(['at', 'code', 'level', 'linkId', 'msg', 'scope']);
   });
 
   it('request_otp on an unapproved block -> 409 not_available, no code sent', async () => {

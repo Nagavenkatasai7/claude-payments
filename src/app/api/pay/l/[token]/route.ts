@@ -21,6 +21,7 @@ import { payNotAvailable, payReloadRequired, transferFunded } from '@/lib/pay-no
 import { parsePayBody } from '@/lib/pay-body';
 import { readPayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
+import { payMoneyGateRefusal } from '@/lib/pay-money-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { providerLineFor } from '@/lib/legal/provider-line';
 import type { PaymentEvidence } from '@/lib/payment-evidence';
@@ -29,7 +30,7 @@ import { pokeWorker } from '@/lib/outbox';
 import { processTransferPayment } from '@/lib/pay-process';
 import { finalizeLinkPayment, resolvePayableLink } from '@/lib/payment-link-finalize';
 import { getLinkQuoteStore } from '@/lib/payment-link-quote';
-import { isLinkFundingMethod, LINK_INACTIVE_MESSAGE } from '@/lib/payment-links';
+import { isLinkFundingMethod, LINK_INACTIVE_MESSAGE, type LinkFundingMethod } from '@/lib/payment-links';
 
 // Batch B2: the customer's payment of a payment link (/pay/l/[token]).
 //
@@ -89,6 +90,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       environment: payable.transfer?.environment,
       transferType: 'b2c',
     });
+    // Fix pack 5 T13b (P13 route pre-verify, M5): pay-process steps 5 (no
+    // unsigned rail) and 7 (no mock funding on real money) answered BEFORE a
+    // code is issued or checked, so their 409 never spends the code and nothing
+    // is minted first. Only a known real-money rail makes a read; pay-process
+    // stays the backstop. A link not minted yet is judged on the b2c fields it
+    // mints with (both link funding methods are customer-paid, never pulled).
+    const moneyGateRefused = async (fundingMethod: LinkFundingMethod): Promise<boolean> => {
+      const subject = payable.transfer ?? {
+        transferType: 'b2c' as const,
+        fundingMethod,
+        partnerId: link.partnerId,
+        settlementPartnerId: undefined,
+        environment: undefined,
+        fundingProvider: undefined,
+        fundingIntentRef: undefined,
+      };
+      const code = await payMoneyGateRefusal(db, { ctx, railPartnerId: link.partnerId, subject });
+      if (!code) return false;
+      logWarn('pay.preverify-refused', 'money gate', { linkId: link.id, code });
+      return true;
+    };
 
     // ── (1) A WhatsApp code to the link's phone. Nothing is minted or charged. ──
     if (body.action === 'request_otp') {
@@ -99,6 +121,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       // Fix pack 4 (C10 c): a mandatory payment (certified owner, or a real-money
       // rail) whose provider block is not approved gets no code at all.
       if (disclosureGateAtRequest({ mandatory: ctx.mandatory, disclosure: ctx.disclosure })) return payNotAvailable();
+      if (await moneyGateRefused('bank_transfer')) return payNotAvailable();
       // On the partner's own number, its approved authentication template carries
       // the code (a link customer has often never messaged that number); without
       // one, a free-form text arrives only inside the 24-h window.
@@ -180,6 +203,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     // Review R1-P1 A1: a minted link row already funded never hears "nothing was charged".
     if (gateRefusal === 'reload_required') return payReloadRequired(!!payable.transfer && transferFunded(payable.transfer));
     if (gateRefusal === 'not_available') return payNotAvailable();
+    if (await moneyGateRefused(fundingMethod)) return payNotAvailable();
 
     const otpCheck = await otpStore.verify(otpKey(link.id), phone, body.otp);
     if (!otpCheck.ok) {

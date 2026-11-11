@@ -43,6 +43,7 @@ import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
 import { fillRecipientBookLegalName, payLegalNameOnFile, writeRecipientLegalName } from '@/lib/recipient-legal-name';
 import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
+import { payMoneyGateRefusal } from '@/lib/pay-money-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { providerLineFor } from '@/lib/legal/provider-line';
 import { alertPayEvidenceUnavailable, type PaymentEvidence } from '@/lib/payment-evidence';
@@ -336,13 +337,38 @@ export async function POST(
     // Fix pack 4 (C12): the pre-verify R18 gate context for the payment's OWNER
     // (the draft's tenant, else the transfer's). The rail is the routed partner,
     // else the owner; a draft has no environment yet (it mints live).
+    const railPartnerFor = (ownerId: PartnerId): PartnerId =>
+      otpDraft ? (otpDraft.settlementPartnerId ?? ownerId) : railPartnerOf(otpTransfer!);
     const gateContextFor = (ownerId: PartnerId): Promise<PayGateContext> =>
       readPayGateContext(getDb(), {
         ownerId,
-        railPartnerId: otpDraft ? (otpDraft.settlementPartnerId ?? ownerId) : railPartnerOf(otpTransfer!),
+        railPartnerId: railPartnerFor(ownerId),
         environment: otpDraft ? undefined : otpTransfer!.environment,
         transferType: (otpDraft ? otpDraft.transferType : otpTransfer!.transferType) ?? 'b2c',
       });
+    // Fix pack 5 T13b (P13 route pre-verify, M5): pay-process steps 5 (no
+    // unsigned rail) and 7 (no mock funding on real money) answered BEFORE a
+    // code is issued or checked, so their 409 never spends the code and nothing
+    // (evidence, legal name, originator data, a mint) is written first. Only a
+    // known real-money rail makes a read; pay-process stays the backstop. A
+    // draft is judged on its own fields (no row, no funding provider yet).
+    const moneyGateRefused = async (ctx: PayGateContext, ownerId: PartnerId): Promise<boolean> => {
+      const subject = otpDraft
+        ? {
+            transferType: otpDraft.transferType ?? 'b2c',
+            fundingMethod: otpDraft.fundingMethod,
+            partnerId: ownerId,
+            settlementPartnerId: otpDraft.settlementPartnerId,
+            environment: undefined,
+            fundingProvider: undefined,
+            fundingIntentRef: undefined,
+          }
+        : otpTransfer!;
+      const code = await payMoneyGateRefusal(getDb(), { ctx, railPartnerId: railPartnerFor(ownerId), subject });
+      if (!code) return false;
+      logWarn('pay.preverify-refused', 'money gate', otpDraft ? { draftId: transferId, code } : { transferId: payId, code });
+      return true;
+    };
 
     // (1) "request_otp": issue + deliver a code (free-form, or an auth template). No charge.
     if (body.action === 'request_otp') {
@@ -380,6 +406,7 @@ export async function POST(
       if (disclosureGateAtRequest({ mandatory: requestCtx.mandatory, disclosure: requestCtx.disclosure })) {
         return payNotAvailable();
       }
+      if (await moneyGateRefused(requestCtx, otpPartnerId)) return payNotAvailable();
       // Program-Fix 49A: the partner's name on the free-form text, on the partner's
       // OWN number only (the shared number keeps its wording). Best-effort: a read
       // error keeps the neutral default wording.
@@ -479,6 +506,10 @@ export async function POST(
     const payFunded = otpTransfer ? transferFunded(otpTransfer) : false;
     if (gateRefusal === 'reload_required') return payReloadRequired(payFunded);
     if (gateRefusal === 'not_available') return payNotAvailable();
+    // Fix pack 5 T13b (P13): the money gate, after R18 and before the
+    // account-holder rule (and T21a's originator rule) and the code check. An
+    // unresolved owner has the SAFE context: no read, pay-process decides.
+    if (payOwnerId && (await moneyGateRefused(payCtx, payOwnerId))) return payNotAvailable();
 
     // Does this request post bank details (the page's Step 1 or "Edit bank details")?
     // Pure body parsing; the fields are validated further down, before any write.
