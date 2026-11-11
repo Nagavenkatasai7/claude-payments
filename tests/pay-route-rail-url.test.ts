@@ -14,6 +14,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
@@ -149,6 +150,8 @@ beforeEach(async () => {
     senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender', // Program-Fix 14: a legal name on file
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', '15551234567');
   await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
     VALUES ('railp', 'railp', 'active', '["US"]'::jsonb, 'ours') ON CONFLICT (id) DO NOTHING`);
   rails.byPartner = {};
@@ -181,6 +184,8 @@ async function acmeOnHttp(o: { certify?: boolean } = {}): Promise<void> {
   // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
   // ORIGINATOR_INFO_MISSING hold (P22) stays out of the rail URL and live-gate cases.
   await seedOriginatorForTest(db, 'acme', '15551234567', { address: true, dob: true });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'acme', '15551234567');
 }
 
 const BAD_URLS = ['http://10.0.0.5/settle', 'https://169.254.169.254/latest', 'https://localhost/x', 'https://rail.acme.com:8443/x', '   '];
@@ -379,6 +384,8 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
       senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender',
       senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
     });
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'acme', '15551234567');
     rails.byPartner.acme = { providerType: 'simulator', credentials: { signingSecret: 's' } };
     await setRailProviderType(db, 'acme', 'simulator');
     await store.saveTransfer(makeTransfer({ id: 'lc5', partnerId: 'acme' }));

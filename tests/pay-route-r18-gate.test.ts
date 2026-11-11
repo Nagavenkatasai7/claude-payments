@@ -23,6 +23,7 @@ import { fixedReply } from '@/lib/hold-replies';
 import { DISCLOSURE_DRAFT_VERSION } from '@/lib/legal/disclosure-drafts';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { setRailProviderType } from './helpers-sanctions';
@@ -121,6 +122,8 @@ beforeEach(async () => {
   await certifyPartnerForTest(db, 'acme');
   await store.saveTransfer(makeTransfer({ id: TID }));
   await customerStore.saveCustomer(customerFor('acme'));
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'acme', PHONE);
   sendTransactionOtp.mockReset();
   sendTransactionOtp.mockResolvedValue(undefined);
   drafts.clear();
@@ -323,6 +326,8 @@ describe('not mandatory: default tenant, b2b, an unresolvable draft owner', { re
   it('default tenant, no version -> paid as before; one otp.verified row; no ack row; no snapshot', async () => {
     await store.saveTransfer(makeTransfer({ id: 'tx_def', partnerId: 'default' }));
     await customerStore.saveCustomer(customerFor('default'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'default', PHONE);
     await txOtp.issue('tx_def', PHONE);
     const res = await post('tx_def', { otp: '654321' });
     expect(res.status).toBe(200);

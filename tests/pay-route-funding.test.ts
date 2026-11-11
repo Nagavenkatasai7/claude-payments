@@ -13,6 +13,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer } from '@/lib/types';
 
 // Swallow after() (poke fast paths) — this suite is about capture ordering,
@@ -171,6 +172,8 @@ beforeEach(async () => {
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', '15551234567');
   captured.afterCallbacks.length = 0;
   captured.order.length = 0;
   observed.fundingRefAtSettle = undefined;

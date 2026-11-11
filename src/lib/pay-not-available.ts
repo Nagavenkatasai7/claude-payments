@@ -99,3 +99,17 @@ export function payOriginatorInvalid(field: 'senderAddress' | 'senderDob'): Next
   const copy = field === 'senderAddress' ? PAY_SENDER_ADDRESS_INVALID_COPY : PAY_SENDER_DOB_INVALID_COPY;
   return NextResponse.json({ ok: false, error: 'originator_invalid', fieldErrors: { [field]: copy } }, { status: 400 });
 }
+
+/**
+ * Fix pack 6 (P5): the routes' 503 for an infrastructure fault before or after the
+ * code check (byte-identical to the literal of the transfer and link routes' catch),
+ * and the E-SIGN gate's `unavailable` answer. Old JS maps reason
+ * `temporarily_unavailable` to PAY_TEMPORARY_COPY. A fresh response on each call
+ * (a Response body is read once).
+ */
+export function payTemporarilyUnavailable(): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
+    { status: 503 },
+  );
+}

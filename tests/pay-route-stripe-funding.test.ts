@@ -18,6 +18,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer } from '@/lib/types';
 
 // Swallow after() (poke fast paths) — this suite is about capture ordering,
@@ -142,6 +143,8 @@ beforeEach(async () => {
       senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender',
       senderCountry: 'US', partnerId, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
     });
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, partnerId, '15551234567');
   }
   captured.afterCallbacks.length = 0;
   sendText.mockClear();

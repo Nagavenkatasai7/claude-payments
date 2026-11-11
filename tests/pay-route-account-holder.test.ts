@@ -24,6 +24,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { okVerify, realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
@@ -211,6 +212,8 @@ async function seedOwner(fullName: string, partnerId: string) {
   // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
   // ORIGINATOR_INFO_MISSING hold (P22) stays out of the cases about the account-holder name.
   await seedOriginatorForTest(db, partnerId, SENDER, { address: true, dob: true });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, partnerId, SENDER);
 }
 
 /** OWNER: certified with an approved provider block, on an http rail, live OFAC list. */

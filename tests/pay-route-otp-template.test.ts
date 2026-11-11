@@ -13,6 +13,7 @@ import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { partners, partnerPortalSettings } from '@/db/schema';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer, Customer } from '@/lib/types';
 import { certifiedLiveControls } from './helpers-live';
 
@@ -124,6 +125,8 @@ beforeEach(async () => {
   for (const pid of ['pa', 'pb']) {
     await store.saveTransfer(transferFor(`t_${pid}`, pid));
     await customerStore.saveCustomer(customerFor(pid));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, pid, PHONE);
   }
   integrationsByPartner.clear();
   integrationsFail.clear();

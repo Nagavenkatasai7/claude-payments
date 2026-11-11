@@ -27,6 +27,12 @@ vi.mock('@/lib/daily-volume-store', () => ({ getDailyVolumeStore: () => ({}) }))
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 const finalizeDraftPayment = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/pay-finalize', () => ({ finalizeDraftPayment }));
+// consent on file (pack 6 P5): the E-SIGN gate is not under test here (this file's database
+// and customer store are stubs, so the gate's real read would throw: P24)
+vi.mock('@/lib/pay-esign-gate', async (o) => ({
+  ...(await o<typeof import('@/lib/pay-esign-gate')>()),
+  payEsignGate: async () => ({ kind: 'not_needed' }),
+}));
 
 import { POST } from '@/app/api/pay/[transferId]/route';
 

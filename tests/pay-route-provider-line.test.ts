@@ -13,6 +13,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import type { Transfer, Customer } from '@/lib/types';
 
@@ -117,6 +118,8 @@ beforeEach(async () => {
   await seedPartner(db, 'acme');
   await certifyPartnerForTest(db, 'acme');
   await customerStore.saveCustomer(customerFor('acme'));
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'acme', PHONE);
   sendTransactionOtp.mockReset();
   sendTransactionOtp.mockResolvedValue(undefined);
   drafts.clear();
@@ -147,6 +150,8 @@ describe('pay route request_otp: hooks.providerLine (pack 4 T18, C22 c)', { retr
     expect(hooks().providerLine).toBe(LINE);
     await seedPartner(db, 'plain');
     await customerStore.saveCustomer(customerFor('plain'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'plain', PHONE);
     await store.saveTransfer(makeTransfer({ id: 'tx_line_2', partnerId: 'plain' }));
     partnerStoreReads.n = 0;
     sendTransactionOtp.mockClear();
@@ -158,6 +163,8 @@ describe('pay route request_otp: hooks.providerLine (pack 4 T18, C22 c)', { retr
   it('unapproved owner (not mandatory: uncertified, mock rail) -> no providerLine key, still purpose payment', async () => {
     await seedPartner(db, 'plain');
     await customerStore.saveCustomer(customerFor('plain'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'plain', PHONE);
     await store.saveTransfer(makeTransfer({ id: TID, partnerId: 'plain' }));
     const res = await post(TID, { action: 'request_otp' });
     expect(res.status).toBe(200);
@@ -180,6 +187,8 @@ describe('pay route request_otp: hooks.providerLine (pack 4 T18, C22 c)', { retr
 
   it('default tenant -> no key', async () => {
     await customerStore.saveCustomer(customerFor('default'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'default', PHONE);
     await store.saveTransfer(makeTransfer({ id: TID, partnerId: 'default' }));
     const res = await post(TID, { action: 'request_otp' });
     expect(res.status).toBe(200);
@@ -191,6 +200,8 @@ describe('pay route request_otp: hooks.providerLine (pack 4 T18, C22 c)', { retr
     await seedPartner(db, 'plain');
     await approveDisclosureForTest(db, 'plain');
     await customerStore.saveCustomer(customerFor('plain'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'plain', PHONE);
     await store.saveTransfer(makeTransfer({ id: TID, partnerId: 'plain' }));
     fault.throwOnceFor = 'plain';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

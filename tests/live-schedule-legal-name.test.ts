@@ -24,6 +24,7 @@ import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { processTransferPayment } from '@/lib/pay-process';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { okVerify, realMoneyPayBody, testEvidence } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
@@ -135,6 +136,8 @@ async function liveOwner() {
   });
   // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b settle hold.
   await seedOriginatorForTest(db, OWNER, SENDER, { address: true, dob: true });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, OWNER, SENDER);
 }
 
 async function saveBook(legalName?: string) {

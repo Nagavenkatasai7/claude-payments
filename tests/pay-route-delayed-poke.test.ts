@@ -16,6 +16,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer } from '@/lib/types';
 
 // Unlike pay-route-bank-details (which no-ops after()), CAPTURE the
@@ -140,6 +141,8 @@ beforeEach(async () => {
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', '15551234567');
   integrations = { kyc: {}, payment: {}, whatsapp: {} }; // default: mock rail
   integrationsByPartner = {};
   captured.afterCallbacks.length = 0;

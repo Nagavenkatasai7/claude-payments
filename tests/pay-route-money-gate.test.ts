@@ -21,6 +21,7 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { fixedReply } from '@/lib/hold-replies';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest, seedRealMoneyRail } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import type { Transfer, Customer } from '@/lib/types';
@@ -158,6 +159,8 @@ beforeEach(async () => {
   await seedRealMoneyRail(db, 'acme');
   await store.saveTransfer(makeTransfer({ id: TID }));
   await customerStore.saveCustomer(customerFor('acme'));
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'acme', PHONE);
   sendTransactionOtp.mockReset();
   sendTransactionOtp.mockResolvedValue(undefined);
   drafts.clear();
@@ -252,6 +255,8 @@ describe('demo unchanged: the gate makes no read', { retry: 0 }, () => {
   it('the default tenant on the mock rail: a code is sent and the payment is paid', async () => {
     await store.saveTransfer(makeTransfer({ id: 'tx_def', partnerId: 'default' }));
     await customerStore.saveCustomer(customerFor('default'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'default', PHONE);
     const req = await post('tx_def', { action: 'request_otp' });
     expect(req.status).toBe(200);
     const res = await post('tx_def', { otp: '654321' });
