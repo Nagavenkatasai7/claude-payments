@@ -274,6 +274,15 @@ describe('Home: Ways to send', () => {
     expect(html).not.toContain('data-ways-to-send'); // agent.tools is off here, so nothing is left to list
   });
 
+  it('agent.paused on for every tenant (a global row) → the card hides WhatsApp too', async () => {
+    signIn(DEFAULT_PARTNER_ID, phone);
+    await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'global', scopeId: '', enabled: true, reason: 'ways card', updatedBy: 'root' });
+    invalidateFlagCache(db);
+    const html = await home();
+    expect(html).not.toContain('data-way="whatsapp"');
+    expect(html).not.toContain('api.whatsapp.com');
+  });
+
   it('agent.paused on for ANOTHER tenant leaves the default tenant\'s WhatsApp entry in place', async () => {
     signIn(DEFAULT_PARTNER_ID, phone);
     await createFeatureFlagRepo(db).upsert({ key: 'agent.paused', scopeType: 'partner', scopeId: 'pa', enabled: true, reason: 'ways card', updatedBy: 'root' });
