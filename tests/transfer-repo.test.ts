@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
-import { createTransferRepo, type TransferRepo } from '@/db/repos/transfer-repo';
+import { sql } from 'drizzle-orm';
+import { createTransferRepo, TransferDecryptError, type TransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo, createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -558,5 +559,45 @@ describe('senderTotalsSince (fix 16: ledger totals under one query)', () => {
     const t = await repo.senderTotalsSince('default', PHONE, DAY, MONTH);
     expect(t.todayUsdCents).toBe(37_000 + 100);
     expect(t.monthUsdCents).toBe(37_000 + 100_000 + 5_555 + 100 + 200);
+  });
+});
+
+describe('transfer-repo: getTransferForUpdate wraps only the decrypt (fix pack 5 T4, P7 G1)', () => {
+  it('a decrypt failure is rethrown as TransferDecryptError (name, ids-only message, cause kept)', async () => {
+    await repo.saveTransfer(fixture());
+    await db.execute(sql`UPDATE transfers SET payout_destination_enc = 'v2.k0.not-a-blob' WHERE id = 'tr_1'`);
+    const err = await db
+      .transaction((tx) => createTransferRepo(tx, provider).getTransferForUpdate('tr_1', { decrypt: true }))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransferDecryptError);
+    const e = err as TransferDecryptError;
+    expect(e.name).toBe('TransferDecryptError');
+    expect(e.message).toBe('transfer_decrypt_failed:tr_1');
+    expect(e.transferId).toBe('tr_1');
+    expect(e.cause).toBeInstanceOf(Error);
+    expect(e.message).not.toContain('not-a-blob');
+  });
+
+  it('without decrypt nothing is wrapped (the masked read never opens the blob)', async () => {
+    await repo.saveTransfer(fixture());
+    await db.execute(sql`UPDATE transfers SET payout_destination_enc = 'v2.k0.not-a-blob' WHERE id = 'tr_1'`);
+    const t = await db.transaction((tx) => createTransferRepo(tx, provider).getTransferForUpdate('tr_1'));
+    expect(t?.id).toBe('tr_1');
+  });
+
+  it('a query error is NOT wrapped', async () => {
+    const failing = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'select') return () => { throw new Error('Failed query: select\nparams: '); };
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const err = await createTransferRepo(failing, provider)
+      .getTransferForUpdate('tr_1', { decrypt: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(TransferDecryptError);
+    expect((err as Error).message).toMatch(/^Failed query/);
   });
 });

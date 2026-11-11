@@ -152,6 +152,22 @@ export interface InsertOnlyColumns {
   screening?: ScreeningEvidence;
 }
 
+/**
+ * Fix pack 5 T4 (P7 G1): a transfer row was read, but one of its sealed
+ * columns did not open (AES-GCM authentication / AAD failure, a malformed
+ * blob, or a key-ring problem named in the cause). Ids only in the message;
+ * the original error is the `cause`.
+ */
+export class TransferDecryptError extends Error {
+  constructor(
+    readonly transferId: string,
+    opts?: { cause?: unknown },
+  ) {
+    super(`transfer_decrypt_failed:${transferId}`, opts);
+    this.name = 'TransferDecryptError';
+  }
+}
+
 export function createTransferRepo(
   db: DbOrTx,
   provider: EncryptionKeyProvider = defaultProvider(),
@@ -237,7 +253,16 @@ export function createTransferRepo(
     ): Promise<Transfer | null> {
       const where = opts.partnerId ? and(eq(transfers.id, id), eq(transfers.partnerId, opts.partnerId)) : eq(transfers.id, id);
       const rows = await db.select().from(transfers).where(where).limit(1).for('update');
-      return rows[0] ? toDomain(rows[0], opts.decrypt ?? false) : null;
+      if (!rows[0]) return null;
+      if (!opts.decrypt) return toDomain(rows[0], false);
+      // Fix pack 5 T4 (P7 G1): ONLY the decrypting map is wrapped (never the
+      // query), so the worker can tell a sealed column that does not open from
+      // a database or pool error.
+      try {
+        return toDomain(rows[0], true);
+      } catch (err) {
+        throw new TransferDecryptError(id, { cause: err });
+      }
     },
 
     /**

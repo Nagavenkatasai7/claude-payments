@@ -12,6 +12,10 @@ import { sendGateActive } from '@/lib/kyc-gate';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
 
+// Fix pack 5 T4 (P7): defined in instruct-errors.ts (no import cycle once T5
+// makes this file throw InstructPermanentError), re-exported here.
+export { ComplianceBlockUnavailableError } from './instruct-errors';
+
 // Program-Fix 31 PR B (rail-10): the DB side of the settlement instruction's
 // additive `compliance` block. The worker calls this once per settlement.instruct
 // and spreads the result after every legacy key; the pure shape lives in

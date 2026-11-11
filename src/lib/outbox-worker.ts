@@ -1,6 +1,6 @@
 import type { Db, DbOrTx } from '@/db/client';
 import { createOutboxRepo, LEASE_MS, retryPolicy, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
-import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createTransferRepo, TransferDecryptError } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
@@ -16,6 +16,14 @@ import {
 import { signRailHeaders, UnsignedRailError } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
+import {
+  ComplianceBlockUnavailableError,
+  InstructFundingModeError,
+  InstructPermanentError,
+  InstructTravelRuleError,
+  RailRecordError,
+  railRecordAlertKey,
+} from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
 import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
@@ -364,6 +372,13 @@ export class RailInstructError extends Error {
 }
 
 const hourBucket = (): number => Math.floor(Date.now() / 3_600_000);
+
+/** Fix pack 5 T4 (P7 G1): a decrypt cause that names the key configuration heals when the env is fixed: it retries. */
+const KEY_CONFIG_CAUSE = /FIELD_ENCRYPTION_KEY|FIELD_ENCRYPTION_PREVIOUS_KEYS|FIELD_ENCRYPTION_CURRENT_KID|unknown key id/;
+function causeMessage(err: Error): string {
+  const c = err.cause;
+  return c instanceof Error ? c.message : typeof c === 'string' ? c : '';
+}
 
 /**
  * Race `work` against the row deadline. The handler already holds `signal`
@@ -770,9 +785,20 @@ async function handle(
       // Program-Fix 15 PR C: a SHORT locking read (FOR UPDATE, committed before
       // the POST below), so a concurrent sender cancel (sender-cancel.ts) is
       // either fully committed — seen here as cancelled — or not yet started.
-      const transfer = await deps.db.transaction((tx) =>
-        createTransferRepo(tx).getTransferForUpdate(transferId, { decrypt: true }),
-      );
+      // Fix pack 5 T4 (P7 G1): a POSITIVELY identified decrypt failure (a
+      // sealed column that does not open) is terminal; a key-ring
+      // misconfiguration named in its cause, and every other error (pool,
+      // driver, network), is rethrown as it is: today's charged retry.
+      let transfer: Awaited<ReturnType<ReturnType<typeof createTransferRepo>['getTransferForUpdate']>>;
+      try {
+        transfer = await deps.db.transaction((tx) =>
+          createTransferRepo(tx).getTransferForUpdate(transferId, { decrypt: true }),
+        );
+      } catch (err) {
+        if (!(err instanceof TransferDecryptError) || KEY_CONFIG_CAUSE.test(causeMessage(err))) throw err;
+        logWarn('outbox.instruct-read', err.name, { transferId });
+        throw new InstructPermanentError(transferId, 'decrypt', { cause: err });
+      }
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
       // Program-Fix 44 P2 — DEFENCE IN DEPTH behind the settlement chokepoint:
       // a sandbox (test-key) transfer is NEVER instructed to a real rail, however
@@ -1008,9 +1034,20 @@ async function handle(
       // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
       // key, so the signature below covers it. Built after the fail-closed URL
       // check; loadComplianceBlock never throws (fail open, originator null).
+      // Fix pack 5 T4 (P7 G15, builder half): the builder's throws are
+      // ids-only codes (settlement_destination_invalid:<id>,
+      // settlement_funding_invalid:<id>, http-payment-provider.ts) and a retry
+      // cannot fix the data: terminal.
+      let instruction: ReturnType<typeof buildSettlementInstruction>;
+      try {
+        instruction = buildSettlementInstruction(transfer);
+      } catch (err) {
+        logWarn('outbox.instruct-build', err instanceof Error ? err.message : 'error', { transferId });
+        throw new InstructPermanentError(transferId, 'build', { cause: err });
+      }
       const compliance = await loadComplianceBlock(deps.db, transfer);
       const rawBody = JSON.stringify({
-        ...buildSettlementInstruction(transfer),
+        ...instruction,
         partner_id: railPartnerId,
         ...(compliance ? { compliance } : {}),
       });
@@ -1773,6 +1810,57 @@ async function alertRailFailing(outbox: OutboxRepo, row: OutboxRow, err: RailIns
   }
 }
 
+// Fix pack 5 T4 (P7): the two alerts below NEVER use railFailKey: rail-health
+// and best-rate routing read railfail, and neither error is the rail failing.
+
+/**
+ * G15 transient: the compliance block could not be read. One coalesced alert
+ * per rail partner per hour, from RAILFAIL_ALERT_MIN_ATTEMPT on. Ids and
+ * counts only; best-effort (never aborts the batch).
+ */
+async function alertInstructBlock(outbox: OutboxRepo, row: OutboxRow, err: ComplianceBlockUnavailableError): Promise<void> {
+  if (row.attempts < RAILFAIL_ALERT_MIN_ATTEMPT) return;
+  try {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: settlement instructions for rail ${err.railPartnerId} are waiting: the compliance block could not be read ` +
+          `(transfer ${err.transferId}, attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}; a database or network error). ` +
+          'Nothing was sent. They keep retrying for about a day, then dead-letter (partner Replay / ops Retry). ' +
+          'Further failures on this rail this hour are coalesced into this alert.',
+      },
+      { dedupeKey: `instructblock:${err.railPartnerId}:${hourBucket()}` },
+    );
+  } catch (e) {
+    logWarn('worker.instructblock', 'instruct-block alert not enqueued', { id: row.id, error: e instanceof Error ? e.name : 'error' });
+  }
+}
+
+/**
+ * G17 (and the reverse record): a rail message could not be recorded before
+ * sending, so it was not sent. The ONE outbound railrecord text (P7); one
+ * alert per hour on every failed or dead outcome (the dedupe does the rest).
+ * Ids and counts only; best-effort.
+ */
+async function alertRailRecord(outbox: OutboxRepo, row: OutboxRow, err: RailRecordError): Promise<void> {
+  try {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: a rail message could not be recorded before sending (transfer ${err.transferId}, outbox #${row.id}, ${row.kind}, ` +
+          `attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}), so it was NOT sent. ` +
+          'It retries under its outbox policy (a dead row also raises dead:<id>); nothing is sent without its record. ' +
+          'Check the database (rail_messages). Further failures this hour are coalesced into this alert.',
+      },
+      { dedupeKey: railRecordAlertKey() },
+    );
+  } catch (e) {
+    logWarn('worker.railrecord', 'rail-record alert not enqueued', { id: row.id, error: e instanceof Error ? e.name : 'error' });
+  }
+}
+
 /** R2a: the tenant a whatsapp.text/template row sends for ('' ⇒ none / the shared number). */
 function sendTenant(row: OutboxRow): string {
   if (row.kind !== 'whatsapp.text' && row.kind !== 'whatsapp.template') return '';
@@ -1905,7 +1993,10 @@ export async function drainOnce(
         err instanceof TurnBusyError ||
         err instanceof ReportDeferredError ||
         err instanceof SettlementPausedError ||
-        err instanceof InstructNotCertifiedError
+        err instanceof InstructNotCertifiedError ||
+        // fix pack 5 (P7): G14b and G16 wait uncharged; their handler raised the alert.
+        err instanceof InstructFundingModeError ||
+        err instanceof InstructTravelRuleError
       ) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;
@@ -1960,7 +2051,10 @@ export async function drainOnce(
       // retry would have gone out on WhatsApp, and that late retry is lost. No
       // current producer enqueues 'whatsapp.template' rows; this covers legacy rows.
       const noTemplate = err instanceof TelegramNoTemplateError && row.kind === 'whatsapp.template';
-      const terminal = terminalDeadline || permanentCode !== undefined || incomplete || noTemplate;
+      // Fix pack 5 T4 (P7): an instruction that can never be built is dead at
+      // once (one dead:<id> alert; ops Retry / partner Replay still work).
+      const instructPermanent = err instanceof InstructPermanentError && row.kind === 'settlement.instruct';
+      const terminal = terminalDeadline || permanentCode !== undefined || incomplete || noTemplate || instructPermanent;
       // A RETRYABLE deadline: the abandoned handler may still be running in this
       // invocation (withRowDeadline cannot cancel it). Park the row for a full
       // LEASE_MS — past maxDuration — so no other worker runs it concurrently
@@ -1978,6 +2072,8 @@ export async function drainOnce(
       }
       await noteSendHealth(deps, row, err, status === 'dead');
       if (status === 'failed' && err instanceof RailInstructError) await alertRailFailing(outbox, row, err);
+      if (status === 'failed' && err instanceof ComplianceBlockUnavailableError) await alertInstructBlock(outbox, row, err);
+      if ((status === 'failed' || status === 'dead') && err instanceof RailRecordError) await alertRailRecord(outbox, row, err);
       if (status === 'dead') {
         result.dead++;
         // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
@@ -1993,6 +2089,8 @@ export async function drainOnce(
                 ? `DEAD (terminal: WhatsApp #${permanentCode})`
               : noTemplate
                 ? 'DEAD (terminal: Telegram chat has no templates)'
+              : instructPermanent
+                ? `DEAD (terminal: the settlement instruction cannot be built (${(err as InstructPermanentError).code}); nothing was sent. Fix the transfer's data, then Retry)`
                 : `DEAD after ${row.attempts} attempts`
           }: ${message.slice(0, 140)}${
             permanentCode !== undefined
