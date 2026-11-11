@@ -45,6 +45,8 @@ import {
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 import { logWarn } from './log';
+import { writeOriginatorInfo } from './originator-info';
+import { validateSenderAddress, validateSenderDob } from './travel-rule';
 import { liveRefusalForRail, railPartnerOf, realMoneyFor } from './live-gate';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { rescreenOnFile } from './pay-rescreen';
@@ -484,6 +486,21 @@ export async function createTransaction(
   }
   const senderName = str(sender.name);
   if (senderName && !isCleanName(senderName)) return err(400, nameError('sender.name'));
+  // Fix pack 5 (P23, T24): the sender's optional travel-rule data. Absent (or null) -> nothing;
+  // a present but invalid value is a 400 HERE, before the customer write and the claim, so a
+  // corrected retry under the same key mints normally. Never required (a Partner-API row is
+  // exempt from the collection and the hold, P22). Written only after a fresh live mint, below.
+  const originatorArg: { address?: string; dateOfBirth?: string } = {};
+  if (sender.address !== undefined && sender.address !== null) {
+    const v = typeof sender.address === 'string' ? validateSenderAddress(sender.address) : { ok: false as const };
+    if (!v.ok) return err(400, 'sender.address is invalid.');
+    originatorArg.address = v.value;
+  }
+  if (sender.date_of_birth !== undefined && sender.date_of_birth !== null) {
+    const v = typeof sender.date_of_birth === 'string' ? validateSenderDob(sender.date_of_birth, new Date()) : { ok: false as const };
+    if (!v.ok) return err(400, 'sender.date_of_birth is invalid.');
+    originatorArg.dateOfBirth = v.value;
+  }
 
   // fix 6 (ctx-01): a masked display value is never an account. Refuse at the
   // edge — BEFORE the customer write and the idempotency claim — so a corrected
@@ -642,6 +659,26 @@ export async function createTransaction(
       return err(403, 'This partner is not certified for live transfers on its settlement rail.', { code: 'partner_not_live' });
     }
     throw e;
+  }
+
+  // Fix pack 5 (P23, T24): a LIVE key's sender address / date of birth, set-if-unset on this
+  // tenant's customer, only after a FRESH mint (a replay, a 409 and every refusal above return
+  // before this line, so a request that mints nothing stores nothing). A test key's values were
+  // validated and are ignored. A failure is logged by the error NAME and does not undo the
+  // mint: the row is exempt from the hold and the worker reads the customer at instruct time.
+  if (environment === 'live' && !replayed && (originatorArg.address || originatorArg.dateOfBirth)) {
+    try {
+      await writeOriginatorInfo(deps.db, { partnerId: partner.id, phone: senderPhone }, originatorArg, {
+        source: 'partner_api',
+        transferId: transfer.id,
+        actor: keyId,
+      });
+    } catch (e) {
+      logWarn('partner-api.originator-write', e instanceof Error ? e.name : 'error', {
+        transferId: transfer.id,
+        partnerId: partner.id,
+      });
+    }
   }
 
   await appendAudit(deps, partner.id, keyId, 'transaction.create', transfer.id);

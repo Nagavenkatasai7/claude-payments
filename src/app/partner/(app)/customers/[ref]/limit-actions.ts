@@ -10,7 +10,9 @@ import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { auditSubjectId, openCustomerRef } from '@/lib/customer-ref';
-import { boundReason } from '@/lib/send-limits';
+import { boundReason, PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
+import { ownerAddressCheck } from '@/lib/originator-info';
+import { limitRaiseNeedsAddress } from '@/lib/travel-rule';
 import { partnerMayWriteOverride, validatePartnerCustomerLimit, type ValidatedPartnerCustomerLimit } from '@/lib/partner-send-limits';
 import { isPartnerNoteShaped } from '@/lib/partner-transfers';
 import { t } from '@/lib/i18n';
@@ -98,6 +100,14 @@ export async function setCustomerLimitAction(formData: FormData): Promise<Action
     );
   } catch {
     return { ok: false, error: t('partner.limits.invalid') };
+  }
+  // Fix pack 5 (P23, T24): a per-transfer cap above $2,999 needs the sender's address on file
+  // when this tenant is on a real-money rail. The clamp keeps a partner cap at or below the
+  // platform's $2,999 today, so this is defence in depth; nothing is written on a refusal.
+  const perTransferCapCents = validated.value?.perTransferCapCents;
+  if (perTransferCapCents !== undefined && perTransferCapCents > PLATFORM_SEND_LIMITS.perTransferCapCents) {
+    const check = await ownerAddressCheck(getDb(), ctx.partnerId, customer.senderPhone);
+    if (limitRaiseNeedsAddress({ perTransferCapCents, ...check })) return { ok: false, error: t('partner.limits.needsAddress') };
   }
 
   const value: SendLimitOverride | null =

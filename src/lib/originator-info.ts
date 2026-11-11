@@ -5,6 +5,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { auditSubjectId } from './customer-ref';
 import { logWarn } from './log';
 import { readPayGateContext } from './pay-gate-context';
+import { readRailProviderType, realMoneyRail } from './live-gate';
 import { originatorDataMissing, travelRuleRequirement, type TravelRuleRequirement } from './travel-rule';
 import type { CountryCode, PartnerId, Transfer } from './types';
 
@@ -196,4 +197,27 @@ export async function readOriginatorView(
     transferType: i.transferType,
   });
   return originatorViewFor(db, ctx.realMoneyForField, i.subject);
+}
+
+/**
+ * Fix pack 5 (P23, T24): what the limit-raise rule needs for a customer of
+ * `partnerId` (the customer's OWNER tenant). `ownerRealMoney`: the owner's
+ * rail is real money (realMoneyRail; a failed rail read is undefined and reads
+ * as real money). `addressOnFile`: an IS NOT NULL test of this tenant's
+ * customer row (never decrypted); a failed read counts as not on file (logged
+ * by the error NAME, partner id only). Never throws.
+ */
+export async function ownerAddressCheck(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+): Promise<{ ownerRealMoney: boolean; addressOnFile: boolean }> {
+  const ownerRealMoney = realMoneyRail({ environment: 'live', railProviderType: await readRailProviderType(db, partnerId) });
+  let addressOnFile = false;
+  try {
+    addressOnFile = (await createCustomerRepo(db, async () => null).originatorOnFile(partnerId, phone)).address;
+  } catch (err) {
+    logWarn('limits.address-check', err instanceof Error ? err.name : 'error', { partnerId });
+  }
+  return { ownerRealMoney, addressOnFile };
 }

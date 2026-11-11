@@ -106,6 +106,7 @@ export const en = {
   'partner.limits.reasonRequired': 'Give a reason for the change.',
   'partner.limits.reasonHasNumber': 'Remove phone or account numbers from the reason.',
   'partner.limits.invalid': 'Enter at least one limit in whole dollars from $1 to $10,000, and an end date in the future.',
+  'partner.limits.needsAddress': "Capture the sender's address first: limits above $2,999 need it on file.",
   'partner.home.title': 'Partner workspace',
   'partner.home.sub': 'Your SmartRemit partner workspace.',
   'partner.home.securityLink': 'Account security',

@@ -268,6 +268,12 @@ paths:
         purpose and keeps the reason. With any other purpose, purpose_detail is ignored.
         SmartRemit checks every reason, and some transactions are held for review
         (compliance_status flagged).
+
+        sender.address (one line, up to 300 characters) and sender.date_of_birth
+        (YYYY-MM-DD, 18 or older) are optional. With a live key they are stored once for
+        this sender (a later value never replaces a stored one) and sent to your own rail
+        on a real-money transfer when the travel rule asks for them. With a test key they
+        are checked and ignored.
       tags: [Transactions]
       x-smartremit-scope: transactions:write
       x-smartremit-sandbox: true
@@ -304,7 +310,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
-        '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; a client_reference that is not 1 to 64 letters, digits and . _ : / # -; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
+        '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; a client_reference that is not 1 to 64 letters, digits and . _ : / # -; an invalid sender.address or sender.date_of_birth; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
         '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active, or the partner is not yet approved for live transfers on its settlement rail (code partner_not_live), or, after the partner is approved for live transfers, the transaction is live with a USDC payout and that feature is not yet approved (code capability_off).' }
         '404': { description: The beneficiary_id was not found for this partner. }
