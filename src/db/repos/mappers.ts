@@ -208,7 +208,8 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (row.fundingRef) t.fundingRef = row.fundingRef;
   // Program-Fix 7: read-only here (transferToRow never writes them — only the
   // guarded transfer-repo funding transitions do). Absent on every legacy row.
-  if (row.fundingProvider === 'stripe') t.fundingProvider = 'stripe';
+  // Fix pack 5 T12 (P12): 'mock' is written by captureFunding (setFundingRef).
+  if (row.fundingProvider === 'stripe' || row.fundingProvider === 'mock') t.fundingProvider = row.fundingProvider;
   if (row.fundingIntentRef) t.fundingIntentRef = row.fundingIntentRef;
   if (row.fundingState) t.fundingState = row.fundingState as FundingState;
   if (row.refundRef) t.refundRef = row.refundRef;

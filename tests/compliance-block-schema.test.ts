@@ -53,7 +53,8 @@ function refFromEvidence(): ComplianceScreeningRef {
   };
 }
 
-const TOP_UNROUTED = ['version', 'originator', 'beneficiary', 'purpose', 'purpose_code', 'kyc', 'screening', 'edd_required'];
+const TOP_UNROUTED = ['version', 'originator', 'beneficiary', 'purpose', 'purpose_code', 'kyc', 'screening', 'funding', 'edd_required'];
+const FUNDING_KEYS = ['mode', 'provider', 'reference', 'status', 'amount', 'currency'];
 
 describe('compliance block schema, version 2 (fix pack 5 T5, P10)', { retry: 0 }, () => {
   it('unrouted, no evidence: version 2; exact top-level keys; screening keys [status, reasons, screened_at]', () => {
@@ -64,6 +65,7 @@ describe('compliance block schema, version 2 (fix pack 5 T5, P10)', { retry: 0 }
     expect(Object.keys(block.originator!)).toEqual(['entity_type', 'name', 'country', 'phone', 'id_type', 'id_last4']);
     expect(Object.keys(block.beneficiary)).toEqual(['entity_type', 'name', 'relationship', 'country']);
     expect(Object.keys(block.kyc)).toEqual(['status', 'tier', 'verified_at']);
+    expect(Object.keys(block.funding)).toEqual(FUNDING_KEYS);
   });
 
   it('routed: keys [version, routed, originator, ...]; originator null', () => {
@@ -72,6 +74,21 @@ describe('compliance block schema, version 2 (fix pack 5 T5, P10)', { retry: 0 }
     expect(block.routed).toBe(true);
     expect(block.originator).toBeNull();
     expect(block.version).toBe(2);
+  });
+
+  it('routed Stripe row: funding.reference is null, originator null, routed true (fix pack 5 T12, P10/P14)', () => {
+    const block = buildComplianceBlock(
+      transfer({ settlementPartnerId: 'railp', fundingProvider: 'stripe', fundingIntentRef: 'pi_routed', fundingRef: 'pi_routed', fundingState: 'succeeded' }),
+      customer(), NOW, { kycGateActive: true },
+    );
+    expect(Object.keys(block)).toEqual(['version', 'routed', ...TOP_UNROUTED.slice(1)]);
+    expect(block.routed).toBe(true);
+    expect(block.originator).toBeNull();
+    expect(Object.keys(block.funding)).toEqual(FUNDING_KEYS);
+    expect(block.funding).toEqual({
+      mode: 'partner_psp', provider: 'stripe', reference: null, status: 'succeeded', amount: 205, currency: 'USD',
+    });
+    expect(JSON.stringify(block)).not.toContain('pi_routed');
   });
 
   it('with evidence: screening keys [status, reasons, screened_at, list_source, list_version, decision, names_screened]; names_screened = { sender, recipient } integers', () => {

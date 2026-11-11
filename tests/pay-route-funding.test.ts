@@ -205,6 +205,12 @@ describe('pay route — funds capture ordering (cleared branch)', () => {
     const after = await store.getTransfer('f1');
     expect(after?.status).toBe('paid');
     expect(after?.fundingRef).toBe('fund-abc');
+    // Fix pack 5 T12 (P12): captureFunding stamps the provider class, so the
+    // funding class is read from this column, never from the ref prefix.
+    const prov = (await db.execute(
+      sql`SELECT funding_provider FROM transfers WHERE id = 'f1'`,
+    )) as unknown as { rows: Array<{ funding_provider: string | null }> };
+    expect(prov.rows[0].funding_provider).toBe('mock');
 
     // Settlement effects committed (stage-1 message + mock rail effect).
     const rows = (await db.execute(

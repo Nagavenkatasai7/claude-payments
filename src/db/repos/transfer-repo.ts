@@ -537,11 +537,19 @@ export function createTransferRepo(
      * settlement begins — a crash between capture and settle leaves an
      * awaiting_payment row WITH a fundingRef, which the reconcile sweep
      * resumes (the customer was charged; the transfer must never be lost).
+     *
+     * Fix pack 5 T12 (P12): `provider` stamps `funding_provider` with
+     * COALESCE in the SAME write-once UPDATE (an already-set provider is
+     * never overwritten), so the funding class is read from that column and
+     * never from the ref prefix. Old two-argument callers keep NULL.
      */
-    async setFundingRef(id: string, ref: string): Promise<void> {
+    async setFundingRef(id: string, ref: string, provider: FundingProviderId | null = null): Promise<void> {
       await db
         .update(transfers)
-        .set({ fundingRef: ref })
+        .set({
+          fundingRef: ref,
+          ...(provider ? { fundingProvider: sql`COALESCE(${transfers.fundingProvider}, ${provider})` } : {}),
+        })
         // Program-Fix 7: never on a row bound to a PSP intent — only a
         // VERIFIED PSP event (markFundingSucceeded) may record that charge.
         .where(and(eq(transfers.id, id), isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef)));
@@ -557,7 +565,8 @@ export function createTransferRepo(
     async bindFundingIntent(
       id: string,
       partnerId: PartnerId,
-      provider: FundingProviderId,
+      // Fix pack 5 T12 (P12): a mock intent cannot be bound.
+      provider: 'stripe',
       intentRef: string,
     ): Promise<Transfer | null> {
       const rows = await db

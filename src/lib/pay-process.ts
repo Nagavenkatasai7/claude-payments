@@ -47,7 +47,9 @@ export async function captureFunding(transfer: Transfer): Promise<void> {
   // The legacy provider is synchronous; an async (pending) shape here would be
   // a wiring error — never record it as a charge.
   if (isPendingCapture(result)) throw new Error('unexpected async capture on the legacy funding path');
-  await createTransferRepo(getDb()).setFundingRef(transfer.id, result.fundingRef);
+  // Fix pack 5 T12 (P12): getFundingProvider() is the mock (funding-provider.ts,
+  // getFundingProvider): the class comes from this column, never the ref prefix.
+  await createTransferRepo(getDb()).setFundingRef(transfer.id, result.fundingRef, 'mock');
 }
 
 /**

@@ -154,8 +154,12 @@ export interface Transfer {
  */
 export type FxRateOrigin = 'platform' | 'partner_push' | 'partner_margin' | 'b2b_lock';
 
-/** Program-Fix 7: the PSP that holds an async funding intent. */
-export type FundingProviderId = 'stripe';
+/**
+ * Program-Fix 7: the PSP that holds an async funding intent.
+ * Fix pack 5 (P12): 'mock' = captured by MockFundingProvider (demo only);
+ * written by captureFunding; never shown to a partner.
+ */
+export type FundingProviderId = 'stripe' | 'mock';
 /** Program-Fix 7: async funds-capture lifecycle (absent ⇒ legacy synchronous capture). */
 export type FundingState = 'pending' | 'succeeded' | 'failed' | 'returned';
 

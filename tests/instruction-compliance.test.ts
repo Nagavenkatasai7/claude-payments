@@ -64,6 +64,8 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
       purpose_code: null,
       kyc: { status: 'verified', tier: 'T1', verified_at: daysAgo(20) },
       screening: { status: 'cleared', reasons: [], screened_at: daysAgo(1) },
+      // Fix pack 5 T12 (P14): bank_transfer, no ref, environment absent.
+      funding: { mode: 'partner_collected', provider: 'partner', reference: null, status: 'partner_confirmed', amount: 205, currency: 'USD' },
       edd_required: false,
     });
   });

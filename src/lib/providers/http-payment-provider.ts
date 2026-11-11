@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { Store } from '../store';
 import { isMaskedDestination, usdcAddressFromDestination } from '../payout-format';
 import { isPartnerPulled } from '../funding-method';
+import { fundingClassOf } from '../funding-class';
 import type { Customer, Transfer, TransferStatus } from '../types';
 import { deriveTier } from '../tier-rules';
 import type { PartnerPaymentConfig } from '../partner-integrations';
@@ -192,6 +193,47 @@ export function buildSettlementInstruction(transfer: Transfer) {
   };
 }
 
+/** Fix pack 5 T12 (P14): how the sender's money was collected, as the rail sees it. */
+export type ComplianceFunding = {
+  mode: 'partner_collected' | 'partner_psp' | 'partner_pull' | 'demo';
+  provider: 'partner' | 'stripe' | 'mock';
+  reference: string | null;
+  status: string;
+  amount: number;
+  currency: string;
+};
+
+/**
+ * Fix pack 5 T12 (P14): the `compliance.funding` block, pure, from the row
+ * only (fundingClassOf, never the 'mockfund-' prefix). The amount is the total
+ * charge and stays on a routed row (a rail reconciles the funding leg with it).
+ * No phone, name, account digits, token or client secret.
+ */
+export function fundingBlockFor(t: Transfer): ComplianceFunding {
+  const amount = t.totalChargeSource ?? t.totalChargeUsd;
+  const currency = t.sourceCurrency ?? 'USD';
+  switch (fundingClassOf(t)) {
+    case 'sandbox':
+    case 'mock':
+      return { mode: 'demo', provider: 'mock', reference: null, status: 'captured', amount, currency };
+    case 'stripe':
+      return {
+        mode: 'partner_psp',
+        provider: 'stripe',
+        // The PSP id is the owner's account data; a routed rail never gets it,
+        // like client_reference above.
+        reference: t.settlementPartnerId ? null : (t.fundingRef ?? t.fundingIntentRef ?? null),
+        status: t.fundingState ?? 'pending',
+        amount,
+        currency,
+      };
+    case 'partner_pull':
+      return { mode: 'partner_pull', provider: 'partner', reference: null, status: 'partner_pull', amount, currency };
+    case 'partner_collected':
+      return { mode: 'partner_collected', provider: 'partner', reference: null, status: 'partner_confirmed', amount, currency };
+  }
+}
+
 /** A name-free reference to the Program-Fix 14 sanctions evidence for this transfer. */
 export interface ComplianceScreeningRef {
   listSource: string;
@@ -222,7 +264,10 @@ export interface ComplianceBlockOptions {
  *   • purpose_code is null until counsel/the partner bank supplies codes (C2);
  *   • a ROUTED row (settlementPartnerId set) goes to another tenant's rail, so
  *     the sender identity is omitted: originator null, routed true (C3);
- *   • the screening list fields come only from fix 14 evidence, never guessed.
+ *   • the screening list fields come only from fix 14 evidence, never guessed;
+ *   • funding (fix pack 5 T12, P14): mode, provider class, opaque PSP
+ *     reference, status, total charge and currency; never card or bank
+ *     digits, a token, a client secret or a name (fundingBlockFor).
  * Version 2 since fix pack 5 (one bump for the pack's new fields);
  * `names_screened` are counts by role of the parties the newest screen
  * covered, never names or hashes. There is no fail-open option: a block that
@@ -286,6 +331,7 @@ export function buildComplianceBlock(
           }
         : {}),
     },
+    funding: fundingBlockFor(transfer),
     edd_required: transfer.eddRequired ?? false,
   };
 }

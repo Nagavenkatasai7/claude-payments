@@ -1,0 +1,63 @@
+import { describe, it, expect } from 'vitest';
+import { fundingClassOf } from '@/lib/funding-class';
+import type { Transfer } from '@/lib/types';
+
+// Fix pack 5 T12 (P12): how the sender's money was collected, read from
+// transfers.funding_provider (and the intent / ref columns), never from the
+// 'mockfund-' prefix of a reference. Pure.
+
+const DAY = 24 * 60 * 60 * 1000;
+const daysAgo = (d: number) => new Date(Date.now() - d * DAY).toISOString();
+
+function transfer(over: Partial<Transfer> = {}): Transfer {
+  return {
+    id: 'fc_t1', phone: '15550000011', amountUsd: 200, feeUsd: 5, totalChargeUsd: 205,
+    fxRate: 83, amountInr: 16600, recipientName: 'Ani', recipientPhone: '919800000011',
+    payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', fundingMethod: 'bank_transfer',
+    status: 'paid', complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: daysAgo(1), paidAt: daysAgo(1), partnerId: 'acme',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 200, feeSource: 5, totalChargeSource: 205,
+    ...over,
+  } as Transfer;
+}
+
+describe('fundingClassOf (fix pack 5 T12, P12)', { retry: 0 }, () => {
+  it('sandbox first: a test row is sandbox whatever its provider or ref', () => {
+    expect(fundingClassOf(transfer({ environment: 'test' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingProvider: 'stripe', fundingIntentRef: 'pi_1' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingProvider: 'mock', fundingRef: 'mockfund-x' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingMethod: 'ach_pull', transferType: 'b2b' }))).toBe('sandbox');
+  });
+
+  it('partner-pulled before any provider: ach_pull and bank_pull are partner_pull', () => {
+    expect(fundingClassOf(transfer({ fundingMethod: 'ach_pull', transferType: 'b2b' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'bank_pull', transferType: 'b2b' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'bank_pull', fundingRef: 'mockfund-y', environment: 'live' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'ach_pull', fundingProvider: 'stripe' }))).toBe('partner_pull');
+  });
+
+  it('stripe: provider stripe, or an intent bound with the provider absent', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe', fundingIntentRef: 'pi_1', fundingState: 'pending' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingIntentRef: 'pi_2' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock', fundingIntentRef: 'pi_3' }))).toBe('stripe');
+  });
+
+  it('mock: provider mock, or provider absent with a fundingRef (an older build charged it)', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock', fundingRef: 'mockfund-fc_t1' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingRef: 'mockfund-fc_t1' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingRef: 'mockfund-fc_t1', environment: 'live' }))).toBe('mock');
+  });
+
+  it('never the prefix: stripe with a mockfund- ref is stripe; no provider with a pi_ ref is mock', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe', fundingRef: 'mockfund-x' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingRef: 'pi_123' }))).toBe('mock');
+  });
+
+  it('partner_collected: no provider, no ref, no intent (a Partner API confirm)', () => {
+    expect(fundingClassOf(transfer())).toBe('partner_collected');
+    expect(fundingClassOf(transfer({ environment: 'live', fundingMethod: 'debit_card' }))).toBe('partner_collected');
+  });
+});

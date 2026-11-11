@@ -322,6 +322,10 @@ describe('H5: funding + settlement views (existing columns only)', () => {
     expect(v.provider).toBeUndefined();
     expect(v.ref).toBe('****1234');
   });
+  it('fundingView never names the mock provider (fix pack 5 T12, P12)', () => {
+    expect(fundingView(base({ fundingProvider: 'mock', fundingRef: 'mockfund-abcd' })).provider).toBeUndefined();
+    expect(fundingView(base({ fundingProvider: 'stripe' })).provider).toBe('Stripe');
+  });
   it('fundingEventView: allowlisted type + outcome, masked event id', () => {
     const e = fundingEventView({ eventType: 'payment_intent.succeeded', outcome: 'funded', eventId: 'evt_1ABCDEF9876', receivedAt: new Date('2026-09-01T10:00:00Z') });
     expect(e.type).toBe('partner.transfers.funding.event.succeeded');

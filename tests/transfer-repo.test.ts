@@ -601,3 +601,43 @@ describe('transfer-repo: getTransferForUpdate wraps only the decrypt (fix pack 5
     expect((err as Error).message).toMatch(/^Failed query/);
   });
 });
+
+describe('transfer-repo: setFundingRef provider stamp (fix pack 5 T12, P12)', { retry: 0 }, () => {
+  async function rawFunding(id: string) {
+    const raw = await db.execute(
+      sql`SELECT funding_provider, funding_ref, funding_intent_ref FROM transfers WHERE id = ${id}`,
+    );
+    return (raw as unknown as { rows: Record<string, string | null>[] }).rows[0];
+  }
+
+  it('setFundingRef with a provider stamps funding_provider once (COALESCE), in the same write-once update', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_mock' }));
+    await repo.setFundingRef('fp_mock', 'mockfund-fp_mock', 'mock');
+    expect(await rawFunding('fp_mock')).toMatchObject({ funding_provider: 'mock', funding_ref: 'mockfund-fp_mock' });
+    // A second call with another ref and provider changes nothing (write-once).
+    await repo.setFundingRef('fp_mock', 'mockfund-other', 'stripe');
+    expect(await rawFunding('fp_mock')).toMatchObject({ funding_provider: 'mock', funding_ref: 'mockfund-fp_mock' });
+  });
+
+  it('setFundingRef with two args (old callers) leaves funding_provider NULL', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_two' }));
+    await repo.setFundingRef('fp_two', 'mockfund-fp_two');
+    expect(await rawFunding('fp_two')).toMatchObject({ funding_provider: null, funding_ref: 'mockfund-fp_two' });
+    expect((await repo.getTransfer('fp_two'))!.fundingProvider).toBeUndefined();
+  });
+
+  it('an intent-bound row is never touched', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_bound' }));
+    expect(await repo.bindFundingIntent('fp_bound', 'default', 'stripe', 'pi_bound')).not.toBeNull();
+    await repo.setFundingRef('fp_bound', 'mockfund-fp_bound', 'mock');
+    expect(await rawFunding('fp_bound')).toMatchObject({
+      funding_provider: 'stripe', funding_ref: null, funding_intent_ref: 'pi_bound',
+    });
+  });
+
+  it("the mapper reads 'mock' back", async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_read' }));
+    await repo.setFundingRef('fp_read', 'mockfund-fp_read', 'mock');
+    expect((await repo.getTransfer('fp_read'))!.fundingProvider).toBe('mock');
+  });
+});
