@@ -37,14 +37,14 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
+import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
 import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
 import { fillRecipientBookLegalName, payLegalNameOnFile, writeRecipientLegalName } from '@/lib/recipient-legal-name';
 import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { providerLineFor } from '@/lib/legal/provider-line';
-import type { PaymentEvidence } from '@/lib/payment-evidence';
+import { alertPayEvidenceUnavailable, type PaymentEvidence } from '@/lib/payment-evidence';
 import { REWARD_ENDED_MESSAGE } from '@/lib/rewards/copy';
 import { checkMintedRate, type MintedRateRefusal } from '@/lib/minted-rate';
 import { QuoteError } from '@/lib/fx';
@@ -445,7 +445,9 @@ export async function POST(
       ackVersion: body.disclosureVersion,
       postedHash: body.disclosureHash,
     });
-    if (gateRefusal === 'reload_required') return payReloadRequired();
+    // Review R1-P1 A1: an existing row already funded never hears "nothing was charged".
+    const payFunded = otpTransfer ? transferFunded(otpTransfer) : false;
+    if (gateRefusal === 'reload_required') return payReloadRequired(payFunded);
     if (gateRefusal === 'not_available') return payNotAvailable();
 
     // Fix pack 4 (C18 step 1, R03): the recipient's account-holder name, b2c only,
@@ -468,7 +470,7 @@ export async function POST(
                 : { draft: otpDraft!, ownerId: payOwnerId, newBankFields: body.fields !== null },
             );
       if (!onFile) {
-        if (payCtx.realMoneyForField && !body.present.accountHolder) return payReloadRequired();
+        if (payCtx.realMoneyForField && !body.present.accountHolder) return payReloadRequired(payFunded);
         if (body.present.accountHolder && body.accountHolder === null) return payAccountHolderInvalid(); // non-string
         const typed = body.accountHolder ?? '';
         if (typed !== '') {
@@ -675,6 +677,10 @@ export async function POST(
             wrote = await writeRecipientLegalName(getDb(), transfer, typedLegalName);
           } catch (err) {
             logWarn('pay.legal_name_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+            // Review R1-P1 A2: the code is already spent, so a lasting fault
+            // raises the same deduped payevidence alert as the evidence arms.
+            await alertPayEvidenceUnavailable(getDb(), 'transfer'); // never throws
+            pokeWorker(); // the ops.alert row is ready now
             return payApprovalNotRecorded();
           }
           if (wrote) legalRow = await store.getTransferDecrypted(payId);

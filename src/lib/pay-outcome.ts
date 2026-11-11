@@ -54,12 +54,20 @@ export const PAY_RELOAD_REQUIRED_COPY =
   'This page is out of date. Reload the page, check the details, then try again. Nothing was charged.';
 export const PAY_APPROVAL_NOT_RECORDED_COPY =
   "We couldn't record your approval, so nothing was charged. Tap Resend for a new code, then try again.";
+// Review R1-P1 A1: the same two answers on a row that is already funded (a
+// recorded capture, or a bank debit bound or settled; the body carries
+// `funded: true`). They drop the "nothing was charged" clause, as
+// PAY_TEMPORARY_COPY does.
+export const PAY_RELOAD_REQUIRED_FUNDED_COPY =
+  'This page is out of date. Reload the page, check the details, then try again.';
+export const PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY =
+  "We couldn't record your approval. Tap Resend for a new code, then try again.";
 export const PAY_ACCOUNT_HOLDER_COPY = "Enter the account holder's name as it appears at the recipient's bank.";
 
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
 export function payErrorMessage(body: unknown): string | null {
   if (!body || typeof body !== 'object') return null;
-  const b = body as { reason?: unknown; kyc_required?: unknown; quoteExpired?: unknown };
+  const b = body as { reason?: unknown; kyc_required?: unknown; quoteExpired?: unknown; funded?: unknown };
   if (b.quoteExpired === true) return PAY_QUOTE_EXPIRED_COPY;
   if (b.reason === 'rate_expired') return PAY_RATE_EXPIRED_COPY;
   if (b.reason === 'rate_expired_payment_pending') return PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY;
@@ -68,8 +76,10 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.kyc_required === true || b.reason === 'kyc_required') return PAY_KYC_REQUIRED_COPY;
   if (b.reason === 'temporarily_unavailable') return PAY_TEMPORARY_COPY;
   if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
-  if (b.reason === 'reload_required') return PAY_RELOAD_REQUIRED_COPY;
-  if (b.reason === 'approval_not_recorded') return PAY_APPROVAL_NOT_RECORDED_COPY;
+  if (b.reason === 'reload_required') return b.funded === true ? PAY_RELOAD_REQUIRED_FUNDED_COPY : PAY_RELOAD_REQUIRED_COPY;
+  if (b.reason === 'approval_not_recorded') {
+    return b.funded === true ? PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY : PAY_APPROVAL_NOT_RECORDED_COPY;
+  }
   return null;
 }
 

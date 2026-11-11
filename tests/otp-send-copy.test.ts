@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   otpRequestErrorMessage, OTP_SEND_FAILED_MESSAGE, OTP_LOCKED_MESSAGE, OTP_RETRY_MESSAGE,
   OTP_RATE_EXPIRED_MESSAGE, OTP_RATE_EXPIRED_PAYMENT_PENDING_MESSAGE, OTP_FX_UNAVAILABLE_MESSAGE,
+  OTP_NOT_AVAILABLE_MESSAGE,
 } from '@/lib/otp-send-copy';
+import { fixedReply } from '@/lib/hold-replies';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
 } from '@/lib/pay-outcome';
@@ -36,6 +38,11 @@ describe('otpRequestErrorMessage — Step 0 rate refusals', () => {
     expect(OTP_RATE_EXPIRED_MESSAGE).toBe(PAY_RATE_EXPIRED_COPY);
     expect(OTP_RATE_EXPIRED_PAYMENT_PENDING_MESSAGE).toBe(PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY);
     expect(OTP_FX_UNAVAILABLE_MESSAGE).toBe(PAY_FX_UNAVAILABLE_COPY);
+  });
+  it("not_available (review R1-P1 F2: the provider block is not approved) -> the fixed cannot_complete line, pinned equal", () => {
+    expect(OTP_NOT_AVAILABLE_MESSAGE).toBe(fixedReply('cannot_complete'));
+    expect(otpRequestErrorMessage('not_available')).toBe(OTP_NOT_AVAILABLE_MESSAGE);
+    expect(otpRequestErrorMessage('not_available')).not.toBe(OTP_RETRY_MESSAGE);
   });
   it('the module stays import-free (client components share it)', () => {
     const src = readFileSync(join(process.cwd(), 'src/lib/otp-send-copy.ts'), 'utf8');

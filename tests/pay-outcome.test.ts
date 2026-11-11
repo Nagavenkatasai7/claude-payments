@@ -3,6 +3,7 @@ import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
   PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody,
+  PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
@@ -99,6 +100,24 @@ describe('payErrorMessage: fix pack 4 copy', () => {
     for (const body of [{ reason: 'account_holder' }, { reason: 'account_holder_required' }, { fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY } }]) {
       expect(payErrorMessage(body), JSON.stringify(body)).toBeNull();
     }
+  });
+});
+
+// Review R1-P1 A1: a funded row's answers carry `funded: true`; the form then
+// shows the variant that makes no "nothing was charged" claim.
+describe('payErrorMessage: funded variants (review R1-P1 A1)', () => {
+  it('funded: true -> the funded copy, which never mentions a charge', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', funded: true })).toBe(PAY_RELOAD_REQUIRED_FUNDED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', funded: true })).toBe(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY);
+    expect(PAY_RELOAD_REQUIRED_FUNDED_COPY).toBe('This page is out of date. Reload the page, check the details, then try again.');
+    expect(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY).toBe("We couldn't record your approval. Tap Resend for a new code, then try again.");
+    expect(PAY_RELOAD_REQUIRED_FUNDED_COPY).not.toMatch(/charged/i);
+    expect(PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY).not.toMatch(/charged/i);
+  });
+
+  it('funded absent or not true -> the existing copy', () => {
+    expect(payErrorMessage({ ok: false, reason: 'reload_required', funded: 'yes' })).toBe(PAY_RELOAD_REQUIRED_COPY);
+    expect(payErrorMessage({ ok: false, reason: 'approval_not_recorded', funded: false })).toBe(PAY_APPROVAL_NOT_RECORDED_COPY);
   });
 });
 

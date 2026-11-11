@@ -16,7 +16,7 @@ import { isInServiceWindow } from '@/lib/whatsapp-errors';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp } from '@/lib/whatsapp';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payNotAvailable, payReloadRequired } from '@/lib/pay-not-available';
+import { payNotAvailable, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
 import { parsePayBody } from '@/lib/pay-body';
 import { readPayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
@@ -176,7 +176,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
       ackVersion: body.disclosureVersion,
       postedHash: body.disclosureHash,
     });
-    if (gateRefusal === 'reload_required') return payReloadRequired();
+    // Review R1-P1 A1: a minted link row already funded never hears "nothing was charged".
+    if (gateRefusal === 'reload_required') return payReloadRequired(!!payable.transfer && transferFunded(payable.transfer));
     if (gateRefusal === 'not_available') return payNotAvailable();
 
     const otpCheck = await otpStore.verify(otpKey(link.id), phone, body.otp);

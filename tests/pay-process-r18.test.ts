@@ -390,3 +390,51 @@ describe('pay-process: the evidence commit (C8)', () => {
     expect(await alerts()).toEqual([]);
   });
 });
+
+// Review R1-P1 A1: an awaiting row whose bank debit is bound (fundingIntentRef,
+// fundingState 'pending') is funded: its R18 and evidence answers keep their
+// reason and status but never say that nothing was charged.
+describe('pay-process: a funded awaiting row (review R1-P1 A1)', () => {
+  async function boundRow(id: string): Promise<Transfer> {
+    const t = makeTransfer({ id, partnerId: 'acme' });
+    await store.saveTransfer(t);
+    expect(await createTransferRepo(db).bindFundingIntent(id, 'acme', 'stripe', `pi_${id}`)).toBeTruthy();
+    const bound = await store.getTransfer(id);
+    expect(bound).toMatchObject({ fundingIntentRef: `pi_${id}`, fundingState: 'pending', status: 'awaiting_payment' });
+    return bound!;
+  }
+
+  it('R18 reload_required on a bound row -> 409 reload_required, funded, the text has no "charged"', async () => {
+    await acme({ approve: true });
+    const t = await boundRow('fa1');
+    const res = await pay(t, testEvidence({ routeId: 'fa1', ack: false }));
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ ok: false, reason: 'reload_required', funded: true });
+    expect(res.body.error).not.toMatch(/charged/i);
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('the evidence commit throws on a bound row -> 503 approval_not_recorded, funded, the text has no "charged"', async () => {
+    await acme({ approve: true });
+    const t = await boundRow('fa2');
+    await failAuditFunded();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const res = await pay(t, testEvidence({ routeId: 'fa2' }));
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ ok: false, reason: 'approval_not_recorded', funded: true });
+    expect(res.body.error).not.toMatch(/charged/i);
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  async function failAuditFunded(): Promise<void> {
+    await db.execute(sql.raw(`CREATE FUNCTION fail_pp_audit_f() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'evidence-leak %', NEW.subject_id; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_pp_audit_f BEFORE INSERT ON audit_events FOR EACH ROW
+      WHEN (NEW.action = 'otp.verified') EXECUTE FUNCTION fail_pp_audit_f()`));
+    onTestFinished(async () => {
+      await db.execute(sql.raw('DROP TRIGGER IF EXISTS fail_pp_audit_f ON audit_events'));
+      await db.execute(sql.raw('DROP FUNCTION IF EXISTS fail_pp_audit_f()'));
+    });
+  }
+});

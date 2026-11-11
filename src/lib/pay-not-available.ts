@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server';
 import { fixedReply } from './hold-replies';
-import { PAY_ACCOUNT_HOLDER_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_RELOAD_REQUIRED_COPY } from './pay-outcome';
+import {
+  PAY_ACCOUNT_HOLDER_COPY,
+  PAY_APPROVAL_NOT_RECORDED_COPY,
+  PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
+  PAY_RELOAD_REQUIRED_COPY,
+  PAY_RELOAD_REQUIRED_FUNDED_COPY,
+} from './pay-outcome';
+import type { Transfer } from './types';
 
 /**
  * Pack 3 (contract 5): the one neutral answer a pay route gives when a live
@@ -28,21 +35,43 @@ export function payNotAvailable(): NextResponse {
 }
 
 /**
+ * Review R1-P1 A1: an awaiting row that is already funded. A recorded capture
+ * (fundingRef: a crash before settleOrHold, resumed by the sweep), a bank debit
+ * bound to the row (fundingIntentRef) or a funding state of pending or
+ * succeeded. Its answers never claim that nothing was charged. A draft (no
+ * row yet) is never funded. Pure.
+ */
+export function transferFunded(t: Pick<Transfer, 'fundingRef' | 'fundingIntentRef' | 'fundingState'>): boolean {
+  return !!t.fundingRef || !!t.fundingIntentRef || t.fundingState === 'pending' || t.fundingState === 'succeeded';
+}
+
+/**
  * Fix pack 4 (C10): an R18 refusal the customer fixes by reloading: the page
  * acknowledged no (or an older) disclosure, or a block other than the one on
- * file. Nothing was charged and the code was not consumed by this answer.
+ * file. The code was not consumed by this answer. Nothing was charged unless
+ * the row is `funded` (review R1-P1 A1): then the body carries `funded: true`
+ * and the text makes no claim about a charge.
  */
-export function payReloadRequired(): NextResponse {
-  return NextResponse.json({ ok: false, reason: 'reload_required', error: PAY_RELOAD_REQUIRED_COPY }, { status: 409 });
+export function payReloadRequired(funded = false): NextResponse {
+  return NextResponse.json(
+    funded
+      ? { ok: false, reason: 'reload_required', funded: true, error: PAY_RELOAD_REQUIRED_FUNDED_COPY }
+      : { ok: false, reason: 'reload_required', error: PAY_RELOAD_REQUIRED_COPY },
+    { status: 409 },
+  );
 }
 
 /**
  * Fix pack 4 (C8): the evidence commit ("authorise, then capture") could not be
- * written, so nothing was charged. The code is spent: the customer taps Resend.
+ * written, so this attempt charged nothing. The code is spent: the customer
+ * taps Resend. On a `funded` row (review R1-P1 A1) the body carries
+ * `funded: true` and the text makes no claim about a charge.
  */
-export function payApprovalNotRecorded(): NextResponse {
+export function payApprovalNotRecorded(funded = false): NextResponse {
   return NextResponse.json(
-    { ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY },
+    funded
+      ? { ok: false, reason: 'approval_not_recorded', funded: true, error: PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY }
+      : { ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY },
     { status: 503 },
   );
 }

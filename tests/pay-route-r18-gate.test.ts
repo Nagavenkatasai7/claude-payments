@@ -315,3 +315,49 @@ describe('not mandatory: default tenant, b2b, an unresolvable draft owner', { re
     expect(JSON.stringify(warn.mock.calls)).not.toContain('postgres://');
   });
 });
+
+// Review R1-P1 A1: a re-POST on an awaiting row whose bank debit is already
+// bound (fundingIntentRef, fundingState 'pending') keeps the reason and status
+// of each answer, but never tells the customer that nothing was charged.
+describe('a funded awaiting row (review R1-P1 A1)', { retry: 0 }, () => {
+  beforeEach(async () => {
+    await approveDisclosureForTest(db, 'acme');
+    expect(await createTransferRepo(db).bindFundingIntent(TID, 'acme', 'stripe', 'pi_r18_funded')).toBeTruthy();
+    expect(await store.getTransfer(TID)).toMatchObject({ fundingIntentRef: 'pi_r18_funded', fundingState: 'pending', status: 'awaiting_payment' });
+    await txOtp.issue(TID, PHONE);
+  });
+
+  it('a stale shown hash -> 409 reload_required with funded: true, and the text has no "charged"', async () => {
+    const res = await post(TID, realMoneyPayBody({ disclosureHash: `dh1:${'0'.repeat(64)}` }));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, reason: 'reload_required', funded: true });
+    expect(body.error).not.toMatch(/charged/i);
+    expect(codeKeys()).toHaveLength(1);
+  });
+
+  it('no acknowledgement -> 409 reload_required with no "charged" claim', async () => {
+    const res = await post(TID, { otp: '654321' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).not.toMatch(/charged/i);
+  });
+
+  it('the evidence commit fails -> 503 approval_not_recorded with funded: true, and the text has no "charged"', async () => {
+    await db.execute(sql.raw(`CREATE FUNCTION fail_r18_audit_f() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'evidence-leak %', NEW.subject_id; END $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_r18_audit_f BEFORE INSERT ON audit_events FOR EACH ROW
+      WHEN (NEW.action = 'otp.verified') EXECUTE FUNCTION fail_r18_audit_f()`));
+    onTestFinished(async () => {
+      await db.execute(sql.raw('DROP TRIGGER IF EXISTS fail_r18_audit_f ON audit_events'));
+      await db.execute(sql.raw('DROP FUNCTION IF EXISTS fail_r18_audit_f()'));
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const res = await post(TID, realMoneyPayBody());
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, reason: 'approval_not_recorded', funded: true });
+    expect(body.error).not.toMatch(/charged/i);
+    expect((await store.getTransfer(TID))?.status).toBe('awaiting_payment');
+  });
+});

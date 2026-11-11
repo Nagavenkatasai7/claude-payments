@@ -9,7 +9,7 @@ import { logError, logWarn } from './log';
 import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
 import { isLiveCertified, liveRefusalForRail, realMoneyRail, settlementTargetUrl } from './live-gate';
-import { payApprovalNotRecorded, payNotAvailable, payReloadRequired } from './pay-not-available';
+import { payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from './pay-not-available';
 import { settleOrHold } from './settlement';
 import { isPartnerPulled } from './funding-method';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -285,7 +285,7 @@ export async function processTransferPayment(
       });
       return payNotAvailable();
     }
-    if (refusal === 'reload_required') return payReloadRequired();
+    if (refusal === 'reload_required') return payReloadRequired(transferFunded(transfer));
   }
 
   // ── AUTHORISE, THEN CAPTURE (fix pack 4, C8) ─────────────────────────────
@@ -299,7 +299,7 @@ export async function processTransferPayment(
       logWarn('pay.evidence-unavailable', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
       await alertPayEvidenceUnavailable(getDb(), evidence.auth?.surface ?? 'transfer'); // never throws
       pokeWorker(); // the ops.alert row is ready now
-      return payApprovalNotRecorded();
+      return payApprovalNotRecorded(transferFunded(transfer));
     }
     if (committed.kind === 'not_awaiting') {
       // Moved since the caller's read: report current truth, never charge.

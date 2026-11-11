@@ -78,13 +78,17 @@ vi.mock('@/lib/partner-integrations-store', () => ({
 }));
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 // Faults: the guarded write misses, the book fill throws, the gate context's rail read fails once.
-const fault = vi.hoisted(() => ({ guardMiss: false, bookThrows: false, railReadFailNext: false }));
+// Review R1-P1 A2: nameThrows makes the guarded legal-name write itself throw.
+const fault = vi.hoisted(() => ({ guardMiss: false, bookThrows: false, railReadFailNext: false, nameThrows: false }));
 vi.mock('@/db/repos/transfer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/transfer-repo')>();
   return {
     ...real,
     createTransferRepo: (...a: Parameters<typeof real.createTransferRepo>) => {
       const repo = real.createTransferRepo(...a);
+      if (fault.nameThrows) {
+        return { ...repo, setRecipientLegalNameIfEditable: async () => { throw new TypeError('name-write-secret'); } };
+      }
       return fault.guardMiss ? { ...repo, setRecipientLegalNameIfEditable: async () => false } : repo;
     },
   };
@@ -225,6 +229,7 @@ beforeEach(async () => {
   fault.guardMiss = false;
   fault.bookThrows = false;
   fault.railReadFailNext = false;
+  fault.nameThrows = false;
   otp.verify = vi.fn(async () => okVerify());
   db = await freshDb();
   store = createStore(fakeRedis(), db);
@@ -386,13 +391,37 @@ describe('pay route, existing transfer, real money: the typed name (C18 steps 3-
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();
     expect(await legalOf('ah-writefail')).toBeUndefined();
-    expect(await outboxKinds()).toEqual([]);
+    // Review R1-P1 A2: the one deduped payevidence ops alert, nothing else.
+    expect(await outboxKinds()).toEqual(['ops.alert']);
     const lines = consoleLines.slice(before);
     expect(lines.filter((l) => l.includes('pay.legal_name_write'))).toHaveLength(1);
     for (const l of lines) {
       expect(l).not.toContain('ah-trigger-secret');
       expect(l).not.toContain('pay.route');
     }
+  });
+
+  it('the repo write throws (review R1-P1 A2) -> 503 approval_not_recorded and ONE payevidence ops alert; the error name only is logged', async () => {
+    await liveOwner();
+    await store.saveTransfer(makeTransfer({ id: 'ah-namethrow' }));
+    fault.nameThrows = true;
+    const before = consoleLines.length;
+    const res = await post('ah-namethrow', realMoneyPayBody({ accountHolder: TYPED }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
+    expect(otp.verify).toHaveBeenCalledOnce(); // the code was spent: the alert makes the fault visible
+    const r = (await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ kind: string; dedupe_key: string | null }>;
+    };
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].kind).toBe('ops.alert');
+    expect(r.rows[0].dedupe_key).toBe(`payevidence:${new Date().toISOString().slice(0, 13)}`);
+    const t = await store.getTransfer('ah-namethrow');
+    expect(t?.status).toBe('awaiting_payment');
+    expect(t?.fundingRef).toBeFalsy();
+    const lines = consoleLines.slice(before);
+    expect(lines.filter((l) => l.includes('pay.legal_name_write'))).toHaveLength(1);
+    for (const l of lines) expect(l).not.toContain('name-write-secret');
   });
 
   it('a Partner-API-minted real-money b2c row: no accountHolder key -> pays, no legal_name_set row, settles (exempt)', async () => {

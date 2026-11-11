@@ -67,8 +67,8 @@ const HELPERS: Record<string, string[]> = {
   // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
   'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
   // Fix pack 4 T8 (C8, critic M9): the payevidence:<hour> alert when a pay-page
-  // payment's evidence could not be written; its callers (pay-process.ts and, in
-  // T10, the B2B pay route) poke.
+  // payment's evidence could not be written; its callers (pay-process.ts, the
+  // B2B pay route and, from review R1-P1 A2, the transfer pay route) poke.
   'src/lib/payment-evidence.ts': ['alertPayEvidenceUnavailable'],
   // Release safety part D: the deploy error watch runs only inside /api/worker.
   'src/lib/deploy-error-watch.ts': ['deployErrorWatch'],
