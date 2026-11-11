@@ -100,6 +100,8 @@ import {
   alertStuckHeld,
   heldStuckDedupeKey,
   instructHeldOnPurpose,
+  instructNotPaidMessage,
+  instructPayability,
   stuckHeldMessage,
   travelRuleBlockIncomplete,
   travelRuleBlocksInstruct,
@@ -108,6 +110,48 @@ import {
 } from '@/lib/instruct-gates';
 
 const provider = new EnvKeyProvider(Buffer.alloc(32, 7));
+
+// Truth check F10 (F1): the G3/G4 rule as ONE pure helper, used at G3/G4 and
+// again under the row lock at the gate `record` (so the two can never drift).
+describe('instructPayability (G3/G4, and the re-check at record)', () => {
+  const STATUSES = ['awaiting_payment', 'paid', 'in_review', 'delivered', 'cancelled', 'blocked'] as const;
+  const REFUNDS = [undefined, 'none', 'requested', 'pending', 'completed', 'failed'] as const;
+  const COMPLIANCE = ['cleared', 'flagged', 'blocked'] as const;
+  function expected(status: string, refund: string, compliance: string): 'ok' | 'skip' | 'retry' {
+    if (status === 'cancelled' || status === 'delivered' || compliance === 'blocked' || refund === 'pending' || refund === 'completed') return 'skip';
+    if (status !== 'paid' || refund !== 'none') return 'retry';
+    return 'ok';
+  }
+  it('a gone row is not payable (skip)', () => {
+    expect(instructPayability(null)).toBe('skip');
+  });
+  it('the table over status x refund status x compliance status', () => {
+    let n = 0;
+    for (const status of STATUSES) {
+      for (const refundStatus of REFUNDS) {
+        for (const complianceStatus of COMPLIANCE) {
+          const row = { status, refundStatus, complianceStatus } as unknown as Pick<Transfer, 'status' | 'refundStatus' | 'complianceStatus'>;
+          expect(instructPayability(row), `${status}/${refundStatus}/${complianceStatus}`).toBe(expected(status, refundStatus ?? 'none', complianceStatus));
+          n++;
+        }
+      }
+    }
+    expect(n).toBe(STATUSES.length * REFUNDS.length * COMPLIANCE.length);
+    // Spot pins.
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared' } as Transfer)).toBe('ok');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared', refundStatus: 'pending' } as Transfer)).toBe('skip');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared', refundStatus: 'requested' } as Transfer)).toBe('retry');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'blocked', refundStatus: 'requested' } as Transfer)).toBe('skip');
+  });
+  it('the G4 error text, byte for byte', () => {
+    expect(instructNotPaidMessage({ status: 'paid', refundStatus: 'requested' } as Transfer)).toBe(
+      'Settlement instruction held: transfer is paid with refund requested — retrying',
+    );
+    expect(instructNotPaidMessage({ status: 'in_review' } as Transfer)).toBe(
+      'Settlement instruction held: transfer is in_review with refund none — retrying',
+    );
+  });
+});
 const ID = 'ig_t1';
 const REASONS: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
 
@@ -399,11 +443,11 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
       `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (${r}), so it is not re-instructed. `;
     expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', false)).toBe(
       head('fundmode') +
-        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
     );
     expect(stuckHeldMessage(ID, 'travelrule', 'partner_collected', false)).toBe(
       head('travelrule') +
-        "Stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+        "Stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
     );
     expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', true)).toBe(
       head('fundmode') +

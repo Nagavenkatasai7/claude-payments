@@ -81,6 +81,31 @@ function handlerSlice(): string {
   return src.slice(start, end);
 }
 
+
+/**
+ * The real db, except that every insert into rail_messages throws (a NeonDbError).
+ * Truth check F10 (F1): the gate `record` writes inside a transaction, so the
+ * transaction handle is wrapped the same way.
+ */
+function railRecordDown<T extends object>(target: T): T {
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      if (prop === 'insert') {
+        return (table: unknown) => {
+          if (table === railMessages) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
+          return (t as unknown as Db).insert(table as never);
+        };
+      }
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => unknown, ...rest: unknown[]) =>
+          (t as unknown as { transaction: (f: (tx: object) => unknown, ...r: unknown[]) => unknown }).transaction((tx) => fn(railRecordDown(tx)), ...rest);
+      }
+      const v = Reflect.get(t, prop, receiver);
+      return typeof v === 'function' ? v.bind(t) : v;
+    },
+  });
+}
+
 describe('INSTRUCT_GATE_ORDER (P8)', () => {
   it('is frozen, unique and exactly the P8 list', () => {
     expect(Object.isFrozen(INSTRUCT_GATE_ORDER)).toBe(true);
@@ -395,18 +420,7 @@ describe('adjacent pairs: a row that fails both steps gets the earlier outcome',
     await seedLiveEvidence(db, t, { listFitness: 'live' });
     await db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
     await enqueueInstruct();
-    const recordDown = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === 'insert') {
-          return (table: unknown) => {
-            if (table === railMessages) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
-            return target.insert(table as never);
-          };
-        }
-        const v = Reflect.get(target, prop, receiver);
-        return typeof v === 'function' ? v.bind(target) : v;
-      },
-    });
+    const recordDown = railRecordDown(db);
     await drainOnce({ ...deps(), db: recordDown }, 'w1');
     expectDeferred(await rowState(), INSTRUCT_TRAVEL_RULE_DEFER_SEC);
     const n = (await db.execute(sql`SELECT count(*)::int AS n FROM rail_messages`)) as unknown as { rows: Array<{ n: number }> };
@@ -420,18 +434,7 @@ describe('adjacent pairs: a row that fails both steps gets the earlier outcome',
     fetchFn.mockResolvedValue(new Response('down', { status: 500 }));
     await enqueueInstruct();
     await db.execute(sql`UPDATE outbox SET attempts = 2 WHERE dedupe_key = ${`instruct:${ID}`}`); // attempt 3: where railfail: would fire
-    const recordDown = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop === 'insert') {
-          return (table: unknown) => {
-            if (table === railMessages) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
-            return target.insert(table as never);
-          };
-        }
-        const v = Reflect.get(target, prop, receiver);
-        return typeof v === 'function' ? v.bind(target) : v;
-      },
-    });
+    const recordDown = railRecordDown(db);
     expect((await drainOnce({ ...deps(), db: recordDown }, 'w1')).failed).toBe(1);
     expect(await rowState()).toMatchObject({ status: 'failed', attempts: 3, last_error: `rail_record_failed:${ID}` });
     expect(fetchFn).not.toHaveBeenCalled();

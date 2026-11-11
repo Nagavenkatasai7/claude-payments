@@ -1,5 +1,5 @@
 import type { Db, DbOrTx } from '@/db/client';
-import { createOutboxRepo, LEASE_MS, retryPolicy, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, LEASE_MS, retryPolicy, ROW_DEADLINE_ERROR_PREFIX, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createTransferRepo, TransferDecryptError } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -23,12 +23,20 @@ import {
   InstructPermanentError,
   InstructTravelRuleError,
   RailRecordError,
+  RefundWaitsForInstructError,
   isKeyConfigError,
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
 import { liveRefusalForRail, realMoneyRail, settlementTargetUrl } from '@/lib/live-gate';
-import { fundingGateRefusal, travelRuleBlockIncomplete, travelRuleBlocksInstruct, travelRuleFor } from '@/lib/instruct-gates';
-import { fundingClassOf, heldBeforeFirstSettle, isRoutedRow, settleReachedLiveRail } from '@/lib/funding-class';
+import {
+  fundingGateRefusal,
+  instructNotPaidMessage,
+  instructPayability,
+  travelRuleBlockIncomplete,
+  travelRuleBlocksInstruct,
+  travelRuleFor,
+} from '@/lib/instruct-gates';
+import { fundingClassOf, heldBeforeFirstSettle, instructSentWithoutRecord, isRoutedRow, settleReachedLiveRail } from '@/lib/funding-class';
 import { instructLivegateMessage } from '@/lib/livegate-alerts';
 import { instructGateRefuses, listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
@@ -231,7 +239,7 @@ function newRowSignal(rowDeadlineMs: number): RowSignal {
 
 export class RowDeadlineError extends Error {
   constructor(ms: number) {
-    super(`outbox row deadline exceeded (${ms}ms)`);
+    super(`${ROW_DEADLINE_ERROR_PREFIX} (${ms}ms)`); // truth check F10: the prefix hasRunningInstruction reads
     this.name = 'RowDeadlineError';
   }
 }
@@ -828,14 +836,11 @@ async function handle(
       //  • pack 2 review R1 (E2): a SANCTIONS-BLOCKED row (a paid row whose
       //    re-screen matched: list-hold-rescreen healPaidRowScreen) is never
       //    paid out, on any rail ⇒ skip; its paidmatch:<id> alert owns it.
+      // Truth check F10 (F1): the rule is instructPayability (instruct-gates.ts),
+      // applied again under the row lock at the gate `record` below.
       const refund = transfer.refundStatus ?? 'none';
-      if (
-        transfer.status === 'cancelled' ||
-        transfer.status === 'delivered' ||
-        transfer.complianceStatus === 'blocked' ||
-        refund === 'pending' ||
-        refund === 'completed'
-      ) {
+      const payability = instructPayability(transfer);
+      if (payability === 'skip') {
         logWarn('outbox.instruct-skipped', 'transfer not payable; instruction not sent', {
           transferId,
           status: transfer.status,
@@ -845,10 +850,8 @@ async function handle(
         return;
       }
       // gate: not_paid (G4)
-      if (transfer.status !== 'paid' || refund !== 'none') {
-        throw new Error(
-          `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
-        );
+      if (payability === 'retry') {
+        throw new Error(instructNotPaidMessage(transfer));
       }
       // gate: funding_state (G5)
       // Program-Fix 7 (review M-1b): the sender's ASYNC debit must still be
@@ -1052,9 +1055,11 @@ async function handle(
       // whose exit text depends on the funding class (final check F8). A row
       // held before its first instruction has no settle record (the record is
       // written at G17), so a refund of a partner-collected one sends no
-      // reverse (refundheld:<id>); one held again on the stuck-paid
-      // re-instruct after an earlier send has a record and gets the signed
-      // reverse (final check R3, F8-D1), so the text hedges.
+      // reverse (refundheld:<id>, or refundunrecorded:<id> when an older build
+      // sent an instruction without a record: truth check F10, F2); one held
+      // again on the stuck-paid re-instruct after a recorded send has a record
+      // and gets the signed reverse (final check R3, F8-D1), so the text says
+      // what SmartRemit recorded, not what the rail did.
       // A failed owner read throws (charged retry). Ids, a class and a mode only.
       if (realMoney) {
         const f = await fundingGateRefusal(deps.db, transfer);
@@ -1086,8 +1091,9 @@ async function handle(
                 // Final check F8 (X1, U1): a partner-collected row held here is
                 // usually not yet instructed. Not routed: Issue refund is
                 // admitted; with no settle record it sends no reverse and leaves
-                // the refund pending (refundheld:<id>), with an earlier live
-                // send it sends the signed reverse (final check R3, F8-D1).
+                // the refund pending (refundheld:<id> or refundunrecorded:<id>,
+                // truth check F10), with a recorded live send it sends the
+                // signed reverse (final check R3, F8-D1).
                 // Routed: Issue refund refuses it (RF1), so it is not offered.
                 // Every other class keeps the earlier text.
                 (fundingClassOf(transfer) === 'stripe'
@@ -1099,7 +1105,7 @@ async function handle(
                       "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner."
                     : fundingClassOf(transfer) === 'partner_collected'
                       ? "It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card: the transfer then goes out on its next attempt. " +
-                        "Or stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if an earlier instruction reached the rail after it went live, the signed reverse goes to the rail."
+                        "Or stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail."
                       : "It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, " +
                         "or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer)."),
             },
@@ -1138,9 +1144,9 @@ async function handle(
       // tenant's rail, C3), is never sent: ONE travelrule:<id> alert, deferred
       // UNCHARGED 900 s (never dead-lettered); the exit named in the alert
       // depends on the funding class (final check F8: Issue refund, which for a
-      // partner-collected row the rail never got sends no reverse and leaves
-      // the refund pending, and for one an earlier live send reached sends the
-      // signed reverse (final check R3); the Stripe dashboard for a card
+      // partner-collected row with no settle record sends no reverse and leaves
+      // the refund pending, and for one with a recorded live send sends the
+      // signed reverse (final check R3, truth check F10); the Stripe dashboard for a card
       // payment; a person for a routed partner-collected row). Then
       // the defence check (a race between that read and the build): a
       // non-exempt individual sender whose built block lacks a field the band
@@ -1161,15 +1167,16 @@ async function handle(
               // row's funding class (as the fundmode:<id> text above): a card
               // payment cannot be refunded from SmartRemit yet (GE1); a routed
               // partner-collected row cannot be refunded here (RF1); an unrouted
-              // one the rail never got gets no reverse, its refund stays pending
-              // (refundheld:<id>); after an earlier live send, the reverse.
+              // one with no settle record gets no reverse, its refund stays
+              // pending (refundheld:<id> or refundunrecorded:<id>, truth check
+              // F10); after a recorded live send, the reverse.
               (fundingClassOf(transfer) === 'stripe'
                 ? "Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer). " +
                   'The ledger cannot record that refund yet, so the transfer then stays paid and held here.'
                 : fundingClassOf(transfer) === 'partner_collected' && isRoutedRow(transfer)
                   ? "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner."
                   : fundingClassOf(transfer) === 'partner_collected'
-                    ? "Stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if an earlier instruction reached the rail after it went live, the signed reverse goes to the rail."
+                    ? "Stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail."
                     : "Return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer)."),
           },
           { dedupeKey: `travelrule:${transferId}` },
@@ -1179,11 +1186,24 @@ async function handle(
       // gate: record (G17)
       // Fix pack 5 T9 (P4, P8 G17): the body and the signed headers are computed
       // ONCE; the sealed rail_messages row (direction 1, kind 'settle') is
-      // appended and AWAITED outside any transaction; only then does the POST
-      // below send those same constants. A failed append is a RailRecordError
-      // (not a RailInstructError: no railfail, no rail-health effect); drainOnce
-      // raises railrecord:<hour>. No time cap: a hung insert ends in the row
-      // deadline, which is retryable (nothing was sent).
+      // appended and AWAITED; only after its transaction commits does the POST
+      // below send those same constants, outside any transaction. A failed
+      // append is a RailRecordError (not a RailInstructError: no railfail, no
+      // rail-health effect); drainOnce raises railrecord:<hour>. No time cap: a
+      // hung insert ends in the row deadline, which is retryable (nothing was
+      // sent).
+      // Truth check F10 (F1): the steps since G1 are slow, and the G1 read
+      // committed at once, so a cancel or a refund may have landed since. The
+      // record is written in ONE short transaction that first re-reads the row
+      // FOR UPDATE (no decrypt) and applies the G3/G4 rule again
+      // (instructPayability): not payable (gone, cancelled, delivered, blocked,
+      // refund pending or completed) => no record, nothing sent, done with a
+      // log; not paid or a refund requested / failed => no record, nothing
+      // sent, the G4 error (charged retry). Every cancel and every refund move
+      // UPDATEs the transfers row, so it serializes with this transaction:
+      // either the record commits first (a later refund finds it and sends the
+      // reverse), or the refund is seen here and nothing is recorded or sent.
+      // A driver error on the re-read is rethrown as it is (charged retry).
       const rawBody = JSON.stringify({
         ...instruction,
         partner_id: railPartnerId,
@@ -1197,14 +1217,28 @@ async function handle(
         throw new RailInstructError(railPartnerId, e); // P5: a sign-time throw is a rail configuration failure
       }
       const headers = { 'Content-Type': 'application/json', ...signed };
-      const recorded = await recordRailOut(deps.db, {
-        partnerId: transfer.partnerId,
-        railPartnerId,
-        transferId,
-        kind: 'settle',
-        body: rawBody,
-        signatureHeader: signed['x-smartremit-signature'] ?? null,
+      const recorded = await deps.db.transaction(async (tx) => {
+        const fresh = await createTransferRepo(tx).getTransferForUpdate(transferId);
+        const now = instructPayability(fresh);
+        if (now === 'skip') {
+          logWarn('outbox.instruct-skipped', 'transfer no longer payable at record; instruction not sent', {
+            transferId,
+            status: fresh?.status ?? 'gone',
+            refundStatus: fresh?.refundStatus ?? 'none',
+          });
+          return null;
+        }
+        if (now === 'retry') throw new Error(instructNotPaidMessage(fresh!));
+        return recordRailOut(tx, {
+          partnerId: transfer.partnerId,
+          railPartnerId,
+          transferId,
+          kind: 'settle',
+          body: rawBody,
+          signatureHeader: signed['x-smartremit-signature'] ?? null,
+        });
       });
+      if (recorded === null) return;
       // gate: send (G18)
       // M3-15b: one best-effort, time-capped partner_webhook_deliveries row per POST (no URL/body;
       // fix pack 5 T9: the body's hash, the same as its rail record's);
@@ -1343,32 +1377,54 @@ async function handle(
             );
             return;
           }
-          // Final check R3 (F8-D2): an instruct that is RUNNING may have read
-          // the row before this refund went pending and be about to record and
-          // POST the payout. Decide nothing while one runs: throw (default
-          // policy: retry); the refund stays pending. Read BEFORE the settle
-          // record: once no instruct runs, any later one reads the pending
-          // refund and skips, and one that finished has its record written.
+          // Final check R3 (F8-D2), truth check F10 (F1): an instruct that RUNS,
+          // or that was abandoned at its row deadline and is still parked
+          // (hasRunningInstruction), may have written its settle record and be
+          // about to POST it. Decide nothing while one does: wait UNCHARGED
+          // (RefundWaitsForInstructError, 60 s, no alert); the refund stays
+          // pending. Every other instruct re-reads the row under its lock at the
+          // gate `record` and, seeing the pending refund, records and sends
+          // nothing; one that finished has its record written. So "no settle
+          // record" here means that no handler of this build can still POST.
           if (await createOutboxRepo(deps.db).hasRunningInstruction(transferId)) {
-            throw new Error('refund_waits_for_running_instruct');
+            throw new RefundWaitsForInstructError();
           }
           const reachedLiveRail = await settleReachedLiveRail(deps.db, transfer);
           if (!reachedLiveRail && (await heldBeforeFirstSettle(deps.db, transfer))) {
-            // Final check F8 (X1, U1): paid on the live rail and HELD by a gate
-            // (funding_mode, travel_rule) before its first instruction: no
-            // settle record, but the partner holds the sender's money. Exactly
-            // as RF1 above: no reverse (the rail never got an instruction), no
-            // record, no customer message; the refund stays pending (so the
-            // instruct skips the row as not_payable) and ONE refundheld:<id>
-            // alert asks a person to arrange the return. A failed read throws.
-            logWarn('outbox.refund-held', 'partner-collected refund of a row never instructed; no reverse sent', { transferId });
+            // Final check F8 (X1, U1): paid on the live rail with NO settle
+            // record (usually held by a gate, funding_mode or travel_rule,
+            // before its first instruction), but the partner holds the sender's
+            // money. Exactly as RF1 above: no reverse, no record, no customer
+            // message; the refund stays pending (so every later instruct skips
+            // the row as not payable). A failed read throws.
+            // Truth check F10 (F2): "no settle record" is not "never sent": a
+            // build older than this pack (an Instant Rollback past PR5, or a rail
+            // certified before it deployed) POSTs with no rail record. Its
+            // provider reference or delivery row shows it: then ONE
+            // refundunrecorded:<id> (the rail may still pay it out); otherwise
+            // ONE refundheld:<id>.
+            if (await instructSentWithoutRecord(deps.db, transfer)) {
+              logWarn('outbox.refund-unrecorded', 'partner-collected refund of a row instructed without a rail record; no reverse sent', { transferId });
+              await createOutboxRepo(deps.db).enqueue(
+                'ops.alert',
+                {
+                  message:
+                    `⚠️ SmartRemit ops: the refund of transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) was NOT sent: ` +
+                    "SmartRemit has no rail record of a payout instruction for this transfer, but its delivery log or its provider reference shows that an instruction was sent to the partner's rail (by a build that keeps no rail record), so the rail may still pay it out. " +
+                    "No reverse was sent, the refund stays pending and the customer was not told; ask the partner whether the transfer was paid out, and arrange with them to stop the payout or to return the sender's money.",
+                },
+                { dedupeKey: `refundunrecorded:${transferId}` },
+              );
+              return;
+            }
+            logWarn('outbox.refund-held', 'partner-collected refund with no record or evidence of an instruction; no reverse sent', { transferId });
             await createOutboxRepo(deps.db).enqueue(
               'ops.alert',
               {
                 message:
                   `⚠️ SmartRemit ops: the refund of transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) was NOT sent: ` +
-                  "the partner collected the money, but no payout instruction for this transfer went to the partner's rail, so there is nothing to reverse there. " +
-                  "The refund stays pending, the transfer is not paid out, and the customer was not told; a person must arrange the return of the sender's money with the partner.",
+                  'the partner collected the money, and SmartRemit has no rail record, delivery log or provider reference of a payout instruction for this transfer, so there is nothing to reverse on the rail. ' +
+                  "The refund stays pending, SmartRemit sends no payout instruction for it, and the customer was not told; a person must arrange the return of the sender's money with the partner.",
               },
               { dedupeKey: `refundheld:${transferId}` },
             );
@@ -2321,7 +2377,9 @@ export async function drainOnce(
         err instanceof InstructNotCertifiedError ||
         // fix pack 5 (P7): G14b and G16 wait uncharged; their handler raised the alert.
         err instanceof InstructFundingModeError ||
-        err instanceof InstructTravelRuleError
+        err instanceof InstructTravelRuleError ||
+        // truth check F10 (F1): a refund waits for a running instruct, no alert.
+        err instanceof RefundWaitsForInstructError
       ) {
         if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
           result.released++;

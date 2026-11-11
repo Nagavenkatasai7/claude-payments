@@ -8,6 +8,8 @@ import {
   InstructPermanentError,
   InstructTravelRuleError,
   RailRecordError,
+  REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC,
+  RefundWaitsForInstructError,
   isKeyConfigError,
   isTransientInstructError,
   railRecordAlertKey,
@@ -169,6 +171,13 @@ describe('the instruct error classes (P7)', () => {
     expect(r.message).toBe('rail_record_failed:t1');
     expect(r.transferId).toBe('t1');
     expect(r instanceof RailInstructError).toBe(false);
+
+    // Truth check F10 (F1): a refund waits for a running instruct, uncharged, 60 s.
+    expect(REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC).toBe(60);
+    const w = new RefundWaitsForInstructError();
+    expect(w.name).toBe('RefundWaitsForInstructError');
+    expect(w.message).toBe('refund_waits_for_running_instruct');
+    expect(w.delaySec).toBe(60);
 
     expect(INSTRUCT_FUNDING_MODE_DEFER_SEC).toBe(900);
     const f = new InstructFundingModeError();

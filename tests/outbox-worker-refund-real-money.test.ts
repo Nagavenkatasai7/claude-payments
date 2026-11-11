@@ -7,6 +7,7 @@ import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail, seedOr
 import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { railBodySha256 } from '@/db/repos/rail-message-repo';
+import { partnerWebhookDeliveries } from '@/db/schema';
 import { issueRefund, approveRefund } from '@/lib/dashboard-ops';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { ctx } from '@/lib/crypto-context';
@@ -27,7 +28,9 @@ vi.mock('@/lib/log', async (orig) => {
   return { ...real, logWarn: (...a: Parameters<typeof real.logWarn>) => { logWarnSpy(...a); return real.logWarn(...a); } };
 });
 
-const railFault = vi.hoisted(() => ({ throws: false, calls: 0 }));
+// Truth check F10 (F1): `flip` runs ONCE inside the next rail integrations read (the instruct's
+// G8, after G4 and before the gate `record`), to change the transfer in the database there.
+const railFault = vi.hoisted(() => ({ throws: false, calls: 0, flip: null as null | (() => Promise<void>) }));
 vi.mock('@/db/repos/integrations-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/integrations-repo')>();
   return {
@@ -38,6 +41,11 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
         ...repo,
         getIntegrations: async (...g: Parameters<typeof repo.getIntegrations>) => {
           railFault.calls++;
+          if (railFault.flip) {
+            const f = railFault.flip;
+            railFault.flip = null;
+            await f();
+          }
           if (railFault.throws) throw Object.assign(new Error('rail read down'), { name: 'NeonDbError' });
           return repo.getIntegrations(...g);
         },
@@ -133,6 +141,7 @@ const ok = (providerRef = 'rev-1') => new Response(JSON.stringify({ providerRef 
 beforeEach(async () => {
   railFault.throws = false;
   railFault.calls = 0;
+  railFault.flip = null;
   rowsAtFetch = [];
   logWarnSpy.mockClear();
   providerRefund.mockClear();
@@ -413,6 +422,17 @@ describe('funding.refund: a partner-collected reverse only for a settle sent to 
     await expectClosedNoSettle();
   });
 
+  // Truth check F10 (F2): the evidence is read only for a row held after the go-live; a
+  // demo-era row has a simulator provider reference and delivery rows and still closes.
+  it('a demo-era row WITH a provider reference and a delivery row: still nofunds-<id> + refundnosettle:<id>', async () => {
+    await store.saveTransfer(transferFixture());
+    await db.execute(sql`UPDATE transfers SET payment_provider_ref = 'rail-sim-1' WHERE id = ${ID}`);
+    await db.insert(partnerWebhookDeliveries).values({ partnerId: 'acme', kind: 'settlement.instruct', subjectId: ID, outboxId: 1, attempt: 1, outcome: 'ok' });
+    await enqueueRefund();
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    await expectClosedNoSettle();
+  });
+
   it('issueRefund refuses the demo-era row (paid before the go-live, no settle record after it), as before pack 5, and enqueues nothing', async () => {
     // transferFixture's paidAt (50 minutes ago) is older than certifyPartnerForTest's go-live (a minute ago).
     await store.saveTransfer(transferFixture({ refundStatus: 'none' }));
@@ -504,7 +524,10 @@ describe('issueRefund: a routed partner-collected row is refused (review round 1
 describe('funding.refund: a partner-collected row held before its first instruction (final check F8, X1 U1)', { retry: 0 }, () => {
   const HID = 'rm_h1';
   const heldText = (id: string, owner: string, rail: string) =>
-    `⚠️ SmartRemit ops: the refund of transfer ${id} (partner ${owner}, rail ${rail}) was NOT sent: the partner collected the money, but no payout instruction for this transfer went to the partner's rail, so there is nothing to reverse there. The refund stays pending, the transfer is not paid out, and the customer was not told; a person must arrange the return of the sender's money with the partner.`;
+    `⚠️ SmartRemit ops: the refund of transfer ${id} (partner ${owner}, rail ${rail}) was NOT sent: the partner collected the money, and SmartRemit has no rail record, delivery log or provider reference of a payout instruction for this transfer, so there is nothing to reverse on the rail. The refund stays pending, SmartRemit sends no payout instruction for it, and the customer was not told; a person must arrange the return of the sender's money with the partner.`;
+  // Truth check F10 (F2): an instruction an older build sent without a rail record.
+  const unrecordedText = (id: string, owner: string, rail: string) =>
+    `⚠️ SmartRemit ops: the refund of transfer ${id} (partner ${owner}, rail ${rail}) was NOT sent: SmartRemit has no rail record of a payout instruction for this transfer, but its delivery log or its provider reference shows that an instruction was sent to the partner's rail (by a build that keeps no rail record), so the rail may still pay it out. No reverse was sent, the refund stays pending and the customer was not told; ask the partner whether the transfer was paid out, and arrange with them to stop the payout or to return the sender's money.`;
   async function heldRow(): Promise<void> {
     await certifyPartnerForTest(db, 'acme', { fundingMode: null });
     await paidRealMoneyTransfer(db, { id: HID });
@@ -568,22 +591,44 @@ describe('funding.refund: a partner-collected row held before its first instruct
     await expectHeldPending();
   });
 
-  // Final check R3 (F8-D2): Issue refund is admitted while the row's instruct
-  // may be RUNNING (it read the row before the refund went pending and may be
-  // about to record and POST the payout). The refund must not decide "never
-  // instructed" then: it waits (retry) until no instruct row is processing,
-  // and only then reads the settle record.
-  it('an instruct row still PROCESSING: the refund waits (failed, retry), no refundheld:; once the instruct is done with no record, refundheld:<id>', async () => {
+  // Final check R3 (F8-D2), truth check F10 (F1): Issue refund is admitted while
+  // the row's instruct may be RUNNING, or abandoned at its row deadline and
+  // still parked (its handler may still record and POST the payout). The refund
+  // must not decide "never instructed" then: it waits, UNCHARGED (no attempt
+  // spent, never dead-lettered, no alert), and only then reads the settle record.
+  type RefundTiming = { status: string; attempts: number; last_error: string | null; due_in_s: number };
+  async function refundTiming(): Promise<RefundTiming> {
+    const r = (await db.execute(
+      sql`SELECT status, attempts, last_error, extract(epoch FROM (next_attempt_at - now()))::float AS due_in_s FROM outbox WHERE kind = 'funding.refund' ORDER BY id LIMIT 1`,
+    )) as unknown as { rows: RefundTiming[] };
+    return { ...r.rows[0], due_in_s: Number(r.rows[0].due_in_s) };
+  }
+  async function expectWaitingUncharged(): Promise<void> {
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`]);
+    const t = await refundTiming();
+    expect(t).toMatchObject({ status: 'pending', attempts: 0, last_error: null });
+    expect(t.due_in_s).toBeGreaterThan(50);
+    expect(t.due_in_s).toBeLessThanOrEqual(61);
+  }
+  const DEADLINE_ERROR = 'outbox row deadline exceeded (40000ms)';
+
+  it('an instruct row still PROCESSING: the refund waits UNCHARGED (pending, attempts not spent, due in 60 s, no alert); once the instruct is done with no record, refundheld:<id>', async () => {
     await heldRow();
     await db.execute(
       sql`UPDATE outbox SET status = 'processing', lease_until = now() + interval '10 minutes', locked_at = now() WHERE dedupe_key = ${`instruct:${HID}`}`,
     );
     await issueRefund(db, HID);
-    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
-    expect(fetchFn).not.toHaveBeenCalled();
-    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
-    expect(await alertKeys()).toEqual([`fundmode:${HID}`]);
-    expect((await refundRow()).last_error).toBe('refund_waits_for_running_instruct');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(0);
+    expect(r.released).toBe(1);
+    await expectWaitingUncharged();
+    // A second wait spends nothing either.
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'funding.refund'`);
+    await drainOnce(deps(), 'w1');
+    await expectWaitingUncharged();
 
     // The instruct finishes without a record (held again, or not payable).
     await db.execute(sql`UPDATE outbox SET status = 'done', lease_until = NULL WHERE dedupe_key = ${`instruct:${HID}`}`);
@@ -592,13 +637,32 @@ describe('funding.refund: a partner-collected row held before its first instruct
     await expectHeldPending();
   });
 
-  it('an instruct row still PROCESSING that then records and sends the payout: the refund waits, then sends the signed reverse (never refundheld:)', async () => {
+  for (const parked of ['failed', 'dead'] as const) {
+    it(`an instruct row ABANDONED at its row deadline and still parked (${parked}): the refund waits uncharged; once the parked row has run or its time is up, refundheld:<id>`, async () => {
+      await heldRow();
+      await db.execute(
+        sql`UPDATE outbox SET status = ${parked}, last_error = ${DEADLINE_ERROR}, next_attempt_at = now() + interval '300 seconds', lease_until = NULL WHERE dedupe_key = ${`instruct:${HID}`}`,
+      );
+      await issueRefund(db, HID);
+      expect((await drainOnce(deps(), 'w1')).failed).toBe(0);
+      await expectWaitingUncharged();
+      // The parked time is up: a 'failed' row runs first in the next batch (its re-read sees the
+      // pending refund: done, nothing sent); a 'dead' row is no longer parked.
+      await db.execute(sql`UPDATE outbox SET next_attempt_at = now() - interval '1 second' WHERE dedupe_key = ${`instruct:${HID}`}`);
+      await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'funding.refund'`);
+      await drainOnce(deps(), 'w1');
+      await expectHeldPending();
+    });
+  }
+
+  it('an instruct row still PROCESSING that then records and sends the payout: the refund waits uncharged, then sends the signed reverse (never refundheld:)', async () => {
     await heldRow();
     await db.execute(
       sql`UPDATE outbox SET status = 'processing', lease_until = now() + interval '10 minutes', locked_at = now() WHERE dedupe_key = ${`instruct:${HID}`}`,
     );
     await issueRefund(db, HID);
-    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect((await drainOnce(deps(), 'w1')).released).toBe(1);
+    expect((await refundTiming()).status).toBe('pending');
     // The running instruct records its settle and POSTs, then finishes.
     await seedSettle({ id: HID });
     await db.execute(sql`UPDATE outbox SET status = 'done', lease_until = NULL WHERE dedupe_key = ${`instruct:${HID}`}`);
@@ -607,6 +671,74 @@ describe('funding.refund: a partner-collected row held before its first instruct
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect((await store.getTransfer(HID))!.refundStatus).toBe('completed');
     expect((await alertKeys()).filter((k) => k.startsWith('refundheld:'))).toEqual([]);
+  });
+
+  // Truth check F10 (F2): a held row (no settle record, paid after the go-live) whose
+  // instruction an older build POSTed without a rail record (an Instant Rollback past
+  // PR5): its provider reference, or a settlement.instruct delivery row for this
+  // transfer and its rail partner, shows it. No reverse, no record, no customer
+  // message; the refund stays pending; ONE refundunrecorded:<id>, never refundheld:.
+  async function expectUnrecordedPending(): Promise<void> {
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect(providerRefund).not.toHaveBeenCalled();
+    const t = (await store.getTransfer(HID))!;
+    expect(t.refundStatus).toBe('pending');
+    expect(t.status).toBe('paid');
+    expect(await dedupeKeys('whatsapp.text')).toEqual([]);
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`, `refundunrecorded:${HID}`]);
+    const msgs = await alertMessages();
+    expect(msgs[1]).toBe(unrecordedText(HID, 'acme', 'acme'));
+    for (const leak of ['123456789012', 'Test Sender', 'Test Recipient', '15551239876', '200']) expect(msgs[1]).not.toContain(leak);
+    expect(logWarnSpy.mock.calls.filter((c) => c[0] === 'outbox.refund-unrecorded').map((c) => c[2])).toContainEqual({ transferId: HID });
+  }
+
+  it('evidence by the provider reference: no reverse, refund pending, ONE refundunrecorded:<id> (no refundheld:); a replay adds no second alert', async () => {
+    await heldRow();
+    await db.execute(sql`UPDATE transfers SET payment_provider_ref = 'rail-old-1' WHERE id = ${HID}`);
+    await issueRefund(db, HID);
+    await drainOnce(deps(), 'w1');
+    await expectUnrecordedPending();
+    await outbox.enqueue('funding.refund', { transferId: HID, collectedOnRealMoney: true }, { dedupeKey: `refund:${HID}:retry:1` });
+    await drainOnce(deps(), 'w1');
+    await expectUnrecordedPending();
+  });
+
+  it('evidence by a settlement.instruct delivery row (no provider reference, a POST that timed out): the same', async () => {
+    await heldRow();
+    await db.insert(partnerWebhookDeliveries).values({ partnerId: 'acme', kind: 'settlement.instruct', subjectId: HID, outboxId: 1, attempt: 1, outcome: 'network' });
+    await issueRefund(db, HID);
+    await drainOnce(deps(), 'w1');
+    await expectUnrecordedPending();
+  });
+
+  it('a delivery row of ANOTHER rail partner, another transfer, or a ping is no evidence: refundheld:<id>', async () => {
+    await heldRow();
+    await seedPartner(db, 'otherp');
+    await db.insert(partnerWebhookDeliveries).values([
+      { partnerId: 'otherp', kind: 'settlement.instruct', subjectId: HID, outboxId: 1, attempt: 1, outcome: 'ok' },
+      { partnerId: 'acme', kind: 'settlement.instruct', subjectId: 'rm_other', outboxId: 2, attempt: 1, outcome: 'ok' },
+      { partnerId: 'acme', kind: 'ping', attempt: 1, outcome: 'ok' },
+    ]);
+    await issueRefund(db, HID);
+    await drainOnce(deps(), 'w1');
+    await expectHeldPending();
+  });
+
+  it('a failed evidence read throws (retry): no alert, no reverse, refund pending', async () => {
+    await heldRow();
+    await issueRefund(db, HID);
+    await db.execute(sql`ALTER TABLE partner_webhook_deliveries RENAME TO partner_webhook_deliveries_gone`);
+    let failed: number;
+    try {
+      failed = (await drainOnce(deps(), 'w1')).failed;
+    } finally {
+      await db.execute(sql`ALTER TABLE partner_webhook_deliveries_gone RENAME TO partner_webhook_deliveries`);
+    }
+    expect(failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await store.getTransfer(HID))!.refundStatus).toBe('pending');
+    expect(await alertKeys()).toEqual([`fundmode:${HID}`]);
   });
 
   it('a row paid after the go-live WITH a live settle record still gets its signed reverse (no refundheld:)', async () => {
@@ -632,5 +764,92 @@ describe('funding.refund: a partner-collected row held before its first instruct
     await drainOnce(deps(), 'w1');
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await alertKeys()).toEqual([`refundrouted:${HID}`]);
+  });
+});
+
+// Truth check F10 (F1): the G1 read commits at once and the steps after G4 are
+// slow, so the gate `record` re-reads the row FOR UPDATE in the transaction
+// that writes the settle record and applies the G3/G4 rule again. A refund or
+// a cancel that lands in between: no record, nothing sent.
+describe('settlement.instruct: the gate record re-checks the row under its lock (truth check F10, F1)', { retry: 0 }, () => {
+  const LID = 'rm_l1';
+  type InstructState = { status: string; attempts: number; last_error: string | null };
+  async function instructRow(): Promise<InstructState> {
+    const r = (await db.execute(sql`SELECT status, attempts, last_error FROM outbox WHERE kind = 'settlement.instruct' ORDER BY id LIMIT 1`)) as unknown as { rows: InstructState[] };
+    return r.rows[0];
+  }
+  const flipTo = (set: ReturnType<typeof sql>) => {
+    railFault.flip = async () => {
+      await db.execute(sql`UPDATE transfers SET ${set} WHERE id = ${LID}`);
+    };
+  };
+  async function liveRow(): Promise<void> {
+    await paidRealMoneyTransfer(db, { id: LID, originator: { address: true, dob: true } });
+    await outbox.enqueue('settlement.instruct', { transferId: LID }, { dedupeKey: `instruct:${LID}` });
+  }
+  const skipped = () => logWarnSpy.mock.calls.filter((c) => c[0] === 'outbox.instruct-skipped' && c[1] === 'transfer no longer payable at record; instruction not sent');
+
+  it('unchanged: one settle record, one POST, the row is done', async () => {
+    await liveRow();
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(rowsAtFetch).toEqual([1]);
+    expect((await records()).map((r) => r.kind)).toEqual(['settle']);
+    expect((await instructRow()).status).toBe('done');
+    expect(skipped()).toHaveLength(0);
+  });
+
+  it("the refund goes 'pending' after G4: no rail_messages row, fetch never called, the row is done (a log with ids and statuses only)", async () => {
+    await liveRow();
+    flipTo(sql`refund_status = 'pending'`);
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(railFault.flip).toBeNull();
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect((await instructRow()).status).toBe('done');
+    expect(skipped().map((c) => c[2])).toEqual([{ transferId: LID, status: 'paid', refundStatus: 'pending' }]);
+  });
+
+  it("the transfer is cancelled after G4: the same", async () => {
+    await liveRow();
+    flipTo(sql`status = 'cancelled'`);
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect((await instructRow()).status).toBe('done');
+    expect(skipped().map((c) => c[2])).toEqual([{ transferId: LID, status: 'cancelled', refundStatus: 'none' }]);
+  });
+
+  it("a refund is 'requested' after G4: no record, no fetch, the row fails with the G4 error (a charged retry)", async () => {
+    await liveRow();
+    flipTo(sql`refund_status = 'requested'`);
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect(await instructRow()).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      last_error: 'Settlement instruction held: transfer is paid with refund requested — retrying',
+    });
+  });
+
+  it("a simulator rail: a refund that goes 'pending' after G4 is not sent either; unchanged otherwise", async () => {
+    await createIntegrationsRepo(db).saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sim' }, webhookSecret: 'simw' },
+    });
+    await store.saveTransfer(transferFixture({ id: LID, refundStatus: 'none' }));
+    await outbox.enqueue('settlement.instruct', { transferId: LID }, { dedupeKey: `instruct:${LID}` });
+    flipTo(sql`refund_status = 'pending'`);
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await countRecords()).toBe(0);
+    expect((await instructRow()).status).toBe('done');
+
+    await store.saveTransfer(transferFixture({ id: 'rm_l2', refundStatus: 'none' }));
+    await outbox.enqueue('settlement.instruct', { transferId: 'rm_l2' }, { dedupeKey: 'instruct:rm_l2' });
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await records()).map((r) => r.transfer_id)).toEqual(['rm_l2']);
   });
 });

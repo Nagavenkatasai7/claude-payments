@@ -65,20 +65,28 @@ let recordDown = false;
 /** rail_messages rows seen at the moment of each fetch call. */
 let rowsAtFetch: number[] = [];
 
-/** The real db, except that an insert into rail_messages throws while `recordDown`. */
-function recordingDb(): Db {
-  return new Proxy(db, {
-    get(target, prop, receiver) {
+/**
+ * The real db, except that an insert into rail_messages throws while `recordDown`.
+ * Truth check F10 (F1): the settle record is written inside a transaction (the
+ * re-check under the row lock), so a transaction handle is wrapped the same way.
+ */
+function recordingDb(target: object = db): Db {
+  return new Proxy(target, {
+    get(t, prop, receiver) {
       if (prop === 'insert') {
         return (table: unknown) => {
           if (table === railMessages && recordDown) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
-          return target.insert(table as never);
+          return (t as Db).insert(table as never);
         };
       }
-      const v = Reflect.get(target, prop, receiver);
-      return typeof v === 'function' ? v.bind(target) : v;
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => unknown, ...rest: unknown[]) =>
+          (t as unknown as { transaction: (f: (tx: object) => unknown, ...r: unknown[]) => unknown }).transaction((tx) => fn(recordingDb(tx)), ...rest);
+      }
+      const v = Reflect.get(t, prop, receiver);
+      return typeof v === 'function' ? v.bind(t) : v;
     },
-  });
+  }) as Db;
 }
 
 function deps(): WorkerDeps {

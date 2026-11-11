@@ -427,11 +427,18 @@ describe('sanctions screening spec says what pack 5 does', () => {
     // Final check F8 (X1, U1, TR1): the exits per class. A card payment's travelrule:<id> names the Stripe dashboard too;
     // a partner-collected row held before its first instruction is refunded with no reverse (refund pending, refundheld:<id>);
     // a routed one cannot be refunded here.
+    expect(rest).not.toContain('(the rail never got the transfer)');
     for (const k of [
       'its `fundmode:<id>`, `travelrule:<id>` and `fundmode:stuck:<id>` / `travelrule:stuck:<id>` alerts name instead',
-      'For a partner-collected row (final check F8) held at either step before its first instruction, Issue refund sends no reverse (the rail never got the transfer): the refund stays `pending` with one `refundheld:<id>` alert',
-      // Final check R3 (F8-D1): a row held again on the stuck-paid re-instruct after an earlier send gets the signed reverse.
-      'a row held again on the stuck-paid re-instruct after an earlier instruction reached the rail gets the signed reverse instead',
+      // Truth check F10 (F1, F2): what SmartRemit recorded, not what the rail did; the uncharged wait; an unrecorded send.
+      'For a partner-collected row (final check F8) held at either step before its first instruction, Issue refund sends no reverse (SmartRemit has no record of an instruction for it): the refund stays `pending` with one `refundheld:<id>` alert',
+      'while an instruct for the row runs, or is parked after its row deadline, the refund waits, uncharged',
+      'when its provider reference or delivery log shows that a build that keeps no rail record sent an instruction, no reverse is sent either and the refund stays `pending` with one `refundunrecorded:<id>` alert',
+      // Final check R3 (F8-D1): a row held again on the stuck-paid re-instruct after a recorded send gets the signed reverse.
+      'a row held again on the stuck-paid re-instruct after a recorded instruction reached the rail gets the signed reverse instead',
+      // Truth check F10 (F1): the gate record re-checks the row under its lock.
+      '`record` re-reads the transfer under its row lock in the same transaction that writes the settle record and applies the `not_payable` / `not_paid` rule again (`instructPayability`',
+      'a transfer that was cancelled, delivered, blocked or put into a refund after the early steps gets no record and is not sent (on every rail, the simulator too); the POST follows the commit',
       'a routed partner-collected row cannot be refunded from SmartRemit, so its texts do not offer Issue refund',
     ]) {
       expect(rest, k).toContain(k);

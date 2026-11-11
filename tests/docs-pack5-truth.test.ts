@@ -331,7 +331,9 @@ describe('pack 5 documents say what the code does', () => {
       // Review round 2 R2 (F6-D1): partner_psp lets only a funding-mode hold go out.
       "so for that one either, when it is held for its funding mode (`fundmode:<id>`), record `partner_psp` on the go-live card and let it go out before rolling back, or return the money in the partner's Stripe dashboard and do not roll back while its row is paid",
       // Final check F8 (X1, U1): a partner-collected row per class.
-      'for a partner-collected row that is not routed, Issue refund sends nothing to a rail that never got the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
+      // Truth check F10 (F2): what SmartRemit recorded, and the unrecorded case.
+      'for a partner-collected row that is not routed, Issue refund sends nothing to the rail when SmartRemit has no record of an instruction for the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (or `refundunrecorded:<id>` when its delivery log or provider reference shows an instruction sent without a record; roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
+      'After the roll forward, a refund of a paid transfer that the older build instructed sends no reverse and raises `refundunrecorded:<id>` (the refund stays `pending`): ask the partner whether the rail still holds the instruction before anyone returns the money.',
       'Issue refund is not available for a routed partner-collected row, so do not roll back while such a row is paid and held',
       // Review round 2 GD1: what else a build serving without 0039 breaks.
       // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
@@ -377,7 +379,7 @@ describe('pack 5 documents say what the code does', () => {
     const docs = [SPEC, ROLLBACK, CLAUDE, WEBHOOKS].join('\n');
     const reasons: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
     for (const r of reasons) expect(heldStuckDedupeKey(r, 'x1')).toBe(`${r}:stuck:x1`);
-    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:', 'refundheld:'];
+    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:', 'refundheld:', 'refundunrecorded:'];
     for (const k of keys) {
       expect(src, k).toContain(k);
       expect(docs, k).toContain(`\`${k}`);
@@ -417,13 +419,18 @@ describe('pack 5 documents say what the code does', () => {
     // Final check R3 (F8-D1): the rail may have got the transfer before (a row held again on the stuck-paid
     // re-instruct), so the worker texts and the Meaning cell never state as fact that it did not.
     expect(pcRow!).not.toContain('no reverse is sent, because the rail never got this transfer');
-    expect(pcRow!).toContain("if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if an earlier instruction reached the rail after it went live, the signed reverse goes to the rail.");
+    // Truth check F10 (F2): the texts say what SmartRemit recorded, not what the rail did.
+    expect(pcRow!).toContain("if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail.");
+    expect(pcRow!).not.toContain('if the rail never got this transfer');
+    expect(pcRow!).toContain('`refundunrecorded:<id>`');
     expect(pcRow!).toContain('held again on the stuck-paid re-instruct');
     expect(pcRow!).not.toContain('and the row was held before its first instruction, so the rail has nothing to reverse');
     const pcStuck = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a partner-collected row'));
     expect(pcStuck, 'the partner-collected stuck row').toBeDefined();
     expect([...pcStuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
     expectQuotedInSrc(pcStuck!, src, 'partner-collected stuck');
+    expect(pcStuck!).not.toContain('if the rail never got this transfer');
+    expect(pcStuck!).toContain('`refundunrecorded:<id>`');
     for (const routedText of ["Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner."]) {
       expect(pcRow!).toContain(routedText);
       expect(pcStuck!).toContain(routedText);
@@ -431,7 +438,7 @@ describe('pack 5 documents say what the code does', () => {
     // The other pack 5 alerts (not compliance alerts) have their rows in section 14.
     const other = section(SPEC, '## 14.').split('\n').filter((l) => l.startsWith('| `'));
     // Review round 1 (RC2, RF1): the two funding.refund alerts.
-    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:', 'refundheld:']) {
+    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:', 'refundheld:', 'refundunrecorded:']) {
       const row = other.find((l) => l.startsWith(`| \`${k}`));
       expect(row, k).toBeDefined();
       expectQuotedInSrc(row!, src, k);
@@ -441,7 +448,16 @@ describe('pack 5 documents say what the code does', () => {
     expect(nosettle).toContain('demo era');
     expect(nosettle).toContain('a row held before its first instruction raises `refundheld:<id>` instead');
     const held = other.find((l) => l.startsWith('| `refundheld:<id>`'))!;
-    for (const s of ['the refund stays `pending`', 'no reverse', 'no customer message', 'not paid out']) expect(held, s).toContain(s);
+    // Truth check F10 (F1, F2): no rail record, delivery log or provider reference; the uncharged wait.
+    for (const s of ['the refund stays `pending`', 'no reverse', 'no customer message', 'no rail record, delivery log or provider reference', 'waits, uncharged', 'parked after its row deadline']) {
+      expect(held, s).toContain(s);
+    }
+    expect(held).not.toContain('refund_waits_for_running_instruct` and retries');
+    expect(held).not.toContain('the transfer is not paid out');
+    const unrec = other.find((l) => l.startsWith('| `refundunrecorded:<id>`'))!;
+    for (const s of ['no reverse', 'the refund stays `pending`', 'no customer message', 'provider reference', 'delivery log', 'may still pay it out']) {
+      expect(unrec, s).toContain(s);
+    }
   });
 
   it('the list-track alert keys: sanctions-archive-lag:<source>:<day> and sanctions-archive-unconfigured:<source>:<day> have their section 11 rows', () => {

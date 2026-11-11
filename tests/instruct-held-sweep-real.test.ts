@@ -140,7 +140,7 @@ describe('stuck-paid sweeps and G14 (real helpers, pack 5 T14)', { retry: 0 }, (
     expect(a).toEqual([{ k: `travelrule:stuck:${ID}`, m: stuckHeldMessage(ID, 'travelrule', 'partner_collected', false) }]);
     expect(a[0].m).toContain('Issue refund');
     // Final check F8 (X1, U1): a partner-collected row's own text.
-    expect(a[0].m).toContain('if the rail never got this transfer, no reverse is sent');
+    expect(a[0].m).toContain('if SmartRemit has no record of an instruction for this transfer, no reverse is sent');
     expect(await escalateStuckPaid(db)).toBe(0);
     expect(await alertKeys()).toEqual([`travelrule:stuck:${ID}`]);
     expect(await instructKeys()).toEqual([`instruct:${ID}`]);

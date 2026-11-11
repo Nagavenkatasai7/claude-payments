@@ -7,6 +7,7 @@ import type { DbOrTx } from '@/db/client';
 import { createRailMessageRepo } from '@/db/repos/rail-message-repo';
 import { railGoLiveAt, railPartnerOf, readRailProviderType, realMoneyFor, realMoneyRail } from './live-gate';
 import { logWarn } from './log';
+import { hasInstructDelivery } from './webhook-delivery-log';
 
 // funding-class (fix pack 5 T12, P12): THE answer to "how was this sender's
 // money collected", pure, from the ledger row only.
@@ -151,6 +152,23 @@ export async function heldBeforeFirstSettle(
   const liveAt = await railGoLiveAt(db, rail);
   if (liveAt === null) return true;
   return paidAt >= liveAt.getTime();
+}
+
+/**
+ * Truth check F10 (F2): for a row heldBeforeFirstSettle calls held (no outbound settle record),
+ * is there evidence that an instruction was POSTed WITHOUT a record (a build older than fix pack
+ * 5, e.g. after an Instant Rollback past PR5, or a rail certified before this pack deployed)? The
+ * row's payment_provider_ref is set (an older build's write-once ack), or a settlement.instruct
+ * delivery row exists for this transfer and its rail partner (railPartnerOf; any outcome). Read
+ * only inside that held branch: a demo-era row has both from the simulator and closes as before.
+ * Ids only; a failed read THROWS.
+ */
+export async function instructSentWithoutRecord(
+  db: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'settlementPartnerId' | 'paymentProviderRef'>,
+): Promise<boolean> {
+  if (t.paymentProviderRef) return true;
+  return hasInstructDelivery(db, railPartnerOf(t), t.id);
 }
 
 type RefundAdmissionRow = Pick<

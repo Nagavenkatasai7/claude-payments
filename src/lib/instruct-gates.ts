@@ -23,7 +23,9 @@
 // build         G15  builder + compliance block, fail closed (P10)
 // travel_rule   G16  real money: travel-rule data missing or routed (P22) -> InstructTravelRuleError
 //                    deferred 900 s + travelrule:<id>; then the defence check (non-exempt individuals)
-// record        G17  the rail_messages record before the POST: RailRecordError + railrecord:<hour>, charged
+// record        G17  re-read the row FOR UPDATE and apply G3/G4 again (instructPayability), then the
+//                    rail_messages record in that SAME transaction; the POST follows the commit.
+//                    RailRecordError + railrecord:<hour>, charged
 // send          G18  the signed POST through withInstructDeliveryLog: RailInstructError
 // provider_ref  G19  setProviderRef, write-once
 //
@@ -170,6 +172,32 @@ export function heldStuckDedupeKey(reason: InstructHeldReason, transferId: strin
 }
 
 /**
+ * Truth check F10 (F1): THE rule of the gates not_payable (G3) and not_paid
+ * (G4), as one pure helper. The handler applies it at G3/G4 to the row it read
+ * at G1, and again at the gate `record` to the row re-read under its lock in
+ * the transaction that writes the settle record, so the two can never drift.
+ *  • 'skip': a row that is gone, cancelled, delivered, sanctions-blocked, or
+ *    whose refund is pending / completed: never paid out (done, with a log);
+ *  • 'retry': any other row that is not 'paid', or whose refund is requested
+ *    or failed: a charged retry with the G4 error (instructNotPaidMessage);
+ *  • 'ok': paid with no refund.
+ */
+export function instructPayability(t: Pick<Transfer, 'status' | 'complianceStatus' | 'refundStatus'> | null): 'ok' | 'skip' | 'retry' {
+  if (!t) return 'skip';
+  const refund = t.refundStatus ?? 'none';
+  if (t.status === 'cancelled' || t.status === 'delivered' || t.complianceStatus === 'blocked' || refund === 'pending' || refund === 'completed') {
+    return 'skip';
+  }
+  if (t.status !== 'paid' || refund !== 'none') return 'retry';
+  return 'ok';
+}
+
+/** The G4 error text (a charged retry), byte for byte as before the helper. */
+export function instructNotPaidMessage(t: Pick<Transfer, 'status' | 'refundStatus'>): string {
+  return `Settlement instruction held: transfer is ${t.status} with refund ${t.refundStatus ?? 'none'} — retrying`;
+}
+
+/**
  * P9 text, one literal per reason (so the spec can quote it as written).
  * Review round 2 GE1: a row of funding class 'stripe' (a card payment through
  * the partner's Stripe key) is never sent to Issue refund, which cannot refund
@@ -189,8 +217,10 @@ export function stuckHeldMessage(transferId: string, reason: InstructHeldReason,
   }
   // Final check F8 (X1, U1): a partner-collected row. Routed: Issue refund
   // refuses it (RF1), so its texts never offer it. Not routed: Issue refund is
-  // admitted, and when the rail never got the transfer the worker sends no
-  // reverse (refundheld:<id>), so the text says what then happens.
+  // admitted, and when SmartRemit has no record of an instruction for the
+  // transfer the worker sends no reverse (refundheld:<id>, or
+  // refundunrecorded:<id> when an older build sent one without a record:
+  // truth check F10, F2), so the text says what then happens.
   if (cls === 'partner_collected' && routed && reason === 'fundmode') {
     return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once). Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.`;
   }
@@ -198,10 +228,10 @@ export function stuckHeldMessage(transferId: string, reason: InstructHeldReason,
     return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.`;
   }
   if (cls === 'partner_collected' && reason === 'fundmode') {
-    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
   }
   if (cls === 'partner_collected' && reason === 'travelrule') {
-    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Stop it with Issue refund; if the rail never got this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
+    return `transfer ${transferId} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. Stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.`;
   }
   switch (reason) {
     case 'mockfund':
