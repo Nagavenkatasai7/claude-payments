@@ -1606,7 +1606,7 @@ export const en = {
   'portal.send.purpose_detail_too_long': 'Keep the reason under 120 characters.',
   'portal.send.purposeFromWords': '{purpose} (from your words: "{detail}")',
   'portal.send.scamWarning':
-    'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. SmartRemit staff check this transfer before the money goes.',
+    'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. This transfer is checked before the money goes.',
   'portal.send.scamAck': 'I have read this warning',
   'portal.send.scam_ack_required': 'Read the warning and tick "I have read this warning" to continue.',
   'portal.send.recipient_invalid': 'Choose a recipient.',
