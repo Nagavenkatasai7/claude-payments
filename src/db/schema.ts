@@ -325,6 +325,13 @@ export const customers = pgTable(
     // writers can set or clear an enrolment.
     mfaTotpEnc: text('mfa_totp_enc'), // ENCRYPTED
     mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
+    // Fix pack 6 (0040, R46): the customer's E-SIGN consent (the version agreed
+    // to, when, and when withdrawn). READ-ONLY in rowToCustomer and NEVER in
+    // customerToRow: saveCustomer's whole-row upsert never names them, so only
+    // recordEsignConsent / withdrawEsignConsent (customer-repo) set or clear them.
+    esignConsentVersion: text('esign_consent_version'),
+    esignConsentedAt: timestamp('esign_consented_at', { withTimezone: true }),
+    esignWithdrawnAt: timestamp('esign_withdrawn_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

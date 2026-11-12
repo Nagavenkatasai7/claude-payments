@@ -3,8 +3,16 @@ import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
-import { buildPrepaymentDisclosure, deliveryDaysFor } from '@/lib/remittance-disclosure';
-import { providerLineFor } from '@/lib/legal/provider-line';
+import {
+  buildPrepaymentDisclosure,
+  buildReceiptDisclosure,
+  deliveryDaysFor,
+  receiptFromSnapshot,
+  type DisclosureSnapshotV1,
+  type ReceiptDisclosure,
+  type ReceiptTransfer,
+} from '@/lib/remittance-disclosure';
+import { providerLineFor, providerLineFromSnapshot } from '@/lib/legal/provider-line';
 import { approvingAmountText } from '@/lib/approving-line';
 import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
@@ -30,6 +38,20 @@ import { readLegalNameView } from '@/lib/recipient-legal-name';
 import { railPartnerOf } from '@/lib/live-gate';
 import { NO_ORIGINATOR_FIELDS, readOriginatorView, type OriginatorView } from '@/lib/originator-info';
 import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
+import { readEsignConsentNeeded } from '@/lib/esign';
+import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
+import { isRiskSignal } from '@/lib/risk-signals';
+import { isOpaqueTransferId } from '@/lib/id';
+import { payReceiptState, type PayReceiptState } from '@/lib/pay-receipt-state';
+import { FIXED_REPLIES } from '@/lib/hold-replies';
+import {
+  PAY_RECEIPT_CANCELLED_CHARGED_COPY,
+  PAY_RECEIPT_CANCELLED_CONTACT_COPY,
+  PAY_RECEIPT_NOT_COMPLETED_COPY,
+  PAY_RECEIPT_PRINT_HINT,
+  PAY_RECEIPT_REFUNDED_COPY,
+} from '@/lib/pay-outcome';
+import { PayReceipt } from './pay-receipt';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -41,6 +63,13 @@ const pageClasses =
   "flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif] text-[#e9edef]";
 const sheetClasses = 'w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7';
 const headingClasses = 'mb-5 text-lg leading-normal font-semibold';
+// Fix pack 6 (P11): only a page that renders a receipt prints white with dark text; every
+// other page keeps the classes above byte for byte.
+const receiptPageClasses = pageClasses + ' print:bg-white print:p-0 print:text-black';
+const receiptSheetClasses = sheetClasses + ' print:max-w-none print:bg-white print:p-0';
+const summaryClasses = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
+const receiptSummaryClasses = summaryClasses + ' print:bg-white print:px-0';
+const neutralClasses = 'text-center font-semibold text-[#e9edef] print:text-black';
 
 // ONE partner read feeds the Reg E disclosure (the brand is always SmartRemit).
 async function loadPartner(partnerId: string | null): Promise<Partner | null> {
@@ -59,6 +88,44 @@ function InactiveSheet() {
       <div className={sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>This link is no longer active</h1>
+      </div>
+    </main>
+  );
+}
+
+/**
+ * Fix pack 6 (P11, critic M2): a cancelled 22-char row that was charged (paid, then held and
+ * rejected; a refund in flight or done) is not a dead link: its stage-1 message carried this
+ * page's link. The dead-link chrome with one fixed line; no snapshot, payout or provider read.
+ */
+function ChargedCancelledSheet({ copy }: { copy: string }) {
+  return (
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
+        <DarkSheetBrand />
+        <h1 className={headingClasses}>{copy}</h1>
+      </div>
+    </main>
+  );
+}
+
+/** Fix pack 6 (P11): the label-only held line ('Processing'); no receipt, no print hint. */
+function HeldLabelLine() {
+  return <p className={neutralClasses}>{FIXED_REPLIES.label_held}</p>;
+}
+
+/**
+ * Review round 1 RC1 (D3): a charged cancelled row that is sanctions-blocked: the same chrome
+ * and the same label-only line as the non-cancelled held_no_receipt sheet; no snapshot, payout
+ * or provider read, and no word on whether any money comes back.
+ */
+function HeldCancelledSheet() {
+  return (
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
+        <DarkSheetBrand />
+        <h1 className={headingClasses}>Secure payment</h1>
+        <HeldLabelLine />
       </div>
     </main>
   );
@@ -205,6 +272,15 @@ async function renderPayPage(transferId: string) {
     // Fix pack 5 (P19, T21b): the sender's address / date-of-birth fields. Four
     // booleans only; a stored address or DOB never reaches the props or the markup.
     originator: OriginatorView;
+    // Fix pack 6 (R46, P8): the E-SIGN consent version to ask for; null = consent on
+    // file, an ACH-debit payment (exempt, P5) or not awaiting payment (page unchanged).
+    esignVersion: string | null;
+    // Fix pack 6 (P11): the reloaded page would show a printable receipt (b2c, not 'test', a
+    // 22-char id or a draft, which mints one); the form's done state then says so.
+    receiptOnReload: boolean;
+    // Fix pack 6 (R48, P19): the draft carries a known risk signal -> the form shows the fixed
+    // warning and its tick. Always false for a minted transfer (no read, no log).
+    riskWarning: boolean;
   };
 
   // A row that is no longer payable, b2b or exempt: no field (and no read).
@@ -213,6 +289,8 @@ async function renderPayPage(transferId: string) {
   let view: View | null = null;
   // WL1: the partner that owns this payment — drives the Reg E disclosure below.
   let brandPartnerId: string | null = null;
+  // Fix pack 6 (P11): the transfer row's state in the status table (a draft is always 'form').
+  let receiptState: PayReceiptState = 'form';
 
   if (transfer) {
     // Program-Fix 32: a cancelled transfer (an expired unpaid link, a staff
@@ -220,8 +298,24 @@ async function renderPayPage(transferId: string) {
     // default branding, byte-equal to not-found, and never "Payment complete".
     // Returned before the decrypted payout read. (The POST still refuses it:
     // refuseUnlessAwaiting in api/pay/[transferId]/route.ts.)
+    // Fix pack 6 (P11, critic M2): a charged cancel is not a dead link (unless it is a
+    // payment-link transfer). A never-charged one returns before any new query.
     if (transfer.status === 'cancelled') {
-      return <InactiveSheet />;
+      const st = payReceiptState(transfer);
+      if (st === null || (await createTransferRepo(getDb()).isPaymentLinkTransfer(transfer.id))) return <InactiveSheet />;
+      switch (st) {
+        case 'refunded':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_REFUNDED_COPY} />;
+        case 'cancelled_charged':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_CANCELLED_CHARGED_COPY} />;
+        case 'cancelled_contact':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_CANCELLED_CONTACT_COPY} />;
+        case 'held_no_receipt':
+          return <HeldCancelledSheet />;
+        default:
+          // payReceiptState answers no other state for a cancelled row; fail to the dead link.
+          return <InactiveSheet />;
+      }
     }
     // Batch B2: a payment-link transfer is paid only on its link page
     // (/pay/l/[token]), which re-runs the link checks; the POST here refuses it
@@ -229,6 +323,7 @@ async function renderPayPage(transferId: string) {
     if (await createTransferRepo(getDb()).isPaymentLinkTransfer(transfer.id)) {
       return <InactiveSheet />;
     }
+    receiptState = payReceiptState(transfer) ?? 'legacy_complete';
     brandPartnerId = transfer.partnerId;
     // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
     // read (boolean + last-4 label only); Edit only where the guarded write would
@@ -274,6 +369,15 @@ async function renderPayPage(transferId: string) {
             },
           })
         : NO_ORIGINATOR_FIELDS;
+    // Fix pack 6 (P5, P8): ask for E-SIGN consent while the row awaits payment and is not
+    // an ACH debit (a non-ACH b2b row is asked too). Owner + sender; never throws (a read
+    // error asks).
+    const esignVersion =
+      transfer.status === 'awaiting_payment' && transfer.fundingMethod !== 'ach_pull'
+        ? (await readEsignConsentNeeded(getDb(), transfer.partnerId, transfer.phone))
+          ? ESIGN_CONSENT_VERSION
+          : null
+        : null;
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
@@ -305,6 +409,9 @@ async function renderPayPage(transferId: string) {
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
       originator,
+      esignVersion,
+      receiptOnReload: transferType === 'b2c' && transfer.environment !== 'test' && isOpaqueTransferId(transfer.id),
+      riskWarning: false,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -345,6 +452,13 @@ async function renderPayPage(transferId: string) {
         routed: !!draft.settlementPartnerId,
       },
     });
+    // Fix pack 6 (P5, P8): the draft's owner and sender, unless it is an ACH debit (never throws).
+    const esignVersion =
+      draft.fundingMethod !== 'ach_pull'
+        ? (await readEsignConsentNeeded(getDb(), brandPartnerId, draft.senderPhone))
+          ? ESIGN_CONSENT_VERSION
+          : null
+        : null;
     view = {
       id: transferId,
       recipientName: draft.recipient.name,
@@ -375,6 +489,10 @@ async function renderPayPage(transferId: string) {
       legalNameRequired: legalName.legalNameRequired,
       legalNameOnFile: legalName.legalNameOnFile,
       originator,
+      esignVersion,
+      receiptOnReload: (draft.transferType ?? 'b2c') === 'b2c',
+      // The same filter as the pay route's tick (T27): an unknown value never asks.
+      riskWarning: (draft.riskSignals ?? []).some(isRiskSignal),
     };
   }
 
@@ -395,7 +513,38 @@ async function renderPayPage(transferId: string) {
     : resolvedDisclosure;
   // Fix pack 4 (C22 a, R16): the owner's approved provider line, from the same
   // resolve (never a second one). Null keeps the page byte-identical.
-  const providerLine = providerLineFor(resolvedDisclosure);
+  let providerLine = providerLineFor(resolvedDisclosure);
+  // Fix pack 6 (P11): a paid / delivered / held 22-char row gets a receipt: what the customer
+  // acknowledged (the snapshot, surface 'transfer') or else the live owner configuration (the
+  // portal rule). One tenant-scoped snapshot read; a read error falls back to live (logged).
+  let receipt: ReceiptDisclosure | null = null;
+  if (transfer && (receiptState === 'complete_receipt' || receiptState === 'held_receipt')) {
+    let snap: DisclosureSnapshotV1 | null = null;
+    try {
+      snap = await createTransferRepo(getDb()).getDisclosureSnapshot(transfer.id, transfer.partnerId);
+    } catch (err) {
+      logWarn('pay.receipt-snapshot', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+    }
+    const acknowledged = snap && snap.surface === 'transfer' ? snap : null;
+    const rt: ReceiptTransfer = {
+      transferType: transfer.transferType,
+      status: transfer.status,
+      amountSource: transfer.amountSource ?? transfer.amountUsd,
+      feeSource: transfer.feeSource ?? transfer.feeUsd,
+      totalChargeSource: transfer.totalChargeSource ?? transfer.totalChargeUsd,
+      sourceCurrency: transfer.sourceCurrency ?? 'USD',
+      amountInr: transfer.amountInr,
+      destinationCurrency: transfer.destinationCurrency ?? 'INR',
+      fxRate: transfer.fxRate,
+      paidAt: transfer.paidAt,
+      deliveredAt: transfer.deliveredAt,
+      deliveryBusinessDays: transfer.deliveryBusinessDays,
+    };
+    receipt = acknowledged
+      ? receiptFromSnapshot(acknowledged, rt, Date.now())
+      : buildReceiptDisclosure(rt, resolvedDisclosure, Date.now());
+    providerLine = providerLineFromSnapshot(acknowledged) ?? providerLine;
+  }
   const disclosure = view.awaitingPayment
     ? buildPrepaymentDisclosure(view, forPage)
     : null;
@@ -405,9 +554,62 @@ async function renderPayPage(transferId: string) {
       ? 'FREE'
       : formatMoney(view.sourceFee, view.sourceCurrency);
 
+  const successLine = (
+    <p className="flex items-center justify-center gap-2 font-semibold text-[#25d366]">
+      {/* Inline SVG check (not the ✅ emoji) so the success state renders
+          identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
+      <svg
+        className="shrink-0"
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <circle cx="12" cy="12" r="10" />
+        <path d="M8 12.5l2.5 2.5L16 9" />
+      </svg>
+      Payment complete &mdash; money sent!
+    </p>
+  );
+  // Fix pack 6 (P11): the receipt and its print hint, only when a receipt renders (b2b: none).
+  const receiptBlock = receipt ? (
+    <>
+      <p className="mt-4 text-[13px] leading-normal text-[#8696a0] print:hidden">{PAY_RECEIPT_PRINT_HINT}</p>
+      <PayReceipt receipt={receipt} transferId={view.id} />
+    </>
+  ) : null;
+  // Fix pack 6 (P11): the non-awaiting sheet by state. Neutral copy only: a held row never
+  // reads "sent" or "complete", and nothing says why.
+  const doneBlock =
+    receiptState === 'complete_receipt' ? (
+      <>
+        {successLine}
+        {receiptBlock}
+      </>
+    ) : receiptState === 'held_receipt' ? (
+      <>
+        <p className={neutralClasses}>{FIXED_REPLIES.label_held}</p>
+        {receiptBlock}
+      </>
+    ) : receiptState === 'held_no_receipt' ? (
+      <HeldLabelLine />
+    ) : receiptState === 'not_completed' ? (
+      <p className={neutralClasses}>{PAY_RECEIPT_NOT_COMPLETED_COPY}</p>
+    ) : receiptState === 'refunded' ? (
+      <p className={neutralClasses}>{PAY_RECEIPT_REFUNDED_COPY}</p>
+    ) : (
+      successLine
+    );
+
   return (
-    <main className={pageClasses}>
-      <div className={sheetClasses}>
+    <main className={receipt ? receiptPageClasses : pageClasses}>
+      <div className={receipt ? receiptSheetClasses : sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>Secure payment</h1>
         {providerLine && (
@@ -420,7 +622,7 @@ async function renderPayPage(transferId: string) {
             {view.preparedByNote}
           </p>
         )}
-        <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
+        <div className={receipt ? receiptSummaryClasses : summaryClasses}>
           <Row label="Recipient" value={view.recipientName} />
           <Row
             label="They receive"
@@ -446,7 +648,9 @@ async function renderPayPage(transferId: string) {
             {view.rewardNote}
           </p>
         )}
-        {disclosure && <RemittanceDisclosure disclosure={disclosure} />}
+        {/* Fix pack 6 (P8): while E-SIGN consent is asked, the form renders the disclosure
+            below the consent block (same place on the page); otherwise unchanged. */}
+        {disclosure && !view.esignVersion && <RemittanceDisclosure disclosure={disclosure} />}
         {view.awaitingPayment ? (
           <PayForm
             disclosureVersion={disclosure?.version ?? null}
@@ -460,6 +664,14 @@ async function renderPayPage(transferId: string) {
             legalNameRequired={view.legalNameRequired}
             legalNameOnFile={view.legalNameOnFile}
             originator={view.originator}
+            {...(view.esignVersion
+              ? {
+                  esignVersion: view.esignVersion,
+                  disclosureSlot: disclosure ? <RemittanceDisclosure disclosure={disclosure} /> : null,
+                }
+              : {})}
+            {...(view.receiptOnReload ? { receiptOnReload: true } : {})}
+            {...(view.riskWarning ? { riskWarning: true } : {})}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
@@ -476,27 +688,7 @@ async function renderPayPage(transferId: string) {
             }}
           />
         ) : (
-          <p className="flex items-center justify-center gap-2 font-semibold text-[#25d366]">
-            {/* Inline SVG check (not the ✅ emoji) so the success state renders
-                identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
-            <svg
-              className="shrink-0"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2.5}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-              focusable="false"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <path d="M8 12.5l2.5 2.5L16 9" />
-            </svg>
-            Payment complete &mdash; money sent!
-          </p>
+          doneBlock
         )}
       </div>
     </main>

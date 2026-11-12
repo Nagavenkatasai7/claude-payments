@@ -1792,3 +1792,108 @@ describe('updatePartnerAction: kycMode under a signed posture or a live certific
     expect(a[0].meta).toEqual({ from: 'ours', to: 'delegated', postureSigned: true });
   });
 });
+
+describe('updatePartnerAction: a corridor added to a certified partner gets the AML hold default (review round 1 RD2)', () => {
+  const amlAudits = async (id: string) =>
+    (await db.execute(rawSql`SELECT partner_id, actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'aml.hold_rules_set' AND partner_id = ${id} ORDER BY id`)).rows as Array<{
+      partner_id: string; actor: string; actor_type: string; subject_id: string; meta: Record<string, unknown>;
+    }>;
+  const corridor = async (id: string) =>
+    ((await db.execute(rawSql`SELECT corridor_compliance FROM partners WHERE id = ${id}`)).rows[0] as { corridor_compliance: Record<string, Record<string, unknown>> | null })
+      .corridor_compliance ?? {};
+  const seed = async (id: string, countries: string[]) => {
+    const now = new Date().toISOString();
+    await ps.savePartner({ id, name: 'Acme', countries: countries as never, status: 'active', kycMode: 'ours', createdAt: now, updatedAt: now });
+  };
+  /** Certify (helpers-live) and run the go-live default exactly as certifyLiveAction does. */
+  const certifyWithDefault = async (id: string) => {
+    const { certifyPartnerForTest } = await import('./helpers-live');
+    const { writeAmlHoldDefaults } = await import('@/lib/aml-hold-defaults');
+    await certifyPartnerForTest(db, id);
+    const p = (await ps.getPartner(id))!;
+    await db.transaction((tx) => writeAmlHoldDefaults(tx, id, p.countries, { username: 'test-admin', scope: 'platform' }, 'go_live_default'));
+  };
+  const form = (id: string, countries: string[], name = 'Acme Renamed') => {
+    const fd = new FormData();
+    fd.set('id', id);
+    fd.set('name', name);
+    for (const c of countries) fd.append('countries', c);
+    return fd;
+  };
+  const ALL = ['structuring', 'first_transfer', 'new_beneficiary'];
+
+  it('a certified partner: an added GB gets holds on with all three rules and one corridor_added_default row; other entries unchanged; fields saved', async () => {
+    await seed('rd1', ['US', 'IN']);
+    await certifyWithDefault('rd1');
+    expect((await corridor('rd1')).US).toMatchObject({ amlHolds: true, amlHoldRules: ALL });
+    expect(await amlAudits('rd1')).toHaveLength(1); // US, go_live_default
+    // A concurrent-looking extra key on US must survive the save.
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateCorridorCompliance('rd1', (prev) => ({ ...prev, US: { ...prev.US, largeAmountUsd: 2500 } }));
+    const before = await corridor('rd1');
+
+    await updatePartnerAction(form('rd1', ['US', 'IN', 'GB']));
+
+    const after = await corridor('rd1');
+    expect(after.GB).toEqual({ amlHolds: true, amlHoldRules: ALL });
+    expect(after.US).toEqual(before.US);
+    expect(after.IN).toEqual(before.IN);
+    expect(Object.keys(after).sort()).toEqual([...Object.keys(before), 'GB'].sort());
+    const rows = await amlAudits('rd1');
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ partner_id: 'rd1', actor: 'admin', actor_type: 'staff', subject_id: 'rd1' });
+    expect(rows[1].meta).toEqual({ country: 'GB', from: [], to: ALL, actorScope: 'platform', reason: 'corridor_added_default' });
+    const saved = (await ps.getPartner('rd1'))!;
+    expect(saved.name).toBe('Acme Renamed');
+    expect(saved.countries).toEqual(['US', 'IN', 'GB']);
+  });
+
+  it('a partner that is NOT certified: no AML entry and no audit row (byte-identical to before)', async () => {
+    await seed('rd2', ['US', 'IN']);
+    await updatePartnerAction(form('rd2', ['US', 'IN', 'GB']));
+    expect(await corridor('rd2')).toEqual({});
+    expect(await amlAudits('rd2')).toEqual([]);
+    expect((await ps.getPartner('rd2'))!.countries).toEqual(['US', 'IN', 'GB']);
+  });
+
+  it('an added corridor that already has an explicit entry (holds off) is untouched', async () => {
+    await seed('rd3', ['US']);
+    await certifyWithDefault('rd3');
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateCorridorCompliance('rd3', (prev) => ({ ...prev, GB: { amlHolds: false } }));
+    const audits = (await amlAudits('rd3')).length;
+    await updatePartnerAction(form('rd3', ['US', 'GB']));
+    expect((await corridor('rd3')).GB).toEqual({ amlHolds: false });
+    expect(await amlAudits('rd3')).toHaveLength(audits);
+  });
+
+  it('adding IN writes nothing', async () => {
+    await seed('rd4', ['US']);
+    await certifyWithDefault('rd4');
+    const before = await corridor('rd4');
+    await updatePartnerAction(form('rd4', ['US', 'IN']));
+    expect(await corridor('rd4')).toEqual(before);
+    expect(await amlAudits('rd4')).toHaveLength(1);
+  });
+
+  it('removing a country writes nothing', async () => {
+    await seed('rd6', ['US', 'GB']);
+    await certifyWithDefault('rd6');
+    const before = await corridor('rd6');
+    await updatePartnerAction(form('rd6', ['US']));
+    expect(await corridor('rd6')).toEqual(before);
+    expect(await amlAudits('rd6')).toHaveLength(2);
+  });
+
+  it('a REVOKED certification writes nothing', async () => {
+    const { writeCertification } = await import('@/lib/live-controls-write');
+    await seed('rd5', ['US']);
+    await certifyWithDefault('rd5');
+    await db.transaction((tx) => writeCertification(tx, 'rd5', { username: 'test-admin', scope: 'platform' }, { kind: 'revoke' }, 'test revoke'));
+    const before = await corridor('rd5');
+    await updatePartnerAction(form('rd5', ['US', 'GB']));
+    expect(await corridor('rd5')).toEqual(before);
+    expect(await amlAudits('rd5')).toHaveLength(1);
+    expect((await ps.getPartner('rd5'))!.countries).toEqual(['US', 'GB']);
+  });
+});

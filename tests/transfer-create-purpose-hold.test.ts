@@ -6,6 +6,8 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { isPartnerReleasableHold } from '@/lib/compliance-config';
+import { partnerMayRejectHold } from '@/lib/partner-reviews';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner, seedSender } from './helpers-db';
@@ -132,15 +134,44 @@ describe('purpose hold', { retry: 0 }, () => {
     expect(await purposeAudits(db)).toEqual([]);
   });
 
-  it('an already-flagged verdict keeps its own reasons; the risk is still audited and alerted', async () => {
+  it('an already-flagged verdict keeps its own reasons and gains the AML reason; the risk is still audited and alerted', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     const t = await createTransfer(store, partnerStore, mvs, {
       ...base, partnerId: 'default', amountSource: 1500, purposeDetail: 'bitcoin to grow my money',
     });
     expect(t.complianceStatus).toBe('flagged');
-    expect(t.complianceReasons).toEqual(['Large transfer amount.']);
+    expect(t.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
     expect((await purposeAudits(db))[0].meta).toEqual({ category: 'investment' });
     expect((await alerts(db)).map((x) => x.dedupe_key)).toEqual([`purposeflag:${t.id}`]);
+  });
+
+  it('regression (pack 6 P15): a delegated partner cannot release a $1,000+ scam-pattern transfer', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores('acme');
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'acme'`);
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, payment_provider_type) VALUES ('acme', 'simulator')`);
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, partnerId: 'acme', amountSource: 1500, purposeDetail: 'bitcoin to grow my money',
+    });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
+    const owner = { kycMode: 'delegated' };
+    const sender = { watchlistHit: false, pepHit: false };
+    const held = { ...t, status: 'in_review' };
+    const kycOnly = { ...held, complianceReasons: ['Large transfer amount.'] };
+    // The AML reason is what keeps the decision with platform staff (control: the KYC reason alone is releasable).
+    expect(isPartnerReleasableHold(held, owner, sender)).toBe(false);
+    expect(isPartnerReleasableHold(kycOnly, owner, sender)).toBe(true);
+    expect(partnerMayRejectHold(held, owner, sender)).toBe(false);
+    expect(partnerMayRejectHold(kycOnly, owner, sender)).toBe(true);
+  });
+
+  it('a scam-pattern reason on the default tenant at $1,500 keeps the non-releasable reason (demo sees it)', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, partnerId: 'default', amountSource: 1500, purposeDetail: 'bitcoin to grow my money',
+    });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toEqual(['Large transfer amount.', AML_HOLD_REASON]);
   });
 
   it('an invalid reason with no scam pattern that reaches the mint is not stored and holds nothing', async () => {

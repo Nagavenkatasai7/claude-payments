@@ -39,6 +39,8 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// consent on file (pack 6 P8): the E-SIGN tick is tested in pay-page-esign.test.ts
+vi.mock('@/lib/esign', async (o) => ({ ...(await o<typeof import('@/lib/esign')>()), readEsignConsentNeeded: async () => false }));
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
@@ -54,6 +56,7 @@ vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => false,
     isPaymentLinkTransfer: async () => linkTransfer.value,
+    getDisclosureSnapshot: async () => null, // pack 6 T11: the paid page's receipt read
     isPartnerApiMinted: async () => false,
     recipientIdentityMissing: async () => false,
   }),

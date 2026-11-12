@@ -1,4 +1,7 @@
-import { assertQuoteOverrideFresh, createTransfer, MintRefusedError, quoteOverrideFromDraft, RewardEndedError } from './transfer-create';
+import {
+  assertQuoteOverrideFresh, createTransfer, MintRefusedError, quoteOverrideFromDraft, RewardEndedError, RiskAckRequiredError,
+} from './transfer-create';
+import { isRiskSignal } from './risk-signals';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { assertLegsUsable } from './fx';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
@@ -73,10 +76,15 @@ export type FinalizeResult =
       // of birth typed on the pay page could not be written. Nothing was claimed,
       // minted or consumed; the route raises the payevidence alert and answers
       // 503 approval_not_recorded.
+      // 'risk_ack_required' (fix pack 6, P19 T27): the draft showed the risk
+      // warning and opts.risk carried no tick (the mint's RiskAckRequiredError,
+      // a backstop behind the route's pre-verify check). Nothing was minted or
+      // consumed; the claimed id stays bound-but-unminted and the draft is kept;
+      // the route answers 409 reload_required.
       error:
         | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
         | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused' | 'reward_ended'
-        | 'not_available' | 'originator_not_recorded';
+        | 'not_available' | 'originator_not_recorded' | 'risk_ack_required';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -119,7 +127,12 @@ export async function finalizeDraftPayment(
   bankDetails?: BankDetails,
   // Fix pack 4 (C18): the account-holder name typed on the pay page (b2c only).
   // Fix pack 5 (P21): the sender's validated address / date of birth (b2c, real money only).
-  opts: { recipientLegalName?: string; originator?: { address?: string; dateOfBirth?: string } } = {},
+  // Fix pack 6 (P19 T27): the risk-warning tick, set by the route only when the draft has signals.
+  opts: {
+    recipientLegalName?: string;
+    originator?: { address?: string; dateOfBirth?: string };
+    risk?: { acked: boolean; ackedAt?: string };
+  } = {},
 ): Promise<FinalizeResult> {
   const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
 
@@ -358,6 +371,21 @@ export async function finalizeDraftPayment(
       ? typedLegalName || (replacesStoredAccount ? undefined : draftOwnLegalName) || (await bookLegalName()) || undefined
       : draftOwnLegalName || typedLegalName || (await bookLegalName()) || undefined;
 
+  // Fix pack 6 (P19 T27): the signals the pay page warned about (stored garbage
+  // filtered out). The mint gets `risk` only when the draft has signals or the
+  // route sent a tick, so every other call keeps an input with no `risk` key.
+  const riskShown = (draft.riskSignals ?? []).filter(isRiskSignal);
+  const risk =
+    riskShown.length > 0 || opts.risk
+      ? {
+          risk: {
+            shown: riskShown,
+            acked: opts.risk?.acked === true,
+            ...(opts.risk?.ackedAt ? { ackedAt: opts.risk.ackedAt } : {}),
+          },
+        }
+      : {};
+
   let transfer: Awaited<ReturnType<typeof createTransfer>>;
   try {
     transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
@@ -397,6 +425,7 @@ export async function finalizeDraftPayment(
       senderBusinessName: draft.senderBusinessName,
       recipientBusinessName: draft.recipientBusinessName,
       invoiceId: draft.invoiceId,
+      ...risk,
     });
   } catch (err) {
     if (err instanceof RateUnavailableError) return fxRefused(err);
@@ -409,6 +438,7 @@ export async function finalizeDraftPayment(
     if (err instanceof SendsPausedError) return { ok: false, error: 'sends_paused' };
     if (err instanceof RewardEndedError) return { ok: false, error: 'reward_ended' };
     if (err instanceof MintRefusedError) return { ok: false, error: 'not_available' };
+    if (err instanceof RiskAckRequiredError) return { ok: false, error: 'risk_ack_required' };
     throw err;
   }
 

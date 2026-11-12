@@ -102,6 +102,25 @@ vi.mock('@/db/repos/live-certification-facts', async (orig) => {
 });
 const pokeSpy = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/outbox', async (orig) => ({ ...(await orig<typeof import('@/lib/outbox')>()), pokeWorker: pokeSpy }));
+// Fix pack 6 T20: while `ccFault.on`, the corridor write throws (pass-through otherwise), so the
+// go-live AML default can fail AFTER the certification write in the same transaction.
+const ccFault = vi.hoisted(() => ({ on: false }));
+vi.mock('@/db/repos/partner-repo', async (orig) => {
+  const actual = await orig<typeof import('@/db/repos/partner-repo')>();
+  return {
+    ...actual,
+    createPartnerRepo: (...a: Parameters<typeof actual.createPartnerRepo>) => {
+      const repo = actual.createPartnerRepo(...a);
+      return {
+        ...repo,
+        updateCorridorCompliance: async (...b: Parameters<typeof repo.updateCorridorCompliance>) => {
+          if (ccFault.on) throw new Error('corridor write down');
+          return repo.updateCorridorCompliance(...b);
+        },
+      };
+    },
+  };
+});
 
 import { createPartnerRepo, updateLiveControlsKey } from '@/db/repos/partner-repo';
 import { isLiveCertified } from '@/lib/live-gate';
@@ -115,6 +134,7 @@ import {
   revokeLiveAction,
   setFundingModeAction,
 } from '@/app/admin-dashboard/partners/go-live-actions';
+import { setAmlHoldsAction } from '@/app/admin-dashboard/compliance/actions';
 
 const REASON = 'Every readiness line was reviewed today';
 const USERS = ['acme-c1', 'acme-c2'];
@@ -193,6 +213,7 @@ beforeEach(async () => {
   factsHook.firstArgs = [];
   factsHook.throws = false;
   factsHook.override = null;
+  ccFault.on = false;
   db = await freshDb();
   await seedPartner(db, 'acme', 'Acme');
   const tx = db.transaction.bind(db);
@@ -568,5 +589,114 @@ describe('recordCounselAction', () => {
       { capability: 'b2b', set: false, actorScope: 'platform' },
     ]);
     expect(pokeSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Fix pack 6 T20 (P17, P21, Q-R47.3): certifying a partner for live money turns AML holds on, with
+// all three rules, for every corridor it serves (IN excepted) that has NO AML entry; explicit
+// entries are kept; a refused certification writes nothing; a failing default rolls it all back.
+describe('certifyLiveAction: go-live AML default (pack 6 P17)', () => {
+  const ALL_RULES = ['structuring', 'first_transfer', 'new_beneficiary'];
+  const cc = async () => (await rows<{ cc: Record<string, unknown> }>(sql`SELECT corridor_compliance AS cc FROM partners WHERE id = 'acme'`))[0].cc;
+  const amlAudits = () =>
+    rows<{ actor: string; actor_type: string; subject_id: string; meta: Record<string, unknown> }>(
+      sql`SELECT actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'aml.hold_rules_set' ORDER BY id`,
+    );
+  const setCc = (v: Record<string, unknown>) => db.execute(sql`UPDATE partners SET corridor_compliance = ${JSON.stringify(v)}::jsonb WHERE id = 'acme'`);
+  beforeEach(async () => {
+    await db.execute(sql`UPDATE partners SET countries = '["US","GB","IN"]'::jsonb WHERE id = 'acme'`);
+  });
+
+  it('certified with no AML entry anywhere: US and GB get holds on with all three rules; IN is skipped; one audit row per corridor', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'ok';
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    const c = await cc();
+    expect(c.US).toEqual({ amlHolds: true, amlHoldRules: ALL_RULES });
+    expect(c.GB).toEqual({ amlHolds: true, amlHoldRules: ALL_RULES });
+    expect(Object.hasOwn(c, 'IN')).toBe(false);
+    const a = await amlAudits();
+    expect(a).toHaveLength(2);
+    for (const [i, country] of ['US', 'GB'].entries()) {
+      expect(a[i]).toMatchObject({ actor: 'ops-admin', actor_type: 'staff', subject_id: 'acme' });
+      expect(a[i].meta).toEqual({ country, from: [], to: ALL_RULES, actorScope: 'platform', reason: 'go_live_default' });
+    }
+    expect(pokeSpy).toHaveBeenCalledTimes(1);
+    expect(await liveAudits()).toHaveLength(1);
+  });
+
+  it('explicit entries are kept', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'ok';
+    const before = { US: { amlHolds: true, amlHoldRules: ['structuring'] }, GB: { amlHoldRules: [] } };
+    await setCc(before);
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    expect(await cc()).toEqual(before);
+    expect(await amlAudits()).toEqual([]);
+  });
+
+  it('an entry with other keys but no AML key gets the default and keeps its keys', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'ok';
+    await setCc({ US: { largeAmountUsd: 800, aml: { firstUsd: 300 } }, GB: { amlHolds: false } });
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    const c = await cc();
+    expect(c.US).toEqual({ largeAmountUsd: 800, aml: { firstUsd: 300 }, amlHolds: true, amlHoldRules: ALL_RULES });
+    expect(c.GB).toEqual({ amlHolds: false }); // a stored amlHolds key (any value) is an entry
+    expect((await amlAudits()).map((r) => r.meta.country)).toEqual(['US']);
+  });
+
+  it('a platform OFF before certification (no amlHolds key, no list) is overridden by the default', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'ok';
+    await setCc({ US: { largeAmountUsd: 800 } });
+    const f = (on: string) => form({ on, partnerId: 'acme', country: 'US' });
+    await setAmlHoldsAction(f('on'));
+    await setAmlHoldsAction(f('off'));
+    expect((await cc()).US).toEqual({ largeAmountUsd: 800 });
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    expect((await cc()).US).toEqual({ largeAmountUsd: 800, amlHolds: true, amlHoldRules: ALL_RULES });
+    expect((await amlAudits()).map((r) => r.meta)).toEqual([
+      { country: 'US', from: [], to: ALL_RULES, actorScope: 'platform', reason: 'go_live_default' },
+      { country: 'GB', from: [], to: ALL_RULES, actorScope: 'platform', reason: 'go_live_default' },
+    ]);
+  });
+
+  it('not_ready writes nothing (corridor_compliance byte-identical, no aml.hold_rules_set row)', async () => {
+    await platformAdmin();
+    await readyAcme();
+    factsHook.override = async () => passingFacts();
+    await setCc({ US: { largeAmountUsd: 800 } });
+    const ccBefore = JSON.stringify(await cc());
+    const before = await snapshot();
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: false, error: 'Not every readiness line passes. Nothing was changed.' });
+    expect(await snapshot()).toBe(before);
+    expect(JSON.stringify(await cc())).toBe(ccBefore);
+    expect(await amlAudits()).toEqual([]);
+    expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
+  it('a failing default write rolls the certification back', async () => {
+    await platformAdmin();
+    readinessHook.mode = 'ok';
+    const before = await snapshot();
+    const ccBefore = JSON.stringify(await cc());
+    ccFault.on = true;
+    expect(await certifyLiveAction('acme', certifyForm())).toEqual({ ok: false, error: 'Something went wrong. Nothing was changed. Please try again.' });
+    expect((await lcOf()).certification).toBeUndefined();
+    expect(await snapshot()).toBe(before);
+    expect(await liveAudits()).toEqual([]);
+    expect(await amlAudits()).toEqual([]);
+    expect(JSON.stringify(await cc())).toBe(ccBefore);
+    expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
+  it('revoke never touches AML settings', async () => {
+    await platformAdmin();
+    await certifyPartnerForTest(db, 'acme');
+    await setCc({ US: { largeAmountUsd: 800 } });
+    expect(await revokeLiveAction('acme', certifyForm())).toEqual({ ok: true });
+    expect(await cc()).toEqual({ US: { largeAmountUsd: 800 } });
+    expect(await amlAudits()).toEqual([]);
   });
 });

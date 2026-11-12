@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import type { CountryCode } from '@/lib/types';
 import {
   PAY_ACCOUNT_HOLDER_COPY,
@@ -10,14 +10,24 @@ import {
   PAY_SENDER_DOB_INVALID_COPY,
   PAY_SENDER_DOB_LABEL,
   disclosureAckBody,
+  esignConsentBody,
+  riskAckBody,
   payErrorMessage,
   payOkStatus,
+  payOkHeld,
+  payDoneCopy,
+  PAY_HELD_LABEL,
+  PAY_SUCCESS_RECEIPT_COPY,
 } from '@/lib/pay-outcome';
 // Type only: originator-info.ts is server code (database reads) and never enters the client bundle.
 import type { OriginatorView } from '@/lib/originator-info';
 import { approvingLine } from '@/lib/approving-line';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
+// Pure and client-safe (no imports); never src/lib/esign.ts here (server: database reads).
+import { ESIGN_CONSENT_LABEL, ESIGN_CONSENT_TEXT, ESIGN_CONSENT_TITLE } from '@/lib/legal/esign-consent';
+// Pure and client-safe (no imports): the fixed risk warning and its tick label (P18).
+import { RISK_ACK_LABEL, RISK_WARNING_TEXT } from '@/lib/legal/risk-warning';
 import {
   BANK_FIELDS_BY_COUNTRY,
   accountConfirmErrors,
@@ -96,6 +106,8 @@ const hiddenTextClasses = '[-webkit-text-security:disc]';
 const showToggleClasses =
   'mb-3 cursor-pointer bg-transparent p-0 text-xs font-semibold text-[#53bdeb] underline-offset-2 hover:underline focus-visible:underline';
 const successClasses = 'flex items-center justify-center gap-2 font-semibold text-[#25d366]';
+// Fix pack 6 (P11): the held done state: neutral, no check icon.
+const heldClasses = 'text-center font-semibold text-[#e9edef]';
 const panelClasses = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
 const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
 
@@ -114,6 +126,10 @@ export function PayForm({
   legalNameRequired = false,
   legalNameOnFile = true,
   originator = NO_ORIGINATOR_VIEW,
+  esignVersion = null,
+  disclosureSlot = null,
+  receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -136,6 +152,25 @@ export function PayForm({
   legalNameOnFile?: boolean;
   /** Fix pack 5 (P19): which sender fields to ask (booleans only). Default: none. The ACH (b2b) form never asks. */
   originator?: OriginatorView;
+  /**
+   * Fix pack 6 (R46, P8): non-null = no current E-SIGN consent on file; the form asks for it
+   * above the disclosure and posts this version when ticked. Null (default): markup unchanged.
+   * The ACH form never asks (exempt, P5).
+   */
+  esignVersion?: string | null;
+  /** Fix pack 6 (P8): the page's Reg E disclosure, rendered by the form below the consent block (only when esignVersion is set). */
+  disclosureSlot?: ReactNode;
+  /**
+   * Fix pack 6 (P11): true = the reloaded page shows a printable receipt, so the done state
+   * says so (PAY_SUCCESS_RECEIPT_COPY). Default false: today's text. The ACH form ignores it.
+   */
+  receiptOnReload?: boolean;
+  /**
+   * Fix pack 6 (R48, P19): the DRAFT page only, when the draft carries risk signals: the form
+   * shows RISK_WARNING_TEXT and a tick above the E-SIGN block, Pay waits for it and the body
+   * carries `riskAck: true`. Default false: markup unchanged. The ACH form never shows it.
+   */
+  riskWarning?: boolean;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -167,6 +202,10 @@ export function PayForm({
         legalNameRequired={legalNameRequired}
         legalNameOnFile={legalNameOnFile}
         originator={originator}
+        esignVersion={esignVersion}
+        disclosureSlot={disclosureSlot}
+        receiptOnReload={receiptOnReload}
+        riskWarning={riskWarning}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -182,6 +221,10 @@ export function PayForm({
       legalNameRequired={legalNameRequired}
       legalNameOnFile={legalNameOnFile}
       originator={originator}
+      esignVersion={esignVersion}
+      disclosureSlot={disclosureSlot}
+      receiptOnReload={receiptOnReload}
+      riskWarning={riskWarning}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -313,6 +356,56 @@ function DisclosureAck({ checked, onChange }: { checked: boolean; onChange: (v: 
       />
       <span>{ACKNOWLEDGEMENT_LABEL}</span>
     </label>
+  );
+}
+
+// ── Fix pack 6 (R48, P19): the risk warning on the draft pay page ───────────
+// The one fixed, versioned warning (MLRO draft) and its tick, above the E-SIGN
+// block. Pay waits for the tick; the POST then carries `riskAck: true`.
+
+function RiskAck({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div data-testid="risk-ack" className="mb-5 rounded-xl border border-[#2a3942] p-3.5">
+      <p className="text-[13px] leading-normal text-[#e9edef]">{RISK_WARNING_TEXT}</p>
+      <label className="mt-3 flex items-start gap-2 text-[13px] leading-normal text-[#e9edef]">
+        <input
+          type="checkbox"
+          name="riskAck"
+          className="mt-0.5 size-4 shrink-0 accent-[#25d366]"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span>{RISK_ACK_LABEL}</span>
+      </label>
+    </div>
+  );
+}
+
+// ── Fix pack 6 (R46, P8): E-SIGN consent ─────────────────────────────────────
+// Shown above the Reg E disclosure while no current consent is on file. Pay (and
+// Continue on the bank-details step) waits for the tick; the POST then carries
+// `esignConsentVersion` (the server requires it, P5). The link form imports it too.
+
+export function EsignConsent({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div data-testid="esign-consent" className="mb-5 rounded-xl border border-[#2a3942] p-3.5">
+      <h2 className="mb-2 text-sm leading-normal font-semibold">{ESIGN_CONSENT_TITLE}</h2>
+      {ESIGN_CONSENT_TEXT.map((line) => (
+        <p key={line} className="mb-1.5 text-[13px] leading-normal text-[#8696a0]">
+          {line}
+        </p>
+      ))}
+      <label className="mt-3 flex items-start gap-2 text-[13px] leading-normal text-[#e9edef]">
+        <input
+          type="checkbox"
+          name="esignConsent"
+          className="mt-0.5 size-4 shrink-0 accent-[#25d366]"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span>{ESIGN_CONSENT_LABEL}</span>
+      </label>
+    </div>
   );
 }
 
@@ -492,6 +585,10 @@ function SimplePayForm({
   legalNameRequired = false,
   legalNameOnFile = true,
   originator = NO_ORIGINATOR_VIEW,
+  esignVersion = null,
+  disclosureSlot = null,
+  receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
@@ -502,10 +599,22 @@ function SimplePayForm({
   legalNameRequired?: boolean;
   legalNameOnFile?: boolean;
   originator?: OriginatorView;
+  esignVersion?: string | null;
+  disclosureSlot?: ReactNode;
+  receiptOnReload?: boolean;
+  riskWarning?: boolean;
 }) {
   const [status, setStatus] = useState<Status>('idle');
+  // Fix pack 6 (P11): a held answer (in_review) shows the neutral label, never "complete".
+  const [held, setHeld] = useState(false);
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
+  // Fix pack 6 (P8): the E-SIGN tick, asked only when the page passed a version.
+  const [esignTicked, setEsignTicked] = useState(false);
+  const esignMissing = esignVersion !== null && !esignTicked;
+  // Fix pack 6 (P19): the risk tick, asked only when the draft page passed riskWarning.
+  const [riskTicked, setRiskTicked] = useState(false);
+  const riskMissing = riskWarning && !riskTicked;
   // Fix pack 4 (C18): the stored account has no name on file -> ask for it here.
   const showHolder = !legalNameOnFile;
   const [holder, setHolder] = useState('');
@@ -526,7 +635,7 @@ function SimplePayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing || holderMissing || origMissing) return; // the button is disabled too; this covers implicit (Enter) submission
+    if (ackMissing || esignMissing || riskMissing || holderMissing || origMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
     setHolderError('');
@@ -539,13 +648,17 @@ function SimplePayForm({
         body: JSON.stringify({
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
+          ...esignConsentBody(esignVersion, esignTicked),
+          ...riskAckBody(riskWarning, riskTicked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
           ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
-        setStatus(payOkStatus(await res.json().catch(() => null)));
+        const body: unknown = await res.json().catch(() => null);
+        setStatus(payOkStatus(body));
+        setHeld(payOkHeld(body));
         return;
       }
       try {
@@ -570,12 +683,38 @@ function SimplePayForm({
     }
   }
 
+  // Fix pack 6 (P8): the E-SIGN block (hidden once paid) and the page's disclosure slot head
+  // EVERY render path, so the disclosure stays where the page showed it. Both absent: nothing.
+  const top = (
+    <>
+      {riskWarning && status !== 'done' && <RiskAck checked={riskTicked} onChange={setRiskTicked} />}
+      {esignVersion !== null && status !== 'done' && <EsignConsent checked={esignTicked} onChange={setEsignTicked} />}
+      {disclosureSlot}
+    </>
+  );
+
   if (status === 'inactive') {
-    return <p className={formErrorClasses}>This link is no longer active.</p>;
+    return (
+      <>
+        {top}
+        <p className={formErrorClasses}>This link is no longer active.</p>
+      </>
+    );
   }
 
   if (status === 'done') {
+    const done = payDoneCopy(held, receiptOnReload);
+    if (done === 'held') {
+      return (
+        <>
+          {top}
+          <p className={heldClasses}>{PAY_HELD_LABEL}</p>
+        </>
+      );
+    }
     return (
+      <>
+        {top}
       <p className={successClasses}>
         {/* Inline SVG check (not the ✅ emoji) so the success state renders
             identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
@@ -595,12 +734,15 @@ function SimplePayForm({
           <circle cx="12" cy="12" r="10" />
           <path d="M8 12.5l2.5 2.5L16 9" />
         </svg>
-        Payment complete! Check WhatsApp for your receipt.
+        {done === 'receipt' ? PAY_SUCCESS_RECEIPT_COPY : 'Payment complete! Check WhatsApp for your receipt.'}
       </p>
+      </>
     );
   }
 
   return (
+    <>
+      {top}
     <form onSubmit={handleSubmit}>
       {savedAccountLabel && (
         <div className={panelClasses}>
@@ -640,7 +782,7 @@ function SimplePayForm({
       <button
         type="submit"
         className={primaryBtnClasses}
-        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || holderMissing || origMissing}
+        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || riskMissing || holderMissing || origMissing}
       >
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
@@ -654,6 +796,7 @@ function SimplePayForm({
         <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}
     </form>
+    </>
   );
 }
 
@@ -670,6 +813,10 @@ function BankDetailsPayForm({
   legalNameRequired = false,
   legalNameOnFile = true,
   originator = NO_ORIGINATOR_VIEW,
+  esignVersion = null,
+  disclosureSlot = null,
+  receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -681,11 +828,17 @@ function BankDetailsPayForm({
   legalNameRequired?: boolean;
   legalNameOnFile?: boolean;
   originator?: OriginatorView;
+  esignVersion?: string | null;
+  disclosureSlot?: ReactNode;
+  receiptOnReload?: boolean;
+  riskWarning?: boolean;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
   const [step, setStep] = useState<Step>('details');
   const [status, setStatus] = useState<Status>('idle');
+  // Fix pack 6 (P11): a held answer (in_review) shows the neutral label, never "complete".
+  const [held, setHeld] = useState(false);
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(defs.map((d) => [d.key, ''])),
   );
@@ -700,6 +853,12 @@ function BankDetailsPayForm({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
+  // Fix pack 6 (P8): the E-SIGN tick, asked only when the page passed a version.
+  const [esignTicked, setEsignTicked] = useState(false);
+  const esignMissing = esignVersion !== null && !esignTicked;
+  // Fix pack 6 (P19): the risk tick, asked only when the draft page passed riskWarning.
+  const [riskTicked, setRiskTicked] = useState(false);
+  const riskMissing = riskWarning && !riskTicked;
   // Fix pack 4 (C18): a name on file describes the STORED account, not the one
   // typed here, so on real money the field shows even with a name on file. An
   // exempt row ({ required: false, onFile: true }) never shows it.
@@ -735,6 +894,7 @@ function BankDetailsPayForm({
   // re-runs authoritatively (single source of truth, no drift).
   function handleContinue(e: FormEvent) {
     e.preventDefault();
+    if (esignMissing) return; // Continue is disabled too; this covers implicit (Enter) submission
     const result = validatePayoutFields(destinationCountry, values);
     const confirmErrors = accountConfirmErrors(destinationCountry, { ...values, ...confirms });
     const holderErrors: Record<string, string> =
@@ -760,7 +920,7 @@ function BankDetailsPayForm({
   // canonical payoutDestination server-side (it never trusts a client-composed
   // string), so we send the raw fields, not the composed string.
   async function handlePay() {
-    if (ackMissing) return;
+    if (ackMissing || esignMissing || riskMissing) return;
     setStatus('paying');
     setOtpError('');
     setErrorMessage(null);
@@ -773,13 +933,17 @@ function BankDetailsPayForm({
           fields: values,
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
+          ...esignConsentBody(esignVersion, esignTicked),
+          ...riskAckBody(riskWarning, riskTicked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
           ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
-        setStatus(payOkStatus(await res.json().catch(() => null)));
+        const body: unknown = await res.json().catch(() => null);
+        setStatus(payOkStatus(body));
+        setHeld(payOkHeld(body));
         return;
       }
       // Surface server-side errors: a wrong/expired OTP stays on the review step;
@@ -805,12 +969,38 @@ function BankDetailsPayForm({
     }
   }
 
+  // Fix pack 6 (P8): the E-SIGN block (hidden once paid) and the page's disclosure slot head
+  // EVERY render path, so the disclosure stays where the page showed it. Both absent: nothing.
+  const top = (
+    <>
+      {riskWarning && status !== 'done' && <RiskAck checked={riskTicked} onChange={setRiskTicked} />}
+      {esignVersion !== null && status !== 'done' && <EsignConsent checked={esignTicked} onChange={setEsignTicked} />}
+      {disclosureSlot}
+    </>
+  );
+
   if (status === 'inactive') {
-    return <p className={formErrorClasses}>This link is no longer active.</p>;
+    return (
+      <>
+        {top}
+        <p className={formErrorClasses}>This link is no longer active.</p>
+      </>
+    );
   }
 
   if (status === 'done') {
+    const done = payDoneCopy(held, receiptOnReload);
+    if (done === 'held') {
+      return (
+        <>
+          {top}
+          <p className={heldClasses}>{PAY_HELD_LABEL}</p>
+        </>
+      );
+    }
     return (
+      <>
+        {top}
       <p className={successClasses}>
         {/* Inline SVG check (not the ✅ emoji) so the success state renders
             identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
@@ -830,8 +1020,9 @@ function BankDetailsPayForm({
           <circle cx="12" cy="12" r="10" />
           <path d="M8 12.5l2.5 2.5L16 9" />
         </svg>
-        Payment complete! Check WhatsApp for your receipt.
+        {done === 'receipt' ? PAY_SUCCESS_RECEIPT_COPY : 'Payment complete! Check WhatsApp for your receipt.'}
       </p>
+      </>
     );
   }
 
@@ -847,6 +1038,7 @@ function BankDetailsPayForm({
       : null;
     return (
       <div>
+        {top}
         <div className={stepLabelClasses}>Step 2 of 2 · Review &amp; pay</div>
         <div className={panelClasses}>
           <div className={lineClasses}>
@@ -868,7 +1060,7 @@ function BankDetailsPayForm({
         </div>
         <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
         {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
-        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
+        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || riskMissing}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
         <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />
@@ -892,6 +1084,8 @@ function BankDetailsPayForm({
 
   // Step 1: per-country recipient bank-details form.
   return (
+    <>
+      {top}
     <form onSubmit={handleContinue}>
       <div className={stepLabelClasses}>Step 1 of 2 · Recipient bank details</div>
       {defs.map((def) => {
@@ -981,8 +1175,11 @@ function BankDetailsPayForm({
         onDob={(v) => setOriginatorValue('senderDob', v)}
         errors={{ senderAddress: errors.senderAddress || undefined, senderDob: errors.senderDob || undefined }}
       />
-      <button type="submit" className={primaryBtnClasses}>Continue</button>
+      <button type="submit" className={primaryBtnClasses} disabled={esignMissing}>
+        Continue
+      </button>
     </form>
+    </>
   );
 }
 

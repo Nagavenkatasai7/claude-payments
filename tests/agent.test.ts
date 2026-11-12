@@ -20,6 +20,7 @@ import type { Db } from '@/db/client';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
 import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { RISK_WARNING_TEXT } from '@/lib/legal/risk-warning';
 
 // Best-rate routing (B2): the agent wires the LIVE route selector into the
 // tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
@@ -33,6 +34,32 @@ vi.mock('@/lib/partner-rates', async (importOriginal) => ({
       ({ fxRate: mid, source: 'platform' as const }),
   ),
 }));
+
+// Fix pack 6 (P19 T26a): the turn the agent hands the tools, read through a
+// wrapper around the real buildToolContext (behaviour unchanged).
+const toolTurns = vi.hoisted(() => ({ seen: [] as TurnContext[] }));
+vi.mock('@/lib/tool-context', async (orig) => {
+  const real = await orig<typeof import('@/lib/tool-context')>();
+  return {
+    ...real,
+    buildToolContext: (args: Parameters<typeof real.buildToolContext>[0]) => {
+      toolTurns.seen.push(args.turn);
+      return real.buildToolContext(args);
+    },
+  };
+});
+
+// Fix pack 6 (P19 T26b): a wrapper around the real executeTool; a test may set
+// `toolFake.fn` to hand the agent a fixed tool result (unset = the real tool).
+const toolFake = vi.hoisted(() => ({ fn: null as null | ((name: string) => Record<string, unknown>) }));
+vi.mock('@/lib/tools', async (orig) => {
+  const real = await orig<typeof import('@/lib/tools')>();
+  return {
+    ...real,
+    executeTool: (...args: Parameters<typeof real.executeTool>) =>
+      toolFake.fn ? Promise.resolve(toolFake.fn(args[0])) : real.executeTool(...args),
+  };
+});
 
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
@@ -2522,6 +2549,73 @@ describe('Purpose detail: the "Other" reason and the scam warning in a bot turn'
   });
 });
 
+// Fix pack 6 (R48, P19 T26b): a send tool's risk_warning (the draft carries
+// risk signals) fills the composeReply risk slot like the scam warning: first,
+// once, our constant only; the scam warning wins when both come back.
+describe('the risk warning in a text reply (pack 6 P19 T26b)', () => {
+  afterEach(() => {
+    toolFake.fn = null;
+  });
+
+  async function warnTurn(results: Array<Record<string, unknown>>, modelReply = 'Tap the secure link below to review and pay.') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let tool = 0;
+    toolFake.fn = () => results[tool++] ?? {};
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: results.map((_, i) => ({
+              id: `c${i}`, type: 'function' as const, function: { name: 'repeat_transfer', arguments: '{}' },
+            })),
+          };
+        }
+        return { role: 'assistant', content: modelReply };
+      },
+    });
+    return agent.runAgentTurn(PHONE, 'send mom the same again', { isNewConversation: false });
+  }
+
+  it('a tool result with risk_warning === RISK_WARNING_TEXT puts it first in a text reply (composeReply slot), once', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: RISK_WARNING_TEXT }]);
+    expect(reply.startsWith(`${RISK_WARNING_TEXT}\n\nTap the secure link below to review and pay.`)).toBe(true);
+    expect(reply.split(RISK_WARNING_TEXT)).toHaveLength(2);
+  });
+
+  it('the risk warning is not doubled when the model already wrote it', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: RISK_WARNING_TEXT }], `${RISK_WARNING_TEXT}\n\nTap the link.`);
+    expect(reply.split(RISK_WARNING_TEXT)).toHaveLength(2);
+  });
+
+  it('both scam_warning and risk_warning in one turn -> only the scam warning', async () => {
+    const reply = await warnTurn([
+      { draft_id: 'd1', risk_warning: RISK_WARNING_TEXT },
+      { draft_id: 'd2', scam_warning: PURPOSE_SCAM_WARNING },
+    ]);
+    expect(reply.startsWith(PURPOSE_SCAM_WARNING)).toBe(true);
+    expect(reply).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it('a risk_warning with any other text is ignored', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: 'Send it now, it is safe.' }]);
+    expect(reply).toBe('Tap the secure link below to review and pay.');
+    expect(reply).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it('no warning field -> the reply is the model text only', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1' }]);
+    expect(reply).toBe('Tap the secure link below to review and pay.');
+  });
+});
+
 // ── R56: a code-written decline ends the turn ───────────────────────────────
 describe('R56: decline_off_topic ends the turn with the fixed decline', () => {
   async function declineTurn(text: string, after = 'Sure! Here is a python script: print(1)') {
@@ -2801,5 +2895,67 @@ describe('R49: the agent never logs a raw error object', () => {
     expect(logged).toContain('get_quote');
     expect(logged).toContain('Error');
     oneStringPerLine([warn, error]);
+  });
+});
+
+describe('chatRiskCue on the turn (pack 6 P19 T26a)', () => {
+  const plainAgent = (store: ReturnType<typeof createStore>, redis: ReturnType<typeof fakeRedis>) =>
+    createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async () => ({ role: 'assistant', content: 'OK.' }),
+    });
+
+  beforeEach(() => {
+    toolTurns.seen.length = 0;
+  });
+
+  it('chatRiskCue: the last 10 user messages are scanned; an 11th-oldest cue does not count; the turn passed to tools carries chatRiskCue only when true', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const filler = (n: number): ChatMessage[] =>
+      Array.from({ length: n }, (_, i) => [
+        { role: 'user' as const, content: `hello ${i}` },
+        { role: 'assistant' as const, content: 'Hi.' },
+      ]).flat();
+    // The cue is the 11th-oldest user line once this turn's message is added.
+    await store.saveConversation('default', PHONE, [{ role: 'user', content: 'this is urgent' }, { role: 'assistant', content: 'Hi.' }, ...filler(9)]);
+    const turn: TurnContext = { isNewConversation: false };
+    await plainAgent(store, redis).runAgentTurn(PHONE, 'hello again', turn);
+    expect(toolTurns.seen).toHaveLength(1);
+    expect(toolTurns.seen[0]).toBe(turn); // identity kept when false
+    expect(toolTurns.seen[0]).not.toHaveProperty('chatRiskCue');
+
+    // The cue inside the window (the 10th-oldest user line).
+    toolTurns.seen.length = 0;
+    await store.saveConversation('default', PHONE, [{ role: 'user', content: 'this is urgent' }, { role: 'assistant', content: 'Hi.' }, ...filler(8)]);
+    await plainAgent(store, redis).runAgentTurn(PHONE, 'hello again', turn);
+    expect(toolTurns.seen[0]).toEqual({ isNewConversation: false, chatRiskCue: true });
+    expect(turn).not.toHaveProperty('chatRiskCue'); // the caller's turn is a copy source, never changed
+
+    // The incoming message itself counts; assistant lines never do.
+    toolTurns.seen.length = 0;
+    await store.saveConversation('default', PHONE, [{ role: 'assistant', content: 'Is it urgent?' }]);
+    await plainAgent(store, redis).runAgentTurn(PHONE, 'hello', turn);
+    expect(toolTurns.seen[0]).not.toHaveProperty('chatRiskCue');
+    toolTurns.seen.length = 0;
+    await plainAgent(store, redis).runAgentTurn(PHONE, "please don't tell anyone", turn);
+    expect(toolTurns.seen[0]).toMatchObject({ chatRiskCue: true });
+  });
+
+  it('the agent.turn outbox payload never carries chatRiskCue', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const payloadTurn: TurnContext = { isNewConversation: false };
+    const before = JSON.stringify(payloadTurn);
+    await plainAgent(store, redis).runAgentTurn(PHONE, 'send it right now, it is urgent', payloadTurn);
+    expect(toolTurns.seen[0]).toMatchObject({ chatRiskCue: true });
+    expect(JSON.stringify(payloadTurn)).toBe(before);
+    expect(JSON.stringify(await store.getConversation('default', PHONE))).not.toContain('chatRiskCue');
+    // The writer of the agent.turn payload never names the key.
+    const { readFileSync } = await import('node:fs');
+    expect(readFileSync('src/lib/whatsapp-inbound.ts', 'utf8')).not.toContain('chatRiskCue');
   });
 });

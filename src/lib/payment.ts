@@ -4,7 +4,7 @@ import type { CurrencyCode, Transfer } from './types';
 import { NAME_MAX, safeDisplayText } from './untrusted-text';
 import { maskPhoneLast4 } from './mask';
 import { DEFAULT_DELIVERY_BUSINESS_DAYS, deliveryEstimatePhrase } from './partner-config';
-import { fixedReply } from './hold-replies';
+import { fixedReply, receiptLine } from './hold-replies';
 
 export interface StageResult {
   transfer: Transfer;
@@ -97,8 +97,14 @@ export function recipientDisplayName(transfer: Transfer): string {
  * (hold-replies.ts) and opens exactly like the paid one ("charged"), so it never
  * names a review or hints at one. R43: it also says how to reach a person
  * (HELP_SUFFIX), like every other hold or block text.
+ *
+ * Pack 6 (P10): an optional receipt line. A non-blank `receiptUrl` adds a new
+ * line and `Receipt: <url>` (hold-replies.ts receiptLine) after
+ * `Transfer ID: <id>` in all four variants; it rides the body only (no new
+ * outbox kind or payload key). Absent, null or blank -> byte-identical text.
+ * settlement.ts receiptUrlFor decides who gets one (22-char, non-link rows).
  */
-export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }): string {
+export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean; receiptUrl?: string | null }): string {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
   const sourceCharge = formatSourceCharge(
@@ -112,15 +118,18 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
   // estimate. No partner read here: the caller runs inside the paid-flip
   // transaction (settlement.ts beginSettlement). 0 is a stored value.
   const delivery = deliveryEstimatePhrase(transfer.deliveryBusinessDays ?? DEFAULT_DELIVERY_BUSINESS_DAYS);
+  let text: string;
   if (isBusinessFunded(transfer)) {
-    return opts?.held
+    text = opts?.held
       ? `✅ Payment received — ${sourceCharge} will be debited from your business account. ${heldText} Transfer ID: ${transfer.id}`
       : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} ${delivery}. Transfer ID: ${transfer.id}`;
+  } else {
+    text = opts?.held
+      ? `✅ Payment received — ${sourceCharge} charged. ${heldText} Transfer ID: ${transfer.id}`
+      : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${delivery}. Transfer ID: ${transfer.id}`;
   }
-
-  return opts?.held
-    ? `✅ Payment received — ${sourceCharge} charged. ${heldText} Transfer ID: ${transfer.id}`
-    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} ${delivery}. Transfer ID: ${transfer.id}`;
+  const line = receiptLine(opts?.receiptUrl);
+  return line ? `${text}\n${line}` : text;
 }
 
 /**

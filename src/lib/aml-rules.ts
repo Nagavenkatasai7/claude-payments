@@ -59,6 +59,20 @@ export function isAmlRule(v: unknown): v is AmlRule {
   return typeof v === 'string' && Object.hasOwn(AML_RULE_REASON, v);
 }
 
+/**
+ * Fix pack 6 (P13): the in-mint rules a corridor may hold on, in canonical
+ * order; `cluster` is sweep-only (it needs other senders' rows). Defined here,
+ * in this pure module, so compliance-config can resolve a corridor's list
+ * without an import cycle (aml-hold.ts imports compliance-config and
+ * re-exports these three; later tasks import them from aml-hold.ts).
+ */
+export const AML_HOLD_RULES = Object.freeze(['structuring', 'first_transfer', 'new_beneficiary'] as const);
+export type AmlHoldRule = (typeof AML_HOLD_RULES)[number];
+
+export function isAmlHoldRule(v: unknown): v is AmlHoldRule {
+  return typeof v === 'string' && (AML_HOLD_RULES as readonly string[]).includes(v);
+}
+
 /** A4: the plain-English meaning of a rule (staff text; shared with the AML explain copilot). */
 export function amlRuleReason(rule: AmlRule): string {
   return AML_RULE_REASON[rule];

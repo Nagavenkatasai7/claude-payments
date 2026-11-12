@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   PAY_FX_UNAVAILABLE_COPY, PAY_QUOTE_EXPIRED_COPY, PAY_RATE_EXPIRED_COPY, PAY_RATE_EXPIRED_PAYMENT_PENDING_COPY,
   PAY_TEMPORARY_COPY, payErrorMessage, payOkStatus,
-  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody,
+  PAY_RELOAD_REQUIRED_COPY, PAY_APPROVAL_NOT_RECORDED_COPY, PAY_ACCOUNT_HOLDER_COPY, disclosureAckBody, esignConsentBody, riskAckBody, payOkHeld, payDoneCopy,
   PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { PAY_RISK_ACK_REQUIRED_COPY } from '@/lib/legal/risk-warning';
 
 // Review S2 (Program-Fix 32): the pay route's contract is fixed (ruling 7) — a
 // POST on a row that is no longer awaiting payment answers 200
@@ -46,6 +47,10 @@ describe('payErrorMessage', () => {
     expect(m).toBe(PAY_TEMPORARY_COPY);
     expect(m).toMatch(/try again/i);
     expect(m).not.toMatch(/charged/i);
+  });
+
+  it('fix pack 6 (P4, T27): risk_ack_required -> PAY_RISK_ACK_REQUIRED_COPY', () => {
+    expect(payErrorMessage({ ok: false, reason: 'risk_ack_required', error: 'x' })).toBe(PAY_RISK_ACK_REQUIRED_COPY);
   });
 
   it('never echoes server text and returns null for anything else', () => {
@@ -141,6 +146,25 @@ describe('disclosureAckBody', () => {
   });
 });
 
+// Fix pack 6 (P4): the E-SIGN consent field a pay form posts: the version only when ticked.
+describe('riskAckBody (fix pack 6 P4, P19)', () => {
+  it('posts riskAck: true only when the warning is shown AND ticked', () => {
+    expect(riskAckBody(false, false)).toEqual({});
+    expect(riskAckBody(false, true)).toEqual({});
+    expect(riskAckBody(true, false)).toEqual({});
+    expect(riskAckBody(true, true)).toEqual({ riskAck: true });
+  });
+});
+
+describe('esignConsentBody (fix pack 6 P4)', () => {
+  it("ticked with a version -> { esignConsentVersion }; not ticked or no version -> {}", () => {
+    expect(esignConsentBody('v', true)).toEqual({ esignConsentVersion: 'v' });
+    expect(esignConsentBody('v', false)).toEqual({});
+    expect(esignConsentBody(null, true)).toEqual({});
+    expect(esignConsentBody(null, false)).toEqual({});
+  });
+});
+
 // Review R2-Q1 I2: a 409 not_available on the pay POST (the R18 gates, the live controls) shows
 // the fixed cannot_complete line on the pay, link and bill forms, never the generic retry text.
 describe('payErrorMessage — not_available (R2-Q1 I2)', () => {
@@ -176,5 +200,25 @@ describe('billPayErrorOutcome (R3-Y2 R1)', () => {
     for (const body of [null, 'x', {}, { reason: 'bad_request' }, { reason: 'rate_limited' }, { error: 'server text' }]) {
       expect(billPayErrorOutcome(body), JSON.stringify(body)).toEqual({ message: null, clearCode: false });
     }
+  });
+});
+
+describe('payOkHeld and payDoneCopy (fix pack 6 P4, P11)', () => {
+  it("payOkHeld: only an object with status 'in_review' is held", () => {
+    expect(payOkHeld({ ok: true, status: 'in_review' })).toBe(true);
+    for (const body of [{ ok: true, status: 'paid' }, { ok: true, status: 'cancelled' }, { ok: true }, null, 'x', undefined]) {
+      expect(payOkHeld(body), JSON.stringify(body)).toBe(false);
+    }
+  });
+
+  it('payOkStatus is unchanged for a held answer (done)', () => {
+    expect(payOkStatus({ ok: true, status: 'in_review' })).toBe('done');
+  });
+
+  it('payDoneCopy: held wins, then receipt, else legacy', () => {
+    expect(payDoneCopy(true, true)).toBe('held');
+    expect(payDoneCopy(true, false)).toBe('held');
+    expect(payDoneCopy(false, true)).toBe('receipt');
+    expect(payDoneCopy(false, false)).toBe('legacy');
   });
 });

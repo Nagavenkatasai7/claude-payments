@@ -16,6 +16,7 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer, Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -122,6 +123,8 @@ beforeEach(async () => {
   customerStore = createCustomerStore(db, store);
   txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
   await customerStore.saveCustomer(customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
   resetRateCacheForTests();
   sendTransactionOtp.mockClear();
   capture.mockReset().mockResolvedValue({ fundingRef: 'mockfund-x' });

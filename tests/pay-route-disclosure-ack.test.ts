@@ -16,6 +16,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer, Customer } from '@/lib/types';
 import { PAY_APPROVAL_NOT_RECORDED_COPY } from '@/lib/pay-outcome';
 import { sql } from 'drizzle-orm';
@@ -123,6 +124,8 @@ beforeEach(async () => {
   txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
   sendTransactionOtp.mockClear();
   drafts.clear();
   finalize.mockReset();
@@ -208,6 +211,8 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
     const DRAFT_ID = 'draft_ack_1';
     const MINTED = 'tx_minted_from_draft_1';
     await seedPartner(db, 'p_draft_tenant');
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'p_draft_tenant', PHONE);
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ disclosure: { licensedEntity: 'Draft Tenant Money LLC' } })}::jsonb
       WHERE id = 'p_draft_tenant'`);
     drafts.set(DRAFT_ID, {

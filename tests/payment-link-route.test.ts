@@ -21,6 +21,7 @@ import { createPayeeRepo } from '@/db/repos/payee-repo';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Customer } from '@/lib/types';
 import { MintRefusedError } from '@/lib/transfer-create';
 import { fixedReply } from '@/lib/hold-replies';
@@ -143,6 +144,8 @@ beforeEach(async () => {
     senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
     partnerId: 'default', createdAt: T0, updatedAt: T0,
   } as Customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
   const payees = createPayeeRepo(db);
   await payees.insert({
     id: 'pye_1', partnerId: 'default', legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',
@@ -419,6 +422,8 @@ describe('POST /api/pay/l/[token] — pay-time live gate on resume (pack 3)', { 
       senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
       partnerId: 'acme', createdAt: T0, updatedAt: T0,
     } as Customer);
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'acme', PHONE);
     const payees = createPayeeRepo(db);
     await payees.insert({
       id: 'pye_acme_live', partnerId: 'acme', legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',
@@ -499,6 +504,8 @@ describe('link route R18 gate (pack 4)', { retry: 0 }, () => {
       senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
       partnerId: 'acme', createdAt: T0, updatedAt: T0,
     } as Customer);
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'acme', PHONE);
     const payees = createPayeeRepo(db);
     await payees.insert({
       id: 'pye_acme', partnerId: 'acme', legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',

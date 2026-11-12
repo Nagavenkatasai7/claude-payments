@@ -5,7 +5,7 @@ import { useActionState } from 'react';
 import { t } from '@/lib/i18n';
 import { Button, Checkbox, Field, Input } from '@/components/ds';
 import type { ActionResult } from '../../action-result';
-import { saveAlertEmailAction, saveComplianceAlertEmailAction, saveDisclosureAction, saveSupportPortalAction } from './actions';
+import { saveAlertEmailAction, saveComplianceAlertEmailAction, saveDisclosureAction, saveSupportPortalAction, setAmlHoldRulesAction } from './actions';
 import { StepUpPrompt, useStepUpAction } from '../integrations/step-up';
 
 // The /partner/settings forms (partner-dashboard merge, 2f). Plain forms: nothing here is trusted.
@@ -216,6 +216,63 @@ export function DisclosureForm({ current, maxDays }: { current: DisclosureValues
           <SaveButton pending={pending} />
         </div>
         <Status state={result} />
+      </form>
+      {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Fix pack 6 T19 (P17): one corridor's AML hold rules. Every rule id, its label and the ticked set
+ * come from the server page as PROPS: this client file imports nothing from aml-hold.ts or
+ * compliance-config.ts (P0 rule 13). Every save asks for the step-up (TOTP); StepUpPrompt re-sends
+ * the SAME submission with the code. Ticking nothing turns the corridor's holds off.
+ */
+export function AmlHoldRulesForm({ country, rules, ticked }: { country: string; rules: ReadonlyArray<{ id: string; label: string }>; ticked: readonly string[] }) {
+  const flow = useStepUpAction<ActionResult>((fd) => setAmlHoldRulesAction(null, fd));
+  const [pending, startSave] = React.useTransition();
+  const result = flow.stepUp ? null : flow.result;
+  const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    startSave(async () => {
+      await flow.run(fd);
+    });
+  };
+  return (
+    <div>
+      <form
+        onSubmit={onSubmit}
+        onChange={() => {
+          if (flow.stepUp) flow.dismiss();
+        }}
+        className="flex flex-col gap-2"
+        data-testid="settings-aml-holds-form"
+        data-country={country}
+      >
+        <h3 className="text-[15px] font-bold text-ds-ink">{country} → IN</h3>
+        <input type="hidden" name="country" value={country} />
+        {rules.map((r) => (
+          <Checkbox key={r.id} name="rules" value={r.id} label={r.label} defaultChecked={ticked.includes(r.id)} />
+        ))}
+        {ticked.length === 0 ? <p className="text-[13px] text-ds-ink-muted">{t('partner.settings.amlHolds.none')}</p> : null}
+        <div>
+          <Button type="submit" size="md" disabled={pending}>
+            {pending ? t('partner.settings.saving') : t('partner.settings.amlHolds.save')}
+          </Button>
+        </div>
+        <div aria-live="polite">
+          {result?.ok === true ? (
+            <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
+              {t('partner.settings.amlHolds.saved')}
+            </p>
+          ) : null}
+          {result && result.ok === false && result.error ? (
+            <p role="alert" className="text-[14px] font-semibold text-ds-danger-ink">
+              {result.error}
+            </p>
+          ) : null}
+        </div>
       </form>
       {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
     </div>

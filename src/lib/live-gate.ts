@@ -1,7 +1,7 @@
 // live-gate — Fix pack 2 (R02): is this transfer real money?
 //
-// Real money = the transfer settles on a real `http` rail (the same test as
-// aml-hold.ts amlHoldRailEligible) and is not a sandbox ('test') transfer. A
+// Real money = the transfer settles on a real `http` rail and is not a sandbox
+// ('test') transfer (the in-mint AML hold keys on it too: fix pack 6 P16). A
 // failed rail read counts as real money: the stricter path (a live sanctions
 // list required) is the safe one. Mock and simulator rails are demo, and stay
 // demo only because a non-http rail never reaches a partner's stored URL.

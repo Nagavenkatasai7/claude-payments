@@ -24,6 +24,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { okVerify, realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
@@ -211,6 +212,8 @@ async function seedOwner(fullName: string, partnerId: string) {
   // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
   // ORIGINATOR_INFO_MISSING hold (P22) stays out of the cases about the account-holder name.
   await seedOriginatorForTest(db, partnerId, SENDER, { address: true, dob: true });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, partnerId, SENDER);
 }
 
 /** OWNER: certified with an approved provider block, on an http rail, live OFAC list. */
@@ -448,7 +451,10 @@ describe('pay route, existing transfer, real money: the typed name (C18 steps 3-
     await store.saveTransfer(makeTransfer({ id: 'ah-namethrow' }));
     fault.nameThrows = true;
     const before = consoleLines.length;
+    // Review round 1 (RG2): the hour is read before and after the request; the key is one of them.
+    const hourBefore = new Date().toISOString().slice(0, 13);
     const res = await post('ah-namethrow', realMoneyPayBody({ accountHolder: TYPED }));
+    const hourAfter = new Date().toISOString().slice(0, 13);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
     expect(otp.verify).toHaveBeenCalledOnce(); // the code was spent: the alert makes the fault visible
@@ -457,7 +463,7 @@ describe('pay route, existing transfer, real money: the typed name (C18 steps 3-
     };
     expect(r.rows).toHaveLength(1);
     expect(r.rows[0].kind).toBe('ops.alert');
-    expect(r.rows[0].dedupe_key).toBe(`payevidence:${new Date().toISOString().slice(0, 13)}`);
+    expect([`payevidence:${hourBefore}`, `payevidence:${hourAfter}`]).toContain(r.rows[0].dedupe_key);
     const t = await store.getTransfer('ah-namethrow');
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();

@@ -6,6 +6,7 @@ import {
   EVAL_CASES,
   PR_SUBSET_IDS,
   casesFor,
+  buildEvalMessages,
   runEval,
   replyExcerpt,
   EVAL_EXCERPT_MAX,
@@ -15,6 +16,8 @@ import {
 import { main, makeEvalChat, EVAL_DEFAULT_MODEL, parseEvalConfig, requiredPasses, reportBaseName } from '../../scripts/eval-bot';
 import { AGENT_MODEL_CHOICES, HAIKU, SONNET } from '@/lib/llm-models';
 import type { ChatMessage } from '@/lib/types';
+import { ENGLISH_STEPS_SECTION, buildSystemPrompt } from '@/lib/prompt';
+import { fixedReply } from '@/lib/hold-replies';
 
 // Program-Fix 49B (prompt-11) and R31. No real model is ever called here:
 // every chat function is a stub, and fetch is a spy that answers like the
@@ -313,6 +316,173 @@ describe('runEval', () => {
     expect(replyExcerpt({ role: 'assistant', content: '', tool_calls: [{ id: 'c', type: 'function', function: { name: 'get_quote', arguments: '{"amount_source":5}' } }] })).toBe(
       '[tool get_quote {"amount_source":5}]',
     );
+  });
+});
+
+describe('buildEvalMessages and the English steps section (pack 6 P12)', () => {
+  it('buildEvalMessages passes englishTransactionSteps only for an englishSteps case', () => {
+    const byId = (id: number) => EVAL_CASES.find((c) => c.id === id)!;
+    expect(String(buildEvalMessages(byId(60))[0].content)).toContain(ENGLISH_STEPS_SECTION);
+    expect(String(buildEvalMessages(byId(61))[0].content)).toContain(ENGLISH_STEPS_SECTION);
+    expect(String(buildEvalMessages(byId(18))[0].content)).not.toContain(ENGLISH_STEPS_SECTION);
+    expect(buildEvalMessages(byId(18))[0].content).toBe(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true, purposeRequired: false }));
+  });
+});
+
+describe('cases 60 and 61 check the lead-in line their titles promise (review round 2 GD4)', () => {
+  const byId = (id: number) => EVAL_CASES.find((c) => c.id === id)!;
+  const say = (content: string): ChatMessage => ({ role: 'assistant', content });
+  const failuresOf = async (id: number, text: string) => (await runEval(async () => say(text), [byId(id)]))[0].failures;
+  const held = fixedReply('hold', { help: true });
+
+  it('case 60 fails with no lead-in line', async () => {
+    expect(await failuresOf(60, held)).not.toEqual([]);
+  });
+  it('case 60 fails with an English lead-in line', async () => {
+    expect(await failuresOf(60, `Here is the answer in English:\n${held}`)).not.toEqual([]);
+  });
+  it('case 60 fails with a Spanish line AFTER the status text instead of before it', async () => {
+    expect(await failuresOf(60, `${held}\nLe dejo la respuesta en inglés.`)).not.toEqual([]);
+  });
+  it('case 60 passes with one Spanish lead-in line, then the status text', async () => {
+    expect(await failuresOf(60, `Le dejo la respuesta en inglés:\n${held}`)).toEqual([]);
+  });
+  it('case 61 fails when the quote lead line is Hinglish', async () => {
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
+  });
+  it('case 61 fails when the quote lead line is Hinglish and the English question names the quote (review round 2 F4-D1)', async () => {
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with this quote?')).not.toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with these details?')).not.toEqual([]);
+  });
+  it('case 61 fails when the only English part is a question with a second opener after the lead word (final check R3 F7-D1)', async () => {
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with the quote you can see above?')).not.toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with this quote, or would you like to change it?')).not.toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShould I confirm these details, or can I change something?')).not.toEqual([]);
+  });
+  it('case 61 fails when the Hinglish line is not the first line', async () => {
+    expect(await failuresOf(61, 'Here is your quote.\nAapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
+  });
+  it('case 61 passes with an English quote lead line, with or without one Hinglish lead-in line first', async () => {
+    expect(await failuresOf(61, 'Here is your quote. Shall I go ahead?')).toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote.\nShall I go ahead?')).toEqual([]);
+  });
+  it('case 61 passes when the English quote lead and the question share one sentence joined by a comma (review round 2 R2-D1)', async () => {
+    expect(await failuresOf(61, 'Here is your quote, shall I go ahead?')).toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote, shall I go ahead?')).toEqual([]);
+  });
+
+  // Final check R4 R3-D1: the lead is decided per sentence; a question counts only from a
+  // declarative lead start, up to its first clause boundary or opener, and only when that names the quote.
+  const H = 'Aapka quote neeche hai.\n';
+  it.each([
+    ['Shall I go ahead?'],
+    [`${H}Is this quote okay, or shall I change it?`],
+    [`${H}Are these details correct, shall I go ahead?`],
+    [`${H}Do these details look right, or should I change something?`],
+    [`${H}Happy with this quote, or should I change the amount?`],
+    [`${H}Want to go ahead with this quote, or shall I change it?`],
+    [`${H}Shall I go ahead with this quote? Or should I change it?`],
+    [`${H}Is this quote okay?\nShall I go ahead?`],
+    [`${H}Here is what I need to know: is this quote okay, shall I go ahead?`],
+    [`${H}This quote okay, or shall I change it?`],
+    [`${H}These details look right, shall I go ahead?`],
+    [`${H}Your quote okay, shall I go ahead?`],
+    [`${H}Quote looks right, shall I go ahead?`],
+    [`${H}Does the quote above look right? Should I confirm?`],
+    [`${H}Can you see the quote above? Shall I go ahead?`],
+    // Final check R5 R4-A-1/R4-B-1: markup or a missing space after a question mark keeps it a question.
+    [`${H}*Is this quote okay?* Shall I go ahead?`],
+    [`${H}(Is this quote okay?) Shall I go ahead?`],
+    [`${H}Is this quote okay?Shall I go ahead?`],
+  ])('case 61 fails when no English statement or declarative lead names the quote (final check R4 R3-D1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toContain('the quote lead line is not in English');
+  });
+  it('case 61 fails on the Hinglish position alone when an English statement leads (final check R5 R4-B-2)', async () => {
+    const failures = await failuresOf(61, 'Here is your quote.\nAapka quote theek hai?\nShall I go ahead?');
+    expect(failures).toContain('a Hinglish line is not the first line');
+    expect(failures).not.toContain('the quote lead line is not in English');
+  });
+  // Final check R5 R4-A-1/R4-B-1: WhatsApp markup, a closing bracket or a missing space after the
+  // full stop still ends the English statement, as it did at 200402e.
+  it.each([
+    [`${H}*Here is your quote.* Shall I go ahead?`],
+    [`${H}*You can review the quote below.* Shall I go ahead?`],
+    ['You can review the quote below.* Shall I go ahead?'],
+    [`${H}(You can review the quote below.) Shall I go ahead?`],
+    [`${H}You can review the quote below.Shall I go ahead?`],
+    ['You can see the quote below.Shall I go ahead?'],
+    [`${H}Please check the quote above.Shall I go ahead?`],
+    [`${H}You can see your quote below.Shall I proceed?`],
+    [`${H}*Here is your quote*, shall I go ahead?`],
+  ])('case 61 passes when markup or a missing space follows the English statement (final check R5 R4-A-1, R4-B-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // Final check R6 R5-1: a missing space ends the statement after any character, not only after
+  // a lowercase letter (a capital, a digit, a bracket or an ellipsis), as it did at 200402e.
+  it.each([
+    [`${H}Check the quote in USD.Shall I go ahead?`],
+    [`${H}You can see the quote for $200.Shall I go ahead?`],
+    [`${H}You can see the quote below (in USD).Shall I go ahead?`],
+    [`${H}You can see the quote below...Shall I go ahead?`],
+    [`${H}You can see the quote below.OK to go ahead?`],
+    // Control: the same ellipsis with a space still ends the statement (the space split, unchanged).
+    [`${H}You can see the quote below... Shall I go ahead?`],
+  ])('case 61 passes when a missing space follows a capital, a digit, a bracket or an ellipsis (final check R6 R5-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // Truth check R6-1: with no space, the next sentence may also start with the word "I", and
+  // after a lowercase letter and a mark with any capital ("above.USD"), as it did at 36ca861.
+  it.each([
+    [`${H}You can see the quote below.I can go ahead if you confirm, shall I?`],
+    [`${H}Please review the quote above.I'll send it once you confirm, shall I go ahead?`],
+    [`${H}Please review the quote above.I hope it looks good, shall I go ahead?`],
+    [`${H}Please review the quote above.USD 200 goes to mummy, shall I go ahead?`],
+    [`${H}Check the quote in USD.I can go ahead if you confirm, shall I?`],
+  ])('case 61 passes when a missing space comes before "I" or, after a lowercase letter, before any capital (truth check R6-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // The documented limits of the sentence splitter (scripts/eval-bot-cases.ts, the comment of case
+  // 61). They are pinned so that a later change of the splitter has to decide about them.
+  it('case 61 keeps the documented limits of its sentence splitter (truth check R6-1, R6-2)', async () => {
+    const LEAD = 'the quote lead line is not in English';
+    // A statement that ends with a bracketed or quoted question counts as a question.
+    expect(await failuresOf(61, `${H}You can see the quote below (any questions?). Shall I go ahead?`)).toContain(LEAD);
+    // So does a statement that ends with a quoted question (truth check R8 F10-D1).
+    expect(await failuresOf(61, `${H}The quote below answers "how much will it cost?". Shall I go ahead?`)).toContain(LEAD);
+    expect(await failuresOf(61, 'The quote below is for "Send to mummy?". Shall I go ahead?')).toContain(LEAD);
+    // With no space, an all-capitals word starts a sentence only after a lowercase letter and a mark.
+    expect(await failuresOf(61, `${H}Check the quote in USD.USD 200 goes to mummy, shall I go ahead?`)).toContain(LEAD);
+    // An abbreviation's full stop ends a sentence, so the first part of this question counts as a statement.
+    expect(await failuresOf(61, `${H}Do you want this quote in U.S. dollars? Shall I go ahead?`)).not.toContain(LEAD);
+  });
+  // Final check R6 R5-1, the other side: the wider split makes no question a statement. A
+  // sentence is a question when its closing run of marks holds a "?" ("?!", "?...", "?)."), and a
+  // decimal point does not split.
+  it.each([
+    [`${H}Is this quote in USD?Shall I go ahead?`],
+    [`${H}Is the $200.00 quote okay? Shall I go ahead?`],
+    [`${H}Is this quote okay (in USD)?Shall I go ahead?`],
+    [`${H}Is this quote OK?OK to go ahead?`],
+    [`${H}Is this quote okay?!Shall I go ahead?`],
+    [`${H}Is this quote okay?! Shall I go ahead?`],
+    [`${H}Is this quote okay?...Shall I go ahead?`],
+    [`${H}Is this quote okay?... Shall I go ahead?`],
+    [`${H}(Is this quote okay?). Shall I go ahead?`],
+  ])('case 61 still fails when a question has no space before the next sentence (final check R6 R5-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toContain('the quote lead line is not in English');
+  });
+  it.each([
+    ['Here are the details you can check, shall I go ahead?'],
+    ['You can review the quote below. Shall I go ahead?'],
+    ['Here is your quote.\nShall I go ahead?'],
+    [`${H}Your quote is ready, shall I go ahead?`],
+    [`${H}Okay, here's the breakdown - shall I go ahead?`],
+    [`${H}I've prepared your quote, should I confirm it?`],
+    [`${H}Here is your quote. Does everything look right? Shall I go ahead?`],
+    [`${H}Here is your quote so shall I go ahead?`],
+    [`${H}Below are the details. Shall I proceed?`],
+  ])('case 61 passes with an English statement or declarative lead that names the quote (final check R4 R3-D1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
   });
 });
 

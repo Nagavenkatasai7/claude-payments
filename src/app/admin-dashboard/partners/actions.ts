@@ -55,6 +55,7 @@ import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { hasStandingCertification, settlementTargetUrl } from '@/lib/live-gate';
 import { lockPartner } from '@/lib/live-controls-write';
+import { writeAmlHoldDefaults } from '@/lib/aml-hold-defaults';
 import { pokeWorker } from '@/lib/outbox';
 import { t } from '@/lib/i18n';
 import { withRotatedSecret, type PartnerWhatsappConfig } from '@/lib/partner-integrations';
@@ -193,6 +194,18 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
         subjectId: id,
         meta: { from: previousKycMode, to: kycMode, postureSigned: signed },
       });
+    }
+    // Fix pack 6 review round 1 RD2: a corridor this save ADDS to a partner whose certification
+    // stands (read on the LOCKED row, the same predicate as the kycMode lock above) gets the
+    // go-live AML default (holds on, all three rules) and one aml.hold_rules_set row, in this
+    // transaction. IN, a removed country and a corridor that already has an AML entry write
+    // nothing; a partner that is not certified is untouched. savePartner never writes
+    // corridor_compliance on an existing row (partner-repo.ts), and this is the LAST write to it here.
+    if (hasStandingCertification(locked.liveControls)) {
+      const added = updated.countries.filter((c) => c !== 'IN' && !(locked.countries ?? []).includes(c));
+      if (added.length > 0) {
+        await writeAmlHoldDefaults(tx, id, added, { username: staff.username, scope: scopeOf(staff).kind }, 'corridor_added_default');
+      }
     }
   });
   revalidatePath('/admin-dashboard/partners');

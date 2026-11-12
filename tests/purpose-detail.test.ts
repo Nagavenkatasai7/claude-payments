@@ -210,11 +210,12 @@ describe('validPurposeDetail and the warning copy', () => {
     expect(validPurposeDetail(42)).toBeUndefined();
   });
 
-  it('the warning is the owner-approved text (it names no matched rule)', () => {
+  it('the warning is the neutral placeholder text (pack 6 P15): names no rule, no category and no SmartRemit staff', () => {
     expect(PURPOSE_SCAM_WARNING).toBe(
       'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. ' +
-        'SmartRemit staff check this transfer before the money goes.',
+        'This transfer is checked before the money goes.',
     );
+    expect(PURPOSE_SCAM_WARNING).not.toMatch(/smartremit|staff|compliance|review|aml/i);
   });
 });
 

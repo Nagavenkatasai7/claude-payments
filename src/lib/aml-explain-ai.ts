@@ -123,7 +123,20 @@ export interface AmlExplainFacts {
   eddRequired: boolean;
   /** Platform only: the scam pattern the customer's stated reason matched (a closed code and its staff label). */
   purposeRisk?: { category: PurposeRiskCategory; label: string };
+  /**
+   * Fix pack 6 (P16): the in-mint AML check could not run, so the mint held the
+   * row (its aml.hold row says check_failed). Set only when true, so every
+   * other bundle and prompt stays byte-identical.
+   */
+  checkFailed?: true;
 }
+
+/**
+ * Fix pack 6 (P16): the ONE staff line for a check_failed AML hold (both
+ * audiences; no number, never names a rule). Staff copy, never shown to a customer.
+ */
+export const AML_HOLD_CHECK_FAILED_TEXT =
+  'The automatic AML check could not run when this transfer was created, so it was held for review. No rule result is recorded.';
 
 export interface AmlExplanation {
   summary: string;
@@ -180,7 +193,11 @@ function ruleFact(
  * Build the facts bundle (PURE). `alerts` are the transfer's aml.alert rows
  * (malformed rows are dropped, one fact per rule). When there is none, the
  * caller may pass `recomputed` — the in-mint rules re-run on the sender's
- * ledger (senderAmlStats → amlHoldHit) — marked "recomputed". `purposeHold`
+ * ledger (senderAmlStats and priorSends → amlHoldHits, limited to the rules the
+ * row's own aml.hold row names; aml-explain-load.ts) — marked "recomputed".
+ * `checkFailed` (that aml.hold row says check_failed: the check could not run,
+ * so nothing was recomputed) adds AML_HOLD_CHECK_FAILED_TEXT and no rule; an
+ * alert row still wins (the sweep saw the row later). `purposeHold`
  * (the transfer has a purpose.flag row) turns the generic hold reason into
  * `purpose_hold`; its category reaches the PLATFORM audience only (the partner
  * transfer page never names it either).
@@ -193,6 +210,7 @@ export function buildAmlExplainBundle(
   now: number,
   recomputed?: AmlHit | null,
   purposeHold?: PurposeHoldFact | null,
+  checkFailed?: boolean,
 ): AmlExplainFacts {
   const rules: AmlExplainRuleFact[] = [];
   for (const a of alerts) {
@@ -219,6 +237,7 @@ export function buildAmlExplainBundle(
     holdReasons: onHold || t.complianceStatus === 'flagged' ? holdReasonCodes(t.complianceReasons, !!purposeHold) : [],
     eddRequired: t.eddRequired === true,
   };
+  if (checkFailed === true && rules.length === 0) facts.checkFailed = true;
   const category = purposeHold?.category;
   if (audience === 'platform' && category) {
     facts.purposeRisk = { category, label: PURPOSE_RISK_LABELS[category] };
@@ -263,6 +282,7 @@ function factsText(f: AmlExplainFacts): string {
       lines.push(line);
     }
   }
+  if (f.checkFailed) lines.push(AML_HOLD_CHECK_FAILED_TEXT);
   if (f.thresholds) {
     const th = f.thresholds;
     lines.push(
@@ -410,6 +430,7 @@ export function amlExplainFallback(f: AmlExplainFacts): AmlExplanation {
     }
     sentences.push(`${s}.`);
   }
+  if (f.checkFailed) sentences.push(AML_HOLD_CHECK_FAILED_TEXT);
   if (f.onHold) {
     const why = f.holdReasons.length ? f.holdReasons.map((c) => HOLD_TEXT[c]).join(', ') : 'review';
     sentences.push(`It is on hold for ${why}.`);

@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { AML_HOLD_CHECK_FAILED_TEXT } from '@/lib/aml-explain-ai';
 import type { Staff } from '@/lib/types';
 
 // A4 — POST /api/copilot/aml-explain. Self-gated like the other copilot
@@ -184,6 +185,23 @@ describe('/api/copilot/aml-explain — explanation', () => {
       { rule: 'first_transfer', reason: 'a large first send from a new customer', source: 'recomputed', window: 'first', count: 1, sumUsd: 900 },
     ]);
     expect(body.facts.onHold).toBe(true);
+  });
+
+  it('a check_failed hold shows no rule and says the check could not run', async () => {
+    // Fix pack 6 T18 (P16): the row's own aml.hold row says check_failed.
+    await createAuditRepo(db).record({
+      partnerId: 'acme', actor: 'system:aml-hold', actorType: 'system', action: 'aml.hold', subjectId: held,
+      meta: { rules: ['check_failed'] },
+    });
+    chatMock.mockRejectedValueOnce(new Error('down'));
+    const res = await POST(req({ subjectId: held }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.source).toBe('fallback');
+    expect(body.facts.rules).toEqual([]);
+    expect(body.facts.checkFailed).toBe(true);
+    expect(body.explanation.summary).toContain(AML_HOLD_CHECK_FAILED_TEXT);
+    expect(body.explanation.summary).not.toMatch(/structuring|first_transfer|new_beneficiary/);
   });
 
   it('a row held for another reason (no AML hold, no alert) shows no recomputed rule', async () => {

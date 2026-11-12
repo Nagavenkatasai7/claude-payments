@@ -10,6 +10,8 @@ import type { Db } from '@/db/client';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Transfer } from '@/lib/types';
 import { HOLD_REPLY } from '@/lib/hold-replies';
+import { newTransferId } from '@/lib/id';
+import { payUrlFor } from '@/lib/pay-url';
 
 // beginSettlement — THE transactional money path (Stage 2c). The paid flip and
 // every external effect commit in ONE transaction, each effect dedupe-keyed.
@@ -729,6 +731,22 @@ describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 },
     const cLock = lower.findIndex((q) => q.includes('"customers"') && q.includes('for update'));
     expect(tLock).toBeGreaterThanOrEqual(0);
     expect(cLock).toBeGreaterThan(tLock); // transfer first, then customer
+  });
+
+  // Pack 6 (P10, T9): the locked sender-hold branch (holdInTx from beginSettlement) carries the receipt line too.
+  it('M1 + pack 6 P10: the locked sender-hold branch of a 22-char row carries the receipt line', async () => {
+    const t = live({ id: newTransferId() });
+    await store.saveTransfer(t);
+    await seedLiveEvidence(db, t);
+    await seedSender(db, { partnerId: 'acme', phone: PHONE });
+    senderRace.stampAfterPreRead = true;
+    expect(await settleOrHold(db, t, HTTP)).toEqual({ kind: 'held' });
+    expect(senderRace.stampAfterPreRead).toBe(false); // the stamp landed: the locked branch decided
+    expect((await store.getTransfer(t.id))?.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
+    const body = await stage1Body(t.id);
+    expect(String(body).endsWith(`\nReceipt: ${payUrlFor(t.id)}`)).toBe(true);
+    expect(String(body).toLowerCase()).not.toContain('review');
+    expect((await outboxRows()).map((r2) => r2.dedupe_key)).toEqual([`stage1:${t.id}`]);
   });
 
   it('M1: http, no stamp -> started; the locked re-read runs and finds no hold', async () => {

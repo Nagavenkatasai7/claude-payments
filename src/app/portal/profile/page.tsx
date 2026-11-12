@@ -11,7 +11,9 @@ import { profileView, recordPortalPiiView } from '@/lib/portal-profile';
 import { t } from '@/lib/i18n';
 import { Badge, Card, MaskedValue, PageHeader } from '@/components/ds';
 import { revealPortalLegalNameAction } from './actions';
-import { KycStartForm, MfaEnrolForm } from './profile-forms';
+import { EsignWithdrawForm, KycStartForm, MfaEnrolForm } from './profile-forms';
+import { esignConsentNeeded, esignStateFromCustomer } from '@/lib/esign';
+import { ESIGN_CONSENT_TITLE, ESIGN_WITHDRAW_COPY } from '@/lib/legal/esign-consent';
 import { portalMetadata } from '@/lib/portal-metadata';
 
 export const generateMetadata = () => portalMetadata('portal.profile.title', { referrer: 'no-referrer' });
@@ -43,6 +45,8 @@ export default async function ProfilePage() {
   await recordPortalPiiView(getDb(), site.partnerId, ctx.session.phone, view.fields);
   const delegated = resolveKycMode(partner).mode === 'delegated';
   const gateOn = sendGateActive(partner);
+  // Fix pack 6 (R46, P9): from the loaded customer, no second read and no new pii.view field.
+  const esignOn = !esignConsentNeeded(esignStateFromCustomer(ctx.customer));
 
   return (
     <>
@@ -107,6 +111,17 @@ export default async function ProfilePage() {
               <MfaEnrolForm />
             </>
           )}
+        </Card>
+
+        <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
+          <h2 className="text-[17px] font-bold text-ds-ink">{ESIGN_CONSENT_TITLE}</h2>
+          <p className="text-[14px] text-ds-ink">{t(esignOn ? 'portal.profile.esign.on' : 'portal.profile.esign.off')}</p>
+          {ESIGN_WITHDRAW_COPY.map((line) => (
+            <p key={line} className="text-[14px] text-ds-ink-muted">
+              {line}
+            </p>
+          ))}
+          <EsignWithdrawForm canWithdraw={esignOn} />
         </Card>
       </div>
     </>

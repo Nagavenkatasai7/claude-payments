@@ -61,9 +61,10 @@ export type LiveWriteResult =
 
 /**
  * Fix pack 4 T5 (C11): the keys a live-change notice can name: the live_controls keys plus
- * 'providerBlock' (a save that clears a certified partner's provider-disclosure approval).
+ * 'providerBlock' (a save that clears a certified partner's provider-disclosure approval) and,
+ * fix pack 6 (P17), 'amlHoldRules' (a certified partner's admin changed its AML hold rules).
  */
-export type LiveNoticeKey = LiveControlsKey | 'providerBlock';
+export type LiveNoticeKey = LiveControlsKey | 'providerBlock' | 'amlHoldRules';
 
 /** The email's `<label>` per key (contract 9). */
 const LABELS: Record<LiveNoticeKey, string> = {
@@ -74,6 +75,7 @@ const LABELS: Record<LiveNoticeKey, string> = {
   optIns: 'A live feature approval',
   fundingMode: 'Your funding mode',
   providerBlock: 'Your provider disclosure',
+  amlHoldRules: 'Your AML hold rule setting',
 };
 
 /** The same username rule as the parser (live-controls.ts complianceUsers). */

@@ -40,6 +40,18 @@ async function expectNoNewPayText(page: Page): Promise<void> {
   await expect(page.getByText('Date of birth')).toHaveCount(0);
 }
 
+// Fix pack 6 T7a (P8): a dead-link sheet shows no E-SIGN consent block. The literal is
+// ESIGN_CONSENT_LABEL (src/lib/legal/esign-consent.ts; this spec imports nothing from src,
+// so tests/pay-form-esign.test.ts pins the two equal). T28 adds the risk checks here.
+async function expectNoPack6Text(page: Page): Promise<void> {
+  await expect(page.getByTestId('esign-consent')).toHaveCount(0);
+  await expect(page.getByText('I agree to get the disclosures, receipts and notices for my transfers electronically.')).toHaveCount(0);
+  // Fix pack 6 T28 (P19): the draft page's risk tick; the literal is RISK_ACK_LABEL
+  // (src/lib/legal/risk-warning.ts), pinned equal by tests/pay-form-risk-ack.test.ts.
+  await expect(page.getByTestId('risk-ack')).toHaveCount(0);
+  await expect(page.getByText('I have read this warning.')).toHaveCount(0);
+}
+
 test('/pay carries exactly one enforced CSP, with the Program-Fix 47 additions', async ({ request }) => {
   // headersArray() keeps duplicate headers apart (headers() merges them).
   const res = await request.get(`/pay/${randomBytes(16).toString('base64url')}`);
@@ -64,6 +76,7 @@ test('a random 22-character id renders the generic inactive sheet with a 200', a
   await expect(page.getByText('Total charge')).toHaveCount(0);
   await expect(page.getByText('Secure payment')).toHaveCount(0);
   await expectNoNewPayText(page);
+  await expectNoPack6Text(page);
 });
 
 test('a legacy-shape 8-character id renders the same sheet with a 200', async ({ page }) => {
@@ -72,6 +85,7 @@ test('a legacy-shape 8-character id renders the same sheet with a 200', async ({
   await expect(page.getByRole('heading', { name: 'This link is no longer active' })).toBeVisible();
   await expect(page.getByText('Total charge')).toHaveCount(0);
   await expectNoNewPayText(page);
+  await expectNoPack6Text(page);
 });
 
 test('a random B2B invoice id renders "This bill is no longer active" with a 200', async ({ page }) => {
@@ -81,6 +95,7 @@ test('a random B2B invoice id renders "This bill is no longer active" with a 200
   await expect(page.getByText('Pay your bill')).toHaveCount(0);
   await expect(page.getByText('Amount due')).toHaveCount(0);
   await expectNoNewPayText(page);
+  await expectNoPack6Text(page);
 });
 
 test('a random payment-link token renders the dead-link sheet with none of the pack 4 or pack 5 text', async ({ page }) => {
@@ -89,4 +104,5 @@ test('a random payment-link token renders the dead-link sheet with none of the p
   await expect(page.getByRole('heading', { name: 'This link is no longer active' })).toBeVisible();
   await expect(page.getByText('Total charge')).toHaveCount(0);
   await expectNoNewPayText(page);
+  await expectNoPack6Text(page);
 });

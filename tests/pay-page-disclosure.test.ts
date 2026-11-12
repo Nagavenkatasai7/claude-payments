@@ -48,6 +48,8 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// consent on file (pack 6 P8): the E-SIGN tick is tested in pay-page-esign.test.ts
+vi.mock('@/lib/esign', async (o) => ({ ...(await o<typeof import('@/lib/esign')>()), readEsignConsentNeeded: async () => false }));
 // Step 0 Q16: no draft:<id> claim behind an unknown id (tests/pay-page-draft-relink.test.ts covers it).
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 // Program-Fix 45: the limiter-down ops signal stays hermetic (never the real outbox).
@@ -67,6 +69,7 @@ vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => editable.value && current.transferType !== 'b2b',
     isPaymentLinkTransfer: async () => false,
+    getDisclosureSnapshot: async () => null, // pack 6 T11: the paid page's receipt read
     // Fix pack 4 (T16): read only by the real readLegalNameView (legalView.real).
     isPartnerApiMinted: async () => false,
     recipientIdentityMissing: async () => false,

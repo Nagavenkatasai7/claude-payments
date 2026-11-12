@@ -521,6 +521,11 @@ export interface Draft {
   // `quote`). The mint re-checks it under the sender lock and records it; a
   // reward that ended meanwhile refuses the mint and the draft is kept.
   reward?: import('./rewards/types').QuotedReward;
+  // Fix pack 6 (R48, P19 T26a): the risk signals the pay page warns about for
+  // this draft (derived at draft time from the mint's inputs). Omitted when
+  // none; enum names only (never a matched word or chat text); the mint asks
+  // the customer's tick for exactly these (T25/T27).
+  riskSignals?: import('./risk-signals').RiskSignal[];
   // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
   // Carried on the draft so the approve-tap mint threads the same discriminators,
   // business names, and linked invoice into createTransfer that the card showed.
@@ -560,6 +565,10 @@ export interface TurnContext {
   // The reply then leads with the redaction notice. Optional: older payloads
   // lack it (the worker redacts their text again).
   redacted?: boolean;
+  // Fix pack 6 (R48, P19 T26a): the customer's last 10 chat lines carry a risk
+  // cue (risk-chat-cue.ts). Set by the agent IN MEMORY for this turn only, and
+  // only when true; never written to the agent.turn payload or any store.
+  chatRiskCue?: boolean;
 }
 
 /**
@@ -694,7 +703,14 @@ export interface Customer {
   // a stale whole-row saveCustomer can never rewrite them.
   screeningFlaggedAt?: string;
   screeningClearedAt?: string;
-  kycSubmittedAt?: string;   // ISO — inquiry created / customer entered the hosted flow
+  // Fix pack 6 (0040, R46): the E-SIGN consent version agreed to and the ISO
+  // times it was given and withdrawn. READ-ONLY here (mapped in rowToCustomer
+  // only, never in customerToRow): recordEsignConsent / withdrawEsignConsent
+  // own them, so a whole-row saveCustomer can never set or clear a consent.
+  esignConsentVersion?: string;
+  esignConsentedAt?: string;
+  esignWithdrawnAt?: string;
+  kycSubmittedAt?: string;  // ISO — inquiry created / customer entered the hosted flow
   kycApprovedBy?: string;    // staff username who approved (audit)
   kycApprovedAt?: string;    // ISO
   kycRejectedAt?: string;    // ISO
@@ -912,6 +928,8 @@ export interface CorridorComplianceRule {
   // set; bad values fall back to the defaults (compliance-config.ts).
   aml?: { band?: number; count?: number; aggUsd?: number; firstUsd?: number; senders?: number };
   amlHolds?: boolean;          // PR B: per partner × corridor hold switch; only literal true = ON (never demo — aml-hold.ts)
+  amlHoldRules?: string[];     // pack 6 (P13): the in-mint rules that hold when amlHolds is on (closed list, validated on read); absent = all three
+  riskSignals?: { enabled?: boolean; amountUsd?: number; newAccountHours?: number; hold?: string[] };   // pack 6 (P18): written only by the platform (T23); validated on read; absent = off
 }
 
 // ── Destination-interest lead (non-India payout requests) ─────────────────────

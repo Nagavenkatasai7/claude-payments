@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createStore } from '@/lib/store';
+import { createStore, firstSeenAtOf } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { SendBusyError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
@@ -264,14 +264,26 @@ describe('fix pack 2 T2: railProviderType and enqueueListNotLiveAlert', () => {
       }),
     ).rejects.toThrow('rolled-back');
     expect(await rows()).toEqual([]);
-    await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
-    await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
-    const r = await rows();
-    expect(r).toHaveLength(1);
-    expect(r[0].dedupe_key).toBe(listNotLiveDedupeKey(new Date()));
-    expect(Object.keys(r[0].payload)).toEqual(['message']);
-    expect(String(r[0].payload.message)).toContain('partner acme');
-    expect(String(r[0].payload.message)).not.toContain('p2');
+    // The key is per Eastern day. Review round 2 R1-D1: freeze Date (freshDb()
+    // already ran in beforeEach) at a time derived from the real clock, moved
+    // back 20 minutes when it is within 10 minutes before an Eastern midnight,
+    // so the two mints can never fall on two Eastern days.
+    const { easternDay } = await import('@/lib/sanctions/list-loader');
+    let at = Date.now();
+    if (easternDay(at + 10 * 60_000) !== easternDay(at)) at -= 20 * 60_000;
+    vi.useFakeTimers({ now: at, toFake: ['Date'] });
+    try {
+      await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
+      await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
+      const r = await rows();
+      expect(r).toHaveLength(1);
+      expect(r[0].dedupe_key).toBe(listNotLiveDedupeKey(new Date(at)));
+      expect(Object.keys(r[0].payload)).toEqual(['message']);
+      expect(String(r[0].payload.message)).toContain('partner acme');
+      expect(String(r[0].payload.message)).not.toContain('p2');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -528,5 +540,110 @@ describe('per-(tenant, phone) agent-turn lock (Program-Fix 34A)', () => {
     expect(await store.tryTurnLock('acme', '15551230000', '102')).toBe(false);
     await store.releaseTurnLock('acme', '15551230000', '101'); // ours
     expect(await store.tryTurnLock('acme', '15551230000', '102')).toBe(true);
+  });
+});
+
+describe('firstSeenAtOf and store.firstSeenAt (pack 6 P19)', () => {
+  const DAY = 86_400_000;
+  const transferSelects = (log: Array<{ sql: string }>) =>
+    log.filter((q) => q.sql.toLowerCase().includes('min(') && q.sql.includes('"transfers"'));
+  const customerSelects = (log: Array<{ sql: string }>) =>
+    log.filter((q) => /^select/i.test(q.sql.trim()) && q.sql.includes('from "customers"'));
+
+  async function seedRow(store: ReturnType<typeof createStore>, partnerId: string, phone: string, at: string) {
+    await createCustomerStore(db, store).saveCustomer({
+      senderPhone: phone, firstSeenAt: at, kycStatus: 'not_started', senderCountry: 'US', partnerId,
+      createdAt: at, updatedAt: at,
+    });
+  }
+
+  it('firstSeenAtOf: the row value wins over the first transfer and now', () => {
+    const now = new Date();
+    const a = new Date(Date.now() - 4 * DAY).toISOString();
+    const b = new Date(Date.now() - 10 * DAY).toISOString();
+    expect(firstSeenAtOf(a, b, now)).toBe(a);
+    expect(firstSeenAtOf(a, null, now)).toBe(a);
+    expect(firstSeenAtOf(a, undefined, now)).toBe(a);
+  });
+
+  it('firstSeenAtOf: no row value (null or undefined) -> the first transfer; neither -> now.toISOString()', () => {
+    const now = new Date();
+    const b = new Date(Date.now() - 10 * DAY).toISOString();
+    expect(firstSeenAtOf(null, b, now)).toBe(b);
+    expect(firstSeenAtOf(undefined, b, now)).toBe(b);
+    expect(firstSeenAtOf(null, null, now)).toBe(now.toISOString());
+    expect(firstSeenAtOf(undefined, undefined, now)).toBe(now.toISOString());
+    // exactly the ?? chain: an empty string is a value, not "missing"
+    expect(firstSeenAtOf('', b, now)).toBe('');
+    expect(firstSeenAtOf(null, '', now)).toBe('');
+  });
+
+  it('firstSeenAtOf is pure: it never reads the clock', () => {
+    const past = new Date(Date.now() - 10 * DAY);
+    const spy = vi.spyOn(Date, 'now');
+    expect(firstSeenAtOf(null, null, past)).toBe(past.toISOString());
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('store.firstSeenAt: customers row (4 days ago) wins; no row -> the tenant\'s first live transfer (seedLedgerSpend 10 days ago); another tenant\'s row or transfer never counts -> now (the passed now)', async () => {
+    const store = createStore(fakeRedis(), db);
+    const fourDaysAgo = new Date(Date.now() - 4 * DAY).toISOString();
+    await seedRow(store, 'default', 'p1', fourDaysAgo);
+    const tenDaysAgo = new Date(Date.now() - 10 * DAY);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p1', amountUsd: 10, createdAt: tenDaysAgo });
+    expect(await store.firstSeenAt('default', 'p1')).toBe(fourDaysAgo);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p2', amountUsd: 10, createdAt: tenDaysAgo });
+    expect(await store.firstSeenAt('default', 'p2')).toBe(tenDaysAgo.toISOString());
+    const now = new Date();
+    expect(await store.firstSeenAt('acme', 'p1', now)).toBe(now.toISOString());
+    expect(await store.firstSeenAt('acme', 'p2', now)).toBe(now.toISOString());
+  });
+
+  it('store.firstSeenAt equals capSubject(...).firstSeenAt for the same inputs', async () => {
+    const store = createStore(fakeRedis(), db);
+    const now = new Date();
+    await seedRow(store, 'default', 'p1', new Date(Date.now() - 4 * DAY).toISOString());
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p2', amountUsd: 10, createdAt: new Date(Date.now() - 10 * DAY) });
+    for (const phone of ['p1', 'p2', 'p3']) {
+      const cap = await store.capSubject('default', phone, 'verified', now);
+      expect(await store.firstSeenAt('default', phone, now)).toBe(cap.firstSeenAt);
+    }
+  });
+
+  it('capSubject keeps its statements: with a row value, NO select on transfers runs; without one, exactly one min(created_at) select runs', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRow(store, 'default', 'p1', new Date(Date.now() - 4 * DAY).toISOString());
+    let stop = captureQueries();
+    await store.capSubject('default', 'p1', 'verified');
+    let log = stop();
+    expect(customerSelects(log)).toHaveLength(1);
+    expect(transferSelects(log)).toHaveLength(0);
+    expect(log).toHaveLength(1);
+    stop = captureQueries();
+    await store.capSubject('default', 'p9', 'verified');
+    log = stop();
+    expect(customerSelects(log)).toHaveLength(1);
+    expect(transferSelects(log)).toHaveLength(1);
+    expect(transferSelects(log)[0].sql.toLowerCase()).toContain('min("created_at")');
+    expect(log).toHaveLength(2);
+  });
+
+  it('store.firstSeenAt makes the same reads as capSubject', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRow(store, 'default', 'p1', new Date(Date.now() - 4 * DAY).toISOString());
+    for (const phone of ['p1', 'p9']) {
+      let stop = captureQueries();
+      await store.capSubject('default', phone, 'verified');
+      const capLog = stop().map((q) => q.sql);
+      stop = captureQueries();
+      await store.firstSeenAt('default', phone);
+      const fsLog = stop().map((q) => q.sql);
+      expect(fsLog).toEqual(capLog);
+    }
+    const stop = captureQueries();
+    await store.firstSeenAt('default', 'p1');
+    const log = stop();
+    expect(customerSelects(log)).toHaveLength(1);
+    expect(transferSelects(log)).toHaveLength(0);
   });
 });

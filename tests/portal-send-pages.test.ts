@@ -335,7 +335,7 @@ describe('the Review page (GET)', () => {
     await review('pa', { ...newRecipient, purpose: 'other', purposeDetail: 'to claim my lottery prize' });
     const html = await reviewHtml();
     expect(html).toContain('data-scam-warning');
-    expect(html).toContain('Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. SmartRemit staff check this transfer before the money goes.');
+    expect(html).toContain('Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. This transfer is checked before the money goes.');
     expect(html).toMatch(/<input required="" type="checkbox"[^>]*name="scam_ack"/);
     expect(html).toContain('I have read this warning');
     expect(html.indexOf('name="scam_ack"')).toBeGreaterThan(html.indexOf('name="rv"'));

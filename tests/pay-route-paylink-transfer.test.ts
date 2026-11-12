@@ -24,6 +24,7 @@ import { createPayeeRepo } from '@/db/repos/payee-repo';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -112,6 +113,8 @@ beforeEach(async () => {
     senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
     partnerId: 'default', createdAt: T0, updatedAt: T0,
   } as Customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
   const payees = createPayeeRepo(db);
   await payees.insert({
     id: 'pye_h1', partnerId: 'default', legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',

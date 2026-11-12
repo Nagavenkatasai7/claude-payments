@@ -7,6 +7,7 @@ import {
   beginPortalMfaEnrolmentAction,
   confirmPortalMfaEnrolmentAction,
   startPortalVerificationAction,
+  withdrawEsignConsentAction,
   type PortalMfaState,
   type ProfileActionState,
 } from './actions';
@@ -106,5 +107,43 @@ export function MfaEnrolForm() {
         </>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Fix pack 6 (R46, P9): withdraw E-SIGN consent. The page keeps this form mounted after the
+ * withdrawal (review round 1, RB1): the returned "Consent withdrawn" notice lives in this form's
+ * action state, so only the button depends on a current consent (`canWithdraw`).
+ */
+export function EsignWithdrawForm({ canWithdraw }: { canWithdraw: boolean }) {
+  const [state, action, pending] = useActionState<ProfileActionState, FormData>(withdrawEsignConsentAction, null);
+  return <EsignWithdrawView canWithdraw={canWithdraw} state={state} action={action} pending={pending} />;
+}
+
+/** The markup of EsignWithdrawForm (state in, markup out), split out so a static render can show a notice. */
+export function EsignWithdrawView({
+  canWithdraw,
+  state,
+  action,
+  pending,
+}: {
+  canWithdraw: boolean;
+  state: ProfileActionState;
+  action: (formData: FormData) => void;
+  pending: boolean;
+}) {
+  return (
+    <form action={action} className="flex flex-col gap-3">
+      {canWithdraw ? (
+        <div>
+          <Button type="submit" variant="ghost" size="md" disabled={pending}>
+            {pending ? t('portal.detail.working') : t('portal.profile.esign.withdraw')}
+          </Button>
+        </div>
+      ) : null}
+      <div aria-live="polite">
+        <Notice state={state} />
+      </div>
+    </form>
   );
 }

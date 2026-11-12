@@ -169,9 +169,37 @@ export interface ReceiptTransfer {
 
 export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure, nowMs: number): ReceiptDisclosure | null {
   if (t.transferType === 'b2b') return null;
+  return receiptCore(
+    t,
+    deliveryDaysFor(t, d),
+    {
+      sourceAmount: t.amountSource,
+      sourceFee: t.feeSource,
+      sourceTotalCharge: t.totalChargeSource,
+      sourceCurrency: t.sourceCurrency,
+      destAmount: t.amountInr,
+      destCurrency: t.destinationCurrency,
+      fxRate: t.fxRate,
+    },
+    providerBlock(d),
+    nowMs,
+  );
+}
+
+/**
+ * Fix pack 6 (P11): the ONE set of receipt rules (date available, the §1005.34 deadline, no
+ * date line for a cancelled or blocked row, the static texts), shared by buildReceiptDisclosure
+ * (live configuration) and receiptFromSnapshot (what was acknowledged). Pure.
+ */
+function receiptCore(
+  t: ReceiptTransfer,
+  days: number,
+  figures: PrepaymentView,
+  provider: DisclosureProvider,
+  nowMs: number,
+): ReceiptDisclosure {
   const paidMs = t.paidAt ? Date.parse(t.paidAt) : NaN;
   const deliveredMs = t.deliveredAt ? Date.parse(t.deliveredAt) : NaN;
-  const days = deliveryDaysFor(t, d);
   const dateAvailable =
     t.status === 'delivered' && Number.isFinite(deliveredMs)
       ? `${DATE_AVAILABLE_DELIVERED_PREFIX} ${DATE_FMT.format(new Date(deliveredMs))}`
@@ -186,23 +214,12 @@ export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure
   // A cancelled or blocked transfer is never delivered: no date-available
   // estimate under "this transfer was cancelled" (the rights and CFPB rows stay).
   const neverDelivered = t.status === 'cancelled' || t.status === 'blocked';
-  const lines = coreLines(
-    {
-      sourceAmount: t.amountSource,
-      sourceFee: t.feeSource,
-      sourceTotalCharge: t.totalChargeSource,
-      sourceCurrency: t.sourceCurrency,
-      destAmount: t.amountInr,
-      destCurrency: t.destinationCurrency,
-      fxRate: t.fxRate,
-    },
-    dateAvailable,
-  ).filter((l) => !(neverDelivered && l.label === L.dateAvailable));
+  const lines = coreLines(figures, dateAvailable).filter((l) => !(neverDelivered && l.label === L.dateAvailable));
   return {
     version: DISCLOSURE_DRAFT_VERSION,
     lines,
     thirdPartyFeeNote: THIRD_PARTY_FEE_STATEMENT,
-    provider: providerBlock(d),
+    provider,
     rightsSummary: RIGHTS_SUMMARY,
     links: DISCLOSURE_LINKS,
     cancelDeadline,
@@ -382,4 +399,52 @@ export function buildDisclosureSnapshot(i: {
     acknowledgedAt: new Date(Number.isFinite(input.acknowledgedAt) ? input.acknowledgedAt : i.now).toISOString(),
     surface: input.surface,
   };
+}
+
+/**
+ * Fix pack 6 (P11): the receipt's provider block from the snapshot's provider details, by the
+ * providerBlock rule. The snapshot keeps the state regulator's NAME only (by design), so its
+ * phone and website read null here (known limit; the live receipt keeps them). Pure.
+ */
+function snapshotProviderBlock(p: DisclosureSnapshotV1['provider']): DisclosureProvider {
+  if (p.kind === 'demo') {
+    return { kind: 'demo', name: null, note: DEMO_NO_PARTNER_NOTE, licenseIds: [], phone: null, website: null, stateRegulator: null };
+  }
+  return {
+    kind: p.kind,
+    name: p.licensedEntity,
+    note: p.kind === 'configured' ? null : PARTNER_DETAILS_PENDING,
+    licenseIds: [...p.licenceIds],
+    phone: p.phone,
+    website: p.website,
+    stateRegulator: p.regulator ? { name: p.regulator, phone: null, website: null } : null,
+  };
+}
+
+/**
+ * Fix pack 6 (P11): the receipt of what was acknowledged; pure; the caller decides when a
+ * snapshot applies (parsed and surface 'transfer'). Figures and provider come from the snapshot,
+ * the date and the deadline from the transfer's paidAt / deliveredAt and the snapshot's stored
+ * days, by exactly buildReceiptDisclosure's rules (receiptCore). `version` stays
+ * DISCLOSURE_DRAFT_VERSION: the wording rendered is today's static text; the acknowledged version
+ * lives in the snapshot and the ack audit row. A b2b transfer returns null.
+ */
+export function receiptFromSnapshot(s: DisclosureSnapshotV1, t: ReceiptTransfer, nowMs: number): ReceiptDisclosure | null {
+  if (t.transferType === 'b2b') return null;
+  const f = s.figures;
+  return receiptCore(
+    t,
+    s.deliveryBusinessDays,
+    {
+      sourceAmount: f.amountSource,
+      sourceFee: f.feeSource,
+      sourceTotalCharge: f.totalChargeSource,
+      sourceCurrency: f.sourceCurrency,
+      destAmount: f.amountDest,
+      destCurrency: f.destinationCurrency,
+      fxRate: f.fxRate,
+    },
+    snapshotProviderBlock(s.provider),
+    nowMs,
+  );
 }

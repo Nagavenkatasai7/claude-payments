@@ -11,6 +11,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { Transfer } from '@/lib/types';
 
@@ -122,6 +123,8 @@ beforeEach(async () => {
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', '15551234567');
 });
 
 // "Charged" is now observable in the LEDGER (Stage 2c beginSettlement): the

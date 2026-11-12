@@ -36,8 +36,10 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// consent on file (pack 6 P8): the E-SIGN tick is tested in pay-page-esign.test.ts
+vi.mock('@/lib/esign', async (o) => ({ ...(await o<typeof import('@/lib/esign')>()), readEsignConsentNeeded: async () => false }));
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer: async () => false }),
+  createTransferRepo: () => ({ isPayoutEditable, isPaymentLinkTransfer: async () => false, getDisclosureSnapshot: async () => null }),
 }));
 vi.mock('@/db/repos/aux-repos', () => ({ createIdempotencyRepo: () => ({ find }) }));
 

@@ -32,3 +32,11 @@ export function newTransferId(): string {
   } while (id[0] === '_' || id[0] === '-');
   return id;
 }
+
+/**
+ * The shape newTransferId mints; legacy 8-char ids are guessable and never get
+ * a receipt link (pack 6 P10).
+ */
+export function isOpaqueTransferId(id: unknown): id is string {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{22}$/.test(id);
+}

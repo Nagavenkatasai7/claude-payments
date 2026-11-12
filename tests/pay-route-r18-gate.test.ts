@@ -23,6 +23,7 @@ import { fixedReply } from '@/lib/hold-replies';
 import { DISCLOSURE_DRAFT_VERSION } from '@/lib/legal/disclosure-drafts';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { setRailProviderType } from './helpers-sanctions';
@@ -121,6 +122,8 @@ beforeEach(async () => {
   await certifyPartnerForTest(db, 'acme');
   await store.saveTransfer(makeTransfer({ id: TID }));
   await customerStore.saveCustomer(customerFor('acme'));
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'acme', PHONE);
   sendTransactionOtp.mockReset();
   sendTransactionOtp.mockResolvedValue(undefined);
   drafts.clear();
@@ -323,6 +326,8 @@ describe('not mandatory: default tenant, b2b, an unresolvable draft owner', { re
   it('default tenant, no version -> paid as before; one otp.verified row; no ack row; no snapshot', async () => {
     await store.saveTransfer(makeTransfer({ id: 'tx_def', partnerId: 'default' }));
     await customerStore.saveCustomer(customerFor('default'));
+    // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+    await seedEsignConsentForTest(db, 'default', PHONE);
     await txOtp.issue('tx_def', PHONE);
     const res = await post('tx_def', { otp: '654321' });
     expect(res.status).toBe(200);
@@ -350,19 +355,20 @@ describe('not mandatory: default tenant, b2b, an unresolvable draft owner', { re
     expect(await createTransferRepo(db).getDisclosureSnapshot('tx_b2b', 'acme')).toBeNull();
   });
 
-  it("legacyTenantOf throws on the pay path -> the safe context; verify runs and the flow reaches finalizeDraftPayment, never the outer 400 'Payment failed' (critic M8)", async () => {
+  // Fix pack 6 P5 overrides PR4 C12/M8 here: E-SIGN consent cannot be read without
+  // the owner, so an unresolved draft owner answers 503 before verify; R18, the money
+  // gate, the account-holder and originator steps keep the SAFE context.
+  it('legacyTenantOf throws on the pay path -> 503 temporarily_unavailable before the code is checked (pack 6 P5: no owner, no consent read); finalize never runs; the rejection text is never logged', async () => {
     drafts.set('d_legacy_pay', { senderPhone: PHONE });
     await txOtp.issue('d_legacy_pay', PHONE);
     vi.spyOn(store, 'legacyTenantOf').mockRejectedValue(new Error('db down postgres://user:pw@host/db'));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     onTestFinished(() => warn.mockRestore());
-    finalize.mockResolvedValue({ ok: false, error: 'bank_details_required' });
     const res = await post('d_legacy_pay', { otp: '654321' });
-    expect(finalize).toHaveBeenCalledOnce();
-    expect(finalize.mock.calls[0][1]).toBe('d_legacy_pay');
-    expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({ reason: 'bank_details_required' });
-    expect(codeKeys()).toEqual([]); // the code was checked (and consumed)
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ ok: false, reason: 'temporarily_unavailable' });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(codeKeys()).not.toEqual([]); // the code was NOT checked (still there)
     expect(JSON.stringify(warn.mock.calls)).not.toContain('postgres://');
   });
 });

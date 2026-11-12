@@ -289,10 +289,22 @@ export function validPurposeDetail(raw: unknown): string | undefined {
  * The customer-facing scam warning (portal review, Send again, schedules and the
  * bot). Deliberately names no rule and no category: the customer is never told
  * which words matched.
+ *
+ * Pack 6 (P15, Q-R47.1): one fixed neutral sentence for every partner; it never
+ * names SmartRemit staff. A placeholder until the first partner's MLRO approves
+ * it (index.md); the portal catalogue key portal.send.scamWarning must stay
+ * equal (tests/scam-warning-copy.test.ts).
  */
 export const PURPOSE_SCAM_WARNING =
   'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. ' +
-  'SmartRemit staff check this transfer before the money goes.';
+  'This transfer is checked before the money goes.';
+
+/**
+ * Pack 6 (P15): the version of PURPOSE_SCAM_WARNING. Bump it with any wording
+ * change; the hash pin in tests/scam-warning-version-pin.test.ts enforces it.
+ * Nothing stores it yet.
+ */
+export const PURPOSE_SCAM_WARNING_VERSION = 'scam-2026-11.1-draft';
 
 /** What a send tool tells the model when purpose `other` has no valid reason (never shown to the customer as is). */
 export const PURPOSE_DETAIL_HINT =

@@ -51,6 +51,8 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// consent on file (pack 6 P8): the E-SIGN tick is tested in pay-page-esign.test.ts
+vi.mock('@/lib/esign', async (o) => ({ ...(await o<typeof import('@/lib/esign')>()), readEsignConsentNeeded: async () => false }));
 // Step 0 Q16: no draft:<id> claim behind an unknown id (tests/pay-page-draft-relink.test.ts covers it).
 vi.mock('@/lib/pay-link', () => ({ transferMintedFromDraft: async () => null }));
 // Program-Fix 45: the limiter-down ops signal stays hermetic (never the real outbox).
@@ -64,7 +66,11 @@ vi.mock('@/lib/originator-info', async (orig) => {
   return { ...real, readOriginatorView: async () => real.NO_ORIGINATOR_FIELDS };
 });
 vi.mock('@/db/repos/transfer-repo', () => ({
-  createTransferRepo: () => ({ isPayoutEditable: async () => false, isPaymentLinkTransfer: async () => false }),
+  createTransferRepo: () => ({
+    isPayoutEditable: async () => false,
+    isPaymentLinkTransfer: async () => false,
+    getDisclosureSnapshot: async () => null,
+  }),
 }));
 
 import PayPage from '@/app/pay/[transferId]/page';

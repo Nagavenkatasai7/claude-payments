@@ -1,7 +1,7 @@
 import { assertLegsUsable, legsProvenance, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { feeTierCount } from './fee-tier';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
-import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
+import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone, sourceCountryFor } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -43,6 +43,7 @@ import { openRecallTicketLocked } from './receipt-cores';
 import { refundDisposition } from './refund-policy';
 import { cancelWithinWindow, type SenderCancelResult } from './sender-cancel';
 import { CANCEL_REPLY_HINT } from './legal/cancel-drafts';
+import { RISK_WARNING_TEXT } from './legal/risk-warning';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -50,7 +51,9 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
-import { senderScreeningHoldActive } from './compliance-config';
+import { resolveCorridorRules, senderScreeningHoldActive } from './compliance-config';
+import { evaluateRiskSignals, riskSignalsApply, type RiskSignal } from './risk-signals';
+import type { PriorSends } from '@/db/repos/transfer-repo';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
@@ -3876,6 +3879,15 @@ function scamWarningFields(risk: PurposeRiskCategory | undefined): ToolResult {
   return risk ? { scam_warning: PURPOSE_SCAM_WARNING } : {};
 }
 
+/**
+ * Fix pack 6 (R48, P19 T26b): the ONE fixed risk warning, only when the draft
+ * carries risk signals AND no scam warning applies (the scam warning wins;
+ * never both). The constant only: never a signal name.
+ */
+function riskWarningFields(risk: PurposeRiskCategory | undefined, riskSignals: readonly RiskSignal[] | undefined): ToolResult {
+  return !risk && riskSignals?.length ? { risk_warning: RISK_WARNING_TEXT } : {};
+}
+
 function senderNameRequired(): ToolResult {
   return { needs_sender_name: true, reply_to_customer: SENDER_NAME_QUESTION };
 }
@@ -3920,6 +3932,43 @@ async function setSenderNameTool(
     saved: true,
     reply_hint: 'Name saved. Now call the tool that asked for it again with the same details to continue the send.',
   };
+}
+
+/**
+ * Fix pack 6 (R48, P19 T26a): the risk signals a draft records, from the SAME
+ * inputs as the mint (T25): the mint's corridor (sourceCountryFor, never the
+ * customer row's senderCountry), the paid/delivered prior sends
+ * (store.priorSends), the one firstSeenAt rule (store.firstSeenAt), the quoted
+ * USD amount and the turn's in-memory chat cue. Off -> [] with NO read. A
+ * failed read is an unknown fact (logged by error name only) and never blocks
+ * the draft. Enum names only: no text, keyword or amount leaves this function.
+ */
+async function draftRiskSignals(
+  ctx: ToolContext,
+  partner: Partner,
+  sourceCurrency: CurrencyCode,
+  recipientPhone: string,
+  amountUsd: number,
+  transferType: 'b2c' | 'b2b',
+): Promise<RiskSignal[]> {
+  const cfg = resolveCorridorRules(partner, sourceCountryFor(partner, sourceCurrency, ctx.phone)).riskSignals;
+  if (!riskSignalsApply({ cfg, partnerId: ctx.partnerId, environment: 'live', transferType })) return [];
+  const now = new Date();
+  const failed = (err: unknown) =>
+    logWarn('draft.risk-signals', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+  let sends: PriorSends | null = null;
+  try {
+    sends = await ctx.store.priorSends(ctx.partnerId, ctx.phone, recipientPhone);
+  } catch (err) {
+    failed(err);
+  }
+  let firstSeenAt: string | null = null;
+  try {
+    firstSeenAt = await ctx.store.firstSeenAt(ctx.partnerId, ctx.phone, now);
+  } catch (err) {
+    failed(err);
+  }
+  return evaluateRiskSignals({ amountUsd, sends, firstSeenAt, now, chatCue: ctx.turn?.chatRiskCue === true }, cfg);
 }
 
 /**
@@ -4173,6 +4222,10 @@ export async function prepareSendDraft(
       return { kind: 'blocked' };
     }
 
+    // Fix pack 6 (R48, P19 T26a): the risk signals the pay page warns about,
+    // from the mint's inputs. Off (the default; always for the default tenant
+    // and b2b): [] with no read, so the draft and the result are unchanged.
+    const riskSignals = await draftRiskSignals(ctx, partner, sourceCurrency, recipientPhone, q.amountUsd, b2b ? 'b2b' : 'b2c');
     // Batch B follow-up A3 / security review L2: the reason the draft keeps (re-checked at the mint).
     const keptDetail = keptPurposeDetail(input.purposeDetail)?.detail;
     const draftId = await ctx.draftStore.createDraft({
@@ -4232,6 +4285,7 @@ export async function prepareSendDraft(
       senderBusinessName: b2b?.senderBusinessName,
       recipientBusinessName: b2b?.recipientBusinessName ?? (b2b ? input.recipientName : undefined),
       invoiceId: b2b?.invoiceId,
+      ...(riskSignals.length > 0 ? { riskSignals } : {}), // pack 6 P19: omitted when none
     }, { pointer });
     const summary = buildApproveSummary(
       q,
@@ -4258,6 +4312,7 @@ export async function prepareSendDraft(
       destinationCountry,
       fxFetchedAt,
       routeExpiresAt,
+      ...(riskSignals.length > 0 ? { riskSignals } : {}),
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
@@ -4371,8 +4426,9 @@ async function sendApprovePickerTool(
       summary,
       pay_url: payUrl,
       ...scamWarningFields(pd.risk),
+      ...riskWarningFields(pd.risk, r.riskSignals),
       reply_hint:
-        `${pd.risk ? 'start your reply with the scam_warning text word for word, then ' : ''}show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+        `${pd.risk ? 'start your reply with the scam_warning text word for word, then ' : r.riskSignals?.length ? 'start your reply with the risk_warning text word for word, then ' : ''}show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
           lockMinutes < 2
             ? 'the rate is valid only for a moment, so they should tap soon'
             : `the rate is locked for ${lockMinutes} minutes`
@@ -4405,7 +4461,8 @@ async function sendApprovePickerTool(
     await sendCtaUrl(
       ctx.phone,
       // Batch B follow-up A4: a scam-pattern reason puts the warning at the top of the card.
-      `${pd.risk ? `${PURPOSE_SCAM_WARNING}\n\n` : ''}${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+      // Fix pack 6 (P19 T26b): else the draft's risk signals put the risk warning there.
+      `${pd.risk ? `${PURPOSE_SCAM_WARNING}\n\n` : r.riskSignals?.length ? `${RISK_WARNING_TEXT}\n\n` : ''}${summary}\n\nTap to pay securely, or reply cancel to stop.`,
       { displayText: 'Approve & Pay', url: payUrl },
       undefined,
       undefined,
@@ -4418,7 +4475,7 @@ async function sendApprovePickerTool(
     await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
     throw sendErr;
   }
-  return { sent: true, draft_id: draftId, ...scamWarningFields(pd.risk) };
+  return { sent: true, draft_id: draftId, ...scamWarningFields(pd.risk), ...riskWarningFields(pd.risk, r.riskSignals) };
 }
 
 async function repeatTransferTool(

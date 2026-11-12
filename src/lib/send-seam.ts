@@ -44,6 +44,7 @@
 import type { Quote, CapEvaluation, CountryCode, CurrencyCode, FundingMethod } from './types';
 import type { DraftPointer } from './draft-store';
 import type { QuotedReward } from './rewards/types';
+import type { RiskSignal } from './risk-signals';
 import { payUrlFor } from './pay-url';
 
 export { prepareSendDraft, getQuoteTyped } from './tools';
@@ -112,6 +113,8 @@ export type PrepareSendResult =
       fxFetchedAt: number | undefined;
       /** Step 0 FX-5: a winning partner push's expiry (epoch ms); bounds the lock line. */
       routeExpiresAt: number | undefined;
+      /** Fix pack 6 (P19 T26a): the draft's risk signals; present only when non-empty. */
+      riskSignals?: RiskSignal[];
     }
   | { kind: 'invalid_phone' }
   | { kind: 'bad_funding'; message: string }

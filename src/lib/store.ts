@@ -1,11 +1,10 @@
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { stripProviderContent } from './llm-translate';
 import { getRedis } from './redis';
 import { easternDayStart, easternMonth, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
 import { getDb, type Db, type Tx } from '@/db/client';
-import { partnerIntegrations } from '@/db/schema';
-import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
+import { createTransferRepo, type PriorSends, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from './outbox';
 import { logError, logWarn } from './log';
@@ -14,7 +13,6 @@ import { isFlagOn, type FlagContext, type FlagKey } from './flags';
 import { readRailProviderType } from './live-gate';
 import { listNotLiveDedupeKey } from './sanctions/list-health';
 import { enqueueSanctionsBlockNotices, type SanctionsBlockNotice } from './sanctions/notices';
-import { amlHoldRailEligible } from './aml-hold';
 import { deliverTransfer } from './delivery-receipt';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
@@ -48,17 +46,18 @@ export interface SenderLedgerOps {
   /** Program-Fix 14: the sanctions.screen evidence row, in the SAME transaction as the insert. */
   recordAudit(e: AuditEvent): Promise<void>;
   /**
-   * Program-Fix 43 PR B: the optional AML hold's two reads — the RAIL
-   * partner's payment provider type (a plain column, no decrypt) and, only on
-   * an `http` rail, the sender's AML aggregates before `anchor`. mintLocked
-   * calls it ONLY past amlHoldGate (setting ON, not demo, verdict cleared), so
-   * a partner with the setting OFF pays zero statements.
+   * Program-Fix 43 PR B, fix pack 6 (P16): the AML hold's two reads — the
+   * sender's AML aggregates before `anchor` (senderAmlStats) and its prior
+   * paid/delivered live sends, in total and to `recipientPhone` (priorSends).
+   * mintLocked calls it ONLY past amlHoldGate (real money, setting ON with at
+   * least one rule, not demo, verdict not blocked), so a partner with the
+   * setting OFF pays zero statements.
    *
-   * NEVER throws. Both reads run inside a SAVEPOINT: a failed statement rolls
-   * back to it and the mint transaction carries on (without the savepoint any
-   * SQL error would abort the whole mint). On failure it logs (scrubbed),
-   * queues ONE hour-deduped ops.alert in this transaction, and returns null ⇒
-   * the caller does not hold (fail to "no hold" + alert).
+   * NEVER throws. Both reads run inside ONE SAVEPOINT: a failed statement
+   * rolls back to it and the mint transaction carries on (without the
+   * savepoint any SQL error would abort the whole mint). On failure it logs
+   * (scrubbed), queues ONE hour-deduped ops.alert in this transaction, and
+   * returns null ⇒ the caller HOLDS (fail closed).
    */
   amlHoldInputs(q: AmlHoldQuery): Promise<AmlHoldInputs | null>;
   /**
@@ -108,6 +107,14 @@ export interface SenderLedgerOps {
    * written). mintLocked calls it on a real-money rail only.
    */
   senderScreeningFlags(): Promise<SenderScreeningFlags | null>;
+  /**
+   * Fix pack 6 (P14): this sender's prior paid/delivered LIVE sends (the ONE
+   * rule, transfer-repo priorSends), in total and to `recipientPhone`
+   * (digits), strictly before `before` when given, in its OWN savepoint.
+   * NEVER throws: on failure it logs (`mint.prior_sends`, the partner id
+   * only, no alert) and returns null; the mint transaction stays usable.
+   */
+  priorSends(recipientPhone: string, before?: { at: Date; id: string }): Promise<PriorSends | null>;
 }
 
 /** B3 rewards v1: what a quote needs to pick a reward (read on the root handle). */
@@ -127,16 +134,16 @@ export interface RewardMintFacts {
 }
 
 export interface AmlHoldQuery {
-  railPartnerId: PartnerId;
   anchor: { at: Date; id: string };
   largeAmountUsd: number;
   band: number;
+  /** The new transfer's recipient phone ('' when none: no new_beneficiary verdict). */
+  recipientPhone: string;
 }
 
 export interface AmlHoldInputs {
-  railProviderType: string | null;
-  /** Null when the rail is not eligible (the stats are never read then). */
-  prior: SenderAmlStats | null;
+  stats: SenderAmlStats;
+  sends: PriorSends;
 }
 
 /**
@@ -163,15 +170,10 @@ async function readAmlHoldInputs(
   q: AmlHoldQuery,
 ): Promise<AmlHoldInputs | null> {
   const read = await inSavepoint(tx, async (sp): Promise<AmlHoldInputs> => {
-    const rows = await sp
-      .select({ providerType: partnerIntegrations.paymentProviderType })
-      .from(partnerIntegrations)
-      .where(eq(partnerIntegrations.partnerId, q.railPartnerId))
-      .limit(1);
-    const railProviderType = rows[0]?.providerType ?? null;
-    if (!amlHoldRailEligible(railProviderType)) return { railProviderType, prior: null };
-    const prior = await createTransferRepo(sp).senderAmlStats(partnerId, phone, q.anchor, q.largeAmountUsd, q.band);
-    return { railProviderType, prior };
+    const repo = createTransferRepo(sp);
+    const stats = await repo.senderAmlStats(partnerId, phone, q.anchor, q.largeAmountUsd, q.band);
+    const sends = await repo.priorSends(partnerId, phone, q.recipientPhone, 'live', q.anchor);
+    return { stats, sends };
   });
   if (read.ok) return read.value;
   logError('aml.hold_check', read.error, { partnerId });
@@ -184,7 +186,7 @@ async function readAmlHoldInputs(
       {
         message:
           `⚠️ SmartRemit ops: the AML hold check failed for partner ${partnerId}; ` +
-          `transfers are being minted WITHOUT it (no hold) until it recovers. Check the aml.hold_check logs.`,
+          `transfers are being HELD for review until it recovers. Check the aml.hold_check logs.`,
       },
       { dedupeKey: `aml-hold-check:${partnerId}:${hour}` },
     ),
@@ -193,6 +195,22 @@ async function readAmlHoldInputs(
   // partner-demo R4: after() runs post-response — after the mint transaction
   // commits (a rolled-back mint makes it a harmless empty poke).
   else pokeWorker();
+  return null;
+}
+
+/** Fix pack 6 (P14): SenderLedgerOps.priorSends — 'live' only (AML needs real money; risk signals never apply to 'test'). */
+async function readPriorSends(
+  tx: Tx,
+  partnerId: PartnerId,
+  phone: string,
+  recipientPhone: string,
+  before?: { at: Date; id: string },
+): Promise<PriorSends | null> {
+  const read = await inSavepoint(tx, (sp) =>
+    createTransferRepo(sp).priorSends(partnerId, phone, recipientPhone, 'live', before),
+  );
+  if (read.ok) return read.value;
+  logError('mint.prior_sends', read.error, { partnerId });
   return null;
 }
 
@@ -253,6 +271,19 @@ function trimHistory(messages: ChatMessage[]): ChatMessage[] {
   return trimmed;
 }
 
+/**
+ * Pack 6 (P19): THE firstSeenAt rule, shared by the tier subject (capSubject, the mint's
+ * p.subject) and R48's new_account signal at draft time (store.firstSeenAt): the tenant's
+ * customers row, else the tenant's first live transfer (any status), else now. Pure.
+ */
+export function firstSeenAtOf(
+  rowFirstSeenAt: string | null | undefined,
+  firstTransferAt: string | null | undefined,
+  now: Date,
+): string {
+  return rowFirstSeenAt ?? firstTransferAt ?? now.toISOString();
+}
+
 // `db` is the ROOT handle (never a tx): mintUnderSenderLock opens its own
 // transaction with an isolation level, which only PgDatabase.transaction takes.
 export function createStore(redis: RedisLike, db: Db) {
@@ -267,6 +298,17 @@ export function createStore(redis: RedisLike, db: Db) {
   // the phone's OLDEST customers row (see legacy-tenant.ts). Built once.
   const customersRepo = createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph));
   const legacyTenantOf = legacyTenantResolver(customersRepo);
+
+  /**
+   * Pack 6 (P19): the customers row and the firstSeenAt by firstSeenAtOf, read once for
+   * capSubject and store.firstSeenAt. Lazy: the transfer read runs only when the row has
+   * no value (the statements capSubject always ran). Tenant-scoped on both reads.
+   */
+  async function subjectRowAndFirstSeen(partnerId: PartnerId, phone: string, now: Date) {
+    const row = await customersRepo.getCustomer(partnerId, phone);
+    const ft = row?.firstSeenAt != null ? null : await transfersRepo.firstTransferAt(partnerId, phone);
+    return { row, firstSeenAt: firstSeenAtOf(row?.firstSeenAt, ft, now) };
+  }
 
   /**
    * R49: the sealed thread for (tenant, thread phone), or null when there is
@@ -490,6 +532,14 @@ export function createStore(redis: RedisLike, db: Db) {
     async hasB2bTransferTo(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<boolean> {
       return transfersRepo.hasB2bTransferTo(partnerId, phone, recipientPhone);
     },
+    /**
+     * Fix pack 6 (P14): this sender's prior paid/delivered LIVE sends (draft
+     * time, root handle). THROWS on a read error: the caller treats it as
+     * "fact unknown".
+     */
+    async priorSends(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<PriorSends> {
+      return transfersRepo.priorSends(partnerId, phone, recipientPhone, 'live');
+    },
     /** fix 6: DECRYPTED newest settled consumer transfer to this number in this country (rehydration only). */
     async latestSettledConsumerTransferTo(
       partnerId: PartnerId,
@@ -520,7 +570,8 @@ export function createStore(redis: RedisLike, db: Db) {
      * it: firstSeenAt from the tenant's customers row, else the tenant's first
      * transfer, else now (a brand-new sender is T0). kycStatus is the caller's
      * attestation (input.senderKycStatus) — the same value the KYC backstop
-     * already trusts. Tenant-scoped on both reads.
+     * already trusts. Tenant-scoped on both reads. Pack 6 (P19): the rule is
+     * firstSeenAtOf (one rule with store.firstSeenAt, R48's draft-time read).
      */
     async capSubject(
       partnerId: PartnerId,
@@ -528,12 +579,17 @@ export function createStore(redis: RedisLike, db: Db) {
       kycStatus: KycStatus,
       now: Date = new Date(),
     ): Promise<CapSubject & { sendLimitOverride?: SendLimitOverride }> {
-      const row = await customersRepo.getCustomer(partnerId, phone);
-      const firstSeenAt =
-        row?.firstSeenAt ?? (await transfersRepo.firstTransferAt(partnerId, phone)) ?? now.toISOString();
+      const { row, firstSeenAt } = await subjectRowAndFirstSeen(partnerId, phone, now);
       // Program fix 16b: the customer's raise rides along (same row, no extra
       // query on the hot path) so createTransfer resolves the effective limits.
       return { firstSeenAt, kycStatus, sendLimitOverride: row?.sendLimitOverride };
+    },
+    /**
+     * Pack 6 (P19): the sender's firstSeenAt by the ONE rule (draft time, root handle).
+     * Throws on a read error (the caller treats it as unknown).
+     */
+    async firstSeenAt(partnerId: PartnerId, phone: string, now: Date = new Date()): Promise<string> {
+      return (await subjectRowAndFirstSeen(partnerId, phone, now)).firstSeenAt;
     },
     /**
      * ONE locked mint per (partner, phone). Opens a READ COMMITTED transaction
@@ -604,6 +660,7 @@ export function createStore(redis: RedisLike, db: Db) {
                 pokeWorker();
               },
               senderScreeningFlags: () => readSenderScreeningFlags(tx, partnerId, phone),
+              priorSends: (r, before) => readPriorSends(tx, partnerId, phone, r, before),
               recordSanctionsBlock: async (n) => {
                 await enqueueSanctionsBlockNotices(tx, { ...n, partnerId });
                 // partner-demo R4: after() runs post-response, after the mint commits.

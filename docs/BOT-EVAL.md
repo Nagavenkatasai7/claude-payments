@@ -10,7 +10,8 @@ Hinglish and Spanish.
 - Cases: `scripts/eval-bot-cases.ts`. Each case has a category, a language,
   the recorded context and a check. It also has a recorded passing reply and a
   recorded failing reply, and `tests/eval/eval-bot.test.ts` proves the check
-  both ways without calling any model.
+  both ways without calling any model. Cases 60 to 62 run with the English
+  transaction steps section on (a live-certified partner, R46).
 - Runner: `scripts/eval-bot.ts`.
 - Scope filter for pull requests: `scripts/ci/eval-scope.mjs`.
 - Prompt hash: `src/lib/ai-provenance.ts` (`promptHash`). It is `p1:` plus the
@@ -31,7 +32,7 @@ the eval itself) or the `@anthropic-ai/sdk` version. Any other pull request
 finishes the job in seconds, so the required `ci` check never sees it skipped.
 Push runs on `main` are out of scope, because the nightly run covers `main`.
 
-Cost: about 354 calls a night (59 cases x 2 models x 3 runs) and about 120
+Cost: about 372 calls a night (62 cases x 2 models x 3 runs) and about 120
 calls for each in-scope pull request.
 
 ## Pass policy (Q-R31.1)

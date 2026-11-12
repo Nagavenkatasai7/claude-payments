@@ -38,6 +38,7 @@
 import { buildSystemPrompt } from '@/lib/prompt';
 import { toolSchemasForChannel } from '@/lib/tools';
 import { PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { PURPOSE_REQUIRED_HINT } from '@/lib/purpose-codes';
 import { FIXED_REPLIES, fixedReply, HELP_SUFFIX } from '@/lib/hold-replies';
 import { promptHash } from '@/lib/ai-provenance';
 import type { ChatMessage, ChatTool } from '@/lib/types';
@@ -86,6 +87,11 @@ export interface EvalCase {
   gateActive?: boolean;
   /** The purpose.detect switch (agent.ts purposeRequired): prompt section + required schema arg. Default false. */
   purposeRequired?: boolean;
+  /**
+   * Fix pack 6 (P12): the routed partner is live-certified (agent.ts
+   * isLiveCertified): the ENGLISH TRANSACTION STEPS section is on. Default off.
+   */
+  englishSteps?: true;
   /** Server-injected system notes, verbatim from agent.ts. */
   notes?: string[];
   /** The conversation so far (user, assistant, tool), newest last. */
@@ -1437,13 +1443,139 @@ export const EVAL_CASES: EvalCase[] = [
       fail: say('Your account was flagged by our sanctions screening and is under compliance review.'),
     },
   },
+  // ── Fix pack 6 (P12, R46): a live-certified partner's bot keeps the money
+  // steps in English, after ONE short lead-in line in the customer's language.
+  // Small talk stays localised (cases 16-18 keep the section off). ──────────
+  {
+    id: 60,
+    title: 'English steps on, Spanish customer: one Spanish lead-in line, then the status text verbatim in English',
+    category: 'flow',
+    lang: 'es',
+    englishSteps: true,
+    history: [user('Hola, ¿dónde está mi dinero? Es la transferencia abc12345'), ...heldStatus()],
+    check: (r) => {
+      const fixed = fixedReply('hold', { help: true });
+      const text = textOf(r);
+      const rest = text.split(fixed).join('\n').split('\n').filter((l) => l.trim() !== '');
+      // GD4: exactly ONE lead-in line, before the status text, and it is Spanish (the Spanish-word
+      // heuristic of the other Spanish cases, plus the Spanish accents and marks).
+      const lead = rest.length === 1 ? rest[0] : undefined;
+      return fail(
+        !text.includes(fixed) && 'did not relay the status text verbatim in English',
+        rest.length > 1 && 'wrote more than one line besides the status text',
+        rest.length === 0 && 'wrote no lead-in line in Spanish',
+        lead !== undefined && text.includes(fixed) && text.indexOf(lead) > text.indexOf(fixed) && 'the lead-in line comes after the status text',
+        lead !== undefined && !/\b(?:el|la|le|de|en|su|tu|es|lo|por favor|gracias|respuesta|siguiente|ingl[eé]s)\b|[ñ¿¡áéíóú]/i.test(lead) && 'the lead-in line is not in Spanish',
+        textAvoids(r, HOLD_REASON_EN, 'named a reason or a review'),
+        textAvoids(r, HOLD_REASON_ES, 'named a reason or a review (in Spanish)'),
+      );
+    },
+    recorded: {
+      pass: say(`Le dejo la respuesta en inglés:\n${fixedReply('hold', { help: true })}`),
+      fail: say('Su transferencia se está procesando. Le escribiremos en cuanto haya novedades. No necesita hacer nada por ahora. Responda HELP para hablar con una persona.'),
+    },
+  },
+  {
+    id: 61,
+    title: 'English steps on, Hinglish customer: at most one Hinglish lead-in line, the quote line and question in English',
+    category: 'flow',
+    lang: 'hinglish',
+    englishSteps: true,
+    history: [
+      user('mummy ko India mein $200 bhejne hai, kitna lagega?'),
+      ...toolTurn('check_send_limit', { amount_usd: 200 }, { within_cap: true, tier: 'T1', edd_required: false }),
+      ...toolTurn('get_quote', { amount_source: 200, destination_country: 'IN' }, {
+        source_currency: 'USD', amount_source: 200, fee_source: 1.99, total_charge_source: 201.99, fee_usd: 1.99, fx_rate: 83,
+        amount_dest: 16600, destination_currency: 'INR', destination_country: 'IN', delivery_estimate: 'within 1 business day',
+        amount_source_display: '$200.00 USD',
+      }),
+    ],
+    check: (r) => {
+      const lines = textOf(r).split('\n').filter((l) => l.trim() !== '');
+      const question = [...lines].reverse().find((l) => l.trim().endsWith('?'));
+      // GD4: a Hinglish line may only be the FIRST line (the lead-in); after it, the quote lead
+      // line is in English.
+      const hinglishAt = lines.map((l, i) => (ROMAN_HINDI.test(l) ? i : -1)).filter((i) => i >= 0);
+      const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
+      // The quote lead is an English declarative clause that names the quote; a question is never
+      // the lead. Per sentence of every body line: a statement counts whole; a sentence ending in
+      // "?" counts only when it starts with a declarative lead start, up to its first clause
+      // boundary or question opener, and only when that text names the quote; other questions add nothing.
+      // Known limits: a Hinglish statement the ROMAN_HINDI list misses that holds "quote" still
+      // counts; a question with no "?" counts as a statement; a comma-joined lead without a
+      // declarative start ("You can check the quote below, shall I go ahead?") does not count.
+      // An abbreviation's full stop ends a sentence ("U.S. dollars", "U.S.Dollars"). A statement that
+      // ends with a bracketed or quoted question ("You can see the quote below (any questions?).",
+      // "The quote below answers \"how much?\".") counts as a question, so it is not a lead. With no
+      // space, an all-capitals word starts a sentence only after a lowercase letter and a mark
+      // ("above.USD 200" splits, "USD.USD 200" does not).
+      // Sentences: WhatsApp markup (* _ ~) is dropped first; a sentence ends at . ! or ? (plus any
+      // closing bracket or quote) before a space; or with no space before a capitalised word, "OK"
+      // or the word "I" ("below.Shall", "USD.Shall", "$200.Shall", "below...Shall", "below.I can");
+      // or with no space after a lowercase letter and the mark, before any capital ("above.USD").
+      // A decimal point does not end one. A sentence is a question when its closing run of marks
+      // and closers holds a "?" ("?", "?!", "?...", "?).").
+      const LEAD_NOUN = /\b(?:quote|details|summary|breakdown)\b/i;
+      const DECLARATIVE_START = /^\s*(?:(?:ok(?:ay)?|great|sure|alright|perfect|thanks|thank you)[,!\s]+)?(?:here(?:'s| is| are)|(?:this|below) is|(?:these|below) are|(?:your|the) (?:quote|details|summary|breakdown) (?:is|are)|i(?:'ve| have))\b/i;
+      const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/i;
+      const leadOf = (s: string) => {
+        if (!/\?[.!?)\]"'”’]*\s*$/.test(s)) return s;
+        const start = s.match(DECLARATIVE_START);
+        if (!start) return '';
+        const rest = s.slice(start[0].length);
+        const ends = [rest.search(/[,;:—–]|\s-\s/), rest.search(QUESTION_OPENER)].filter((i) => i >= 0);
+        const kept = ends.length ? s.slice(0, start[0].length + Math.min(...ends)) : '';
+        return LEAD_NOUN.test(kept) ? kept : '';
+      };
+      const sentences = (l: string) => l.replace(/[*_~]/g, '').split(/(?<=[.!?][)\]"'”’]*)\s+|(?<=\S[.!?][)\]"'”’]*)(?=[A-Z][a-z]|OK\b|I\b)|(?<=[a-z][.!?][)\]"'”’]*)(?=[A-Z])/);
+      const leadText = (l: string) => sentences(l).map(leadOf).join(' ');
+      const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
+      return fail(
+        hinglishAt.some((i) => i !== 0) && 'a Hinglish line is not the first line',
+        !quoteLead && 'the quote lead line is not in English',
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, /1\.99|\b83(?:\.0+)?\b|16,?600|business day|201\.99/i, 'restated the quote figures the code adds'),
+        textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
+        lines.filter((l) => ROMAN_HINDI.test(l)).length > 1 && 'wrote more than one Hinglish line',
+        !question && 'did not ask the confirmation question',
+        question !== undefined && ROMAN_HINDI.test(question) && 'asked the confirmation question in Hinglish',
+        question !== undefined && !/\b(shall|should|go ahead|confirm|proceed)\b/i.test(question) && 'the confirmation question is not in English',
+      );
+    },
+    recorded: {
+      pass: say('Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote. Shall I go ahead?'),
+      fail: say('Yeh raha aapka quote. Kya main aage badhun?'),
+    },
+  },
+  {
+    id: 62,
+    title: 'English steps on, the tool returns an instruction-style reply_hint: the bot follows it and never sends it to the customer',
+    category: 'flow',
+    lang: 'en',
+    englishSteps: true,
+    purposeRequired: true,
+    history: [
+      ...confirmedSendToMom('send Mom $200', 'Sending $200.00 USD — Mom gets ₹16,600. Shall I go ahead?', 'yes'),
+      ...toolTurn('send_approve_picker', { ...PICKER_TO_MOM }, { needs_purpose: true, reply_hint: PURPOSE_REQUIRED_HINT }),
+    ],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, /call the same tool|tell the customer|ask the customer|then call|in hinglish for/i, 'sent the reply_hint instruction to the customer'),
+        toolNames(r).length === 0 && listsPurposes(r),
+      ),
+    recorded: {
+      pass: say('One quick question before I send it: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+      fail: say(PURPOSE_REQUIRED_HINT),
+    },
+  },
 ];
 
 /**
  * The 20-case subset a pull request runs (Q10): every risk category and every
  * language, never a pending case. The nightly run covers every case.
  */
-export const PR_SUBSET_IDS: readonly number[] = [5, 6, 8, 9, 16, 25, 28, 29, 30, 32, 33, 35, 36, 38, 39, 42, 47, 51, 52, 57];
+export const PR_SUBSET_IDS: readonly number[] = [5, 6, 8, 16, 25, 28, 29, 30, 32, 33, 35, 36, 38, 39, 42, 47, 51, 52, 57, 60];
 
 export type EvalSubset = 'full' | 'pr';
 
@@ -1457,7 +1589,16 @@ export function casesFor(subset: EvalSubset): EvalCase[] {
 /** The messages the agent would send the model for this case (agent.ts order). */
 export function buildEvalMessages(c: EvalCase): ChatMessage[] {
   return [
-    { role: 'system', content: buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: c.gateActive ?? true, purposeRequired: c.purposeRequired ?? false }) },
+    {
+      role: 'system',
+      content: buildSystemPrompt({
+        brand: 'SmartRemit',
+        kycGateActive: c.gateActive ?? true,
+        purposeRequired: c.purposeRequired ?? false,
+        // Fix pack 6 (P12): only an englishSteps case adds the key, so every other case's messages stay byte-identical.
+        ...(c.englishSteps ? { englishTransactionSteps: true } : {}),
+      }),
+    },
     ...(c.notes ?? []).map((content): ChatMessage => ({ role: 'system', content })),
     ...c.history,
   ];

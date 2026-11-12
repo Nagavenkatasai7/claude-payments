@@ -40,6 +40,7 @@ import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Customer } from '@/lib/types';
@@ -194,6 +195,8 @@ async function seedLink(partnerId: string) {
     senderPhone: PHONE, firstSeenAt: now, kycStatus: 'verified', fullName: 'Asha Patel', senderCountry: 'US',
     partnerId, createdAt: now, updatedAt: now,
   } as Customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, partnerId, PHONE);
   const payees = createPayeeRepo(db);
   await payees.insert({
     id: `pye_${partnerId}`, partnerId, legalName: 'Sunrise Public School', accountHolder: 'Sunrise School Trust',

@@ -5,6 +5,7 @@ import {
   payApprovalNotRecorded,
   payNotAvailable,
   payReloadRequired,
+  payTemporarilyUnavailable,
   transferFunded,
 } from '@/lib/pay-not-available';
 import {
@@ -13,6 +14,8 @@ import {
   PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
   PAY_RELOAD_REQUIRED_COPY,
   PAY_RELOAD_REQUIRED_FUNDED_COPY,
+  PAY_TEMPORARY_COPY,
+  payErrorMessage,
 } from '@/lib/pay-outcome';
 import { fixedReply } from '@/lib/hold-replies';
 
@@ -115,5 +118,26 @@ describe('payAccountHolderInvalid (pack 4 T15)', () => {
       fieldErrors: { accountHolder: PAY_ACCOUNT_HOLDER_COPY },
     });
     expect(payAccountHolderInvalid()).not.toBe(payAccountHolderInvalid());
+  });
+});
+
+// Fix pack 6 T4 (P5): the routes' 503 for an infrastructure fault, as one helper.
+describe('payTemporarilyUnavailable (pack 6 P5)', () => {
+  it("is 503 { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' } (fresh body on each call)", async () => {
+    const a = payTemporarilyUnavailable();
+    const b = payTemporarilyUnavailable();
+    expect(a).not.toBe(b);
+    expect(a.status).toBe(503);
+    expect(await a.json()).toEqual({
+      ok: false,
+      error: 'Temporary problem. Please try again in a moment.',
+      reason: 'temporarily_unavailable',
+    });
+    expect(b.status).toBe(503);
+    expect((await b.json()).reason).toBe('temporarily_unavailable');
+  });
+
+  it('payErrorMessage of that body is PAY_TEMPORARY_COPY (old JS reads it)', async () => {
+    expect(payErrorMessage(await payTemporarilyUnavailable().json())).toBe(PAY_TEMPORARY_COPY);
   });
 });

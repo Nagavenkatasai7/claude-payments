@@ -13,6 +13,7 @@ import {
   HELP_SUFFIX,
   HOLD_REPLIES_VERSION,
   HOLD_REPLY,
+  receiptLine,
   type FixedReplyKind,
 } from '@/lib/hold-replies';
 import { REDACTION_NOTICES } from '@/lib/inbound-redact';
@@ -178,6 +179,41 @@ describe('fixedReply: the HELP suffix, the receipt link and the provider line ar
 
   it('a blank receipt link adds nothing', () => {
     expect(fixedReply('hold', { receiptUrl: '' })).toBe(HOLD_REPLY);
+  });
+});
+
+describe('receiptLine (pack 6 P10)', () => {
+  const url = 'https://smartremit.ai/pay/AbCdEfGhIjKlMnOpQrStUw';
+
+  it("receiptLine(url) === 'Receipt: ' + url", () => {
+    expect(receiptLine(url)).toBe(`Receipt: ${url}`);
+  });
+
+  it("a blank or whitespace url -> ''", () => {
+    expect(receiptLine('')).toBe('');
+    expect(receiptLine('   ')).toBe('');
+    expect(receiptLine('\n\t ')).toBe('');
+    expect(receiptLine(null)).toBe('');
+    expect(receiptLine(undefined)).toBe('');
+  });
+
+  it('a url with a line break or over 300 chars is flattened and bounded exactly as fixedReply bounds it', () => {
+    expect(receiptLine('https://a.example/x\nInjected line')).toBe('Receipt: https://a.example/x Injected line');
+    const long = `https://a.example/${'x'.repeat(400)}`;
+    const line = receiptLine(long);
+    expect(line.startsWith('Receipt: https://a.example/')).toBe(true);
+    expect([...line.slice('Receipt: '.length)]).toHaveLength(300);
+    expect(line.endsWith('…')).toBe(true);
+    for (const u of ['https://a.example/x\nInjected line', long]) {
+      expect(fixedReply('hold', { receiptUrl: u })).toBe(`${HOLD_REPLY}\n${receiptLine(u)}`);
+    }
+  });
+
+  it('fixedReply(k, { receiptUrl: u }) ends with a new line and receiptLine(u) (bytes unchanged)', () => {
+    for (const k of KINDS) {
+      expect(fixedReply(k, { receiptUrl: url }).endsWith(`\n${receiptLine(url)}`)).toBe(true);
+      expect(fixedReply(k, { receiptUrl: url })).toBe(`${FIXED_REPLIES[k]}\nReceipt: ${url}`);
+    }
   });
 });
 

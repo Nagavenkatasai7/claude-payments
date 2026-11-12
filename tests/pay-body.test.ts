@@ -10,9 +10,12 @@ describe('parsePayBody', () => {
       for (const surface of ['transfer', 'link', 'b2b'] as const) {
         expect(parsePayBody(raw, surface), `${JSON.stringify(raw)} ${surface}`).toEqual({
           action: null, otp: '', disclosureVersion: null, disclosureHash: null, accountHolder: null,
-          senderAddress: null, senderDob: null,
+          senderAddress: null, senderDob: null, esignConsentVersion: null, riskAck: false,
           country: null, fields: null, ach: null, fundingMethod: null, quoteLockedAt: null,
-          present: { disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false },
+          present: {
+            disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false,
+            esignConsentVersion: false, riskAck: false,
+          },
         });
       }
     }
@@ -57,8 +60,12 @@ describe('parsePayBody', () => {
     }, 'b2b');
     expect(p).toEqual({
       action: null, otp: '', country: 'IN', fields: { a: 'b' }, ach: null, disclosureVersion: null, disclosureHash: null,
-      accountHolder: null, senderAddress: null, senderDob: null, fundingMethod: null, quoteLockedAt: null,
-      present: { disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false },
+      accountHolder: null, senderAddress: null, senderDob: null, esignConsentVersion: null, riskAck: false,
+      fundingMethod: null, quoteLockedAt: null,
+      present: {
+        disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false,
+        esignConsentVersion: false, riskAck: false,
+      },
     });
   });
 
@@ -93,6 +100,41 @@ describe('parsePayBody', () => {
   it('fix pack 5 (P19): b2b never parses senderAddress / senderDob: both null and not present even when posted', () => {
     const p = parsePayBody({ senderAddress: '1 Test St', senderDob: '1990-01-02' }, 'b2b');
     expect(p).toMatchObject({ senderAddress: null, senderDob: null, present: { senderAddress: false, senderDob: false } });
+  });
+
+  it("fix pack 6 (P4): esignConsentVersion on transfer AND link: absent -> null, present false; a string -> kept as posted (not trimmed, not validated), present true; '' -> '' present true; a non-string -> null present true", () => {
+    for (const surface of ['transfer', 'link'] as const) {
+      expect(parsePayBody({}, surface), surface).toMatchObject({ esignConsentVersion: null, present: { esignConsentVersion: false } });
+      expect(parsePayBody({ esignConsentVersion: 'esign-v1' }, surface), surface).toMatchObject({
+        esignConsentVersion: 'esign-v1', present: { esignConsentVersion: true },
+      });
+      expect(parsePayBody({ esignConsentVersion: '  any thing  ' }, surface).esignConsentVersion, surface).toBe('  any thing  ');
+      expect(parsePayBody({ esignConsentVersion: '' }, surface), surface).toMatchObject({ esignConsentVersion: '', present: { esignConsentVersion: true } });
+      for (const bad of [7, true, null, { v: 1 }, ['esign-v1']]) {
+        expect(parsePayBody({ esignConsentVersion: bad }, surface), `${surface} ${JSON.stringify(bad)}`).toMatchObject({
+          esignConsentVersion: null, present: { esignConsentVersion: true },
+        });
+      }
+    }
+  });
+
+  it('fix pack 6 (P4): b2b never parses esignConsentVersion (null, not present) even when posted', () => {
+    expect(parsePayBody({ esignConsentVersion: 'esign-v1' }, 'b2b')).toMatchObject({
+      esignConsentVersion: null, present: { esignConsentVersion: false },
+    });
+  });
+
+  it('fix pack 6 (P4, T27): riskAck: transfer only; true only for the boolean true; present tells absent from posted', () => {
+    expect(parsePayBody({}, 'transfer')).toMatchObject({ riskAck: false, present: { riskAck: false } });
+    expect(parsePayBody({ riskAck: true }, 'transfer')).toMatchObject({ riskAck: true, present: { riskAck: true } });
+    for (const bad of ['true', 1, false, null]) {
+      expect(parsePayBody({ riskAck: bad }, 'transfer'), JSON.stringify(bad)).toMatchObject({
+        riskAck: false, present: { riskAck: true },
+      });
+    }
+    for (const surface of ['link', 'b2b'] as const) {
+      expect(parsePayBody({ riskAck: true }, surface), surface).toMatchObject({ riskAck: false, present: { riskAck: false } });
+    }
   });
 
   it('fields keeps only string values of a plain object (an array or a non-object -> null)', () => {

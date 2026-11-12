@@ -1,4 +1,4 @@
-import { FIXED_REPLIES } from '../../hold-replies';
+import { FIXED_REPLIES } from '../../hold-replies-text';
 
 // The en catalogue: the source of truth for keys. To add a language, add <locale>.ts with the SAME
 // keys and register it in ./index.ts (one line); tests/i18n.test.ts fails otherwise.
@@ -293,6 +293,8 @@ export const en = {
   'partner.audit.action.optinApprove': 'Live feature approval changed',
   'partner.audit.action.kycModeChange': 'KYC handling changed',
   'partner.audit.action.otpVerified': 'Payment approved with a code',
+  'partner.audit.action.amlHoldRulesSet': 'AML hold rules changed',
+  'partner.audit.action.riskSignals': 'Payment warning recorded',
   'partner.audit.action.disclosureConfig': 'Disclosure details changed',
   'partner.audit.action.persona': 'Assistant persona changed',
   'partner.audit.action.displayName': 'Display name changed',
@@ -612,6 +614,18 @@ export const en = {
   'partner.settings.pricing.margin': 'Margin (basis points)',
   'partner.settings.pricing.notSet': 'Not set',
   'partner.settings.pricing.empty': 'No margin is set for any corridor yet.',
+  // Fix pack 6 T19 (P17): the partner's AML hold rules per corridor (staff page only).
+  'partner.settings.amlHolds.title': 'AML holds before payout',
+  'partner.settings.amlHolds.body':
+    'Choose, for each country you send from, which checks hold a real-money transfer for SmartRemit review before payout. They apply only once you are live. A held transfer never tells the customer why.',
+  'partner.settings.amlHolds.rule.structuring': 'Several smaller sends that add up to a large amount',
+  'partner.settings.amlHolds.rule.first_transfer': 'A large first send from a new customer',
+  'partner.settings.amlHolds.rule.new_beneficiary': 'A large send to a new recipient',
+  'partner.settings.amlHolds.save': 'Save AML holds',
+  'partner.settings.amlHolds.saved': 'AML holds saved.',
+  'partner.settings.amlHolds.mfaRequired': 'Turn on two-step sign-in to change AML holds.',
+  'partner.settings.amlHolds.invalid': 'Choose a corridor you serve and only the listed rules.',
+  'partner.settings.amlHolds.none': 'No rule holds transfers in this corridor.',
   'partner.webhooks.callbackTitle': 'Status callback URL',
   'partner.webhooks.callbackHint': 'Your rail sends signed status events (created, funded, paid_out) to this address.',
   'partner.keys.baseUrlTitle': 'API base URL',
@@ -1405,6 +1419,12 @@ export const en = {
   'portal.profile.email': 'Email',
   'portal.profile.notOnFile': 'Not on file',
   'portal.profile.manageEmail': 'Add or change your email',
+  // Fix pack 6 (R46, P9): the Electronic records card's UI chrome only. The card's title and
+  // withdrawal text come from src/lib/legal/esign-consent.ts (version-pinned counsel draft).
+  'portal.profile.esign.on': 'You agreed to get your transfer disclosures, receipts and notices electronically.',
+  'portal.profile.esign.off': 'You have not agreed to get them electronically. Your next payment on a pay page will ask you.',
+  'portal.profile.esign.withdraw': 'Withdraw consent',
+  'portal.profile.esign.withdrawn': 'Consent withdrawn. Your next payment on a pay page will ask you again.',
   'portal.kyc.title': 'Identity verification',
   'portal.kyc.status.verified': 'Verified',
   'portal.kyc.status.review': 'In review',
@@ -1600,7 +1620,7 @@ export const en = {
   'portal.send.purpose_detail_too_long': 'Keep the reason under 120 characters.',
   'portal.send.purposeFromWords': '{purpose} (from your words: "{detail}")',
   'portal.send.scamWarning':
-    'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. SmartRemit staff check this transfer before the money goes.',
+    'Stop and check. Scammers ask people to send money for prizes, loans, investments, parcels, jobs or people met online. This transfer is checked before the money goes.',
   'portal.send.scamAck': 'I have read this warning',
   'portal.send.scam_ack_required': 'Read the warning and tick "I have read this warning" to continue.',
   'portal.send.recipient_invalid': 'Choose a recipient.',
@@ -2176,6 +2196,18 @@ export const en = {
   'partner.customers.trail.createdVerified': 'Created as verified',
   'partner.customers.trail.created': 'Created with a set status',
   'partner.customers.trail.reason': 'Reason: {reason}',
+  // Fix pack 6 truth check TC-T1: staff record a withdrawal of the electronic records consent.
+  'partner.customers.esign.title': 'Electronic records',
+  'partner.customers.esign.sub': 'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.',
+  'partner.customers.esign.none': 'No consent on file.',
+  'partner.customers.esign.on': 'Consent on file (text {version}), given {date}.',
+  'partner.customers.esign.withdrawn': 'Consent withdrawn {date}.',
+  'partner.customers.esign.unavailable': 'Not available right now.',
+  'partner.customers.esign.confirm': 'The customer asked to withdraw this consent.',
+  'partner.customers.esign.submit': 'Record withdrawal',
+  'partner.customers.esign.saving': 'Recording…',
+  'partner.customers.esign.saved': 'Withdrawal recorded.',
+  'partner.customers.esign.confirmRequired': 'Tick the box to confirm that the customer asked for this.',
   'partner.customers.conversation.title': 'Conversation log',
   'partner.customers.conversation.sub': 'The latest {limit} WhatsApp and web chat messages with customer {phone}.',
   'partner.customers.conversation.open': 'Open conversation log',

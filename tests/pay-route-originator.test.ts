@@ -20,6 +20,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { okVerify, realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
@@ -178,6 +179,8 @@ async function seedOwner(partnerId: string) {
     senderPhone: SENDER, firstSeenAt: nowIso, kycStatus: 'verified',
     senderCountry: 'US', partnerId, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso, fullName: 'Alex Sender',
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, partnerId, SENDER);
 }
 
 /** OWNER: certified with an approved provider block, on an http rail, live OFAC list; nothing on file. */

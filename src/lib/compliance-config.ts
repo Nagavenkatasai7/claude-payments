@@ -1,6 +1,7 @@
 import type { CountryCode, Partner } from './types';
-import { AML_DEFAULTS, type AmlConfig } from './aml-rules';
+import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
+import { RISK_SIGNALS, RISK_SIGNALS_OFF, type RiskSignal, type RiskSignalConfig } from './risk-signals';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -283,9 +284,18 @@ export interface ResolvedCorridorRules {
   kycCapHintUsd?: number;      // ADVISORY ONLY — consumed by the NEXT (KYC) batch
   // Program-Fix 43: behavioural AML thresholds (alerts — aml-sweep.ts) and the
   // PR B per-partner×corridor hold switch (OFF by default; read by mintLocked
-  // through aml-hold.ts amlHoldGate, which never holds a demo transfer).
+  // through aml-hold.ts amlHoldGate, which holds only real money and never a
+  // demo transfer; fail closed, fix pack 6 P16).
   aml: AmlConfig;
   amlHolds: boolean;
+  // Fix pack 6 (P13): the in-mint rules that hold on this corridor. Empty
+  // unless amlHolds; canonical order, frozen (resolveAmlHoldRules). The mint
+  // holds only on these (T17).
+  amlHoldRules: readonly AmlHoldRule[];
+  // Fix pack 6 (P18): this corridor's risk-signal setting. OFF by default (the
+  // shared RISK_SIGNALS_OFF); the readers (T25 mint, T26a draft) call
+  // riskSignalsApply before reading anything else of it.
+  riskSignals: RiskSignalConfig;
 }
 
 // Today's globals, named so the dormant path is PROVABLY equal to current
@@ -298,6 +308,8 @@ export const GLOBAL_DEFAULTS: ResolvedCorridorRules = {
   velocityLimit: VELOCITY_LIMIT,      // 3
   aml: AML_DEFAULTS,
   amlHolds: false,
+  amlHoldRules: Object.freeze([]) as readonly AmlHoldRule[],
+  riskSignals: RISK_SIGNALS_OFF,
 };
 
 // corridor_compliance is untrusted jsonb: every AML field is validated and
@@ -327,11 +339,48 @@ function resolveAml(...layers: Array<Partial<AmlConfig> | undefined>): AmlConfig
   };
 }
 
+// Fix pack 6 (P18): the stored riskSignals jsonb is untrusted. Absent or not a
+// plain object -> the shared RISK_SIGNALS_OFF; enabled only for a literal true;
+// thresholds through posNumber/posInt with the OFF defaults as fallback (the
+// 1..10000 / 1..720 bounds are the writer's, T23); hold filtered to known
+// signals, de-duplicated, canonical order. enabled false keeps valid stored
+// thresholds (the admin form shows them). Result and hold are frozen copies.
+function resolveRiskSignals(stored: unknown): RiskSignalConfig {
+  if (stored === undefined || stored === null || typeof stored !== 'object' || Array.isArray(stored)) {
+    return RISK_SIGNALS_OFF;
+  }
+  const o = stored as Record<string, unknown>;
+  const hold: readonly unknown[] = Array.isArray(o.hold) ? o.hold : [];
+  return Object.freeze({
+    enabled: o.enabled === true,
+    amountUsd: posNumber(o.amountUsd, RISK_SIGNALS_OFF.amountUsd),
+    newAccountHours: posInt(o.newAccountHours, RISK_SIGNALS_OFF.newAccountHours),
+    hold: Object.freeze(RISK_SIGNALS.filter((s) => hold.includes(s))) as readonly RiskSignal[],
+  });
+}
+
 // Code-defined per-corridor DEFAULTS. EMPTY at ship time — every corridor
 // inherits GLOBAL_DEFAULTS. Populated later as real corridors are calibrated
 // (partner-interest-driven, like P4's deferred per-currency cap/fee tables).
 // US is intentionally absent → falls through to GLOBAL_DEFAULTS → byte-for-byte.
 export const CORRIDOR_DEFAULTS: Partial<Record<CountryCode, Partial<ResolvedCorridorRules>>> = {};
+
+/**
+ * Fix pack 6 (P13): the resolved hold rules of one corridor entry.
+ * - holds off (`on` false) -> [] (the shared frozen GLOBAL_DEFAULTS list);
+ * - `stored` not an array (absent, or malformed jsonb: a string, an object, a
+ *   number) -> all three rules: absent is the Q-R47.3 default, and a malformed
+ *   value takes the same stricter default so bad data never weakens holds;
+ * - an array -> its valid members, de-duplicated, in canonical order, frozen
+ *   (an empty or all-garbage array -> [], "no rule holds" with the switch on).
+ * Exported for the partner writer and the admin page (T19).
+ */
+export function resolveAmlHoldRules(on: boolean, stored: unknown): readonly AmlHoldRule[] {
+  if (!on) return GLOBAL_DEFAULTS.amlHoldRules;
+  if (!Array.isArray(stored)) return AML_HOLD_RULES;
+  const list: readonly unknown[] = stored;
+  return Object.freeze(AML_HOLD_RULES.filter((r) => list.includes(r)));
+}
 
 export function resolveCorridorRules(
   partner: Partner | null,
@@ -353,6 +402,8 @@ export function resolveCorridorRules(
   const hasOverride = partner?.corridorCompliance?.[sourceCountry] !== undefined;
   if (!hasCorridorDefault && !hasOverride) return GLOBAL_DEFAULTS;
 
+  // Only a literal true switches holds on (PR B); anything else is OFF.
+  const amlHolds = (override.amlHolds ?? corridorDefault.amlHolds) === true;
   return {
     baseWatchlist: GLOBAL_DEFAULTS.baseWatchlist,
     watchlistExtra,
@@ -360,7 +411,8 @@ export function resolveCorridorRules(
     velocityLimit: override.velocityLimit ?? corridorDefault.velocityLimit ?? GLOBAL_DEFAULTS.velocityLimit,
     kycCapHintUsd: override.kycCapHintUsd ?? corridorDefault.kycCapHintUsd,
     aml: resolveAml(override.aml, corridorDefault.aml),
-    // Only a literal true switches holds on (PR B); anything else is OFF.
-    amlHolds: (override.amlHolds ?? corridorDefault.amlHolds) === true,
+    amlHolds,
+    amlHoldRules: resolveAmlHoldRules(amlHolds, override.amlHoldRules ?? corridorDefault.amlHoldRules),
+    riskSignals: resolveRiskSignals(override.riskSignals ?? corridorDefault.riskSignals),
   };
 }

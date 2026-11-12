@@ -13,6 +13,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -144,6 +145,8 @@ async function seedOwner(fullName: string | undefined, partnerId = 'default') {
   // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
   // ORIGINATOR_INFO_MISSING hold (P22) stays out of the cases about the re-screen.
   await seedOriginatorForTest(db, partnerId, SENDER_PHONE, { address: true, dob: true });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, partnerId, SENDER_PHONE);
 }
 
 async function screenRows(id: string) {

@@ -25,6 +25,7 @@ import {
   buildAmlExplainBundle,
   explainAml,
   AML_EXPLAIN_TIMEOUT_MS,
+  AML_HOLD_CHECK_FAILED_TEXT,
 } from '@/lib/aml-explain-ai';
 
 const chatMock = vi.mocked(chat);
@@ -343,5 +344,47 @@ describe('amlExplainFallback (deterministic)', () => {
   it('never names a person, phone or id', () => {
     const f = JSON.stringify(amlExplainFallback(buildAmlExplainBundle(makeTransfer(), [structuringAlert], CFG, 'platform', NOW)));
     for (const secret of [PHONE, RECIPIENT, TRANSFER_ID, PARTNER_ID, LAST4]) expect(f).not.toContain(secret);
+  });
+});
+
+describe('check_failed AML hold (fix pack 6 T18, P16)', () => {
+  it('checkFailed adds the fixed line to the facts text and the fallback; no rule is named', () => {
+    const f = buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW, undefined, null, true);
+    expect(f.checkFailed).toBe(true);
+    expect(f.rules).toEqual([]);
+    expect(amlExplainPrompt(f)[1].content).toContain(AML_HOLD_CHECK_FAILED_TEXT);
+    const fb = amlExplainFallback(f);
+    expect(fb.summary).toContain(AML_HOLD_CHECK_FAILED_TEXT);
+    expect(fb.summary).not.toMatch(/structuring|first_transfer|new_beneficiary/);
+    expect(fb.next_step).toBe('keep_on_hold');
+    // The fixed line comes before the hold sentence.
+    expect(fb.summary.indexOf(AML_HOLD_CHECK_FAILED_TEXT)).toBeLessThan(fb.summary.indexOf('It is on hold for'));
+  });
+
+  it('checkFailed false or absent: the facts and the prompt are byte-identical to today', () => {
+    const base = buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW);
+    for (const flag of [false, undefined]) {
+      const f = buildAmlExplainBundle(makeTransfer(), [], CFG, 'platform', NOW, undefined, null, flag);
+      expect('checkFailed' in f).toBe(false);
+      expect(JSON.stringify(f)).toBe(JSON.stringify(base));
+      expect(amlExplainPrompt(f)).toEqual(amlExplainPrompt(base));
+      expect(amlExplainFallback(f)).toEqual(amlExplainFallback(base));
+    }
+    expect(amlExplainPrompt(base)[1].content).not.toContain(AML_HOLD_CHECK_FAILED_TEXT);
+  });
+
+  it('an alert row still wins over checkFailed', () => {
+    const f = buildAmlExplainBundle(makeTransfer(), [structuringAlert], CFG, 'platform', NOW, undefined, null, true);
+    expect('checkFailed' in f).toBe(false);
+    expect(f.rules.map((r) => r.rule)).toEqual(['structuring']);
+  });
+
+  it('the partner audience gets the same fixed line (no numbers in it)', () => {
+    expect(AML_HOLD_CHECK_FAILED_TEXT).not.toMatch(/\d/);
+    const f = buildAmlExplainBundle(makeTransfer(), [], CFG, 'partner', NOW, undefined, null, true);
+    expect(f.checkFailed).toBe(true);
+    expect(f.thresholds).toBeUndefined();
+    expect(amlExplainPrompt(f)[1].content).toContain(AML_HOLD_CHECK_FAILED_TEXT);
+    expect(amlExplainFallback(f).summary).toContain(AML_HOLD_CHECK_FAILED_TEXT);
   });
 });

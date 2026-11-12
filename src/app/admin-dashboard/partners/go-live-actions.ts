@@ -28,6 +28,7 @@ import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { liveReadiness, type LiveReadinessFacts } from '@/lib/live-certification';
 import { LIVE_CAPABILITIES, type LiveCapability } from '@/lib/live-controls';
 import { isCalendarDate, writeCertification, writeContract, writeFundingMode, writeOptIn, type LiveWriteResult } from '@/lib/live-controls-write';
+import { writeAmlHoldDefaults } from '@/lib/aml-hold-defaults';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { gateStaffStepUp } from '@/lib/partner-step-up-gate';
@@ -129,6 +130,8 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
 // getDb(), getAuthStore(), Redis or the OFAC source. Four readiness lines are not built until
 // PR8/PR9 (pack 4 built provider_block, pack 5 funding), so certify always answers "not ready"
 // (pinned in tests/admin-live-actions.test.ts).
+// Fix pack 6 T20 (P17): a certification also writes the go-live AML default (holds on, all three
+// rules) for every served corridor except IN with no AML entry, in the same transaction.
 
 export type LiveActionResult = { ok: true } | { ok: false; error: string };
 
@@ -212,7 +215,13 @@ export async function certifyLiveAction(partnerId: string, formData: FormData): 
     const partner = await createPartnerRepo(tx).getPartner(id);
     if (!partner) return { ok: false, code: 'not_found' };
     const readiness = liveReadiness(partner, facts); // on the LOCKED row
-    return writeCertification(tx, id, { username: staff.username, scope: 'platform' }, { kind: 'certify', readiness }, reason);
+    const actor = { username: staff.username, scope: 'platform' as const };
+    const r = await writeCertification(tx, id, actor, { kind: 'certify', readiness }, reason);
+    if (!r.ok) return r; // not_ready writes nothing (writeCertification refuses before any write)
+    // Fix pack 6 T20 (P17): the go-live AML default, same tx, after the certification was
+    // written (shared with a corridor added later, review round 1 RD2: src/lib/aml-hold-defaults.ts).
+    await writeAmlHoldDefaults(tx, id, partner.countries ?? [], actor, 'go_live_default');
+    return r;
   });
 }
 

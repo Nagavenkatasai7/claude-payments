@@ -61,4 +61,12 @@ describe('helpers-pay-evidence (C24)', () => {
     expect(noAck.disclosureSnapshot).toBeNull();
     expect(noAck.auth?.routeId).toBe('tx_2');
   });
+
+  it('fix pack 6 (P6): testEvidence({ esignVersion }) adds esignConsent { version, routeId }; absent without it', () => {
+    expect('esignConsent' in testEvidence({ routeId: 'tx_1' })).toBe(false);
+    expect(testEvidence({ routeId: 'tx_1', esignVersion: 'esign-v' }).esignConsent).toEqual({ version: 'esign-v', routeId: 'tx_1' });
+    expect(testEvidence({ routeId: 'tx_2', ack: false, esignVersion: 'esign-v' })).toMatchObject({
+      disclosureAck: null, esignConsent: { version: 'esign-v', routeId: 'tx_2' },
+    });
+  });
 });

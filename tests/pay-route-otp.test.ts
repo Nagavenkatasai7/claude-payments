@@ -9,6 +9,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Transfer, Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -89,6 +90,8 @@ beforeEach(async () => {
   txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
   sendTransactionOtp.mockClear();
   getDraft.mockReset().mockResolvedValue(null);
 });

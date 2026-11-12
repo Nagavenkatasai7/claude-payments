@@ -341,3 +341,64 @@ describe('delivery-days hint (pack 4 C21)', () => {
     expect(html).toContain(hint);
   });
 });
+
+// Fix pack 6 T19 (P17): the AML holds section, one step-up form per served corridor (never IN),
+// with the RESOLVED rules ticked; the client form gets every id, label and tick as props.
+describe('AML holds before payout (pack 6 T19)', () => {
+  const RULE_LABELS = ['structuring', 'first_transfer', 'new_beneficiary'].map((r) => t(`partner.settings.amlHolds.rule.${r}` as Parameters<typeof t>[0]));
+  /** The markup of the form for `country` (from its data-country to the closing </form>). */
+  const formOf = (html: string, country: string): string => {
+    const start = html.indexOf(`data-country="${country}"`);
+    expect(start, country).toBeGreaterThan(-1);
+    return html.slice(start, html.indexOf('</form>', start));
+  };
+  const ticked = (f: string): string[] =>
+    [...f.matchAll(/<input([^>]*)>/g)].map((m) => m[1]).filter((a) => /type="checkbox"/.test(a) && /checked=""/.test(a)).map((a) => /value="([^"]+)"/.exec(a)?.[1] ?? '?');
+
+  beforeEach(async () => {
+    await box.db!
+      .update(partners)
+      .set({ countries: ['US', 'GB', 'IN', 'CA'], corridorCompliance: { US: { amlHolds: true }, GB: { amlHolds: true, amlHoldRules: ['first_transfer'] }, CA: { amlHoldRules: [] } } })
+      .where(eq(partners.id, PA));
+  });
+
+  it('the AML holds section lists one form per served corridor (never IN) with the resolved rules ticked', async () => {
+    staffMfa.enrolled.add('pa-admin');
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain('data-testid="settings-aml-holds"');
+    expect(html).toContain(t('partner.settings.amlHolds.title'));
+    expect(html.match(/data-testid="settings-aml-holds-form"/g)).toHaveLength(3);
+    expect(html).not.toContain('data-country="IN"');
+    expect(ticked(formOf(html, 'US'))).toEqual(['structuring', 'first_transfer', 'new_beneficiary']);
+    expect(ticked(formOf(html, 'GB'))).toEqual(['first_transfer']);
+    expect(ticked(formOf(html, 'CA'))).toEqual([]);
+    for (const c of ['US', 'GB', 'CA']) {
+      const f = formOf(html, c);
+      expect(f).toContain(`name="country" value="${c}"`);
+      expect(f.match(/name="rules"/g)).toHaveLength(3);
+      for (const label of RULE_LABELS) expect(f).toContain(label);
+      expect(f).toContain(t('partner.settings.amlHolds.save'));
+    }
+    expect(html).not.toContain(t('partner.settings.amlHolds.mfaRequired'));
+  });
+
+  it('without two-step sign-in it shows the enrol hint and no save button', async () => {
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain('data-testid="settings-aml-holds"');
+    expect(html).toContain(t('partner.settings.amlHolds.mfaRequired'));
+    expect(html).not.toContain('data-testid="settings-aml-holds-form"');
+    expect(html).not.toContain(t('partner.settings.amlHolds.save'));
+  });
+
+  it('B’s corridors never show; the default tenant gets no AML holds section', async () => {
+    await box.db!.update(partners).set({ countries: ['US', 'MX'] }).where(eq(partners.id, PB));
+    staffMfa.enrolled.add('pa-admin');
+    await signInAs({});
+    expect(decode(await render())).not.toContain('data-country="MX"');
+    staffMfa.enrolled.add('def-admin');
+    await signInAs({ username: 'def-admin', partnerId: DEFAULT_PARTNER_ID });
+    expect(await render()).not.toContain('data-testid="settings-aml-holds"');
+  });
+});

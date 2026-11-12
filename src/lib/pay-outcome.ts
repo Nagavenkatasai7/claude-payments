@@ -1,4 +1,5 @@
 import { REWARD_ENDED_MESSAGE } from './rewards/copy';
+import { PAY_RISK_ACK_REQUIRED_COPY } from './legal/risk-warning';
 // Review S2 (Program-Fix 32): the pay routes answer a POST on a row that is no
 // longer awaiting payment with 200 { ok: true, status } (ruling 7 keeps that
 // contract fixed — api/pay/[transferId]/route.ts refuseUnlessAwaiting). A
@@ -15,6 +16,35 @@ export function payOkStatus(body: unknown): PayOkStatus {
   }
   return 'done';
 }
+
+/**
+ * Fix pack 6 (P4, P11): a 2xx answer on a held transfer (status 'in_review'). The forms show
+ * the neutral PAY_HELD_LABEL for it, never "complete". payOkStatus is unchanged.
+ */
+export function payOkHeld(body: unknown): boolean {
+  return !!body && typeof body === 'object' && (body as { status?: unknown }).status === 'in_review';
+}
+
+/** Fix pack 6 (P11): which done-state text a b2c pay form shows. Pure. */
+export function payDoneCopy(held: boolean, receiptOnReload: boolean): 'held' | 'receipt' | 'legacy' {
+  if (held) return 'held';
+  return receiptOnReload ? 'receipt' : 'legacy';
+}
+
+// Fix pack 6 (P20): the paid pay page's fixed copy. Client-safe twins: PAY_HELD_LABEL of
+// FIXED_REPLIES.label_held (hold-replies.ts is not client-safe) and PAY_RECEIPT_PRINT_HINT of
+// en.ts 'portal.receipt.printHint'; tests/pay-receipt-copy.test.ts pins them equal. None says
+// review, check, compliance or held.
+export const PAY_SUCCESS_RECEIPT_COPY = 'Payment complete! Reload this page to see and print your receipt.';
+export const PAY_HELD_LABEL = 'Processing';
+export const PAY_RECEIPT_PRINT_HINT = "To print or save this receipt, use your browser's Print command.";
+export const PAY_RECEIPT_NOT_COMPLETED_COPY = 'This transfer was not completed. Nothing was charged.';
+export const PAY_RECEIPT_REFUNDED_COPY = 'This payment was refunded.';
+export const PAY_RECEIPT_CANCELLED_CHARGED_COPY = 'This transfer was not completed. Any payment will be returned.';
+// Review round 1 RC1 (D2): a cancelled charged row with no refund in flight (partner-funded,
+// a refund requested or failed): nothing promises a return the platform has not started.
+export const PAY_RECEIPT_CANCELLED_CONTACT_COPY =
+  'This transfer was not completed. If you paid, reply in the WhatsApp chat and we will help you.';
 
 // Program-Fix 14 follow-up: the two pay refusals the customer can fix in the
 // WhatsApp chat get their own copy; every other failure keeps the form's
@@ -90,6 +120,8 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
   if (b.reason === 'reload_required') return b.funded === true ? PAY_RELOAD_REQUIRED_FUNDED_COPY : PAY_RELOAD_REQUIRED_COPY;
   if (b.reason === 'not_available') return PAY_NOT_AVAILABLE_COPY;
+  // Fix pack 6 (P4, T27): the draft pay page's risk-warning box was not ticked.
+  if (b.reason === 'risk_ack_required') return PAY_RISK_ACK_REQUIRED_COPY;
   if (b.reason === 'approval_not_recorded') {
     return b.funded === true ? PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY : PAY_APPROVAL_NOT_RECORDED_COPY;
   }
@@ -124,4 +156,18 @@ export function disclosureAckBody(
 ): { disclosureVersion?: string; disclosureHash?: string } {
   if (!acked || version === null) return {};
   return hash !== null && DISCLOSURE_HASH_RE.test(hash) ? { disclosureVersion: version, disclosureHash: hash } : { disclosureVersion: version };
+}
+
+// Fix pack 6 (P4): the E-SIGN consent field a pay form posts: the version the
+// page was rendered with, only when the box is ticked. Client-safe (no import of
+// esign.ts); the server checks the version (pay-esign-gate).
+export function esignConsentBody(version: string | null, ticked: boolean): { esignConsentVersion?: string } {
+  return ticked && version !== null ? { esignConsentVersion: version } : {};
+}
+
+// Fix pack 6 (P4, P19): the risk tick a draft pay form posts: `riskAck: true` only
+// when the page showed the warning AND the box is ticked. Client-safe; the server
+// requires it for a draft that carries risk signals (payRiskAckRequired).
+export function riskAckBody(required: boolean, ticked: boolean): { riskAck?: true } {
+  return required && ticked ? { riskAck: true } : {};
 }

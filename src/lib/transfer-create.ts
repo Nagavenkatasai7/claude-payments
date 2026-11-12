@@ -9,7 +9,9 @@ import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
 import { logError, logWarn } from './log';
 import { SendsPausedError } from './flags';
-import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold, applyPurposeHold } from './aml-hold';
+import { addHoldReason, amlHoldGate, amlHoldHits, applyPurposeHold } from './aml-hold';
+import { evaluateRiskSignals, isRiskSignal, riskAckMissing, riskSignalsApply, RISK_SIGNALS, type RiskSignal } from './risk-signals';
+import { RISK_WARNING_VERSION } from './legal/risk-warning';
 import { keptPurposeDetail } from './purpose-detail';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
@@ -24,6 +26,7 @@ import { quoteCeilingUsd, resolveEffectiveSendLimits, SendCapError } from './sen
 import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { RewardMintFacts, SenderLedgerOps, Store } from './store';
+import type { PriorSends } from '@/db/repos/transfer-repo';
 import type { PartnerStore } from './partner-store';
 import type { FixedReplyKind } from './hold-replies';
 import type { LiveCapability } from './live-controls';
@@ -142,10 +145,35 @@ export interface CreateTransferInput {
   // the redemption row in the mint transaction. A reward that ended since the
   // quote throws RewardEndedError with nothing written. Absent ⇒ unchanged.
   reward?: QuotedReward;
+  // Fix pack 6 (R48, P19): set ONLY by pay-finalize (T27), when the draft pay
+  // page showed the risk warning. `shown` is what the page showed (from
+  // draft.riskSignals), `acked` the customer's tick, `ackedAt` when the route
+  // stamped it. A shown signal without `acked: true` throws
+  // RiskAckRequiredError with nothing written. Absent ⇒ record-only: the mint
+  // still derives, records and (per the corridor's hold list) holds signals.
+  risk?: { shown: readonly RiskSignal[]; acked: boolean; ackedAt?: string };
 }
 
 /** Batch B follow-up A4: the actor of the `purpose.flag` audit row. */
 export const PURPOSE_AUDIT_ACTOR = 'system:purpose-check';
+/** Fix pack 6 (P16): the actor of the `aml.hold` audit row. */
+export const AML_HOLD_AUDIT_ACTOR = 'system:aml-hold';
+/** Fix pack 6 (P19, P21): the actor of the `risk.signals` audit row. */
+export const RISK_AUDIT_ACTOR = 'system:risk-signals';
+
+/**
+ * Fix pack 6 (R48, P19): thrown inside the locked mint when the pay page
+ * showed a risk warning (input.risk.shown) and the customer's tick is missing.
+ * NOTHING was written (the transaction rolls back); a claim-first caller's
+ * idempotency claim stays bound and its draft is kept. pay-finalize maps it
+ * (T27).
+ */
+export class RiskAckRequiredError extends Error {
+  constructor() {
+    super('risk_ack_required');
+    this.name = 'RiskAckRequiredError';
+  }
+}
 
 /** B3: what a customer sees when the reward on an approved quote ended before the mint. */
 export { REWARD_ENDED_MESSAGE } from './rewards/copy';
@@ -741,11 +769,20 @@ async function lockedFeeTierQuote(
  * pool connection per mint). Order:
  *   1. same-id replay (claim-first callers) → return the existing row, no
  *      second insert and no cap check;
+ *   1a. the risk ack (pack 6 P19): a shown warning without the tick throws
+ *      RiskAckRequiredError (before screening: nothing written);
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
- *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
- *       demo, cleared → flagged only, never throws);
+ *   2a. the optional AML hold (Program-Fix 43 PR B, fix pack 6 P16: real
+ *       money only, OFF by default, per-corridor rules, never demo; a hit,
+ *       a null read or a thrown check adds the generic reason to a cleared
+ *       or flagged verdict (fail closed), never throws; the `aml.hold` audit
+ *       row is written after the insert);
  *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction
  *       (PR C: the same evidence is stored on the inserted row, transfers.screening);
+ *   2d. risk signals (pack 6 P19, after the purpose hold): record, hold via
+ *       addHoldReason for a signal in the corridor's CURRENT hold list,
+ *       never refuse (a failed read is recorded, not held); the
+ *       `risk.signals` audit row is written after the insert;
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
  *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
@@ -768,6 +805,11 @@ async function mintLocked(
       return { transfer: existing, replayed: true };
     }
   }
+  // Fix pack 6 (R48, P19 1a): the risk ack, AFTER the replay (a replay already
+  // committed its own ack) and before anything is read or written. Only enum
+  // values count as shown.
+  const riskShown: RiskSignal[] = (input.risk?.shown ?? []).filter(isRiskSignal);
+  if (riskAckMissing(riskShown, input.risk?.acked === true)) throw new RiskAckRequiredError();
   // M2-10 (#398 review L2): a scheduled mint re-checks its schedule under the lock, BEFORE the
   // sanctions screen, so a refused run leaves no blocked row or evidence behind.
   if (input.scheduleId) {
@@ -810,33 +852,53 @@ async function mintLocked(
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
   const id = input.id ?? newTransferId();
-  // ── Optional AML hold (Program-Fix 43 PR B) ──────────────────────────────
-  // OFF unless the partner's corridor switch is the literal `true`; never on
-  // the default (demo) tenant on either side; never on a non-http rail; only
-  // ever cleared → flagged. The gate is pure, so OFF / demo / an already
-  // flagged or blocked verdict costs ZERO statements. Past it, the two reads
-  // run in a savepoint that never throws (null ⇒ failed, alert queued ⇒ no
-  // hold), and this block is wrapped again: it can never fail the mint.
+  // ── Optional AML hold (Program-Fix 43 PR B, fix pack 6 P16) ─────────────
+  // Real money only (p.realMoney: computed on the RAIL partner, a failed rail
+  // read counts as real), OFF unless the corridor switch is the literal `true`
+  // with at least one rule, never on the default (demo) tenant on either
+  // side, never on a blocked verdict. The gate is pure, so all of those cost
+  // ZERO statements. Past it, the reads run in ONE savepoint that never throws
+  // (null ⇒ failed, alert queued). FAIL CLOSED: a rule hit, a null read or a
+  // thrown check adds the generic reason (a flagged row gains it too), and
+  // the mint goes on: this block never throws (a throw would roll back and
+  // leave the idempotency claim bound: a refusal, not a hold).
+  let amlAudit: string[] | null = null;
+  // Fix pack 6 (P19): the AML step's prior sends, shared with the risk
+  // signals below (undefined = the AML step did not read; null = its read failed).
+  let amlSends: PriorSends | null | undefined;
   if (amlHoldGate({
-    amlHolds: p.rules.amlHolds,
+    realMoney: p.realMoney,
+    amlHolds: p.rules.amlHolds && p.rules.amlHoldRules.length > 0,
     partnerId: input.partnerId,
     railPartnerId: p.settlementPartnerId ?? input.partnerId,
     complianceStatus,
   })) {
     try {
       const inputs = await ops.amlHoldInputs({
-        railPartnerId: p.settlementPartnerId ?? input.partnerId,
         anchor: { at: now, id },
         largeAmountUsd: p.rules.largeAmountUsd,
         band: p.rules.aml.band,
+        recipientPhone: input.recipientPhone ?? '',
       });
-      if (inputs?.prior && amlHoldRailEligible(inputs.railProviderType)) {
-        const hit = amlHoldHit(inputs.prior, q.amountUsd, { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd });
-        ({ complianceStatus, complianceReasons } = applyAmlHold({ complianceStatus, complianceReasons }, hit));
+      amlSends = inputs?.sends ?? null;
+      if (!inputs) {
+        amlAudit = ['check_failed'];
+      } else {
+        const hits = amlHoldHits({
+          stats: inputs.stats,
+          sends: inputs.sends,
+          amountUsd: q.amountUsd,
+          cfg: { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd },
+          rules: p.rules.amlHoldRules,
+        });
+        if (hits.length > 0) amlAudit = [...new Set(hits.map((h) => h.rule))];
       }
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
+      amlAudit = ['check_failed'];
+      amlSends = null;
     }
+    if (amlAudit) ({ complianceStatus, complianceReasons } = addHoldReason({ complianceStatus, complianceReasons }));
   }
   // ── Sender screening hold (fix pack 2 T6, R06) ────────────────────────────
   // Real-money rails only (no read otherwise): a sender with a Persona
@@ -859,14 +921,60 @@ async function mintLocked(
   // authority): only a valid one is stored, or an invalid one that matches a
   // scam pattern (keptPurposeDetail, security review L2: the bot sends one on
   // when purpose.detect is off). A scam-pattern reason holds the
-  // transfer, cleared → flagged with the generic reason, never a downgrade and
-  // never touching blocked (applyPurposeHold). OWNER DECISION 2026-10-08: this
+  // transfer: a cleared or flagged verdict becomes flagged with the generic
+  // reason added once (a row already flagged for amount, velocity or EDD keeps
+  // its reasons and gains this one, so it is no longer partner-releasable: fix
+  // pack 6 P15), never a downgrade and never touching blocked
+  // (applyPurposeHold). OWNER DECISION 2026-10-08: this
   // hold applies to EVERY partner, the default (demo) tenant and simulator
   // rails included (unlike the optional AML hold above), so the owner can test it.
   const keptPurpose = input.purposeDetail ? keptPurposeDetail(input.purposeDetail) : undefined;
   const purposeDetail = keptPurpose?.detail;
   const purposeRisk = keptPurpose?.risk;
   ({ complianceStatus, complianceReasons } = applyPurposeHold({ complianceStatus, complianceReasons }, purposeRisk));
+  // ── Risk signals (fix pack 6 R48, P19 2d) ─────────────────────────────────
+  // Off unless the corridor turned them on, never for the default tenant,
+  // 'test' or b2b (riskSignalsApply is pure: zero statements otherwise). The
+  // prior sends are the AML step's when it read them, else ONE ops.priorSends
+  // read (its own savepoint, null on an SQL error). A signal shown or derived
+  // that is in the CURRENT hold list holds the row (the generic reason, after
+  // every existing rule, so their reason order is unchanged); a failed read is
+  // recorded (checkFailed) and never holds or refuses (owner Q25, D6). A
+  // config switched off since the draft derives and holds nothing, but the
+  // shown signals are still recorded. Blocked rows get nothing.
+  const riskCfg = p.rules.riskSignals;
+  let riskDerived: RiskSignal[] = [];
+  let riskHeld: RiskSignal[] = [];
+  let riskCheckFailed = false;
+  if (complianceStatus !== 'blocked' && riskSignalsApply({
+    cfg: riskCfg,
+    partnerId: input.partnerId,
+    environment: input.environment ?? 'live',
+    transferType: input.transferType ?? 'b2c',
+  })) {
+    let sends: PriorSends | null;
+    if (amlSends !== undefined) {
+      sends = amlSends;
+    } else {
+      try {
+        sends = await ops.priorSends(input.recipientPhone ?? '', { at: now, id });
+      } catch (err) {
+        logError('risk.signals_check', err, { partnerId: input.partnerId }); // never a refusal (D6)
+        sends = null;
+      }
+    }
+    if (sends === null) riskCheckFailed = true;
+    riskDerived = evaluateRiskSignals({
+      amountUsd: q.amountUsd,
+      sends,
+      firstSeenAt: p.subject.firstSeenAt ?? null,
+      now,
+      chatCue: riskShown.includes('chat_cue'),
+    }, riskCfg);
+    riskHeld = RISK_SIGNALS.filter((s) => (riskShown.includes(s) || riskDerived.includes(s)) && riskCfg.hold.includes(s));
+    if (riskHeld.length > 0) ({ complianceStatus, complianceReasons } = addHoldReason({ complianceStatus, complianceReasons }));
+  }
+  const riskRecord = complianceStatus !== 'blocked' && (riskShown.length > 0 || riskDerived.length > 0 || riskCheckFailed);
   const transfer: Transfer = {
     id,
     phone: input.phone,
@@ -983,6 +1091,40 @@ async function mintLocked(
   await ops.insertTransfer(transfer, { screening: compliance.evidence });
   // One reward per transfer (the PK), committed with the transfer or not at all.
   if (rewardWrite) await ops.insertRedemption({ transferId: transfer.id, ...rewardWrite });
+  // Fix pack 6 (P16): the in-mint AML hold, audited with the row (ids and rule
+  // ids only: never a phone, amount or name). The blocked early return above
+  // never reaches here (the gate excluded blocked).
+  if (amlAudit) {
+    await ops.recordAudit({
+      partnerId: input.partnerId,
+      actor: AML_HOLD_AUDIT_ACTOR,
+      actorType: 'system',
+      action: 'aml.hold',
+      subjectId: transfer.id,
+      meta: { rules: amlAudit },
+    });
+  }
+  // Fix pack 6 (P19, P21): the risk signals, audited with the row (enum
+  // values, booleans, the warning version and the ack time only). No alert,
+  // no outbox row (P23).
+  if (riskRecord) {
+    await ops.recordAudit({
+      partnerId: input.partnerId,
+      actor: RISK_AUDIT_ACTOR,
+      actorType: 'system',
+      action: 'risk.signals',
+      subjectId: transfer.id,
+      meta: {
+        shown: riskShown,
+        derived: riskDerived,
+        acked: input.risk?.acked === true,
+        held: riskHeld,
+        warningVersion: RISK_WARNING_VERSION,
+        ackedAt: input.risk?.ackedAt ?? null,
+        ...(riskCheckFailed ? { checkFailed: true } : {}),
+      },
+    });
+  }
   // Batch B follow-up A4: a scam-pattern reason is audited (category and id, no
   // free text) and raises one deduped ops alert, committed with the row. Also
   // when another rule already flagged it: staff should know the category. A

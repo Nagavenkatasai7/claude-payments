@@ -5,9 +5,11 @@
 // Ids and hashes only: never a phone, raw IP, user-agent, code or name.
 import type { Db } from '@/db/client';
 import { createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
+import { createCustomerRepo, recordEsignConsent } from '@/db/repos/customer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { auditSubjectId } from './customer-ref';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { logWarn } from './log';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
@@ -30,10 +32,18 @@ export interface DisclosureSnapshotInput {
   acknowledgedAt: number;
 }
 
+/** Fix pack 6 (P6): the E-SIGN consent the customer ticked (a current version, checked by the caller's gate). */
+export interface EsignConsentEvidence {
+  version: string;
+  routeId: string;
+}
+
 export interface PaymentEvidence {
   disclosureAck: DisclosureAckEvidence | null;
   disclosureSnapshot: DisclosureSnapshotInput | null;
   auth: PaymentAuthEvidence | null;
+  /** Fix pack 6 (P6): optional; absent or null writes no consent and touches no customers row. */
+  esignConsent?: EsignConsentEvidence | null;
 }
 
 export type EvidenceCommitResult =
@@ -73,6 +83,20 @@ const iso = (ms: number | null): string | null => (ms === null ? null : new Date
  * BEFORE anything is written. The ack's provider kind and the snapshot are then
  * built from the locked read, never the caller's copy. A payment that is not
  * mandatory takes no partner lock and uses the caller's `disclosure` as before.
+ *
+ * Fix pack 6 (P6, P21, critic C10): when `ev.esignConsent`, the same INSERT
+ * also carries the `customer.consent.esign` row (subject the transfer id, meta
+ * `{ version, surface, on: true, routeId, customerRef }`, customerRef the keyed
+ * `auditSubjectId` of the owner and sender, never the phone), and after the
+ * snapshot the OWNER's customers row `(locked.partnerId, locked.phone)` records
+ * the version at `now` (lock order: transfer row, partner row FOR SHARE when
+ * mandatory, customers row). A missing customers row (a legacy or never-inbound
+ * sender) is created with ensureCustomer (no opt-in, firstSeenAt by the
+ * first-transfer rule) and the write retried ONCE; a second miss throws
+ * `esign_consent_not_written` (rolled back: the caller answers 503
+ * approval_not_recorded, nothing charged). The consent is not part of the
+ * disclosure snapshot (v1 unchanged). Without `ev.esignConsent` no customers
+ * SQL runs at all.
  */
 export async function commitPaymentEvidence(
   db: Db,
@@ -82,7 +106,7 @@ export async function commitPaymentEvidence(
   now: number = Date.now(),
   opts: EvidenceCommitOptions = {},
 ): Promise<EvidenceCommitResult> {
-  if (!ev.auth && !ev.disclosureAck) return { kind: 'nothing' };
+  if (!ev.auth && !ev.disclosureAck && !ev.esignConsent) return { kind: 'nothing' };
   return db.transaction(async (tx): Promise<EvidenceCommitResult> => {
     const repo = createTransferRepo(tx);
     const locked = await repo.getTransferForUpdate(t.id, { partnerId: t.partnerId });
@@ -141,12 +165,43 @@ export async function commitPaymentEvidence(
         },
       });
     }
+    if (ev.esignConsent) {
+      const c = ev.esignConsent;
+      rows.push({
+        partnerId: locked.partnerId,
+        actor: 'pay-page',
+        actorType: 'system',
+        action: 'customer.consent.esign',
+        subjectId: locked.id,
+        meta: {
+          version: c.version,
+          surface: ev.auth?.surface ?? 'transfer',
+          on: true,
+          routeId: c.routeId,
+          customerRef: auditSubjectId(locked.partnerId, locked.phone),
+        },
+      });
+    }
     await createAuditRepo(tx).recordMany(rows);
     if (ev.disclosureAck && ev.disclosureSnapshot && disclosure) {
       const snap = buildDisclosureSnapshot({ transfer: locked, disclosure, input: ev.disclosureSnapshot, now });
       if (!(await repo.setDisclosureSnapshotIfAwaiting(locked.id, locked.partnerId, snap))) {
         throw new Error('disclosure_snapshot_not_written');
       }
+    }
+    if (ev.esignConsent) {
+      const { version } = ev.esignConsent;
+      const at = new Date(now);
+      let ok = await recordEsignConsent(tx, locked.partnerId, locked.phone, version, at);
+      if (!ok) {
+        // Critic C10: no customers row for this sender yet; create it (no opt-in) and retry once.
+        await createCustomerRepo(tx, (p, ph) => createTransferRepo(tx).firstTransferAt(p, ph)).ensureCustomer(
+          locked.partnerId,
+          locked.phone,
+        );
+        ok = await recordEsignConsent(tx, locked.partnerId, locked.phone, version, at);
+      }
+      if (!ok) throw new Error('esign_consent_not_written');
     }
     return { kind: 'written' };
   });

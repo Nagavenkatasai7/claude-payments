@@ -8,6 +8,7 @@ import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
 import { parseDisclosureSnapshot, type DisclosureSnapshotV1 } from '@/lib/remittance-disclosure';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { normalizePhone } from '@/lib/phone';
 import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
   encodeStatementCursor,
@@ -37,6 +38,12 @@ export interface Page<T> {
 }
 
 /** Program fix 16: one sender's ledger totals for the cap, velocity and EDD checks. */
+/** Fix pack 6 (P14): a sender's prior paid/delivered sends, in total and to one recipient (null = no recipient digits). */
+export interface PriorSends {
+  total: number;
+  toRecipient: number | null;
+}
+
 export interface SenderTotals {
   todayUsdCents: number;
   todayCount: number;
@@ -2013,6 +2020,54 @@ export function createTransferRepo(
         subTCount30d: Number(r?.subTCount30d ?? 0),
         priorCount: Number(r?.priorCount ?? 0),
       };
+    },
+
+    /**
+     * Fix pack 6 (P14): the ONE "known sender / known recipient" rule for R47
+     * (AML holds in the mint) and R48 (risk signals). Counts this sender's rows
+     * of the SAME tenant and environment whose money really moved: status
+     * 'paid' or 'delivered' only (an abandoned draft, a held row, a cancelled
+     * or blocked one never makes a sender or a recipient known) and refund not
+     * completed (a refund keeps the status and sets refund_status; a pending or
+     * failed refund still counts). Every transfer type counts (B2B and Partner
+     * API rows too). `toRecipient` compares recipient_phone DIGITS with the
+     * input's digits (the hasB2bTransferTo rule); an input with no digits gives
+     * no verdict (null). `before` is senderAmlStats' strict (created_at, id)
+     * anchor. One statement, served by transfers_phone_created. Throws on error.
+     */
+    async priorSends(
+      partnerId: PartnerId,
+      phone: string,
+      recipientPhone: string,
+      environment: TransferEnvironment = 'live',
+      before?: { at: Date; id: string },
+    ): Promise<PriorSends> {
+      const digits = normalizePhone(recipientPhone);
+      const where = and(
+        eq(transfers.partnerId, partnerId),
+        eq(transfers.phone, phone),
+        eq(transfers.environment, environment),
+        inArray(transfers.status, ['paid', 'delivered']),
+        ne(transfers.refundStatus, 'completed'),
+        before
+          ? or(
+              sql`${transfers.createdAt} < ${before.at}`,
+              and(sql`${transfers.createdAt} = ${before.at}`, sql`${transfers.id} < ${before.id}`),
+            )
+          : undefined,
+      );
+      if (!digits) {
+        const rows = await db.select({ total: sql<number>`count(*)::int` }).from(transfers).where(where);
+        return { total: Number(rows[0]?.total ?? 0), toRecipient: null };
+      }
+      const rows = await db
+        .select({
+          total: sql<number>`count(*)::int`,
+          toRecipient: sql<number>`count(*) filter (where regexp_replace(${transfers.recipientPhone}, '[^0-9]', '', 'g') = ${digits})::int`,
+        })
+        .from(transfers)
+        .where(where);
+      return { total: Number(rows[0]?.total ?? 0), toRecipient: Number(rows[0]?.toRecipient ?? 0) };
     },
 
     /** Masked rows by id, pinned to `partnerId` when given (the compliance alerts card). */

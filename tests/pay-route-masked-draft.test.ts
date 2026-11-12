@@ -14,6 +14,7 @@ import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { fakeRedis } from './helpers';
 import { freshDb, clearLegalName } from './helpers-db';
+import { seedEsignConsentForTest } from './helpers-esign';
 import type { Draft } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -115,6 +116,8 @@ beforeEach(async () => {
     senderPhone: PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso, fullName: 'Alex Rivera', createdAt: nowIso, updatedAt: nowIso,
   });
+  // consent on file (pack 6 P5): the E-SIGN gate is not under test here
+  await seedEsignConsentForTest(db, 'default', PHONE);
 });
 
 describe('POST /api/pay/<draftId> — fix 6 (ctx-01)', () => {

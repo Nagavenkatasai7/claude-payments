@@ -101,10 +101,12 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
 });
 
 describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the app', () => {
-  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases, the 2 R56 scope cases, the R32 code-quote case, the 26 R31 risk cases and the R06 sender-unavailable case, ids 1..59', () => {
-    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 59 }, (_, i) => i + 1));
-    // Required purpose: 19-24 run with the purpose.detect switch on; the rest keep it off.
-    expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24]);
+  it('is the 15 audit cases, the 3 A2 language cases, the 3 required-purpose cases, the 3 "Other" reason cases, the 3 R30 no-tipping-off cases, the 2 R17 AI-identity cases, the 2 R56 scope cases, the R32 code-quote case, the 26 R31 risk cases, the R06 sender-unavailable case and the 3 R46 English-steps cases, ids 1..62', () => {
+    expect(EVAL_CASES.map((c) => c.id)).toEqual(Array.from({ length: 62 }, (_, i) => i + 1));
+    // Fix pack 6 (P12): 60, 61 and 62 (review round 2 GD1) run with the ENGLISH TRANSACTION STEPS section on; the rest keep it off.
+    expect(EVAL_CASES.filter((c) => c.englishSteps).map((c) => c.id)).toEqual([60, 61, 62]);
+    // Required purpose: 19-24 (and 62, whose tool result is the purpose refusal) run with the purpose.detect switch on; the rest keep it off.
+    expect(EVAL_CASES.filter((c) => c.purposeRequired).map((c) => c.id)).toEqual([19, 20, 21, 22, 23, 24, 62]);
   });
 
   it('R31: every case names a known category and language, and the risk cases cover EN, HI, Hinglish and ES', () => {

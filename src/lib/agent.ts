@@ -36,10 +36,13 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
 import { PURPOSE_SCAM_WARNING } from './purpose-detail';
+import { RISK_WARNING_TEXT } from './legal/risk-warning';
 import { modelVisibleResult } from './model-visible-result';
 import { composeReply } from './compose-reply';
 import { MIN_USD } from './fx';
 import { providerLineFor } from './legal/provider-line';
+import { isLiveCertified } from './live-gate';
+import { chatRiskCue } from './risk-chat-cue';
 import {
   addPolicyFacts,
   addTextFacts,
@@ -284,6 +287,9 @@ export function createAgent(deps: AgentDeps) {
     // new read). None for the default tenant, demo or an unapproved block, so the
     // prompt and the tool context stay byte-identical there.
     const providerLine = providerLineFor(resolvePartnerDisclosure(notePartner)) ?? undefined;
+    // Fix pack 6 (P12, Q-R46.2): a live-certified routed partner's bot keeps the
+    // money steps in English. Decided on the partner row already read; no rail read.
+    const englishTransactionSteps = isLiveCertified(notePartner);
     // Scheduled-send name nudge (2026-10-02): an active schedule that cannot run
     // for want of the owner's legal name. Fail-soft: a read error injects nothing.
     let scheduleNeedsName = false;
@@ -333,11 +339,19 @@ export function createAgent(deps: AgentDeps) {
     // read the same tenant, phone, stores and tap.
     // UI redesign M2-4: built by the shared buildToolContext (tool-context.ts),
     // the same object field for field; every dep is passed, so no singleton.
+    // Fix pack 6 (R48, P19 T26a): does the customer's recent chat (the last 10
+    // user lines, this message included) carry a risk cue? Computed in memory;
+    // the tools see `chatRiskCue: true` on a COPY of the turn only when true
+    // (the caller's turn, i.e. the agent.turn payload, is never changed), and
+    // neither the texts nor the cue are logged or stored.
+    const riskCue = chatRiskCue(
+      history.filter((m) => m.role === 'user').slice(-10).map((m) => (typeof m.content === 'string' ? m.content : '')),
+    );
     const toolCtx: ToolContext = buildToolContext({
       partnerId,
       phone,
       channel,
-      turn,
+      turn: riskCue ? { ...turn, chatRiskCue: true } : turn,
       deps: {
         store: deps.store,
         scheduleStore: deps.scheduleStore,
@@ -381,6 +395,9 @@ export function createAgent(deps: AgentDeps) {
     // Batch B follow-up A4: a send tool's scam_warning. Only OUR constant is ever
     // shown (never a value read back from the model's world), at the top of a text reply.
     let scamWarning = false;
+    // Fix pack 6 (P19 T26b): a send tool's risk_warning (the draft carries risk
+    // signals). Only OUR constant counts; the scam warning wins over it.
+    let riskWarned = false;
     // R56: the model called decline_off_topic. The turn ends with the fixed,
     // code-written decline in the customer's language; the model is not asked
     // again, so it cannot add to or soften it.
@@ -397,7 +414,7 @@ export function createAgent(deps: AgentDeps) {
     // the front of `history`, which moves where this turn starts.
     let historyAtTurnStart = history.length;
     const prefix: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired, providerLine }) },
+      { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits, purposeRequired, providerLine, ...(englishTransactionSteps ? { englishTransactionSteps: true } : {}) }) },
     ];
     // Web channel: in the prefix, so the model still knows the channel's limits
     // after tool results arrive. Never persisted.
@@ -574,6 +591,7 @@ export function createAgent(deps: AgentDeps) {
           // An interactive (picker/approve card) sent by a tool IS the reply.
           if ((result as Record<string, unknown>).sent === true) interactiveSent = true;
           if ((result as Record<string, unknown>).scam_warning === PURPOSE_SCAM_WARNING) scamWarning = true;
+          if ((result as Record<string, unknown>).risk_warning === RISK_WARNING_TEXT) riskWarned = true;
           if ((result as Record<string, unknown>).declined_off_topic === true) declinedReply = offTopicReply(detectReplyLang(incomingText));
           // R32: the raw result is a fact of this turn; get_quote's quote_text
           // is the code-written quote the reply ends with.
@@ -697,7 +715,7 @@ export function createAgent(deps: AgentDeps) {
     // formatting or code-written slot. Off (shadow) only reports; on replaces
     // the reply with the fixed fallback. The switch is read only on a failed
     // check, and an unreadable switch stays shadow.
-    const riskWarning = scamWarning ? PURPOSE_SCAM_WARNING : undefined;
+    const riskWarning = scamWarning ? PURPOSE_SCAM_WARNING : riskWarned ? RISK_WARNING_TEXT : undefined;
     if (reply.trim()) {
       const check = checkReply(reply, facts);
       if (!check.ok) {

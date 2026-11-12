@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { newTransferId } from '@/lib/id';
+import { isOpaqueTransferId, newTransferId } from '@/lib/id';
 
 // Program-Fix 23: the id is an unauthenticated capability (/pay/<id>), the draft
 // id, the rail reference and every prefixed id. It must come from a CSPRNG and
@@ -76,5 +76,27 @@ describe('newTransferId — WhatsApp-safe first character (review S2)', () => {
 
   it('the last character is always A, Q, g or w (so a trailing "_"/"-" is impossible)', () => {
     for (let i = 0; i < 2_000; i++) expect(newTransferId()[21]).toMatch(/^[AQgw]$/);
+  });
+});
+
+describe('isOpaqueTransferId (pack 6 P10)', () => {
+  it('true for 1,000 newTransferId() values', () => {
+    for (let i = 0; i < 1_000; i++) expect(isOpaqueTransferId(newTransferId())).toBe(true);
+  });
+
+  it("false for a legacy 8-char id ('pay12345'), '', 21 and 23 chars, a 22-char string with '=' or '/' or a space, a non-string (cast)", () => {
+    const base = 'AbCdEfGhIjKlMnOpQrStUw'; // 22 chars of the alphabet
+    expect(isOpaqueTransferId(base)).toBe(true);
+    expect(isOpaqueTransferId('pay12345')).toBe(false);
+    expect(isOpaqueTransferId('')).toBe(false);
+    expect(isOpaqueTransferId(base.slice(0, 21))).toBe(false);
+    expect(isOpaqueTransferId(`${base}A`)).toBe(false);
+    expect(isOpaqueTransferId(`${base.slice(0, 21)}=`)).toBe(false);
+    expect(isOpaqueTransferId(`${base.slice(0, 21)}/`)).toBe(false);
+    expect(isOpaqueTransferId(`${base.slice(0, 10)} ${base.slice(11)}`)).toBe(false);
+    expect(isOpaqueTransferId(`${base}\n`)).toBe(false);
+    expect(isOpaqueTransferId(12345 as unknown as string)).toBe(false);
+    expect(isOpaqueTransferId(null as unknown as string)).toBe(false);
+    expect(isOpaqueTransferId(undefined as unknown as string)).toBe(false);
   });
 });

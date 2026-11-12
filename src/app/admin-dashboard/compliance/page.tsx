@@ -10,6 +10,8 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { reviewAmlAlertAction, setAmlHoldsAction } from './actions';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { amlHoldRulesSummary } from '@/lib/aml-hold';
+import { RiskSignalsForm } from './risk-signals-form';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
@@ -226,6 +228,8 @@ export default async function CompliancePage() {
           partnerName: p.name ?? '',
           corridor: `${country} → IN`,
           amlHolds: rules.amlHolds,
+          amlHoldRules: rules.amlHoldRules, // fix pack 6 (P13): the RESOLVED rule list
+          riskSignals: rules.riskSignals, // fix pack 6 (P18, T23): the RESOLVED risk-signal setting
           largeAmountUsd: rules.largeAmountUsd,
           velocityLimit: rules.velocityLimit,
           watchlistSize: rules.baseWatchlist.length + rules.watchlistExtra.length,
@@ -538,7 +542,7 @@ export default async function CompliancePage() {
                     <span key="aml-holds" className="text-muted-foreground">Never (demo)</span>
                   ) : (
                     <span key="aml-holds" className="inline-flex flex-wrap items-center gap-2">
-                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{r.amlHolds ? 'On' : 'Off'}</Badge>
+                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{amlHoldRulesSummary(r.amlHolds, r.amlHoldRules)}</Badge>
                       {canSetAmlHolds && (
                         <form action={setAmlHoldsAction}>
                           <input type="hidden" name="partnerId" value={r.partnerId} />
@@ -556,6 +560,52 @@ export default async function CompliancePage() {
             />
           </CardContent>
         </Card>
+
+        {/* Fix pack 6 T23 (R48, P22): platform admins only; the action re-gates. The default tenant is skipped. */}
+        {canSetAmlHolds && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>Risk signals before payment</CardTitle>
+              <CardDescription>
+                Off by default, and never for the default (demo) tenant, sandbox or business payments. When on,
+                the customer sees a fixed warning before paying; a signal ticked to hold sends the transfer to
+                review. Saving asks for your authenticator code every time.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-6">
+              {corridorRows.filter((r) => r.partnerId !== DEFAULT_PARTNER_ID).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No partner corridors configured.</p>
+              ) : (
+                corridorRows
+                  .filter((r) => r.partnerId !== DEFAULT_PARTNER_ID)
+                  .map((r) => (
+                    <div key={`risk-${r.partnerId}-${r.country}`} className="flex flex-col gap-3 border-b border-border pb-6 last:border-b-0 last:pb-0">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="font-semibold">{r.partnerName}</span>
+                        <span>{r.corridor}</span>
+                        <Badge variant={r.riskSignals.enabled ? 'destructive' : 'outline'}>{r.riskSignals.enabled ? 'On' : 'Off'}</Badge>
+                        <span className="tabular-nums">{money(r.riskSignals.amountUsd, 'USD')}</span>
+                        <span className="tabular-nums">{r.riskSignals.newAccountHours} h</span>
+                        <span className="text-muted-foreground">
+                          {r.riskSignals.hold.length > 0 ? `Holds: ${r.riskSignals.hold.join(', ')}` : 'Holds: none'}
+                        </span>
+                      </div>
+                      <RiskSignalsForm
+                        partnerId={r.partnerId}
+                        country={r.country}
+                        value={{
+                          enabled: r.riskSignals.enabled,
+                          amountUsd: r.riskSignals.amountUsd,
+                          newAccountHours: r.riskSignals.newAccountHours,
+                          hold: [...r.riskSignals.hold],
+                        }}
+                      />
+                    </div>
+                  ))
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="mb-6">
           <CardHeader>
