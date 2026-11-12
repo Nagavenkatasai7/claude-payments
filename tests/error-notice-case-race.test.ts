@@ -12,7 +12,7 @@ import type { Transfer } from '@/lib/types';
 // pass-through mock of the ticket repo lets a hook stamp the recall case with a class FIRST (as a
 // concurrent report would), so the writer's own stampRegClass returns false deterministically.
 
-const hook = vi.hoisted(() => ({ cls: null as string | null, shiftMs: 0 }));
+const hook = vi.hoisted(() => ({ cls: null as string | null, shiftMs: 0, resolveOn: null as null | 'recall' | 'regcase' }));
 
 vi.mock('@/db/repos/ticket-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/ticket-repo')>();
@@ -22,6 +22,17 @@ vi.mock('@/db/repos/ticket-repo', async (orig) => {
       const repo = real.createTicketRepo(db, opts);
       return {
         ...repo,
+        // F2 (FC2): staff resolve the found case between the writer's find and its write.
+        async findOpenRecallForTransfer(...args: Parameters<typeof repo.findOpenRecallForTransfer>) {
+          const found = await repo.findOpenRecallForTransfer(...args);
+          if (found && hook.resolveOn === 'recall') await repo.updateStatus(found.id, 'resolved');
+          return found;
+        },
+        async findOpenRegCase(...args: Parameters<typeof repo.findOpenRegCase>) {
+          const found = await repo.findOpenRegCase(...args);
+          if (found && hook.resolveOn === 'regcase') await repo.updateStatus(found.id, 'resolved');
+          return found;
+        },
         async stampRegClass(...args: Parameters<typeof repo.stampRegClass>) {
           if (hook.cls) {
             const [id, partnerId] = args;
@@ -84,6 +95,7 @@ beforeEach(async () => {
   await createStore(fakeRedis(), db).saveTransfer(transfer());
   hook.cls = null;
   hook.shiftMs = 0;
+  hook.resolveOn = null;
 });
 
 describe('openErrorNoticeCaseLocked: a lost stamp re-reads the ticket (P8 step 3, test 7d)', () => {
@@ -128,5 +140,76 @@ describe('openErrorNoticeCaseLocked: a lost stamp re-reads the ticket (P8 step 3
     const row = await db.execute(sql`SELECT due_at FROM tickets WHERE id = ${recallId}`);
     expect(new Date((row.rows[0] as { due_at: string }).due_at).toISOString()).toBe(want);
     expect(await auditCount()).toBe(0);
+  });
+});
+
+async function snapshot(id: string) {
+  const repo = createTicketRepo(db);
+  return { t: await repo.getTicket(id), msgs: await repo.listMessages(id, { includeInternal: true }) };
+}
+
+describe('openErrorNoticeCaseLocked: a case staff resolved after the find is never reused (F2, FC2)', () => {
+  it('the found classless recall is resolved in between -> a NEW classed case; the resolved one is untouched', async () => {
+    const recallId = await openRecall();
+    const before = await snapshot(recallId);
+    hook.resolveOn = 'recall';
+    const r = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, input('error_notice')));
+    hook.resolveOn = null;
+    if (r.kind !== 'opened') throw new Error('unreachable');
+    expect(r.ticketId).not.toBe(recallId);
+    expect(r).toMatchObject({ reused: false, classStamped: true, regClass: 'error_notice' });
+    const after = await snapshot(recallId);
+    expect(after.t!.status).toBe('resolved');
+    expect(after.t!.regClass).toBeUndefined();
+    expect(after.msgs).toEqual(before.msgs);
+    expect((await createTicketRepo(db).getTicket(r.ticketId))!.regClass).toBe('error_notice');
+    const a = await db.execute(sql`SELECT subject_id FROM audit_events WHERE action = 'ticket.reg_case.open'`);
+    expect(a.rows).toEqual([{ subject_id: r.ticketId }]);
+  });
+
+  it('the found classed case is resolved in between -> a NEW classed case; no Also reported note on the resolved one', async () => {
+    const first = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, input('error_notice')));
+    if (first.kind !== 'opened') throw new Error('unreachable');
+    const before = await snapshot(first.ticketId);
+    hook.resolveOn = 'regcase';
+    const r = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, input('error_notice')));
+    hook.resolveOn = null;
+    if (r.kind !== 'opened') throw new Error('unreachable');
+    expect(r.ticketId).not.toBe(first.ticketId);
+    expect(r).toMatchObject({ reused: false, classStamped: true, regClass: 'error_notice' });
+    const after = await snapshot(first.ticketId);
+    expect(after.t!.status).toBe('resolved');
+    expect(after.msgs).toEqual(before.msgs);
+    expect(after.msgs.some((m) => m.body.startsWith('Also reported'))).toBe(false);
+  });
+
+  it('unclassed path: the found recall is resolved in between -> a NEW unclassed ticket; the resolved one is untouched', async () => {
+    const recallId = await openRecall();
+    const before = await snapshot(recallId);
+    hook.resolveOn = 'recall';
+    const r = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, { ...input('error_notice'), regClass: null, code: 'other' }));
+    hook.resolveOn = null;
+    if (r.kind !== 'opened') throw new Error('unreachable');
+    expect(r.ticketId).not.toBe(recallId);
+    expect(r).toEqual({ kind: 'opened', ticketId: r.ticketId, reused: false, regClass: null, dueAt: null, classStamped: false });
+    const after = await snapshot(recallId);
+    expect(after.t!.status).toBe('resolved');
+    expect(after.msgs).toEqual(before.msgs);
+  });
+
+  it('unclassed path at the cap: the found recall is resolved in between -> { kind: cap }, nothing created', async () => {
+    const recallId = await openRecall();
+    const repo = createTicketRepo(db);
+    for (let k = 0; k < 5; k++) {
+      await repo.createTicket({ id: `tk_cap_${k}`, partnerId: 'p1', kind: 'customer', customerPhone: PHONE, subject: 's', body: 'b' });
+    }
+    const n0 = await db.execute(sql`SELECT count(*)::int AS n FROM tickets`);
+    hook.resolveOn = 'recall';
+    const r = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, { ...input('error_notice'), regClass: null, code: 'other' }));
+    hook.resolveOn = null;
+    expect(r).toEqual({ kind: 'cap' });
+    const n1 = await db.execute(sql`SELECT count(*)::int AS n FROM tickets`);
+    expect(n1.rows).toEqual(n0.rows);
+    expect((await repo.getTicket(recallId))!.status).toBe('resolved');
   });
 });

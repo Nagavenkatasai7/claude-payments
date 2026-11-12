@@ -8,7 +8,7 @@ import type { Db, DbOrTx } from '@/db/client';
 // ticket repo lets a hook stamp the help case with fraud_report FIRST (as a concurrent report
 // would), so openHelpCase's own stampRegClass returns false deterministically.
 
-const hook = vi.hoisted(() => ({ cls: null as string | null }));
+const hook = vi.hoisted(() => ({ cls: null as string | null, resolveOnFind: false }));
 
 vi.mock('@/db/repos/ticket-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/ticket-repo')>();
@@ -18,6 +18,12 @@ vi.mock('@/db/repos/ticket-repo', async (orig) => {
       const repo = real.createTicketRepo(db, opts);
       return {
         ...repo,
+        // F2 (FC2): staff resolve the found case between the writer's find and its write.
+        async findOpenHumanHelpCase(...args: Parameters<typeof repo.findOpenHumanHelpCase>) {
+          const found = await repo.findOpenHumanHelpCase(...args);
+          if (found && hook.resolveOnFind) await repo.updateStatus(found.id, 'resolved');
+          return found;
+        },
         async stampRegClass(...args: Parameters<typeof repo.stampRegClass>) {
           if (hook.cls) {
             const [id, partnerId] = args;
@@ -46,6 +52,7 @@ let db: Db;
 beforeEach(async () => {
   db = await freshDb();
   hook.cls = null;
+  hook.resolveOnFind = false;
 });
 
 afterEach(() => {
@@ -108,5 +115,34 @@ describe('openHelpCase: a lost stamp re-reads the ticket (P9, test 10)', () => {
     const want = new Date(regDueAt('fraud_report', Date.parse(t0!.createdAt))).toISOString();
     expect(b).toMatchObject({ caseId: id, created: false, regClass: 'complaint', caseCreatedOrStamped: false, dueAt: want });
     expect(await storedDue(id)).toBe(want);
+  });
+});
+
+describe('openHelpCase: a case staff resolved after the find is never reused (F2, FC2)', () => {
+  it('the found classless case is resolved in between -> a NEW complaint case; the resolved one is untouched', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    const nowMs = Date.now();
+    const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
+    const repo = createTicketRepo(db);
+    const msgsBefore = await repo.listMessages(a.caseId, { includeInternal: true });
+    hook.resolveOnFind = true;
+    const b = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'complaint' }));
+    hook.resolveOnFind = false;
+    const old = await repo.getTicket(a.caseId);
+    expect(old!.status).toBe('resolved');
+    expect(old!.regClass).toBeUndefined();
+    expect(old!.dueAt).toBeUndefined();
+    expect(await repo.listMessages(a.caseId, { includeInternal: true })).toEqual(msgsBefore);
+    expect(b.caseId).not.toBe(a.caseId);
+    const due = new Date(regDueAt('complaint', nowMs)).toISOString();
+    expect(b).toEqual({ caseId: b.caseId, partnerId: 'default', created: true, regClass: 'complaint', dueAt: due, caseCreatedOrStamped: true });
+    const fresh = await repo.getTicket(b.caseId);
+    expect(fresh).toMatchObject({ status: 'open', regClass: 'complaint', firstNoticeAt: new Date(nowMs).toISOString(), dueAt: due });
+    const r = await db.execute(sql`SELECT subject_id, meta FROM audit_events WHERE action = 'ticket.reg_case.open'`);
+    expect(r.rows).toHaveLength(1);
+    const row = r.rows[0] as { subject_id: string; meta: { reused: boolean } | string };
+    expect(row.subject_id).toBe(b.caseId);
+    const meta = typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta;
+    expect(meta.reused).toBe(false);
   });
 });

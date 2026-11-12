@@ -232,14 +232,19 @@ export async function openErrorNoticeCaseLocked(tx: DbOrTx, i: ErrorNoticeCaseIn
   };
 
   if (regClass) {
-    const found = await repo.findOpenRegCase(partnerId, transferId, regClass);
+    // Fix F2 (FC2): lock the found row and continue with the FRESH row; a case staff resolved or
+    // closed after the find is "not found" (a new case is created: owner question 14).
+    const hit = await repo.findOpenRegCase(partnerId, transferId, regClass);
+    const found = hit ? await repo.lockOpenCase(hit.id, partnerId) : null;
     if (found) {
       await addNote(found.id);
       return { kind: 'opened', ticketId: found.id, reused: true, regClass, dueAt: found.dueAt ?? null, classStamped: false };
     }
   }
 
-  const open = await repo.findOpenRecallForTransfer(partnerId, phone, transferId);
+  // Fix F2 (FC2): the same rule for the recall find (classed and unclassed paths alike).
+  const recall = await repo.findOpenRecallForTransfer(partnerId, phone, transferId);
+  const open = recall ? await repo.lockOpenCase(recall.id, partnerId) : null;
   if (open && regClass === null) {
     return { kind: 'opened', ticketId: open.id, reused: true, regClass: open.regClass ?? null, dueAt: open.dueAt ?? null, classStamped: false };
   }

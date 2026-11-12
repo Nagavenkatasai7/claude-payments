@@ -215,6 +215,42 @@ describe('ticket-repo reg — stampRegClass', () => {
     const after = await rawRow(t.id);
     expect(after).toEqual(before);
   });
+
+  it('F2 (FC2): a resolved or closed unclassed case is never stamped and nothing is written', async () => {
+    for (const status of ['resolved', 'closed'] as const) {
+      const t = await plain({ transferId: 't1' });
+      await setStatus(t.id, status);
+      const before = await rawRow(t.id);
+      expect(
+        await repo.stampRegClass(t.id, 'pa', { regClass: 'complaint', firstNoticeAt: new Date(), dueAt: new Date(Date.now() + DAY) }),
+      ).toBe(false);
+      expect(await rawRow(t.id)).toEqual(before);
+    }
+  });
+});
+
+describe('ticket-repo reg — lockOpenCase (F2, FC2)', () => {
+  it('returns the fresh row for open, pending and waiting_admin', async () => {
+    for (const status of ['open', 'pending', 'waiting_admin'] as const) {
+      const t = await plain({ transferId: 't1' });
+      await setStatus(t.id, status);
+      const got = await db.transaction((tx) => createTicketRepo(tx).lockOpenCase(t.id, 'pa'));
+      expect(got).toEqual(await repo.getTicket(t.id));
+      expect(got?.status).toBe(status);
+    }
+  });
+
+  it('returns null for resolved and closed, another tenant and an unknown id', async () => {
+    const resolved = await plain({ transferId: 't1' });
+    await setStatus(resolved.id, 'resolved');
+    const closed = await plain({ transferId: 't1' });
+    await setStatus(closed.id, 'closed');
+    const open = await plain({ transferId: 't1' });
+    expect(await repo.lockOpenCase(resolved.id, 'pa')).toBeNull();
+    expect(await repo.lockOpenCase(closed.id, 'pa')).toBeNull();
+    expect(await repo.lockOpenCase(open.id, 'pb')).toBeNull();
+    expect(await repo.lockOpenCase('tk_unknown', 'pa')).toBeNull();
+  });
 });
 
 describe('ticket-repo reg — setTriage guard', () => {

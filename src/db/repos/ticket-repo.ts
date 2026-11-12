@@ -358,9 +358,30 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
+     * Fix pack 8 (P6, fix F2, early review FC2): lock ONE tenant's ticket row (`SELECT ... FOR
+     * UPDATE`; drizzle pg-core `select().for('update')`, node_modules/drizzle-orm/pg-core/
+     * query-builders/select.d.ts:586) and return the FRESH row when it is still open (open, pending
+     * or waiting_admin), else null (also null for an unknown id or another tenant's). A case writer
+     * calls it right after a find returns a case and continues with ITS result, so a staff resolve
+     * that committed in between makes the writer create a new case (owner question 14). The row lock
+     * lasts until the caller's transaction ends (with a pool handle it ends at once).
+     */
+    async lockOpenCase(id: string, partnerId: PartnerId): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(and(eq(tickets.id, id), eq(tickets.partnerId, partnerId)))
+        .for('update');
+      const row = rows[0];
+      if (!row || !(OPEN_STATUSES as readonly string[]).includes(row.status)) return null;
+      return rowToTicket(row);
+    },
+
+    /**
      * Fix pack 8 (P6): stamp a class and its clock on an UNCLASSED case of ONE tenant, once (one
      * UPDATE ... WHERE reg_class IS NULL). True when a row was stamped; a classed case is never
-     * re-classed and its clock never moves.
+     * re-classed and its clock never moves. Fix F2 (FC2): the WHERE also requires an OPEN status, a
+     * second guard behind `lockOpenCase`, so a resolved or closed case is never stamped.
      */
     async stampRegClass(
       id: string,
@@ -377,7 +398,14 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
           priority: 'urgent',
           updatedAt: new Date(),
         })
-        .where(and(eq(tickets.id, id), eq(tickets.partnerId, partnerId), isNull(tickets.regClass)))
+        .where(
+          and(
+            eq(tickets.id, id),
+            eq(tickets.partnerId, partnerId),
+            isNull(tickets.regClass),
+            inArray(tickets.status, [...OPEN_STATUSES]),
+          ),
+        )
         .returning({ id: tickets.id });
       return rows.length === 1;
     },

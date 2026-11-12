@@ -123,7 +123,10 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
   const tickets = createTicketRepo(tx);
   const cls = CLASS_OF[input.reason];
   const nowMs = Date.now();
-  const open = await tickets.findOpenHumanHelpCase(input.partnerId, input.phone);
+  // Fix F2 (FC2): lock the found row and continue with the FRESH row (a class a concurrent report
+  // stamped is visible); a case staff resolved or closed after the find means no open case.
+  const found = await tickets.findOpenHumanHelpCase(input.partnerId, input.phone);
+  const open = found ? await tickets.lockOpenCase(found.id, found.partnerId) : null;
   const ticket =
     open ??
     (await tickets.createTicket({
