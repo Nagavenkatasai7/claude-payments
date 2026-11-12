@@ -15,6 +15,22 @@ import { isKycDisposition, type KycDecision, type KycDecisionExtraMeta } from '.
 
 export const KYC_EDD_NOTE_MAX = 280;
 
+// Fix pack 7 T27 (P25): the platform side of a partner that decides KYC. The fixed refusal texts of
+// the admin customer actions live here because a 'use server' module may export only guarded
+// actions (tests/site-host-guard.test.ts). English literals: the admin dashboard is not localized.
+/** A SmartRemit platform admin tries to decide KYC for a customer of a partner that decides it. */
+export const PARTNER_DECIDES_KYC_REFUSAL = 'This partner decides KYC for its customers: record a recommendation instead.';
+/** Partner-scoped staff on /admin-dashboard (unreachable in production: requireStaff redirects them). */
+export const PARTNER_WORKSPACE_KYC_REFUSAL = 'Decide this customer in your partner workspace.';
+/** A create already verified or grandfathered for a partner that decides KYC. */
+export const PARTNER_CREATE_KYC_REFUSAL = 'This partner decides KYC: create the customer with KYC not started.';
+/** The platform clear of a PEP-only sender hold of a partner that decides KYC. */
+export const PARTNER_PEP_CLEAR_REFUSAL = 'This partner decides this PEP flag: record a recommendation instead.';
+/** A recommendation for a customer of a partner that does not decide KYC (SmartRemit decides there). */
+export const KYC_RECOMMENDATION_ONLY_REFUSAL = 'Recommendations are only for a partner that decides KYC.';
+/** A recommendation other than approve or reject. */
+export const KYC_RECOMMENDATION_INVALID = 'Invalid recommendation.';
+
 export type KycExtraMetaCode = 'disposition' | 'edd_required' | 'note_long' | 'note_number';
 
 type NoteCheck = { ok: true; note: string | undefined } | { ok: false; code: 'note_long' | 'note_number' };
