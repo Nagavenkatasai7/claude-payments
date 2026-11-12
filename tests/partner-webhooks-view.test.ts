@@ -14,6 +14,7 @@ describe('webhookConfigView', () => {
       railType: 'mock',
       partnerRail: false,
       endpoint: null,
+      eventsUrl: null,
       signing: { set: false, previousUntil: null },
       webhook: { set: false, previousUntil: null },
     });
@@ -36,6 +37,7 @@ describe('webhookConfigView', () => {
       railType: 'http',
       partnerRail: true,
       endpoint: 'https://rail.example.com/i',
+      eventsUrl: null,
       signing: { set: true, previousUntil: later },
       webhook: { set: true, previousUntil: null },
     });
@@ -49,6 +51,14 @@ describe('webhookConfigView', () => {
       now,
     );
     expect(v.signing).toEqual({ set: true, previousUntil: null });
+  });
+
+  it('webhookConfigView exposes eventsUrl (null when absent or empty) (pack 7 T20, P19)', () => {
+    const view = (credentials: Record<string, string>) => webhookConfigView({ kyc: {}, payment: { providerType: 'http', credentials }, whatsapp: {} }, now);
+    expect(view({ settlementUrl: 'https://rail.example.com/i', eventsUrl: 'https://events.example.com/e' }).eventsUrl).toBe('https://events.example.com/e');
+    expect(view({ settlementUrl: 'https://rail.example.com/i' }).eventsUrl).toBeNull();
+    expect(view({ settlementUrl: 'https://rail.example.com/i', eventsUrl: '' }).eventsUrl).toBeNull();
+    expect(webhookConfigView({ kyc: {}, payment: {}, whatsapp: {} }, now).eventsUrl).toBeNull();
   });
 
   it('a simulator rail is SmartRemit-managed', () => {

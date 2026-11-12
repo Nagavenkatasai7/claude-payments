@@ -140,6 +140,50 @@ export async function saveSettlementEndpoint(db: Db, partnerId: string, actor: E
   }
 }
 
+/**
+ * Pack 7 T20 (P19): the OPTIONAL compliance events URL (`credentials.eventsUrl`, inside the sealed
+ * credentials blob; no column). Partner events (partner-events.ts partnerEventTarget) go here, else
+ * to the settlement URL. The same lock-read-spread-write as saveSettlementEndpoint and the same URL
+ * rule; an empty (or whitespace) value REMOVES the key. One audit row whose meta is the host only
+ * (null when cleared): never the path or the query, which may carry a token.
+ */
+export async function saveEventsEndpoint(db: Db, partnerId: string, actor: EndpointActor, rawUrl: string, opts: UrlOpts = {}): Promise<SaveEndpointResult> {
+  try {
+    return await db.transaction(async (tx) => {
+      await lockTenant(tx, partnerId);
+      const store = createPartnerIntegrationsStore(tx);
+      const existing = await store.getIntegrations(partnerId);
+      if (!isPartnerRail(existing)) throw new NotPartnerRail();
+      const raw = typeof rawUrl === 'string' ? rawUrl : '';
+      const current = existing.payment.credentials ?? {};
+      let credentials: Record<string, string>;
+      let host: string | null;
+      if (raw.trim() === '') {
+        credentials = Object.fromEntries(Object.entries(current).filter(([k]) => k !== 'eventsUrl'));
+        host = null;
+      } else {
+        const checked = checkPartnerEndpointUrl(raw, opts);
+        if (!checked.ok) return { ok: false as const, reason: 'invalid_url' as const };
+        credentials = { ...current, eventsUrl: checked.url.href };
+        host = checked.url.host;
+      }
+      await store.saveIntegrations(partnerId, { ...existing, payment: { ...existing.payment, credentials } });
+      await createAuditRepo(tx).record({
+        partnerId,
+        actor: actor.username,
+        actorType: 'staff',
+        action: 'partner.events_endpoint.update',
+        subjectId: partnerId,
+        meta: { host, actorScope: actor.actorScope },
+      });
+      return { ok: true as const };
+    });
+  } catch (err) {
+    if (err instanceof NotPartnerRail) return { ok: false, reason: 'not_partner_rail' };
+    throw err;
+  }
+}
+
 export type RotateResult =
   | { ok: true; secret: string; graceUntil: string | null }
   | { ok: false; reason: 'not_partner_rail' }

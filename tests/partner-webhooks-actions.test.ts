@@ -57,7 +57,7 @@ import { auditEvents, outbox, partnerWebhookDeliveries } from '@/db/schema';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { railSecrets, type PartnerIntegrations } from '@/lib/partner-integrations';
 import { t } from '@/lib/i18n';
-import { rotateSecretAction, saveEndpointAction, sendTestAction } from '@/app/partner/(app)/integrations/webhooks/actions';
+import { rotateSecretAction, saveEndpointAction, saveEventsEndpointAction, sendTestAction } from '@/app/partner/(app)/integrations/webhooks/actions';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 async function signInAs(o: Partial<Staff>): Promise<void> {
@@ -97,6 +97,7 @@ const RUNNERS: Runner[] = [
   { name: 'saveEndpointAction', run: (extra) => saveEndpointAction(null, form({ url: 'https://new-rail.example.com/x', ...extra })) },
   { name: 'rotateSecretAction', run: (extra) => rotateSecretAction(null, form({ kind: 'signing', ...extra })) },
   { name: 'sendTestAction', run: (extra) => sendTestAction(null, form({ ...extra })) },
+  { name: 'saveEventsEndpointAction', run: (extra) => saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x', ...extra })) },
 ];
 
 beforeEach(async () => {
@@ -291,5 +292,78 @@ describe('sendTestAction', () => {
     expect(await sendTestAction(null, form())).toEqual({ ok: false, error: t('partner.webhooks.failed') });
     spy.mockRestore();
     expect(JSON.stringify(logWarnSpy.mock.calls)).not.toContain('rail.example.com');
+  });
+});
+
+// Pack 7 T20 (P19): the optional compliance events URL. The checklist above (anonymous, roles, MFA,
+// site host, a form naming B, one audit row) runs for it through RUNNERS.
+describe('saveEventsEndpointAction', () => {
+  it('ok -> saved into credentials.eventsUrl; every other key unchanged; one audit row { host, actorScope }', async () => {
+    await signInAs({});
+    expect(await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/hook?token=abc' }))).toEqual({ ok: true });
+    const after = await store().getIntegrations('pa');
+    expect(after.payment.credentials).toEqual({ ...rail().payment.credentials, eventsUrl: 'https://events.example.com/hook?token=abc' });
+    expect(after.payment.webhookSecret).toBe(HOOK);
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partnerId: 'pa', action: 'partner.events_endpoint.update', subjectId: 'pa' });
+    expect(rows[0].meta).toEqual({ host: 'events.example.com', actorScope: 'partner' });
+    expect(JSON.stringify(rows[0])).not.toContain('token=abc');
+  });
+  it("'' -> cleared: the key is gone; audit meta host null", async () => {
+    await signInAs({});
+    await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x' }));
+    expect(await saveEventsEndpointAction(null, form({ url: '' }))).toEqual({ ok: true });
+    expect((await store().getIntegrations('pa')).payment.credentials).toEqual(rail().payment.credentials);
+    const rows = await audits();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].meta).toEqual({ host: null, actorScope: 'partner' });
+  });
+  it('an invalid URL -> the events invalid copy, nothing written', async () => {
+    await signInAs({});
+    const before = await snapshot();
+    for (const url of ['http://events.example.com/x', 'https://10.0.0.1/', 'https://smartremit.ai/api/worker', 'https://acme.smartremit.ai/x', 'not a url']) {
+      expect(await saveEventsEndpointAction(null, form({ url }))).toEqual({ ok: false, error: t('partner.webhooks.events.invalid') });
+    }
+    expect(await saveEventsEndpointAction(null, form())).toEqual({ ok: false, error: t('partner.webhooks.events.invalid') });
+    expect(await snapshot()).toBe(before);
+  });
+  it('an over-long URL -> invalid before the step-up (a stale session is not asked to re-verify)', async () => {
+    await signInAs({});
+    await redis.del(staffStepUpKey(cookieJar.get(SESSION_COOKIE)!));
+    const before = await snapshot();
+    expect(await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/' + 'a'.repeat(3000) }))).toEqual({ ok: false, error: t('partner.webhooks.events.invalid') });
+    expect(await snapshot()).toBe(before);
+  });
+  it('a stale step-up -> step_up_required and nothing written', async () => {
+    await signInAs({});
+    await redis.del(staffStepUpKey(cookieJar.get(SESSION_COOKIE)!));
+    const before = await snapshot();
+    const r = (await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x' }))) as { ok: boolean; code?: string };
+    expect(r).toMatchObject({ ok: false, code: 'step_up_required' });
+    expect(await snapshot()).toBe(before);
+  });
+  it('a core throw -> failed + logWarn with the error name only', async () => {
+    await signInAs({});
+    const spy = vi.spyOn(db, 'transaction').mockRejectedValueOnce(new TypeError('db down https://events.example.com/x?token=abc'));
+    expect(await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x?token=abc' }))).toEqual({ ok: false, error: t('partner.webhooks.failed') });
+    spy.mockRestore();
+    expect(logWarnSpy).toHaveBeenCalledWith('partner.webhooks.events', 'TypeError', { partnerId: 'pa' });
+    expect(JSON.stringify(logWarnSpy.mock.calls)).not.toContain('events.example.com');
+  });
+  it('a simulator rail -> the managed copy, nothing written', async () => {
+    await store().saveIntegrations('pa', { ...rail(), payment: { ...rail().payment, providerType: 'simulator' } });
+    await signInAs({});
+    const before = await snapshot();
+    expect(await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x' }))).toEqual({ ok: false, error: t('partner.webhooks.managed') });
+    expect(await saveEventsEndpointAction(null, form({ url: '' }))).toEqual({ ok: false, error: t('partner.webhooks.managed') });
+    expect(await snapshot()).toBe(before);
+  });
+  it('the tenant is ctx.partnerId: a partnerId form field is ignored', async () => {
+    await signInAs({});
+    const bBefore = JSON.stringify(await store().getIntegrations('pb'));
+    expect(await saveEventsEndpointAction(null, form({ url: 'https://events.example.com/x', partnerId: 'pb' }))).toEqual({ ok: true });
+    expect(JSON.stringify(await store().getIntegrations('pb'))).toBe(bBefore);
+    expect((await store().getIntegrations('pa')).payment.credentials?.eventsUrl).toBe('https://events.example.com/x');
   });
 });
