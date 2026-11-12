@@ -183,6 +183,9 @@ describe("no 'use client' file imports a server-only module directly", { retry: 
       'src/app/partner/(app)/settings/settings-forms.tsx',
       'src/app/partner/(app)/transfers/[id]/aml-explain.tsx',
       'src/app/admin-dashboard/compliance/aml-explain.tsx',
+      // Review round 1 (H1): the two client files pack 6 adds or changes.
+      'src/app/admin-dashboard/compliance/risk-signals-form.tsx',
+      'src/app/portal/profile/profile-forms.tsx',
     ]));
   });
 

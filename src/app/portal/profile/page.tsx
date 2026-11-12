@@ -121,7 +121,7 @@ export default async function ProfilePage() {
               {line}
             </p>
           ))}
-          {esignOn && <EsignWithdrawForm />}
+          <EsignWithdrawForm canWithdraw={esignOn} />
         </Card>
       </div>
     </>

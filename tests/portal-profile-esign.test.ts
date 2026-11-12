@@ -83,6 +83,9 @@ vi.mock('@/lib/log', async (orig) => ({ ...(await orig<typeof import('@/lib/log'
 
 import ProfilePage from '@/app/portal/profile/page';
 import { withdrawEsignConsentAction } from '@/app/portal/profile/actions';
+import { EsignWithdrawForm, EsignWithdrawView } from '@/app/portal/profile/profile-forms';
+import { readFileSync } from 'node:fs';
+import { createElement } from 'react';
 
 const SITE = (partnerId: string): PortalSite => ({ partnerId, slug: partnerId === 'pa' ? 'acme' : 'bolt', host: partnerId === 'pa' ? 'acme.smartremit.ai' : 'bolt.smartremit.ai', brand: 'SmartRemit', logo: null, theme: {} as PortalSite['theme'] });
 
@@ -271,5 +274,51 @@ describe('Profile page: Electronic records card', () => {
     const rows = await db.select().from(auditEvents).where(eq(auditEvents.action, 'pii.view'));
     expect(rows).toHaveLength(1);
     expect((rows[0].meta as { fields?: unknown }).fields).toEqual(profileView((h.ctx as { customer: Customer }).customer).fields);
+  });
+});
+
+// Fix pack 6 review round 1 (RB1): the "Consent withdrawn" notice lives in EsignWithdrawForm's action
+// state, so the page must keep the form mounted after the withdrawal (canWithdraw false) and only the
+// button may depend on the consent. The presentational view takes the action state as a prop, so a
+// static render can show the returned notice.
+describe('EsignWithdrawForm keeps its notice after the withdrawal (RB1)', () => {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  const noop = () => undefined;
+
+  it('canWithdraw false and the withdrawn state -> the notice shows and there is no button', () => {
+    const html = renderToStaticMarkup(
+      createElement(EsignWithdrawView, { canWithdraw: false, state: { notice: 'portal.profile.esign.withdrawn' }, action: noop, pending: false }),
+    );
+    expect(html).toContain(esc(t('portal.profile.esign.withdrawn')));
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain(esc(t('portal.profile.esign.withdraw')));
+  });
+
+  it('canWithdraw true -> the Withdraw button; no state -> no notice', () => {
+    const html = renderToStaticMarkup(createElement(EsignWithdrawView, { canWithdraw: true, state: null, action: noop, pending: false }));
+    expect(html).toContain(esc(t('portal.profile.esign.withdraw')));
+    expect(html).not.toContain('role="status"');
+  });
+
+  it('the form with canWithdraw false still renders its notice region, with no button', () => {
+    const html = renderToStaticMarkup(createElement(EsignWithdrawForm, { canWithdraw: false }));
+    expect(html).toContain('aria-live="polite"');
+    expect(html).not.toContain('<button');
+  });
+
+  it('withdrawn consent -> the page still mounts the form (notice region) but no button', async () => {
+    await seedEsignConsentForTest(db, 'pa', phone, { withdrawn: true });
+    await signIn('pa');
+    const html = renderToStaticMarkup(await ProfilePage());
+    const card = html.slice(html.indexOf(esc(ESIGN_CONSENT_TITLE)));
+    expect(card).toContain('aria-live="polite"');
+    expect(card).not.toContain(esc(t('portal.profile.esign.withdraw')));
+  });
+
+  it('source pin: page.tsx mounts EsignWithdrawForm unconditionally with canWithdraw={esignOn}', () => {
+    const src = readFileSync('src/app/portal/profile/page.tsx', 'utf8');
+    expect(src).toContain('<EsignWithdrawForm canWithdraw={esignOn} />');
+    expect(src).not.toMatch(/esignOn\s*(&&|\?)\s*(\(\s*)?<EsignWithdrawForm/);
   });
 });

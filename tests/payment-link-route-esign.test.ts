@@ -354,7 +354,10 @@ describe('link route: the E-SIGN gate before the code (P5, P7 link order)', { re
     await seedLink('default', { customer: true });
     await freshCode();
     fault.recordMiss = true;
+    // Review round 1 (RG2): the hour is read before and after the request; the key is one of them.
+    const hourBefore = new Date().toISOString().slice(0, 13);
     const res = await call(await payBody('default', { esignConsentVersion: V }));
+    const hourAfter = new Date().toISOString().slice(0, 13);
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
     expect(fault.recordCalls).toBe(2);
@@ -362,9 +365,9 @@ describe('link route: the E-SIGN gate before the code (P5, P7 link order)', { re
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('awaiting_payment');
     expect((await store.getTransfer(rows[0].id))?.fundingRef).toBeFalsy();
-    expect((await outboxRows()).map((r) => [r.kind, r.dedupe_key])).toEqual([
-      ['ops.alert', `payevidence:${new Date().toISOString().slice(0, 13)}`],
-    ]);
+    const alertRows = await outboxRows();
+    expect(alertRows.map((r) => r.kind)).toEqual(['ops.alert']);
+    expect([`payevidence:${hourBefore}`, `payevidence:${hourAfter}`]).toContain(alertRows[0].dedupe_key);
     expect((await auditRows()).map((r) => r.action).filter((a) => a === 'otp.verified' || a === 'customer.consent.esign')).toEqual([]);
     expect(await consentOnFile('default')).toBeNull();
 

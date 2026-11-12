@@ -348,16 +348,19 @@ describe('transfer pay route, existing b2c row: the E-SIGN gate before the code 
     await seedCustomer('default');
     await store.saveTransfer(makeTransfer({ id: 'es-miss' }));
     fault.recordMiss = true;
+    // Review round 1 (RG2): the hour is read before and after the request; the key is one of them.
+    const hourBefore = new Date().toISOString().slice(0, 13);
     const res = await post('es-miss', { otp: '000000', esignConsentVersion: V });
+    const hourAfter = new Date().toISOString().slice(0, 13);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
     expect(fault.recordCalls).toBe(2);
     const t = await store.getTransfer('es-miss');
     expect(t?.status).toBe('awaiting_payment');
     expect(t?.fundingRef).toBeFalsy();
-    expect((await outboxRows()).map((r) => [r.kind, r.dedupe_key])).toEqual([
-      ['ops.alert', `payevidence:${new Date().toISOString().slice(0, 13)}`],
-    ]);
+    const alertRows = await outboxRows();
+    expect(alertRows.map((r) => r.kind)).toEqual(['ops.alert']);
+    expect([`payevidence:${hourBefore}`, `payevidence:${hourAfter}`]).toContain(alertRows[0].dedupe_key);
     // The evidence transaction rolled back whole (the pay-time re-screen's own row stays).
     expect((await auditRows()).map((r) => r.action).filter((a) => a === 'otp.verified' || a === 'customer.consent.esign')).toEqual([]);
     expect(await consentOnFile('default')).toBeNull();

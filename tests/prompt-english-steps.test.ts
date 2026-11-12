@@ -1,6 +1,7 @@
 // Fix pack 6 T12 (P12, Q-R46.2): the optional ENGLISH TRANSACTION STEPS section.
 // On only for a live-certified routed partner; absent or false keeps every prompt
 // (and its promptHash) byte-for-byte what it was.
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   ENGLISH_STEPS_SECTION,
@@ -69,5 +70,28 @@ describe('ENGLISH TRANSACTION STEPS section (pack 6 P12)', () => {
     expect(promptHash(SYSTEM_PROMPT, tools)).toBe(today);
     expect(promptHash(buildSystemPrompt({ brand: 'SmartRemit', englishTransactionSteps: false }), tools)).toBe(today);
     expect(promptHash(buildSystemPrompt({ brand: 'SmartRemit', englishTransactionSteps: true }), tools)).not.toBe(today);
+  });
+});
+
+// Review round 1 (RC2): frozen sha256 of the flag-off prompts, computed on fix pack 5's final tree
+// (d9411d9) and again on this branch. The pins above compare the code with itself; these compare it
+// with the text that shipped. They change only with a deliberate change of the prompt text: when the
+// prompt is changed on purpose, update both literals in the same commit.
+const SHA_DEFAULT = '7a1dbf7d955edb3ae79e53f1eb10dfdc92f7731fe463a956bf85e1595583bed1'; // 44302 characters
+const SHA_BRANDED = '78ef9039aeed19d5a4b198a3fafbc9351edd4da30d0fa0a721e9d2c1a090241e'; // 44895 characters
+
+describe('flag-off prompts match the frozen pack 5 text (RC2)', () => {
+  const sha = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+  it('default and branded prompts hash to the frozen literals, with the flag absent, false or undefined', () => {
+    for (const flag of [{}, { englishTransactionSteps: false }, { englishTransactionSteps: undefined }]) {
+      const def = buildSystemPrompt({ brand: 'SmartRemit', ...flag });
+      expect(def.length).toBe(44302);
+      expect(sha(def)).toBe(SHA_DEFAULT);
+      const branded = buildSystemPrompt({ ...BRANDED, ...flag });
+      expect(branded.length).toBe(44895);
+      expect(sha(branded)).toBe(SHA_BRANDED);
+    }
+    expect(sha(SYSTEM_PROMPT)).toBe(SHA_DEFAULT);
   });
 });
