@@ -297,4 +297,27 @@ describe('pack 6 documents say what the code does', () => {
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) expect(readFileSync(join(dir, f), 'utf8'), f).not.toMatch(/\bcertified\b/i);
   });
+
+  it('truth check TC-T1: the docs say staff record a withdrawal of the electronic records consent, and the code agrees', () => {
+    const STAFF =
+      "When a customer asks you to withdraw the consent to electronic records, record it on the customer's page (Customers, then the customer, then Electronic records, then Record withdrawal). The next pay-page payment asks the customer again.";
+    const funding = section(read('src/content/docs/funding.mdx'), "## Who collects the sender's money");
+    expect(funding).toContain(STAFF);
+    expect(funding).not.toMatch(/\btest(ing)?\b/i);
+    const nov = section(CHANGELOG, '## 2026-11');
+    expect(nov).toContain('or by your staff on the customer\'s page (Electronic records, then Record withdrawal)');
+    // ROLLBACK.md, PR6 paragraph: an older build has no such action; the recorded withdrawal stays.
+    expect(paragraph(ROLLBACK, PR6)).toContain(
+      'A build older than this pack has no action to record a withdrawal for the customer; a withdrawal already recorded stays on the customer record and is honoured again after the roll-forward.',
+    );
+    // The consent file's header names the staff route (comment only).
+    expect(read('src/lib/legal/esign-consent.ts')).toContain('recordStaffEsignWithdrawal');
+    // The code agrees: the partner page block and form, the strings the docs name.
+    const en = read('src/lib/i18n/catalogues/en.ts');
+    expect(en).toContain("'partner.customers.esign.title': 'Electronic records'");
+    expect(en).toContain("'partner.customers.esign.submit': 'Record withdrawal'");
+    expect(read('src/app/partner/(app)/customers/[ref]/page.tsx')).toContain('<EsignConsentBlock ');
+    expect(read('src/app/admin-dashboard/customers/[ref]/page.tsx')).toContain('<EsignConsentCard ');
+    expect(read('src/app/partner/(app)/customers/[ref]/esign-actions.ts')).toContain('recordStaffEsignWithdrawal(');
+  });
 });

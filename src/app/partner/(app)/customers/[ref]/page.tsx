@@ -33,6 +33,7 @@ import { revealCustomerFieldAction } from './actions';
 import { LimitForm } from './limit-form';
 import { KycDecisionDialog } from './kyc-decision-dialog';
 import { CustomerTransfers, toCustomerTransferRow } from './customer-transfers';
+import { EsignConsentBlock, loadEsignConsentView } from './esign-block';
 
 export const metadata: Metadata = {
   title: t('partner.customers.detailTitle'),
@@ -143,6 +144,7 @@ export default async function PartnerCustomerDetailPage({
   // a no-op) the admin sees ONE neutral line.
   const kycDecisions = canEditLimits ? partnerKycOfferedDecisions(partner, customer) : [];
   const override = customer.sendLimitOverride;
+  const esignView = await loadEsignConsentView(ctx.partnerId, customer.senderPhone); // Fix pack 6 TC-T1
   const partnerSetExpiry =
     !setBySmartRemit && override?.setScope === 'partner' && typeof override.expiresAt === 'string' ? override.expiresAt : null;
 
@@ -320,6 +322,8 @@ export default async function PartnerCustomerDetailPage({
           </Section>
         </div>
       ) : null}
+      {/* Fix pack 6 truth check TC-T1: the E-SIGN consent state and the staff-recorded withdrawal. */}
+      <EsignConsentBlock view={esignView} customerRef={view.ref} />
       <div className="mt-5">
         <Section title={t('partner.customers.transfers.title')}>
           <p className="mb-2 text-[13px] text-ds-ink-muted">{t('partner.customers.transfers.sub')}</p>

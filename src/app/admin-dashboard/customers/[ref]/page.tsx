@@ -22,6 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { clearSenderScreeningHoldAction, manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
+import { EsignConsentCard, loadEsignConsentView } from './esign-card';
 import { canDecideCustomerKyc, senderScreeningHoldActive, senderScreeningLabel } from '@/lib/compliance-config';
 import { CustomerLink } from '../../customer-link';
 import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
@@ -118,6 +119,7 @@ export default async function CustomerDetailPage({
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner), limits);
+  const esignView = await loadEsignConsentView(customer.partnerId, customer.senderPhone); // Fix pack 6 TC-T1
 
   return (
     <>
@@ -340,6 +342,9 @@ export default async function CustomerDetailPage({
           action={setCustomerSendLimitAction}
           hidden={{ phone: customer.senderPhone, partnerId: customer.partnerId }}
         />
+
+        {/* Fix pack 6 truth check TC-T1: the E-SIGN consent state and the staff-recorded withdrawal (admins). */}
+        <EsignConsentCard view={esignView} partnerId={customer.partnerId} phone={customer.senderPhone} canWithdraw={isAdmin} />
 
         {conversation !== null && (
           <Card className="mb-6">
