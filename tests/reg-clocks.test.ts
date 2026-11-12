@@ -1,0 +1,170 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  REG_CLASSES,
+  REG_CLOCKS,
+  REG_CLOCKS_VERSION,
+  addRegBusinessDays,
+  earlierDue,
+  isRegClass,
+  regDueAt,
+  type RegClass,
+} from '@/lib/reg-clocks';
+import { addBusinessDays } from '@/lib/remittance-disclosure';
+
+// Fix pack 8 T2 (P4): pure clock module. Every start is built from Date.now()
+// (CLAUDE.md: never hardcode dates that interact with time windows).
+
+const DAY = 86_400_000;
+
+/** The next UTC date at or after now whose weekday is `dow`, at hourUtc:07:00.000. */
+function nextWeekday(dow: number, hourUtc = 15): number {
+  const d = new Date(Date.now());
+  d.setUTCHours(hourUtc, 7, 0, 0);
+  while (d.getUTCDay() !== dow) d.setUTCDate(d.getUTCDate() + 1);
+  return d.getTime();
+}
+
+const SUN = 0, MON = 1, WED = 3, FRI = 5, SAT = 6;
+
+/** Independent expectation: step one UTC day at a time, count Mon-Fri. */
+function countBusiness(fromMs: number, n: number): number {
+  let t = fromMs;
+  let left = n;
+  while (left > 0) {
+    t += DAY;
+    const dow = new Date(t).getUTCDay();
+    if (dow !== 0 && dow !== 6) left -= 1;
+  }
+  return t;
+}
+
+const wholeDays = (a: number, b: number) => Math.round((b - a) / DAY);
+
+describe('reg-clocks (P4)', () => {
+  it('REG_CLASSES is the frozen closed tuple of four', () => {
+    expect(REG_CLASSES).toEqual(['error_notice', 'cancellation', 'complaint', 'fraud_report']);
+    expect(Object.isFrozen(REG_CLASSES)).toBe(true);
+    for (const c of REG_CLASSES) expect(isRegClass(c)).toBe(true);
+    for (const v of ['error-notice', '', 'COMPLAINT', '__proto__', 'toString', 1, null, undefined]) {
+      expect(isRegClass(v)).toBe(false);
+    }
+  });
+
+  it('REG_CLOCKS holds the draft lengths', () => {
+    expect(REG_CLOCKS).toEqual({
+      error_notice: { unit: 'calendar', days: 90 },
+      cancellation: { unit: 'business', days: 3 },
+      complaint: { unit: 'calendar', days: 15 },
+      fraud_report: { unit: 'business', days: 10 },
+    });
+    expect(Object.isFrozen(REG_CLOCKS)).toBe(true);
+    for (const c of REG_CLASSES) expect(Object.isFrozen(REG_CLOCKS[c])).toBe(true);
+    expect(REG_CLOCKS_VERSION.endsWith('-draft')).toBe(true);
+  });
+
+  it('addRegBusinessDays counts Mon-Fri only, from the next day', () => {
+    const cases: Array<[number, number, number, number]> = [
+      // [start weekday, n, expected weekday, expected whole days later]
+      [WED, 3, MON, 5],
+      [FRI, 3, WED, 5],
+      [SAT, 3, WED, 4],
+      [SUN, 3, WED, 3],
+      [FRI, 1, MON, 3],
+      [SAT, 1, MON, 2],
+      [WED, 10, WED, 14],
+    ];
+    for (const [dow, n, wantDow, wantDays] of cases) {
+      const s = nextWeekday(dow);
+      const r = addRegBusinessDays(s, n);
+      expect(new Date(r).getUTCDay()).toBe(wantDow);
+      expect(wholeDays(s, r)).toBe(wantDays);
+    }
+  });
+
+  it('keeps the time of day', () => {
+    for (const dow of [SUN, MON, WED, FRI, SAT]) {
+      const s = nextWeekday(dow, 23);
+      expect(addRegBusinessDays(s, 7) % DAY).toBe(s % DAY);
+    }
+  });
+
+  it('n = 0 returns the start; garbage throws RangeError', () => {
+    const s = nextWeekday(SAT);
+    expect(addRegBusinessDays(s, 0)).toBe(s);
+    for (const n of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => addRegBusinessDays(s, n)).toThrow(RangeError);
+    }
+    expect(() => addRegBusinessDays(Number.NaN, 1)).toThrow(RangeError);
+    expect(() => regDueAt('complaint', Number.NaN)).toThrow(RangeError);
+    expect(() => regDueAt('cancellation', Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
+
+  it('regDueAt: calendar classes add whole days', () => {
+    for (const dow of [FRI, SAT, WED]) {
+      const s = nextWeekday(dow);
+      expect(regDueAt('error_notice', s)).toBe(s + 90 * DAY);
+      expect(regDueAt('complaint', s)).toBe(s + 15 * DAY);
+    }
+  });
+
+  it('regDueAt: business classes skip weekends', () => {
+    const fri = nextWeekday(FRI), sat = nextWeekday(SAT), wed = nextWeekday(WED);
+    expect(new Date(regDueAt('cancellation', fri)).getUTCDay()).toBe(WED);
+    expect(new Date(regDueAt('cancellation', sat)).getUTCDay()).toBe(WED);
+    expect(new Date(regDueAt('cancellation', wed)).getUTCDay()).toBe(MON);
+    for (const s of [fri, sat, wed]) {
+      expect(regDueAt('cancellation', s)).toBe(countBusiness(s, 3));
+      expect(regDueAt('fraud_report', s)).toBe(countBusiness(s, 10));
+    }
+    expect(new Date(regDueAt('fraud_report', fri)).getUTCDay()).toBe(FRI);
+    expect(wholeDays(fri, regDueAt('fraud_report', fri))).toBe(14);
+    expect(new Date(regDueAt('fraud_report', sat)).getUTCDay()).toBe(FRI);
+    expect(wholeDays(sat, regDueAt('fraud_report', sat))).toBe(13);
+    expect(new Date(regDueAt('fraud_report', wed)).getUTCDay()).toBe(WED);
+    expect(wholeDays(wed, regDueAt('fraud_report', wed))).toBe(14);
+  });
+
+  it('never earlier than the notice and never later than the calendar bound', () => {
+    for (const cls of REG_CLASSES as readonly RegClass[]) {
+      for (let dow = 0; dow < 7; dow++) {
+        const s = nextWeekday(dow);
+        const due = regDueAt(cls, s);
+        expect(due).toBeGreaterThanOrEqual(s);
+        if (REG_CLOCKS[cls].unit === 'business') {
+          expect(due).toBeLessThanOrEqual(s + REG_CLOCKS[cls].days * 2 * DAY);
+        }
+      }
+    }
+  });
+
+  it('earlierDue never moves a due date later', () => {
+    const b = nextWeekday(WED);
+    expect(earlierDue(null, b)).toBe(b);
+    expect(earlierDue(b - DAY, b)).toBe(b - DAY);
+    expect(earlierDue(b + DAY, b)).toBe(b);
+    expect(earlierDue(b, b)).toBe(b);
+  });
+
+  it('differs from the disclosure helper only on a weekend start', () => {
+    const wed = nextWeekday(WED);
+    expect(addRegBusinessDays(wed, 1)).toBe(addBusinessDays(wed, 1).getTime());
+    const sat = nextWeekday(SAT);
+    const reg = addRegBusinessDays(sat, 1);
+    const disclosure = addBusinessDays(sat, 1).getTime();
+    expect(reg).toBeLessThan(disclosure);
+    expect(new Date(reg).getUTCDay()).toBe(MON);
+    expect(new Date(disclosure).getUTCDay()).toBe(2);
+  });
+
+  it('the module has no runtime import', () => {
+    const src = readFileSync(join(process.cwd(), 'src/lib/reg-clocks.ts'), 'utf8');
+    const runtime = src
+      .split('\n')
+      .filter((l) => /^\s*import\s/.test(l) && !/^\s*import\s+type\s/.test(l));
+    expect(runtime).toEqual([]);
+    expect(src).not.toMatch(/\brequire\(/);
+    expect(src).not.toMatch(/^\s*export\s+[^\n]*\bfrom\s+['"]/m);
+  });
+});
