@@ -27,13 +27,15 @@ import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
 import { liveReadiness, type LiveReadinessFacts } from '@/lib/live-certification';
 import { LIVE_CAPABILITIES, type LiveCapability } from '@/lib/live-controls';
-import { isCalendarDate, writeCertification, writeContract, writeFundingMode, writeOptIn, type LiveWriteResult } from '@/lib/live-controls-write';
+import { isCalendarDate, writeCertification, writeContract, writeFundingMode, writeOptIn, type LiveActor, type LiveWriteResult } from '@/lib/live-controls-write';
+import { AML_HOLD_RULES, amlHoldRulesEntry, hasAmlHoldEntry, type AmlHoldRule } from '@/lib/aml-hold';
+import { resolveAmlHoldRules } from '@/lib/compliance-config';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
 import { gateStaffStepUp } from '@/lib/partner-step-up-gate';
 import { pokeWorker } from '@/lib/outbox';
 import type { StepUpRequired } from '@/lib/staff-step-up-result';
-import type { Staff } from '@/lib/types';
+import type { CountryCode, Staff } from '@/lib/types';
 
 export type GoLiveApprovalOutcome =
   | 'approved'
@@ -129,6 +131,8 @@ export async function approveGoLiveAction(formData: FormData): Promise<void> {
 // getDb(), getAuthStore(), Redis or the OFAC source. Four readiness lines are not built until
 // PR8/PR9 (pack 4 built provider_block, pack 5 funding), so certify always answers "not ready"
 // (pinned in tests/admin-live-actions.test.ts).
+// Fix pack 6 T20 (P17): a certification also writes the go-live AML default (holds on, all three
+// rules) for every served corridor except IN with no AML entry, in the same transaction.
 
 export type LiveActionResult = { ok: true } | { ok: false; error: string };
 
@@ -212,8 +216,45 @@ export async function certifyLiveAction(partnerId: string, formData: FormData): 
     const partner = await createPartnerRepo(tx).getPartner(id);
     if (!partner) return { ok: false, code: 'not_found' };
     const readiness = liveReadiness(partner, facts); // on the LOCKED row
-    return writeCertification(tx, id, { username: staff.username, scope: 'platform' }, { kind: 'certify', readiness }, reason);
+    const actor = { username: staff.username, scope: 'platform' as const };
+    const r = await writeCertification(tx, id, actor, { kind: 'certify', readiness }, reason);
+    if (!r.ok) return r; // not_ready writes nothing (writeCertification refuses before any write)
+    await writeGoLiveAmlDefaults(tx, id, partner.countries ?? [], actor);
+    return r;
   });
+}
+
+/**
+ * Fix pack 6 T20 (P17, P21, owner Q-R47.3): the go-live AML default, on the certify transaction's
+ * handle and only after the certification was written. Every served corridor except IN that has
+ * NO AML entry (hasAmlHoldEntry: neither amlHolds nor amlHoldRules stored) gets holds ON with all
+ * three rules, other keys kept; explicit entries (an empty partner list included) are never
+ * touched. One aml.hold_rules_set row per defaulted corridor (from/to are RESOLVED lists). A throw
+ * rolls the certification back (FAILED copy). Module-local and unexported: not a server action.
+ */
+async function writeGoLiveAmlDefaults(tx: Tx, id: string, countries: readonly CountryCode[], actor: LiveActor): Promise<void> {
+  const defaulted: { country: CountryCode; from: AmlHoldRule[] }[] = [];
+  const { found } = await createPartnerRepo(tx).updateCorridorCompliance(id, (prev) => {
+    const next = { ...prev };
+    for (const c of countries) {
+      if (c === 'IN' || hasAmlHoldEntry(prev[c]) || defaulted.some((d) => d.country === c)) continue;
+      next[c] = amlHoldRulesEntry(prev[c], AML_HOLD_RULES);
+      defaulted.push({ country: c, from: [...resolveAmlHoldRules(prev[c]?.amlHolds === true, prev[c]?.amlHoldRules)] });
+    }
+    return defaulted.length > 0 ? next : prev;
+  });
+  if (!found) throw new Error('partner row vanished under the certify lock');
+  const audit = createAuditRepo(tx);
+  for (const d of defaulted) {
+    await audit.record({
+      partnerId: id,
+      actor: actor.username,
+      actorType: 'staff',
+      action: 'aml.hold_rules_set',
+      subjectId: id,
+      meta: { country: d.country, from: d.from, to: [...AML_HOLD_RULES], actorScope: 'platform', reason: 'go_live_default' },
+    });
+  }
 }
 
 export async function revokeLiveAction(partnerId: string, formData: FormData): Promise<LiveActionResult | StepUpRequired> {
