@@ -181,8 +181,13 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
       classStamped = true;
       await recordAudit(cls, dueAt, true);
     } else {
-      // A concurrent report stamped it first: re-read its class and due date.
-      const now = await tickets.getTicket(open.id);
+      // P9 step 2b (fix F1): a concurrent report stamped it first. Its first class is kept, and
+      // this call's own clock (from the first notice it computed) can only move the due date EARLIER.
+      let now = await tickets.getTicket(open.id);
+      if (now?.regClass) {
+        await tickets.tightenDueAt(open.id, open.partnerId, due);
+        now = await tickets.getTicket(open.id);
+      }
       classOfCase = now?.regClass;
       dueAt = now?.dueAt;
     }

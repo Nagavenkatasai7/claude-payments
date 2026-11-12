@@ -256,7 +256,10 @@ export async function openErrorNoticeCaseLocked(tx: DbOrTx, i: ErrorNoticeCaseIn
     // A concurrent report won the stamp (another class takes another lock key): re-read.
     const reread = await repo.getTicket(open.id);
     if (reread && reread.regClass === regClass) {
-      return { kind: 'opened', ticketId: open.id, reused: true, regClass, dueAt: reread.dueAt ?? null, classStamped: false };
+      // Same class (fix F1): this call's clock from the case's createdAt only moves the due date EARLIER.
+      await repo.tightenDueAt(open.id, partnerId, dueAt);
+      const tightened = await repo.getTicket(open.id);
+      return { kind: 'opened', ticketId: open.id, reused: true, regClass, dueAt: tightened?.dueAt ?? reread.dueAt ?? null, classStamped: false };
     }
     // Another class: fall through and create a case of this class.
   }

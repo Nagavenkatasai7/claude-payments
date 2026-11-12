@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import { regDueAt, type RegClass } from '@/lib/reg-clocks';
@@ -37,6 +37,7 @@ vi.mock('@/db/repos/ticket-repo', async (orig) => {
 
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { openHelpCase } from '@/lib/help-case';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
 
 const PHONE = '15551230043';
 const base = { partnerId: 'default', phone: PHONE, channel: 'whatsapp', source: 'keyword' } as const;
@@ -47,6 +48,17 @@ beforeEach(async () => {
   hook.cls = null;
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const DAY = 86_400_000;
+const iso = (v: unknown) => new Date(v as string).toISOString();
+async function storedDue(id: string): Promise<string> {
+  const r = await db.execute(sql`SELECT due_at FROM tickets WHERE id = ${id}`);
+  return iso((r.rows[0] as { due_at: unknown }).due_at);
+}
+
 describe('openHelpCase: a lost stamp re-reads the ticket (P9, test 10)', () => {
   it('another class won the stamp -> the result carries the re-read class and due date, no audit row from this call', async () => {
     const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
@@ -55,8 +67,46 @@ describe('openHelpCase: a lost stamp re-reads the ticket (P9, test 10)', () => {
     hook.cls = null;
     const t = await createTicketRepo(db).getTicket(a.caseId);
     expect(t!.regClass).toBe('fraud_report');
+    // F1: the hook's fraud_report clock is the earlier one; the caller's complaint clock never moves it later.
+    expect(Date.parse(t!.dueAt!)).toBeLessThanOrEqual(regDueAt('complaint', Date.now()));
+    expect(await storedDue(a.caseId)).toBe(t!.dueAt);
     expect(b).toEqual({ caseId: a.caseId, partnerId: 'default', created: false, regClass: 'fraud_report', dueAt: t!.dueAt, caseCreatedOrStamped: false });
     const r = await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'ticket.reg_case.open'`);
     expect((r.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it('F1 (FC1): complaint wins the stamp, the caller reports unauthorised -> the earlier fraud_report due date, first class kept', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    const firstMs = Date.now();
+    const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
+    hook.cls = 'complaint';
+    const b = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
+    hook.cls = null;
+    const want = new Date(regDueAt('fraud_report', firstMs)).toISOString();
+    expect(Date.parse(want)).toBeLessThan(regDueAt('complaint', firstMs));
+    expect(b.regClass).toBe('complaint');
+    expect(b.caseCreatedOrStamped).toBe(false);
+    expect(b.dueAt).toBe(want);
+    expect(await storedDue(a.caseId)).toBe(want);
+    const r = await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'ticket.reg_case.open'`);
+    expect((r.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it('F1 (FC1): an older classless case that recorded unauthorised -> the lost stamp tightens with the case createdAt clock', async () => {
+    const id = 'tk_f1_old';
+    await createTicketRepo(db).createTicket({
+      id, partnerId: 'default', kind: 'customer', customerPhone: PHONE,
+      subject: HUMAN_HELP_SUBJECT, body: 'Reason: unauthorised.', category: HUMAN_HELP_CATEGORY,
+    });
+    const createdAt = new Date(Date.now() - 6 * DAY);
+    await db.execute(sql`UPDATE tickets SET created_at = ${createdAt.toISOString()}::timestamptz WHERE id = ${id}`);
+    const t0 = await createTicketRepo(db).getTicket(id);
+    expect(t0!.regClass).toBeUndefined();
+    hook.cls = 'complaint';
+    const b = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
+    hook.cls = null;
+    const want = new Date(regDueAt('fraud_report', Date.parse(t0!.createdAt))).toISOString();
+    expect(b).toMatchObject({ caseId: id, created: false, regClass: 'complaint', caseCreatedOrStamped: false, dueAt: want });
+    expect(await storedDue(id)).toBe(want);
   });
 });

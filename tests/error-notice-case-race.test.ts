@@ -12,7 +12,7 @@ import type { Transfer } from '@/lib/types';
 // pass-through mock of the ticket repo lets a hook stamp the recall case with a class FIRST (as a
 // concurrent report would), so the writer's own stampRegClass returns false deterministically.
 
-const hook = vi.hoisted(() => ({ cls: null as string | null }));
+const hook = vi.hoisted(() => ({ cls: null as string | null, shiftMs: 0 }));
 
 vi.mock('@/db/repos/ticket-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/ticket-repo')>();
@@ -25,7 +25,7 @@ vi.mock('@/db/repos/ticket-repo', async (orig) => {
         async stampRegClass(...args: Parameters<typeof repo.stampRegClass>) {
           if (hook.cls) {
             const [id, partnerId] = args;
-            const at = Date.now();
+            const at = Date.now() + hook.shiftMs;
             await repo.stampRegClass(id, partnerId, {
               regClass: hook.cls as RegClass,
               firstNoticeAt: new Date(at),
@@ -83,6 +83,7 @@ beforeEach(async () => {
   await seedPartner(db, 'p1');
   await createStore(fakeRedis(), db).saveTransfer(transfer());
   hook.cls = null;
+  hook.shiftMs = 0;
 });
 
 describe('openErrorNoticeCaseLocked: a lost stamp re-reads the ticket (P8 step 3, test 7d)', () => {
@@ -110,5 +111,22 @@ describe('openErrorNoticeCaseLocked: a lost stamp re-reads the ticket (P8 step 3
     expect(await auditCount()).toBe(0);
     const notes = (await createTicketRepo(db).listMessages(recallId, { includeInternal: true })).filter((m) => m.actorType === 'system');
     expect(notes).toEqual([]);
+  });
+
+  it('(iii) F1 (FC1): the SAME class won with a LATER due date -> tightened to this call\'s earlier date, reused, no audit row', async () => {
+    const recallId = await openRecall();
+    const repo = createTicketRepo(db);
+    const createdAt = (await repo.getTicket(recallId))!.createdAt;
+    hook.cls = 'error_notice';
+    hook.shiftMs = 5 * 86_400_000;
+    const r = await db.transaction((tx) => openErrorNoticeCaseLocked(tx, input('error_notice')));
+    hook.cls = null;
+    const want = new Date(regDueAt('error_notice', Date.parse(createdAt))).toISOString();
+    expect(Date.parse(want)).toBeLessThan(regDueAt('error_notice', Date.now() + 5 * 86_400_000));
+    expect(r).toEqual({ kind: 'opened', ticketId: recallId, reused: true, regClass: 'error_notice', dueAt: want, classStamped: false });
+    expect((await repo.getTicket(recallId))!.dueAt).toBe(want);
+    const row = await db.execute(sql`SELECT due_at FROM tickets WHERE id = ${recallId}`);
+    expect(new Date((row.rows[0] as { due_at: string }).due_at).toISOString()).toBe(want);
+    expect(await auditCount()).toBe(0);
   });
 });
