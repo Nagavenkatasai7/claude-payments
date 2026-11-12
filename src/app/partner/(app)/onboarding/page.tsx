@@ -180,10 +180,11 @@ function PostureCard({ partner }: { partner: Partner | null | undefined }) {
           <dt className="font-semibold">{t('partner.live.posture.holdDecider')}</dt>
           <dd>{t(HOLD_LABEL[posture.holdDecider])}</dd>
         </dl>
-        {/* Pack 3 review round 2 (H2): the hold decider and the four-eyes rule are recorded, not
-            enforced (no hold-release path reads them yet), and the copy says so. */}
+        {/* P31 (pack 7): the posture answers route and are enforced once the partner is live-certified (holdDecider routes holds; fourEyes is enforced in a queue partner's hold queue). */}
         <p className="text-ds-ink-muted">{t('partner.live.posture.holdDecider.recorded')}</p>
-        {posture.fourEyesNonSanctions ? <p>{t('partner.live.posture.fourEyes.signed')}</p> : null}
+        {posture.fourEyesNonSanctions ? (
+          <p>{t(posture.holdDecider === 'smartremit_delegated' ? 'partner.live.posture.fourEyes.signedDelegated' : 'partner.live.posture.fourEyes.signed')}</p>
+        ) : null}
         <p className="text-ds-ink-muted">{t('partner.live.posture.forcedNote')}</p>
       </div>
     );

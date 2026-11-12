@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { seedTwoTenants, signInAs } from './helpers-partner-app';
+import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
@@ -195,6 +196,21 @@ describe('signPostureAction', () => {
     await admin();
     const before = await snapshot();
     expect(await signPostureAction(null, form({ ...VALID, kycDecider: 'partner' }))).toEqual({ ok: false, error: t('partner.live.posture.mismatch') });
+    expect(await snapshot()).toBe(before);
+    expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
+  // Fix pack 7 T15 (R7, P2): while the partner is certified its posture is locked against a change
+  // of who decides (or four-eyes turned off); the action shows the certifiedLocked copy.
+  it("a certified partner changing its holdDecider -> the certifiedLocked copy, nothing written, no poke", async () => {
+    await certifyPartnerForTest(db, 'pa', { posture: true });
+    await admin();
+    const before = await snapshot();
+    expect(await signPostureAction(null, form({ ...VALID, holdDecider: 'smartremit_delegated' }))).toEqual({
+      ok: false,
+      error: t('partner.live.posture.certifiedLocked'),
+    });
+    expect(t('partner.live.posture.certifiedLocked')).toBe('Your posture is locked while you are approved for live money. Ask SmartRemit to re-certify you to change it.');
     expect(await snapshot()).toBe(before);
     expect(pokeSpy).not.toHaveBeenCalled();
   });
