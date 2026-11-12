@@ -1,7 +1,7 @@
 import { assertLegsUsable, legsProvenance, MAX_USD, MIN_USD, quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { feeTierCount } from './fee-tier';
 import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
-import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
+import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone, sourceCountryFor } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -50,7 +50,9 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
-import { senderScreeningHoldActive } from './compliance-config';
+import { resolveCorridorRules, senderScreeningHoldActive } from './compliance-config';
+import { evaluateRiskSignals, riskSignalsApply, type RiskSignal } from './risk-signals';
+import type { PriorSends } from '@/db/repos/transfer-repo';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
@@ -3923,6 +3925,43 @@ async function setSenderNameTool(
 }
 
 /**
+ * Fix pack 6 (R48, P19 T26a): the risk signals a draft records, from the SAME
+ * inputs as the mint (T25): the mint's corridor (sourceCountryFor, never the
+ * customer row's senderCountry), the paid/delivered prior sends
+ * (store.priorSends), the one firstSeenAt rule (store.firstSeenAt), the quoted
+ * USD amount and the turn's in-memory chat cue. Off -> [] with NO read. A
+ * failed read is an unknown fact (logged by error name only) and never blocks
+ * the draft. Enum names only: no text, keyword or amount leaves this function.
+ */
+async function draftRiskSignals(
+  ctx: ToolContext,
+  partner: Partner,
+  sourceCurrency: CurrencyCode,
+  recipientPhone: string,
+  amountUsd: number,
+  transferType: 'b2c' | 'b2b',
+): Promise<RiskSignal[]> {
+  const cfg = resolveCorridorRules(partner, sourceCountryFor(partner, sourceCurrency, ctx.phone)).riskSignals;
+  if (!riskSignalsApply({ cfg, partnerId: ctx.partnerId, environment: 'live', transferType })) return [];
+  const now = new Date();
+  const failed = (err: unknown) =>
+    logWarn('draft.risk-signals', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+  let sends: PriorSends | null = null;
+  try {
+    sends = await ctx.store.priorSends(ctx.partnerId, ctx.phone, recipientPhone);
+  } catch (err) {
+    failed(err);
+  }
+  let firstSeenAt: string | null = null;
+  try {
+    firstSeenAt = await ctx.store.firstSeenAt(ctx.partnerId, ctx.phone, now);
+  } catch (err) {
+    failed(err);
+  }
+  return evaluateRiskSignals({ amountUsd, sends, firstSeenAt, now, chatCue: ctx.turn?.chatRiskCue === true }, cfg);
+}
+
+/**
  * The typed body of send_approve_picker up to (not including) the channel send
  * (UI redesign M2-4; re-exported by send-seam.ts). The gate ORDER is the bot's:
  * phone → funding → destination → rates → KYC gate → sender name → B2B bill →
@@ -4173,6 +4212,10 @@ export async function prepareSendDraft(
       return { kind: 'blocked' };
     }
 
+    // Fix pack 6 (R48, P19 T26a): the risk signals the pay page warns about,
+    // from the mint's inputs. Off (the default; always for the default tenant
+    // and b2b): [] with no read, so the draft and the result are unchanged.
+    const riskSignals = await draftRiskSignals(ctx, partner, sourceCurrency, recipientPhone, q.amountUsd, b2b ? 'b2b' : 'b2c');
     // Batch B follow-up A3 / security review L2: the reason the draft keeps (re-checked at the mint).
     const keptDetail = keptPurposeDetail(input.purposeDetail)?.detail;
     const draftId = await ctx.draftStore.createDraft({
@@ -4232,6 +4275,7 @@ export async function prepareSendDraft(
       senderBusinessName: b2b?.senderBusinessName,
       recipientBusinessName: b2b?.recipientBusinessName ?? (b2b ? input.recipientName : undefined),
       invoiceId: b2b?.invoiceId,
+      ...(riskSignals.length > 0 ? { riskSignals } : {}), // pack 6 P19: omitted when none
     }, { pointer });
     const summary = buildApproveSummary(
       q,
@@ -4258,6 +4302,7 @@ export async function prepareSendDraft(
       destinationCountry,
       fxFetchedAt,
       routeExpiresAt,
+      ...(riskSignals.length > 0 ? { riskSignals } : {}),
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');

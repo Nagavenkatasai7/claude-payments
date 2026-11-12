@@ -41,6 +41,7 @@ import { composeReply } from './compose-reply';
 import { MIN_USD } from './fx';
 import { providerLineFor } from './legal/provider-line';
 import { isLiveCertified } from './live-gate';
+import { chatRiskCue } from './risk-chat-cue';
 import {
   addPolicyFacts,
   addTextFacts,
@@ -337,11 +338,19 @@ export function createAgent(deps: AgentDeps) {
     // read the same tenant, phone, stores and tap.
     // UI redesign M2-4: built by the shared buildToolContext (tool-context.ts),
     // the same object field for field; every dep is passed, so no singleton.
+    // Fix pack 6 (R48, P19 T26a): does the customer's recent chat (the last 10
+    // user lines, this message included) carry a risk cue? Computed in memory;
+    // the tools see `chatRiskCue: true` on a COPY of the turn only when true
+    // (the caller's turn, i.e. the agent.turn payload, is never changed), and
+    // neither the texts nor the cue are logged or stored.
+    const riskCue = chatRiskCue(
+      history.filter((m) => m.role === 'user').slice(-10).map((m) => (typeof m.content === 'string' ? m.content : '')),
+    );
     const toolCtx: ToolContext = buildToolContext({
       partnerId,
       phone,
       channel,
-      turn,
+      turn: riskCue ? { ...turn, chatRiskCue: true } : turn,
       deps: {
         store: deps.store,
         scheduleStore: deps.scheduleStore,

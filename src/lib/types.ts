@@ -521,6 +521,11 @@ export interface Draft {
   // `quote`). The mint re-checks it under the sender lock and records it; a
   // reward that ended meanwhile refuses the mint and the draft is kept.
   reward?: import('./rewards/types').QuotedReward;
+  // Fix pack 6 (R48, P19 T26a): the risk signals the pay page warns about for
+  // this draft (derived at draft time from the mint's inputs). Omitted when
+  // none; enum names only (never a matched word or chat text); the mint asks
+  // the customer's tick for exactly these (T25/T27).
+  riskSignals?: import('./risk-signals').RiskSignal[];
   // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
   // Carried on the draft so the approve-tap mint threads the same discriminators,
   // business names, and linked invoice into createTransfer that the card showed.
@@ -560,6 +565,10 @@ export interface TurnContext {
   // The reply then leads with the redaction notice. Optional: older payloads
   // lack it (the worker redacts their text again).
   redacted?: boolean;
+  // Fix pack 6 (R48, P19 T26a): the customer's last 10 chat lines carry a risk
+  // cue (risk-chat-cue.ts). Set by the agent IN MEMORY for this turn only, and
+  // only when true; never written to the agent.turn payload or any store.
+  chatRiskCue?: boolean;
 }
 
 /**
