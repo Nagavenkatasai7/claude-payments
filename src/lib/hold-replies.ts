@@ -1,5 +1,6 @@
 import { boundUntrustedText } from './untrusted-text';
 import { PROVIDER_LINE_MAX } from './legal/provider-line';
+import { FIXED_REPLIES } from './hold-replies-text';
 
 /**
  * hold-replies — the ONLY source of the fixed text a customer is shown when a
@@ -27,42 +28,9 @@ import { PROVIDER_LINE_MAX } from './legal/provider-line';
 /** The wording version the partner's compliance officer (MLRO) approves. Bump it on any text change. */
 export const HOLD_REPLIES_VERSION = '2026-11-10.1 (draft, awaiting MLRO approval)';
 
-export const FIXED_REPLIES = {
-  /** A paid transfer that is held before payout (status in_review). */
-  hold: "Your transfer is being processed. We'll message you as soon as there is an update. You don't need to do anything right now.",
-  /** A transfer that cannot go ahead (it was never charged). */
-  block: "This transfer can't be completed, and you have not been charged.",
-  /** Before the approval card: the two extra questions (source of funds and occupation). */
-  edd_ask: 'Before this transfer we need two quick details: where the money comes from, and your occupation.',
-  /** The same two questions, on a surface that cannot ask them (web chat, portal, AI apps). */
-  edd_elsewhere:
-    'This transfer needs a couple of extra details that can only be given in our WhatsApp chat. Message us on WhatsApp to finish it.',
-  /** Over the daily sending cap. */
-  cap_daily: 'This is more than you can send today. You can send a smaller amount, or try again on another day.',
-  /** Over the per-transfer cap. */
-  cap_per_transfer: 'This is more than you can send in one transfer. You can send a smaller amount.',
-  /** The intro window ended without a verified identity. */
-  cap_verify: 'Please verify your identity to keep sending.',
-  /** Sending is switched off for this customer (for example a failed verification). */
-  cap_unavailable: 'Sending is not available on this account right now.',
-  /** Any other refusal of a send. */
-  cannot_complete: "This transfer can't be completed right now.",
-  /** A refund asked for while the transfer is held. */
-  refund_while_held: "A refund can't be requested for this transfer yet. We'll message you as soon as there is an update.",
-  /** A held business bill payment (B2B), for example when the buyer asks to cancel it. */
-  payment_held: "This payment is being processed. We'll message you as soon as there is an update.",
-  /** The status label of a held transfer, inside a list or a sentence. */
-  status_held: "processing, we'll message you",
-  /** The held step on a transfer's timeline (the customer portal). */
-  timeline_held: "Processing. We'll message you as soon as there is an update.",
-  /** The status pill of a held transfer on customer surfaces (the portal, its receipt, /account). */
-  label_held: 'Processing',
-  /**
-   * Fix pack 3 (R13): a repeat payment this account may not set up: a closed
-   * capability, a licence or a closed corridor. Never says which (no reason).
-   */
-  schedule_unavailable: "Repeat payments aren't available on this account right now.",
-} as const;
+// The table itself lives in hold-replies-text.ts (no runtime import, so the client-bundled i18n
+// catalogue can read it: H2); it is re-exported here so this module stays the one import site.
+export { FIXED_REPLIES };
 
 export type FixedReplyKind = keyof typeof FIXED_REPLIES;
 
