@@ -390,9 +390,32 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
     [`${H}Quote looks right, shall I go ahead?`],
     [`${H}Does the quote above look right? Should I confirm?`],
     [`${H}Can you see the quote above? Shall I go ahead?`],
-    ['Here is your quote.\nAapka quote theek hai?\nShall I go ahead?'],
+    // Final check R5 R4-A-1/R4-B-1: markup or a missing space after a question mark keeps it a question.
+    [`${H}*Is this quote okay?* Shall I go ahead?`],
+    [`${H}(Is this quote okay?) Shall I go ahead?`],
+    [`${H}Is this quote okay?Shall I go ahead?`],
   ])('case 61 fails when no English statement or declarative lead names the quote (final check R4 R3-D1): %j', async (text) => {
-    expect(await failuresOf(61, text)).not.toEqual([]);
+    expect(await failuresOf(61, text)).toContain('the quote lead line is not in English');
+  });
+  it('case 61 fails on the Hinglish position alone when an English statement leads (final check R5 R4-B-2)', async () => {
+    const failures = await failuresOf(61, 'Here is your quote.\nAapka quote theek hai?\nShall I go ahead?');
+    expect(failures).toContain('a Hinglish line is not the first line');
+    expect(failures).not.toContain('the quote lead line is not in English');
+  });
+  // Final check R5 R4-A-1/R4-B-1: WhatsApp markup, a closing bracket or a missing space after the
+  // full stop still ends the English statement, as it did at 200402e.
+  it.each([
+    [`${H}*Here is your quote.* Shall I go ahead?`],
+    [`${H}*You can review the quote below.* Shall I go ahead?`],
+    ['You can review the quote below.* Shall I go ahead?'],
+    [`${H}(You can review the quote below.) Shall I go ahead?`],
+    [`${H}You can review the quote below.Shall I go ahead?`],
+    ['You can see the quote below.Shall I go ahead?'],
+    [`${H}Please check the quote above.Shall I go ahead?`],
+    [`${H}You can see your quote below.Shall I proceed?`],
+    [`${H}*Here is your quote*, shall I go ahead?`],
+  ])('case 61 passes when markup or a missing space follows the English statement (final check R5 R4-A-1, R4-B-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
   });
   it.each([
     ['Here are the details you can check, shall I go ahead?'],
