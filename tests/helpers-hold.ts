@@ -4,6 +4,7 @@ import {
   AML_HOLD_REASON, LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON,
   POSSIBLE_MATCH_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
+import type { HoldClass } from '@/lib/hold-queue';
 import type { PartnerId, Staff, Transfer } from '@/lib/types';
 import { seedPartner } from './helpers-db';
 import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail } from './helpers-live';
@@ -15,9 +16,8 @@ import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail } from 
 // does, because the files that use these helpers vi.mock them.
 // Never hand-write live_controls or posture JSON in a test: use these.
 
-// T5 replaces it with `HoldClass` from '@/lib/hold-queue' (one-line edit).
-export type HoldClassName =
-  | 'kyc' | 'aml' | 'sender_pep' | 'sanctions_review' | 'sender_watchlist' | 'list_wait' | 'data_missing' | 'blocked' | 'unknown';
+// T5: the hold class names come from '@/lib/hold-queue' (kept as an alias).
+export type HoldClassName = HoldClass;
 
 /**
  * A partner certified for live money on an http rail with a signed posture whose
@@ -87,7 +87,7 @@ export async function seedComplianceUsers(
   }
 }
 
-const CLASS_REASONS: Record<HoldClassName, string[]> = {
+const CLASS_REASONS: Record<HoldClass, string[]> = {
   kyc: [LARGE_AMOUNT_REASON],
   aml: [AML_HOLD_REASON],
   sender_pep: [SENDER_SCREENING_REASON],

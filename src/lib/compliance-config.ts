@@ -234,6 +234,11 @@ export interface CustomerScreeningFlags {
   pepHit?: boolean | null;
   screeningFlaggedAt?: string | Date | null;
   screeningClearedAt?: string | Date | null;
+  /**
+   * Fix pack 7 (P4, R2): when a WATCHLIST hit was last stamped (0041 column).
+   * undefined = not read (never PEP-only, senderPepOnly); null = read, empty.
+   */
+  screeningWatchlistAt?: string | Date | null;
 }
 
 /**
