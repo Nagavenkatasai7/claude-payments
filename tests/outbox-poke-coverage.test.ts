@@ -41,9 +41,15 @@ const HELPERS: Record<string, string[]> = {
   // transaction; every caller pokes after it commits (store.ts recordSanctionsBlock,
   // pay-rescreen, payment-link-*, tools) or is a listed helper (settlement.ts).
   'src/lib/sanctions/notices.ts': ['enqueueSanctionsBlockNotices'],
+  // Fix pack 7 T21 (P16): compliance events to a partner, queued in the caller's
+  // transaction; every caller pokes after it commits or runs in the worker (T22/T23).
+  // T22 (P21): enqueuePotentialMatchIfEligible (pay-rescreen pokes; settlement.ts is a listed helper).
+  // T23 (P21): enqueueHoldDispositionIfEligible (the decision seams; decideHold pokes after every final outcome).
+  'src/lib/partner-events.ts': ['enqueuePartnerEvent', 'enqueuePotentialMatchIfEligible', 'enqueueHoldDispositionIfEligible'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
-  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold', 'releaseRescreenedHold', 'releaseHoldAfterRescreen'],
+  // T23: recordHoldStep queues the hold.disposition event of a final row; its caller decideHold (hold-decision.ts) pokes.
+  'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold', 'releaseRescreenedHold', 'releaseHoldAfterRescreen', 'recordHoldStep'],
   // R2a: the partner alert email.send — called from drainOnce (the worker) and
   // the inbound webhook path (whatsapp-inbound.ts, which pokes).
   'src/lib/channel-health.ts': ['recordChannelHealth'],

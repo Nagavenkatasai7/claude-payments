@@ -14,6 +14,7 @@ import { readRailProviderType } from './live-gate';
 import { listNotLiveDedupeKey } from './sanctions/list-health';
 import { enqueueSanctionsBlockNotices, type SanctionsBlockNotice } from './sanctions/notices';
 import { deliverTransfer } from './delivery-receipt';
+import { enqueuePartnerEvent } from './partner-events';
 import type { SenderAmlStats } from './aml-rules';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
@@ -101,6 +102,15 @@ export interface SenderLedgerOps {
    * Deliberately NOT named like the helper (tests/outbox-poke-coverage.test.ts).
    */
   recordSanctionsBlock(n: Omit<SanctionsBlockNotice, 'partnerId'>): Promise<void>;
+  /**
+   * Fix pack 7 (P21 site 1): the ONE `screening.potential_match` partner.event of a
+   * possible-match mint, in the SAME transaction as the transfer insert (dedupe
+   * `screening.potential_match:<transferId>`). mintLocked calls it only when the owner
+   * read above the lock qualified (partnerEventsApply): no read under the lock.
+   * Deliberately NOT named like the helper (tests/outbox-poke-coverage.test.ts), as
+   * recordSanctionsBlock, because transfer-create.ts does not poke.
+   */
+  recordPotentialMatch(transferId: string): Promise<void>;
   /**
    * Fix pack 2 T6 (R06): the lock sender's screening flags and hold times
    * (customer-repo readSenderScreeningFlags, tenant-scoped, no PII column), in
@@ -654,6 +664,12 @@ export function createStore(redis: RedisLike, db: Db) {
                   },
                   { dedupeKey: `purposeflag:${transferId}` },
                 );
+                // partner-demo R4: after() runs post-response, after the mint commits.
+                pokeWorker();
+              },
+              recordPotentialMatch: async (transferId) => {
+                // Inline literal payload in enqueuePartnerEvent (ids only).
+                await enqueuePartnerEvent(tx, { type: 'screening.potential_match', transferId });
                 // partner-demo R4: after() runs post-response, after the mint commits.
                 pokeWorker();
               },

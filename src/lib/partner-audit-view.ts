@@ -126,6 +126,21 @@ const ACTION_LABELS = Object.freeze({
   // held and the acked boolean are shown (never derived, warningVersion, ackedAt or checkFailed).
   // The platform writer risk_signals.set and customer.consent.esign stay OUT of the feed.
   'risk.signals': 'partner.audit.action.riskSignals',
+  // Fix pack 7 (P28): recordHoldStep's hold decision step (subject = the transfer id; own-only).
+  // Only the closed holdClass, disposition and step are shown (never reviewId, final or reason).
+  'transfer.hold.review': 'partner.audit.action.holdReview',
+  // Fix pack 7 (P28): escalateHoldAction, SmartRemit hands a hold to the partner (subject = the
+  // transfer id; reads "SmartRemit"). No detail: holdClasses would name a sanctions class.
+  'transfer.hold.escalate': 'partner.audit.action.holdEscalate',
+  // Fix pack 7 (P28): the partner transfer page's evidence panel was opened (subject = the
+  // transfer id; own-only). No detail.
+  'transfer.screening.view': 'partner.audit.action.screeningView',
+  // Fix pack 7 (P28): saveEventsEndpoint changed the compliance events URL (subject = the partner
+  // id). Only the host is shown.
+  'partner.events_endpoint.update': 'partner.audit.action.eventsEndpointUpdate',
+  // Fix pack 7 (P28, P10-critic): recordKycRecommendationAction (subject = the customer; own-only,
+  // so SmartRemit's rows never reach this feed; they show only in the KYC trail). No detail.
+  'kyc.recommend': 'partner.audit.action.kycRecommend',
 } as const satisfies Record<string, MessageKey>);
 
 export type TenantAuditAction = keyof typeof ACTION_LABELS;
@@ -149,6 +164,10 @@ export const TENANT_OWN_ONLY_ACTIONS: readonly TenantAuditAction[] = Object.free
   'kyc.manual_override.reject',
   'kyc.manual_override.create',
   'aml.reviewed',
+  // Fix pack 7 (P28, P10-critic): hold decisions, evidence views and SmartRemit's KYC recommendations.
+  'transfer.hold.review',
+  'transfer.screening.view',
+  'kyc.recommend',
 ] as const);
 
 export function actionLabelKey(action: string): MessageKey {
@@ -181,6 +200,9 @@ const DETAIL_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'aml.hold_rules_set': ['country', 'to'],
   // Fix pack 6 T28 (P21): closed RiskSignal lists and a boolean only.
   'risk.signals': ['shown', 'held', 'acked'],
+  // Fix pack 7 (P28): closed enums and the step number (never reviewId, final, actorScope or reason).
+  'transfer.hold.review': ['holdClass', 'disposition', 'step'],
+  'partner.events_endpoint.update': ['host'],
 });
 
 /**

@@ -40,6 +40,7 @@ import { KycScreeningChangedError } from '@/lib/sender-screening';
 import { isOpaqueTransferId } from '@/lib/id';
 import { payUrlFor } from '@/lib/pay-url';
 import { logWarn } from '@/lib/log';
+import { enqueueHoldDispositionIfEligible, enqueuePotentialMatchIfEligible } from '@/lib/partner-events';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
 //
@@ -537,7 +538,8 @@ async function releaseHoldWithReview(
       paid,
       { previousStatus: 'in_review', newStatus: paid.status, ...reviewAuditMeta(reviewId, r, review) },
     );
-    // P21 hold.disposition (T23)
+    // P21 (T23): the disposition event, after the audit and before the rail effect (a failed enqueue rolls back).
+    await enqueueHoldDispositionIfEligible(tx, paid, r.owner, reviewId, r.step.final);
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
     return { kind: 'released', webhookDriven };
   });
@@ -552,8 +554,8 @@ export type RecordHoldStepResult =
  * Fix pack 7 (P9): a NON-MOVING hold decision step (route 'record': a step 1
  * under four-eyes, or a final decision of one class while another class is
  * still open). ONE transaction: lockAndRouteReview(..., 'record'), the
- * hold_reviews row, the `transfer.hold.review` audit row. No status change and
- * no outbox row (T23 adds the hold.disposition event for a final row). A
+ * hold_reviews row, the `transfer.hold.review` audit row. No status change; a
+ * final row queues the hold.disposition event (T23, P21). A
  * refusal found by the route is returned as 'changed' / 'already' with nothing
  * written; a failed insert throws HoldReviewChangedError (rolled back).
  */
@@ -575,7 +577,8 @@ export async function recordHoldStep(db: Db, review: HoldReviewInput & { transfe
       r.t,
       { ...reviewAuditMeta(reviewId, r, review), final: r.step.final },
     );
-    // P21 hold.disposition (T23): a final row.
+    // P21 (T23): a final row queues the disposition event (a non-final step 1 queues nothing).
+    await enqueueHoldDispositionIfEligible(tx, r.t, r.owner, reviewId, r.step.final);
     return { kind: 'recorded', reviewId, final: r.step.final };
   });
 }
@@ -714,6 +717,9 @@ export async function releaseHoldAfterRescreen(
         uncovered: [...uncovered],
         trigger: 'release',
       });
+      // Fix pack 7 (P21 site 4): a possible match of a live-certified owner queues one
+      // partner event with the hold (dashboard-ops' caller pokes on 'held').
+      await enqueuePotentialMatchIfEligible(tx, t, ev?.decision);
       return { kind: 'held', cause: newReasons.includes(LIST_UNAVAILABLE_REASON) ? 'list_not_live' : 'review' };
     }
 
@@ -767,7 +773,8 @@ export async function releaseHoldAfterRescreen(
         paid,
         { previousStatus: 'in_review', newStatus: paid.status, ...reviewAuditMeta(reviewId, routed, review) },
       );
-      // P21 hold.disposition (T23)
+      // P21 (T23): the disposition event, after the audit and before the rail effect.
+      await enqueueHoldDispositionIfEligible(tx, paid, routed.owner, reviewId, routed.step.final);
     } else {
       await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {
         previousStatus: 'in_review',
@@ -912,6 +919,9 @@ export async function releaseRescreenedHold(
         subjectId: t.id,
         meta: { previousReasons, newReasons, decision: result.evidence?.decision ?? null, uncovered: [...uncovered] },
       });
+      // Fix pack 7 (P21 site 3): a possible match of a live-certified owner queues one
+      // partner event with the hold (the sweep runs in the worker, which marks the next due row).
+      await enqueuePotentialMatchIfEligible(tx, t, result.evidence?.decision);
       return { kind: 'still_held' };
     }
 

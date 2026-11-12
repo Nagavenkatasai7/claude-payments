@@ -137,6 +137,38 @@ describe('/partner/integrations/webhooks: a partner-operated rail', () => {
   });
 });
 
+// Pack 7 T20 (P19): the optional compliance events URL, only where the settlement endpoint form renders.
+describe('/partner/integrations/webhooks: the compliance events URL', () => {
+  it('http rail: the partner-events-url form renders with the current value', async () => {
+    await seedHttpRail();
+    const cfg = await store().getIntegrations('pa');
+    await store().saveIntegrations('pa', { ...cfg, payment: { ...cfg.payment, credentials: { ...cfg.payment.credentials, eventsUrl: 'https://events-a.example.com/compliance' } } });
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain('data-testid="partner-events-url"');
+    expect(html).toContain(t('partner.webhooks.events.title'));
+    expect(html).toContain(t('partner.webhooks.events.label'));
+    expect(html).toContain(t('partner.webhooks.events.save'));
+    expect(html).toContain('value="https://events-a.example.com/compliance"');
+    for (const s of SECRETS) expect(html).not.toContain(s);
+  });
+  it('http rail with no events URL: the form renders empty', async () => {
+    await seedHttpRail();
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).toContain('data-testid="partner-events-url"');
+    expect(html).not.toContain('events-a.example.com');
+  });
+  it('simulator rail: no partner-events-url', async () => {
+    await store().saveIntegrations('pa', { kyc: {}, payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://smartremit.ai/api/partner-rail', eventsUrl: 'https://events-a.example.com/x' } }, whatsapp: {} });
+    await signInAs({});
+    const html = decode(await render());
+    expect(html).not.toContain('partner-events-url');
+    expect(html).not.toContain(t('partner.webhooks.events.title'));
+    expect(html).not.toContain('events-a.example.com');
+  });
+});
+
 describe('/partner/integrations/webhooks: the status callback URL (2f)', () => {
   it('a partner-operated rail shows the read-only status callback URL, computed like the legacy guide', async () => {
     await seedHttpRail();

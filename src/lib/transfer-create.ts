@@ -17,6 +17,7 @@ import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { sourceCountryFor } from './partner-currency';
 import { resolvePartnerDisclosure } from './partner-config';
+import { partnerEventsApply } from './partner-events';
 import { feeTierCount, isFirstTransferFree } from './fee-tier';
 import { easternMonth, easternMonthStart } from './dates';
 import { budgetAllows, discountFor, giveBackFor, qualifies } from './rewards/engine';
@@ -462,6 +463,9 @@ export async function createTransferWithOutcome(
   // Fix pack 4 (C2): the OWNER's disclosed delivery days, stamped on the row at
   // mint from this read (never the settlement partner's; no read under the lock).
   const deliveryBusinessDays = resolvePartnerDisclosure(partner).deliveryBusinessDays;
+  // Fix pack 7 (P21): a possible match queues a partner event only for a live-certified
+  // OWNER (never the settlement partner) on a non-sandbox row; from this read, none under the lock.
+  const partnerEventsEligible = partnerEventsApply(partner, { environment: input.environment ?? 'live' });
   // P4 symbol. EUR: the sender's euro country, kept inside the partner's own countries so its corridor rules apply.
   const sourceCountry = sourceCountryFor(partner, input.sourceCurrency, input.phone);
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
@@ -588,6 +592,7 @@ export async function createTransferWithOutcome(
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
       subject, limits, kycGateActive, settlementPartnerId, provenance,
       requote, quotedCount, rewardPlan, railProviderType, realMoney, deliveryBusinessDays,
+      partnerEventsEligible,
     }),
   );
   const transfer = minted.transfer;
@@ -648,6 +653,8 @@ interface PreparedMint {
   realMoney: boolean;
   /** Fix pack 4 (C2): the owner's disclosed business days, from the owner read above the lock (no read under the lock). */
   deliveryBusinessDays: number;
+  /** Fix pack 7 (P21): partnerEventsApply on the owner read above the lock (no read under it). */
+  partnerEventsEligible: boolean;
 }
 
 /** B3: a reward the mint will re-check under the lock and record. */
@@ -783,6 +790,9 @@ async function lockedFeeTierQuote(
  *       addHoldReason for a signal in the corridor's CURRENT hold list,
  *       never refuse (a failed read is recorded, not held); the
  *       `risk.signals` audit row is written after the insert;
+ *   2e. the potential-match event (pack 7 P21), after the risk.signals and
+ *       purpose.flag audits: one partner.event when the owner qualified above
+ *       the lock and the screen decision is exactly possible_match;
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
  *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
@@ -1140,6 +1150,11 @@ async function mintLocked(
       meta: { category: purposeRisk },
     });
     if (transfer.environment !== 'test') await ops.enqueuePurposeFlagAlert(transfer.id, purposeRisk);
+  }
+  // Fix pack 7 (P21 site 1): the screening.potential_match event, committed with
+  // the row. A blocked row returned above; a sandbox mint is never eligible.
+  if (p.partnerEventsEligible && compliance.evidence?.decision === 'possible_match') {
+    await ops.recordPotentialMatch(transfer.id);
   }
   return { transfer, replayed: false };
 }

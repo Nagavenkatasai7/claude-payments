@@ -197,6 +197,9 @@ describe('decideHold (P13, the shared core)', { retry: 0 }, () => {
     expect((await store.getTransfer(t.id))?.status).toBe('paid');
     expect((await reviewRows(t.id)).map((r) => [r.hold_class, r.step, r.final, r.actor_scope])).toEqual([['kyc', 1, true, 'partner']]);
     expect((await outboxKeys()).slice(keysBefore.length)).toContain(`instruct:${t.id}`);
+    // T23 (P21): the final review's hold.disposition event, before the rail effect.
+    const relAudit = await audits(t.id, 'transfer.release');
+    expect((await outboxKeys()).slice(keysBefore.length)).toEqual([`hold.disposition:${relAudit[0].meta.reviewId as string}`, `instruct:${t.id}`]);
     expect(paths).toEqual({ release: 1, reject: 0, record: 0 });
   });
 

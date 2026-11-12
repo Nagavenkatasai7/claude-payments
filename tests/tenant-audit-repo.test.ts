@@ -4,6 +4,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import { auditEvents } from '@/db/schema';
 import type { Db } from '@/db/client';
 import { listTenantAudit, listTenantAuditForSubject } from '@/db/repos/tenant-audit-repo';
+import { TENANT_AUDIT_ACTIONS, TENANT_OWN_ONLY_ACTIONS } from '@/lib/partner-audit-view';
 
 // UI redesign M3-4: the tenant audit read. The partner id is ALWAYS in the WHERE, the action list is
 // an IN filter (empty = no query), and paging is keyset on (at, id) newest first.
@@ -166,6 +167,31 @@ describe('listTenantAudit ownOnly (KYC decisions and AML reviews: the tenant\'s 
   it('without ownOnly the read is unchanged (the page always passes it)', async () => {
     const { ownOnly: _ignored, ...plain } = q(['pa-admin']);
     expect(await listTenantAudit(db, 'pa', plain)).toHaveLength(8);
+  });
+});
+
+// Fix pack 7 T18 (P28, P10-critic): the page's own-only list keeps SmartRemit's KYC
+// recommendations, hold decisions and evidence views off /partner/audit.
+describe('listTenantAudit with the page\'s own-only list (fix pack 7 T18)', () => {
+  const pageQuery = (tenantActors: string[]) => ({
+    actions: TENANT_AUDIT_ACTIONS,
+    from: daysAgo(30),
+    to: new Date(),
+    limit: 100,
+    ownOnly: { actions: TENANT_OWN_ONLY_ACTIONS, tenantActors },
+  });
+  it('a SmartRemit-written kyc.recommend row is NOT returned by the tenant audit query', async () => {
+    await insert({ partnerId: 'pa', action: 'kyc.recommend', actor: 'owner-admin', subjectId: 'cust:abcdef01', meta: { recommendation: 'reject', reason: 'SECRET' } });
+    expect(await listTenantAudit(db, 'pa', pageQuery(['pa-admin']))).toEqual([]);
+  });
+  it('SmartRemit hold decisions and evidence views stay off; the tenant own rows and the escalation show', async () => {
+    await insert({ partnerId: 'pa', action: 'transfer.hold.review', actor: 'owner-admin', subjectId: 'platform-review', meta: { step: 1, actorScope: 'platform' } });
+    await insert({ partnerId: 'pa', action: 'transfer.screening.view', actor: 'owner-admin', subjectId: 'platform-view', meta: { holdClasses: ['kyc'] } });
+    await insert({ partnerId: 'pa', action: 'transfer.hold.review', actor: 'pa-admin', subjectId: 'own-review', meta: { step: 1, actorScope: 'partner' } });
+    await insert({ partnerId: 'pa', action: 'transfer.screening.view', actor: 'pa-admin', subjectId: 'own-view', meta: { holdClasses: ['kyc'], actorScope: 'partner' } });
+    await insert({ partnerId: 'pa', action: 'transfer.hold.escalate', actor: 'owner-admin', subjectId: 'escalated', meta: { holdClasses: ['kyc'], actorScope: 'platform' } });
+    const rows = await listTenantAudit(db, 'pa', pageQuery(['pa-admin']));
+    expect(rows.map((r) => r.subjectId).sort()).toEqual(['escalated', 'own-review', 'own-view']);
   });
 });
 

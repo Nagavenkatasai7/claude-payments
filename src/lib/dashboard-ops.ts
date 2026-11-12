@@ -35,6 +35,7 @@ import {
 } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
+import { enqueueHoldDispositionIfEligible } from './partner-events';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -705,6 +706,8 @@ export async function releaseTransfer(
       );
     }
     if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
+    // Fix pack 7 (P21 site 4): a held re-screen may have queued a partner event; mark the worker due.
+    if (rr.kind === 'held') pokeWorker();
     // Review R2 (J2): partner staff get one text for every outcome; platform
     // staff get the text for the outcome class (what to do next).
     if (partnerRelease) throw new Error(RESCREEN_RELEASE_REFUSAL);
@@ -828,7 +831,8 @@ export async function rejectTransfer(
           ...(realMoney && hasSanctionsHold(classes) ? { fundsKept: true } : {}),
         },
       );
-      // P21 hold.disposition (T23)
+      // P21 (T23): the disposition event, after the audit and before the funds rule / refund branch.
+      await enqueueHoldDispositionIfEligible(tx, cancelled, r.owner, reviewId, r.step.final);
     } else {
       // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
       // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.

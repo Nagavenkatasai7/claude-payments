@@ -7,7 +7,7 @@ import { Button, ConfirmDialog, Field, Input } from '@/components/ds';
 import type { RailSecretKind } from '@/lib/partner-integrations';
 import type { RotateSecretResult, TestPingResult } from '@/lib/partner-webhooks-view';
 import type { ActionResult } from '../../../action-result';
-import { replayDeliveryAction, rotateSecretAction, saveEndpointAction, sendTestAction } from './actions';
+import { replayDeliveryAction, rotateSecretAction, saveEndpointAction, saveEventsEndpointAction, sendTestAction } from './actions';
 import { StepUpPrompt, useStepUpAction } from '../step-up';
 
 // The /partner settlement-webhook controls (UI redesign M3-15a). A rotated secret exists ONLY in the
@@ -72,6 +72,61 @@ export function EndpointForm({ current }: { current: string | null }) {
             result.ok ? (
               <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
                 {t('partner.webhooks.saved')}
+              </p>
+            ) : (
+              <Alert text={result.error} />
+            )
+          ) : null}
+        </div>
+      </form>
+      {flow.stepUp ? <StepUpPrompt stepUp={flow.stepUp} onSubmit={flow.retry} onCancel={flow.dismiss} pending={flow.retrying} /> : null}
+    </div>
+  );
+}
+
+/**
+ * Pack 7 T20 (P19): the optional compliance events URL. A copy of EndpointForm without `required`:
+ * an empty value clears it. The one ok result reads "saved" or "cleared" from the value that was
+ * submitted (kept in `sent`, so editing the field afterwards does not change the message).
+ */
+export function EventsUrlForm({ current }: { current: string | null }) {
+  const [sent, setSent] = React.useState('');
+  const flow = useStepUpAction<ActionResult>((fd) => {
+    const v = fd.get('url');
+    setSent(typeof v === 'string' ? v : '');
+    return saveEventsEndpointAction(null, fd);
+  });
+  const result = flow.stepUp ? null : flow.result;
+  const [url, setUrl] = React.useState(current ?? '');
+  return (
+    <div>
+      <form action={flow.run} className="mt-4 flex flex-col gap-4">
+        <Field name="url" label={t('partner.webhooks.events.label')} hint={t('partner.webhooks.events.hint')}>
+          {(ids) => (
+            <Input
+              id={ids.id}
+              aria-describedby={ids.describedBy}
+              name="url"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={2048}
+              value={url}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                if (flow.stepUp) flow.dismiss();
+              }}
+              placeholder="https://"
+            />
+          )}
+        </Field>
+        <div className="flex flex-wrap items-center gap-3">
+          <Submit label={t('partner.webhooks.events.save')} pending={t('partner.webhooks.saving')} />
+          {result ? (
+            result.ok ? (
+              <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
+                {t(sent.trim() === '' ? 'partner.webhooks.events.cleared' : 'partner.webhooks.events.saved')}
               </p>
             ) : (
               <Alert text={result.error} />

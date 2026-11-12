@@ -5,7 +5,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { scopeOf } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
-import { rotateRailSecret, saveSettlementEndpoint, sendTestPing, type EndpointActor } from '@/lib/partner-settlement-endpoint';
+import { rotateRailSecret, saveEventsEndpoint, saveSettlementEndpoint, sendTestPing, type EndpointActor } from '@/lib/partner-settlement-endpoint';
 import { parseSecretKind, type RotateSecretResult, type TestPingResult } from '@/lib/partner-webhooks-view';
 import { MAX_SETTLEMENT_URL_LENGTH } from '@/lib/settlement-url';
 import { t, type MessageKey } from '@/lib/i18n';
@@ -56,6 +56,30 @@ export async function saveEndpointAction(_prev: ActionResult | null, formData: F
     return refused('partner.webhooks.failed');
   }
   if (!r.ok) return refused(r.reason === 'not_partner_rail' ? 'partner.webhooks.managed' : 'partner.webhooks.invalidUrl');
+  revalidatePath(PAGE);
+  return { ok: true };
+}
+
+/**
+ * Pack 7 T20 (P19): the optional compliance events URL; the mirror of saveEndpointAction (the same
+ * step-up purpose). An empty value clears it (events then go to the settlement endpoint); the one
+ * `{ ok: true }` result serves both, and the form picks "saved" or "cleared" from what it sent.
+ */
+export async function saveEventsEndpointAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
+  await refuseOnSiteHost();
+  const ctx = await requirePartnerStaff(POLICY);
+  const raw = formData.get('url');
+  if (typeof raw !== 'string' || raw.length > MAX_SETTLEMENT_URL_LENGTH + 64) return refused('partner.webhooks.events.invalid');
+  const stepUp = await gatePartnerStepUp(ctx, formData, 'webhook.endpoint.save');
+  if (stepUp) return stepUp;
+  let r;
+  try {
+    r = await saveEventsEndpoint(getDb(), ctx.partnerId, actorOf(ctx), raw);
+  } catch (err) {
+    logWarn('partner.webhooks.events', errName(err), { partnerId: ctx.partnerId });
+    return refused('partner.webhooks.failed');
+  }
+  if (!r.ok) return refused(r.reason === 'not_partner_rail' ? 'partner.webhooks.managed' : 'partner.webhooks.events.invalid');
   revalidatePath(PAGE);
   return { ok: true };
 }

@@ -15,7 +15,7 @@ import { listDeliveries, parseDeliveryCursor, type DeliveryView } from '@/lib/we
 import type { RailSecretKind } from '@/lib/partner-integrations';
 import { Badge, Card, EmptyState, ErrorState, PageHeader, buttonVariants } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../../routes';
-import { EndpointForm, ReplayControl, RotateSecretControl, TestEventForm } from './webhook-controls';
+import { EndpointForm, EventsUrlForm, ReplayControl, RotateSecretControl, TestEventForm } from './webhook-controls';
 
 export const metadata: Metadata = { title: t('partner.webhooks.title'), robots: { index: false, follow: false } };
 
@@ -251,6 +251,10 @@ export default async function PartnerWebhooksPage({ searchParams }: { searchPara
             <dd className="font-mono text-[13.5px] break-all text-ds-ink">{view.endpoint ?? t('partner.webhooks.endpointNone')}</dd>
           </dl>
           <EndpointForm current={view.endpoint} />
+          <div data-testid="partner-events-url" className="mt-5 border-t border-ds-border pt-4">
+            <h3 className="text-[15px] font-semibold text-ds-ink">{t('partner.webhooks.events.title')}</h3>
+            <EventsUrlForm current={view.eventsUrl} />
+          </div>
         </Card>
         <Card as="section" className="p-5 sm:p-6">
           <h2 className={H2}>{t('partner.webhooks.callbackTitle')}</h2>

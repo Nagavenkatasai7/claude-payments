@@ -214,3 +214,39 @@ export async function platformReviewFor(
     reason: audit.reason, actor: audit.actor, actorScope: 'platform', evidence: {}, expectFinal: true,
   };
 }
+
+/**
+ * T21 (P32): the partner's rail integrations for compliance events, through
+ * createIntegrationsRepo(db).saveIntegrations (replaces the whole config).
+ * Defaults: an http rail, settlementUrl `https://rail.<partnerId>.example/settle`,
+ * signingSecret 'evt-secret', no eventsUrl. `null` drops a key (settlementUrl,
+ * signingSecret, eventsUrl). `settlementUrl` is an addition to P32's signature
+ * (the "no URL at all" case).
+ */
+export async function eventRail(
+  db: Db,
+  partnerId: PartnerId,
+  o: {
+    eventsUrl?: string | null;
+    signingSecret?: string | null;
+    settlementUrl?: string | null;
+    providerType?: 'http' | 'mock' | 'simulator';
+  } = {},
+): Promise<void> {
+  const { createIntegrationsRepo } = await import('@/db/repos/integrations-repo');
+  const settlementUrl = o.settlementUrl === undefined ? `https://rail.${partnerId}.example/settle` : o.settlementUrl;
+  const signingSecret = o.signingSecret === undefined ? 'evt-secret' : o.signingSecret;
+  await createIntegrationsRepo(db).saveIntegrations(partnerId, {
+    kyc: {},
+    whatsapp: {},
+    payment: {
+      providerType: o.providerType ?? 'http',
+      credentials: {
+        ...(settlementUrl ? { settlementUrl } : {}),
+        ...(signingSecret ? { signingSecret } : {}),
+        ...(o.eventsUrl ? { eventsUrl: o.eventsUrl } : {}),
+      },
+      webhookSecret: 'evt-webhook',
+    },
+  });
+}
