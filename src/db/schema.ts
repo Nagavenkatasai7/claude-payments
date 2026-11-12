@@ -179,6 +179,12 @@ export const transfers = pgTable(
     // `screening`), never in an API response.
     deliveryBusinessDays: smallint('delivery_business_days'),
     disclosureSnapshot: jsonb('disclosure_snapshot'),
+    // Fix pack 8 (0042, R36, P1/P31): both written at the mint (T39); the bidx also
+    // by the pay page's setPayoutIfEditable. payout_dest_bidx is an HMAC under k0
+    // like thread_key: platform-wide and NOT tenant-bound, so every query on it
+    // has partner_id. purpose_source: where the payment purpose came from.
+    payoutDestBidx: text('payout_dest_bidx'),
+    purposeSource: text('purpose_source'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -203,6 +209,15 @@ export const transfers = pgTable(
       .where(sql`${t.fundingIntentRef} IS NOT NULL`),
     // Refund queues (ops page + sweeps) — partial: 'none' is ~every row.
     index('transfers_refund_status').on(t.refundStatus).where(sql`${t.refundStatus} <> 'none'`),
+    // Fix pack 8 (0042, P31): the two arms of the India beneficiary-year count
+    // (payout blind index, recipient phone digits), both index-served. The
+    // expression of the second must match the count SQL byte for byte.
+    index('transfers_partner_payout_bidx')
+      .on(t.partnerId, t.payoutDestBidx, t.createdAt)
+      .where(sql`${t.payoutDestBidx} IS NOT NULL AND ${t.destinationCountry} = 'IN'`),
+    index('transfers_partner_rcpt_digits')
+      .on(t.partnerId, sql`regexp_replace(${t.recipientPhone}, '[^0-9]', '', 'g')`, t.createdAt)
+      .where(sql`${t.destinationCountry} = 'IN' AND ${t.environment} = 'live'`),
   ],
 );
 
@@ -334,6 +349,12 @@ export const customers = pgTable(
     esignConsentVersion: text('esign_consent_version'),
     esignConsentedAt: timestamp('esign_consented_at', { withTimezone: true }),
     esignWithdrawnAt: timestamp('esign_withdrawn_at', { withTimezone: true }),
+    // Fix pack 8 (0042, R12, P7): the verified US state of residence, its source
+    // and when it was set. READ-ONLY in rowToCustomer, NEVER in customerToRow;
+    // setResidenceState (T8) is the only writer.
+    residenceState: text('residence_state'),
+    residenceStateSource: text('residence_state_source'),
+    residenceStateAt: timestamp('residence_state_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -427,6 +448,11 @@ export const tickets = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp('closed_at', { withTimezone: true }),
+    // Fix pack 8 (0042, R44, P1/P6): the Reg E case class, the first-notice time
+    // and the due date. NULL on every non-case ticket; written by the ticket repo (T7).
+    regClass: text('reg_class'),
+    firstNoticeAt: timestamp('first_notice_at', { withTimezone: true }),
+    dueAt: timestamp('due_at', { withTimezone: true }),
   },
   (t) => [
     check('tickets_kind_check', sql`${t.kind} IN ('customer','internal')`),
@@ -439,6 +465,8 @@ export const tickets = pgTable(
     index('tickets_assigned_updated').on(t.assignedTo, t.updatedAt.desc()),
     index('tickets_customer_partner').on(t.customerPhone, t.partnerId),
     index('tickets_kind_status').on(t.kind, t.status),
+    // Fix pack 8 (0042): plain, non-unique (the case writer's advisory lock dedupes).
+    index('tickets_reg_due').on(t.partnerId, t.dueAt).where(sql`${t.regClass} IS NOT NULL`),
   ],
 );
 
@@ -1110,6 +1138,34 @@ export const holdReviews = pgTable(
     uniqueIndex('hold_reviews_cycle_actor').on(t.transferId, t.holdClass, t.reasonsFp, t.actor),
     index('hold_reviews_partner_queue').on(t.partnerId, t.transferId, t.createdAt),
   ],
+);
+
+// ── Fix pack 8 (0042, R36, P1/P23/P24): the destination register ────────────
+// One row per OWNER partner and destination country. status, rule_pack and the
+// purpose codes are validated in code (corridor-register.ts), not by a CHECK
+// (the hold_reviews precedent). Rows are updated in place (no trigger); every
+// change writes an audit row. A save clears attested_by/at/hash.
+export const partnerCorridors = pgTable(
+  'partner_corridors',
+  {
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    destinationCountry: text('destination_country').notNull(),
+    status: text('status').notNull(),
+    rulePack: text('rule_pack'),
+    purposeCodeMap: jsonb('purpose_code_map').notNull().default(sql`'{}'::jsonb`),
+    attestationRef: text('attestation_ref').notNull(),
+    attestationSha256: text('attestation_sha256'),
+    recipientNotices: boolean('recipient_notices').notNull().default(false),
+    travelDobFromUsd: numeric('travel_dob_from_usd', { precision: 12, scale: 2 }),
+    travelFullFromUsd: numeric('travel_full_from_usd', { precision: 12, scale: 2 }),
+    reattestDue: date('reattest_due', { mode: 'string' }).notNull(),
+    recordedBy: text('recorded_by').notNull(),
+    recordedAt: timestamp('recorded_at', { withTimezone: true }).notNull().defaultNow(),
+    attestedBy: text('attested_by'),
+    attestedAt: timestamp('attested_at', { withTimezone: true }),
+    attestedHash: text('attested_hash'),
+  },
+  (t) => [primaryKey({ name: 'partner_corridors_pk', columns: [t.partnerId, t.destinationCountry] })],
 );
 
 // ── Release safety Batch 2 part A (0029): feature flags and kill switches ────

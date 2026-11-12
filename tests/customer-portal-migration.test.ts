@@ -153,7 +153,9 @@ describe('migration 0027 is NEW TABLES ONLY (safe for the build already in produ
       // 0040 (fix pack 6) appends three NULLABLE columns at the end; 0027 itself still alters nothing here.
       ["esign_consent_version","text","YES"],["esign_consented_at",TS,"YES"],["esign_withdrawn_at",TS,"YES"],
       // 0041 (fix pack 7) appends one NULLABLE column at the end; 0027 itself still alters nothing here.
-      ["screening_watchlist_at",TS,"YES"]]);
+      ["screening_watchlist_at",TS,"YES"],
+      // 0042 (fix pack 8) appends three NULLABLE columns at the end; 0027 itself still alters nothing here.
+      ["residence_state","text","YES"],["residence_state_source","text","YES"],["residence_state_at",TS,"YES"]]);
   });
 
   it('the SQL only creates the three new tables; every ALTER TABLE adds an FK to a NEW table', () => {

@@ -124,6 +124,22 @@ describe('clean-smoke-partner', () => {
     expect(lines.join('\n')).toMatch(/skip p_smoke .*1 hold reviews/);
   });
 
+  it("removes the smoke partner's partner_corridors rows (config rows, never a skip reason)", async () => {
+    // Fix pack 8 T1 (0042, P1): the destination register rows are config, deleted before the partner.
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    const due = new Date(Date.now() + 180 * 86_400_000).toISOString().slice(0, 10);
+    await db.execute(
+      sql.raw(
+        `INSERT INTO partner_corridors (partner_id, destination_country, status, attestation_ref, reattest_due, recorded_by) VALUES ('p_smoke', 'IN', 'active', 'ref-1', '${due}', 'admin_1')`,
+      ),
+    );
+    const lines: string[] = [];
+    await cleanSmokePartners(db, (l) => lines.push(l));
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(0);
+    expect(await count(`SELECT count(*)::int AS n FROM partner_corridors WHERE partner_id = 'p_smoke'`)).toBe(0);
+    expect(lines.join('\n')).not.toMatch(/skip/);
+  });
+
   it('never touches a partner with a different name', async () => {
     await seedPartner(db, 'p_real', 'Real Partner');
     await createStaffRepo(db).upsert(smokeStaff('p_real'));
