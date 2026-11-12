@@ -10,7 +10,12 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { isAmlDisposition, parseAmlAlertId } from '@/lib/partner-reviews';
-import { resolveAmlHoldRules } from '@/lib/compliance-config';
+import { resolveAmlHoldRules, resolveCorridorRules } from '@/lib/compliance-config';
+import { RISK_SIGNALS, isRiskSignal, type RiskSignal, type RiskSignalConfig } from '@/lib/risk-signals';
+import { staffMfaEnrolled } from '@/lib/staff-mfa-store';
+import { gateStaffStepUp } from '@/lib/partner-step-up-gate';
+import { logWarn } from '@/lib/log';
+import type { StepUpRequired } from '@/lib/staff-step-up-result';
 
 /**
  * Program-Fix 43 (compliance-09, partial): close an AML review item.
@@ -150,4 +155,114 @@ export async function setAmlHoldsAction(formData: FormData): Promise<void> {
     });
   });
   revalidatePath('/admin-dashboard/compliance');
+}
+
+/**
+ * Fix pack 6 T23 (R48, P22, P21): the platform writer of one corridor's pay-step
+ * risk signals (partners.corridor_compliance[<country>].riskSignals). Off by
+ * default; nothing reads it at pay time until T25/T26a. Partners get no writer.
+ *
+ * Order: the site-host guard, requirePlatformAdmin, the actor's own two-step
+ * (so the forced step-up is always a TOTP code), the partner (the default tenant
+ * refused), the corridor (never IN), strict fields, the FORCED step-up
+ * ('risk_signal.save', always), then ONE transaction: the partner read, the
+ * corridor in `countries`, the row-locked corridor write (other keys kept) and
+ * the `risk_signals.set` audit row (meta: country and the resolved from / to:
+ * booleans, numbers and enum strings only). 'off' stores enabled:false and keeps
+ * the posted thresholds and hold list. No outbox row. Returns a result (client
+ * form) and never a driver message.
+ */
+export type RiskSignalsActionResult = { ok: true } | { ok: false; error: string };
+
+const RS_NOT_FOUND = 'Partner not found.';
+const RS_BAD_CORRIDOR = 'Invalid corridor.';
+const RS_BAD_INPUT = 'Check the fields and try again.';
+const RS_NEED_MFA = 'Turn on two-step verification for your own staff account first.';
+const RS_FAILED = 'Something went wrong. Nothing was changed. Please try again.';
+const RS_DEMO = 'The default (demo) tenant never shows risk signals.';
+
+class RefusedError extends Error {
+  constructor(readonly copy: string) {
+    super('refused');
+    this.name = 'RefusedError';
+  }
+}
+
+const rsRefused = (error: string): RiskSignalsActionResult => ({ ok: false, error });
+const rsErrName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
+
+/** The plain stored / audited shape of a config (unfrozen copy of `hold`). */
+function riskSignalsShape(c: RiskSignalConfig): { enabled: boolean; amountUsd: number; newAccountHours: number; hold: RiskSignal[] } {
+  return { enabled: c.enabled, amountUsd: c.amountUsd, newAccountHours: c.newAccountHours, hold: [...c.hold] };
+}
+
+/** The strict field parse; null when any field is off. */
+function parseRiskSignalsFields(formData: FormData): RiskSignalConfig | null {
+  const enabledRaw = formData.get('enabled');
+  if (enabledRaw !== 'on' && enabledRaw !== 'off') return null;
+  const amountRaw = formData.get('amountUsd');
+  const hoursRaw = formData.get('newAccountHours');
+  if (typeof amountRaw !== 'string' || typeof hoursRaw !== 'string') return null;
+  if (amountRaw.trim() === '' || hoursRaw.trim() === '') return null;
+  const amount = Number(amountRaw);
+  if (!Number.isFinite(amount) || amount < 1 || amount > 10000) return null;
+  const hours = Number(hoursRaw);
+  if (!Number.isInteger(hours) || hours < 1 || hours > 720) return null;
+  const hold = formData.getAll('hold');
+  if (!hold.every((h) => isRiskSignal(h))) return null;
+  return {
+    enabled: enabledRaw === 'on',
+    amountUsd: Math.round(amount * 100) / 100,
+    newAccountHours: hours,
+    hold: RISK_SIGNALS.filter((s) => hold.includes(s)),
+  };
+}
+
+export async function setRiskSignalsAction(_prev: unknown, formData: FormData): Promise<RiskSignalsActionResult | StepUpRequired> {
+  await refuseOnSiteHost();
+  const staff = await requirePlatformAdmin();
+  if (!(await staffMfaEnrolled(staff.username))) return rsRefused(RS_NEED_MFA);
+  const rawId = formData.get('partnerId');
+  const partnerId = typeof rawId === 'string' ? rawId.trim() : '';
+  if (!partnerId || partnerId.length > 100) return rsRefused(RS_NOT_FOUND);
+  if (partnerId === DEFAULT_PARTNER_ID) return rsRefused(RS_DEMO);
+  const countryRaw = formData.get('country');
+  if (typeof countryRaw !== 'string' || !/^[A-Z]{2}$/.test(countryRaw) || countryRaw === 'IN') return rsRefused(RS_BAD_CORRIDOR);
+  const country = countryRaw as CountryCode;
+  const parsed = parseRiskSignalsFields(formData);
+  if (!parsed) return rsRefused(RS_BAD_INPUT);
+  const next = riskSignalsShape(parsed);
+
+  const stepUp = await gateStaffStepUp(staff, formData, 'risk_signal.save', { always: true });
+  if (stepUp) return stepUp;
+
+  try {
+    await getDb().transaction(async (tx) => {
+      const partners = createPartnerStore(tx);
+      const partner = await partners.getPartner(partnerId);
+      if (!partner) throw new RefusedError(RS_NOT_FOUND);
+      if (!(partner.countries ?? []).includes(country)) throw new RefusedError(RS_BAD_CORRIDOR);
+      const { found, previous } = await partners.updateCorridorCompliance(partnerId, (prev) => ({
+        ...prev,
+        [country]: { ...(prev[country] ?? {}), riskSignals: { ...next, hold: [...next.hold] } },
+      }));
+      if (!found) throw new RefusedError(RS_NOT_FOUND);
+      const from = riskSignalsShape(resolveCorridorRules({ ...partner, corridorCompliance: previous }, country).riskSignals);
+      await createAuditRepo(tx).record({
+        partnerId,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'risk_signals.set',
+        subjectId: partnerId,
+        meta: { country, from, to: next },
+      });
+    });
+  } catch (err) {
+    if (err instanceof RefusedError) return rsRefused(err.copy);
+    // The error NAME only: never the driver object or its message.
+    logWarn('admin.risk_signals', rsErrName(err), { partnerId });
+    return rsRefused(RS_FAILED);
+  }
+  revalidatePath('/admin-dashboard/compliance');
+  return { ok: true };
 }

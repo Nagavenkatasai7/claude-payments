@@ -118,7 +118,7 @@ describe('projectAuditRow', () => {
 
 describe('TENANT_AUDIT_ACTIONS', () => {
   it('the allowlist excludes screening, login and ops rows', () => {
-    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
+    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'risk_signals.set', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
       expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
     }
   });
