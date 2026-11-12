@@ -18,9 +18,10 @@ import type { DbOrTx } from '@/db/client';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { env } from './env';
 import { logWarn } from './log';
-import type { LiveCapability, LiveControls } from './live-controls';
+import type { LiveCapability } from './live-controls';
+import { isLiveCertified, type LivePartner } from './live-certified';
 import type { PartnerIntegrations } from './partner-integrations';
-import type { Partner, PartnerId, Transfer, TransferEnvironment } from './types';
+import type { PartnerId, Transfer, TransferEnvironment } from './types';
 
 /** 'test' -> false; undefined (read failed) -> true; 'http' -> true; else false. */
 export function realMoneyRail(r: {
@@ -81,35 +82,13 @@ export function settlementTargetUrl(p: PartnerIntegrations['payment']): string {
 // (railPartnerOf) must be certified for live money, and the default tenant may
 // never own a real-money transfer. Nothing on a money path calls these yet
 // (pack 3 T4-T6 and T12 wire them in).
+// isLiveCertified / hasStandingCertification live in live-certified.ts (fix pack 7 DP1).
 
-type LivePartner = Pick<Partner, 'id' | 'status' | 'liveControls'> | null | undefined;
+export { hasStandingCertification, isLiveCertified } from './live-certified';
+
 type LiveTransfer = Pick<Transfer, 'partnerId' | 'settlementPartnerId' | 'environment'>;
 
 export type LiveRefusalCode = 'live_not_certified' | 'default_on_live_rail';
-
-/**
- * Certified for live money: an active, non-default partner whose certification
- * is on record and not revoked (a revoke at or after the certification time
- * counts; a later re-certification lifts it). Pure.
- */
-export function isLiveCertified(p: LivePartner): boolean {
-  if (!p || p.id === DEFAULT_PARTNER_ID || p.status !== 'active') return false;
-  const c = p.liveControls?.certification;
-  if (!c || Number.isNaN(Date.parse(c.certifiedAt))) return false;
-  return hasStandingCertification(p.liveControls);
-}
-
-/**
- * A certification record is on file and not revoked: no revokedAt, or a revokedAt strictly
- * before certifiedAt (a later re-certification lifts it; an unparseable stamp counts as revoked).
- * Ignores the partner's status and id: isLiveCertified adds those, the revoke writer and the
- * platform's kycMode lock (pack 3 review Q1) use this alone. Pure.
- */
-export function hasStandingCertification(lc: Pick<LiveControls, 'certification'> | null | undefined): boolean {
-  const c = lc?.certification;
-  if (!c) return false;
-  return c.revokedAt === undefined || Date.parse(c.revokedAt) < Date.parse(c.certifiedAt);
-}
 
 /** The action of the audit row certifyLiveAction writes (writeCertification, live-controls-write.ts). */
 export const LIVE_CERTIFY_AUDIT_ACTION = 'partner.live.certify';
