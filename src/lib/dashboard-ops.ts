@@ -34,8 +34,9 @@ import {
   type HoldClass, type HoldDisposition, type ReviewRowLite,
 } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
-import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
+import { HoldReviewChangedError, insertReview, lockAndRouteReview, readSenderFlagsLocked, type HoldReviewInput } from './hold-review-tx';
 import { enqueueHoldDispositionIfEligible } from './partner-events';
+import { logWarn } from './log';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -858,13 +859,7 @@ export async function rejectTransfer(
       // row lock: transfer -> customer order). A failed read is null: fail closed (a synthetic
       // sender_watchlist class keeps the funds). No customer row in the owner tenant (a partner-API
       // sender) has no stamp to read: undefined, so only a SENDER_SCREENING reason makes a sender class.
-      if (realMoney) {
-        const flags = await readSenderScreeningFlags(tx, cancelled.partnerId, cancelled.phone, { forUpdate: true }).then(
-          (f) => f ?? undefined,
-          () => null,
-        );
-        classes = fundsRuleClasses(cancelled, flags);
-      }
+      if (realMoney) classes = fundsRuleClasses(cancelled, await lockedFundsRuleFlags(tx, cancelled));
     }
     const fundsKept = realMoney && hasSanctionsHold(classes);
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
@@ -960,13 +955,25 @@ export const REFUND_HOLD_FIRST_REFUSAL = 'Decide this hold in the review first.'
  * (`reviewRecordApplies`) -> REFUND_HOLD_FIRST_REFUSAL (a refund on a held row would race a later
  * release). A missing owner refuses with the generic permission text. Uncertified owners: unchanged.
  */
+/**
+ * Fix pack 7 F4 (early review EE2): the funds rule's sender flags under the lock, for rejectTransfer
+ * and refundHoldGuard. The read runs in a savepoint (readSenderFlagsLocked), so a SQL failure
+ * answers null (fail closed: a synthetic sender_watchlist class) AND the transaction goes on (the
+ * reject commits with the funds kept, its rejectfunds alert and rejectmsg). No customer row in the
+ * owner tenant (a partner-API sender) is undefined: nothing to read is not a hit.
+ */
+async function lockedFundsRuleFlags(tx: DbOrTx, t: Transfer): Promise<CustomerScreeningFlags | null | undefined> {
+  const read = await readSenderFlagsLocked(tx, t.partnerId, t.phone);
+  if (!read.read) {
+    logWarn('funds-rule.flags-read', read.errorName, { transferId: t.id });
+    return null;
+  }
+  return read.flags ?? undefined;
+}
+
 async function refundHoldGuard(tx: DbOrTx, t: Transfer, realMoney: boolean): Promise<void> {
   if (!realMoney) return;
-  const flags = await readSenderScreeningFlags(tx, t.partnerId, t.phone, { forUpdate: true }).then(
-    (f) => f ?? undefined,
-    () => null,
-  );
-  if (hasSanctionsHold(fundsRuleClasses(t, flags))) throw new Error(REFUND_SANCTIONS_REFUSAL);
+  if (hasSanctionsHold(fundsRuleClasses(t, await lockedFundsRuleFlags(tx, t)))) throw new Error(REFUND_SANCTIONS_REFUSAL);
   if (t.status !== 'in_review') return;
   const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
   if (!owner) throw new Error('You do not have permission to perform this action.');

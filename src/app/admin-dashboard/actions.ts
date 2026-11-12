@@ -21,6 +21,7 @@ import {
   HOLD_REASON_REFUSAL,
   HOLD_REVIEW_RELOAD_REFUSAL,
   PARTNER_DECIDES_HOLD_REFUSAL,
+  canRejectHeld,
   platformHoldRefusal,
   RESCREEN_ONLY_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
@@ -104,8 +105,9 @@ const ROW_FP_MAX = 1000;
  * THROWS one fixed text (the actions are void) and writes nothing:
  *   a. the owner read: a throw (logged by name) or null -> the generic permission text, never
  *      "not certified" (that would reopen the platform path, P2);
- *   b. a queue owner's partner-decided class (the posted class, or any class when none was
- *      posted) -> PARTNER_DECIDES_HOLD_REFUSAL; a release of a list-wait row -> RESCREEN_ONLY;
+ *   b. a reject that canRejectHeld (P12) refuses (a queue owner whose classes are all
+ *      partner-decided), or a queue owner's partner-decided class (the posted class, or any class
+ *      when none was posted) -> PARTNER_DECIDES_HOLD_REFUSAL; a release of a list-wait row -> RESCREEN_ONLY;
  *   c. a missing or invalid holdClass / disposition / rowFp, a disposition the platform may not
  *      give that class, or one of the other direction -> HOLD_REVIEW_RELOAD_REFUSAL (an old tab);
  *   d. the note fails the decision reason rule (P7) -> HOLD_REASON_REFUSAL;
@@ -149,6 +151,11 @@ async function platformReviewGate(
     { queue: holdQueueApplies(owner), partnerDecidesKyc: partnerDecidesKyc(owner) },
     { blocked: transfer.complianceStatus === 'blocked', dataOnFile },
   );
+  // F4 (early review ED2): the P12 reject rule is the enforced rule (canRejectHeld, the same
+  // flags): a queue owner whose classes are all partner-decided is refused before any field check.
+  if (want === 'reject' && !canRejectHeld({ kind: 'platform' }, owner, transfer, flags)) {
+    throw new Error(PARTNER_DECIDES_HOLD_REFUSAL);
+  }
   const rawClass = formData.get('holdClass');
   const holdClass = isHoldClass(rawClass) ? rawClass : null;
   if (holdQueueApplies(owner)) {

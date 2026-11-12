@@ -228,6 +228,8 @@ export async function planHoldDecision(
   void _dropped;
   const pepRefused = pepClearRefusal({ cls, step }, { ...(step.final ? i : withoutClear), expectFinal: step.final });
   if (pepRefused) return refuse(pepRefused);
+  // F4 (EB2): rule 8 of decisionRoute subsumes this today; kept as the last guard, pinned by
+  // tests/hold-step4-guard.test.ts.
   if (
     route.kind === 'reject' &&
     i.actorScope === 'partner' &&

@@ -23,21 +23,25 @@ import { refundHoldBlockedIds, refundHoldRefusals } from '@/lib/refund-row-flags
 import { refundControls } from '@/lib/partner-refunds';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { RECIPIENT_WATCHLIST_REASON } from '@/lib/compliance-config';
+import { readSenderFlagsLocked } from '@/lib/hold-review-tx';
 
 vi.mock('@/lib/outbox', async (orig) => {
   const real = await orig<typeof import('@/lib/outbox')>();
   return { ...real, pokeWorker: () => {} };
 });
 
-// The sender flags read: a counter and a switch that makes it throw.
-const flagsRead = vi.hoisted(() => ({ calls: 0, throws: false }));
+// The sender flags read: a counter, a switch that makes it throw before any SQL, and (F4, early
+// review EE2) one that runs a FAILING statement on the caller's handle first, then delegates.
+const flagsRead = vi.hoisted(() => ({ calls: 0, throws: false, sqlFails: false }));
 vi.mock('@/db/repos/customer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
   return {
     ...real,
     readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
       flagsRead.calls += 1;
       if (flagsRead.throws) throw new Error('flags read failed');
+      if (flagsRead.sqlFails) await a[0].execute(q`select 1/0`);
       return real.readSenderScreeningFlags(...a);
     },
   };
@@ -55,6 +59,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
   flagsRead.calls = 0;
   flagsRead.throws = false;
+  flagsRead.sqlFails = false;
 });
 
 type Row = { kind: string; dedupe_key: string | null };
@@ -147,6 +152,42 @@ describe('refund back doors on real money (P14, D7)', { retry: 0 }, () => {
     flagsRead.throws = true;
     await expect(approveRefund(db, t.id, AUDIT)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
     expect(await refunds()).toEqual([]);
+  });
+
+  it('3c (F4, EE2): the flags SELECT really fails in the transaction: each refund core refuses with REFUND_SANCTIONS_REFUSAL (never a 25P02 error); nothing moves', async () => {
+    await httpOwner();
+    const a = await heldRowFor(db, 'acme', 'kyc', { id: 'rg_3c_a', fundingRef: 'ch_rg_3c_a' });
+    await setRow(a.id, 'cancelled', 'requested');
+    const r = await heldRowFor(db, 'acme', 'kyc', { id: 'rg_3c_r', fundingRef: 'ch_rg_3c_r' });
+    await setRow(r.id, 'cancelled', 'failed');
+    const i = await paidRealMoneyTransfer(db, { id: 'rg_3c_i', partnerId: 'acme', fundingRef: 'ch_rg_3c_i' });
+    flagsRead.sqlFails = true;
+    await expect(approveRefund(db, a.id, AUDIT)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
+    await expect(retryRefund(db, r.id, AUDIT)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
+    await expect(issueRefund(db, i.id, AUDIT)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
+    flagsRead.sqlFails = false;
+    expect(await refunds()).toEqual([]);
+    expect([(await load(a.id)).refundStatus, (await load(r.id)).refundStatus, (await load(i.id)).refundStatus ?? 'none'])
+      .toEqual(['requested', 'failed', 'none']);
+  });
+
+  it('3d (F4, EE2): the locked flags read runs in a savepoint: a real SQL failure answers read:false and the transaction stays usable', async () => {
+    await httpOwner();
+    const t = await paidRealMoneyTransfer(db, { id: 'rg_3d', partnerId: 'acme' });
+    flagsRead.sqlFails = true;
+    const out = await db.transaction(async (tx) => {
+      const r = await readSenderFlagsLocked(tx, t.partnerId, t.phone);
+      // The next statement in the SAME transaction runs (no 25P02).
+      const n = (await tx.execute(sql`SELECT count(*)::int AS n FROM transfers WHERE id = ${t.id}`)) as unknown as { rows: Array<{ n: number }> };
+      return { r, n: n.rows[0].n };
+    });
+    expect(out).toEqual({ r: { read: false, errorName: expect.any(String) }, n: 1 });
+    flagsRead.sqlFails = false;
+    const ok = await db.transaction((tx) => readSenderFlagsLocked(tx, t.partnerId, t.phone));
+    expect(ok.read).toBe(true);
+    expect(ok.read && ok.flags).toHaveProperty('watchlistHit');
+    const none = await db.transaction((tx) => readSenderFlagsLocked(tx, t.partnerId, '15550000000'));
+    expect(none).toEqual({ read: true, flags: null });
   });
 
   it('4: approveRefund, http rail, in_review row of a certified owner, no sanctions class: REFUND_HOLD_FIRST_REFUSAL', async () => {
