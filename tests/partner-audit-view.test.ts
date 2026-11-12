@@ -118,7 +118,7 @@ describe('projectAuditRow', () => {
 
 describe('TENANT_AUDIT_ACTIONS', () => {
   it('the allowlist excludes screening, login and ops rows', () => {
-    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'risk_signals.set', 'aml.hold', 'customer.consent.esign', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
+    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'risk_signals.set', 'aml.hold', 'customer.consent.esign', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review', 'refund.record_outside']) {
       expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
     }
   });
@@ -240,7 +240,19 @@ describe('lost-features audit labels (BL-4)', () => {
   });
   it('KYC decisions and AML reviews are own-only, and own-only actions are all allowlisted', () => {
     expect([...TENANT_OWN_ONLY_ACTIONS].sort()).toEqual(
-      ['aml.reviewed', 'kyc.manual_override.approve', 'kyc.manual_override.create', 'kyc.manual_override.reject', 'kyc.review.approve', 'kyc.review.reject'].sort(),
+      [
+        'aml.reviewed',
+        'kyc.manual_override.approve',
+        'kyc.manual_override.create',
+        'kyc.manual_override.reject',
+        'kyc.review.approve',
+        'kyc.review.reject',
+        // Fix pack 7 T18 (P28, P10-critic): the hold decisions, the evidence views and SmartRemit's
+        // KYC recommendations are the tenant's own rows only (a feed of SmartRemit's would be a screening list, D6).
+        'transfer.hold.review',
+        'transfer.screening.view',
+        'kyc.recommend',
+      ].sort(),
     );
     expect(Object.isFrozen(TENANT_OWN_ONLY_ACTIONS)).toBe(true);
     for (const a of TENANT_OWN_ONLY_ACTIONS) expect(TENANT_AUDIT_ACTIONS).toContain(a);
@@ -427,5 +439,60 @@ describe('otp.verified (pack 4 C17)', () => {
     expect(TENANT_AUDIT_ACTIONS).not.toContain('transfer.legal_name_set');
     expect(actionLabelKey('remittance.disclosure_ack')).toBe('partner.audit.action.other');
     expect(actionLabelKey('transfer.legal_name_set')).toBe('partner.audit.action.other');
+  });
+});
+
+// Fix pack 7 T18 (P28): the hold decision, escalation, evidence view, events URL and KYC
+// recommendation rows. Closed-enum detail only; never a reason, list name, score or class list.
+describe('fix pack 7 T18: hold decision audit rows', () => {
+  const PACK7: Record<string, string> = {
+    'transfer.hold.review': 'Hold decision recorded',
+    'transfer.hold.escalate': 'SmartRemit asked you to decide a hold',
+    'transfer.screening.view': 'Screening evidence viewed',
+    'partner.events_endpoint.update': 'Compliance events URL changed',
+    'kyc.recommend': 'SmartRemit recommendation',
+  };
+  it('pack 7 labels: each action is in TENANT_AUDIT_ACTIONS with its exact English label', () => {
+    for (const [a, label] of Object.entries(PACK7)) {
+      expect(TENANT_AUDIT_ACTIONS, a).toContain(a);
+      expect(t(actionLabelKey(a)), a).toBe(label);
+    }
+    expect(actionLabelKey('transfer.hold.review')).toBe('partner.audit.action.holdReview');
+    expect(actionLabelKey('transfer.hold.escalate')).toBe('partner.audit.action.holdEscalate');
+    expect(actionLabelKey('transfer.screening.view')).toBe('partner.audit.action.screeningView');
+    expect(actionLabelKey('partner.events_endpoint.update')).toBe('partner.audit.action.eventsEndpointUpdate');
+    expect(actionLabelKey('kyc.recommend')).toBe('partner.audit.action.kycRecommend');
+  });
+  it('transfer.hold.review shows holdClass, disposition and step only', () => {
+    const meta = { reviewId: 'hr_1', step: 1, final: true, disposition: 'docs_verified', holdClass: 'kyc', actorScope: 'partner', reason: 'secret note' };
+    const p = projectAuditRow(row({ action: 'transfer.hold.review', subjectId: 'tr_abc123', meta }), tenant);
+    expect(p.actor).toBe('pa-admin');
+    expect(p.detail).toBe('holdClass=kyc, disposition=docs_verified, step=1');
+    for (const v of ['hr_1', 'secret note', 'actorScope', 'final', 'reviewId']) expect(JSON.stringify(p), v).not.toContain(v);
+  });
+  it('transfer.hold.review, transfer.screening.view and kyc.recommend are own-only; escalate and the events URL are not', () => {
+    for (const a of ['transfer.hold.review', 'transfer.screening.view', 'kyc.recommend']) expect(TENANT_OWN_ONLY_ACTIONS, a).toContain(a);
+    for (const a of ['transfer.hold.escalate', 'partner.events_endpoint.update']) expect(TENANT_OWN_ONLY_ACTIONS, a).not.toContain(a);
+  });
+  it('escalate, screening view and kyc.recommend show no detail; escalate by SmartRemit staff reads as SmartRemit', () => {
+    const meta = { holdClasses: ['sanctions_review'], recommendation: 'reject', reason: 'SECRET_REASON', actorScope: 'platform' };
+    for (const action of ['transfer.hold.escalate', 'transfer.screening.view', 'kyc.recommend']) {
+      const p = projectAuditRow(row({ action, meta }), tenant);
+      expect(p.detail, action).toBeNull();
+      for (const v of ['sanctions_review', 'holdClasses', 'recommendation', 'SECRET_REASON']) expect(JSON.stringify(p), action).not.toContain(v);
+    }
+    const esc = projectAuditRow(row({ action: 'transfer.hold.escalate', actor: 'owner-admin', subjectId: 'tr_abc123', meta: { holdClasses: ['sanctions_review'], actorScope: 'platform' } }), tenant, platform);
+    expect(esc.actor).toBe(t('partner.audit.smartremit'));
+    expect(JSON.stringify(esc)).not.toContain('owner-admin');
+    expect(esc.detail).toBeNull();
+  });
+  it('partner.events_endpoint.update shows host only', () => {
+    const p = projectAuditRow(row({ action: 'partner.events_endpoint.update', subjectId: 'pa', meta: { host: 'events.example.test', actorScope: 'partner' } }), tenant);
+    expect(p.detail).toBe('host=events.example.test');
+    expect(JSON.stringify(p)).not.toContain('actorScope');
+  });
+  it('refund.record_outside stays out of the tenant feed (platform-only)', () => {
+    expect(TENANT_AUDIT_ACTIONS).not.toContain('refund.record_outside');
+    expect(actionLabelKey('refund.record_outside')).toBe('partner.audit.action.other');
   });
 });

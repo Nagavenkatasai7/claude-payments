@@ -234,22 +234,35 @@ describe('/partner/onboarding: the posture card', () => {
     expect(card).not.toContain('test-contract');
     expect(card).not.toContain('test-counsel');
   });
-  // Pack 3 review round 2 (H2): the four-eyes rule and the hold decider are RECORDED, not enforced
-  // (no hold-release path reads them; dual control is a later pack). The copy must say so. When the
-  // enforcement ships, flip these assertions on purpose.
-  it('copy truth: the four-eyes box and the signed card call it a recorded commitment SmartRemit does not enforce yet', async () => {
+  // Fix pack 7 T15 (P31, P3, M12): the copy states enforcement only "once live", and four-eyes
+  // only "in your hold queue" (it is enforced where the partner decides, a queue partner). A
+  // partner whose holds SmartRemit decides is never promised a partner-side second approver.
+  it('copy truth: the posture copy says SmartRemit enforces it once live, never "does not enforce", never "must approve"', async () => {
     await signInAs({});
     let card = html2card(decode(await render()));
     const label = /name="fourEyesNonSanctions"[\s\S]*?<\/label>/.exec(card)?.[0] ?? card;
-    expect(label).toMatch(/We commit that a second person approves/);
-    expect(label).toMatch(/does not enforce it yet/);
+    expect(label).toMatch(/We commit that a second person approves the release of every hold that is not a sanctions match\./);
+    expect(label).toMatch(/Once you are live, SmartRemit enforces this in your hold queue\./);
+    expect(card).not.toMatch(/does not enforce/);
     expect(card).not.toMatch(/must approve/);
 
     await certifyPartnerForTest(db, 'pa', { posture: true });
     await db.execute(sql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{posture,fourEyesNonSanctions}', 'true'::jsonb) WHERE id = 'pa'`);
     card = html2card(decode(await render()));
-    expect(card).toMatch(/Recorded commitment: a second person approves the release of every hold that is not a sanctions match\. SmartRemit does not enforce this yet\./);
-    expect(card).toMatch(/records this answer on compliance holds and does not enforce it yet/);
+    expect(card).toMatch(/A second person approves the release of every hold that is not a sanctions match\. SmartRemit enforces this in your hold queue while your signed posture says so\./);
+    expect(card).not.toMatch(/SmartRemit decides your holds/);
+    expect(card).toMatch(/Once you are live, this answer decides who releases or rejects your compliance holds\. Sanctions matches stay with SmartRemit\./);
+    expect(card).not.toMatch(/does not enforce/);
+    expect(card).not.toMatch(/records this answer/);
+    expect(card).not.toMatch(/must approve/);
+
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{posture,holdDecider}', '"smartremit_delegated"'::jsonb) WHERE id = 'pa'`);
+    card = html2card(decode(await render()));
+    expect(card).toMatch(/SmartRemit decides your holds; a second SmartRemit approver is not enforced yet\./);
+    expect(card).not.toMatch(/enforces this in your hold queue/);
+    expect(card).toMatch(/Once you are live, this answer decides who releases or rejects your compliance holds\. Sanctions matches stay with SmartRemit\./);
+    expect(card).not.toMatch(/does not enforce/);
+    expect(card).not.toMatch(/records this answer/);
     expect(card).not.toMatch(/must approve/);
   });
   it('a partner read failure -> the card shows unavailable, the checklist still renders', async () => {

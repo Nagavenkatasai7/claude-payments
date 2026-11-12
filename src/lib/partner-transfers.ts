@@ -208,6 +208,9 @@ export const TIMELINE_AUDIT_ACTIONS = Object.freeze([
   'transfer.cancel',
   'transfer.paylink.resend',
   'refund.issue',
+  // Fix pack 7 (P28): a hold decision step and SmartRemit's escalation, one plain row each.
+  'transfer.hold.review',
+  'transfer.hold.escalate',
 ] as const);
 
 const PLAIN_ROWS: Readonly<Record<string, { kind: TimelineKind; label: MessageKey }>> = Object.freeze({
@@ -217,6 +220,8 @@ const PLAIN_ROWS: Readonly<Record<string, { kind: TimelineKind; label: MessageKe
   'transfer.cancel': { kind: 'cancel', label: 'partner.transfers.timeline.cancel' },
   'transfer.paylink.resend': { kind: 'resend', label: 'partner.transfers.timeline.resend' },
   'refund.issue': { kind: 'refundIssue', label: 'partner.transfers.timeline.refundIssue' },
+  'transfer.hold.review': { kind: 'holdReview', label: 'partner.transfers.timeline.holdReview' },
+  'transfer.hold.escalate': { kind: 'holdEscalate', label: 'partner.transfers.timeline.holdEscalate' },
 });
 
 export interface TimelineAuditRow {
@@ -226,7 +231,7 @@ export interface TimelineAuditRow {
   actorType?: string;
   meta: unknown;
 }
-export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'assign' | 'cancel' | 'resend' | 'refundIssue' | 'delivered' | 'refunded';
+export type TimelineKind = 'created' | 'paid' | 'note' | 'release' | 'reject' | 'assign' | 'cancel' | 'resend' | 'refundIssue' | 'holdReview' | 'holdEscalate' | 'delivered' | 'refunded';
 export interface TimelineRow {
   at: string;
   kind: TimelineKind;

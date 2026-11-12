@@ -14,6 +14,11 @@ import { applyKycEvent } from './kyc-state-machine';
 import type { PersonaEvent } from './providers/persona-webhook-parse';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { clearPepInTx, KycScreeningChangedError } from './sender-screening';
+import { senderPepOnly } from './hold-queue';
+import type { KycDecisionExtraMeta } from './partner-reviews';
+import { sanitizeKycExtraMeta } from './partner-kyc-decision';
 
 /**
  * kyc-case-store (Phase 2, Task 9) — the KYC review case layer.
@@ -29,6 +34,10 @@ import { pokeWorker } from '@/lib/outbox';
  * trail: it still carries Persona events (applyDelta) and pre-fix history, and
  * a durable decision's Redis copy is tagged `durable: true` so the page does not
  * show it twice (the old build, during a rollout, still shows it).
+ *
+ * Fix pack 7 (P22): `review`'s durable options also take `extraMeta`, `pepClear` and
+ * `pepClearable` for a partner that decides KYC (DurableReviewOpts); every option absent ⇒ the
+ * same statements, rows and meta as before.
  */
 
 const EVT_TTL = 30 * 24 * 60 * 60; // 30d replay-dedup window
@@ -77,6 +86,35 @@ export interface DurableReviewOpts {
    * only by the /partner decision ('partner'); absent ⇒ the meta is byte-identical to before.
    */
   actorScope?: 'platform' | 'partner';
+  /**
+   * Fix pack 7 (P22): the closed disposition / EDD keys of a partner that decides KYC, merged
+   * into the decision's audit meta through sanitizeKycExtraMeta (closed keys, bounded,
+   * number-free note). Absent ⇒ the meta is byte-identical to before.
+   */
+  extraMeta?: KycDecisionExtraMeta;
+  /**
+   * Fix pack 7 (P22, P23): a partner that decides KYC acts on a PEP-only flag. Inside the
+   * locked transaction the row must be PEP-only (senderPepOnly: no watchlist hit, no uncovered
+   * watchlist stamp) at the posted flag time, else KycScreeningChangedError (nothing written).
+   * An approve then clears the PEP-only hold through clearPepInTx before the save; a reject only
+   * re-checks. Absent ⇒ today.
+   */
+  pepClear?: { reviewedFlaggedAt: string };
+  /**
+   * Fix pack 7 (P22): the locked re-check uses isScreeningCustomerHold(c, { pepClearable: true })
+   * (a PEP-only hit already lifted by a later clear no longer refuses; a watchlist hit or stamp
+   * still does). The caller passes partnerDecidesKyc(owner). Absent ⇒ today's rule.
+   */
+  pepClearable?: boolean;
+}
+
+/** The posted reviewed flag time as ISO ('' for none); null when unreadable (admin customers/actions.ts reviewedFlaggedAt). */
+function normaliseFlaggedAt(raw: string): string | null {
+  if (typeof raw !== 'string') return null;
+  const v = raw.trim();
+  if (v === '') return '';
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
 /** One line of the customer page's KYC audit trail. */
@@ -207,7 +245,8 @@ export function createKycCaseStore(
         // clear on the locked row, so a clear that won the lock first never
         // outranks this match.
         if (delta.pepHit === true || delta.watchlistHit === true) {
-          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(now()));
+          // Fix pack 7 (R2): a watchlist match also records screening_watchlist_at.
+          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(now()), delta.watchlistHit === true ? 'watchlist' : 'pep');
         }
         if (event.matchKind !== undefined && opts.alertMessage) {
           const message =
@@ -235,6 +274,12 @@ export function createKycCaseStore(
       return result;
     },
 
+    /**
+     * The human KYC decision. With `durable`: ONE locked transaction (lock, re-read, the
+     * screening re-check, an optional partner PEP clear (pack 7, P22: `pepClear` on approve), the
+     * save, the audit row with the optional `extraMeta` keys). Without it: the legacy Redis path,
+     * which ignores every pack 7 option.
+     */
     async review(
       partnerId: PartnerId,
       phone: string,
@@ -285,10 +330,31 @@ export function createKycCaseStore(
         if (!(await txCustomers.lockCustomer(partnerId, phone))) return null;
         const c = await txCustomers.getCustomer(partnerId, phone);
         if (!c) return null;
-        if (durable.allowScreeningHold !== true && isScreeningCustomerHold(c)) {
+        if (durable.pepClear) {
+          // Fix pack 7 (P22): the locked row must still be the PEP-only flag the partner reviewed.
+          const want = normaliseFlaggedAt(durable.pepClear.reviewedFlaggedAt);
+          const flags = await readSenderScreeningFlags(tx, partnerId, phone, { forUpdate: true });
+          const locked = flags?.screeningFlaggedAt ? flags.screeningFlaggedAt.toISOString() : '';
+          if (!flags || !senderPepOnly(flags) || want === null || want !== locked) throw new KycScreeningChangedError();
+        }
+        if (
+          durable.allowScreeningHold !== true &&
+          isScreeningCustomerHold(c, durable.pepClearable === true ? { pepClearable: true } : undefined)
+        ) {
           throw new Error('You do not have permission to perform this action.');
         }
         const next = decide(c);
+        if (durable.pepClear && decision === 'approve') {
+          // Re-locks the same row (one transaction, no deadlock); its own checks are the authority.
+          // screening_* columns are read-only in the row mapping, so the save below keeps the clear.
+          await clearPepInTx(tx, {
+            partnerId,
+            phone,
+            reviewedFlaggedAt: durable.pepClear.reviewedFlaggedAt,
+            actor: durable.actor,
+            via: 'kyc_decision',
+          });
+        }
         await txCustomers.saveCustomer(next);
         await createAuditRepo(tx).record({
           partnerId,
@@ -303,6 +369,7 @@ export function createKycCaseStore(
             source: durable.source,
             reviewerName: reviewer,
             ...(durable.actorScope ? { actorScope: durable.actorScope } : {}),
+            ...(durable.extraMeta ? sanitizeKycExtraMeta(durable.extraMeta) : {}),
           },
         });
         return next;

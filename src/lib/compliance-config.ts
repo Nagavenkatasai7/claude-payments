@@ -2,6 +2,7 @@ import type { CountryCode, Partner } from './types';
 import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
 import { RISK_SIGNALS, RISK_SIGNALS_OFF, type RiskSignal, type RiskSignalConfig } from './risk-signals';
+import { partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -155,6 +156,9 @@ export function isRecipientIdentityHold(t: { complianceReasons?: readonly string
   return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON);
 }
 
+/** The owner fields the legacy partner hold rule reads (a full Partner, or just { kycMode } in pure tests). */
+export type LegacyHoldOwner = { kycMode?: string | null; id?: string; status?: string; liveControls?: unknown };
+
 /**
  * SPEC §3.3 + D7: a partner admin may release ONLY a delegated partner's
  * KYC-class hold. Fails CLOSED: an unknown KYC mode, a missing partner, a
@@ -171,12 +175,20 @@ export function isRecipientIdentityHold(t: { complianceReasons?: readonly string
  * KYC-class. REQUIRED, and a missing row or failed lookup (null / undefined)
  * ⇒ false. Fix pack 2 review F2: `sender` carries the stamp times too, and a
  * stamped, uncleared hold refuses like a boolean hit (isScreeningCustomerHold).
+ *
+ * Fix pack 7 (P11, DP5): this legacy one-step path (no review record, the release with no
+ * step-up) is CLOSED for every live-certified partner, whatever its posture
+ * (reviewRecordApplies). A certified queue partner decides in the hold queue (decideHoldAction);
+ * a certified delegated partner's holds are decided by SmartRemit with a recorded review. An
+ * owner without id / status / liveControls reads as not certified, so every partner that is not
+ * certified (all of them today) gets today's answer.
  */
 export function isPartnerReleasableHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
-  owner: { kycMode?: string | null } | null | undefined,
+  owner: LegacyHoldOwner | null | undefined,
   sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
+  if (owner && reviewRecordApplies(owner as ScopeOwner)) return false;
   if (!owner || owner.kycMode !== 'delegated') return false;
   if (!sender || isScreeningCustomerHold(sender)) return false;
   if (t.status !== 'in_review' || t.complianceStatus === 'blocked') return false;
@@ -234,6 +246,11 @@ export interface CustomerScreeningFlags {
   pepHit?: boolean | null;
   screeningFlaggedAt?: string | Date | null;
   screeningClearedAt?: string | Date | null;
+  /**
+   * Fix pack 7 (P4, R2): when a WATCHLIST hit was last stamped (0041 column).
+   * undefined = not read (never PEP-only, senderPepOnly); null = read, empty.
+   */
+  screeningWatchlistAt?: string | Date | null;
 }
 
 /**
@@ -250,9 +267,31 @@ export interface CustomerScreeningFlags {
  * boolean hit still refuses partner staff. The SQL twin is
  * senderClearForPartnerRelease (transfer-repo.ts); a table-driven test
  * (tests/sender-screening-hold-parity.test.ts) runs both on the same cases.
+ *
+ * Fix pack 7 (P22, T9): `o.pepClearable` is ONLY for an owner whose partner
+ * decides KYC (partnerDecidesKyc): a PEP-only hit lifted by a later clear (the
+ * partner's own clearPepInTx, or a platform clear) no longer refuses its
+ * compliance users; a watchlist hit always does, and so does a watchlist stamp
+ * (screeningWatchlistAt) that no readable, strictly later clear covers (a stale
+ * save may have nulled watchlistHit). The SQL twin takes the same option.
+ * Absent or false: today's rule, unchanged.
  */
-export function isScreeningCustomerHold(c: CustomerScreeningFlags): boolean {
+export function isScreeningCustomerHold(c: CustomerScreeningFlags, o?: { pepClearable?: boolean }): boolean {
+  if (o?.pepClearable === true) {
+    return c.watchlistHit === true || senderScreeningHoldActive(c) || watchlistStampActive(c);
+  }
   return c.watchlistHit === true || c.pepHit === true || senderScreeningHoldActive(c);
+}
+
+/** A watchlist stamp that no readable, strictly later clear covers (an unreadable time stays held). */
+function watchlistStampActive(c: CustomerScreeningFlags): boolean {
+  const wl = c.screeningWatchlistAt ?? null;
+  if (wl == null) return false;
+  const cleared = c.screeningClearedAt ?? null;
+  if (cleared == null) return true;
+  const cl = toMs(cleared);
+  const w = toMs(wl);
+  return !(Number.isFinite(cl) && Number.isFinite(w) && cl > w);
 }
 
 /**
@@ -267,12 +306,18 @@ export function senderScreeningLabel(c: CustomerScreeningFlags): 'watchlist' | '
   return isScreeningCustomerHold(c) ? 'hold' : 'clear';
 }
 
-/** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold. */
+/**
+ * Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold.
+ * Fix pack 7 (P25, T24): platform staff may NOT decide for an owner whose partner decides KYC
+ * (partnerDecidesKyc): its KYC is decided in its own workspace, SmartRemit records a
+ * recommendation. An absent or null owner is today's rule (callers pass it from T27).
+ */
 export function canDecideCustomerKyc(
   scope: { kind: 'platform' | 'partner' },
   c: CustomerScreeningFlags,
+  owner?: ScopeOwner | null,
 ): boolean {
-  if (scope.kind === 'platform') return true;
+  if (scope.kind === 'platform') return !partnerDecidesKyc(owner);
   return !isScreeningCustomerHold(c);
 }
 

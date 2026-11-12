@@ -68,6 +68,12 @@ describe('crypto-context pins the exact AAD strings', () => {
       ctx.railMessage('0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 2, 'callback'),
       'v2|k0|rail_messages|body_enc|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|2|callback',
     ],
+    // Fix pack 7 (P20): a signed partner compliance event, sealed under its own kind.
+    [
+      'rail message out event',
+      ctx.railMessage('0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 1, 'event'),
+      'v2|k0|rail_messages|body_enc|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|1|event',
+    ],
   ];
   it.each(cases)('%s', (_name, c, expected) => {
     expect(aadFor(c)).toBe(expected);

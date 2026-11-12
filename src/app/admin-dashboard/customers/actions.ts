@@ -23,6 +23,21 @@ import { sealCustomerRef, auditSubjectId } from '@/lib/customer-ref';
 import type { CountryCode, KycStatus, PartnerId, Staff } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { partnerDecidesKyc } from '@/lib/partner-decision-scope';
+import { senderPepOnly } from '@/lib/hold-queue';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { parseHoldReason } from '@/lib/hold-decision';
+import { HOLD_REASON_REFUSAL } from '@/lib/dashboard-ops';
+import { logWarn } from '@/lib/log';
+import {
+  PARTNER_DECIDES_KYC_REFUSAL,
+  PARTNER_WORKSPACE_KYC_REFUSAL,
+  PARTNER_CREATE_KYC_REFUSAL,
+  PARTNER_PEP_CLEAR_REFUSAL,
+  KYC_RECOMMENDATION_ONLY_REFUSAL,
+  KYC_RECOMMENDATION_INVALID,
+} from '@/lib/partner-kyc-decision';
+import type { Partner } from '@/lib/partner-store';
 
 const VALID_COUNTRIES = new Set<CountryCode>(SUPPORTED_DESTINATIONS);
 
@@ -70,6 +85,32 @@ function targetPartnerId(staff: { partnerId?: string }, formData: FormData): Par
   return requested;
 }
 
+const NOT_ALLOWED = 'You do not have permission to perform this action.';
+
+/**
+ * Fix pack 7 T27 (P25): who decides this tenant's KYC. The default tenant is never read (it never
+ * decides KYC). Any other tenant is read through the partner store; a read that throws or finds no
+ * row is a REFUSAL with the permission text, never "not certified" (platformReviewGate's rule,
+ * admin-dashboard/actions.ts). The owner is returned so canDecideCustomerKyc gets it.
+ */
+async function deciderOwner(partnerId: PartnerId): Promise<{ decides: boolean; owner: Partner | null }> {
+  if (partnerId === DEFAULT_PARTNER_ID) return { decides: false, owner: null };
+  let owner: Partner | null;
+  try {
+    owner = await getPartnerStore().getPartner(partnerId);
+  } catch (err) {
+    logWarn('admin.kyc.owner-read', err instanceof Error ? err.name : 'error', { partnerId });
+    owner = null;
+  }
+  if (!owner) throw new Error(NOT_ALLOWED);
+  return { decides: partnerDecidesKyc(owner), owner };
+}
+
+/** P25: a deciding partner's KYC is decided in its own workspace; SmartRemit staff are refused. */
+function refuseDecidingPartner(staff: Staff): never {
+  throw new Error(scopeOf(staff).kind === 'platform' ? PARTNER_DECIDES_KYC_REFUSAL : PARTNER_WORKSPACE_KYC_REFUSAL);
+}
+
 /** "Main Admin (forextransfer)" — the display string kept in kycApprovedBy / meta.reviewerName. */
 function reviewerDisplay(staff: Pick<Staff, 'name' | 'username'>): string {
   return staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
@@ -110,7 +151,10 @@ export async function manualKycDecisionAction(formData: FormData): Promise<void>
   // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to
   // decide — refused before any mutation (re-checked on the locked row).
   const platformStaff = scopeOf(staff).kind === 'platform';
-  if (!canDecideCustomerKyc(scopeOf(staff), customer)) {
+  // Fix pack 7 T27 (P25): a partner that decides KYC decides it in its own workspace.
+  const { decides, owner } = await deciderOwner(customer.partnerId);
+  if (decides) refuseDecidingPartner(staff);
+  if (!canDecideCustomerKyc(scopeOf(staff), customer, owner)) {
     throw new Error('You do not have permission to perform this action.');
   }
   if (decision === 'approve' && (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered')) {
@@ -155,7 +199,10 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to
   // decide — refused before any mutation (re-checked on the locked row).
   const platformStaff = scopeOf(staff).kind === 'platform';
-  if (!canDecideCustomerKyc(scopeOf(staff), customer)) {
+  // Fix pack 7 T27 (P25): a partner that decides KYC decides it in its own workspace.
+  const { decides, owner } = await deciderOwner(customer.partnerId);
+  if (decides) refuseDecidingPartner(staff);
+  if (!canDecideCustomerKyc(scopeOf(staff), customer, owner)) {
     throw new Error('You do not have permission to perform this action.');
   }
 
@@ -221,6 +268,11 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
       if (!partner) throw new Error('Selected partner not found.');
       partnerId = requested;
     }
+  }
+  // Fix pack 7 T27 (P25): a partner that decides KYC is created with KYC not started (no read
+  // for not_started: the same statements as before).
+  if (kycStatus !== 'not_started' && (await deciderOwner(partnerId)).decides) {
+    throw new Error(PARTNER_CREATE_KYC_REFUSAL);
   }
 
   // Collision check is per (tenant, phone) since fix 1 — the same number may
@@ -438,10 +490,24 @@ export async function clearSenderScreeningHoldAction(formData: FormData): Promis
   const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
   if (!customer) throw new Error('Customer not found.');
   if (!senderScreeningHoldActive(customer)) throw new NoScreeningHold();
+  // Fix pack 7 T27 (P25): a PEP-only sender hold of a partner that decides KYC is the partner's
+  // to decide. The flags come from readSenderScreeningFlags (R2: the Customer object lacks the
+  // watchlist stamp); a watchlist or stamp-only flag stays SmartRemit's. Re-checked on the
+  // locked row below. Any other tenant: no new read.
+  const { decides } = await deciderOwner(customer.partnerId);
+  if (decides) {
+    const flags = await readSenderScreeningFlags(getDb(), customer.partnerId, customer.senderPhone);
+    if (senderPepOnly(flags) && senderScreeningHoldActive(flags)) throw new Error(PARTNER_PEP_CLEAR_REFUSAL);
+  }
 
   await getDb().transaction(async (tx) => {
     // tx-bound repos ONLY inside the transaction (a root-handle call here would
     // deadlock PGlite's single connection / hold a second Neon pool connection).
+    if (decides) {
+      // T27: the PEP-only test again on the row locked FOR UPDATE (before the clear writes it).
+      const locked = await readSenderScreeningFlags(tx, customer.partnerId, customer.senderPhone, { forUpdate: true });
+      if (senderPepOnly(locked) && senderScreeningHoldActive(locked)) throw new Error(PARTNER_PEP_CLEAR_REFUSAL);
+    }
     const { found, previous } = await createCustomerStore(tx, getStore()).clearScreeningHold(
       customer.partnerId, customer.senderPhone,
     );
@@ -468,5 +534,45 @@ export async function clearSenderScreeningHoldAction(formData: FormData): Promis
     });
   });
   revalidatePath('/admin-dashboard/customers');
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
+}
+
+/**
+ * Fix pack 7 T27 (P25): SmartRemit's RECOMMENDATION on the KYC of a customer of a partner that
+ * decides KYC (partnerDecidesKyc). The partner decides; this records what SmartRemit recommends.
+ * Server-action checklist, in order:
+ *  1. refuseOnSiteHost + requireAdmin; platform scope only (partner-scoped staff decide in their
+ *     own workspace: PARTNER_WORKSPACE_KYC_REFUSAL);
+ *  2. the phone and the named tenant (targetPartnerId), the customer read + canSee ('Customer not
+ *     found.');
+ *  3. the owner read (deciderOwner: a failed or empty read refuses) must decide KYC, else
+ *     KYC_RECOMMENDATION_ONLY_REFUSAL;
+ *  4. recommendation approve | reject, else 'Invalid recommendation.'; the reason passes the P7
+ *     rule (parseHoldReason: 10-500 characters, no long digit run), else HOLD_REASON_REFUSAL;
+ *  5. ONE audit_events row `kyc.recommend` (keyed subject, meta { recommendation, reason }).
+ * No customer write, no notify, no outbox row.
+ */
+export async function recordKycRecommendationAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
+  const staff = await requireAdmin();
+  if (scopeOf(staff).kind !== 'platform') throw new Error(PARTNER_WORKSPACE_KYC_REFUSAL);
+  const phone = String(formData.get('phone') ?? '').trim();
+  if (!phone) throw new Error('Phone is required.');
+  const partnerId = targetPartnerId(staff, formData);
+  const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
+  if (!customer || !canSee(scopeOf(staff), customer.partnerId)) throw new Error('Customer not found.');
+  if (!(await deciderOwner(customer.partnerId)).decides) throw new Error(KYC_RECOMMENDATION_ONLY_REFUSAL);
+  const recommendation = String(formData.get('recommendation') ?? '');
+  if (recommendation !== 'approve' && recommendation !== 'reject') throw new Error(KYC_RECOMMENDATION_INVALID);
+  const parsed = parseHoldReason(formData.get('reason'));
+  if (!parsed.ok) throw new Error(HOLD_REASON_REFUSAL);
+  await createAuditRepo(getDb()).record({
+    partnerId: customer.partnerId,
+    actor: staff.username,
+    actorType: 'staff',
+    action: 'kyc.recommend',
+    subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
+    meta: { recommendation, reason: parsed.reason },
+  });
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

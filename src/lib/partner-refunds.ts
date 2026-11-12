@@ -22,13 +22,23 @@ export interface RefundControls {
   retry: boolean;
 }
 
-/** What to offer for one refund. Admin only; requested → approve / dismiss, failed → retry. */
-export function refundControls(refundStatus: RefundStatus | undefined, role: PartnerRole): RefundControls {
+/**
+ * What to offer for one refund. Admin only; requested → approve / dismiss, failed → retry.
+ * Fix pack 7 T16b (P14, D7): `holdBlocked` (refundHoldBlockedIds: a sanctions hold on a
+ * real-money row, or a certified owner's held row) hides approve and retry; dismiss moves no
+ * money and stays. Absent options = unchanged. (T38 adds `cardRefundBlocked` to this object.)
+ */
+export function refundControls(
+  refundStatus: RefundStatus | undefined,
+  role: PartnerRole,
+  o: { holdBlocked?: boolean } = {},
+): RefundControls {
   const admin = role === 'admin';
+  const moves = !o.holdBlocked;
   return {
-    approve: admin && refundStatus === 'requested',
+    approve: admin && moves && refundStatus === 'requested',
     dismiss: admin && refundStatus === 'requested',
-    retry: admin && refundStatus === 'failed',
+    retry: admin && moves && refundStatus === 'failed',
   };
 }
 
@@ -69,7 +79,7 @@ export interface PartnerRefundRow {
   controls: RefundControls;
 }
 
-export function toPartnerRefundRow(tr: Transfer, role: PartnerRole): PartnerRefundRow {
+export function toPartnerRefundRow(tr: Transfer, role: PartnerRole, o: { holdBlocked?: boolean } = {}): PartnerRefundRow {
   const refundStatus = tr.refundStatus ?? 'none';
   return {
     id: tr.id,
@@ -81,6 +91,6 @@ export function toPartnerRefundRow(tr: Transfer, role: PartnerRole): PartnerRefu
     refundStatus,
     test: (tr.environment ?? 'live') === 'test',
     at: refundStatus === 'completed' && tr.refundedAt ? tr.refundedAt : tr.createdAt,
-    controls: refundControls(refundStatus, role),
+    controls: refundControls(refundStatus, role, o),
   };
 }

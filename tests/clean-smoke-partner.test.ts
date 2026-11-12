@@ -7,6 +7,8 @@ import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { RAIL_OUT, createRailMessageRepo } from '@/db/repos/rail-message-repo';
+import { createHoldReviewRepo } from '@/db/repos/hold-review-repo';
+import { seedPartnerTransfer } from './helpers-partner-app';
 import { partnerGoLive, partnerPortalSettings, partnerReportJobs, partnerSites, partnerSlugTombstones, partnerWebhookDeliveries } from '@/db/schema';
 
 // Program-Fix 45 P5: the staff ledger's partner_id FK means the smoke
@@ -104,6 +106,22 @@ describe('clean-smoke-partner', () => {
     expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
     expect(await count(`SELECT count(*)::int AS n FROM rail_messages WHERE rail_partner_id = 'p_smoke'`)).toBe(1);
     expect(lines.join('\n')).toMatch(/skip p_smoke .*1 rail messages/);
+  });
+
+  it('SKIPS a smoke partner that has hold_reviews rows, and keeps them', async () => {
+    // Fix pack 7 T4 (P1, D3): the append-only hold decision record is never deleted.
+    await seedPartner(db, 'pa');
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    await seedPartnerTransfer(db, { id: 'tq', partnerId: 'pa' });
+    await createHoldReviewRepo(db).insert({
+      transferId: 'tq', partnerId: 'p_smoke', holdClass: 'kyc', reasonsFp: 'v1|kyc|x', step: 1, final: true,
+      disposition: 'documents_verified', reason: 'Documents checked and fine', evidence: {}, actor: 'co-a', actorScope: 'partner',
+    });
+    const lines: string[] = [];
+    await cleanSmokePartners(db, (l) => lines.push(l));
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM hold_reviews WHERE partner_id = 'p_smoke'`)).toBe(1);
+    expect(lines.join('\n')).toMatch(/skip p_smoke .*1 hold reviews/);
   });
 
   it('never touches a partner with a different name', async () => {

@@ -116,11 +116,23 @@ const fundingGate = () =>
  * Fix pack 2 review F2 (A2, B1): AND no stamped screening hold that a LATER clear does not cover
  * (a tie stays held) — the SQL twin of isScreeningCustomerHold (compliance-config.ts), pinned
  * equal by tests/sender-screening-hold-parity.test.ts. Also guards cancelInReviewForPartner.
+ * Fix pack 7 (P22, T9): exported for that parity test only; `o.pepClearable` is the twin of
+ * isScreeningCustomerHold's option. No production caller passes it in pack 7 (markPaidIfInReview
+ * and cancelInReviewForPartner call it with no option: the SQL text is byte-identical).
  */
-const senderClearForPartnerRelease = (partnerId: PartnerId) => [
-  eq(transfers.partnerId, partnerId),
-  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
-];
+export const senderClearForPartnerRelease = (partnerId: PartnerId, o?: { pepClearable?: boolean }) =>
+  o?.pepClearable === true
+    ? [
+        eq(transfers.partnerId, partnerId),
+        // Fix pack 7 (P22, P23, T9): the exact negation of isScreeningCustomerHold(c, { pepClearable: true }):
+        // no watchlist hit; no PEP hit or stamp left uncovered by a later clear; no watchlist stamp left
+        // uncovered by a strictly later clear.
+        sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.watchlistHit} IS NOT TRUE AND ((${customers.pepHit} IS NOT TRUE AND ${customers.screeningFlaggedAt} IS NULL) OR (${customers.screeningClearedAt} IS NOT NULL AND (${customers.screeningFlaggedAt} IS NULL OR ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt}))) AND (${customers.screeningWatchlistAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningWatchlistAt})))`,
+      ]
+    : [
+        eq(transfers.partnerId, partnerId),
+        sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
+      ];
 
 /**
  * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /
@@ -508,22 +520,34 @@ export function createTransferRepo(
     async failPaidFromRail(
       id: string,
       note: string,
+      // Fix pack 7 T16 (P14, D7): true keeps the refund state of a sanctions-BLOCKED row (the row
+      // still cancels); the caller passes it only on real money. Without it the SQL is unchanged.
+      opts: { keepRefundWhenBlocked?: boolean } = {},
     ): Promise<{ prior: Transfer | null; updated: Transfer | null }> {
       const locked = await db.select().from(transfers).where(eq(transfers.id, id)).limit(1).for('update');
       const prior = locked[0] ? toDomain(locked[0]) : null;
       if (!prior || prior.status !== 'paid') return { prior, updated: null };
+      const refundStatus = opts.keepRefundWhenBlocked
+        ? sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              AND ${transfers.complianceStatus} <> 'blocked'
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`
+        : sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`;
       const rows = await db
         .update(transfers)
         .set({
           status: 'cancelled',
           // APPENDED, never clobbered: a rail must not erase a staff note.
           adminNote: sql`CASE WHEN COALESCE(${transfers.adminNote}, '') = '' THEN ${note} ELSE ${transfers.adminNote} || ' | ' || ${note} END`,
-          refundStatus: sql`CASE
-            WHEN ${transfers.refundStatus} IN ('none', 'requested')
-              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
-              THEN 'pending'
-            ELSE ${transfers.refundStatus}
-          END`,
+          refundStatus,
         })
         .where(and(eq(transfers.id, id), eq(transfers.status, 'paid')))
         .returning();

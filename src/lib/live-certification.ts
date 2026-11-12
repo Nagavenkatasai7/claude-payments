@@ -10,6 +10,7 @@
 
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { EMPTY_LIVE_CONTROLS, postureSigned, type KycDecider } from './live-controls';
+import { isQualifiedComplianceUser } from './partner-decision-scope';
 import { resolveKycMode, resolvePartnerDisclosure } from './partner-config';
 import type { ListFitness } from './sanctions/list-policy';
 import type { Partner, PartnerId, StaffRole } from './types';
@@ -32,7 +33,6 @@ export interface LiveReadinessLine { id: LiveReadinessLineId; state: 'pass' | 'f
 export interface LiveReadiness { ok: boolean; lines: LiveReadinessLine[] }
 
 const MIN_COMPLIANCE_USERS = 2;
-const COMPLIANCE_ROLES: ReadonlySet<StaffRole> = new Set<StaffRole>(['admin', 'agent']);
 
 function isNotBuilt(id: LiveReadinessLineId): id is keyof typeof NOT_BUILT_LINES {
   return Object.prototype.hasOwnProperty.call(NOT_BUILT_LINES, id);
@@ -58,10 +58,10 @@ export function liveReadiness(
 
   // Only a username the partner LISTED counts, once, and only when its staff
   // record is this tenant's, an admin or agent, active and MFA-enrolled.
-  const listed = new Set(lc.complianceUsers);
+  // The rule is isQualifiedComplianceUser (fix pack 7 T2), shared with the hold and KYC decisions.
   const qualified = new Set(
     f.complianceStaff
-      .filter((s) => listed.has(s.username) && s.partnerId === p.id && COMPLIANCE_ROLES.has(s.role) && s.active && s.mfaEnrolled)
+      .filter((s) => isQualifiedComplianceUser(p, s, s.mfaEnrolled))
       .map((s) => s.username),
   );
 

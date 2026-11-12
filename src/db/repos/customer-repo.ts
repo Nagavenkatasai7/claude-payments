@@ -102,6 +102,9 @@ export function createCustomerRepo(
     // single-column writers, so saveCustomer's whole-row upsert cannot touch them.
     set('screeningFlaggedAt', isoOpt(row.screeningFlaggedAt));
     set('screeningClearedAt', isoOpt(row.screeningClearedAt));
+    // Fix pack 7 (R2): READ-ONLY too (never in customerToRow); only
+    // stampScreeningFlagged(kind 'watchlist') writes it. Absent when NULL.
+    set('screeningWatchlistAt', isoOpt(row.screeningWatchlistAt));
     // Fix pack 6 (R46): READ-ONLY here (never in customerToRow):
     // recordEsignConsent / withdrawEsignConsent are the only writers, so no
     // whole-row save or insert can set or clear a consent.
@@ -458,11 +461,21 @@ export function createCustomerRepo(
      * never moves it back: two matches never share a flag time, and a clear
      * posting an older reviewed time is refused (ScreeningChanged).
      */
-    async stampScreeningFlagged(partnerId: PartnerId, senderPhone: string, at: Date): Promise<boolean> {
+    async stampScreeningFlagged(
+      partnerId: PartnerId,
+      senderPhone: string,
+      at: Date,
+      kind: 'pep' | 'watchlist',
+    ): Promise<boolean> {
+      const stamp = sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond', ${customers.screeningFlaggedAt} + interval '1 millisecond')`;
       const rows = await db
         .update(customers)
         .set({
-          screeningFlaggedAt: sql`greatest(${at.toISOString()}::timestamptz, ${customers.screeningClearedAt} + interval '1 millisecond', ${customers.screeningFlaggedAt} + interval '1 millisecond')`,
+          screeningFlaggedAt: stamp,
+          // Fix pack 7 (R2, P23 "Stamp kind"): a WATCHLIST match also records its own time, the
+          // same greatest(...) value (computed on the pre-update row), so a stale whole-row save
+          // that nulls watchlist_hit can never make the sender look PEP-only (senderPepOnly).
+          ...(kind === 'watchlist' ? { screeningWatchlistAt: stamp } : {}),
           updatedAt: new Date(),
         })
         .where(tenantKey(partnerId, senderPhone))
@@ -726,6 +739,11 @@ export interface SenderScreeningFlags {
   pepHit: boolean | null;
   screeningFlaggedAt: Date | null;
   screeningClearedAt: Date | null;
+  /**
+   * Fix pack 7 (R2): the last WATCHLIST stamp (0041), read by readSenderScreeningFlags only
+   * (clearScreeningHold's `previous` keeps the four columns above, so it is optional here).
+   */
+  screeningWatchlistAt?: Date | null;
 }
 
 const SCREENING_FLAG_COLUMNS = {
@@ -735,10 +753,13 @@ const SCREENING_FLAG_COLUMNS = {
   screeningClearedAt: customers.screeningClearedAt,
 };
 
+/** Fix pack 7 (R2): readSenderScreeningFlags also reads the watchlist stamp (null = read, empty). */
+const SENDER_FLAG_COLUMNS = { ...SCREENING_FLAG_COLUMNS, screeningWatchlistAt: customers.screeningWatchlistAt };
+
 /**
  * M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release.
  * TENANT-SCOPED by (partner_id, phone), like getCustomer; selects ONLY the two boolean columns and
- * (fix pack 2, R06) the two hold times: no PII column, no decrypt. null when this tenant has no row
+ * (fix pack 2, R06) the two hold times, and (fix pack 7, R2) the watchlist stamp time: no PII column, no decrypt. null when this tenant has no row
  * for the phone. Throws on a DB error: lib/sender-screening.ts turns that into a fail-closed null;
  * the fix pack 2 mint / pay / sweep callers let it throw (nothing paid). `opts.forUpdate` locks
  * the row (the platform release's in-transaction re-check, settlement.ts).
@@ -750,7 +771,7 @@ export async function readSenderScreeningFlags(
   opts: { forUpdate?: boolean } = {},
 ): Promise<SenderScreeningFlags | null> {
   const q = db
-    .select(SCREENING_FLAG_COLUMNS)
+    .select(SENDER_FLAG_COLUMNS)
     .from(customers)
     .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
     .limit(1);

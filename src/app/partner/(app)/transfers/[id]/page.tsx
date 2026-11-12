@@ -47,6 +47,29 @@ import { NoteForm } from './note-form';
 import { ReleaseDialog } from './release-dialog';
 import { RejectDialog } from './reject-dialog';
 import { PartnerAmlExplain } from './aml-explain';
+import { decideHoldAction } from './hold-decision-actions';
+import { HoldDecisionDialog, type HoldDecisionOption } from './hold-decision-dialog';
+import { HoldEvidencePanel } from './hold-evidence-panel';
+import { holdQueueApplies, isQualifiedComplianceUser, partnerDecidesKyc, reviewRecordApplies } from '@/lib/partner-decision-scope';
+import {
+  allowedDispositions,
+  classifyHold,
+  classReasonsFp,
+  dispositionReleases,
+  rowReasonsFp,
+  toReviewRowLite,
+  type HoldClass,
+  type ReviewRowLite,
+} from '@/lib/hold-queue';
+import { loadHoldEvidence, recordScreeningView, type AmlEvidenceView, type ScreeningView } from '@/lib/partner-screening-view';
+import { createHoldReviewRepo } from '@/db/repos/hold-review-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { identityMissingForRelease, originatorMissingForRelease } from '@/lib/release-data-checks';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import type { MessageKey } from '@/lib/i18n';
+import type { PartnerCtx } from '@/lib/partner-access';
+import type { SenderScreeningFlags } from '@/lib/sender-screening';
+import type { Partner, Transfer } from '@/lib/types';
 
 // The AML Explain server action waits up to AML_EXPLAIN_TIMEOUT_MS (45 s) for
 // the model; a page-level maxDuration sets the limit for this page's actions.
@@ -107,6 +130,106 @@ async function mfaEnrolled(username: string): Promise<boolean> {
   }
 }
 
+type HoldItem =
+  | { kind: 'dialog'; holdClass: HoldClass; mode: 'first' | 'second'; screeningFlaggedAt: string | null }
+  | { kind: 'note'; holdClass: HoldClass; key: MessageKey };
+interface HoldBlock {
+  panel: { screening: ScreeningView | null; aml: AmlEvidenceView | null } | null;
+  items: HoldItem[];
+  fourEyes: boolean;
+  rowFp: string;
+}
+
+/**
+ * Fix pack 7 T12 (P15, P8): the hold block of a qualified compliance user of a CERTIFIED owner;
+ * null for every other viewer and every uncertified partner (the page is then unchanged, and no
+ * read or audit row is added). The evidence panel shows only once its `transfer.screening.view`
+ * row is written; the decision dialogs (queue partner, live rows only) list each partner-decided
+ * OPEN class. Any read failure logs the error name and drops that part (fail closed: no panel or
+ * no dialog). UX only: decideHoldAction re-runs every gate under the row lock.
+ */
+async function loadHoldBlock(
+  ctx: PartnerCtx,
+  transfer: Transfer,
+  owner: Partner | null,
+  sender: SenderScreeningFlags | null,
+  test: boolean,
+): Promise<HoldBlock | null> {
+  if (!owner || !reviewRecordApplies(owner) || !PARTNER_OPS.roles.includes(ctx.role)) return null;
+  const fact = { username: ctx.username, partnerId: ctx.staff.partnerId ?? null, role: ctx.role, active: ctx.staff.status !== 'suspended' };
+  if (!isQualifiedComplianceUser(owner, fact, await mfaEnrolled(ctx.username))) return null;
+  const queue = holdQueueApplies(owner);
+  try {
+    // P4 dataOnFile (only when a data_missing reason is present), with the RAIL partner's integrations.
+    const reasons = transfer.complianceReasons ?? [];
+    let dataOnFile = false;
+    if (reasons.includes(RECIPIENT_IDENTITY_MISSING_REASON) || reasons.includes(ORIGINATOR_INFO_MISSING_REASON)) {
+      const rail = await createIntegrationsRepo(getDb()).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
+      dataOnFile = !(await identityMissingForRelease(getDb(), transfer, rail)) && !(await originatorMissingForRelease(getDb(), transfer, rail));
+    }
+    // R1: the sender flags (read for every in_review row; null = the read failed, fail closed).
+    const classes = classifyHold(
+      transfer.complianceReasons,
+      sender,
+      { queue, partnerDecidesKyc: partnerDecidesKyc(owner) },
+      { blocked: transfer.complianceStatus === 'blocked', dataOnFile },
+    );
+    const ev = await loadHoldEvidence(getDb(), ctx.partnerId, transfer);
+    const shown = await recordScreeningView(getDb(), {
+      partnerId: ctx.partnerId,
+      actor: ctx.username,
+      transferId: transfer.id,
+      holdClasses: classes.map((c) => c.holdClass),
+    });
+    const panel = shown ? { screening: ev.screening, aml: classes.some((c) => c.holdClass === 'aml') ? ev.aml : null } : null;
+    const items: HoldItem[] = [];
+    if (queue && !test) {
+      const stored = await createHoldReviewRepo(getDb()).listForTransfer(ctx.partnerId, transfer.id);
+      const reviews = stored.map(toReviewRowLite).filter((r): r is ReviewRowLite => r !== null);
+      // F3 (early review EC1): a blocked or list_wait class locks every partner decision (decisionRoute
+      // steps 1 and 4); the partner-decided classes then show the note the queue page shows, not a form.
+      const waitsList = classes.some((c) => c.holdClass === 'list_wait');
+      const partnerLocked = waitsList || classes.some((c) => c.holdClass === 'blocked');
+      for (const c of classes) {
+        if (c.decider === 'partner' && partnerLocked) {
+          items.push({ kind: 'note', holdClass: c.holdClass, key: waitsList ? 'partner.holdDecision.waitsList' : 'partner.holdDecision.notYours' });
+          continue;
+        }
+        if (c.decider !== 'partner') {
+          const key: MessageKey =
+            c.holdClass === 'list_wait' ? 'partner.holdDecision.waitsList' : c.holdClass === 'data_missing' && c.decider === 'nobody' ? 'partner.holdDecision.waitsData' : 'partner.holdDecision.notYours';
+          items.push({ kind: 'note', holdClass: c.holdClass, key });
+          continue;
+        }
+        const fp = classReasonsFp(c, sender);
+        const cycle = reviews.filter((r) => r.holdClass === c.holdClass && r.reasonsFp === fp);
+        const open = cycle.find((r) => r.step === 1 && !r.final);
+        if (cycle.some((r) => r.final)) items.push({ kind: 'note', holdClass: c.holdClass, key: 'partner.holdDecision.closed' });
+        else if (open && open.actor === ctx.username) items.push({ kind: 'note', holdClass: c.holdClass, key: 'partner.holdDecision.fourEyesNote' });
+        else {
+          // R5: the sender_pep form posts the flag time it saw ('' = no time on file).
+          const flaggedAt = c.holdClass === 'sender_pep' ? (sender?.screeningFlaggedAt?.toISOString() ?? '') : null;
+          items.push({ kind: 'dialog', holdClass: c.holdClass, mode: open ? 'second' : 'first', screeningFlaggedAt: flaggedAt });
+        }
+      }
+    }
+    return { panel, items, fourEyes: owner.liveControls?.posture?.fourEyesNonSanctions === true, rowFp: rowReasonsFp(transfer.complianceReasons) };
+  } catch (err) {
+    logWarn('partner.transfers.hold-block', errName(err), { transferId: transfer.id });
+    return null;
+  }
+}
+
+/** The disposition options of one class for the partner scope, release first. */
+function optionsFor(c: HoldClass): HoldDecisionOption[] {
+  const l = allowedDispositions(c, 'partner');
+  return [...l.release, ...l.reject].map((d) => ({
+    value: d,
+    label: t(`partner.holdDecision.disposition.${d}` as MessageKey),
+    releases: dispositionReleases(d),
+  }));
+}
+
 /**
  * /partner/transfers/[id] (UI redesign M3-5 + H5). The route param is resolved INSIDE the session
  * tenant: a foreign or missing id is notFound(). Masked reads only (never a decrypting read): the
@@ -117,8 +240,15 @@ async function mfaEnrolled(username: string): Promise<boolean> {
  * (partner-reveal-policy; the Show control depends on the viewer only, never on the transfer).
  * Each reveal writes `pii.reveal`. The one decrypting read on render is the customer's "Other"
  * reason (Batch B follow-up A4), read inside the session tenant and audited as `pii.view` (actorScope
- * 'partner'); the staff-only scam-pattern name is never shown here. The settling partner is shown by
- * class only, never named.
+ * 'partner'); the staff-only scam-pattern name is never shown here, EXCEPT (fix pack 7 T12, P8
+ * overrides PR6 P21 for this surface only) as the closed category label in the hold evidence panel.
+ * That panel (list, version, screened time, result, per party role / matched / score / list entry id,
+ * the AML rule, scam-pattern and warning-signal labels; never a hash, name, phone or amount) and the
+ * per-class decision dialogs show ONLY to a qualified compliance user (listed, admin or agent of this
+ * tenant, active, two-step enrolled) of an owner certified for live money; every render that shows
+ * the panel writes one own-tenant `transfer.screening.view` audit row (no row, no panel). Dialogs
+ * show for a hold-queue partner's live rows only. Every other viewer and partner sees the page as
+ * before. The settling partner is shown by class only, never named.
  */
 export default async function PartnerTransferDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.transfers.policy);
@@ -141,6 +271,9 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const releasable = isPartnerReleasableHold(transfer, owner, sender);
   const canRelease = releasable && PARTNER_ADMIN.roles.includes(ctx.role);
   const reasons = holdReasonKeys(transfer.complianceReasons);
+  const test = (transfer.environment ?? 'live') === 'test';
+  // Fix pack 7 T12: null for every partner today (none is certified) and every non-compliance viewer.
+  const holdBlock = inReview ? await loadHoldBlock(ctx, transfer, owner, sender, test) : null;
   // Pack 4 review R2 (I5): a recipient-identity hold is never released (C19, owner Q19): it can only
   // be rejected or refunded, so the page says that instead of "SmartRemit releases this hold".
   // R3-Y2 P1: it is class 'screening' (never partner-releasable), so this page shows no Reject or
@@ -149,7 +282,6 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   const funding = fundingView(transfer);
   const events = detail.fundingEvents.map(fundingEventView);
   const settlement = settlementView(transfer, detail.rail);
-  const test = (transfer.environment ?? 'live') === 'test';
   const currency = transfer.sourceCurrency ?? 'USD';
   const destination = transfer.payoutDestination.startsWith('****') ? transfer.payoutDestination : '****';
   // A3: the stated purpose and, where one exists, the UNCONFIRMED suggested RBI code (staff/partner only).
@@ -317,6 +449,30 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
                 <li key={k}>{t(k)}</li>
               ))}
             </ul>
+            {holdBlock ? (
+              <div className="mt-4 flex flex-col gap-4">
+                {holdBlock.panel ? <HoldEvidencePanel screening={holdBlock.panel.screening} aml={holdBlock.panel.aml} /> : null}
+                {holdBlock.items.map((item) =>
+                  item.kind === 'dialog' ? (
+                    <HoldDecisionDialog
+                      key={item.holdClass}
+                      action={decideHoldAction.bind(null, transfer.id)}
+                      holdClass={item.holdClass}
+                      classLabel={t(`partner.holdDecision.class.${item.holdClass}` as MessageKey)}
+                      dispositions={optionsFor(item.holdClass)}
+                      rowFp={holdBlock.rowFp}
+                      screeningFlaggedAt={item.screeningFlaggedAt}
+                      fourEyes={holdBlock.fourEyes}
+                      mode={item.mode}
+                    />
+                  ) : (
+                    <p key={item.holdClass} className="text-[13.5px] text-ds-ink-muted" data-testid="partner-hold-decision-note" data-class={item.holdClass}>
+                      <span className="font-semibold text-ds-ink">{t(`partner.holdDecision.class.${item.holdClass}` as MessageKey)}:</span> {t(item.key)}
+                    </p>
+                  ),
+                )}
+              </div>
+            ) : null}
             {canRelease ? (
               // Merge plan 2c (D4): reject & refund is offered on exactly the holds the partner may
               // release (partnerMayRejectHold is the same rule); the action re-checks both.

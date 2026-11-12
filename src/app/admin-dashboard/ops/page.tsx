@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/table';
 import { DiagnosePanel } from './diagnose-panel';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
-import { cardRefundBlockedIds } from '@/lib/refund-row-flags';
+import { cardRefundBlockedIds, refundHoldRefusals } from '@/lib/refund-row-flags';
 import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 import { SenderCell, FundingRefs } from '../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
@@ -87,6 +87,9 @@ export default async function OpsPage() {
   // Final check F9 (X2): a real-money card payment cannot be approved or retried
   // here; its row shows the reason instead (a rail read per listed card row only).
   const cardBlocked = await cardRefundBlockedIds(getDb(), [...snap.refundsRequested, ...snap.refundsFailed]);
+  // Fix pack 7 T16b (P14, D7): a sanctions hold on a real-money row, or a certified owner's held
+  // row, shows the refusal text in place of Approve / Retry (the cores re-check).
+  const holdBlocked = await refundHoldRefusals(getDb(), [...snap.refundsRequested, ...snap.refundsFailed]);
   const refundsTotal =
     snap.refundsRequested.length + snap.refundsPending.length + snap.refundsFailed.length;
   const healthy =
@@ -397,6 +400,8 @@ export default async function OpsPage() {
                             <div className="flex justify-end gap-2">
                               {cardBlocked.has(t.id) ? (
                                 <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot approve: {CARD_REFUND_UNAVAILABLE}</span>
+                              ) : holdBlocked.has(t.id) ? (
+                                <span className="max-w-xs text-left text-xs text-muted-foreground">{holdBlocked.get(t.id)}</span>
                               ) : (
                                 <form action={approveRefundAction} className="flex items-center gap-1">
                                   <input type="hidden" name="id" value={t.id} />
@@ -453,6 +458,8 @@ export default async function OpsPage() {
                           <TableCell className="text-right">
                             {cardBlocked.has(t.id) ? (
                               <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot retry: {CARD_REFUND_UNAVAILABLE}</span>
+                            ) : holdBlocked.has(t.id) ? (
+                              <span className="max-w-xs text-left text-xs text-muted-foreground">{holdBlocked.get(t.id)}</span>
                             ) : (
                               <form action={retryRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />

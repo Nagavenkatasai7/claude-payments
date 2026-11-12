@@ -15,6 +15,8 @@ export interface WebhookConfigView {
   /** Only a partner-operated rail ('http') is self-service; simulator / mock are SmartRemit-managed. */
   partnerRail: boolean;
   endpoint: string | null;
+  /** Pack 7 T20 (P19): the optional compliance events URL; null when absent or empty. */
+  eventsUrl: string | null;
   signing: SecretState;
   webhook: SecretState;
 }
@@ -33,6 +35,7 @@ export function webhookConfigView(cfg: PartnerIntegrations, now: Date): WebhookC
     railType,
     partnerRail: railType === 'http',
     endpoint: cfg.payment.credentials?.settlementUrl || null,
+    eventsUrl: cfg.payment.credentials?.eventsUrl || null,
     signing: secretState(cfg.payment, 'signing', now),
     webhook: secretState(cfg.payment, 'webhook', now),
   };

@@ -23,6 +23,7 @@ import {
   isSmartRemitHost,
   listRecentPings,
   rotateRailSecret,
+  saveEventsEndpoint,
   saveSettlementEndpoint,
   sendTestPing,
 } from '@/lib/partner-settlement-endpoint';
@@ -140,6 +141,106 @@ describe('saveSettlementEndpoint', () => {
     const before = JSON.stringify(await store().getIntegrations('pb'));
     await saveSettlementEndpoint(db, 'pa', actor, 'https://new-rail.example.com/x', prodOpts);
     expect(JSON.stringify(await store().getIntegrations('pb'))).toBe(before);
+  });
+});
+
+// Pack 7 T20 (P19): the optional compliance events URL, inside the sealed credentials blob.
+describe('saveEventsEndpoint', () => {
+  it('saves a public https URL into credentials.eventsUrl; settlementUrl, signingSecret, webhookSecret and every other key unchanged; ONE audit row partner.events_endpoint.update meta exactly { host, actorScope }', async () => {
+    const r = await saveEventsEndpoint(db, 'pa', actor, '  https://events.example.com/v1/compliance  ', prodOpts);
+    expect(r).toEqual({ ok: true });
+    const after = await store().getIntegrations('pa');
+    const expected = httpRail();
+    expected.payment.credentials = { ...expected.payment.credentials!, eventsUrl: 'https://events.example.com/v1/compliance' };
+    expect(after).toEqual(expected);
+    const now = new Date();
+    expect(railSecrets(after.payment, 'signing', now)).toEqual([SIGN_OLD]);
+    expect(railSecrets(after.payment, 'webhook', now)).toEqual([HOOK_OLD]);
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ partnerId: 'pa', actor: 'pa-admin', actorType: 'staff', action: 'partner.events_endpoint.update', subjectId: 'pa' });
+    expect(a[0].meta).toEqual({ host: 'events.example.com', actorScope: 'partner' });
+  });
+
+  it.each(['', '   '])('an empty or whitespace URL (%j) clears the key (absent, not empty); audit meta { host: null, actorScope }', async (raw) => {
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts);
+    const r = await saveEventsEndpoint(db, 'pa', { username: 'sr-ops', actorScope: 'platform' }, raw, prodOpts);
+    expect(r).toEqual({ ok: true });
+    const after = await store().getIntegrations('pa');
+    expect(after.payment.credentials).not.toHaveProperty('eventsUrl');
+    expect(after).toEqual(httpRail());
+    const a = await audits();
+    expect(a).toHaveLength(2);
+    expect(a[1]).toMatchObject({ action: 'partner.events_endpoint.update', subjectId: 'pa', actor: 'sr-ops' });
+    expect(a[1].meta).toEqual({ host: null, actorScope: 'platform' });
+  });
+
+  it.each([
+    'http://events.example.com/x',
+    'https://10.0.0.1/x',
+    'https://192.168.1.10/x',
+    `${APP}/api/partner-rail`,
+    'https://smartremit.ai/x',
+    'https://acme.smartremit.ai/x',
+    'https://claude-payments-git-x-team.vercel.app/x',
+    'not a url',
+  ])('refuses case %# -> invalid_url; nothing written, no audit', async (url) => {
+    const before = JSON.stringify(await store().getIntegrations('pa'));
+    expect(await saveEventsEndpoint(db, 'pa', actor, url, prodOpts)).toEqual({ ok: false, reason: 'invalid_url' });
+    expect(JSON.stringify(await store().getIntegrations('pa'))).toBe(before);
+    expect(await audits()).toHaveLength(0);
+  });
+
+  it('a simulator or mock rail -> not_partner_rail; nothing written (a clear too)', async () => {
+    await store().saveIntegrations('pa', { ...httpRail(), payment: { ...httpRail().payment, providerType: 'simulator' } });
+    const before = JSON.stringify(await store().getIntegrations('pa'));
+    expect(await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts)).toEqual({ ok: false, reason: 'not_partner_rail' });
+    expect(await saveEventsEndpoint(db, 'pa', actor, '', prodOpts)).toEqual({ ok: false, reason: 'not_partner_rail' });
+    expect(JSON.stringify(await store().getIntegrations('pa'))).toBe(before);
+    await store().saveIntegrations('pa', { kyc: {}, payment: {}, whatsapp: {} });
+    expect(await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts)).toEqual({ ok: false, reason: 'not_partner_rail' });
+    expect(await audits()).toHaveLength(0);
+  });
+
+  it('partner B is untouched', async () => {
+    const before = JSON.stringify(await store().getIntegrations('pb'));
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts);
+    expect(JSON.stringify(await store().getIntegrations('pb'))).toBe(before);
+  });
+
+  it('the URL path and query never appear in the audit row', async () => {
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.test/hook?token=abc', prodOpts);
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0].meta).toEqual({ host: 'events.example.test', actorScope: 'partner' });
+    const json = JSON.stringify(a[0]);
+    expect(json).not.toContain('token=abc');
+    expect(json).not.toContain('/hook');
+  });
+
+  it('a later saveSettlementEndpoint keeps eventsUrl', async () => {
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts);
+    expect(await saveSettlementEndpoint(db, 'pa', actor, 'https://new-rail.example.com/y', prodOpts)).toEqual({ ok: true });
+    const c = (await store().getIntegrations('pa')).payment.credentials!;
+    expect(c.eventsUrl).toBe('https://events.example.com/x');
+    expect(c.settlementUrl).toBe('https://new-rail.example.com/y');
+  });
+
+  it('a later rotateRailSecret keeps eventsUrl', async () => {
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts);
+    for (const kind of ['signing', 'webhook'] as const) {
+      const r = await rotateRailSecret(db, 'pa', actor, kind);
+      expect(r.ok).toBe(true);
+      expect((await store().getIntegrations('pa')).payment.credentials!.eventsUrl).toBe('https://events.example.com/x');
+    }
+  });
+
+  it('saving the events URL keeps a rotation in its grace (previous secret and expiry untouched)', async () => {
+    const r = await rotateRailSecret(db, 'pa', actor, 'signing');
+    if (!r.ok) throw new Error('expected ok');
+    const before = (await store().getIntegrations('pa')).payment.credentials!;
+    await saveEventsEndpoint(db, 'pa', actor, 'https://events.example.com/x', prodOpts);
+    expect((await store().getIntegrations('pa')).payment.credentials).toEqual({ ...before, eventsUrl: 'https://events.example.com/x' });
   });
 });
 

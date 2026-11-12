@@ -4,8 +4,9 @@ import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { isBillExpired } from '@/lib/b2b-bill-expiry';
-import { isPartnerPulled } from '@/lib/funding-method';
-import { decideStaffCancel } from '@/lib/dashboard-cancel-policy';
+import { getDb } from '@/db/client';
+import { refundHoldRefusals } from '@/lib/refund-row-flags';
+import { b2bRowControl, showsReverse } from '@/lib/b2b-row-control';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { money } from '../format';
@@ -87,6 +88,11 @@ export default async function B2bPage() {
     store.listTransfers(),
   ]);
   const b2bTransfers = allTransfers.filter((t) => t.transferType === 'b2b');
+  // Fix pack 7 F2 (P14, early review EE1): a real-money row with a sanctions hold shows the fixed
+  // refusal line in place of Reverse. One read per render, only for the rows that would show it;
+  // reverseB2bSettlement re-checks under its lock.
+  const reverseRows = b2bTransfers.filter(showsReverse);
+  const reverseRefusals = reverseRows.length > 0 ? await refundHoldRefusals(getDb(), reverseRows, { reverse: true }) : new Map<string, string>();
   const unpaidCount = invoices.filter((i) => i.status === 'unpaid').length;
   const disputedCount = invoices.filter((i) => i.status === 'disputed').length;
 
@@ -271,7 +277,7 @@ export default async function B2bPage() {
                   ) : (
                     <span key="kyb" className="text-xs text-muted-foreground">—</span>
                   ),
-                  decideStaffCancel(t).kind === 'void' ? (
+                  ((c) => c.kind === 'cancel' ? (
                     <form key="actions" action={cancelB2bTransferAction}>
                       <input type="hidden" name="id" value={t.id} />
                       <Button
@@ -284,7 +290,7 @@ export default async function B2bPage() {
                         Cancel
                       </Button>
                     </form>
-                  ) : t.status === 'paid' && isPartnerPulled(t.fundingMethod) ? (
+                  ) : c.kind === 'reverse' ? (
                     <form key="actions" action={reverseB2bTransferAction}>
                       <input type="hidden" name="id" value={t.id} />
                       <Button
@@ -297,21 +303,23 @@ export default async function B2bPage() {
                         Reverse
                       </Button>
                     </form>
-                  ) : t.status === 'in_review' ? (
+                  ) : c.kind === 'reverse_refused' ? (
+                    <span key="actions" className="block max-w-xs text-xs text-muted-foreground">{c.text}</span>
+                  ) : c.kind === 'in_review' ? (
                     // A compliance hold, charged or not, is decided by an admin on the
                     // Compliance page (Release / Reject), never by Cancel (Task 5,
                     // Wave 2 review). Reject is cancel-only when uncharged and
                     // cancel + auto-refund when charged.
                     <span key="actions" className="text-xs text-muted-foreground">In review — decide in Compliance</span>
-                  ) : t.status === 'awaiting_payment' ? (
+                  ) : c.kind === 'charged' ? (
                     // CHARGED (a card-funded B2B bill, pay-finalize.ts:221-228): a bare
                     // cancel would strand the charge; the reconcile sweep resumes it. money-05.
                     <span key="actions" className="text-xs text-muted-foreground">Charged — settling</span>
-                  ) : t.status === 'delivered' ? (
+                  ) : c.kind === 'recall' ? (
                     <span key="actions" className="text-xs text-muted-foreground">Recall via support</span>
                   ) : (
                     <span key="actions" className="text-xs text-muted-foreground">—</span>
-                  ),
+                  ))(b2bRowControl(t, reverseRefusals)),
                 ],
               }))}
             />

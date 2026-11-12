@@ -19,6 +19,10 @@ export const FACTS = {
   instructMaxAttempts: 56,
   /** src/db/repos/outbox-repo.ts INSTRUCT_BACKOFF_CAP_SEC (settlement instructions: about a day in total). */
   instructBackoffCapSec: 1800,
+  /** src/db/repos/outbox-repo.ts PARTNER_EVENT_MAX_ATTEMPTS (compliance events to a partner; then dead-lettered with an ops alert). */
+  partnerEventMaxAttempts: 24,
+  /** src/db/repos/outbox-repo.ts PARTNER_EVENT_BACKOFF_CAP_SEC (compliance events: about 7 hours in total). */
+  partnerEventBackoffCapSec: 1800,
   /** src/lib/providers/http-payment-provider.ts RAIL_TIMEOUT_MS / 1000. */
   railAckTimeoutSec: 15,
   /** src/lib/safe-fetch.ts MAX_ACK_BYTES / 1024 (the settlement acknowledgement cap). */

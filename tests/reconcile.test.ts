@@ -16,7 +16,7 @@ import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
 import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
-import { LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, POSSIBLE_MATCH_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
@@ -707,6 +707,31 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     );
     expect(text).not.toMatch(/refund it by hand/);
     expect((await store.getTransfer('rc_fund1'))?.status).toBe('cancelled');
+  });
+
+  // Fix pack 7 T16 (P14, C1, M3): a funds-kept sanctions reject is flagged, not
+  // blocked; its rejectfunds:<id> outbox row picks the no-refund text.
+  it('T16-16: a funds-kept rejected POSSIBLE_MATCH row (flagged, with its rejectfunds:<id> row): the sanctions text, never "refund it by hand"', async () => {
+    await store.saveTransfer(victim({
+      status: 'cancelled', refundStatus: 'none',
+      complianceStatus: 'flagged', complianceReasons: [POSSIBLE_MATCH_REASON],
+    }));
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'kept' }, { dedupeKey: 'rejectfunds:rc_fund1' });
+    await reconcileSweep(db);
+    const text = await cancelChargedText('rc_fund1');
+    expect(text).toBe(
+      `⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED, was CHARGED (mockfund-rc_fund1) and was rejected while a sanctions screening hold was on it; ${SANCTIONS_FUNDS_RULE}.`,
+    );
+    expect(text).not.toMatch(/refund it by hand/);
+  });
+
+  it('T16-17: a cancelled charged row without rejectfunds and not blocked keeps today\'s text (another row\'s key does not count)', async () => {
+    await store.saveTransfer(victim({ status: 'cancelled', refundStatus: 'none' }));
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'kept' }, { dedupeKey: 'rejectfunds:rc_other' });
+    await reconcileSweep(db);
+    expect(await cancelChargedText('rc_fund1')).toBe(
+      '⚠️ SmartRemit ops: transfer rc_fund1 (partner acme) is CANCELLED but was CHARGED (mockfund-rc_fund1) and has no refund in flight — refund it by hand.',
+    );
   });
 });
 

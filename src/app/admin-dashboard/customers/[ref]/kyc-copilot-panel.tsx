@@ -22,7 +22,17 @@ const DECISION_LABEL: Record<Suggestion['suggested_decision'], string> = {
   need_more: 'Need more info',
 };
 
-export function KycCopilotPanel({ phone, partnerId }: { phone: string; partnerId: string }) {
+// Fix pack 7 T27 (P25): 'recommend' is the panel beside the recommendation form of a partner that
+// decides KYC; the default 'decide' keeps today's text.
+export function KycCopilotPanel({
+  phone,
+  partnerId,
+  mode = 'decide',
+}: {
+  phone: string;
+  partnerId: string;
+  mode?: 'decide' | 'recommend';
+}) {
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -53,7 +63,9 @@ export function KycCopilotPanel({ phone, partnerId }: { phone: string; partnerId
           {loading ? 'Analyzing…' : '✦ AI review summary'}
         </Button>
         <span className="text-xs text-muted-foreground">
-          A suggestion only — you decide. Nothing here approves or rejects.
+          {mode === 'recommend'
+            ? 'A suggestion only. This partner decides; use it to write your recommendation.'
+            : 'A suggestion only — you decide. Nothing here approves or rejects.'}
         </span>
         {error && <span className="text-xs text-muted-foreground">AI unavailable</span>}
       </div>

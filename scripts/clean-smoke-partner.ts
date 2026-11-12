@@ -10,7 +10,9 @@
  * rail_messages rows as owner or rail (fix pack 5: append-only, its DELETE
  * trigger refuses, and its FK blocks the partner delete). A real partner is
  * never touched; the sealed conversation log and the rail record are never
- * deleted. FK-ordered,
+ * deleted. Fix pack 7: the same for the append-only hold decision record
+ * (hold_reviews; its DELETE trigger refuses and its FK blocks the partner
+ * delete): a smoke partner with any review is skipped. FK-ordered,
  * and ONE transaction (Program-Fix 45 P5): a refusal part-way commits nothing.
  * Program-Fix 45 P5: the partner's rows in the Postgres staff ledger (0022,
  * FK to partners) are deleted first. The partner-scoped staff
@@ -31,7 +33,8 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
         (SELECT count(*) FROM transfers t WHERE t.partner_id = p.id)::int AS transfers,
         (SELECT count(*) FROM customers c WHERE c.partner_id = p.id)::int AS customers,
         (SELECT count(*) FROM conversation_messages m WHERE m.partner_id = p.id)::int AS conversations,
-        (SELECT count(*) FROM rail_messages r WHERE r.partner_id = p.id OR r.rail_partner_id = p.id)::int AS rail_messages
+        (SELECT count(*) FROM rail_messages r WHERE r.partner_id = p.id OR r.rail_partner_id = p.id)::int AS rail_messages,
+        (SELECT count(*) FROM hold_reviews h WHERE h.partner_id = p.id)::int AS hold_reviews
       FROM partners p
       WHERE p.name = ${SMOKE_PARTNER_NAME}
     `)) as unknown as {
@@ -42,6 +45,7 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
         customers: number;
         conversations: number;
         rail_messages: number;
+        hold_reviews: number;
       }>;
     }).rows;
 
@@ -54,9 +58,10 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
       // Partner-Demo R3b: conversation_messages is a permanent, sealed audit
       // log — a partner with any row is never deleted (and the rows never are).
       // Fix pack 5: the same for the append-only rail record, as owner OR rail.
-      if (t.transfers > 0 || t.customers > 0 || t.conversations > 0 || t.rail_messages > 0) {
+      // Fix pack 7: the same for the append-only hold decision record.
+      if (t.transfers > 0 || t.customers > 0 || t.conversations > 0 || t.rail_messages > 0 || t.hold_reviews > 0) {
         log(
-          `  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers / ${t.conversations} conversation messages / ${t.rail_messages} rail messages (NOT a disposable smoke row)`,
+          `  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers / ${t.conversations} conversation messages / ${t.rail_messages} rail messages / ${t.hold_reviews} hold reviews (NOT a disposable smoke row)`,
         );
         continue;
       }

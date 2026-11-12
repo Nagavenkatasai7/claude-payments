@@ -146,6 +146,7 @@ const CODE_COPY: Record<Exclude<LiveWriteResult, { ok: true }>['code'], string> 
   bad_input: 'Check the fields and try again.',
   kyc_decider_mismatch: 'Check the fields and try again.',
   psp_unavailable: 'Partner-run card payments need Stripe funding switched on and a restricted Stripe key stored first.',
+  certified: FAILED, // fix pack 7 T15: writePosture only (the posture lock), never from here
 };
 const refused = (error: string): LiveActionResult => ({ ok: false, error });
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');

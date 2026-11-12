@@ -278,6 +278,42 @@ describe('transferTimeline: lost-features p1 actions (one row each, never a note
   });
 });
 
+// Fix pack 7 T18 (P28): a hold decision and a SmartRemit escalation show as one plain row each
+// (who, never the meta); a screening evidence view never reaches the timeline.
+describe('transferTimeline: fix pack 7 hold decisions', () => {
+  it('transfer.hold.review and transfer.hold.escalate are timeline actions; each renders one plain row with its label and a masked by, never the meta', () => {
+    const tenant = new Set(['pa-agent']);
+    const at = (m: number) => new Date(Date.now() - (10 - m) * 60_000);
+    const meta = { reason: 'DECIDE WHY', disposition: 'docs_verified', holdClasses: ['sanctions_review'], holdClass: 'kyc', reviewId: 'hr_SECRET' };
+    const rows = transferTimeline(
+      base({ status: 'in_review', createdAt: new Date(Date.now() - 20 * 60_000).toISOString() }),
+      [
+        { at: at(1), action: 'transfer.hold.escalate', actor: 'platform-ops', actorType: 'staff', meta: { ...meta, actorScope: 'platform' } },
+        { at: at(2), action: 'transfer.hold.review', actor: 'pa-agent', actorType: 'staff', meta: { ...meta, actorScope: 'partner' } },
+        { at: at(3), action: 'transfer.hold.review', actor: 'platform-ops', actorType: 'staff', meta: { ...meta, actorScope: 'platform' } },
+      ],
+      tenant,
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['created', 'holdEscalate', 'holdReview', 'holdReview']);
+    expect(rows[1]).toEqual({ at: at(1).toISOString(), kind: 'holdEscalate', label: 'partner.transfers.timeline.holdEscalate', by: t('partner.transfers.actor.smartremit') });
+    expect(rows[2]).toEqual({ at: at(2).toISOString(), kind: 'holdReview', label: 'partner.transfers.timeline.holdReview', by: 'pa-agent' });
+    expect(rows[3].by).toBe(t('partner.transfers.actor.smartremit'));
+    expect(JSON.stringify(rows)).not.toMatch(/WHY|docs_verified|sanctions_review|hr_SECRET|platform-ops|holdClass/);
+    expect(t('partner.transfers.timeline.holdReview')).toBe('Hold decision recorded');
+    expect(t('partner.transfers.timeline.holdEscalate')).toBe('SmartRemit asked your team to decide');
+    for (const a of ['transfer.hold.review', 'transfer.hold.escalate']) expect(TIMELINE_AUDIT_ACTIONS).toContain(a);
+  });
+  it('a transfer.screening.view row is not on the timeline', () => {
+    expect(TIMELINE_AUDIT_ACTIONS).not.toContain('transfer.screening.view');
+    const rows = transferTimeline(
+      base({ status: 'in_review' }),
+      [{ at: new Date(Date.now() - 60_000), action: 'transfer.screening.view', actor: 'pa-agent', actorType: 'staff', meta: { holdClasses: ['sanctions_review'], actorScope: 'partner' } }],
+      new Set(['pa-agent']),
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['created']);
+  });
+});
+
 describe('holds', () => {
   it('isHeld: a flagged transfer stops being held once released or finished', () => {
     // markPaidIfInReview never clears complianceStatus, so 'flagged' outlives the hold.

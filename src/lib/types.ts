@@ -703,6 +703,9 @@ export interface Customer {
   // a stale whole-row saveCustomer can never rewrite them.
   screeningFlaggedAt?: string;
   screeningClearedAt?: string;
+  // Fix pack 7 (0041, R2): ISO time of the last WATCHLIST stamp. READ-ONLY
+  // like the two above (stampScreeningFlagged kind 'watchlist' owns it).
+  screeningWatchlistAt?: string;
   // Fix pack 6 (0040, R46): the E-SIGN consent version agreed to and the ISO
   // times it was given and withdrawn. READ-ONLY here (mapped in rowToCustomer
   // only, never in customerToRow): recordEsignConsent / withdrawEsignConsent

@@ -12,6 +12,7 @@ import type { LiveReadiness } from './live-certification';
 import {
   LIVE_CAPABILITIES,
   parseFundingModeRecord,
+  parseLiveControls,
   type CertificationRecord,
   type ContractRecord,
   type FundingMode,
@@ -57,7 +58,11 @@ export interface LiveActor {
 
 export type LiveWriteResult =
   | { ok: true }
-  | { ok: false; code: 'not_found' | 'kyc_decider_mismatch' | 'not_ready' | 'not_certified' | 'bad_input' | 'psp_unavailable' };
+  | {
+      ok: false;
+      // Fix pack 7 T15 (R7, P2): 'certified' = writePosture's posture lock while certified.
+      code: 'not_found' | 'kyc_decider_mismatch' | 'not_ready' | 'not_certified' | 'bad_input' | 'psp_unavailable' | 'certified';
+    };
 
 /**
  * Fix pack 4 T5 (C11): the keys a live-change notice can name: the live_controls keys plus
@@ -151,6 +156,14 @@ export async function notifyLiveChange(
  * ('delegated' -> 'partner', else 'smartremit_procedures'); a mismatch is
  * refused. A signed posture forces verify-before-send (resolveKycMode); the
  * requireKycBeforeSend column is never rewritten. The default tenant is refused (not_found).
+ *
+ * Fix pack 7 T15 (R7, P2): the posture lock. Once the partner is certified its posture routes and
+ * is enforced (holdDecider routes holds, fourEyes is enforced in a queue partner's hold queue), so
+ * ONE partner admin with MFA must not re-sign holds away from SmartRemit or turn four-eyes off and
+ * then decide alone. While hasStandingCertification is true on the LOCKED row, a record that changes
+ * holdDecider or kycDecider, or turns fourEyesNonSanctions from true to false, is refused with
+ * 'certified' (nothing written). Tightening (false -> true) and a same-answer re-sign stay allowed.
+ * A certified row with no posture on file (certification requires one) has nothing to compare.
  */
 export async function writePosture(
   tx: DbOrTx,
@@ -165,7 +178,7 @@ export async function writePosture(
   // verify-before-send on all of SmartRemit's own demo traffic, and no writer clears a posture).
   if (partnerId === DEFAULT_PARTNER_ID) return { ok: false, code: 'not_found' };
   const locked = await tx
-    .select({ kycMode: partners.kycMode, supportConfig: partners.supportConfig })
+    .select({ kycMode: partners.kycMode, supportConfig: partners.supportConfig, liveControls: partners.liveControls })
     .from(partners)
     .where(eq(partners.id, partnerId))
     .limit(1)
@@ -174,6 +187,15 @@ export async function writePosture(
   if (!row) return { ok: false, code: 'not_found' };
   const expected: KycDecider = row.kycMode === 'delegated' ? 'partner' : 'smartremit_procedures';
   if (i.kycDecider !== expected) return { ok: false, code: 'kyc_decider_mismatch' };
+  const lc = parseLiveControls(row.liveControls);
+  const prev = lc.posture;
+  if (
+    prev &&
+    hasStandingCertification(lc) &&
+    (prev.holdDecider !== i.holdDecider || prev.kycDecider !== i.kycDecider || (prev.fourEyesNonSanctions && !i.fourEyesNonSanctions))
+  ) {
+    return { ok: false, code: 'certified' };
+  }
   const record: PostureRecord = {
     version: 1,
     signedBy: actor.username,

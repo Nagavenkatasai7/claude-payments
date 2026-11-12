@@ -197,6 +197,19 @@ export function buildRailFailureMessage(transfer: Transfer, variant: RailFailure
   }
 }
 
+/**
+ * Fix pack 7 T16 (P14, D7; M9, P6): the neutral customer message after a reject that keeps the
+ * funds (a sanctions hold on real money). Promises no refund and names no check (pinned by the
+ * hold-replies banned-word scan). `<charge>` as buildRailFailureMessage words it.
+ */
+export function buildRejectContactMessage(transfer: Transfer): string {
+  const sourceCharge = formatSourceCharge(
+    transfer.totalChargeSource ?? transfer.totalChargeUsd,
+    transfer.sourceCurrency ?? 'USD',
+  );
+  return `Your transfer ${transfer.id} could not be completed. Our team will contact you shortly about your ${sourceCharge}.`;
+}
+
 export async function completePaymentStage1(
   store: Store,
   transferId: string,

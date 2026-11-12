@@ -16,6 +16,7 @@ import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { railPartnerOf } from './live-gate';
 import { senderChargeState } from './funding-method';
 import { pokeWorker } from './outbox';
+import { enqueuePotentialMatchIfEligible } from './partner-events';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createPartnerStore } from './partner-store';
 import type { Transfer } from './types';
@@ -112,6 +113,7 @@ export async function rescreenBeforePay(
   }
   const reasons = [...new Set([...(transfer.complianceReasons ?? []), ...added])];
 
+  let eventQueued = false;
   const outcome = await db.transaction(async (tx): Promise<RescreenOutcome> => {
     let updated: Transfer | null = transfer;
     if (verdict) {
@@ -125,6 +127,12 @@ export async function rescreenBeforePay(
     }
     if (result.evidence) {
       await createAuditRepo(tx).record(sanctionsAuditEvent(transfer.partnerId, transfer.id, result.evidence));
+    }
+    // Fix pack 7 (P21 site 2): a possible match of a live-certified owner queues one
+    // partner event with the hold (the owner is read only for a possible match on a
+    // live row; a failed read rolls this transaction back).
+    if (verdict === 'flagged') {
+      eventQueued = await enqueuePotentialMatchIfEligible(tx, updated ?? transfer, result.evidence?.decision);
     }
     if (verdict === 'blocked') {
       // Review S5 (W3): a row bound to a PSP intent with no charge reference
@@ -155,8 +163,8 @@ export async function rescreenBeforePay(
     if (verdict === 'flagged') return { kind: 'flagged', transfer: updated };
     return { kind: 'cleared', transfer };
   });
-  // partner-demo R4: the notices are committed; mark the worker due.
-  if (outcome.kind === 'blocked') pokeWorker();
+  // partner-demo R4: the notices (or the partner event) are committed; mark the worker due.
+  if (outcome.kind === 'blocked' || eventQueued) pokeWorker();
   return outcome;
 }
 

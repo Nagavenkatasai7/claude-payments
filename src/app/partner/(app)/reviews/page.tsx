@@ -13,7 +13,17 @@ import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { customerListRow, kycStatusKey } from '@/lib/partner-customer-view';
 import { amlRuleKey, kycQueueCounts } from '@/lib/partner-reviews';
 import { isTransferId, transfersListHref } from '@/lib/partner-transfers';
-import { t } from '@/lib/i18n';
+import { t, type MessageKey } from '@/lib/i18n';
+import type { DbOrTx } from '@/db/client';
+import type { Partner, Transfer } from '@/lib/types';
+import { holdQueueApplies, partnerDecidesKyc } from '@/lib/partner-decision-scope';
+import { holdQueueView, toReviewRowLite, type QueueGroup, type ReviewRowLite } from '@/lib/hold-queue';
+import { createHoldReviewRepo } from '@/db/repos/hold-review-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { loadSenderScreening } from '@/lib/sender-screening';
+import { identityMissingForRelease, originatorMissingForRelease } from '@/lib/release-data-checks';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON, type CustomerScreeningFlags } from '@/lib/compliance-config';
+import { logWarn } from '@/lib/log';
 import { Card, EmptyState, PageHeader } from '@/components/ds';
 import { PARTNER_ROUTES } from '../../routes';
 import { TransferRows, toPartnerRow } from '../transfers/transfer-rows';
@@ -49,6 +59,39 @@ function Section({ title, sub, testId, children }: { title: string; sub?: ReactN
       </Card>
     </div>
   );
+}
+
+const errName = (e: unknown): string => (e instanceof Error ? e.name : 'unknown');
+
+/**
+ * Fix pack 7 T17 (P15): the hold queue of a queue partner (holdQueueApplies), or null for
+ * today's list. Reads the review rows of the held ids (own tenant, <= HELD_LIMIT ids), the sender
+ * flags of EVERY held row (R1: loadSenderScreening never throws; null = failed, fail closed) and
+ * `dataOnFile` for a row with a data_missing reason with the release checks (O2, the row's rail
+ * integrations). Any read that throws -> one logWarn (the error NAME only) and null.
+ */
+async function loadHoldQueue(db: DbOrTx, partnerId: string, owner: Partner, held: readonly Transfer[]): Promise<QueueGroup[] | null> {
+  try {
+    const reviews = new Map<string, ReviewRowLite[]>();
+    for (const r of await createHoldReviewRepo(db).listForQueue(partnerId, held.map((tr) => tr.id))) {
+      const lite = toReviewRowLite(r);
+      if (lite) reviews.set(r.transferId, [...(reviews.get(r.transferId) ?? []), lite]);
+    }
+    const flags = new Map<string, CustomerScreeningFlags | null>(
+      await Promise.all(held.map(async (tr) => [tr.id, await loadSenderScreening(db, tr.partnerId, tr.phone)] as const)),
+    );
+    const dataOnFile = new Map<string, boolean>();
+    for (const tr of held) {
+      const reasons = tr.complianceReasons ?? [];
+      if (!reasons.includes(RECIPIENT_IDENTITY_MISSING_REASON) && !reasons.includes(ORIGINATOR_INFO_MISSING_REASON)) continue;
+      const rail = await createIntegrationsRepo(db).getIntegrations(tr.settlementPartnerId ?? tr.partnerId);
+      dataOnFile.set(tr.id, !(await identityMissingForRelease(db, tr, rail)) && !(await originatorMissingForRelease(db, tr, rail)));
+    }
+    return holdQueueView(held, reviews, flags, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, dataOnFile, new Date());
+  } catch (err) {
+    logWarn('partner.reviews.queue', errName(err), { partnerId });
+    return null;
+  }
 }
 
 function Tile({ label, kpi, value }: { label: string; kpi: string; value: number }) {
@@ -95,6 +138,7 @@ export default async function PartnerReviewsPage() {
     .map(customerListRow);
   const openAlerts = alerts.filter((a) => a.partnerId === ctx.partnerId && a.action === 'aml.alert');
   const delegated = owner?.kycMode === 'delegated';
+  const queue = owner && holdQueueApplies(owner) && held.length > 0 ? await loadHoldQueue(db, ctx.partnerId, owner, held) : null;
 
   return (
     <>
@@ -114,7 +158,31 @@ export default async function PartnerReviewsPage() {
             <EmptyState icon={<ShieldCheck aria-hidden="true" className="size-6" />} title={t('partner.reviews.held.empty')} />
           ) : (
             <>
-              <TransferRows rows={held.map(toPartnerRow)} caption={t('partner.reviews.held.caption')} />
+              {queue ? (
+                <div className="flex flex-col gap-4">
+                  {queue.map((g) => (
+                    <div key={`${g.holdClass}:${g.state}`} data-testid="partner-hold-queue-group" data-class={g.holdClass} data-state={g.state}>
+                      <h3 className="text-[14.5px] font-semibold text-ds-ink">
+                        {t(`partner.holdDecision.class.${g.holdClass}` as MessageKey)} · {t(`partner.holdDecision.state.${g.state}` as MessageKey)}
+                      </h3>
+                      <ul className="mt-2 flex flex-col divide-y divide-ds-border">
+                        {g.rows.map((r) =>
+                          isTransferId(r.transferId) ? (
+                            <li key={r.transferId} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2">
+                              <Link href={`${PARTNER_ROUTES.transfers.href}/${encodeURIComponent(r.transferId)}`} prefetch={false} className={`font-mono ${LINK}`}>
+                                {r.transferId}
+                              </Link>
+                              <span className="text-[13px] text-ds-ink-muted tabular-nums">{t('partner.reviews.held.age', { n: r.ageHours })}</span>
+                            </li>
+                          ) : null,
+                        )}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <TransferRows rows={held.map(toPartnerRow)} caption={t('partner.reviews.held.caption')} />
+              )}
               {heldPage.nextCursor ? (
                 <p className="mt-3 text-[13px] text-ds-ink-muted">
                   {t('partner.reviews.held.more', { n: HELD_LIMIT })}{' '}
@@ -129,7 +197,13 @@ export default async function PartnerReviewsPage() {
 
         <Section
           title={t('partner.reviews.kyc.title')}
-          sub={delegated ? t('partner.reviews.kyc.subDelegated') : t('partner.reviews.neutral')}
+          sub={
+            owner && partnerDecidesKyc(owner)
+              ? t('partner.reviews.kyc.subPartnerDecides') // Fix pack 7 T28 (P25)
+              : delegated
+                ? t('partner.reviews.kyc.subDelegated')
+                : t('partner.reviews.neutral')
+          }
           testId="partner-reviews-kyc"
         >
           {kycRows.length === 0 ? (

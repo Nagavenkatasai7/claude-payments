@@ -8,19 +8,35 @@ import { paylinkDedupeKey, resendEligibility } from './partner-transfer-ops';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { releaseHold, releaseHoldAfterRescreen, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+import { isSandbox, releaseHold, releaseHoldAfterRescreen, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+import { buildRejectContactMessage } from './payment';
+import { SANCTIONS_FUNDS_RULE } from './sanctions/notices';
 export type { StaffAuditCtx } from './settlement';
-import type { Db } from '@/db/client';
+import type { Db, DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
-import { realMoneyRail } from './live-gate';
+import {
+  isPartnerReleasableHold, isRescreenOnlyHold, RECIPIENT_IDENTITY_MISSING_REASON, senderScreeningHoldActive, type CustomerScreeningFlags,
+} from './compliance-config';
+import { partnerMayRejectHold } from './partner-reviews';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { sanctionsNoticeAddress } from './sanctions/notices';
+import { realMoneyFor, realMoneyRail } from './live-gate';
 import { CARD_REFUND_UNAVAILABLE, cardRefundUnavailableFor, collectedOnRealMoneyFor } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { screenHeldOnFile } from './list-hold-rescreen';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
+import {
+  allowedDispositions, classifyHold, hasSanctionsHold, openHoldClasses, rowReasonsFp, type ClassifiedClass, type DecisionRefusal,
+  type HoldClass, type HoldDisposition, type ReviewRowLite,
+} from './hold-queue';
+import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
+import { HoldReviewChangedError, insertReview, lockAndRouteReview, readSenderFlagsLocked, type HoldReviewInput } from './hold-review-tx';
+import { enqueueHoldDispositionIfEligible } from './partner-events';
+import { logWarn } from './log';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -87,6 +103,27 @@ export const PLATFORM_RESCREEN_REFUSALS = {
     'Read the reasons on the compliance page, and release again only after that review.',
   blocked: 'Cannot release: the sanctions re-screen at release blocked this transfer.',
 } as const;
+
+/**
+ * Fix pack 7 (P12, P9 rule D6): the platform refusals on a partner certified
+ * for live money. A queue partner (posture holdDecider 'partner') decides its
+ * partner-decided classes itself; every other decision on a certified partner
+ * needs a recorded review with a disposition (an old tab posts none).
+ */
+export const PARTNER_DECIDES_HOLD_REFUSAL = 'The partner decides this hold: pause or escalate.';
+export const HOLD_REVIEW_RELOAD_REFUSAL =
+  'This partner needs a recorded decision with a disposition: reload the page and decide again.';
+export const HOLD_CHANGED_REFUSAL = 'This hold changed since the page loaded: reload the page and decide again.';
+/** Fix pack 7 T14a (P7, P12): the platform decision reason rule (parseHoldReason) refused the note. */
+export const HOLD_REASON_REFUSAL = 'Add a reason of at least 10 characters, with no account or phone numbers.';
+/** Fix pack 7 T14a (P12): the escalate refusals. */
+export const ESCALATE_NOT_QUEUE_REFUSAL = 'Escalate applies only to a partner that decides its own holds.';
+export const ESCALATE_NOT_HELD_REFUSAL = 'This transfer is no longer held.';
+
+/** The partner release refusal when the row or its sender changed (the partner actions map it to notAllowed). */
+const PARTNER_RELEASE_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
+/** The partner reject refusal when the row or its sender changed (the partner actions map it to notAllowed). */
+const PARTNER_REJECT_CHANGED = 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -176,7 +213,9 @@ export async function cancelOwnedTransfer(
 export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    // Fix pack 7 F2 (early review EE1): the row is read FOR UPDATE, so the checks below and the
+    // none -> pending flip see one locked row (lock order transfer -> customer, as rejectTransfer).
+    const transfer = await repo.getTransferForUpdate(id);
     if (!transfer) {
       throw new Error('Cannot reverse: transfer not found.');
     }
@@ -191,6 +230,12 @@ export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot reverse: a reversal is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 F2 (P14 "Refund back doors", D7): the B2B Reverse is a refund path too. On real
+    // money a sanctions-held row keeps its funds (REFUND_SANCTIONS_REFUSAL, thrown BEFORE the flip:
+    // refund stays 'none', no funding.refund); the partner returns them on its own rail and staff
+    // record it outside SmartRemit (P26). Not real money (mock, simulator, sandbox): one rail read,
+    // then today's path with no further read.
+    await refundHoldGuard(tx, transfer, await realMoneyFor(tx, transfer));
     await repo.updateRefund(id, { refundStatus: 'pending' });
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
@@ -340,13 +385,213 @@ export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the
  */
 export function canReleaseHeld(
   scope: Scope,
-  owner: Pick<Partner, 'kycMode'> | null | undefined,
+  owner: HoldOwner,
   transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
   sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   if (isRescreenOnlyHold(transfer)) return false;
-  if (scope.kind === 'platform') return true;
+  if (scope.kind === 'platform') {
+    // Fix pack 7 T14a (P12): a queue partner decides its partner-decided classes itself. The sender
+    // flags are not read here (null: the sender classes read as platform watchlist, conservative);
+    // the action re-checks with the flags.
+    return !queueClasses(owner, transfer, null)?.some((c) => c.decider === 'partner');
+  }
   return isPartnerReleasableHold(transfer, owner, sender);
+}
+
+/**
+ * Fix pack 7 T14a (P12): the owner shape canReleaseHeld / canRejectHeld take (a full Partner row
+ * fits). A `{ kycMode }`, `{}` or null owner (no id, status or liveControls) is never certified, so
+ * it keeps today's answers. `status` is a plain string, like compliance-config's LegacyHoldOwner.
+ */
+export type HoldOwner =
+  | { kycMode?: Partner['kycMode']; id?: string; status?: string; liveControls?: Partner['liveControls'] }
+  | null
+  | undefined;
+
+/** The classes of a queue owner's row (null for every other owner). Pure. */
+function queueClasses(
+  owner: HoldOwner,
+  transfer: Pick<Transfer, 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+) {
+  const o = owner as ScopeOwner | null | undefined;
+  if (!holdQueueApplies(o)) return null;
+  return classifyHold(transfer.complianceReasons, sender, { queue: true, partnerDecidesKyc: partnerDecidesKyc(o) }, {
+    blocked: transfer.complianceStatus === 'blocked',
+  });
+}
+
+/**
+ * Fix pack 7 T14a (P12): WHO may reject a held transfer. Platform staff: always, except on a queue
+ * partner whose classes are ALL partner-decided (the partner decides them; SmartRemit pauses or
+ * escalates). `sender`: the flags the caller read (undefined = not read; null = the read failed,
+ * which adds a platform sender class, fail closed). Partner staff: partnerMayRejectHold (unchanged).
+ * Pure.
+ */
+export function canRejectHeld(
+  scope: Scope,
+  owner: HoldOwner,
+  transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+): boolean {
+  if (scope.kind !== 'platform') return partnerMayRejectHold(transfer, owner, sender);
+  const classes = queueClasses(owner, transfer, sender);
+  return !classes || !classes.every((c) => c.decider === 'partner');
+}
+
+/**
+ * Fix pack 7 T14a (P12): a HoldReviewChangedError's `why` as the ONE fixed platform text. No
+ * sanctions detail beyond the existing texts.
+ */
+export function platformHoldRefusal(why: DecisionRefusal | 'changed', t: Pick<Transfer, 'complianceReasons'>): string {
+  switch (why) {
+    case 'not_yours':
+    case 'waits_platform':
+      return PARTNER_DECIDES_HOLD_REFUSAL;
+    case 'waits_list':
+      return RESCREEN_ONLY_RELEASE_REFUSAL;
+    case 'waits_data':
+      return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON)
+        ? RECIPIENT_IDENTITY_RELEASE_REFUSAL
+        : ORIGINATOR_INFO_RELEASE_REFUSAL;
+    case 'blocked':
+      return PLATFORM_RESCREEN_REFUSALS.blocked;
+    default:
+      return HOLD_CHANGED_REFUSAL;
+  }
+}
+
+/** Fix pack 7 T14a (P12): one platform decision form of one open class. */
+export interface PlatformHoldForm {
+  holdClass: HoldClass;
+  release: readonly HoldDisposition[];
+  reject: readonly HoldDisposition[];
+}
+export type PlatformHoldControls =
+  | { mode: 'legacy' }
+  | { mode: 'review'; rowFp: string; forms: PlatformHoldForm[]; partnerDecides: boolean; escalate: boolean; waitsList: boolean };
+
+/**
+ * Fix pack 7 T14a (P12, C3, R1, M11): what the admin compliance page renders for one held row.
+ * Legacy (today's Release / Reject) for every owner that is not certified. For a certified owner:
+ * one form per OPEN class (openHoldClasses) the platform decides (a queue owner: the platform
+ * classes; a delegated owner: every partner or platform class), plus a present data_missing class
+ * (reject `data_not_provided`; release `data_received` only when `dataOnFile`) and a present blocked
+ * class (reject `confirmed_match`) although no class decider owns them. While a list_wait class is
+ * present only Reject lists are offered (P5 rule 3); a blocked class or a data_missing class whose
+ * data is not on file also empties the Release lists (P5 rules 2, 4). A form with two empty lists
+ * is dropped. `sender`: the flags the caller read for a real-money row (R1: a later stamp is a
+ * synthetic platform sender class); `dataOnFile`: settlement's release data checks on the row.
+ * `partnerDecides` / `escalate`: a queue owner with an open partner class. Pure.
+ */
+export function platformHoldControls(
+  owner: HoldOwner,
+  t: Pick<Transfer, 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+  reviews: readonly ReviewRowLite[],
+  o: { dataOnFile?: boolean } = {},
+): PlatformHoldControls {
+  const so = owner as ScopeOwner | null | undefined;
+  if (!reviewRecordApplies(so)) return { mode: 'legacy' };
+  const queue = holdQueueApplies(so);
+  const dataOnFile = o.dataOnFile === true;
+  const classes = classifyHold(t.complianceReasons, sender, { queue, partnerDecidesKyc: partnerDecidesKyc(so) }, {
+    blocked: t.complianceStatus === 'blocked',
+    dataOnFile,
+  });
+  const open = openHoldClasses(classes, reviews, sender);
+  const waitsList = classes.some((c) => c.holdClass === 'list_wait');
+  const noRelease =
+    waitsList || classes.some((c) => c.holdClass === 'blocked' || (c.holdClass === 'data_missing' && c.decider === 'nobody'));
+  const forms: PlatformHoldForm[] = [];
+  for (const c of open) {
+    const ours =
+      c.decider === 'platform' ||
+      (!queue && c.decider === 'partner') ||
+      c.holdClass === 'data_missing' ||
+      c.holdClass === 'blocked' ||
+      c.holdClass === 'list_wait';
+    if (!ours) continue;
+    const lists = allowedDispositions(c.holdClass, 'platform');
+    const release = noRelease || (c.holdClass === 'data_missing' && !dataOnFile) ? [] : lists.release;
+    if (release.length === 0 && lists.reject.length === 0) continue;
+    forms.push({ holdClass: c.holdClass, release, reject: lists.reject });
+  }
+  const partnerDecides = queue && open.some((c) => c.decider === 'partner');
+  return { mode: 'review', rowFp: rowReasonsFp(t.complianceReasons), forms, partnerDecides, escalate: partnerDecides, waitsList };
+}
+
+/**
+ * Fix pack 7 T14a (P12, P28, P29): SmartRemit asks a queue partner to decide a held transfer. ONE
+ * transaction: the locked row (not in_review -> 'not_held'), the owner (null or not
+ * holdQueueApplies -> 'not_queue'), the classes (with the sender flags for a real-money row, R1),
+ * ONE `transfer.hold.escalate` audit row (meta: the class names and actorScope, nothing else) and,
+ * when the partner has a compliance address, ONE `email.send` deduped per transfer per UTC day.
+ * Changes no state. Pokes after the commit.
+ */
+export async function escalateHold(db: Db, id: string, actor: string): Promise<'ok' | 'not_queue' | 'not_held'> {
+  const r = await db.transaction(async (tx): Promise<'ok' | 'not_queue' | 'not_held'> => {
+    const t = await createTransferRepo(tx).getTransferForUpdate(id);
+    if (!t || t.status !== 'in_review') return 'not_held';
+    const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
+    if (!owner || !holdQueueApplies(owner)) return 'not_queue';
+    const flags = (await realMoneyFor(tx, t)) ? await readSenderScreeningFlags(tx, t.partnerId, t.phone) : undefined;
+    const holdClasses = classifyHold(t.complianceReasons, flags, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, {
+      blocked: t.complianceStatus === 'blocked',
+    }).map((c) => c.holdClass);
+    await createAuditRepo(tx).record({
+      partnerId: t.partnerId,
+      actor,
+      actorType: 'staff',
+      action: 'transfer.hold.escalate',
+      subjectId: t.id,
+      meta: { holdClasses, actorScope: 'platform' },
+    });
+    const addr = sanctionsNoticeAddress(owner.supportConfig);
+    if (addr) {
+      await createOutboxRepo(tx).enqueue(
+        'email.send',
+        {
+          to: [addr],
+          subject: 'SmartRemit: a held transfer waits for your decision',
+          text: `Transfer ${t.id} is held and waits for your compliance team's decision in your SmartRemit workspace (Reviews). Do not share this notice with the customer.`,
+        },
+        { dedupeKey: `holdescalate:${t.id}:${new Date().toISOString().slice(0, 10)}` },
+      );
+    }
+    return 'ok';
+  });
+  if (r === 'ok') pokeWorker();
+  return r;
+}
+
+/**
+ * Fix pack 7 (P9, D6): a release or reject with NO review on a live row reads
+ * the owner (a throw propagates; null refuses with the generic permission
+ * text). On a certified owner (reviewRecordApplies): a partner-scoped call is
+ * refused with the partner's concurrent text (`changedText`: its legacy path is
+ * closed by design); a platform call is refused with PARTNER_DECIDES_HOLD_REFUSAL
+ * when a queue owner decides a class of the row, else HOLD_REVIEW_RELOAD_REFUSAL.
+ * Uncertified owners (every tenant today): one read, no change.
+ */
+async function ownerGate(
+  db: Db,
+  transfer: Pick<Transfer, 'partnerId' | 'complianceReasons'>,
+  o: { partnerScoped: boolean; changedText: string },
+): Promise<void> {
+  const owner = await createPartnerRepo(db).getPartner(transfer.partnerId);
+  if (!owner) throw new Error('You do not have permission to perform this action.');
+  if (!reviewRecordApplies(owner)) return;
+  if (o.partnerScoped) throw new Error(o.changedText);
+  if (
+    holdQueueApplies(owner) &&
+    classifyHold(transfer.complianceReasons, null, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, { blocked: false })
+      .some((c) => c.decider === 'partner')
+  ) {
+    throw new Error(PARTNER_DECIDES_HOLD_REFUSAL);
+  }
+  throw new Error(HOLD_REVIEW_RELOAD_REFUSAL);
 }
 
 /**
@@ -372,7 +617,15 @@ export async function releaseTransfer(
   id: string,
   audit: StaffAuditCtx,
   partnerRelease?: { partnerId: PartnerId },
+  review?: HoldReviewInput,
 ): Promise<void> {
+  // Fix pack 7 (P9): programming errors, before any read.
+  if (review) {
+    if (partnerRelease) throw new Error('releaseTransfer: review and partnerRelease are exclusive');
+    if (audit?.actor !== review.actor || audit.reason !== review.reason) {
+      throw new Error("releaseTransfer: the audit context must be the review's actor and reason");
+    }
+  }
   // Program-Fix 43 follow-up (defence in depth behind releaseTransferAction):
   // every release records WHO and WHY, so no audit context or a blank reason
   // is refused before any read or write.
@@ -400,6 +653,13 @@ export async function releaseTransfer(
   if (isRescreenOnlyHold(transfer)) {
     throw new Error(RESCREEN_ONLY_RELEASE_REFUSAL);
   }
+  // Fix pack 7 (P9, D6 defence in depth): a certified owner's hold moves only with a recorded
+  // review. A sandbox ('test') row is exempt and its owner is not read (P0 rule 3).
+  if (review) {
+    if (review.ownerId !== transfer.partnerId) throw new HoldReviewChangedError('changed');
+  } else if (transfer.environment !== 'test') {
+    await ownerGate(db, transfer, { partnerScoped: partnerRelease !== undefined, changedText: PARTNER_RELEASE_CHANGED });
+  }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
   // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
   // sender's screening hold first (the audited clearSenderScreeningHoldAction
@@ -409,8 +669,11 @@ export async function releaseTransfer(
   // right before the claim ('sender_hold' below), so a stamp in between refuses. The partner path is already
   // refused in markPaidIfInReview (partnerRelease) for a flagged sender, a
   // stamp-only hold included (pack 2 review F2: senderClearForPartnerRelease).
+  // Fix pack 7 T9 (P9 step 6): a review with pepClear skips this unlocked read: the locked
+  // transaction clears the PEP hit first, then re-checks with platformSenderHoldLocked.
   if (
     !partnerRelease &&
+    !review?.pepClear &&
     realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
     senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))
   ) {
@@ -432,11 +695,14 @@ export async function releaseTransfer(
   ) {
     await warmSanctionsList();
     const { result, uncovered } = await screenHeldOnFile(db, transfer, true, now);
-    const rr = await releaseHoldAfterRescreen(db, transfer.id, { result, uncovered, railIntegrations, audit, partnerRelease });
+    const rr = await releaseHoldAfterRescreen(db, transfer.id, {
+      result, uncovered, railIntegrations, audit, partnerRelease, ...(review ? { review } : {}),
+    });
     if (rr.kind === 'released') {
       pokeWorker();
       return;
     }
+    if (rr.kind === 'changed') throw new HoldReviewChangedError(rr.why);
     // Review R1 (H2): a stamp that landed after the pre-read above (platform only).
     if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
     // Fix pack 4 (C19): the clear re-screen's evidence is kept; nothing else written.
@@ -445,12 +711,12 @@ export async function releaseTransfer(
     if (rr.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
-        partnerRelease
-          ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
-          : 'Cannot release: transfer is not in_review (it moved concurrently)',
+        partnerRelease ? PARTNER_RELEASE_CHANGED : 'Cannot release: transfer is not in_review (it moved concurrently)',
       );
     }
     if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
+    // Fix pack 7 (P21 site 4): a held re-screen may have queued a partner event; mark the worker due.
+    if (rr.kind === 'held') pokeWorker();
     // Review R2 (J2): partner staff get one text for every outcome; platform
     // staff get the text for the outcome class (what to do next).
     if (partnerRelease) throw new Error(RESCREEN_RELEASE_REFUSAL);
@@ -463,15 +729,14 @@ export async function releaseTransfer(
     );
   }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
-  const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
+  const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease, review);
+  if (r.kind === 'changed') throw new HoldReviewChangedError(r.why);
   if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL); // fix pack 4 (C19): nothing written
   if (r.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL); // fix pack 5 (P22): nothing written
   if (r.kind === 'already') {
     throw new Error(
-      partnerRelease
-        ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
-        : 'Cannot release: transfer is not in_review (it moved concurrently)',
+      partnerRelease ? PARTNER_RELEASE_CHANGED : 'Cannot release: transfer is not in_review (it moved concurrently)',
     );
   }
   pokeWorker(); // fast path for the rail effect — the per-minute cron drains it regardless
@@ -489,6 +754,16 @@ export async function releaseTransfer(
  * the claim then re-checks, atomically, the tenant, a non-blocked row and the sender's customer
  * row (present, no PEP / watchlist hit), and the audit meta carries actorScope 'partner'. Omitted
  * (platform and legacy callers) ⇒ unchanged.
+ *
+ * Fix pack 7 T16 (D7, P14): on real money (`realMoneyFor`, every non-'test' row: one rail read) a
+ * reject of a row that carries a SANCTIONS hold class (`hasSanctionsHold`: sanctions_review,
+ * sender_watchlist, blocked; classes from the sender flags read under the lock, fail closed) KEEPS
+ * the funds: the row cancels, the refund status is left as it is (none, or requested after a
+ * sender-cancel escalation), no funding.refund; the audit meta says `fundsKept: true`, ONE
+ * `rejectfunds:<id>` ops alert and ONE neutral `rejectmsg:<id>` customer message are queued. A
+ * PEP-only sender is not a sanctions hold and refunds as today. The exit (P14 "Named exits"): the
+ * partner returns the funds on its own processor or rail once its compliance officer approves, and
+ * staff record it with `recordRefundOutsideAction` (T34, `sanctionsReturnApproved` + `approvalRef`).
  */
 export async function rejectTransfer(
   store: Store,
@@ -496,13 +771,29 @@ export async function rejectTransfer(
   id: string,
   audit?: StaffAuditCtx,
   partnerReject?: { partnerId: PartnerId },
+  review?: HoldReviewInput,
 ): Promise<void> {
+  // Fix pack 7 (P9): programming errors, before any read.
+  if (review) {
+    if (partnerReject) throw new Error('rejectTransfer: review and partnerReject are exclusive');
+    if (review.pepClear) throw new Error('rejectTransfer: review.pepClear is for a release only');
+    if (!audit || audit.actor !== review.actor || audit.reason !== review.reason) {
+      throw new Error("rejectTransfer: the audit context must be the review's actor and reason");
+    }
+  }
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
   }
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot reject: transfer is not in_review (current status: ${transfer.status})`);
+  }
+  // Fix pack 7 (P9, D6 defence in depth): a certified owner's hold is rejected only with a
+  // recorded review. A sandbox ('test') row is exempt and its owner is not read (P0 rule 3).
+  if (review) {
+    if (review.ownerId !== transfer.partnerId) throw new HoldReviewChangedError('changed');
+  } else if (transfer.environment !== 'test') {
+    await ownerGate(db, transfer, { partnerScoped: partnerReject !== undefined, changedText: PARTNER_REJECT_CHANGED });
   }
   // The in_review check above is advisory; the GUARDED UPDATE below is the
   // claim. A concurrent release (in_review → paid + rail instructed) between
@@ -512,28 +803,98 @@ export async function rejectTransfer(
   // can never leave a cancelled, charged, UNREFUNDED transfer.
   const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
-    // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
-    const cancelled = partnerReject
-      ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
-      : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
-    if (!cancelled) {
-      throw new Error(
-        partnerReject
-          ? 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)'
-          : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+    // Fix pack 7 T16 (P14): real money BEFORE every claim (reads only; a 'test' row reads nothing).
+    const realMoney = await realMoneyFor(tx, transfer);
+    // The classes for the funds rule, from the claimed (locked) row; on real money only.
+    let classes: readonly ClassifiedClass[] = [];
+    let cancelled: Transfer | null;
+    if (review) {
+      // Fix pack 7 (P9 steps 1-4): the tenant-pinned locked read, the owner re-read, the row
+      // fingerprint, the locked sender flags, the classes, the route ('reject', final) and the
+      // partner-scope sender stance. Every refusal throws, so nothing commits.
+      const r = await lockAndRouteReview(tx, id, review, 'reject');
+      if (r.kind === 'already') throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      if (r.kind !== 'ok') throw new HoldReviewChangedError(r.kind === 'changed' ? r.why : 'changed');
+      // P9 step 7: the claim on the locked, tenant-pinned row (never the partner claim, DP6).
+      cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+      if (!cancelled) throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      // T16 (P14): the review path reuses the flags lockAndRouteReview read under the lock.
+      if (realMoney) classes = fundsRuleClasses(cancelled, r.flags);
+      // P9 step 8: the review row AFTER the claim (a refused insert throws: the claim rolls back).
+      const reviewId = await insertReview(tx, r, review);
+      // P9 step 9: the audit ctx is DERIVED from the review, so the two rows can never differ.
+      await recordStaffTransferAudit(
+        tx,
+        { actor: review.actor, reason: review.reason, actorScope: review.actorScope },
+        'transfer.reject',
+        cancelled,
+        {
+          previousStatus: 'in_review',
+          newStatus: 'cancelled',
+          refundStatus: rejectRefundStatus(cancelled, realMoney && hasSanctionsHold(classes)),
+          reviewId,
+          step: r.step.step,
+          disposition: review.disposition,
+          holdClass: r.cls.holdClass,
+          actorScope: review.actorScope,
+          ...(realMoney && hasSanctionsHold(classes) ? { fundsKept: true } : {}),
+        },
       );
+      // P21 (T23): the disposition event, after the audit and before the funds rule / refund branch.
+      await enqueueHoldDispositionIfEligible(tx, cancelled, r.owner, reviewId, r.step.final);
+    } else {
+      // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
+      // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
+      cancelled = partnerReject
+        ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
+        : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+      if (!cancelled) {
+        throw new Error(
+          partnerReject
+            ? PARTNER_REJECT_CHANGED
+            : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+        );
+      }
+      // T16 (P14): the sender flags under the lock, AFTER the claim (the claim holds the transfer
+      // row lock: transfer -> customer order). A failed read is null: fail closed (a synthetic
+      // sender_watchlist class keeps the funds). No customer row in the owner tenant (a partner-API
+      // sender) has no stamp to read: undefined, so only a SENDER_SCREENING reason makes a sender class.
+      if (realMoney) classes = fundsRuleClasses(cancelled, await lockedFundsRuleFlags(tx, cancelled));
     }
+    const fundsKept = realMoney && hasSanctionsHold(classes);
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
-    // branches record the decision in this transaction.
-    if (audit) {
+    // branches record the decision in this transaction (the review path wrote its own above).
+    if (audit && !review) {
       await recordStaffTransferAudit(tx, audit, 'transfer.reject', cancelled, {
         previousStatus: 'in_review',
         newStatus: 'cancelled',
-        refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+        refundStatus: rejectRefundStatus(cancelled, fundsKept),
         ...(partnerReject ? { actorScope: 'partner' } : {}),
+        ...(fundsKept ? { fundsKept: true } : {}),
       });
     }
+    if (fundsKept) {
+      // T16 (P14, D7): the funds are kept; ops and the customer are told, once each.
+      const outbox = createOutboxRepo(tx);
+      await outbox.enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: transfer ${id} (partner ${cancelled.partnerId}) was rejected while a sanctions screening hold was on it. ` +
+            `It is cancelled and NOT refunded: ${SANCTIONS_FUNDS_RULE}. The partner blocks or returns the funds on its own processor or rail; ` +
+            `once the partner's compliance officer has approved a return and the money is back with the sender, record it with "Record refund made outside SmartRemit".`,
+        },
+        { dedupeKey: `rejectfunds:${id}` },
+      );
+      await outbox.enqueue(
+        'whatsapp.text',
+        // M9, P6: essential (survives STOP); neutral, no refund promised, no check named.
+        { to: cancelled.phone, body: buildRejectContactMessage(cancelled), partnerId: cancelled.partnerId, category: 'essential', ...(isSandbox(cancelled) ? { sandbox: true } : {}) },
+        { dedupeKey: `rejectmsg:${id}` },
+      );
+      return true; // the poke below runs
+    }
+    // T32: card / partner-collected variants (P27)
     if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
     await repo.updateRefund(id, { refundStatus: 'pending' });
     await createOutboxRepo(tx).enqueue(
@@ -547,6 +908,17 @@ export async function rejectTransfer(
   pokeWorker(); // fast path — the per-minute cron drains it regardless
 }
 
+/** T16 (P14): the classes the funds rule reads; the owner argument only changes deciders. */
+function fundsRuleClasses(t: Transfer, flags: Parameters<typeof classifyHold>[1]): readonly ClassifiedClass[] {
+  return classifyHold(t.complianceReasons, flags, { queue: false, partnerDecidesKyc: false }, { blocked: t.complianceStatus === 'blocked' });
+}
+
+/** T16 (P14, M1): the reject audit's refundStatus: the real status when the funds are kept. */
+function rejectRefundStatus(t: Transfer, fundsKept: boolean): string {
+  if (fundsKept) return t.refundStatus ?? 'none';
+  return t.fundingRef ? 'pending' : 'none';
+}
+
 /**
  * Merge plan 2b: an optional tenant for the refund decisions below. When given, the in-transaction
  * reload is `getOwnedTransfer(partnerId, id)` (tenant in the WHERE), so a foreign id reads as
@@ -558,6 +930,54 @@ export interface RefundScope {
 
 function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, scope: RefundScope | undefined): Promise<Transfer | null> {
   return scope ? repo.getOwnedTransfer(scope.partnerId, id) : repo.getTransfer(id);
+}
+
+/**
+ * Fix pack 7 T16b (P14 "Refund back doors", D7, M1): why approveRefund, retryRefund and
+ * issueRefund refuse a real-money row that carries a sanctions hold class. Staff-facing; the
+ * exit is the partner's own return plus "Record refund made outside SmartRemit" (P26).
+ */
+export const REFUND_SANCTIONS_REFUSAL =
+  'Cannot refund: a sanctions hold is on this transfer. The partner\'s compliance officer decides; record an approved return with "Record refund made outside SmartRemit".';
+
+/** Fix pack 7 T16b (P14, D5/D6): a certified owner's held (in_review) row is decided in the review first. */
+export const REFUND_HOLD_FIRST_REFUSAL = 'Decide this hold in the review first.';
+
+/**
+ * Fix pack 7 T16b (P14, D7): the refund back-door guard, inside each refund core's transaction.
+ * `realMoney` was read BEFORE the claim (`realMoneyFor`: one rail read, a 'test' row reads
+ * nothing); false = today's path, nothing else is read. On real money it runs AFTER the core's
+ * guarded claim (the claim UPDATE holds the transfer row lock, so the sender flags are locked
+ * transfer -> customer, the order rejectTransfer uses; a throw rolls the claim back), on the
+ * CLAIMED row: the sender flags under the lock (a thrown read is null: fail closed; no customer
+ * row is undefined, nothing to read, as rejectTransfer), the classes, and `hasSanctionsHold` ->
+ * REFUND_SANCTIONS_REFUSAL in both scopes. Then an in_review row of a certified owner
+ * (`reviewRecordApplies`) -> REFUND_HOLD_FIRST_REFUSAL (a refund on a held row would race a later
+ * release). A missing owner refuses with the generic permission text. Uncertified owners: unchanged.
+ */
+/**
+ * Fix pack 7 F4 (early review EE2): the funds rule's sender flags under the lock, for rejectTransfer
+ * and refundHoldGuard. The read runs in a savepoint (readSenderFlagsLocked), so a SQL failure
+ * answers null (fail closed: a synthetic sender_watchlist class) AND the transaction goes on (the
+ * reject commits with the funds kept, its rejectfunds alert and rejectmsg). No customer row in the
+ * owner tenant (a partner-API sender) is undefined: nothing to read is not a hit.
+ */
+async function lockedFundsRuleFlags(tx: DbOrTx, t: Transfer): Promise<CustomerScreeningFlags | null | undefined> {
+  const read = await readSenderFlagsLocked(tx, t.partnerId, t.phone);
+  if (!read.read) {
+    logWarn('funds-rule.flags-read', read.errorName, { transferId: t.id });
+    return null;
+  }
+  return read.flags ?? undefined;
+}
+
+async function refundHoldGuard(tx: DbOrTx, t: Transfer, realMoney: boolean): Promise<void> {
+  if (!realMoney) return;
+  if (hasSanctionsHold(fundsRuleClasses(t, await lockedFundsRuleFlags(tx, t)))) throw new Error(REFUND_SANCTIONS_REFUSAL);
+  if (t.status !== 'in_review') return;
+  const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
+  if (!owner) throw new Error('You do not have permission to perform this action.');
+  if (reviewRecordApplies(owner)) throw new Error(REFUND_HOLD_FIRST_REFUSAL);
 }
 
 /**
@@ -622,12 +1042,17 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'none': a concurrent decision that committed
     // after the read above leaves nothing to claim, so this throws (rolls back) instead of
     // flipping a row that moved.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' });
+    if (!claimed) {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: the issue-time real-money decision rides the payload,
     // so a rail that is no longer real money at the drain never sends this
     // refund down the mock path. Absent for every other row (unchanged payload).
@@ -668,12 +1093,17 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (await cardRefundUnavailableFor(tx, transfer)) {
       throw new Error(`Cannot approve: ${CARD_REFUND_UNAVAILABLE}`);
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
     // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
     // call throws (rolls back) instead of starting a refund or auditing a no-op.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' });
+    if (!claimed) {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: carry the real-money decision (as issueRefund). No
     // admission here: a row that fails it is closed by the worker (RC2, RF1).
     const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
@@ -745,12 +1175,17 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (await cardRefundUnavailableFor(tx, transfer)) {
       throw new Error(`Cannot retry: ${CARD_REFUND_UNAVAILABLE}`);
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
     // this check (not the key) is what keeps a concurrent second retry from enqueueing a second
     // refund effect.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' });
+    if (!claimed) {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: carry the real-money decision (as issueRefund).
     const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(

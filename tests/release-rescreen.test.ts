@@ -38,6 +38,7 @@ import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-re
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { platformReviewFor } from './helpers-hold';
 
 vi.mock('@/lib/outbox', async (orig) => {
   const real = await orig<typeof import('@/lib/outbox')>();
@@ -180,7 +181,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_old' });
-    await releaseTransfer(store, db, 'rr_old', REL);
+    await releaseTransfer(store, db, 'rr_old', REL, undefined, await platformReviewFor(db, 'rr_old', REL));
     const after = await store.getTransfer('rr_old');
     expect(after?.status).toBe('paid');
     const rows = await auditRows('rr_old');
@@ -198,7 +199,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: 40 * H }); // stale list
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_stale' });
-    await expect(releaseTransfer(store, db, 'rr_stale', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
+    await expect(releaseTransfer(store, db, 'rr_stale', REL, undefined, await platformReviewFor(db, 'rr_stale', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
     const after = await store.getTransfer('rr_stale');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceStatus).toBe('flagged');
@@ -221,7 +222,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     await heldLarge({ id: 'rr_match', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
     let msg = '';
     try {
-      await releaseTransfer(store, db, 'rr_match', REL);
+      await releaseTransfer(store, db, 'rr_match', REL, undefined, await platformReviewFor(db, 'rr_match', REL));
     } catch (e) {
       msg = (e as Error).message;
     }
@@ -247,7 +248,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
       { id: 'rr_m2_card', recipientName: 'Testa Fixturelli', fundingMethod: 'credit_card', fundingRef: 'pi_rr_m2' },
       { recipientName: 'Testa Fixturelli' },
     );
-    await expect(releaseTransfer(store, db, 'rr_m2_card', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    await expect(releaseTransfer(store, db, 'rr_m2_card', REL, undefined, await platformReviewFor(db, 'rr_m2_card', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
     const alert = await outboxText('sanctionsblock:rr_m2_card', 'message');
     const mail = await outboxText('sanctionsblockmail:rr_m2_card:acme', 'text');
     expect(alert).toContain('the sender was charged');
@@ -264,7 +265,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     await rail('acme', 'http');
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
     await heldLarge({ id: 'rr_m2_none', recipientName: 'Testa Fixturelli', fundingMethod: 'ach_pull', transferType: 'b2b' }, { recipientName: 'Testa Fixturelli' });
-    await expect(releaseTransfer(store, db, 'rr_m2_none', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    await expect(releaseTransfer(store, db, 'rr_m2_none', REL, undefined, await platformReviewFor(db, 'rr_m2_none', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
     expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).toContain('Nothing was charged or paid out');
     expect(await outboxText('sanctionsblock:rr_m2_none', 'message')).not.toMatch(/the sender was charged|refund/);
     expect(await outboxText('sanctionsblockmail:rr_m2_none:acme', 'text')).toContain('nothing was charged or paid out');
@@ -277,7 +278,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     await rail('acme', 'http');
     await db.execute(sql`UPDATE partners SET support_config = ${JSON.stringify({ complianceAlertEmail: 'compliance@acme.example' })}::jsonb WHERE id = 'acme'`);
     await heldLarge({ id: 'rr_m2_pc', recipientName: 'Testa Fixturelli', fundingMethod: 'bank_transfer' }, { recipientName: 'Testa Fixturelli' });
-    await expect(releaseTransfer(store, db, 'rr_m2_pc', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    await expect(releaseTransfer(store, db, 'rr_m2_pc', REL, undefined, await platformReviewFor(db, 'rr_m2_pc', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
     const alert = await outboxText('sanctionsblock:rr_m2_pc', 'message');
     const mail = await outboxText('sanctionsblockmail:rr_m2_pc:acme', 'text');
     expect(alert).toBe(
@@ -302,7 +303,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
       { screenedAgoMs: 40 * H, at: new Date(Date.now() - 40 * H) },
     );
     expect(await beginHold(db, t, { addReasons: [LARGE_AMOUNT_REASON] })).toEqual({ kind: 'held' });
-    await expect(releaseTransfer(store, db, 'rr_unc', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
+    await expect(releaseTransfer(store, db, 'rr_unc', REL, undefined, await platformReviewFor(db, 'rr_unc', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
     const after = await store.getTransfer('rr_unc');
     expect(after?.status).toBe('in_review');
     expect(after?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, SENDER_IDENTITY_MISSING_REASON]);
@@ -312,6 +313,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
   // Review R2 (J2): partner staff get ONE text for every outcome (a list
   // outage, a match, an uncovered name, a possible match): it tells nothing apart.
   it('partner-scoped release: a list outage, a match, an uncovered name and a possible match give the SAME refusal text', async () => {
+    await db.execute(sql`UPDATE partners SET live_controls = '{}'::jsonb WHERE id = 'acme'`); // T8a (DP9): the uncertified delegated path; a certified partner's legacy release is closed by design
     await rail('acme', 'http');
     primeOfacSource({ checkedAgoMs: 40 * H });
     await heldLarge({ id: 'rr_p_list' });
@@ -347,7 +349,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_none' }, ev);
     const before = (await auditRows('rr_none')).filter((a) => a.action === 'sanctions.screen').length;
-    await releaseTransfer(store, db, 'rr_none', REL);
+    await releaseTransfer(store, db, 'rr_none', REL, undefined, await platformReviewFor(db, 'rr_none', REL));
     expect((await store.getTransfer('rr_none'))?.status).toBe('paid');
     expect((await auditRows('rr_none')).filter((a) => a.action === 'sanctions.screen')).toHaveLength(before + 1);
   });
@@ -356,8 +358,9 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_race' });
+    const review = await platformReviewFor(db, 'rr_race', REL); // T8a (DP9): read before the race switch is armed
     senderRace.stampAfterPreRead = true;
-    await expect(releaseTransfer(store, db, 'rr_race', REL)).rejects.toThrow(SENDER_SCREENING_RELEASE_REFUSAL);
+    await expect(releaseTransfer(store, db, 'rr_race', REL, undefined, review)).rejects.toThrow(SENDER_SCREENING_RELEASE_REFUSAL);
     expect(senderRace.stampAfterPreRead).toBe(false);
     expect((await store.getTransfer('rr_race'))?.status).toBe('in_review');
     const rows = await auditRows('rr_race');
@@ -370,7 +373,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_fresh' }, { screenedAgoMs: H });
-    await releaseTransfer(store, db, 'rr_fresh', REL);
+    await releaseTransfer(store, db, 'rr_fresh', REL, undefined, await platformReviewFor(db, 'rr_fresh', REL));
     expect((await store.getTransfer('rr_fresh'))?.status).toBe('paid');
     expect((await auditRows('rr_fresh')).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
   });
@@ -383,7 +386,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
     primeOfacSource({ checkedAgoMs: 40 * H });
     await rail('acme', type);
     await heldLarge({ id: 'rr_demo', environment: environment as Transfer['environment'] });
-    await releaseTransfer(store, db, 'rr_demo', REL);
+    await releaseTransfer(store, db, 'rr_demo', REL, undefined, await platformReviewFor(db, 'rr_demo', REL));
     expect((await store.getTransfer('rr_demo'))?.status).toBe('paid');
     expect((await auditRows('rr_demo')).filter((a) => a.action === 'sanctions.screen')).toHaveLength(1);
   });
@@ -391,7 +394,7 @@ describe('releaseTransfer — real-money freshness (review F1/A1)', { retry: 0 }
   it('absent rail config (default mock): release unchanged', async () => {
     primeOfacSource({ checkedAgoMs: 40 * H });
     await heldLarge({ id: 'rr_absent' });
-    await releaseTransfer(store, db, 'rr_absent', REL);
+    await releaseTransfer(store, db, 'rr_absent', REL, undefined, await platformReviewFor(db, 'rr_absent', REL));
     expect((await store.getTransfer('rr_absent'))?.status).toBe('paid');
   });
 });
@@ -412,7 +415,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     await rail('acme', 'http');
     if (id === 'rr_2_unc') await heldUncovered(id);
     else await heldLarge({ id, recipientName: POSSIBLE_NAME }, { recipientName: POSSIBLE_NAME });
-    await expect(releaseTransfer(store, db, id, REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
+    await expect(releaseTransfer(store, db, id, REL, undefined, await platformReviewFor(db, id, REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.review);
     const held = await store.getTransfer(id);
     expect(held?.status).toBe('in_review');
     expect(held?.complianceReasons).toContain(reason);
@@ -421,7 +424,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     const screened = await screens(id);
     expect(screened).toBe(2);
 
-    await releaseTransfer(store, db, id, { actor: 'plat2', reason: 'reviewed the reasons' });
+    await releaseTransfer(store, db, id, { actor: 'plat2', reason: 'reviewed the reasons' }, undefined, await platformReviewFor(db, id, { actor: 'plat2', reason: 'reviewed the reasons' }));
     expect((await store.getTransfer(id))?.status).toBe('paid');
     expect(await screens(id)).toBe(screened);
     expect((await auditRows(id)).filter((a) => a.action === 'transfer.release')).toEqual([
@@ -434,7 +437,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     primeOfacSource({ checkedAgoMs: 40 * H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_2_list' });
-    await expect(releaseTransfer(store, db, 'rr_2_list', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
+    await expect(releaseTransfer(store, db, 'rr_2_list', REL, undefined, await platformReviewFor(db, 'rr_2_list', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
     primeOfacSource({ checkedAgoMs: H });
     await expect(releaseTransfer(store, db, 'rr_2_list', REL)).rejects.toThrow(RESCREEN_ONLY_RELEASE_REFUSAL);
     expect((await store.getTransfer('rr_2_list'))?.status).toBe('in_review');
@@ -446,7 +449,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_2_m', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
-    await expect(releaseTransfer(store, db, 'rr_2_m', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
+    await expect(releaseTransfer(store, db, 'rr_2_m', REL, undefined, await platformReviewFor(db, 'rr_2_m', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.blocked);
     // Review round 3 (M3): the second click says the transfer is blocked (not
     // "it moved concurrently"), before any write.
     const auditBefore = await auditRows('rr_2_m');
@@ -462,6 +465,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
   });
 
   it('M3: a match, partner staff: both clicks get the one partner text (a match looks like an outage), nothing written by the second', async () => {
+    await db.execute(sql`UPDATE partners SET live_controls = '{}'::jsonb WHERE id = 'acme'`); // T8a (DP9): the uncertified delegated path; a certified partner's legacy release is closed by design
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_2_pm_b', recipientName: 'Testa Fixturelli' }, { recipientName: 'Testa Fixturelli' });
@@ -491,7 +495,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     primeOfacSource({ checkedAgoMs: 40 * H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_k2' });
-    await expect(releaseTransfer(store, db, 'rr_k2', REL)).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
+    await expect(releaseTransfer(store, db, 'rr_k2', REL, undefined, await platformReviewFor(db, 'rr_k2', REL))).rejects.toThrow(PLATFORM_RESCREEN_REFUSALS.listNotLive);
     expect((await store.getTransfer('rr_k2'))?.complianceReasons).toEqual([LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
 
     primeOfacSource({ checkedAgoMs: H });
@@ -503,7 +507,7 @@ describe('releaseTransfer — the platform refusal per outcome and the second cl
     expect((await keys()).filter((k) => k?.startsWith('instruct:'))).toEqual([]);
 
     // Back in the review queue: a platform release now releases it.
-    await releaseTransfer(store, db, 'rr_k2', { actor: 'plat2', reason: 'reviewed after the re-screen' });
+    await releaseTransfer(store, db, 'rr_k2', { actor: 'plat2', reason: 'reviewed after the re-screen' }, undefined, await platformReviewFor(db, 'rr_k2', { actor: 'plat2', reason: 'reviewed after the re-screen' }));
     expect((await store.getTransfer('rr_k2'))?.status).toBe('paid');
   });
 });
@@ -514,6 +518,7 @@ describe('releaseTransfer — partner release through the re-screen claim (revie
   const PARTNER_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
 
   it('a stamp-only sender (screening_flagged_at set, flags NULL): the re-screen clears, the claim refuses; evidence kept, no instruct', async () => {
+    await db.execute(sql`UPDATE partners SET live_controls = '{}'::jsonb WHERE id = 'acme'`); // T8a (DP9): the uncertified delegated path; a certified partner's legacy release is closed by design
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await heldLarge({ id: 'rr_j1_stamp' });
@@ -529,6 +534,7 @@ describe('releaseTransfer — partner release through the re-screen claim (revie
   });
 
   it("another tenant's partnerId: the same text, the row unchanged, no audit row and no outbox row", async () => {
+    await db.execute(sql`UPDATE partners SET live_controls = '{}'::jsonb WHERE id = 'acme'`); // T8a (DP9): the uncertified delegated path; a certified partner's legacy release is closed by design
     primeOfacSource({ checkedAgoMs: H });
     await rail('acme', 'http');
     await seedPartner(db, 'other');

@@ -189,6 +189,65 @@ describe('writePosture', () => {
   });
 });
 
+// Fix pack 7 T15 (R7, P2): while hasStandingCertification is true, a re-signed posture may not change
+// who decides holds or KYC, nor turn four-eyes off; tightening and a same-answer re-sign stay allowed.
+describe('writePosture: the posture lock while certified (R7)', () => {
+  const SIGNED = { kycDecider: 'smartremit_procedures', holdDecider: 'partner', fourEyesNonSanctions: true } as const;
+  async function certifiedWith(fourEyes: boolean): Promise<void> {
+    await certifyPartnerForTest(db, 'acme', { posture: true });
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{posture,fourEyesNonSanctions}', ${JSON.stringify(fourEyes)}::jsonb) WHERE id = 'acme'`);
+  }
+
+  it("certified + holdDecider change -> 'certified', nothing written, no livectl email", async () => {
+    await certifiedWith(true);
+    const before = await column();
+    expect(await posture({ ...SIGNED, holdDecider: 'smartremit_delegated' })).toEqual({ ok: false, code: 'certified' });
+    await expectNothingWritten(before);
+  });
+
+  it("certified + kycDecider change -> 'certified'", async () => {
+    await certifiedWith(true);
+    // the platform moved to delegated (only possible while uncertified; seeded here) so the
+    // decider change passes the kycMode match and reaches the lock
+    await db.execute(sql`UPDATE partners SET kyc_mode = 'delegated' WHERE id = 'acme'`);
+    const before = await column();
+    expect(await posture({ ...SIGNED, kycDecider: 'partner' })).toEqual({ ok: false, code: 'certified' });
+    await expectNothingWritten(before);
+  });
+
+  it("certified + fourEyes true -> false -> 'certified'", async () => {
+    await certifiedWith(true);
+    const before = await column();
+    expect(await posture({ ...SIGNED, fourEyesNonSanctions: false })).toEqual({ ok: false, code: 'certified' });
+    await expectNothingWritten(before);
+  });
+
+  it('certified + fourEyes false -> true -> ok', async () => {
+    await certifiedWith(false);
+    expect(await posture(SIGNED)).toEqual({ ok: true });
+    expect((await column()).posture).toMatchObject({ holdDecider: 'partner', fourEyesNonSanctions: true, signedBy: 'acme-admin' });
+    expect((await audits()).map((a) => a.action)).toEqual(['partner.live.posture.sign']);
+  });
+
+  it('certified + same answers -> ok', async () => {
+    await certifiedWith(true);
+    expect(await posture(SIGNED)).toEqual({ ok: true });
+    expect((await column()).posture).toMatchObject({ ...SIGNED, signedBy: 'acme-admin' });
+  });
+
+  it('a revoked certification (not standing) -> any change ok', async () => {
+    await certifiedWith(true);
+    await db.execute(sql`UPDATE partners SET live_controls = jsonb_set(live_controls, '{certification,revokedAt}', ${JSON.stringify(new Date().toISOString())}::jsonb) WHERE id = 'acme'`);
+    expect(await posture({ ...SIGNED, holdDecider: 'smartremit_delegated', fourEyesNonSanctions: false })).toEqual({ ok: true });
+  });
+
+  it('NOT certified + any change -> ok as today', async () => {
+    expect(await posture(SIGNED)).toEqual({ ok: true });
+    expect(await posture({ ...SIGNED, holdDecider: 'smartremit_delegated', fourEyesNonSanctions: false })).toEqual({ ok: true });
+    expect((await column()).posture).toMatchObject({ holdDecider: 'smartremit_delegated', fourEyesNonSanctions: false });
+  });
+});
+
 describe('writeComplianceUser', () => {
   it('add, add again (deduped), remove', async () => {
     expect(await compliance('acme-comp1', true)).toEqual({ ok: true });

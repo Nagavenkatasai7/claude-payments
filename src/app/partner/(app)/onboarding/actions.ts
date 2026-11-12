@@ -140,6 +140,7 @@ const POSTURE_REFUSAL: Record<Exclude<LiveWriteResult, { ok: true }>['code'], Me
   not_ready: 'partner.onboarding.failed',
   not_certified: 'partner.onboarding.failed',
   psp_unavailable: 'partner.onboarding.failed', // fix pack 5 T17: writeFundingMode only (platform), never from here
+  certified: 'partner.live.posture.certifiedLocked', // fix pack 7 T15 (R7, P2): the posture lock while certified
 };
 
 export async function signPostureAction(_prev: ActionResult | null, formData: FormData): Promise<ActionResult | StepUpRequired> {
