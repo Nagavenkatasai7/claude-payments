@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
-import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES } from '@/lib/reconcile';
+import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES, sweepRegClockDigest, regClockDigestKey } from '@/lib/reconcile';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { beginHold, releaseHold } from '@/lib/settlement';
@@ -111,6 +111,27 @@ vi.mock('@/db/repos/transfer-repo', async (orig) => {
   };
 });
 
+// Fix pack 8 T20 (P15): a switch that makes the regulatory clock read throw.
+// Off by default: the pass-through returns the real repo, so every other block
+// of this file runs unchanged.
+const regDueThrows = vi.hoisted(() => ({ value: false }));
+vi.mock('@/db/repos/ticket-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/ticket-repo')>();
+  return {
+    ...real,
+    createTicketRepo: (...args: Parameters<typeof real.createTicketRepo>) => {
+      const repo = real.createTicketRepo(...args);
+      return {
+        ...repo,
+        listRegClockDue: async (...a: Parameters<typeof repo.listRegClockDue>) => {
+          if (regDueThrows.value) throw new Error('reg clock read down');
+          return repo.listRegClockDue(...a);
+        },
+      };
+    },
+  };
+});
+
 // reconcileSweep — the Stage-2d safety net. Stuck/stale money states surface as
 // EXACTLY-ONCE deduped outbox effects, no matter how often the sweep runs.
 
@@ -150,6 +171,7 @@ beforeEach(async () => {
   evidenceHook.before = null;
   logSpy.warn.mockClear();
   listSweepThrows.value = false;
+  regDueThrows.value = false;
 });
 
 describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
@@ -921,6 +943,156 @@ describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
     await overdueTicket('tk_fresh', 1);
     await reconcileSweep(db);
     expect(await digestRows()).toHaveLength(0);
+  });
+});
+
+// Fix pack 8 T20 (P15): staff learn once a day which regulatory cases are due
+// within 3 days or overdue. ONE platform-wide ops.alert per UTC day
+// (`regclock:<day>`), ids and counts only, isolated from the money sweeps.
+describe('reconcileSweep — regulatory clock digest (fix pack 8 P15)', () => {
+  const HOUR = 3_600_000;
+  const SENDER = '15555550142'; // fake 555 test number
+  const SUBJECT = 'Recall request: not_received';
+  const BODY = 'my private words about the money';
+  async function regCase(id: string, dueInHours: number, o: { status?: string; partnerId?: string } = {}): Promise<void> {
+    const status = o.status ?? 'open';
+    const partnerId = o.partnerId ?? 'acme';
+    await db.execute(sql`
+      INSERT INTO tickets (id, partner_id, kind, customer_phone, subject, status, priority,
+                           reg_class, first_notice_at, due_at, created_at, updated_at)
+      VALUES (${id}, ${partnerId}, 'customer', ${SENDER}, ${SUBJECT}, ${status}, 'urgent',
+              'error_notice', now() - interval '1 day', now() + make_interval(hours => ${dueInHours}),
+              now(), now())
+    `);
+    await db.execute(sql`
+      INSERT INTO ticket_messages (ticket_id, actor_type, actor_id, body, internal, created_at)
+      VALUES (${id}, 'customer', ${SENDER}, ${BODY}, false, now())
+    `);
+  }
+  async function unclassedTicket(id: string): Promise<void> {
+    await db.execute(sql`
+      INSERT INTO tickets (id, partner_id, kind, customer_phone, subject, status, priority, created_at, updated_at)
+      VALUES (${id}, 'acme', 'customer', ${SENDER}, 'Plain question', 'open', 'low', now(), now())
+    `);
+  }
+  async function digestRows(): Promise<Array<{ dedupe_key: string; message: string; payload: Record<string, unknown> }>> {
+    const r = await db.execute(sql`
+      SELECT dedupe_key, payload->>'message' AS message, payload FROM outbox
+      WHERE kind = 'ops.alert' AND starts_with(dedupe_key, 'regclock:') ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string; message: string; payload: Record<string, unknown> }> }).rows;
+  }
+  const dayOf = (d: Date) => d.toISOString().slice(0, 10);
+
+  it('cases due within 3 days or overdue -> exactly one digest per day', async () => {
+    await regCase('rc_over', -48);
+    await regCase('rc_d1', 24);
+    await regCase('rc_d60', 60);
+    await regCase('rc_far', 240);
+    await unclassedTicket('tk_plain');
+    const now = new Date();
+    const r = await reconcileSweep(db, now);
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
+    await reconcileSweep(db, now);
+    await reconcileSweep(db, new Date(now.getTime() + 60_000));
+    const rows = await digestRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toBe(`regclock:${dayOf(now)}`);
+    expect(rows[0].message).toBe(
+      '⏰ SmartRemit ops: 3 regulatory case(s) are due within 3 days (1 overdue). ' +
+        'Oldest: rc_over, rc_d1, rc_d60. Open them in the Tickets queue.',
+    );
+  });
+
+  it('the next UTC day gets its own digest', async () => {
+    await regCase('rc_over', -48);
+    const day1 = new Date();
+    const day2 = new Date(day1.getTime() + 24 * HOUR);
+    await reconcileSweep(db, day1);
+    await reconcileSweep(db, day2);
+    expect((await digestRows()).map((x) => x.dedupe_key)).toEqual([`regclock:${dayOf(day1)}`, `regclock:${dayOf(day2)}`]);
+  });
+
+  it('nothing due -> no row (the day key is read, nothing is enqueued)', async () => {
+    await regCase('rc_far', 240);
+    await regCase('rc_done', -24, { status: 'resolved' });
+    const now = new Date();
+    const stop = captureQueries();
+    let queued: boolean;
+    let qs: Array<{ sql: string; params: unknown[] }> = [];
+    try {
+      queued = await sweepRegClockDigest(db, now);
+    } finally {
+      qs = stop();
+    }
+    expect(queued).toBe(false);
+    expect(qs.some((q) => /from "outbox"/i.test(q.sql) && q.params.includes(regClockDigestKey(now)))).toBe(true);
+    expect(qs.some((q) => /insert into "outbox"/i.test(q.sql))).toBe(false);
+    await reconcileSweep(db, now);
+    expect(await digestRows()).toHaveLength(0);
+  });
+
+  it('platform-wide: due cases of two partners land in one row', async () => {
+    await seedPartner(db, 'pb');
+    await regCase('rc_acme', 12);
+    await regCase('rc_pb', 24, { partnerId: 'pb' });
+    await reconcileSweep(db, new Date());
+    const rows = await digestRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toContain('2 regulatory case(s)');
+    expect(rows[0].message).toContain('Oldest: rc_acme, rc_pb.');
+  });
+
+  it('the message carries ids and counts only', async () => {
+    await regCase('rc_over', -48);
+    await reconcileSweep(db, new Date());
+    const rows = await digestRows();
+    expect(rows).toHaveLength(1);
+    expect(Object.keys(rows[0].payload)).toEqual(['message']);
+    for (const bad of [SUBJECT, 'not_received', BODY, SENDER, '5555550142', 'error_notice', 'acme']) {
+      expect(rows[0].message).not.toContain(bad);
+    }
+  });
+
+  it('a failed due read never stops the sweep or the SLA digest', async () => {
+    await db.execute(sql`
+      INSERT INTO tickets (id, partner_id, kind, customer_phone, subject, status, priority, created_at, updated_at)
+      VALUES ('tk_sla', 'acme', 'customer', ${SENDER}, 'Plain question', 'open', 'urgent', now() - interval '90 days', now())
+    `);
+    await regCase('rc_over', -48);
+    regDueThrows.value = true;
+    const r = await reconcileSweep(db, new Date());
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0, listHoldsReleased: 0 });
+    const sla = await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE starts_with(dedupe_key, 'ticketsla:')`);
+    expect((sla as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(1);
+    expect(await digestRows()).toHaveLength(0);
+    expect(logSpy.warn).toHaveBeenCalledWith('reconcile', 'reg clock digest skipped', { error: 'Error' });
+  });
+
+  it('regClockDigestKey is the UTC day: 23:59:59 and the next second are two days', () => {
+    const n = new Date();
+    const last = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), 23, 59, 59));
+    const next = new Date(last.getTime() + 1000);
+    expect(regClockDigestKey(last)).toBe(`regclock:${dayOf(last)}`);
+    expect(regClockDigestKey(next)).toBe(`regclock:${dayOf(next)}`);
+    expect(regClockDigestKey(last)).not.toBe(regClockDigestKey(next));
+    expect(regClockDigestKey(last)).toMatch(/^regclock:\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('the day key is checked first: with the row queued, no tickets read', async () => {
+    await regCase('rc_over', -48);
+    const now = new Date();
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'earlier' }, { dedupeKey: regClockDigestKey(now) });
+    const stop = captureQueries();
+    let queued: boolean;
+    let qs: Array<{ sql: string; params: unknown[] }> = [];
+    try {
+      queued = await sweepRegClockDigest(db, now);
+    } finally {
+      qs = stop();
+    }
+    expect(queued).toBe(false);
+    expect(qs.some((q) => /from "tickets"/i.test(q.sql) && /reg_class/i.test(q.sql))).toBe(false);
+    expect(qs.some((q) => /from "outbox"/i.test(q.sql))).toBe(true);
   });
 });
 

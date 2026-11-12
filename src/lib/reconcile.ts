@@ -556,6 +556,13 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     logWarn('reconcile', 'ticket SLA digest skipped', { error: e instanceof Error ? e.message : String(e) });
   }
 
+  // REG E CLOCK DIGEST (fix pack 8 P15): staff-facing; isolated like the SLA digest.
+  try {
+    await sweepRegClockDigest(db, now);
+  } catch (e) {
+    logWarn('reconcile', 'reg clock digest skipped', { error: e instanceof Error ? e.name : 'unknown' });
+  }
+
   return {
     stuckPaid: stuck.length,
     reinstructed,
@@ -595,6 +602,45 @@ export async function sweepTicketSlaDigest(db: Db, now: Date): Promise<boolean> 
         `${b.urgent} urgent, ${b.normal} normal, ${b.low} low. ` +
         `Oldest: ${breaches.oldest.map((t) => `${t.id} (${t.priority}, partner ${t.partnerId})`).join(', ')}. ` +
         `Work them from Tickets.`,
+    },
+    { dedupeKey: key },
+  );
+}
+
+/** Due window of the regulatory clock digest: cases due within 3 days (P15). */
+export const REG_CLOCK_DIGEST_WITHIN_MS = 3 * 86_400_000;
+/** Oldest regulatory case ids named in the digest. */
+export const REG_CLOCK_DIGEST_IDS = 5;
+
+/** `regclock:<yyyy-mm-dd>` (UTC day, like `slaDigestKey`; no partner part). */
+export function regClockDigestKey(now: Date): string {
+  return `regclock:${now.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * Regulatory clock digest (fix pack 8 P15): staff-facing, platform-wide, one
+ * per UTC day; ids and counts only (never a subject, a phone, a class or a
+ * partner name). ONE ops.alert (`regclock:<day>`) when any open classed case
+ * (Reg E error notice, complaint, cancellation, fraud report) is due within 3
+ * days or overdue. The day's key is checked FIRST so the due query runs at most
+ * until the digest is queued. Returns whether a new digest row was queued.
+ */
+export async function sweepRegClockDigest(db: Db, now: Date): Promise<boolean> {
+  const outbox = createOutboxRepo(db);
+  const key = regClockDigestKey(now);
+  if (await outbox.hasDedupeKey(key)) return false;
+  const due = await createTicketRepo(db).listRegClockDue({
+    now,
+    withinMs: REG_CLOCK_DIGEST_WITHIN_MS,
+    limit: REG_CLOCK_DIGEST_IDS,
+  });
+  if (due.total === 0) return false;
+  return outbox.enqueue(
+    'ops.alert',
+    {
+      message:
+        `⏰ SmartRemit ops: ${due.total} regulatory case(s) are due within 3 days (${due.overdue} overdue). ` +
+        `Oldest: ${due.ids.join(', ')}. Open them in the Tickets queue.`,
     },
     { dedupeKey: key },
   );
