@@ -46,7 +46,9 @@ export type RefundDisposition =
  * it with the database clock — it alone decides.
  */
 export function refundDisposition(
-  transfer: Transfer,
+  // Fix pack 8 T3 (P5): type-only widening to the five fields read here, so the
+  // pure report routing (error-notice.ts) can pass its narrower row shape.
+  transfer: Pick<Transfer, 'status' | 'transferType' | 'refundStatus' | 'paidAt' | 'deliveredAt'>,
   now: number = Date.now(),
   chargedAt?: string,
 ): RefundDisposition {
