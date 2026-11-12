@@ -36,6 +36,7 @@ import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
 import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 import { isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
+import { regCaseStatusMeta } from '@/lib/reg-case-view';
 
 /** The latest escalation was SmartRemit's own: rolls the withdraw back. */
 class NotYourEscalationError extends Error {}
@@ -211,7 +212,8 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
         actorType: 'staff',
         action: 'ticket.status',
         subjectId: ticket.id,
-        meta: { actorScope: 'partner', status, from: ticket.status },
+        // Fix pack 8 (critic R6): a classed ticket adds its clock; an unclassed meta is unchanged.
+        meta: { actorScope: 'partner', status, from: ticket.status, ...regCaseStatusMeta(ticket, Date.now()) },
       });
     });
   } catch (err) {

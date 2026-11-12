@@ -3,6 +3,7 @@ import { CheckCircle2, CircleDot, Clock, Lock, TriangleAlert } from 'lucide-reac
 import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, type Tone } from '@/components/ds';
 import type { Ticket, TicketPriority, TicketStatus } from '@/lib/types';
+import { formatDueDate, regCaseOverdue } from '@/lib/reg-case-view';
 
 // Server-rendered pieces shared by the /partner/support pages (UI redesign M3-19). Status and
 // priority always carry text (never colour alone). Times are shown in UTC so the server render is
@@ -32,6 +33,24 @@ export function TicketStatusBadge({ status }: { status: TicketStatus }) {
 
 export function priorityLabel(priority: TicketPriority): string {
   return t(`partner.support.priority.${priority === 'low' || priority === 'urgent' ? priority : 'normal'}` as MessageKey);
+}
+
+/**
+ * Fix pack 8 (R44, P14): the class, the due date and the overdue state of a regulatory case, as
+ * meta texts; nothing for an unclassed ticket (keyed on regClass, never on dueAt alone).
+ */
+export function regCaseTexts(row: Pick<Ticket, 'regClass' | 'dueAt' | 'status'>, now: number): string[] {
+  if (!row.regClass) return [];
+  const out = [t(`partner.support.regClass.${row.regClass}` as MessageKey)];
+  if (row.dueAt && Number.isFinite(Date.parse(row.dueAt))) out.push(t('partner.support.dueAt', { date: formatDueDate(row.dueAt) }));
+  if (regCaseOverdue(row, now)) out.push(t('partner.support.overdue'));
+  return out;
+}
+
+/** "First notice <date>" of a regulatory case, or null. */
+export function firstNoticeText(row: Pick<Ticket, 'regClass' | 'firstNoticeAt'>): string | null {
+  if (!row.regClass || !row.firstNoticeAt || !Number.isFinite(Date.parse(row.firstNoticeAt))) return null;
+  return t('partner.support.firstNotice', { date: formatDueDate(row.firstNoticeAt) });
 }
 
 const FMT = new Intl.DateTimeFormat('en-US', {

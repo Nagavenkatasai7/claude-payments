@@ -19,12 +19,15 @@ interface Triage {
 export function CopilotPanel({
   ticketId,
   closed,
+  triageLocked = false,
   replyAction,
   applyTriageAction,
   copilotRejectAction,
 }: {
   ticketId: string;
   closed: boolean;
+  /** Fix pack 8 (P14): a regulatory case keeps its priority and category, so no triage chips. */
+  triageLocked?: boolean;
   replyAction: (formData: FormData) => Promise<void>;
   applyTriageAction: (formData: FormData) => Promise<void>;
   copilotRejectAction: (ticketId: string) => Promise<void>;
@@ -174,7 +177,7 @@ export function CopilotPanel({
               {summary}
             </div>
           )}
-          {triage && !closed && (
+          {triage && !closed && !triageLocked && (
             <form action={applyTriage} className="flex flex-wrap items-center gap-2">
               <input type="hidden" name="ticketId" value={ticketId} />
               <input type="hidden" name="category" value={triage.category} />

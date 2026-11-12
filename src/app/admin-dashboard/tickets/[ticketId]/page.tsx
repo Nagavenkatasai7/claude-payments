@@ -17,7 +17,10 @@ import { CustomerLink } from '../../customer-link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
-import { TicketStatusPill, TicketPriorityPill } from '../pills';
+import { TicketStatusPill, TicketPriorityPill, RegClassPill, RegDueText } from '../pills';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { TICKET_CATEGORIES } from '@/lib/ticket-ai';
+import { formatDueDate } from '@/lib/reg-case-view';
 import { CopilotPanel } from '../copilot-panel';
 import {
   replyAction,
@@ -64,6 +67,17 @@ function MessageBubble({ m }: { m: TicketMessage }) {
   );
 }
 
+const SUGGESTED_PRIORITIES: readonly string[] = ['low', 'normal', 'urgent'];
+
+/** The worker's unapplied suggestion, only when both values are on the closed lists. */
+function triageSuggestionOf(meta: Record<string, unknown> | undefined): { category: string; priority: string } | null {
+  if (!meta || meta.applied !== false) return null;
+  const { category, priority } = meta;
+  if (typeof category !== 'string' || !(TICKET_CATEGORIES as readonly string[]).includes(category)) return null;
+  if (typeof priority !== 'string' || !SUGGESTED_PRIORITIES.includes(priority)) return null;
+  return { category, priority };
+}
+
 export default async function TicketDetailPage({
   params,
 }: {
@@ -85,7 +99,7 @@ export default async function TicketDetailPage({
   if (isAgent && ticket.assignedTo !== staff.username) notFound();
 
   // The four reads below are independent once the ticket is in hand — fetch in parallel.
-  const [messages, linkedTransfer, allStaff, partner] = await Promise.all([
+  const [messages, linkedTransfer, allStaff, partner, triageRow] = await Promise.all([
     repo.listMessages(ticket.id, { includeInternal: true }),
     ticket.transferId
       ? createTransferRepo(getDb()).getTransfer(ticket.transferId)
@@ -94,7 +108,13 @@ export default async function TicketDetailPage({
     scope.kind === 'platform'
       ? getPartnerStore().getPartner(ticket.partnerId)
       : Promise.resolve(null),
+    // Fix pack 8 (P14): a regulatory case keeps its priority and category, so the worker's
+    // triage row only SUGGESTS (applied false). One read, the ticket's own tenant and subject.
+    ticket.regClass
+      ? createAuditRepo(getDb()).latestForSubject(ticket.partnerId, ticket.id, 'ticket.triage')
+      : Promise.resolve(null),
   ]);
+  const aiSuggestion = triageSuggestionOf(triageRow?.meta);
 
   // Linked transfer summary — MASKED default read, double-scoped (the ticket
   // is already in scope; the transfer must be too before we show anything).
@@ -149,6 +169,7 @@ export default async function TicketDetailPage({
               <CopilotPanel
                 ticketId={ticket.id}
                 closed={closed}
+                triageLocked={Boolean(ticket.regClass)}
                 replyAction={replyAction}
                 applyTriageAction={applyTriageAction}
                 copilotRejectAction={copilotRejectAction}
@@ -197,6 +218,29 @@ export default async function TicketDetailPage({
                   <span className="text-muted-foreground">Category</span>
                   <span>{ticketCategoryLabel(ticket.category)}</span>
                 </div>
+                {ticket.regClass && (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Class</span>
+                      <RegClassPill regClass={ticket.regClass} dueAt={ticket.dueAt} status={ticket.status} now={Date.now()} />
+                    </div>
+                    {ticket.firstNoticeAt && Number.isFinite(Date.parse(ticket.firstNoticeAt)) && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">First notice</span>
+                        <span className="text-xs">{formatDueDate(ticket.firstNoticeAt)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-muted-foreground">Due</span>
+                      <RegDueText dueAt={ticket.dueAt} />
+                    </div>
+                    {aiSuggestion && (
+                      <div className="text-xs text-muted-foreground">
+                        AI suggestion: {ticketCategoryLabel(aiSuggestion.category)}, {aiSuggestion.priority}
+                      </div>
+                    )}
+                  </>
+                )}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-muted-foreground">Assignee</span>
                   <span>{ticket.assignedTo ?? 'Unassigned'}</span>

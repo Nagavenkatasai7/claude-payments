@@ -19,7 +19,7 @@ import {
 import { EmptyState, PageHeader, buttonVariants } from '@/components/ds';
 import { dsCn } from '@/lib/ui/ds-cn';
 import type { Ticket, TicketStatus } from '@/lib/types';
-import { LoadError, TicketRows, formatWhen, priorityLabel, statusLabel } from './support-bits';
+import { LoadError, TicketRows, formatWhen, priorityLabel, regCaseTexts, statusLabel } from './support-bits';
 
 export const metadata: Metadata = { title: t('partner.support.title'), robots: { index: false, follow: false } };
 
@@ -56,6 +56,7 @@ export default async function PartnerSupportPage({
     rows = null;
   }
 
+  const now = Date.now();
   const assignee = (r: Ticket) =>
     !r.assignedTo
       ? t('partner.support.unassigned')
@@ -126,6 +127,7 @@ export default async function PartnerSupportPage({
             meta={(r) => [
               t('partner.support.customer', { masked: maskPhoneLast4(r.customerPhone) }),
               priorityLabel(r.priority),
+              ...regCaseTexts(r, now),
               assignee(r),
               t('partner.support.updated', { when: formatWhen(r.updatedAt) }),
             ]}

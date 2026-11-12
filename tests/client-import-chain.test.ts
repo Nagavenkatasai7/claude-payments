@@ -48,6 +48,7 @@ const ROOTS: readonly string[] = [
   'src/lib/hold-queue.ts',
   'src/lib/reg-clocks.ts',
   'src/lib/error-notice.ts',
+  'src/lib/reg-case-view.ts',
   ...readdirSync(join(SRC, 'lib/legal'))
     .filter((f) => f.endsWith('.ts') && !LEGAL_SERVER_ONLY.has(f))
     .sort()

@@ -1549,14 +1549,16 @@ async function handle(
       const keepsCategory = keepsCategoryOnTriage(ticket.category);
       const category = keepsCategory && ticket.category ? ticket.category : suggested.category;
       const priority = suggested.priority;
-      await repo.setTriage(ticketId, keepsCategory ? { priority } : { category, priority });
+      // Fix pack 8 (P14): on a regulatory case the SQL guard keeps priority and category
+      // (applied false); the row still records what was SUGGESTED, for the staff view.
+      const { applied } = await repo.setTriage(ticketId, keepsCategory ? { priority } : { category, priority });
       await createAuditRepo(deps.db).record({
         partnerId: ticket.partnerId,
         actor: 'system',
         actorType: 'system',
         action: 'ticket.triage',
         subjectId: ticket.id,
-        meta: { source: 'copilot', category, priority },
+        meta: { source: 'copilot', category, priority, applied },
       });
 
       // ── AI-assisted load-balancer: auto-assign to the least-loaded agent ────

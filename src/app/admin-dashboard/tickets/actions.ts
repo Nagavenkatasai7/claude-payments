@@ -16,6 +16,7 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { ticketAssigneeRefusal, type AssigneeRefusal } from '@/lib/ticket-assignable';
 import { ticketReplyNudge, ticketResolvedNudge } from '@/lib/ticket-nudge';
 import { RECOVERY_LOCKED_MESSAGE, isRecoveryTicket } from '@/lib/customer-mfa-recovery-rules';
+import { REG_CASE_TRIAGE_REFUSAL, regCaseStatusMeta } from '@/lib/reg-case-view';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -260,7 +261,8 @@ export async function resolveAction(formData: FormData): Promise<void> {
     }
   });
   pokeWorker();
-  await audit(staff, ticket, 'ticket.resolve');
+  // Fix pack 8 (critic R6): a classed ticket's row records its clock; an unclassed row has no meta.
+  await audit(staff, ticket, 'ticket.resolve', regCaseStatusMeta(ticket, Date.now()));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -275,7 +277,7 @@ export async function closeAction(formData: FormData): Promise<void> {
   if (isRecoveryTicket(ticket)) throw new Error(RECOVERY_LOCKED_MESSAGE);
   const updated = await createTicketRepo(getDb()).updateStatus(ticket.id, 'closed');
   if (!updated) throw new Error('Ticket cannot be closed.');
-  await audit(staff, ticket, 'ticket.close');
+  await audit(staff, ticket, 'ticket.close', regCaseStatusMeta(ticket, Date.now()));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -298,6 +300,9 @@ export async function applyTriageAction(formData: FormData): Promise<void> {
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
   requireOpen(ticket);
+  // Fix pack 8 (P14): a regulatory case keeps its priority and category (the SQL guard of
+  // setTriage is the real control; this refuses before any write).
+  if (ticket.regClass) throw new Error(REG_CASE_TRIAGE_REFUSAL);
   await createTicketRepo(getDb()).setTriage(ticket.id, {
     category: category as TicketCategory,
     priority: priority as TicketPriority,
