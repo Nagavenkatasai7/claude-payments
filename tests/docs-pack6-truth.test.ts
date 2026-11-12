@@ -204,7 +204,38 @@ describe('pack 6 documents say what the code does', () => {
   it('review round 1 RG3/RD2: go-live.mdx says the default does not apply to India (IN) and also covers a corridor added later', () => {
     const p = paragraph(section(GO_LIVE, '### Live money on your own rail'), 'When SmartRemit turns on live money');
     expect(p).toMatch(/except India \(IN\)/);
-    expect(p).toContain('A corridor you add later gets the same default');
+    // Final check U7: a partner cannot add a corridor; only SmartRemit's partner save writes the countries.
+    expect(p).toContain('A corridor SmartRemit adds to your account later gets the same default when it is added.');
+    expect(p).not.toContain('A corridor you add later');
+  });
+
+  it('final check T1: the PR6 paragraph says what this build does serving without 0040 (503 at the E-SIGN gate, before the code); the code agrees', () => {
+    const p = paragraph(ROLLBACK, PR6);
+    expect(p).toContain('serving without 0040');
+    expect(p).toContain('`MIGRATE_ON_BUILD_SKIP=1`');
+    expect(p).toContain('503');
+    expect(p).toContain('ACH debit');
+    expect(p).toContain('Prod migrations behind');
+    // The gate turns a failed consent read into 503, ACH debit is exempt on the transfer route only,
+    // and the gate runs before the code is checked on both routes.
+    expect(read('src/lib/pay-esign-gate.ts')).toContain("return { kind: 'unavailable' };");
+    for (const [file, gate] of [
+      ['src/app/api/pay/[transferId]/route.ts', "exempt: payMethod === 'ach_pull'"],
+      ['src/app/api/pay/l/[token]/route.ts', 'exempt: false'],
+    ] as const) {
+      const src = read(file);
+      const at = src.indexOf(gate);
+      expect(at, file).toBeGreaterThan(0);
+      expect(src.indexOf("if (esign.kind === 'unavailable') return payTemporarilyUnavailable();", at), file).toBeGreaterThan(at);
+      expect(src.indexOf('.verify(', at), file).toBeGreaterThan(at);
+    }
+  });
+
+  it('final check U6: the roll-forward step covers a country a certified partner gained while the older build served', () => {
+    const p = paragraph(ROLLBACK, PR6);
+    expect(p).toContain('gained a country while the older build served');
+    // The added-corridor default runs only inside the platform partner save (never after the fact).
+    expect(read('src/app/admin-dashboard/partners/actions.ts')).toContain("'corridor_added_default'");
   });
 
   it('the hold-reason registry table is unchanged: exactly one AML_HOLD_REASON row (no new reason: owner Q15, Q21)', () => {
