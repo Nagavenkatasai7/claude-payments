@@ -283,7 +283,9 @@ describe('transferTimeline: lost-features p1 actions (one row each, never a note
 describe('transferTimeline: fix pack 7 hold decisions', () => {
   it('transfer.hold.review and transfer.hold.escalate are timeline actions; each renders one plain row with its label and a masked by, never the meta', () => {
     const tenant = new Set(['pa-agent']);
-    const at = (m: number) => new Date(Date.now() - (10 - m) * 60_000);
+    // One clock read: the rows and the expected values must share the same millisecond.
+    const now = Date.now();
+    const at = (m: number) => new Date(now - (10 - m) * 60_000);
     const meta = { reason: 'DECIDE WHY', disposition: 'docs_verified', holdClasses: ['sanctions_review'], holdClass: 'kyc', reviewId: 'hr_SECRET' };
     const rows = transferTimeline(
       base({ status: 'in_review', createdAt: new Date(Date.now() - 20 * 60_000).toISOString() }),
